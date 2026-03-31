@@ -1619,18 +1619,22 @@ def _normalize_paroquant_best_state_dtype(best_state_dtype: Optional[Union[str, 
         return "fp32"
     if isinstance(best_state_dtype, str):
         normalized = best_state_dtype.strip().lower()
+        if normalized in {"fp16", "float16"}:
+            return "fp16"
         if normalized in {"bf16", "bfloat16"}:
             return "bf16"
         if normalized in {"fp32", "float32"}:
             return "fp32"
     elif isinstance(best_state_dtype, torch.dtype):
+        if best_state_dtype == torch.float16:
+            return "fp16"
         if best_state_dtype == torch.bfloat16:
             return "bf16"
         if best_state_dtype == torch.float32:
             return "fp32"
     raise ValueError(
-        "ParoQuantizeConfig: `opt_best_state_dtype` must be one of {'bf16', 'fp32'} "
-        "or torch.bfloat16/torch.float32."
+        "ParoQuantizeConfig: `opt_best_state_dtype` must be one of {'fp16', 'bf16', 'fp32'} "
+        "or torch.float16/torch.bfloat16/torch.float32."
     )
 
 

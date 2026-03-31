@@ -128,7 +128,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_fused_rotation": False,
                 "opt_gradient_checkpointing": False,
                 "opt_stage_cudagraph": False,
-                "opt_best_state_dtype": "bf16",
+                "opt_best_state_dtype": "fp16",
                 "opt_train_on_noisy_inputs": True,
                 "opt_scope": "compute_block",
                 "opt_stage_impl": "reference",
@@ -165,7 +165,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_fused_rotation is False
     assert cfg.opt_gradient_checkpointing is False
     assert cfg.opt_stage_cudagraph is False
-    assert cfg.opt_best_state_dtype == "bf16"
+    assert cfg.opt_best_state_dtype == "fp16"
     assert cfg.opt_train_on_noisy_inputs is True
     assert cfg.opt_scope == "compute_block"
     assert cfg.opt_stage_impl == "reference"
@@ -176,7 +176,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
     assert cfg.to_dict()["meta"]["opt_gradient_checkpointing"] is False
     assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
-    assert cfg.to_dict()["meta"]["opt_best_state_dtype"] == "bf16"
+    assert cfg.to_dict()["meta"]["opt_best_state_dtype"] == "fp16"
     assert cfg.to_dict()["meta"]["opt_train_on_noisy_inputs"] is True
     assert cfg.to_dict()["meta"]["opt_scope"] == "compute_block"
     assert cfg.to_dict()["meta"]["opt_stage_impl"] == "reference"
@@ -239,7 +239,7 @@ def test_paroquant_quantize_config_rejects_invalid_best_state_dtype():
         ParoQuantizeConfig(
             bits=4,
             group_size=128,
-            opt_best_state_dtype="fp16",
+            opt_best_state_dtype="int8",
         )
 
 
@@ -979,14 +979,14 @@ def test_optimize_paroquant_linear_forwards_best_state_dtype(monkeypatch):
         seed=0,
         fused_rotation=True,
         stage_cudagraph=False,
-        best_state_dtype="bf16",
+        best_state_dtype="fp16",
         stage_impl="fast",
         pair_impl="fast",
         quantizer_impl="reference",
     )
 
     assert result.val_loss >= 0.0
-    assert best_state_dtype_calls == ["bf16", "bf16"]
+    assert best_state_dtype_calls == ["fp16", "fp16"]
 
 
 def test_optimize_paroquant_linear_supports_sgd_optimizer():
@@ -1391,7 +1391,7 @@ def test_paroquant_processor_module_quantize_forces_stage_cudagraph_off(monkeypa
         opt_sgd_dampening=0.0,
         opt_sgd_nesterov=True,
         opt_fused_rotation=True,
-        opt_best_state_dtype="bf16",
+        opt_best_state_dtype="fp16",
         opt_stage_impl="fast",
         opt_pair_impl="fast",
         opt_quantizer_impl="reference",
@@ -1442,7 +1442,7 @@ def test_paroquant_processor_module_quantize_forces_stage_cudagraph_off(monkeypa
     assert forwarded_kwargs["sgd_nesterov"] is True
     assert forwarded_kwargs["fused_rotation"] is True
     assert forwarded_kwargs["gradient_checkpointing"] is False
-    assert forwarded_kwargs["best_state_dtype"] == "bf16"
+    assert forwarded_kwargs["best_state_dtype"] == "fp16"
     assert forwarded_kwargs["stage_impl"] == "fast"
     assert forwarded_kwargs["pair_impl"] == "fast"
     assert forwarded_kwargs["quantizer_impl"] == "reference"
@@ -3024,6 +3024,27 @@ def test_paroquant_processor_group_best_state_can_cast_float_snapshots_without_t
     assert sorted(best_state.keys()) == ["a.index", "a.weight"]
     assert best_state["a.weight"].dtype == torch.bfloat16
     assert best_state["a.index"].dtype == torch.int32
+
+
+def test_paroquant_quantize_config_accepts_torch_float16_best_state_dtype():
+    """Guard direct config construction so torch.float16 snapshots serialize as fp16."""
+    cfg = ParoQuantizeConfig(
+        bits=4,
+        group_size=128,
+        opt_best_state_dtype=torch.float16,
+    )
+
+    assert cfg.opt_best_state_dtype == "fp16"
+
+
+def test_paroquant_best_state_dtype_resolves_explicit_fp16():
+    """Guard explicit fp16 snapshot selection."""
+    resolved = paroquant_optimization._resolve_best_state_snapshot_dtype(
+        best_state_dtype="fp16",
+        device=torch.device("cuda"),
+    )
+
+    assert resolved == torch.float16
 
 
 def test_paroquant_best_state_dtype_resolves_explicit_bf16():

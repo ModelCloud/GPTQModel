@@ -42,7 +42,7 @@ _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_OPTIMIZERS: tuple[str, ...] = ("adamw", "adam", "sgd")
 # Best-state snapshots are a separate memory policy from the always-fp32 live optimization path.
-_PAROQUANT_BEST_STATE_DTYPES: tuple[str, ...] = ("bf16", "fp32")
+_PAROQUANT_BEST_STATE_DTYPES: tuple[str, ...] = ("fp16", "bf16", "fp32")
 _PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL = 8_000_000
 
 
@@ -81,18 +81,22 @@ def _normalize_best_state_dtype_name(best_state_dtype: Optional[str | torch.dtyp
         return "fp32"
     if isinstance(best_state_dtype, str):
         normalized = best_state_dtype.strip().lower()
+        if normalized in {"fp16", "float16"}:
+            return "fp16"
         if normalized in {"bf16", "bfloat16"}:
             return "bf16"
         if normalized in {"fp32", "float32"}:
             return "fp32"
     elif isinstance(best_state_dtype, torch.dtype):
+        if best_state_dtype == torch.float16:
+            return "fp16"
         if best_state_dtype == torch.bfloat16:
             return "bf16"
         if best_state_dtype == torch.float32:
             return "fp32"
     raise ValueError(
         "ParoQuant optimization: `best_state_dtype` must be one of "
-        f"{_PAROQUANT_BEST_STATE_DTYPES} or torch.bfloat16/torch.float32."
+        f"{_PAROQUANT_BEST_STATE_DTYPES} or torch.float16/torch.bfloat16/torch.float32."
     )
 
 
@@ -103,7 +107,12 @@ def _resolve_best_state_snapshot_dtype(
 ) -> torch.dtype:
     """Resolve the best-state snapshot dtype policy for the target snapshot device."""
     del device
-    return torch.bfloat16 if _normalize_best_state_dtype_name(best_state_dtype) == "bf16" else torch.float32
+    normalized = _normalize_best_state_dtype_name(best_state_dtype)
+    if normalized == "fp16":
+        return torch.float16
+    if normalized == "bf16":
+        return torch.bfloat16
+    return torch.float32
 
 
 def _snapshot_state_tensor(
