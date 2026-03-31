@@ -55,10 +55,10 @@ class Qwen3_5_MoeQModel(BaseQModel):
             "mlp:moe:?": {
                 "gate": ("gate:!",),  # <-- 0.5MB per layer. Not worth quantizing
                 "shared_expert_gate": ("shared_expert_gate:!",),
-                "experts": {
+                "experts:0": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
-                "shared_expert": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
             },
         }
     ]
