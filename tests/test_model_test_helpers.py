@@ -1,6 +1,10 @@
-import model_test as model_test_module
+from types import SimpleNamespace
+
 import torch
+import model_test as model_test_module
 from model_test import ModelTest
+
+from gptqmodel import BACKEND
 
 
 class FakeBatchEncoding(dict):
@@ -185,3 +189,34 @@ def test_mode_specific_baseline_value_supports_gpu_mapping(monkeypatch):
     monkeypatch.setattr(_ModeSpecificHarness, "_detect_gpu_profile", classmethod(lambda cls: "RTX4090"))
 
     assert helper._mode_specific_baseline_value("NATIVE_ARC_CHALLENGE_ACC") == 0.53
+
+
+def test_lm_eval_threads_seed_and_explicit_greedy_gen_kwargs(monkeypatch):
+    captured = {}
+
+    class _Harness(ModelTest):
+        EVAL_TASKS = ("arc_challenge",)
+        LOAD_BACKEND = BACKEND.AUTO
+        QUANT_BACKEND = BACKEND.AUTO
+
+    def _fake_evaluate(**kwargs):
+        captured.update(kwargs)
+        return {"tests": [{"name": "arc_challenge", "metrics": {"accuracy,loglikelihood": 1.0}}]}
+
+    helper = _Harness(methodName="runTest")
+    monkeypatch.setattr(model_test_module, "evaluate", _fake_evaluate)
+    monkeypatch.setattr(_Harness, "_cleanup_quantized_model", lambda self, model, enabled=False: None)
+    monkeypatch.setattr(_Harness, "_normalize_task_list", lambda self: ["arc_challenge"])
+    monkeypatch.setattr(
+        _Harness,
+        "_current_load_backend",
+        lambda self: SimpleNamespace(name="AUTO"),
+    )
+
+    results = helper.lm_eval("/tmp/model", extra_args={"device": "cuda:0"})
+
+    assert results == {"arc_challenge": {"accuracy,loglikelihood": 1.0}}
+    assert captured["model_args"]["device"] == "cuda:0"
+    assert captured["model_args"]["seed"] == model_test_module.RAND_SEED
+    assert captured["model_args"]["random_seed"] == model_test_module.RAND_SEED
+    assert captured["gen_kwargs"] == "do_sample=false,temperature=0.0,top_p=1.0,top_k=50"

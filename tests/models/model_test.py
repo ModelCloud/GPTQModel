@@ -1732,6 +1732,10 @@ class ModelTest(unittest.TestCase):
                     apply_chat_template = bool(chat_template_lookup.get(normalized_name, False))
                     task_model_args = dict(model_args)
                     task_model_args.update(task_model_args_lookup.get(normalized_name, {}) or {})
+                    # Keep evalution-backed generation reproducible even when a task opts
+                    # into sampling or an engine backend introduces RNG-sensitive paths.
+                    task_model_args.setdefault("seed", RAND_SEED)
+                    task_model_args.setdefault("random_seed", RAND_SEED)
                     task_suite_kwargs = dict(suite_kwargs_lookup.get(normalized_name, {}) or {})
                     task_batch_size = eval_batch_size_lookup.get(normalized_name)
                     if task_batch_size is None:
@@ -1757,7 +1761,7 @@ class ModelTest(unittest.TestCase):
                         apply_chat_template=apply_chat_template,
                         trust_remote_code=trust_remote_code,
                         batch_size=task_batch_size,
-                        gen_kwargs="temperature=0.0,top_k=50",
+                        gen_kwargs="do_sample=false,temperature=0.0,top_p=1.0,top_k=50",
                         suite_kwargs=task_suite_kwargs,
                     )
 

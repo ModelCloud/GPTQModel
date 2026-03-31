@@ -6,9 +6,7 @@
 from types import SimpleNamespace
 
 import pytest
-from transformers import AutoTokenizer
-
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND
 from tests import eval as eval_module
 from tests.eval import evaluate
 
@@ -16,21 +14,24 @@ from tests.eval import evaluate
 def test_eval_string_model_load_filters_eval_only_keys(monkeypatch):
     captured = {}
 
-    def _fake_load(*args, **kwargs):
-        captured.update(kwargs)
-        raise RuntimeError("sentinel-load-stop")
+    class FakeGPTQModelEngine:
+        def __init__(self, **kwargs):
+            captured["engine_kwargs"] = kwargs
 
-    monkeypatch.setattr(GPTQModel, "load", _fake_load)
-    monkeypatch.setattr(
-        AutoTokenizer,
-        "from_pretrained",
-        lambda *args, **kwargs: SimpleNamespace(
-            padding_side="left",
-            pad_token_id=0,
-            pad_token="</s>",
-            eos_token="</s>",
-            unk_token="<unk>",
-        ),
+        def build(self, model_config):
+            captured["model_kwargs"] = dict(model_config.kwargs["model_kwargs"])
+            raise RuntimeError("sentinel-load-stop")
+
+    class FakeModel:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def to_dict(self):
+            return dict(self.kwargs)
+
+    fake_evalution = SimpleNamespace(
+        GPTQModel=FakeGPTQModelEngine,
+        Model=FakeModel,
     )
 
     model_args = {
@@ -44,22 +45,23 @@ def test_eval_string_model_load_filters_eval_only_keys(monkeypatch):
     }
 
     with pytest.raises(RuntimeError, match="sentinel-load-stop"):
-        evaluate(
+        eval_module._build_evalution_runtime(
+            evalution=fake_evalution,
             model_or_id_or_path="/tmp/current-model",
-            tasks=["arc_challenge"],
-            batch_size=1,
-            backend=BACKEND.EXLLAMA_V3,
             llm_backend="gptqmodel",
-            model_args=model_args,
+            backend=BACKEND.EXLLAMA_V3,
+            batch_size=1,
             trust_remote_code=True,
+            model_args=model_args,
+            tokenizer=None,
         )
 
-    assert captured["model_id_or_path"] == "/tmp/current-model"
-    assert captured["backend"] == BACKEND.EXLLAMA_V3
-    assert captured["device"] == "cuda:0"
-    assert captured["trust_remote_code"] is True
+    assert captured["engine_kwargs"]["backend"] == BACKEND.EXLLAMA_V3.value
+    assert captured["engine_kwargs"]["device"] == "cuda:0"
+    assert captured["engine_kwargs"]["trust_remote_code"] is True
+    assert captured["model_kwargs"] == {}
     for key in ("gptqmodel", "pretrained", "tokenizer"):
-        assert key not in captured
+        assert key not in captured["model_kwargs"]
 
 
 def test_build_evalution_runtime_supports_vllm_engine_options():
@@ -182,3 +184,52 @@ def test_build_evalution_runtime_supports_sglang_engine_options():
     assert captured["engine_kwargs"]["max_total_tokens"] == 32768
     assert captured["engine_kwargs"]["random_seed"] == 123
     assert captured["engine_kwargs"]["sampling_params"] == {"top_p": 0.9}
+
+
+def test_build_evalution_runtime_supports_gptqmodel_seed():
+    captured = {}
+
+    class FakeGPTQModel:
+        def __init__(self, **kwargs):
+            captured["engine_kwargs"] = kwargs
+
+        def build(self, model_config):
+            captured["model_config"] = model_config
+            return "session"
+
+    class FakeModel:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def to_dict(self):
+            return dict(self.kwargs)
+
+    fake_evalution = SimpleNamespace(
+        GPTQModel=FakeGPTQModel,
+        Model=FakeModel,
+    )
+
+    engine, model_config, session = eval_module._build_evalution_runtime(
+        evalution=fake_evalution,
+        model_or_id_or_path="/tmp/model",
+        llm_backend="gptqmodel",
+        backend=BACKEND.AUTO,
+        batch_size=4,
+        trust_remote_code=True,
+        model_args={
+            "dtype": "float16",
+            "seed": 898,
+            "device": "cuda:0",
+            "foo": "bar",
+        },
+        tokenizer=None,
+    )
+
+    assert session == "session"
+    assert engine is not None
+    assert model_config.kwargs["path"] == "/tmp/model"
+    assert model_config.kwargs["model_kwargs"] == {"foo": "bar"}
+    assert captured["engine_kwargs"]["dtype"] == "float16"
+    assert captured["engine_kwargs"]["device"] == "cuda:0"
+    assert captured["engine_kwargs"]["batch_size"] == 4
+    assert captured["engine_kwargs"]["seed"] == 898
