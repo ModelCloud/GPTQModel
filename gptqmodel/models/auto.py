@@ -534,22 +534,7 @@ class GPTQModel:
         # load gptq model
         gptq_model = GPTQModel.load(model_id_or_path, backend=backend)
 
-        if format == "mlx":
-            try:
-                from mlx_lm.utils import save_config, save_model
-
-                from ..utils.mlx import convert_gptq_to_mlx_weights
-            except ImportError:
-                raise ValueError(
-                    "MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
-
-            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config,
-                                                                  gptq_model.lm_head)
-
-            save_model(target_path, mlx_weights, donate_model=True)
-
-            save_config(mlx_config, config_path=target_path + "/config.json")
-        elif format == "hf":
+        if format == "hf":
             from ..nn_modules.qlinear.torch import dequantize_model
 
             dequantized_model = dequantize_model(gptq_model.model)
