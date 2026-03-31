@@ -10,15 +10,13 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.module import try_import
+from ...utils.awq import awq_gemmv2_forward, awq_gemv_forward, awq_runtime_available, awq_runtime_error
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
 from ...utils.logger import setup_logger
 
 
 log = setup_logger()
-
-awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
 class AwqGEMVQuantLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMV]
@@ -119,8 +117,8 @@ class AwqGEMVQuantLinear(AWQuantLinear):
         super().post_init()
 
     def forward(self, x: torch.Tensor):
-        if awq_ext is None:
-            raise ModuleNotFoundError("External AWQ kernels are not properly installed." + msg)
+        if not awq_runtime_available():
+            raise ModuleNotFoundError("External AWQ kernels are not properly installed." + awq_runtime_error())
 
         out_shape = x.shape[:-1] + (self.out_features,)
         inputs = x.reshape(-1, x.shape[-1])
@@ -130,7 +128,7 @@ class AwqGEMVQuantLinear(AWQuantLinear):
             inputs = inputs.half()
 
         if inputs.shape[0] > 8:
-            out = awq_ext.gemmv2_forward_cuda(
+            out = awq_gemmv2_forward(
                 inputs,
                 self.qweight,
                 self.scales,
@@ -139,7 +137,7 @@ class AwqGEMVQuantLinear(AWQuantLinear):
                 self.split_k_iters,
             )
         else:
-            out = awq_ext.gemv_forward_cuda(
+            out = awq_gemv_forward(
                 inputs, self.qweight, self.scales, self.qzeros, self.group_size
             )
 

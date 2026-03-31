@@ -17,16 +17,16 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
+from ...utils.awq import awq_runtime_available
 from ...utils.backend import BACKEND
 from ...utils.paroquant import apply_paroquant_rotation, is_identity_rotation
 from .gemm_awq import FP32_ACCUM, _awq_cuda_gemm_forward
 from .torch_awq import AwqTorchQuantLinear
 
 
-awq_ext, awq_import_error = try_import("gptqmodel_awq_kernels")
-# Optional AWQ GEMM extension reused after ParoQuant rotates the activations.
+# Rotated activations benchmark faster with a shallower K split than generic AWQ.
+_PAROQUANT_AWQ_SPLIT_K = 4
 
 
 class ParoQuantQuantLinear(AwqTorchQuantLinear):
@@ -129,7 +129,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
             f"bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}, "
-            f"krot={self.krot}, fp32_accum={self.fp32_accum}"
+            f"krot={self.krot}, awq_split_k={_PAROQUANT_AWQ_SPLIT_K}, fp32_accum={self.fp32_accum}"
         )
 
     def _rotate_inputs(self, x_flat: torch.Tensor) -> torch.Tensor:
@@ -163,7 +163,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
 
     def _forward_cuda_awq_kernel(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
         """Fast path that feeds rotated activations into the AWQ CUDA GEMM kernel."""
-        if awq_ext is None or x_flat.device.type != "cuda":
+        if x_flat.device.type != "cuda" or not awq_runtime_available():
             return None
 
         compute_dtype = x_flat.dtype if x_flat.dtype in (torch.float16, torch.bfloat16) else torch.float16
@@ -184,7 +184,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
             self.qweight,
             kernel_scales,
             self.qzeros,
-            8,
+            _PAROQUANT_AWQ_SPLIT_K,
             fp32_accum=self.fp32_accum,
         )
         if self.bias is not None:

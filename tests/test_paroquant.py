@@ -4218,12 +4218,13 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
     seen = {}
 
     def fake_awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum=True):
-        del qweight, qzeros, split_k_iters, fp32_accum
+        del qweight, qzeros, fp32_accum
         seen["input_dtype"] = input.dtype
         seen["scales_dtype"] = scales.dtype
+        seen["split_k_iters"] = split_k_iters
         return torch.zeros((input.shape[0], module.out_features), device=input.device, dtype=input.dtype)
 
-    monkeypatch.setattr(paroquant_module, "awq_ext", object())
+    monkeypatch.setattr(paroquant_module, "awq_runtime_available", lambda: True)
     monkeypatch.setattr(paroquant_module, "_awq_cuda_gemm_forward", fake_awq_cuda_gemm_forward)
 
     x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
@@ -4231,6 +4232,7 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
 
     assert seen["input_dtype"] == torch.bfloat16
     assert seen["scales_dtype"] == torch.bfloat16
+    assert seen["split_k_iters"] == 4
     assert out is not None
     assert out.dtype == torch.bfloat16
 
