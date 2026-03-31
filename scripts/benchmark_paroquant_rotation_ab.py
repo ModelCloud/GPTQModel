@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,7 +17,11 @@ import torch
 from tabulate import tabulate
 
 from gptqmodel.quantization.paroquant.optimization import build_random_rotation_buffers
-from gptqmodel.utils.paroquant import apply_paroquant_rotation, apply_paroquant_rotation_reference
+from gptqmodel.utils.paroquant import (
+    apply_paroquant_rotation,
+    apply_paroquant_rotation_reference,
+    clear_paroquant_rotation_extension_cache,
+)
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-shards", type=int, default=1)
     parser.add_argument("--json-out", type=Path, default=None)
     parser.add_argument("--json", action="store_true", help="Print the full payload as JSON.")
+    parser.add_argument("--force-rebuild-extension", action="store_true")
     return parser.parse_args()
 
 
@@ -231,6 +237,10 @@ def main() -> int:
     args = parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for the ParoQuant rotation benchmark.")
+
+    if args.force_rebuild_extension:
+        os.environ["GPTQMODEL_PAROQUANT_FORCE_REBUILD"] = "1"
+        clear_paroquant_rotation_extension_cache()
 
     device = torch.device(f"cuda:{args.device}")
     results = run(

@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Tuple
@@ -184,18 +186,36 @@ def _rotation_kernel_ready(
     )
 
 
+def _rotation_extension_build_root() -> Path:
+    return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / "paroquant"
+
+
+def clear_paroquant_rotation_extension_cache() -> None:
+    """Delete any cached ParoQuant rotation extension binaries and reset load state."""
+    _load_rotation_extension.cache_clear()
+    build_root = _rotation_extension_build_root()
+    if build_root.exists():
+        shutil.rmtree(build_root, ignore_errors=True)
+
+
+def _rotation_force_rebuild_enabled() -> bool:
+    return os.getenv("GPTQMODEL_PAROQUANT_FORCE_REBUILD", "0") == "1"
+
+
 @lru_cache(maxsize=1)
 def _load_rotation_extension() -> bool:
     """JIT-build and load the optional fused CUDA rotation extension once."""
     if not torch.cuda.is_available():
         return False
 
-    build_root = Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / "paroquant"
+    build_root = _rotation_extension_build_root()
+    if _rotation_force_rebuild_enabled():
+        clear_paroquant_rotation_extension_cache()
     build_root.mkdir(parents=True, exist_ok=True)
 
     # Prefer a previously built shared object so stale cpp_extension lock files
     # cannot stall startup once the kernel has already been compiled successfully.
-    if _try_load_prebuilt_rotation_extension(build_root):
+    if not _rotation_force_rebuild_enabled() and _try_load_prebuilt_rotation_extension(build_root):
         return True
 
     try:
@@ -382,6 +402,7 @@ __all__ = [
     "apply_paroquant_rotation_autograd",
     "apply_paroquant_rotation_reference",
     "build_identity_rotation_buffers",
+    "clear_paroquant_rotation_extension_cache",
     "is_identity_rotation",
     "prewarm_paroquant_rotation_extension",
 ]
