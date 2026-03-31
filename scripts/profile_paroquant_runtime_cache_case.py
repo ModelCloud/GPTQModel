@@ -82,7 +82,10 @@ def _make_quant_buffers(case: BenchCase, dtype: torch.dtype, bits: int = 4) -> d
 
 def _configure_runtime(args: argparse.Namespace, device: torch.device) -> None:
     if args.force_rebuild_awq:
-        awq_build_root = Path("/tmp") / f"awq_ext_profile_{os.getpid()}_{args.case_id}_{args.dtype}_{int(args.cache_runtime_dtype)}"
+        awq_build_root = Path("/tmp") / (
+            f"awq_ext_profile_{os.getpid()}_{args.case_id}_{args.dtype}_"
+            f"rt{int(args.cache_runtime_dtype)}_rot{int(args.cache_rotation_dtype)}"
+        )
         os.environ["GPTQMODEL_AWQ_BUILD_ROOT"] = str(awq_build_root)
         os.environ["GPTQMODEL_AWQ_FORCE_REBUILD"] = "1"
     elif "GPTQMODEL_AWQ_BUILD_ROOT" not in os.environ:
@@ -90,7 +93,10 @@ def _configure_runtime(args: argparse.Namespace, device: torch.device) -> None:
         os.environ.pop("GPTQMODEL_AWQ_FORCE_REBUILD", None)
 
     if args.force_rebuild_paroquant:
-        paro_build_root = Path("/tmp") / f"paroquant_ext_profile_{os.getpid()}_{args.case_id}_{args.dtype}_{int(args.cache_runtime_dtype)}"
+        paro_build_root = Path("/tmp") / (
+            f"paroquant_ext_profile_{os.getpid()}_{args.case_id}_{args.dtype}_"
+            f"rt{int(args.cache_runtime_dtype)}_rot{int(args.cache_rotation_dtype)}"
+        )
         os.environ["GPTQMODEL_PAROQUANT_BUILD_ROOT"] = str(paro_build_root)
         os.environ["GPTQMODEL_PAROQUANT_FORCE_REBUILD"] = "1"
     elif "GPTQMODEL_PAROQUANT_BUILD_ROOT" not in os.environ:
@@ -116,7 +122,13 @@ def _configure_runtime(args: argparse.Namespace, device: torch.device) -> None:
         raise RuntimeError("Failed to build/load ParoQuant runtime.")
 
 
-def _make_module(case: BenchCase, dtype: torch.dtype, device: torch.device, cache_runtime_dtype: bool):
+def _make_module(
+    case: BenchCase,
+    dtype: torch.dtype,
+    device: torch.device,
+    cache_runtime_dtype: bool,
+    cache_rotation_dtype: bool,
+):
     from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 
     buffers = _make_quant_buffers(case, dtype=dtype)
@@ -132,6 +144,8 @@ def _make_module(case: BenchCase, dtype: torch.dtype, device: torch.device, cach
         krot=case.krot,
         cache_runtime_dtype=cache_runtime_dtype,
         auto_cache_bf16_runtime_dtype=cache_runtime_dtype,
+        cache_rotation_dtype=cache_rotation_dtype,
+        auto_cache_bf16_rotation_dtype=cache_rotation_dtype,
     ).to(device)
     module.qweight.copy_(buffers["qweight"].to(device))
     module.qzeros.copy_(buffers["qzeros"].to(device))
@@ -153,6 +167,7 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--cache-runtime-dtype", action="store_true")
+    parser.add_argument("--cache-rotation-dtype", action="store_true")
     parser.add_argument("--force-rebuild-awq", action="store_true")
     parser.add_argument("--force-rebuild-paroquant", action="store_true")
     parser.add_argument("--torch-profiler-json-out", type=Path, default=None)
@@ -172,7 +187,13 @@ def main() -> int:
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
 
-    module = _make_module(case, dtype=dtype, device=device, cache_runtime_dtype=args.cache_runtime_dtype)
+    module = _make_module(
+        case,
+        dtype=dtype,
+        device=device,
+        cache_runtime_dtype=args.cache_runtime_dtype,
+        cache_rotation_dtype=args.cache_rotation_dtype,
+    )
     x = torch.randn((case.batch, case.seq, case.in_features), device=device, dtype=dtype)
 
     with torch.inference_mode():
@@ -210,6 +231,7 @@ def main() -> int:
                         "case_id": args.case_id,
                         "dtype": args.dtype,
                         "cache_runtime_dtype": args.cache_runtime_dtype,
+                        "cache_rotation_dtype": args.cache_rotation_dtype,
                         "top_events": events[: args.torch_profiler_top_n],
                     },
                     indent=2,

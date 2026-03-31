@@ -4238,6 +4238,55 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
     assert out.dtype == torch.bfloat16
 
 
+def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
+    """Guard that cached BF16 rotation metadata preserves the runtime dtype and values."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant rotation cache path.")
+
+    paroquant_module = sys.modules[ParoQuantQuantLinear.__module__]
+    from gptqmodel.utils import paroquant as paroquant_utils
+
+    module = ParoQuantQuantLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        register_buffers=True,
+        auto_cache_bf16_rotation_dtype=True,
+    ).to("cuda")
+    module.theta.uniform_(-0.2, 0.2)
+    module.channel_scales.uniform_(0.75, 1.25)
+    module.post_init()
+
+    seen = {}
+    original_rotate = paroquant_utils.apply_paroquant_rotation
+
+    def spy_rotate(x, pairs, theta, scales=None, group_size=128):
+        del pairs, group_size
+        seen["x_dtype"] = x.dtype
+        seen["theta_dtype"] = theta.dtype
+        seen["scales_dtype"] = None if scales is None else scales.dtype
+        return original_rotate(x, module.pairs, theta, scales=scales, group_size=module.group_size)
+
+    monkeypatch.setattr(paroquant_module, "apply_paroquant_rotation", spy_rotate)
+
+    x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
+    baseline = module._rotate_inputs(x)
+    cached = module._rotate_inputs(x)
+
+    assert seen["x_dtype"] == torch.bfloat16
+    assert seen["theta_dtype"] == torch.bfloat16
+    assert seen["scales_dtype"] == torch.bfloat16
+    assert module._runtime_theta is not None
+    assert module._runtime_channel_scales is not None
+    assert module._runtime_theta.dtype == torch.bfloat16
+    assert module._runtime_channel_scales.dtype == torch.bfloat16
+    assert torch.equal(baseline, cached)
+
+
 def test_paroquant_optimizer_improves_over_identity_quantization():
     """Guard that learned rotations beat naive identity-domain quantization."""
     in_features = 128

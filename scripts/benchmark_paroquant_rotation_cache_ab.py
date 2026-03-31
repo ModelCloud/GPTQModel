@@ -113,41 +113,15 @@ def _make_quant_buffers(case: BenchCase, dtype: torch.dtype, bits: int = 4) -> d
     }
 
 
-def _clone_module(module):
-    cloned = type(module)(
-        bits=module.bits,
-        group_size=module.group_size,
-        sym=module.sym,
-        desc_act=module.desc_act,
-        in_features=module.in_features,
-        out_features=module.out_features,
-        bias=module.bias is not None,
-        pack_dtype=module.pack_dtype,
-        register_buffers=True,
-        krot=module.krot,
-        fp32_accum=module.fp32_accum,
-        cache_runtime_dtype=module.cache_runtime_dtype,
-        auto_cache_bf16_runtime_dtype=module.auto_cache_bf16_runtime_dtype,
-        cache_rotation_dtype=module.cache_rotation_dtype,
-        auto_cache_bf16_rotation_dtype=module.auto_cache_bf16_rotation_dtype,
-    ).to(module.qweight.device)
-    cloned.qweight.copy_(module.qweight)
-    cloned.qzeros.copy_(module.qzeros)
-    cloned.scales.copy_(module.scales)
-    if module.bias is not None:
-        cloned.bias.copy_(module.bias)
-    cloned.pairs.copy_(module.pairs)
-    cloned.theta.copy_(module.theta)
-    cloned.channel_scales.copy_(module.channel_scales)
-    cloned.post_init()
-    cloned.eval()
-    return cloned
-
-
-def _make_module(case: BenchCase, dtype: torch.dtype, device: torch.device, cache_runtime_dtype: bool):
+def _make_module(
+    case: BenchCase,
+    dtype: torch.dtype,
+    device: torch.device,
+    buffers: dict[str, torch.Tensor],
+    auto_cache_bf16_rotation_dtype: bool,
+):
     from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 
-    buffers = _make_quant_buffers(case, dtype=dtype)
     module = ParoQuantQuantLinear(
         bits=4,
         group_size=case.group_size,
@@ -158,18 +132,18 @@ def _make_module(case: BenchCase, dtype: torch.dtype, device: torch.device, cach
         bias=True,
         register_buffers=True,
         krot=case.krot,
-        cache_runtime_dtype=cache_runtime_dtype,
-        auto_cache_bf16_runtime_dtype=cache_runtime_dtype,
+        cache_runtime_dtype=False,
+        auto_cache_bf16_runtime_dtype=True,
         cache_rotation_dtype=False,
-        auto_cache_bf16_rotation_dtype=False,
+        auto_cache_bf16_rotation_dtype=auto_cache_bf16_rotation_dtype,
     ).to(device)
     module.qweight.copy_(buffers["qweight"].to(device))
     module.qzeros.copy_(buffers["qzeros"].to(device))
     module.scales.copy_(buffers["scales"].to(device))
     module.bias.copy_(buffers["bias"].to(device))
     module.pairs.copy_(buffers["pairs"].to(device))
-    module.theta.copy_(buffers["theta"].to(device))
-    module.channel_scales.copy_(buffers["channel_scales"].to(device))
+    module.theta.copy_(buffers["theta"].to(device=device, dtype=module.theta.dtype))
+    module.channel_scales.copy_(buffers["channel_scales"].to(device=device, dtype=module.channel_scales.dtype))
     module.post_init()
     module.eval()
     return module
@@ -222,10 +196,22 @@ def run(
     selected_cases = _subset_cases(QUICK_CASES if quick else DEFAULT_CASES, shard_index=shard_index, num_shards=num_shards)
 
     for index, case in enumerate(selected_cases):
-        torch.manual_seed(4000 + index)
-        baseline = _make_module(case, dtype=dtype, device=device, cache_runtime_dtype=False)
-        candidate = _clone_module(baseline)
-        candidate.cache_runtime_dtype = True
+        torch.manual_seed(5000 + index)
+        buffers = _make_quant_buffers(case, dtype=dtype)
+        baseline = _make_module(
+            case,
+            dtype=dtype,
+            device=device,
+            buffers=buffers,
+            auto_cache_bf16_rotation_dtype=False,
+        )
+        candidate = _make_module(
+            case,
+            dtype=dtype,
+            device=device,
+            buffers=buffers,
+            auto_cache_bf16_rotation_dtype=True,
+        )
         x = torch.randn((case.batch, case.seq, case.in_features), device=device, dtype=dtype)
 
         with torch.inference_mode():
@@ -253,7 +239,7 @@ def run(
                 "baseline_ms": baseline_ms,
                 "candidate_ms": candidate_ms,
                 "speedup": speedup,
-                "winner": "cache_on" if candidate_ms < baseline_ms else "cache_off",
+                "winner": "rotation_cache_on" if candidate_ms < baseline_ms else "rotation_cache_off",
                 "baseline_dense_max_abs": baseline_dense.max().item(),
                 "candidate_dense_max_abs": candidate_dense.max().item(),
                 "baseline_candidate_max_abs": baseline_candidate.max().item(),
@@ -281,7 +267,7 @@ def run(
 def _configure_runtime(args: argparse.Namespace, device: torch.device) -> None:
     if args.force_rebuild_awq:
         awq_build_root = Path("/tmp") / (
-            f"awq_ext_runtimecache_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
+            f"awq_ext_rotcache_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
         )
         os.environ["GPTQMODEL_AWQ_BUILD_ROOT"] = str(awq_build_root)
         os.environ["GPTQMODEL_AWQ_FORCE_REBUILD"] = "1"
@@ -291,7 +277,7 @@ def _configure_runtime(args: argparse.Namespace, device: torch.device) -> None:
 
     if args.force_rebuild_paroquant:
         paro_build_root = Path("/tmp") / (
-            f"paroquant_ext_runtimecache_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
+            f"paroquant_ext_rotcache_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
         )
         os.environ["GPTQMODEL_PAROQUANT_BUILD_ROOT"] = str(paro_build_root)
         os.environ["GPTQMODEL_PAROQUANT_FORCE_REBUILD"] = "1"
@@ -342,8 +328,8 @@ def _print_ascii(results: dict[str, Any]) -> None:
                 "case",
                 "batch x seq",
                 "shape",
-                "cache_off vs dense max_abs",
-                "cache_on vs dense max_abs",
+                "rotation_cache_off vs dense max_abs",
+                "rotation_cache_on vs dense max_abs",
                 "off vs on max_abs",
                 "off vs on mean_abs",
             ],
@@ -372,8 +358,8 @@ def _print_ascii(results: dict[str, Any]) -> None:
                 "case",
                 "batch x seq",
                 "shape",
-                "cache_off ms",
-                "cache_on ms",
+                "rotation_cache_off ms",
+                "rotation_cache_on ms",
                 "speedup",
                 "winner",
             ],
@@ -389,7 +375,7 @@ def _print_ascii(results: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="A/B benchmark ParoQuant runtime-dtype caching.")
+    parser = argparse.ArgumentParser(description="A/B benchmark ParoQuant BF16 rotation-metadata caching.")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--dtype", choices=("fp16", "bf16"), default="fp16")
     parser.add_argument("--warmup", type=int, default=5)
@@ -404,7 +390,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for the ParoQuant runtime cache benchmark.")
+        raise RuntimeError("CUDA is required for the ParoQuant rotation-cache benchmark.")
 
     device = torch.device(f"cuda:{args.device}")
     _configure_runtime(args, device)
