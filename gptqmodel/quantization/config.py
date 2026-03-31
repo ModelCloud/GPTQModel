@@ -1613,6 +1613,27 @@ def _normalize_pack_dtype(pack_dtype: Optional[Union[str, torch.dtype]]) -> torc
     raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {pack_dtype}")
 
 
+def _normalize_paroquant_best_state_dtype(best_state_dtype: Optional[Union[str, torch.dtype]]) -> str:
+    """Canonicalize the ParoQuant best-state snapshot dtype into a serialized string."""
+    if best_state_dtype is None:
+        return "fp32"
+    if isinstance(best_state_dtype, str):
+        normalized = best_state_dtype.strip().lower()
+        if normalized in {"bf16", "bfloat16"}:
+            return "bf16"
+        if normalized in {"fp32", "float32"}:
+            return "fp32"
+    elif isinstance(best_state_dtype, torch.dtype):
+        if best_state_dtype == torch.bfloat16:
+            return "bf16"
+        if best_state_dtype == torch.float32:
+            return "fp32"
+    raise ValueError(
+        "ParoQuantizeConfig: `opt_best_state_dtype` must be one of {'bf16', 'fp32'} "
+        "or torch.bfloat16/torch.float32."
+    )
+
+
 def _normalize_fallback(fallback: Optional[Union[Fallback, Dict[str, Any], str, int, float]]) -> Optional[Fallback]:
     if fallback is None:
         return None
@@ -2510,6 +2531,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_fused_rotation": "opt_fused_rotation",
             "opt_gradient_checkpointing": "opt_gradient_checkpointing",
             "opt_stage_cudagraph": "opt_stage_cudagraph",
+            "opt_best_state_dtype": "opt_best_state_dtype",
             "opt_train_on_noisy_inputs": "opt_train_on_noisy_inputs",
             "opt_scope": "opt_scope",
             "opt_stage_impl": "opt_stage_impl",
@@ -2865,6 +2887,7 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_fused_rotation: bool = field(default=True)
     opt_gradient_checkpointing: Optional[bool] = field(default=None)
     opt_stage_cudagraph: bool = field(default=True)
+    opt_best_state_dtype: Union[str, torch.dtype] = field(default="fp32")
     opt_train_on_noisy_inputs: bool = field(default=False)
     opt_scope: str = field(default="module")
     opt_stage_impl: str = field(default="fast")
@@ -2932,6 +2955,7 @@ class ParoQuantizeConfig(QuantizeConfig):
             checkpointing = self.default_opt_gradient_checkpointing_for_scope(self.opt_scope)
         self.opt_gradient_checkpointing = bool(checkpointing)
         self.opt_stage_cudagraph = bool(self.opt_stage_cudagraph)
+        self.opt_best_state_dtype = _normalize_paroquant_best_state_dtype(self.opt_best_state_dtype)
         self.opt_train_on_noisy_inputs = bool(self.opt_train_on_noisy_inputs)
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
@@ -3007,6 +3031,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_fused_rotation"] = self.opt_fused_rotation
         meta_payload["opt_gradient_checkpointing"] = self.opt_gradient_checkpointing
         meta_payload["opt_stage_cudagraph"] = self.opt_stage_cudagraph
+        meta_payload["opt_best_state_dtype"] = self.opt_best_state_dtype
         meta_payload["opt_train_on_noisy_inputs"] = self.opt_train_on_noisy_inputs
         meta_payload["opt_scope"] = self.opt_scope
         meta_payload["opt_stage_impl"] = self.opt_stage_impl

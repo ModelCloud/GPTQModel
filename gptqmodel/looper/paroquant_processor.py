@@ -58,6 +58,7 @@ from ..quantization.paroquant.optimization import (
     _normalize_opt_optimizer,
     _normalize_quantizer_impl,
     _quantizer_sym_for_impl,
+    _resolve_best_state_snapshot_dtype,
     _result_from_model,
     build_paroquant_optimizer,
     build_random_rotation_buffers,
@@ -472,6 +473,7 @@ class ParoQuantProcessor(LoopProcessor):
                 fused_rotation=self.qcfg.opt_fused_rotation,
                 gradient_checkpointing=bool(getattr(self.qcfg, "opt_gradient_checkpointing", False)),
                 stage_cudagraph=self._module_scope_stage_cudagraph_enabled(),
+                best_state_dtype=getattr(self.qcfg, "opt_best_state_dtype", "fp32"),
                 stage_impl=self.qcfg.opt_stage_impl,
                 pair_impl=self.qcfg.opt_pair_impl,
                 quantizer_impl=self.qcfg.opt_quantizer_impl,
@@ -1755,13 +1757,17 @@ class ParoQuantProcessor(LoopProcessor):
         *,
         active_prefixes: tuple[str, ...],
         target_device: Optional[torch.device] = None,
+        target_dtype: Optional[torch.dtype] = None,
     ) -> dict[str, torch.Tensor]:
         """Capture only the mutable grouped module state instead of the whole layer clone."""
         return {
             key: (
                 tensor.detach().clone()
-                if target_device is None
-                else tensor.detach().to(device=target_device).clone()
+                if target_device is None and (target_dtype is None or not tensor.is_floating_point() or tensor.dtype == target_dtype)
+                else tensor.detach().to(
+                    device=target_device if target_device is not None else tensor.device,
+                    dtype=target_dtype if target_dtype is not None and tensor.is_floating_point() else tensor.dtype,
+                ).clone()
             )
             for key, tensor in layer.state_dict().items()
             if self._group_state_key_matches_prefixes(key, active_prefixes)
@@ -1838,6 +1844,10 @@ class ParoQuantProcessor(LoopProcessor):
             scaler = torch.amp.GradScaler(enabled=use_amp)
             active_prefixes = tuple(optim_modules.keys())
             needs_angle_reset = any(optim_module.theta.requires_grad for optim_module in optim_modules.values())
+            best_state_dtype = _resolve_best_state_snapshot_dtype(
+                best_state_dtype=getattr(self.qcfg, "opt_best_state_dtype", "fp32"),
+                device=opt_device,
+            )
             best_state: Optional[dict[str, torch.Tensor]] = None
             best_val_loss = float("inf")
             last_train_loss = 0.0
@@ -1899,6 +1909,7 @@ class ParoQuantProcessor(LoopProcessor):
                     best_state = self._snapshot_group_best_state(
                         layer,
                         active_prefixes=active_prefixes,
+                        target_dtype=best_state_dtype,
                     )
 
             if best_state is not None:
@@ -1990,6 +2001,10 @@ class ParoQuantProcessor(LoopProcessor):
             scaler = torch.amp.GradScaler(enabled=use_amp)
             active_prefixes = tuple(optim_modules.keys())
             needs_angle_reset = any(optim_module.theta.requires_grad for optim_module in optim_modules.values())
+            best_state_dtype = _resolve_best_state_snapshot_dtype(
+                best_state_dtype=getattr(self.qcfg, "opt_best_state_dtype", "fp32"),
+                device=CPU,
+            )
             best_state: Optional[dict[str, torch.Tensor]] = None
             best_val_loss = float("inf")
             last_train_loss = 0.0
@@ -2057,6 +2072,7 @@ class ParoQuantProcessor(LoopProcessor):
                         layer,
                         active_prefixes=active_prefixes,
                         target_device=CPU,
+                        target_dtype=best_state_dtype,
                     )
 
             if best_state is not None:

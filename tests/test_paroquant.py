@@ -79,6 +79,7 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.opt_quantizer_impl == "reference"
     assert cfg.opt_stage_cudagraph is True
     assert cfg.opt_gradient_checkpointing is False
+    assert cfg.opt_best_state_dtype == "fp32"
     assert cfg.opt_train_on_noisy_inputs is False
     assert cfg.opt_channel_scale_clamp_min == 1e-2
     assert cfg.opt_channel_scale_clamp_max == 1e2
@@ -127,6 +128,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_fused_rotation": False,
                 "opt_gradient_checkpointing": False,
                 "opt_stage_cudagraph": False,
+                "opt_best_state_dtype": "bf16",
                 "opt_train_on_noisy_inputs": True,
                 "opt_scope": "compute_block",
                 "opt_stage_impl": "reference",
@@ -163,6 +165,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_fused_rotation is False
     assert cfg.opt_gradient_checkpointing is False
     assert cfg.opt_stage_cudagraph is False
+    assert cfg.opt_best_state_dtype == "bf16"
     assert cfg.opt_train_on_noisy_inputs is True
     assert cfg.opt_scope == "compute_block"
     assert cfg.opt_stage_impl == "reference"
@@ -173,6 +176,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
     assert cfg.to_dict()["meta"]["opt_gradient_checkpointing"] is False
     assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
+    assert cfg.to_dict()["meta"]["opt_best_state_dtype"] == "bf16"
     assert cfg.to_dict()["meta"]["opt_train_on_noisy_inputs"] is True
     assert cfg.to_dict()["meta"]["opt_scope"] == "compute_block"
     assert cfg.to_dict()["meta"]["opt_stage_impl"] == "reference"
@@ -226,6 +230,16 @@ def test_paroquant_quantize_config_rejects_invalid_opt_optimizer():
             bits=4,
             group_size=128,
             opt_optimizer="lion",
+        )
+
+
+def test_paroquant_quantize_config_rejects_invalid_best_state_dtype():
+    """Guard best-state snapshot compression against unsupported dtype strings."""
+    with pytest.raises(ValueError, match="opt_best_state_dtype"):
+        ParoQuantizeConfig(
+            bits=4,
+            group_size=128,
+            opt_best_state_dtype="fp16",
         )
 
 
@@ -931,6 +945,50 @@ def test_optimize_paroquant_linear_forwards_optimizer_name(monkeypatch):
     assert optimizer_name_calls == ["sgd", "sgd"]
 
 
+def test_optimize_paroquant_linear_forwards_best_state_dtype(monkeypatch):
+    """Guard that explicit best-state snapshot dtype policy is forwarded into both optimization stages."""
+    best_state_dtype_calls = []
+    original_run_stage = paroquant_optimization._run_stage
+
+    def spy_run_stage(*, best_state_dtype="fp32", **kwargs):
+        best_state_dtype_calls.append(best_state_dtype)
+        return original_run_stage(best_state_dtype=best_state_dtype, **kwargs)
+
+    monkeypatch.setattr(paroquant_optimization, "_run_stage", spy_run_stage)
+
+    weight = torch.randn((8, 8), dtype=torch.float32)
+    inputs = torch.randn((64, 8), dtype=torch.float32)
+
+    result = optimize_paroquant_linear(
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        pair_ratio=0.5,
+        train_rows=32,
+        val_rows=16,
+        batch_size=16,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        fused_rotation=True,
+        stage_cudagraph=False,
+        best_state_dtype="bf16",
+        stage_impl="fast",
+        pair_impl="fast",
+        quantizer_impl="reference",
+    )
+
+    assert result.val_loss >= 0.0
+    assert best_state_dtype_calls == ["bf16", "bf16"]
+
+
 def test_optimize_paroquant_linear_supports_sgd_optimizer():
     """Guard the direct ParoQuant path against rejecting valid SGD hyperparameters."""
     weight = torch.randn((16, 16), dtype=torch.float32)
@@ -1333,6 +1391,7 @@ def test_paroquant_processor_module_quantize_forces_stage_cudagraph_off(monkeypa
         opt_sgd_dampening=0.0,
         opt_sgd_nesterov=True,
         opt_fused_rotation=True,
+        opt_best_state_dtype="bf16",
         opt_stage_impl="fast",
         opt_pair_impl="fast",
         opt_quantizer_impl="reference",
@@ -1383,6 +1442,7 @@ def test_paroquant_processor_module_quantize_forces_stage_cudagraph_off(monkeypa
     assert forwarded_kwargs["sgd_nesterov"] is True
     assert forwarded_kwargs["fused_rotation"] is True
     assert forwarded_kwargs["gradient_checkpointing"] is False
+    assert forwarded_kwargs["best_state_dtype"] == "bf16"
     assert forwarded_kwargs["stage_impl"] == "fast"
     assert forwarded_kwargs["pair_impl"] == "fast"
     assert forwarded_kwargs["quantizer_impl"] == "reference"
@@ -2934,6 +2994,56 @@ def test_paroquant_processor_group_best_state_can_snapshot_to_cpu():
 
     assert sorted(best_state.keys()) == ["a.weight"]
     assert all(tensor.device.type == "cpu" for tensor in best_state.values())
+
+
+def test_paroquant_processor_group_best_state_can_cast_float_snapshots_without_touching_int_buffers():
+    """Guard grouped best-state compression so float tensors shrink without corrupting integer buffers."""
+
+    class _ToyBranch(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.randn(4, 4, dtype=torch.float32))
+            self.register_buffer("index", torch.tensor([1, 2], dtype=torch.int32))
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a = _ToyBranch()
+            self.b = _ToyBranch()
+
+    processor = object.__new__(ParoQuantProcessor)
+    layer = _ToyLayer()
+
+    best_state = processor._snapshot_group_best_state(
+        layer,
+        active_prefixes=("a",),
+        target_device=torch.device("cpu"),
+        target_dtype=torch.bfloat16,
+    )
+
+    assert sorted(best_state.keys()) == ["a.index", "a.weight"]
+    assert best_state["a.weight"].dtype == torch.bfloat16
+    assert best_state["a.index"].dtype == torch.int32
+
+
+def test_paroquant_best_state_dtype_resolves_explicit_bf16():
+    """Guard explicit bf16 snapshot selection after removing the auto policy."""
+    resolved = paroquant_optimization._resolve_best_state_snapshot_dtype(
+        best_state_dtype="bf16",
+        device=torch.device("cuda"),
+    )
+
+    assert resolved == torch.bfloat16
+
+
+def test_paroquant_best_state_dtype_defaults_to_fp32():
+    """Guard the no-auto default so missing best-state dtype configuration stays on fp32."""
+    resolved = paroquant_optimization._resolve_best_state_snapshot_dtype(
+        best_state_dtype=None,
+        device=torch.device("cpu"),
+    )
+
+    assert resolved == torch.float32
 
 
 def test_paroquant_processor_caches_group_forward_signature_flags(monkeypatch):

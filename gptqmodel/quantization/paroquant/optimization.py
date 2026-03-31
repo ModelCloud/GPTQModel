@@ -41,6 +41,8 @@ from ...utils.paroquant import (
 _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_OPTIMIZERS: tuple[str, ...] = ("adamw", "adam", "sgd")
+# Best-state snapshots are a separate memory policy from the always-fp32 live optimization path.
+_PAROQUANT_BEST_STATE_DTYPES: tuple[str, ...] = ("bf16", "fp32")
 _PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL = 8_000_000
 
 
@@ -71,6 +73,69 @@ def _normalize_opt_optimizer(name: str) -> str:
             f"{_PAROQUANT_OPTIMIZERS}, got `{name}`."
         )
     return normalized
+
+
+def _normalize_best_state_dtype_name(best_state_dtype: Optional[str | torch.dtype]) -> str:
+    """Normalize the requested best-state snapshot dtype into one of the supported policy names."""
+    if best_state_dtype is None:
+        return "fp32"
+    if isinstance(best_state_dtype, str):
+        normalized = best_state_dtype.strip().lower()
+        if normalized in {"bf16", "bfloat16"}:
+            return "bf16"
+        if normalized in {"fp32", "float32"}:
+            return "fp32"
+    elif isinstance(best_state_dtype, torch.dtype):
+        if best_state_dtype == torch.bfloat16:
+            return "bf16"
+        if best_state_dtype == torch.float32:
+            return "fp32"
+    raise ValueError(
+        "ParoQuant optimization: `best_state_dtype` must be one of "
+        f"{_PAROQUANT_BEST_STATE_DTYPES} or torch.bfloat16/torch.float32."
+    )
+
+
+def _resolve_best_state_snapshot_dtype(
+    *,
+    best_state_dtype: Optional[str | torch.dtype],
+    device: torch.device,
+) -> torch.dtype:
+    """Resolve the best-state snapshot dtype policy for the target snapshot device."""
+    del device
+    return torch.bfloat16 if _normalize_best_state_dtype_name(best_state_dtype) == "bf16" else torch.float32
+
+
+def _snapshot_state_tensor(
+    tensor: torch.Tensor,
+    *,
+    target_device: Optional[torch.device] = None,
+    target_dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
+    """Clone a state tensor, optionally moving it and casting floating tensors for compact snapshots."""
+    snapshot = tensor.detach()
+    cast_dtype = target_dtype if target_dtype is not None and snapshot.is_floating_point() else None
+    needs_move = target_device is not None and snapshot.device != target_device
+    needs_cast = cast_dtype is not None and snapshot.dtype != cast_dtype
+    if needs_move or needs_cast:
+        snapshot = snapshot.to(
+            device=target_device if target_device is not None else snapshot.device,
+            dtype=cast_dtype if cast_dtype is not None else snapshot.dtype,
+        )
+    return snapshot.clone()
+
+
+def _snapshot_model_state(
+    model: nn.Module,
+    *,
+    target_device: Optional[torch.device] = None,
+    target_dtype: Optional[torch.dtype] = None,
+) -> dict[str, torch.Tensor]:
+    """Capture a model state dict with optional float-only dtype compression for best-state snapshots."""
+    return {
+        key: _snapshot_state_tensor(tensor, target_device=target_device, target_dtype=target_dtype)
+        for key, tensor in model.state_dict().items()
+    }
 
 
 def _quantizer_sym_for_impl(sym: bool, quantizer_impl: str) -> bool:
@@ -1162,6 +1227,7 @@ def _run_stage_gptqmodel_impl(
     batch_size: int,
     optimizer_name: str,
     gradient_checkpointing: bool = False,
+    best_state_dtype: Optional[str | torch.dtype] = "fp32",
 ) -> tuple[float, float]:
     """Run one optimization stage with validation-based best-state selection."""
     normalized_groups = _normalize_optimizer_param_groups(param_groups)
@@ -1183,8 +1249,9 @@ def _run_stage_gptqmodel_impl(
     base_lrs = [float(group["lr"]) for group in normalized_groups]
     scaler = torch.amp.GradScaler(enabled=use_amp)
     global_step = 0
+    best_state_snapshot_dtype = _resolve_best_state_snapshot_dtype(best_state_dtype=best_state_dtype, device=inputs_train.device)
 
-    best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+    best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
     best_val_loss = float("inf")
     last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
 
@@ -1217,7 +1284,7 @@ def _run_stage_gptqmodel_impl(
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+            best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
 
     model.load_state_dict(best_state, strict=True)
     model.reset_masked_angles()
@@ -1256,6 +1323,7 @@ def _run_stage_gptqmodel_cudagraph(
     epochs: int,
     batch_size: int,
     optimizer_name: str,
+    best_state_dtype: Optional[str | torch.dtype] = "fp32",
 ) -> tuple[float, float]:
     """Replay fixed-size CUDA mini-batches through one captured train-step graph with eager tail fallback."""
     normalized_groups = _normalize_optimizer_param_groups(param_groups)
@@ -1275,8 +1343,9 @@ def _run_stage_gptqmodel_cudagraph(
     total_steps = max(1, epochs * steps_per_epoch)
     base_lrs = [float(group["lr"]) for group in normalized_groups]
     global_step = 0
+    best_state_snapshot_dtype = _resolve_best_state_snapshot_dtype(best_state_dtype=best_state_dtype, device=inputs_train.device)
 
-    best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+    best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
     best_val_loss = float("inf")
     last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
 
@@ -1353,7 +1422,7 @@ def _run_stage_gptqmodel_cudagraph(
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+            best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
 
     model.load_state_dict(best_state, strict=True)
     model.reset_masked_angles()
@@ -1373,6 +1442,7 @@ def _run_stage_gptqmodel(
     stage_cudagraph: Optional[bool] = None,
     optimizer_name: str = "adamw",
     gradient_checkpointing: bool = False,
+    best_state_dtype: Optional[str | torch.dtype] = "fp32",
 ) -> tuple[float, float]:
     """Run the fast stage, preferring CUDA-graph replay on fused CUDA paths and falling back to eager."""
     if not _should_use_paroquant_stage_cudagraph(
@@ -1392,6 +1462,7 @@ def _run_stage_gptqmodel(
             batch_size=batch_size,
             optimizer_name=optimizer_name,
             gradient_checkpointing=gradient_checkpointing,
+            best_state_dtype=best_state_dtype,
         )
 
     initial_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
@@ -1407,6 +1478,7 @@ def _run_stage_gptqmodel(
             epochs=epochs,
             batch_size=batch_size,
             optimizer_name=optimizer_name,
+            best_state_dtype=best_state_dtype,
         )
     except Exception:
         model.load_state_dict(initial_state, strict=True)
@@ -1423,6 +1495,7 @@ def _run_stage_gptqmodel(
             batch_size=batch_size,
             optimizer_name=optimizer_name,
             gradient_checkpointing=gradient_checkpointing,
+            best_state_dtype=best_state_dtype,
         )
 
 
@@ -1438,6 +1511,7 @@ def _run_stage_reference(
     batch_size: int,
     optimizer_name: str,
     gradient_checkpointing: bool = False,
+    best_state_dtype: Optional[str | torch.dtype] = "fp32",
 ) -> tuple[float, float]:
     """Official-parity stage runner: AMP + GradScaler + cosine LR update."""
     normalized_groups = _normalize_optimizer_param_groups(param_groups)
@@ -1459,8 +1533,9 @@ def _run_stage_reference(
     base_lrs = [float(group["lr"]) for group in normalized_groups]
     scaler = torch.amp.GradScaler(enabled=use_amp)
     global_step = 0
+    best_state_snapshot_dtype = _resolve_best_state_snapshot_dtype(best_state_dtype=best_state_dtype, device=inputs_train.device)
 
-    best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+    best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
     best_val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
     last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
 
@@ -1495,7 +1570,7 @@ def _run_stage_reference(
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+            best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
 
     model.load_state_dict(best_state, strict=True)
     model.reset_masked_angles()
@@ -1516,6 +1591,7 @@ def _run_stage(
     stage_cudagraph: Optional[bool] = None,
     optimizer_name: str = "adamw",
     gradient_checkpointing: bool = False,
+    best_state_dtype: Optional[str | torch.dtype] = "fp32",
 ) -> tuple[float, float]:
     impl = _normalize_opt_impl(stage_impl, field="stage_impl")
     with _activate_stage_params(model, param_groups):
@@ -1531,6 +1607,7 @@ def _run_stage(
                 batch_size=batch_size,
                 optimizer_name=optimizer_name,
                 gradient_checkpointing=gradient_checkpointing,
+                best_state_dtype=best_state_dtype,
             )
         return _run_stage_gptqmodel(
             model=model,
@@ -1544,6 +1621,7 @@ def _run_stage(
             stage_cudagraph=stage_cudagraph,
             optimizer_name=optimizer_name,
             gradient_checkpointing=gradient_checkpointing,
+            best_state_dtype=best_state_dtype,
         )
 
 
@@ -1651,6 +1729,7 @@ def optimize_paroquant_linear(
     pair_impl: Literal["fast", "reference"] = "fast",
     quantizer_impl: Literal["fast", "reference"] = "fast",
     gradient_checkpointing: bool = False,
+    best_state_dtype: Optional[str | torch.dtype] = "fp32",
     scale_clamp_min: float = PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT,
     scale_clamp_max: float = PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT,
 ) -> ParoQuantOptimizationResult:
@@ -1762,6 +1841,7 @@ def optimize_paroquant_linear(
         stage_cudagraph=stage_cudagraph,
         optimizer_name=normalized_optimizer_name,
         gradient_checkpointing=gradient_checkpointing,
+        best_state_dtype=best_state_dtype,
     )
 
     model.init_quantizer()
@@ -1801,6 +1881,7 @@ def optimize_paroquant_linear(
         stage_cudagraph=stage_cudagraph,
         optimizer_name=normalized_optimizer_name,
         gradient_checkpointing=gradient_checkpointing,
+        best_state_dtype=best_state_dtype,
     )
 
     return _result_from_model(
