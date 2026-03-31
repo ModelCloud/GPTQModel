@@ -6,6 +6,7 @@
 import os
 from urllib.parse import urlparse
 
+from ..utils.hub import hf_hub_download
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -39,8 +40,6 @@ def resolve_path(path: str, filename: str) -> str: # return a valid file path to
 
         return resolved_path
     elif path.startswith("http"):
-        from huggingface_hub import hf_hub_download
-
         result = parse_url(path)
         if len(result) == 3:
             log.info(
@@ -65,8 +64,6 @@ def resolve_path(path: str, filename: str) -> str: # return a valid file path to
             path_split = path.split("/")
             path = f"{path_split[0]}/{path_split[1]}"
             subfolder = "/".join(path_split[2:])
-
-        from huggingface_hub import hf_hub_download
 
         # _ = HfApi().list_repo_files(path)
 

@@ -4,6 +4,7 @@ import torch
 
 from gptqmodel.models import GPTQModel, auto, loader
 from gptqmodel.quantization import QuantizeConfig
+from gptqmodel.utils import model as model_utils
 
 
 def test_load_treats_missing_absolute_path_as_local(monkeypatch):
@@ -41,6 +42,53 @@ def test_get_model_local_path_skips_snapshot_download_for_absolute_path(monkeypa
     )
 
     assert loader.get_model_local_path(model_path) == model_path
+
+
+def test_copy_py_files_uses_remote_metadata_downloads(monkeypatch, tmp_path):
+    downloads = []
+
+    monkeypatch.setattr(
+        model_utils,
+        "model_info",
+        lambda *args, **kwargs: SimpleNamespace(
+            siblings=[
+                SimpleNamespace(rfilename="model.py"),
+                SimpleNamespace(rfilename="README.md"),
+                SimpleNamespace(rfilename="subdir/tokenizer.py"),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        model_utils,
+        "hf_hub_download",
+        lambda **kwargs: downloads.append(kwargs) or str(tmp_path / kwargs["filename"].replace("/", "_")),
+    )
+
+    model_utils.copy_py_files(str(tmp_path), model_id_or_path="org/repo")
+
+    assert downloads == [
+        {"repo_id": "org/repo", "filename": "model.py", "local_dir": str(tmp_path)},
+        {"repo_id": "org/repo", "filename": "subdir/tokenizer.py", "local_dir": str(tmp_path)},
+    ]
+
+
+def test_get_model_files_size_uses_remote_metadata_sizes(monkeypatch):
+    monkeypatch.setattr(
+        model_utils,
+        "model_info",
+        lambda *args, **kwargs: SimpleNamespace(
+            siblings=[
+                SimpleNamespace(rfilename="model.safetensors", size=10),
+                SimpleNamespace(rfilename="weights.bin", size=20),
+                SimpleNamespace(rfilename="README.md", size=99),
+                SimpleNamespace(rfilename="adapter.pt", size=None),
+            ]
+        ),
+    )
+
+    result = model_utils.get_model_files_size("org/repo")
+
+    assert result == (30 / (1024 * 1024))
 
 
 def test_gptqmodel_from_pretrained_forwards_dtype_kwarg(monkeypatch):

@@ -51,7 +51,6 @@ from os.path import isdir, join  # noqa: E402
 from typing import Dict, List, Optional, Union  # noqa: E402
 
 import torch  # noqa: E402
-from huggingface_hub import list_repo_files  # noqa: E402
 from packaging.version import Version  # noqa: E402
 from transformers import AutoConfig, PreTrainedTokenizerBase  # noqa: E402
 from transformers import __version__ as TRANSFORMERS_VERSION
@@ -62,6 +61,7 @@ from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa
 from ..utils import BACKEND  # noqa: E402
 from ..utils.backend import normalize_backend  # noqa: E402
 from ..utils.hf import normalize_torch_dtype_kwarg, resolve_trust_remote_code  # noqa: E402
+from ..utils.hub import create_repo, list_repo_files, repo_info, upload_large_folder  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
 from .base import BaseQModel  # noqa: E402
@@ -571,18 +571,15 @@ class GPTQModel:
         if not repo_id:
             raise RuntimeError("You must pass repo_id as str to push_to_hub.")
 
-        from huggingface_hub import HfApi
         repo_type = "model"
-
-        api = HfApi()
         # if repo does not exist, create it
         try:
-            api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token)
+            repo_info(repo_id=repo_id, repo_type=repo_type, token=token)
         except Exception:
-            api.create_repo(repo_id=repo_id, repo_type=repo_type, token=token, private=private, exist_ok=exists_ok)
+            create_repo(repo_id=repo_id, repo_type=repo_type, token=token, private=private, exist_ok=exists_ok)
 
         # upload the quantized save folder
-        api.upload_large_folder(
+        upload_large_folder(
             folder_path=quantized_path,
             repo_id=repo_id,
             repo_type=repo_type,

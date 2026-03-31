@@ -21,7 +21,7 @@ from ..utils.structure import print_module_tree
 if ensure_modelscope_available():
     from modelscope import snapshot_download
 else:
-    from huggingface_hub import snapshot_download
+    from ..utils.hub import snapshot_download
 
 import defuser
 from packaging.version import InvalidVersion, Version
