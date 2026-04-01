@@ -76,3 +76,4 @@ from .mistral3 import Mistral3GPTQ
 from .afmoe import AfMoeQModel
 from .glm4v import Glm4vGPTQ
 from .voxtral import VoxtralGPTQ
+from .glm4_moe_lite import Glm4MoeLiteQModel
