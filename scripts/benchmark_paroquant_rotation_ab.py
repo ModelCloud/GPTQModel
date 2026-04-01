@@ -162,7 +162,8 @@ def run(device: torch.device, dtype: torch.dtype, warmup: int, iters: int, quick
     rows: list[dict[str, Any]] = []
 
     for case_index, case in enumerate(selected_cases):
-        inputs = _make_case_inputs(case, dtype=dtype, device=device, seed=seed + (case_index * 17))
+        case_seed = seed + (case_index * 17)
+        inputs = _make_case_inputs(case, dtype=dtype, device=device, seed=case_seed)
         x = inputs["x"]
         pairs = inputs["pairs"]
         theta = inputs["theta"]
@@ -173,6 +174,30 @@ def run(device: torch.device, dtype: torch.dtype, warmup: int, iters: int, quick
             reference = apply_paroquant_rotation_reference(x, pairs, theta, scales=scales, group_size=case.group_size)
 
         diff = (fused - reference).abs()
+        fp32_metrics = {
+            "fused_fp32_max_abs": None,
+            "fused_fp32_mean_abs": None,
+            "reference_fp32_max_abs": None,
+            "reference_fp32_mean_abs": None,
+        }
+        if dtype != torch.float32:
+            fp32_inputs = _make_case_inputs(case, dtype=torch.float32, device=device, seed=case_seed)
+            with torch.inference_mode():
+                reference_fp32 = apply_paroquant_rotation_reference(
+                    fp32_inputs["x"],
+                    fp32_inputs["pairs"],
+                    fp32_inputs["theta"],
+                    scales=fp32_inputs["scales"],
+                    group_size=case.group_size,
+                )
+            fused_fp32_diff = (fused.float() - reference_fp32).abs()
+            reference_fp32_diff = (reference.float() - reference_fp32).abs()
+            fp32_metrics = {
+                "fused_fp32_max_abs": fused_fp32_diff.max().item(),
+                "fused_fp32_mean_abs": fused_fp32_diff.mean().item(),
+                "reference_fp32_max_abs": reference_fp32_diff.max().item(),
+                "reference_fp32_mean_abs": reference_fp32_diff.mean().item(),
+            }
         elapsed_ms = _benchmark_ms(
             lambda: apply_paroquant_rotation(x, pairs, theta, scales=scales, group_size=case.group_size),
             device=device,
@@ -187,6 +212,7 @@ def run(device: torch.device, dtype: torch.dtype, warmup: int, iters: int, quick
                 "gbps": _rotation_bandwidth_gbps(case, dtype, elapsed_ms),
                 "max_abs": diff.max().item(),
                 "mean_abs": diff.mean().item(),
+                **fp32_metrics,
             }
         )
 
@@ -223,10 +249,27 @@ def _print_ascii(results: dict[str, Any]) -> None:
                     f"{row['gbps']:.1f}",
                     f"{row['max_abs']:.6f}",
                     f"{row['mean_abs']:.6f}",
+                    "-" if row["fused_fp32_max_abs"] is None else f"{row['fused_fp32_max_abs']:.6f}",
+                    "-" if row["fused_fp32_mean_abs"] is None else f"{row['fused_fp32_mean_abs']:.6f}",
+                    "-" if row["reference_fp32_max_abs"] is None else f"{row['reference_fp32_max_abs']:.6f}",
+                    "-" if row["reference_fp32_mean_abs"] is None else f"{row['reference_fp32_mean_abs']:.6f}",
                 ]
                 for row in results["rows"]
             ],
-            headers=["case", "rows", "hidden", "dtype", "latency_ms", "gbps", "max_abs", "mean_abs"],
+            headers=[
+                "case",
+                "rows",
+                "hidden",
+                "dtype",
+                "latency_ms",
+                "gbps",
+                "fused vs ref max_abs",
+                "fused vs ref mean_abs",
+                "fused vs fp32 max_abs",
+                "fused vs fp32 mean_abs",
+                "ref vs fp32 max_abs",
+                "ref vs fp32 mean_abs",
+            ],
             tablefmt="plain",
         )
     )

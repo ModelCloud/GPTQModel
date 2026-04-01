@@ -5,6 +5,7 @@
 #include "rotation.cuh"
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAFunctions.h>
 #include <cstdlib>
 #include <torch/extension.h>
 
@@ -38,6 +39,40 @@ __global__ void rotate_kernel(const scalar_t *__restrict__ x, scalar_t *__restri
                                                                                g, t);
 }
 
+template <int CTA_M, int GROUP_SIZE, int KROT, bool USE_SCALE, int ROW_PAD>
+__global__ void rotate_kernel_bf16_half_workspace(const __nv_bfloat16 *__restrict__ x,
+                                                  __nv_bfloat16 *__restrict__ out,
+                                                  const int16_t *__restrict__ idx_ij,
+                                                  const __nv_bfloat16 *__restrict__ theta,
+                                                  const __nv_bfloat16 *__restrict__ scales, int s,
+                                                  int h) {
+  constexpr int ROW_STRIDE = CTA_M + ROW_PAD;
+  __shared__ __half x_grp[ROW_STRIDE * GROUP_SIZE];
+
+  int j = blockIdx.x;
+  int g = blockIdx.y;
+  int t = threadIdx.x;
+
+  RotateAccessBFloat16HalfWorkspace::template load_group<CTA_M, ROW_STRIDE, GROUP_SIZE, USE_SCALE>(
+      x_grp, x, scales, s, h, j, g, t);
+
+  float reg_theta[KROT];
+  int reg_idx[KROT];
+  RotateAccessBFloat16HalfWorkspace::template load_coeffs<KROT, GROUP_SIZE>(reg_theta, reg_idx,
+                                                                            idx_ij, theta, h, g,
+                                                                            t);
+  __syncthreads();
+
+#pragma unroll
+  for (int r = 0; r < KROT; r++) {
+    RotateAccess<__half>::template apply_one<CTA_M, ROW_STRIDE>(x_grp, reg_idx[r], reg_theta[r]);
+    __syncthreads();
+  }
+
+  RotateAccessBFloat16HalfWorkspace::template store_group<CTA_M, ROW_STRIDE, GROUP_SIZE>(
+      out, x_grp, s, h, j, g, t);
+}
+
 #define LAUNCH_ROTATE(CUDA_T, TORCH_T)                                                               \
   {                                                                                                  \
     auto *x_p = reinterpret_cast<CUDA_T *>(x.data_ptr<TORCH_T>());                                   \
@@ -53,6 +88,40 @@ __global__ void rotate_kernel(const scalar_t *__restrict__ x, scalar_t *__restri
     }                                                                                                \
     break;                                                                                           \
   }
+
+template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
+torch::Tensor rotate_launcher_bf16_half_workspace(at::Tensor x, at::Tensor idx_ij,
+                                                  at::Tensor theta, at::Tensor scales) {
+  int h = x.size(-1);
+  TORCH_CHECK(h % GROUP_SIZE == 0, "h must be divisible by GROUP_SIZE");
+  int groups_per_row = h / GROUP_SIZE;
+  constexpr int pn = GROUP_SIZE / 2;
+  int seq_len = x.numel() / x.size(-1);
+  auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
+  at::Tensor out = torch::empty(x.sizes(), options);
+  bool has_scale = scales.defined() && scales.numel() > 0;
+
+  auto theta_cast = theta.scalar_type() == at::kBFloat16 ? theta : theta.to(at::kBFloat16);
+  auto scales_cast = !has_scale                       ? at::Tensor()
+                     : scales.scalar_type() == at::kBFloat16 ? scales
+                                                             : scales.to(at::kBFloat16);
+
+  dim3 grid((seq_len + CTA_M - 1) / CTA_M, groups_per_row);
+  dim3 block(pn);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto *x_p = reinterpret_cast<__nv_bfloat16 *>(x.data_ptr<c10::BFloat16>());
+  auto *o_p = reinterpret_cast<__nv_bfloat16 *>(out.data_ptr<c10::BFloat16>());
+  auto *t_p = reinterpret_cast<__nv_bfloat16 *>(theta_cast.data_ptr<c10::BFloat16>());
+  if (has_scale) {
+    auto *s_p = reinterpret_cast<__nv_bfloat16 *>(scales_cast.data_ptr<c10::BFloat16>());
+    rotate_kernel_bf16_half_workspace<CTA_M, GROUP_SIZE, KROT, true, ROW_PAD><<<grid, block, 0, stream>>>(
+        x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, s_p, seq_len, h);
+  } else {
+    rotate_kernel_bf16_half_workspace<CTA_M, GROUP_SIZE, KROT, false, ROW_PAD><<<grid, block, 0, stream>>>(
+        x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, nullptr, seq_len, h);
+  }
+  return out;
+}
 
 template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
 torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
@@ -82,7 +151,7 @@ torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
   case at::kHalf:
     LAUNCH_ROTATE(__half, c10::Half)
   case at::kBFloat16:
-    LAUNCH_ROTATE(__nv_bfloat16, c10::BFloat16)
+    return rotate_launcher_bf16_half_workspace<KROT, CTA_M, GROUP_SIZE, ROW_PAD>(x, idx_ij, theta, scales);
   default:
     TORCH_CHECK(false, "rotate supports Float, Half, and BFloat16, got ", x.scalar_type());
   }
@@ -125,11 +194,53 @@ torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
 
 namespace {
 
-int resolve_cta_m() {
+struct LaunchConfig {
+  int cta_m;
+  int row_pad;
+};
+
+int current_sm_version() {
+  static thread_local c10::DeviceIndex cached_device = -1;
+  static thread_local int cached_sm = -1;
+  const c10::DeviceIndex current_device = c10::cuda::current_device();
+  if (current_device != cached_device) {
+    cached_device = current_device;
+    const cudaDeviceProp *props = at::cuda::getDeviceProperties(current_device);
+    cached_sm = props == nullptr ? -1 : (props->major * 10 + props->minor);
+  }
+  return cached_sm;
+}
+
+int resolve_cta_m(at::ScalarType dtype) {
   if (const char *override_value = std::getenv("GPTQMODEL_PAROQUANT_ROTATE_CTA_M")) {
     int parsed = std::atoi(override_value);
     if (parsed == 4 || parsed == 8 || parsed == 16) {
       return parsed;
+    }
+  }
+
+  // These defaults are pinned to manual full-sweep measurements on the A100
+  // (sm80) and RTX 4090 (sm89) available on this host. Other architectures may
+  // not benefit from these launch shapes and can regress in performance, so
+  // they stay on the legacy default until benchmarked explicitly.
+  const int sm_version = current_sm_version();
+  if (dtype == at::kHalf) {
+    switch (sm_version) {
+    case 80:
+    case 89:
+      return 8;
+    default:
+      return 4;
+    }
+  }
+  if (dtype == at::kBFloat16) {
+    switch (sm_version) {
+    case 80:
+      return 4;
+    case 89:
+      return 16;
+    default:
+      return 4;
     }
   }
   return 4;
@@ -145,6 +256,13 @@ int resolve_row_pad(at::ScalarType dtype) {
   return dtype == at::kFloat ? 0 : 2;
 }
 
+LaunchConfig resolve_launch_config(at::ScalarType dtype) {
+  return {
+      resolve_cta_m(dtype),
+      resolve_row_pad(dtype),
+  };
+}
+
 } // namespace
 
 torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
@@ -152,13 +270,22 @@ torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
   int64_t krot = theta.size(0);
   TORCH_CHECK(krot == idx.size(0), "theta.size(0) must equal idx_ij.size(0)");
   at::Tensor scales = scales_opt.value_or(at::Tensor());
-  int cta_m = resolve_cta_m();
-  int row_pad = resolve_row_pad(x.scalar_type());
+  const LaunchConfig config = resolve_launch_config(x.scalar_type());
+  int cta_m = config.cta_m;
+  int row_pad = config.row_pad;
 
   if (group_size == 128) {
     DISPATCH_KROT(128)
   }
   TORCH_CHECK(false, "Unsupported group_size: ", group_size, "; expected 128");
+}
+
+std::vector<int64_t> rotate_launch_config(at::Tensor x) {
+  const LaunchConfig config = resolve_launch_config(x.scalar_type());
+  return {
+      static_cast<int64_t>(config.cta_m),
+      static_cast<int64_t>(config.row_pad),
+  };
 }
 
 #undef DISPATCH_ROW_PAD
@@ -167,8 +294,10 @@ torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
 
 TORCH_LIBRARY(gptqmodel_paroquant, m) {
   m.def("rotate(Tensor x, Tensor idx_ij, Tensor theta, Tensor? scales=None, int group_size=128) -> Tensor");
+  m.def("launch_config(Tensor x) -> int[]");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_paroquant, CUDA, m) {
   m.impl("rotate", &rotate_dynamic);
+  m.impl("launch_config", &rotate_launch_config);
 }

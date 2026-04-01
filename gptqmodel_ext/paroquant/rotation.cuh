@@ -175,11 +175,77 @@ struct BFloat16Traits {
   __device__ static __nv_bfloat162 from_floats(float a, float b) {
     return __floats2bfloat162_rn(a, b);
   }
+  __device__ static __half2 to_half2(__nv_bfloat162 v) {
+    float2 pair = __bfloat1622float2(v);
+    return __floats2half2_rn(pair.x, pair.y);
+  }
+  __device__ static __nv_bfloat162 from_half2(__half2 v) {
+    float2 pair = __half22float2(v);
+    return __floats2bfloat162_rn(pair.x, pair.y);
+  }
   __device__ static float to_float(__nv_bfloat16 v) { return __bfloat162float(v); }
   __device__ static __nv_bfloat16 from_float(float v) { return __float2bfloat16(v); }
   __device__ static __nv_bfloat16 low(__nv_bfloat162 v) { return __low2bfloat16(v); }
   __device__ static __nv_bfloat16 high(__nv_bfloat162 v) { return __high2bfloat16(v); }
   __device__ static __nv_bfloat16 hmul(__nv_bfloat16 a, __nv_bfloat16 b) { return __hmul(a, b); }
+};
+
+// Keep BF16 inputs/outputs on the fused path while using the FP16 workspace
+// update pattern internally to reduce BF16 round-trip loss across k-rot stages.
+struct RotateAccessBFloat16HalfWorkspace {
+  template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE, bool USE_SCALE>
+  __device__ static void load_group(__half *__restrict__ x_grp, const __nv_bfloat16 *__restrict__ x,
+                                    const __nv_bfloat16 *__restrict__ scales, const int s,
+                                    const int h, const int j, const int g, const int t) {
+    static_assert((ROW_STRIDE % 2) == 0, "ROW_STRIDE must be even for vectorized half access");
+    const int offset = GROUP_SIZE * g + 2 * t;
+    __half2 scale_pair;
+    if constexpr (USE_SCALE) {
+      scale_pair = BFloat16Traits::to_half2(*reinterpret_cast<const __nv_bfloat162 *>(scales + offset));
+    } else {
+      scale_pair = __floats2half2_rn(1.0f, 1.0f);
+    }
+
+#pragma unroll
+    for (int i = 0; i < CTA_M; i++) {
+      int row = j * CTA_M + i;
+      if (row < s) {
+        __half2 x_pair =
+            BFloat16Traits::to_half2(*reinterpret_cast<const __nv_bfloat162 *>(x + row * h + offset));
+        __half2 prod = __hmul2(x_pair, scale_pair);
+        x_grp[(2 * t) * ROW_STRIDE + i] = __low2half(prod);
+        x_grp[(2 * t + 1) * ROW_STRIDE + i] = __high2half(prod);
+      }
+    }
+  }
+
+  template <int KROT, int GROUP_SIZE>
+  __device__ static void load_coeffs(float reg_theta[KROT], int reg_idx[KROT],
+                                     const int16_t *__restrict__ idx_ij,
+                                     const __nv_bfloat16 *__restrict__ theta, const int h,
+                                     const int g, const int t) {
+#pragma unroll
+    for (int r = 0; r < KROT; r++) {
+      reg_theta[r] = BFloat16Traits::to_float(theta[r * h / 2 + g * GROUP_SIZE / 2 + t]);
+      reg_idx[r] = *reinterpret_cast<const int *>(idx_ij + r * h + g * GROUP_SIZE + 2 * t);
+    }
+  }
+
+  template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE>
+  __device__ static void store_group(__nv_bfloat16 *__restrict__ out, const __half *__restrict__ x_grp,
+                                     const int s, const int h, const int j, const int g,
+                                     const int t) {
+    static_assert((ROW_STRIDE % 2) == 0, "ROW_STRIDE must be even for vectorized half access");
+    const int base = GROUP_SIZE * g + 2 * t;
+#pragma unroll
+    for (int i = 0; i < CTA_M; i++) {
+      int row = j * CTA_M + i;
+      if (row < s) {
+        __half2 out_pair = __halves2half2(x_grp[(2 * t) * ROW_STRIDE + i], x_grp[(2 * t + 1) * ROW_STRIDE + i]);
+        *reinterpret_cast<__nv_bfloat162 *>(out + row * h + base) = BFloat16Traits::from_half2(out_pair);
+      }
+    }
+  }
 };
 
 template <>

@@ -20,7 +20,7 @@ from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
-from ...utils.paroquant import apply_paroquant_rotation, is_identity_rotation
+from ...utils.paroquant import apply_paroquant_rotation, build_identity_rotation_buffers, is_identity_rotation
 from .gemm_awq import FP32_ACCUM, _awq_cuda_gemm_forward
 from .torch_awq import AwqTorchQuantLinear
 
@@ -116,9 +116,15 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
 
     def _register_rotation_buffers(self) -> None:
         """Allocate the per-layer buffers that encode runtime rotations."""
-        theta = torch.zeros((self.krot, self.in_features // 2), dtype=torch.float16)
-        pairs = torch.zeros((self.krot, self.in_features), dtype=torch.int16)
-        channel_scales = torch.ones((1, self.in_features), dtype=torch.float16)
+        # Fresh runtime modules must start from a valid identity matching so the
+        # fused kernel never sees duplicate pair indices before optimized
+        # buffers are loaded from quantization or checkpoints.
+        pairs, theta, channel_scales = build_identity_rotation_buffers(
+            in_features=self.in_features,
+            group_size=self.group_size,
+            krot=self.krot,
+            dtype=torch.float16,
+        )
 
         if "theta" not in self._buffers:
             self.register_buffer("theta", theta)
