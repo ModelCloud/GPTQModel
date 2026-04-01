@@ -4,7 +4,7 @@ numpy==2.2.6; python_version < "3.14"
 numpy>=2.3.0; python_version >= "3.14"
 torch>=2.8.0
 safetensors>=0.7.0
-transformers>=5.2.0
+transformers>=5.4.0
 threadpoolctl>=3.6.0
 packaging>=24.2
 device-smi>=0.5.2
@@ -19,4 +19,4 @@ pyarrow>=21.0
 dill>=0.3.8
 torchao>=0.16.0
 kernels>=0.12.2
-defuser>=0.0.16
+defuser>=0.0.18

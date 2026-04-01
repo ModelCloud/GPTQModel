@@ -13,10 +13,12 @@
 #include <ATen/cuda/CUDAContext.h>
 #include "gemm_cuda.h"
 #include "dequantize.cuh"
+#include <algorithm>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cublas_v2.h>
+#include <cstdlib>
 #include <type_traits>
 
 
@@ -149,6 +151,89 @@ __device__ __forceinline__ void mma_m16n8(float* C_warp, scalar_t* A_shared_warp
 }
 
 static void validate_bf16_device(torch::Device device);
+
+namespace {
+
+bool fused_splitk_reduce_enabled()
+{
+  const char* disable_value = std::getenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE");
+  return disable_value == nullptr || std::atoi(disable_value) == 0;
+}
+
+template <typename output_t>
+__global__ void reduce_splitk_fp32_to_output_kernel(
+    const float* __restrict__ partials,
+    output_t* __restrict__ out,
+    int split_k_iters,
+    int total_elements)
+{
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+
+  for (; idx < total_elements; idx += stride)
+  {
+    float acc = 0.0f;
+#pragma unroll 8
+    for (int split_idx = 0; split_idx < split_k_iters; ++split_idx)
+    {
+      acc += partials[split_idx * total_elements + idx];
+    }
+    store_accum_value(out + idx, acc);
+  }
+}
+
+template <typename output_t>
+torch::Tensor fused_reduce_splitk_fp32_to_output(torch::Tensor out_feats_tensor, at::ScalarType output_dtype)
+{
+  auto options = torch::TensorOptions().dtype(output_dtype).device(out_feats_tensor.device());
+  at::Tensor result = torch::empty({out_feats_tensor.size(1), out_feats_tensor.size(2)}, options);
+  const int total_elements = static_cast<int>(result.numel());
+  const int split_k_iters = static_cast<int>(out_feats_tensor.size(0));
+  const int threads = 256;
+  const int blocks = std::max(1, std::min((total_elements + threads - 1) / threads, 4096));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  auto partials = reinterpret_cast<const float*>(out_feats_tensor.data_ptr<float>());
+  output_t* out = nullptr;
+  if constexpr (std::is_same_v<output_t, half>)
+  {
+    out = reinterpret_cast<half*>(result.data_ptr<at::Half>());
+  }
+  else if constexpr (std::is_same_v<output_t, nv_bfloat16>)
+  {
+    out = reinterpret_cast<nv_bfloat16*>(result.data_ptr<at::BFloat16>());
+  }
+  else
+  {
+    out = reinterpret_cast<float*>(result.data_ptr<float>());
+  }
+
+  reduce_splitk_fp32_to_output_kernel<output_t><<<blocks, threads, 0, stream>>>(
+      partials, out, split_k_iters, total_elements);
+  return result;
+}
+
+torch::Tensor maybe_fused_reduce_splitk_fp32_to_output(torch::Tensor out_feats_tensor, at::ScalarType output_dtype)
+{
+  if (!fused_splitk_reduce_enabled())
+  {
+    return out_feats_tensor.sum(0).to(output_dtype);
+  }
+
+  switch (output_dtype)
+  {
+  case at::kHalf:
+    return fused_reduce_splitk_fp32_to_output<half>(out_feats_tensor, output_dtype);
+  case at::kBFloat16:
+    return fused_reduce_splitk_fp32_to_output<nv_bfloat16>(out_feats_tensor, output_dtype);
+  case at::kFloat:
+    return fused_reduce_splitk_fp32_to_output<float>(out_feats_tensor, output_dtype);
+  default:
+    return out_feats_tensor.sum(0).to(output_dtype);
+  }
+}
+
+} // namespace
 
 template <typename scalar_t, typename output_t>
 __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, int split_k_iters, scalar_t* __restrict__ A, int* __restrict__ B, scalar_t* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, output_t* __restrict__ C) 
@@ -1367,7 +1452,7 @@ torch::Tensor launch_gemm_forward_cuda_fp32_reduce(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
 
-    return out_feats_tensor.sum(0).to(output_dtype);
+    return maybe_fused_reduce_splitk_fp32_to_output(out_feats_tensor, output_dtype);
 }
 
 torch::Tensor gemm_forward_cuda(

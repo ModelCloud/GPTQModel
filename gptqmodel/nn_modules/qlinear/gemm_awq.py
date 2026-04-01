@@ -13,34 +13,17 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.utils import get_best_device
+from ...utils.awq import awq_dequantize_weights, awq_gemm_forward, awq_runtime_available, awq_runtime_error
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 
 
-awq_ext, msg = try_import("gptqmodel_awq_kernels")
 # Shared runtime default: prefer accuracy first unless the user explicitly opts out.
 FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
-
 def _awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool = FP32_ACCUM):
-    if awq_ext is None:
-        raise ValueError(msg or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
-
-    try:
-        # Newer CUDA wheels expose fp32 accumulation directly on the main GEMM entrypoint.
-        return awq_ext.gemm_forward_cuda(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
-    except TypeError:
-        pass
-
-    if fp32_accum:
-        # Keep older wheels working until they are rebuilt with the unified fp32_accum API.
-        fp32_reduce_kernel = getattr(awq_ext, "gemm_forward_cuda_fp32_reduce", None)
-        if fp32_reduce_kernel is not None:
-            return fp32_reduce_kernel(input, qweight, scales, qzeros, split_k_iters)
-
-    return awq_ext.gemm_forward_cuda(input, qweight, scales, qzeros, split_k_iters)
+    return awq_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
 
 
 class AwqGemmFn(torch.autograd.Function):
@@ -58,9 +41,6 @@ class AwqGemmFn(torch.autograd.Function):
         prefer_backend=None,
         fp32_accum=FP32_ACCUM,
     ):
-        if awq_ext is None:
-            raise ValueError(msg or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
-
         ctx.save_for_backward(x, qweight, qzeros, scales, bias)
         ctx.out_features = out_features
 
@@ -71,7 +51,7 @@ class AwqGemmFn(torch.autograd.Function):
         # Above compute density threshold it is faster to just dequantize the whole thing and do simple matmul
         FULL_DEQUANT_MATMUL_THRESHOLD = x.shape[0] * x.shape[1] > 1024
         if FULL_DEQUANT_MATMUL_THRESHOLD:
-            out = awq_ext.dequantize_weights_cuda(qweight, scales, qzeros, 0, 0, 0, False)
+            out = awq_dequantize_weights(qweight, scales, qzeros, 0, 0, 0, False)
             out = torch.matmul(x, out.to(dtype=x.dtype))
         else:
             out = _awq_cuda_gemm_forward(
@@ -95,10 +75,7 @@ class AwqGemmFn(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, qweight, qzeros, scales, bias = ctx.saved_tensors
 
-        if awq_ext is None:
-            raise ValueError(msg or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
-
-        weights = awq_ext.dequantize_weights_cuda(
+        weights = awq_dequantize_weights(
             qweight, scales, qzeros, 1, 0, 0, False
         ).to(grad_output.dtype)
 
@@ -138,8 +115,8 @@ class AwqGEMMQuantLinear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        if awq_ext is None:
-            return False, ValueError(msg or "CUDA AWQ extension not available; cannot select AwqGEMMQuantLinear")
+        if not awq_runtime_available():
+            return False, ValueError(awq_runtime_error() or "CUDA AWQ extension not available; cannot select AwqGEMMQuantLinear")
         else:
             return True, None
 

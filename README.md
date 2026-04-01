@@ -20,6 +20,7 @@
 </p>
 
 ## Latest News
+* 04/01/2026 [6.0-dev `main`]: ✨New PrismAI/Bonsai 1bit model quantization (inference only) suupport. Faster ParoQuant/AWQ kernels. New ParoQuant `optimization scope` control: `module` (Paro Lite), `layer` (Paro reference).
 * 03/22/2026 [6.0-dev `main`]: ✨New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`. `main` is currently undergoing a major refactor and api is unstable.
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
 * 03/09/2026 [main]: ✨Qwen 3.5 MoE model support added. New HF Kernel support added for AWQ. 
@@ -144,6 +145,23 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 * 06/20/2924 ✨ [0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0): Thanks for all the work from ModelCloud team and the open-source ML community for their contributions!
 </details>
 
+## Special Notes: 
+
+PrismAI/Bonsai inference sample script. Requires gguf pypi pkg: `pip install -U gguf`
+
+```py
+• from gptqmodel import GPTQModel
+
+  model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf")
+
+  tokens = model.generate(
+      "Who wrote Romeo and Juliet?",
+      max_new_tokens=128,
+  )[0]
+
+  print(model.tokenizer.decode(tokens, skip_special_tokens=True))
+  ```
+
 ## What is GPT-QModel?
 GPT-QModel is a production-ready LLM model compression/quantization toolkit with hw-accelerated inference support for both CPU/GPU via HF Transformers, vLLM, and SGLang.
 
@@ -202,6 +220,7 @@ Current internal benchmarks have only shown a clear resource-usage benefit for `
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, and EXL3 quantization support.
+* ✨ Prism Bonsai `Q1_0_g128` GGUF checkpoints can be loaded for post-quantized inference through the normal `model_id_or_path` argument. GPTQModel normalizes the GGUF artifact internally for HF Transformers, requires the external `gguf` PyPI package, and does not support Prism Bonsai quantization or export.
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
@@ -245,6 +264,8 @@ Selected public references where teams or companies explicitly mention `GPTQMode
 | Dream             | ✅ | GRIN-MoE      | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | Voxtral             | ✅ |
 | ERNIE 4.5         | ✅ | GLM 4/4V/4MoE | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | XVERSE              | ✅ |
 | Brumby            | ✅ | Hymba         | ✅ | Mistral        | ✅ | Qwen 1/2/3/3.5     | ✅ | Minimax M2          | ✅ |
+
+Prism Bonsai GGUF checkpoints are supported for inference only. Current support targets post-quantized `Q1_0_g128` loading through the normal model path or repo argument, requires the external `gguf` PyPI package, and does not include Prism model quantization.
 
 
 ## Platform and HW Support 

@@ -3,17 +3,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import importlib
 import inspect
 import json
+import os
 import sys
 import warnings
 from contextlib import contextmanager
 from functools import lru_cache
+from importlib import metadata as importlib_metadata
 from typing import Any, Optional
 
+import numpy as np
 import torch
 import transformers
 from accelerate import init_empty_weights
+from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoModelForCausalLM, GenerationConfig, PreTrainedModel
 
 
@@ -37,6 +42,8 @@ __all__ = [
     "prepare_remote_code_compat",
     "prepare_remote_model_init_compat",
     "has_native_transformers_causallm_support",
+    "get_hf_gguf_load_kwargs",
+    "normalize_model_id_or_path_for_hf_gguf",
     "resolve_trust_remote_code",
     "set_hf_config_dtype",
     "load_tokenizer",
@@ -45,6 +52,14 @@ __all__ = [
 log = setup_logger()
 _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
 _MISSING = object()
+INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
+GGUF_MIN_VERSION = Version("0.10.0")
+PRISM_Q1_0_G128_NAME = "Q1_0_g128"
+PRISM_Q1_0_G128_VALUE = 41
+PRISM_Q1_0_G128_BLOCK_SIZE = 128
+PRISM_Q1_0_G128_TYPE_SIZE = 18
+_DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
+_PRISM_GGUF_PATCH_WARNED = False
 
 
 def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
@@ -130,12 +145,246 @@ def suspend_hf_weight_init():
             delattr(modeling_utils, "_init_weights")
 
 
+def _raise_public_gguf_file_arg_error(api_name: str) -> None:
+    raise TypeError(
+        f"{api_name} does not accept `gguf_file`. Pass the GGUF checkpoint as `model_id_or_path`, "
+        "or pass a model directory / repo containing a single GGUF file."
+    )
+
+
+def get_hf_gguf_load_kwargs(kwargs: dict[str, Any]) -> dict[str, str]:
+    gguf_file = kwargs.get(INTERNAL_HF_GGUF_FILE_KWARG)
+    if gguf_file is None:
+        return {}
+    return {"gguf_file": gguf_file}
+
+
+def _normalize_repo_file_paths(file_names) -> list[str]:
+    return [str(file_name).replace("\\", "/") for file_name in file_names]
+
+
+def _infer_single_gguf_file(file_names) -> Optional[str]:
+    normalized_files = _normalize_repo_file_paths(file_names)
+    gguf_files = sorted(file_name for file_name in normalized_files if file_name.lower().endswith(".gguf"))
+    if len(gguf_files) != 1:
+        return None
+
+    dense_files = [
+        file_name
+        for file_name in normalized_files
+        if file_name.lower().endswith(_DENSE_MODEL_FILE_EXTENSIONS)
+    ]
+    if dense_files:
+        return None
+
+    return gguf_files[0]
+
+
+def _iter_local_repo_files(root_dir: str) -> list[str]:
+    repo_files = []
+    for current_root, _dirs, files in os.walk(root_dir):
+        for file_name in files:
+            full_path = os.path.join(current_root, file_name)
+            repo_files.append(os.path.relpath(full_path, root_dir).replace(os.sep, "/"))
+    return repo_files
+
+
+@lru_cache(maxsize=None)
+def _resolve_hf_gguf_artifact(model_id_or_path: str) -> Optional[tuple[str, str]]:
+    if os.path.isfile(model_id_or_path) and model_id_or_path.lower().endswith(".gguf"):
+        model_root = os.path.dirname(os.path.abspath(model_id_or_path)) or "."
+        return model_root, os.path.basename(model_id_or_path)
+
+    if os.path.isdir(model_id_or_path):
+        inferred_gguf_file = _infer_single_gguf_file(_iter_local_repo_files(model_id_or_path))
+        if inferred_gguf_file is not None:
+            return os.path.normpath(model_id_or_path), inferred_gguf_file
+        return None
+
+    try:
+        from .hub import list_repo_files
+    except Exception:
+        return None
+
+    try:
+        repo_files = list_repo_files(repo_id=model_id_or_path)
+    except Exception:
+        return None
+
+    inferred_gguf_file = _infer_single_gguf_file(repo_files)
+    if inferred_gguf_file is None:
+        return None
+    return model_id_or_path, inferred_gguf_file
+
+
+def _is_prism_q1_0_g128(tensor_type) -> bool:
+    if getattr(tensor_type, "name", None) == PRISM_Q1_0_G128_NAME:
+        return True
+
+    try:
+        return int(tensor_type) == PRISM_Q1_0_G128_VALUE
+    except (TypeError, ValueError):
+        return False
+
+
+def _dequantize_prism_q1_0_g128(data: np.ndarray) -> np.ndarray:
+    rows = np.asarray(data, dtype=np.uint8)
+    if rows.shape[-1] % PRISM_Q1_0_G128_TYPE_SIZE != 0:
+        raise ValueError(
+            "Prism Q1_0_g128 row byte width must be divisible by 18, got "
+            f"{rows.shape[-1]} for shape {rows.shape}"
+        )
+
+    n_blocks = rows.shape[-1] // PRISM_Q1_0_G128_TYPE_SIZE
+    blocks = rows.reshape(*rows.shape[:-1], n_blocks, PRISM_Q1_0_G128_TYPE_SIZE)
+    scales = np.ascontiguousarray(blocks[..., :2]).view(np.float16).astype(np.float32)[..., 0]
+    sign_bits = np.unpackbits(blocks[..., 2:], axis=-1, bitorder="little")
+    weights = np.where(sign_bits == 1, scales[..., None], -scales[..., None]).astype(np.float32, copy=False)
+    return weights.reshape(*rows.shape[:-1], n_blocks * PRISM_Q1_0_G128_BLOCK_SIZE)
+
+
+def _ensure_valid_gguf_runtime(*, api_name: str):
+    try:
+        gguf = importlib.import_module("gguf")
+    except ImportError as exc:
+        raise ImportError(
+            f"{api_name}: GGUF model loading requires the external `gguf` PyPI package. "
+            f"Install `gguf>={GGUF_MIN_VERSION}` and retry."
+        ) from exc
+
+    missing_symbols = [symbol for symbol in ("GGUFReader", "dequantize") if not hasattr(gguf, symbol)]
+    if missing_symbols:
+        raise ImportError(
+            f"{api_name}: installed `gguf` package is not a compatible GGUF runtime. "
+            f"Missing symbols: {', '.join(missing_symbols)}. Install `gguf>={GGUF_MIN_VERSION}`."
+        )
+
+    try:
+        version_str = importlib_metadata.version("gguf")
+    except importlib_metadata.PackageNotFoundError:
+        version_str = getattr(gguf, "__version__", None)
+
+    if not version_str:
+        raise ImportError(
+            f"{api_name}: installed `gguf` package does not expose a usable version. "
+            f"Install `gguf>={GGUF_MIN_VERSION}`."
+        )
+
+    try:
+        parsed_version = Version(version_str)
+    except InvalidVersion as exc:
+        raise ImportError(
+            f"{api_name}: installed `gguf` package reports invalid version `{version_str}`. "
+            f"Install `gguf>={GGUF_MIN_VERSION}`."
+        ) from exc
+
+    if parsed_version < GGUF_MIN_VERSION:
+        raise ImportError(
+            f"{api_name}: installed `gguf` version `{parsed_version}` is too old. "
+            f"Install `gguf>={GGUF_MIN_VERSION}`."
+        )
+
+    return gguf, parsed_version
+
+
+def _transformers_has_native_prism_gguf_support() -> bool:
+    try:
+        import transformers.modeling_gguf_pytorch_utils as gguf_utils
+    except Exception:
+        return False
+
+    return hasattr(gguf_utils, "_dequantize_prism_q1_0_g128")
+
+
+def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
+    global _PRISM_GGUF_PATCH_WARNED
+
+    try:
+        import transformers.modeling_gguf_pytorch_utils as gguf_utils
+        from transformers.utils import import_utils as hf_import_utils
+    except Exception:
+        return
+
+    gguf, gguf_version = _ensure_valid_gguf_runtime(api_name=api_name)
+
+    if not gguf_utils.is_gguf_available():
+        gguf_utils.is_gguf_available = lambda: True
+        if hasattr(hf_import_utils, "is_gguf_available"):
+            hf_import_utils.is_gguf_available = lambda: True
+
+    if _transformers_has_native_prism_gguf_support():
+        return
+
+    original_dequantize = gguf.dequantize
+    if not getattr(original_dequantize, "_gptqmodel_prism_q1_0_g128_patch", False):
+        def patched_dequantize(data, tensor_type):
+            try:
+                return original_dequantize(data, tensor_type)
+            except NotImplementedError:
+                if _is_prism_q1_0_g128(tensor_type):
+                    return _dequantize_prism_q1_0_g128(data)
+                raise
+
+        patched_dequantize._gptqmodel_prism_q1_0_g128_patch = True
+        gguf.dequantize = patched_dequantize
+
+    gguf_utils.PRISM_Q1_0_G128_NAME = PRISM_Q1_0_G128_NAME
+    gguf_utils.PRISM_Q1_0_G128_VALUE = PRISM_Q1_0_G128_VALUE
+    gguf_utils.PRISM_Q1_0_G128_BLOCK_SIZE = PRISM_Q1_0_G128_BLOCK_SIZE
+    gguf_utils.PRISM_Q1_0_G128_TYPE_SIZE = PRISM_Q1_0_G128_TYPE_SIZE
+    gguf_utils._is_prism_q1_0_g128 = _is_prism_q1_0_g128
+    gguf_utils._dequantize_prism_q1_0_g128 = _dequantize_prism_q1_0_g128
+
+    if not _PRISM_GGUF_PATCH_WARNED:
+        log.warning(
+            "HF: installed transformers lacks native Prism GGUF support; GPTQModel applied a local "
+            "Q1_0_g128 compatibility monkeypatch using gguf %s.",
+            gguf_version,
+        )
+        _PRISM_GGUF_PATCH_WARNED = True
+
+
+def normalize_model_id_or_path_for_hf_gguf(
+    model_id_or_path: Optional[str],
+    kwargs: dict[str, Any],
+    *,
+    api_name: str,
+) -> Optional[str]:
+    if INTERNAL_HF_GGUF_FILE_KWARG in kwargs:
+        return model_id_or_path
+
+    if kwargs.pop("gguf_file", None) is not None:
+        _raise_public_gguf_file_arg_error(api_name)
+
+    if model_id_or_path is None:
+        return None
+
+    resolved = _resolve_hf_gguf_artifact(str(model_id_or_path))
+    if resolved is None:
+        return model_id_or_path
+
+    normalized_model_id_or_path, gguf_file = resolved
+    _patch_transformers_prism_gguf_compat(api_name=api_name)
+    kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = gguf_file
+    return normalized_model_id_or_path
+
+
 @lru_cache(maxsize=None)
 def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple[bool, Optional[str], Optional[str]]:
+    config_load_kwargs: dict[str, Any] = {}
+    normalized_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
+        model_id_or_path,
+        config_load_kwargs,
+        api_name="_detect_native_transformers_causallm_support",
+    )
     try:
-        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=False)
+        config = AutoConfig.from_pretrained(
+            normalized_model_id_or_path,
+            trust_remote_code=False,
+            **get_hf_gguf_load_kwargs(config_load_kwargs),
+        )
     except Exception as exc:
-        log.debug("HF: native transformers support check failed for `%s`: %s", model_id_or_path, exc)
+        log.debug("HF: native transformers support check failed for `%s`: %s", normalized_model_id_or_path, exc)
         return False, None, None
 
     model_type = getattr(config, "model_type", None)
@@ -145,7 +394,7 @@ def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple
         log.debug(
             "HF: config `%s` for `%s` has no native AutoModelForCausalLM mapping: %s",
             type(config).__name__,
-            model_id_or_path,
+            normalized_model_id_or_path,
             exc,
         )
         return False, model_type, None
