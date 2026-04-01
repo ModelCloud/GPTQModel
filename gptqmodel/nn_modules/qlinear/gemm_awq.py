@@ -38,8 +38,6 @@ msg = awq_runtime_error()
 
 
 def _awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool = FP32_ACCUM):
-    if not awq_runtime_available():
-        raise ValueError(awq_runtime_error() or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
     return awq_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
 
 
@@ -58,9 +56,6 @@ class AwqGemmFn(torch.autograd.Function):
         prefer_backend=None,
         fp32_accum=FP32_ACCUM,
     ):
-        if not awq_runtime_available():
-            raise ValueError(awq_runtime_error() or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
-
         ctx.save_for_backward(x, qweight, qzeros, scales, bias)
         ctx.out_features = out_features
 
@@ -94,9 +89,6 @@ class AwqGemmFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         input, qweight, qzeros, scales, bias = ctx.saved_tensors
-
-        if not awq_runtime_available():
-            raise ValueError(awq_runtime_error() or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
 
         weights = awq_dequantize_weights(
             qweight, scales, qzeros, 1, 0, 0, False

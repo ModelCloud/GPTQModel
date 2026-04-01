@@ -46,6 +46,7 @@ from gptqmodel.utils.importer import get_kernel_for_backend
 from gptqmodel.utils.paroquant import (
     apply_paroquant_rotation_reference,
     build_identity_rotation_buffers,
+    clear_paroquant_rotation_extension_cache,
     prewarm_paroquant_rotation_extension,
 )
 from gptqmodel.utils.paroquant_benchmark import make_paroquant_config
@@ -1203,7 +1204,11 @@ def test_paroquant_prewarm_rotation_extension_skips_unsupported_configs(monkeypa
     """Guard the explicit prewarm helper so startup only pays for real fused-kernel cases."""
     calls = []
 
-    monkeypatch.setattr("gptqmodel.utils.paroquant._load_rotation_extension", lambda: calls.append("load") or True)
+    monkeypatch.setattr(
+        paroquant_utils_module._PAROQUANT_ROTATION_EXTENSION,
+        "load",
+        lambda: calls.append("load") or True,
+    )
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
     assert prewarm_paroquant_rotation_extension(fused_rotation=False, group_size=128, krot=8) is False
@@ -1222,62 +1227,19 @@ def test_paroquant_prewarm_rotation_extension_skips_unsupported_configs(monkeypa
     assert calls == ["load"]
 
 
-def test_paroquant_load_rotation_extension_prefers_cached_binary(monkeypatch, tmp_path):
-    """Guard against stale cpp_extension lock waits once the fused library already exists."""
-    build_root = tmp_path / ".cache" / "gptqmodel" / "torch_extensions" / "paroquant"
-    build_root.mkdir(parents=True)
-    library_path = build_root / "gptqmodel_paroquant_rotation.so"
-    library_path.write_bytes(b"placeholder")
-    (build_root / "lock").write_text("", encoding="utf-8")
+def test_paroquant_clear_rotation_extension_cache_delegates_to_shared_loader(monkeypatch):
+    """Guard the public cache-clear helper so benchmarks can force fresh torch.ops rebuilds."""
 
-    load_library_calls = []
-    compile_calls = []
+    calls = []
+    monkeypatch.setattr(
+        paroquant_utils_module._PAROQUANT_ROTATION_EXTENSION,
+        "clear_cache",
+        lambda: calls.append("clear"),
+    )
 
-    monkeypatch.setattr(paroquant_utils_module.Path, "home", staticmethod(lambda: tmp_path))
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.ops, "load_library", lambda path: load_library_calls.append(path))
+    clear_paroquant_rotation_extension_cache()
 
-    import torch.utils.cpp_extension as cpp_extension
-
-    monkeypatch.setattr(cpp_extension, "load", lambda *args, **kwargs: compile_calls.append((args, kwargs)) or True)
-
-    paroquant_utils_module._load_rotation_extension.cache_clear()
-    try:
-        assert paroquant_utils_module._load_rotation_extension() is True
-    finally:
-        paroquant_utils_module._load_rotation_extension.cache_clear()
-
-    assert load_library_calls == [str(library_path)]
-    assert compile_calls == []
-
-
-def test_paroquant_load_rotation_extension_builds_plain_library(monkeypatch, tmp_path):
-    """Guard the fused rotation build path against regressing back to pybind module loading."""
-    build_root = tmp_path / ".cache" / "gptqmodel" / "torch_extensions" / "paroquant"
-    build_root.mkdir(parents=True)
-
-    compile_calls = []
-
-    monkeypatch.setattr(paroquant_utils_module.Path, "home", staticmethod(lambda: tmp_path))
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(paroquant_utils_module, "_try_load_prebuilt_rotation_extension", lambda _root: False)
-
-    import torch.utils.cpp_extension as cpp_extension
-
-    monkeypatch.setattr(cpp_extension, "load", lambda *args, **kwargs: compile_calls.append((args, kwargs)) or True)
-
-    paroquant_utils_module._load_rotation_extension.cache_clear()
-    try:
-        assert paroquant_utils_module._load_rotation_extension() is True
-    finally:
-        paroquant_utils_module._load_rotation_extension.cache_clear()
-
-    assert len(compile_calls) == 1
-    _args, kwargs = compile_calls[0]
-    assert kwargs["is_python_module"] is False
-    assert kwargs["sources"] == [
-        str((Path(paroquant_utils_module.__file__).resolve().parents[2] / "gptqmodel_ext" / "paroquant" / "rotation.cu"))
-    ]
+    assert calls == ["clear"]
 
 
 def test_paroquant_processor_prewarm_runtime_runs_once(monkeypatch):
@@ -4224,7 +4186,6 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
         seen["split_k_iters"] = split_k_iters
         return torch.zeros((input.shape[0], module.out_features), device=input.device, dtype=input.dtype)
 
-    monkeypatch.setattr(paroquant_module, "awq_runtime_available", lambda: True)
     monkeypatch.setattr(paroquant_module, "_awq_cuda_gemm_forward", fake_awq_cuda_gemm_forward)
 
     x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
@@ -4274,6 +4235,7 @@ def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
     monkeypatch.setattr(paroquant_module, "apply_paroquant_rotation", spy_rotate)
 
     x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
+    module._rotate_inputs(x)
     baseline = module._rotate_inputs(x)
     cached = module._rotate_inputs(x)
 

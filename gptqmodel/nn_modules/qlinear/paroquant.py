@@ -18,7 +18,6 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
-from ...utils.awq import awq_runtime_available
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.paroquant import apply_paroquant_rotation, is_identity_rotation
@@ -229,7 +228,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
 
     def _forward_cuda_awq_kernel(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
         """Fast path that feeds rotated activations into the AWQ CUDA GEMM kernel."""
-        if x_flat.device.type != "cuda" or not awq_runtime_available():
+        if x_flat.device.type != "cuda":
             return None
 
         compute_dtype = x_flat.dtype if x_flat.dtype in (torch.float16, torch.bfloat16) else torch.float16
