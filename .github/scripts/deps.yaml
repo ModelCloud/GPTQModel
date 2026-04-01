@@ -89,6 +89,9 @@ tests:
     - fastapi
     - pydantic
 
+  test_local_model_paths.py:
+    - gguf
+
 tests/models:
   test_cohere2:
     - jieba

@@ -20,7 +20,8 @@
 </p>
 
 ## Latest News
-* 04/01/2026 [6.0-dev `main`]: ✨New PrismAI/Bonsai 1bit model quantization (inference only) support. Faster ParoQuant/AWQ kernels. New ParoQuant `optimization scope` control: `module` (Paro Lite), `layer` (Paro reference). Added `FOEM` quantization support via `FOEMConfig(alpha, beta, device)`.
+* 04/01/2026 [6.0-dev `main`]: ✨New PrismAI/Bonsai 1bit model quantization (inference only) support. Faster ParoQuant/AWQ kernels. New ParoQuant `optimization scope` control: `module` (Paro Lite), `layer` (Paro reference). `GLM4 MOE lite` model support added. Added `FOEM` quantization support via `FOEMConfig(alpha, beta, device)`.
+* 03/31/2026 [6.0-dev `main`]: ✨`MiniCPM-O` and `MiniCPM-V` model support added.
 * 03/22/2026 [6.0-dev `main`]: ✨New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`. `main` is currently undergoing a major refactor and api is unstable.
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
 * 03/09/2026 [main]: ✨Qwen 3.5 MoE model support added. New HF Kernel support added for AWQ. 
@@ -250,21 +251,22 @@ Selected public references where teams or companies explicitly mention `GPTQMode
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
 ## Model Support  
-| Model             |   |               |   |                |   |                |   |                     |   |
-|-------------------|---|---------------|---|----------------|---|----------------|---|---------------------|---|
-| Apertus           | ✅ | EXAONE 3/4    | ✅ | Dots1          | ✅ | Mistral3       | ✅ | Qwen 2/3 (Next/MoE) | ✅ |
-| Baichuan          | ✅ | Falcon (H1)   | ✅ | InternLM 1/2.5 | ✅ | Mixtral        | ✅ | Qwen 2/2.5/3 VL     | ✅ |
-| Bloom             | ✅ | FastVLM       | ✅ | Kimi K2        | ✅ | MobileLLM      | ✅ | Qwen 2.5/3 Omni     | ✅ |
-| ChatGLM           | ✅ | Gemma 1/2/3   | ✅ | Klear          | ✅ | MOSS           | ✅ | RefinedWeb          | ✅ |
-| CodeGen           | ✅ | GPTBigCod     | ✅ | LING/RING      | ✅ | MPT            | ✅ | StableLM            | ✅ |
-| Cohere 1-2        | ✅ | GPTQ-Neo(X)   | ✅ | Llama 1-3.3    | ✅ | Nemotron H     | ✅ | StarCoder2          | ✅ |
-| DBRX Converted    | ✅ | GPT-2         | ✅ | Llama 3.2 VL   | ✅ | Nemotron Ultra | ✅ | TeleChat2           | ✅ |
-| Deci              | ✅ | GPT-J         | ✅ | Llama 4        | ✅ | OPT            | ✅ | Trinity             | ✅ |
-| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS       | ✅ | LongCatFlash   | ✅ | OLMo2          | ✅ | Yi                  | ✅ |
-| DeepSeek-V2-Lite  | ✅ | Granite       | ✅ | LongLLaMA      | ✅ | Ovis 1.6/2     | ✅ | Seed-OSS            | ✅ |
-| Dream             | ✅ | GRIN-MoE      | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | Voxtral             | ✅ |
-| ERNIE 4.5         | ✅ | GLM 4/4V/4MoE | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | XVERSE              | ✅ |
-| Brumby            | ✅ | Hymba         | ✅ | Mistral        | ✅ | Qwen 1/2/3/3.5     | ✅ | Minimax M2          | ✅ |
+| Model             |   |               |   |                        |   |                |   |                     |   |
+|-------------------|---|---------------|---|------------------------|---|----------------|---|---------------------|---|
+| Apertus           | ✅ | EXAONE 3/4    | ✅ | Dots1                  | ✅ | Mistral3       | ✅ | Qwen 2/3 (Next/MoE) | ✅ |
+| Baichuan          | ✅ | Falcon (H1)   | ✅ | InternLM 1/2.5         | ✅ | Mixtral        | ✅ | Qwen 2/2.5/3 VL     | ✅ |
+| Bloom             | ✅ | FastVLM       | ✅ | Kimi K2                | ✅ | MobileLLM      | ✅ | Qwen 2.5/3 Omni     | ✅ |
+| ChatGLM           | ✅ | Gemma 1/2/3   | ✅ | Klear                  | ✅ | MOSS           | ✅ | RefinedWeb          | ✅ |
+| CodeGen           | ✅ | GPTBigCod     | ✅ | LING/RING              | ✅ | MPT            | ✅ | StableLM            | ✅ |
+| Cohere 1-2        | ✅ | GPTQ-Neo(X)   | ✅ | Llama 1-3.3            | ✅ | Nemotron H     | ✅ | StarCoder2          | ✅ |
+| DBRX Converted    | ✅ | GPT-2         | ✅ | Llama 3.2 VL           | ✅ | Nemotron Ultra | ✅ | TeleChat2           | ✅ |
+| Deci              | ✅ | GPT-J         | ✅ | Llama 4                | ✅ | OPT            | ✅ | Trinity             | ✅ |
+| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS       | ✅ | LongCatFlash           | ✅ | OLMo2          | ✅ | Yi                  | ✅ |
+| DeepSeek-V2-Lite  | ✅ | Granite       | ✅ | LongLLaMA              | ✅ | Ovis 1.6/2     | ✅ | Seed-OSS            | ✅ |
+| Dream             | ✅ | GRIN-MoE      | ✅ | Instella               | ✅ | Phi 1-4        | ✅ | Voxtral             | ✅ |
+| ERNIE 4.5         | ✅ | GLM 4/4V      | ✅ | GLM4 MoE/GLM4 MOE lite | ✅ | MiniCPM3/MiniCPM-O/MiniCPM-V | ✅ | PanGu-α            | ✅ |
+| XVERSE            | ✅ | Brumby        | ✅ | Hymba                  | ✅ | Mistral                      | ✅ | Qwen 1/2/3/3.5     | ✅ |
+| Minimax M2        | ✅ |               |   |                        |   |                              |   |                     |   |
 
 Prism Bonsai GGUF checkpoints are supported for inference only. Current support targets post-quantized `Q1_0_g128` loading through the normal model path or repo argument, requires the external `gguf` PyPI package, and does not include Prism model quantization.
 
