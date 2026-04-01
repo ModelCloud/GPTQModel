@@ -10,15 +10,14 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.module import try_import
+from ...utils.awq import (
+    awq_fast_gemm_forward_prefill,
+    awq_fast_gemv_forward_decode,
+    awq_runtime_available,
+    awq_runtime_error,
+)
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
-from ...utils.logger import setup_logger
-
-
-log = setup_logger()
-
-awq_v2_ext, msg = try_import("gptqmodel_awq_v2_kernels")
 
 
 def pack_intweight(unpacked_qweight, interleave, kstride):
@@ -155,8 +154,8 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
                 self.bias = None
 
     def forward(self, x: torch.Tensor):
-        if awq_v2_ext is None:
-            raise ModuleNotFoundError("External AWQ V2 kernels are not properly installed. Error: " + msg)
+        if not awq_runtime_available():
+            raise ModuleNotFoundError("AWQ torch.ops kernels are not properly installed. Error: " + awq_runtime_error())
 
         inputs = x
         inputs_dim = inputs.dim()
@@ -174,7 +173,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
         zeros = getattr(self, self.zeros_name)
         if inputs_dim == 3 and batch_size < 8 and n_tokens == 1:
-            out = awq_v2_ext.gemv_forward_cuda_decode(
+            out = awq_fast_gemv_forward_decode(
                 inputs,
                 self.qweight,
                 self.scales,
@@ -185,7 +184,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
                 self.group_size,
             )
         else:
-            out = awq_v2_ext.gemm_forward_cuda_prefill(
+            out = awq_fast_gemm_forward_prefill(
                 inputs, self.qweight, self.scales, zeros
             )
 

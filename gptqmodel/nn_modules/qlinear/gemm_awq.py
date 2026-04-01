@@ -21,25 +21,7 @@ from ...utils.env import env_flag
 # Shared runtime default: prefer accuracy first unless the user explicitly opts out.
 FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
-
-class _AwqExtensionCompat:
-    def gemm_forward_cuda(self, input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool = FP32_ACCUM):
-        return awq_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
-
-    def gemm_forward_cuda_fp32_reduce(self, input, qweight, scales, qzeros, split_k_iters):
-        return awq_gemm_forward(input, qweight, scales, qzeros, split_k_iters, True)
-
-    def dequantize_weights_cuda(self, qweight, scales, qzeros, split_k_iters, thx, thy, dbg):
-        return awq_dequantize_weights(qweight, scales, qzeros, split_k_iters, thx, thy, dbg)
-
-
-awq_ext = _AwqExtensionCompat() if awq_runtime_available() else None
-msg = awq_runtime_error()
-
-
 def _awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool = FP32_ACCUM):
-    if not awq_runtime_available():
-        raise ValueError(awq_runtime_error() or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
     return awq_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
 
 
@@ -58,9 +40,6 @@ class AwqGemmFn(torch.autograd.Function):
         prefer_backend=None,
         fp32_accum=FP32_ACCUM,
     ):
-        if not awq_runtime_available():
-            raise ValueError(awq_runtime_error() or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
-
         ctx.save_for_backward(x, qweight, qzeros, scales, bias)
         ctx.out_features = out_features
 
@@ -94,9 +73,6 @@ class AwqGemmFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         input, qweight, qzeros, scales, bias = ctx.saved_tensors
-
-        if not awq_runtime_available():
-            raise ValueError(awq_runtime_error() or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
 
         weights = awq_dequantize_weights(
             qweight, scales, qzeros, 1, 0, 0, False

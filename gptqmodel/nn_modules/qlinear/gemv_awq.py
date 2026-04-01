@@ -10,7 +10,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
-from ...utils.awq import awq_gemmv2_forward, awq_gemv_forward, awq_runtime_available, awq_runtime_error
+from ...utils.awq import awq_gemmv2_forward, awq_gemv_forward
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
 from ...utils.logger import setup_logger
@@ -117,9 +117,6 @@ class AwqGEMVQuantLinear(AWQuantLinear):
         super().post_init()
 
     def forward(self, x: torch.Tensor):
-        if not awq_runtime_available():
-            raise ModuleNotFoundError("External AWQ kernels are not properly installed." + awq_runtime_error())
-
         out_shape = x.shape[:-1] + (self.out_features,)
         inputs = x.reshape(-1, x.shape[-1])
 

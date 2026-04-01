@@ -422,7 +422,7 @@ def _print_suite(name: str, results: dict[str, Any]) -> None:
 def _configure_awq_runtime(args: argparse.Namespace) -> None:
     if args.force_rebuild_awq:
         build_root = Path("/tmp") / (
-            f"awq_ext_bench_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
+            f"awq_jit_bench_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
         )
         os.environ["GPTQMODEL_AWQ_BUILD_ROOT"] = str(build_root)
         os.environ["GPTQMODEL_AWQ_FORCE_REBUILD"] = "1"
@@ -436,7 +436,7 @@ def _configure_awq_runtime(args: argparse.Namespace) -> None:
         clear_awq_extension_cache()
 
     if not prewarm_awq_extension():
-        raise RuntimeError(f"Failed to build/load the AWQ CUDA extension: {awq_runtime_error()}")
+        raise RuntimeError(f"Failed to build/load the AWQ CUDA runtime: {awq_runtime_error()}")
 
 
 def _configure_paroquant_runtime(args: argparse.Namespace, device: torch.device) -> None:

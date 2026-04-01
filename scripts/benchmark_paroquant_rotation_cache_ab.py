@@ -267,7 +267,7 @@ def run(
 def _configure_runtime(args: argparse.Namespace, device: torch.device) -> None:
     if args.force_rebuild_awq:
         awq_build_root = Path("/tmp") / (
-            f"awq_ext_rotcache_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
+            f"awq_jit_rotcache_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
         )
         os.environ["GPTQMODEL_AWQ_BUILD_ROOT"] = str(awq_build_root)
         os.environ["GPTQMODEL_AWQ_FORCE_REBUILD"] = "1"

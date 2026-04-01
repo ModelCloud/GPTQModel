@@ -18,8 +18,6 @@ def _fake_quant_tensors(in_features: int = 32, out_features: int = 8, group_size
 
 def _patch_backend(monkeypatch, backend: str, calls):
     if backend == "triton":
-        monkeypatch.setattr(gemm_awq, "awq_ext", None)
-
         triton_state = getattr(gemm_awq_triton, "tritonv2", SimpleNamespace(TRITON_AVAILABLE=False))
         monkeypatch.setattr(gemm_awq_triton, "tritonv2", triton_state, raising=False)
         monkeypatch.setattr(triton_state, "TRITON_AVAILABLE", True)
@@ -49,34 +47,26 @@ def _patch_backend(monkeypatch, backend: str, calls):
 
         return gemm_awq_triton.AwqGemmTritonFn
 
-    # Stub the compiled AWQ extension so we can count which path is taken.
-    class FakeAwqExt:
-        def dequantize_weights_cuda(self, qweight, scales, qzeros, *_args):
-            calls["dequant"] += 1
-            return torch.ones(qweight.shape[0], qweight.shape[1] * 8, dtype=torch.float16)
+    def fake_dequant(qweight, scales, qzeros, *_args):
+        calls["dequant"] += 1
+        return torch.ones(qweight.shape[0], qweight.shape[1] * 8, dtype=torch.float16)
 
-        def gemm_forward_cuda_fp32_reduce(self, input, qweight, scales, qzeros, _split_k_iters):
-            calls["gemm"] += 1
-            calls["gemm_api"] = "fp32_reduce"
-            calls["gemm_kwargs"] = {"fp32_accum": True}
-            out_features = qweight.shape[1] * 8
-            return torch.ones(input.shape[0], out_features, device=input.device, dtype=input.dtype)
+    def fake_gemm(input, qweight, scales, qzeros, _split_k_iters, fp32_accum=False):
+        calls["gemm"] += 1
+        calls["gemm_api"] = "fp32_accum" if fp32_accum else "legacy"
+        calls["gemm_kwargs"] = {"fp32_accum": fp32_accum}
+        out_features = qweight.shape[1] * 8
+        return torch.ones(input.shape[0], out_features, device=input.device, dtype=input.dtype)
 
-        def gemm_forward_cuda(self, input, qweight, scales, qzeros, _split_k_iters, fp32_accum=False):
-            calls["gemm"] += 1
-            calls["gemm_api"] = "fp32_accum" if fp32_accum else "legacy"
-            calls["gemm_kwargs"] = {"fp32_accum": fp32_accum}
-            out_features = qweight.shape[1] * 8
-            return torch.ones(input.shape[0], out_features, device=input.device, dtype=input.dtype)
-
-    monkeypatch.setattr(gemm_awq, "awq_ext", FakeAwqExt())
+    monkeypatch.setattr(gemm_awq, "awq_dequantize_weights", fake_dequant)
+    monkeypatch.setattr(gemm_awq, "_awq_cuda_gemm_forward", fake_gemm)
     triton_state = getattr(gemm_awq_triton, "tritonv2", SimpleNamespace(TRITON_AVAILABLE=False))
     monkeypatch.setattr(gemm_awq_triton, "tritonv2", triton_state, raising=False)
     monkeypatch.setattr(triton_state, "TRITON_AVAILABLE", False)
     return gemm_awq.AwqGemmFn
 
 
-@pytest.mark.parametrize("backend", ["triton", "ext"], ids=["triton", "awq_ext"])
+@pytest.mark.parametrize("backend", ["triton", "jit"], ids=["triton", "awq_jit"])
 def test_fp16_matmul_heuristic_prefers_dequant_for_large_matrices(monkeypatch, backend):
     calls = {"dequant": 0, "gemm": 0}
     fn = _patch_backend(monkeypatch, backend, calls)
@@ -98,7 +88,7 @@ def test_fp16_matmul_heuristic_prefers_dequant_for_large_matrices(monkeypatch, b
     assert out.shape == (33, 32, out_features)
 
 
-@pytest.mark.parametrize("backend", ["triton", "ext"], ids=["triton", "awq_ext"])
+@pytest.mark.parametrize("backend", ["triton", "jit"], ids=["triton", "awq_jit"])
 def test_fp16_matmul_heuristic_prefers_fused_gemm_for_small_matrices(monkeypatch, backend):
     calls = {"dequant": 0, "gemm": 0}
     fn = _patch_backend(monkeypatch, backend, calls)
@@ -126,9 +116,9 @@ def test_fp16_matmul_heuristic_prefers_fused_gemm_for_small_matrices(monkeypatch
         assert calls["gemm_api"] == "fp32_accum"
 
 
-def test_awq_ext_fp32_accum_can_be_disabled(monkeypatch):
+def test_awq_jit_fp32_accum_can_be_disabled(monkeypatch):
     calls = {"dequant": 0, "gemm": 0}
-    fn = _patch_backend(monkeypatch, "ext", calls)
+    fn = _patch_backend(monkeypatch, "jit", calls)
 
     group_size = 32
     out_features = 8
@@ -148,8 +138,8 @@ def test_awq_ext_fp32_accum_can_be_disabled(monkeypatch):
 
 def _available_bench_backends():
     backends = []
-    if gemm_awq.awq_ext is not None:
-        backends.append("awq_ext")
+    if gemm_awq.awq_runtime_available():
+        backends.append("awq_jit")
     triton_mod = getattr(gemm_awq_triton, "tritonv2", None)
     if triton_mod is not None and getattr(triton_mod, "TRITON_AVAILABLE", False):
         backends.append("triton")
@@ -193,7 +183,7 @@ def test_fp16_matmul_heuristic_benchmark(case_name, batch, seq, in_features, out
 
     tabulate = pytest.importorskip("tabulate").tabulate
 
-    if backend not in {"awq_ext", "triton"}:
+    if backend not in {"awq_jit", "triton"}:
         pytest.skip("No AWQ backend available for benchmark")
 
     device = torch.device("cuda")
@@ -211,8 +201,8 @@ def test_fp16_matmul_heuristic_benchmark(case_name, batch, seq, in_features, out
 
     def run_dequant_matmul():
         with torch.inference_mode():
-            if backend == "awq_ext":
-                weight = gemm_awq.awq_ext.dequantize_weights_cuda(qweight, scales, qzeros, 0, 0, 0, False)
+            if backend == "awq_jit":
+                weight = gemm_awq.awq_dequantize_weights(qweight, scales, qzeros, 0, 0, 0, False)
             else:
                 try:
                     weight = awq_dequantize_triton(qweight, scales, qzeros)
@@ -223,8 +213,8 @@ def test_fp16_matmul_heuristic_benchmark(case_name, batch, seq, in_features, out
     def run_fused_gemm():
         with torch.inference_mode():
             x2d = x.reshape(-1, x.shape[-1])
-            if backend == "awq_ext":
-                return gemm_awq.awq_ext.gemm_forward_cuda(x2d, qweight, scales, qzeros, 8, True)
+            if backend == "awq_jit":
+                return gemm_awq._awq_cuda_gemm_forward(x2d, qweight, scales, qzeros, 8, True)
             try:
                 return awq_gemm_triton(x2d, qweight, scales, qzeros, split_k_iters=8)
             except AttributeError as err:

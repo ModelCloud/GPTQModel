@@ -83,7 +83,7 @@ def _make_quant_buffers(case: BenchCase, dtype: torch.dtype, bits: int = 4) -> d
 def _configure_runtime(args: argparse.Namespace, device: torch.device) -> None:
     if args.force_rebuild_awq:
         awq_build_root = Path("/tmp") / (
-            f"awq_ext_profile_{os.getpid()}_{args.case_id}_{args.dtype}_"
+            f"awq_jit_profile_{os.getpid()}_{args.case_id}_{args.dtype}_"
             f"rt{int(args.cache_runtime_dtype)}_rot{int(args.cache_rotation_dtype)}"
         )
         os.environ["GPTQMODEL_AWQ_BUILD_ROOT"] = str(awq_build_root)
