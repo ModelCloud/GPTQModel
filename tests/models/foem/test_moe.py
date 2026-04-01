@@ -28,8 +28,6 @@ class TestQwen3MoeAwq(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    FORMAT = FORMAT.GEMM
-    METHOD = METHOD.AWQ
     MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride())
 
     def test_moe_awq(self):
