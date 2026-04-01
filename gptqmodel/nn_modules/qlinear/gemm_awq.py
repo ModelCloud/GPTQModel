@@ -13,10 +13,11 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
-from ...utils.awq import awq_dequantize_weights, awq_gemm_forward, awq_runtime_available, awq_runtime_error
 from ...quantization.awq.utils.utils import get_best_device
+from ...utils.awq import awq_dequantize_weights, awq_gemm_forward, awq_runtime_available, awq_runtime_error
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
+
 
 # Shared runtime default: prefer accuracy first unless the user explicitly opts out.
 FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)

@@ -12,7 +12,6 @@ import inspect
 import sys
 import threading
 from contextlib import contextmanager
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest

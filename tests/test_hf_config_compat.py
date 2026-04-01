@@ -11,7 +11,10 @@ from transformers.generation.configuration_utils import GenerationMode
 
 from gptqmodel.utils import hf as hf_utils
 from gptqmodel.utils.hf import (
+    INTERNAL_HF_GGUF_FILE_KWARG,
+    get_hf_gguf_load_kwargs,
     normalize_hf_config_compat,
+    normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
     prepare_remote_model_init_compat,
     resolve_trust_remote_code,
@@ -62,6 +65,27 @@ def test_normalize_torch_dtype_kwarg_rejects_conflicting_values():
         normalize_torch_dtype_kwarg(kwargs, api_name="test")
 
 
+def test_normalize_model_id_or_path_for_hf_gguf_rejects_public_kwarg():
+    kwargs = {"gguf_file": "bonsai.gguf"}
+
+    with pytest.raises(TypeError, match="does not accept `gguf_file`"):
+        normalize_model_id_or_path_for_hf_gguf("/tmp/fake-model", kwargs, api_name="test")
+
+
+def test_normalize_model_id_or_path_for_hf_gguf_normalizes_local_file(monkeypatch, tmp_path):
+    gguf_path = tmp_path / "bonsai.gguf"
+    gguf_path.write_bytes(b"GGUF")
+
+    monkeypatch.setattr(hf_utils, "_patch_transformers_prism_gguf_compat", lambda **_kwargs: None)
+
+    kwargs = {}
+    model_root = normalize_model_id_or_path_for_hf_gguf(str(gguf_path), kwargs, api_name="test")
+
+    assert model_root == str(tmp_path)
+    assert kwargs[INTERNAL_HF_GGUF_FILE_KWARG] == "bonsai.gguf"
+    assert get_hf_gguf_load_kwargs(kwargs) == {"gguf_file": "bonsai.gguf"}
+
+
 def test_normalize_hf_config_compat_drops_default_remote_rope_scaling_dict():
     config = SimpleNamespace(rope_scaling={"rope_type": "default", "rope_theta": 10000.0})
 
@@ -107,10 +131,23 @@ def test_normalize_hf_config_compat_restores_legacy_cache_length_helpers(monkeyp
     monkeypatch.delattr(cache_utils.Cache, "get_max_length", raising=False)
     monkeypatch.delattr(cache_utils.Cache, "get_usable_length", raising=False)
 
-    class DummyLayer:
+    class DummyLayer(cache_utils.CacheLayerMixin):
         def __init__(self, seq_length, max_cache_shape):
+            super().__init__()
             self._seq_length = seq_length
             self._max_cache_shape = max_cache_shape
+
+        def lazy_initialization(self, key_states, value_states):
+            self.keys = key_states
+            self.values = value_states
+            self.is_initialized = True
+
+        def update(self, key_states, value_states, *args, **kwargs):
+            self.lazy_initialization(key_states, value_states)
+            return key_states, value_states
+
+        def get_mask_sizes(self, query_length):
+            return query_length, self._seq_length
 
         def get_seq_length(self):
             return self._seq_length
@@ -374,7 +411,7 @@ def test_prepare_remote_model_init_compat_tightens_peft_awq_probe(monkeypatch):
 
     prepare_remote_model_init_compat("/tmp/phi4mm", config)
 
-    import peft.tuners.lora.awq as peft_awq
+    peft_awq = pytest.importorskip("peft.tuners.lora.awq")
 
     peft_awq.is_auto_awq_available.cache_clear()
     assert peft_awq.is_auto_awq_available() is False

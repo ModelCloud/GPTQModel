@@ -202,6 +202,7 @@ Current internal benchmarks have only shown a clear resource-usage benefit for `
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, and EXL3 quantization support.
+* ✨ Prism Bonsai `Q1_0_g128` GGUF checkpoints can be loaded for post-quantized inference through the normal `model_id_or_path` argument. GPTQModel normalizes the GGUF artifact internally for HF Transformers, requires the external `gguf` PyPI package, and does not support Prism Bonsai quantization or export.
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
@@ -245,6 +246,8 @@ Selected public references where teams or companies explicitly mention `GPTQMode
 | Dream             | ✅ | GRIN-MoE      | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | Voxtral             | ✅ |
 | ERNIE 4.5         | ✅ | GLM 4/4V/4MoE | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | XVERSE              | ✅ |
 | Brumby            | ✅ | Hymba         | ✅ | Mistral        | ✅ | Qwen 1/2/3/3.5     | ✅ | Minimax M2          | ✅ |
+
+Prism Bonsai GGUF checkpoints are supported for inference only. Current support targets post-quantized `Q1_0_g128` loading through the normal model path or repo argument, requires the external `gguf` PyPI package, and does not include Prism model quantization.
 
 
 ## Platform and HW Support 

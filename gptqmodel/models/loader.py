@@ -38,9 +38,12 @@ from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2, BaseQuant
 from ..utils.backend import BACKEND, normalize_backend
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
+    INTERNAL_HF_GGUF_FILE_KWARG,
     get_hf_config_dtype,
+    get_hf_gguf_load_kwargs,
     has_native_transformers_causallm_support,
     normalize_hf_config_compat,
+    normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
     prepare_remote_model_init_compat,
     resolve_trust_remote_code,
@@ -170,6 +173,7 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
     if is_local or os.path.isabs(pretrained_model_id_or_path):
         return os.path.normpath(pretrained_model_id_or_path)
+    kwargs.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
     def _log_removed(removed: list[str]):
         log.debug("Loader: dropping unsupported snapshot_download kwargs: %s", ", ".join(removed))
 
@@ -179,6 +183,10 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
         kwargs=kwargs,
         on_removed=_log_removed,
     )
+
+
+def _get_tokenizer_load_kwargs(model_init_kwargs: Dict) -> Dict:
+    return get_hf_gguf_load_kwargs(model_init_kwargs)
 
 
 def ModelLoader(cls):
@@ -197,19 +205,28 @@ def ModelLoader(cls):
         import torch._dynamo
         torch._dynamo.disable()
 
+        pretrained_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
+            pretrained_model_id_or_path,
+            model_init_kwargs,
+            api_name=f"{cls.__name__}.from_pretrained",
+        )
+
         dtype = normalize_torch_dtype_kwarg(
             model_init_kwargs,
             api_name=f"{cls.__name__}.from_pretrained",
             explicit_dtype=dtype,
         )
+        hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(model_init_kwargs)
+        model_init_kwargs_without_internal = dict(model_init_kwargs)
+        model_init_kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
 
-        tokenizer_trust_remote_code = model_init_kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
-        model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs)
+        tokenizer_trust_remote_code = model_init_kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
+        model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs_without_internal)
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
 
-        model_init_kwargs["trust_remote_code"] = trust_remote_code
+        model_init_kwargs_without_internal["trust_remote_code"] = trust_remote_code
 
-        config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
+        config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs_without_internal, **hf_gguf_load_kwargs)
 
         defuser.replace_fused_blocks(config.model_type)
 
@@ -230,16 +247,19 @@ def ModelLoader(cls):
             set_hf_config_dtype(config, dtype)
 
         tokenizer = AutoTokenizer.from_pretrained(
-            pretrained_model_id_or_path,
+            model_local_path,
             trust_remote_code=tokenizer_trust_remote_code,
+            **_get_tokenizer_load_kwargs(model_init_kwargs),
         )
 
         if quantize_config is None:
-            model_init_kwargs["device_map"] =device_map if device_map else "auto"
-            model_init_kwargs["dtype"] = dtype
+            hf_model_init_kwargs = dict(model_init_kwargs_without_internal)
+            hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"
+            hf_model_init_kwargs["dtype"] = dtype
+            hf_model_init_kwargs.update(hf_gguf_load_kwargs)
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
-            model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
-            model._model_init_kwargs = model_init_kwargs
+            model = cls.loader.from_pretrained(model_local_path, config=config, **hf_model_init_kwargs)
+            model._model_init_kwargs = hf_model_init_kwargs
             _maybe_print_module_tree(model=model)
 
             turtle_model = None
@@ -301,9 +321,9 @@ def ModelLoader(cls):
 
         # enforce some values despite user specified
         # non-quantized models are always loaded into cpu
-        model_init_kwargs["device_map"] = cpu_device_map
-        model_init_kwargs["dtype"] = dtype
-        model_init_kwargs["_fast_init"] = cls.require_fast_init
+        model_init_kwargs_without_internal["device_map"] = cpu_device_map
+        model_init_kwargs_without_internal["dtype"] = dtype
+        model_init_kwargs_without_internal["_fast_init"] = cls.require_fast_init
         #model_init_kwargs["low_cpu_mem_usage"] = True
 
         cls.before_model_load(cls, model_local_path=model_local_path, load_quantized_model=False)
@@ -320,12 +340,12 @@ def ModelLoader(cls):
             log.warn(f"{cls} doesn't support offload_to_disk, set quantize_config.offload_to_disk to False.")
 
         if not cls.loader_requires_dtype:
-            model_init_kwargs.pop("dtype")
+            model_init_kwargs_without_internal.pop("dtype")
 
         if quantize_config.offload_to_disk:
             shell_config = copy.deepcopy(config)
             try:
-                model = build_shell_model(cls.loader, config=shell_config, **model_init_kwargs)
+                model = build_shell_model(cls.loader, config=shell_config, **model_init_kwargs_without_internal)
             except RuntimeError as exc:
                 if not _is_meta_shell_build_error(exc):
                     raise
@@ -336,10 +356,15 @@ def ModelLoader(cls):
                     exc,
                 )
                 log.info("Loader: loading model directly to CPU (meta shell unsupported; turtle_model disabled)")
-                fallback_init_kwargs = model_init_kwargs.copy()
+                fallback_init_kwargs = model_init_kwargs_without_internal.copy()
                 fallback_init_kwargs.pop("device_map", None)
                 fallback_init_kwargs["low_cpu_mem_usage"] = False
-                model = cls.loader.from_pretrained(model_local_path, config=config, **fallback_init_kwargs)
+                model = cls.loader.from_pretrained(
+                    model_local_path,
+                    config=config,
+                    **fallback_init_kwargs,
+                    **hf_gguf_load_kwargs,
+                )
                 if getattr(model, "config", None) is config:
                     model.config = copy.deepcopy(config)
                 defuser.convert_model(model, cleanup_original=False)
@@ -348,7 +373,9 @@ def ModelLoader(cls):
                 turtle_model = None
             else:
                 defuser.convert_model(model, cleanup_original=False)
-                model._model_init_kwargs = model_init_kwargs
+                shell_model_init_kwargs = dict(model_init_kwargs_without_internal)
+                shell_model_init_kwargs.update(hf_gguf_load_kwargs)
+                model._model_init_kwargs = shell_model_init_kwargs
                 _maybe_print_module_tree(model=model)
 
                 # enable mmap with low_cpu_mem_usage
@@ -358,7 +385,8 @@ def ModelLoader(cls):
                         model_local_path,
                         config=config,
                         low_cpu_mem_usage=True,
-                        **model_init_kwargs,
+                        **model_init_kwargs_without_internal,
+                        **hf_gguf_load_kwargs,
                     )
                 finally:
                     turtle_spinner.close()
@@ -367,16 +395,25 @@ def ModelLoader(cls):
                     turtle_model.config = copy.deepcopy(config)
                 defuser.convert_model(turtle_model, cleanup_original=False)
                 # TODO FIX ME...temp store model_init args
-                turtle_model._model_init_kwargs = model_init_kwargs
+                turtle_model_init_kwargs = dict(model_init_kwargs_without_internal)
+                turtle_model_init_kwargs.update(hf_gguf_load_kwargs)
+                turtle_model._model_init_kwargs = turtle_model_init_kwargs
                 # print("actual turtle model-----------")
                 # print_module_tree(model=turtle_model)
         else:
             log.info("Loader: loading model directly to CPU (not using meta device or turtle_model)")
-            model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
+            model = cls.loader.from_pretrained(
+                model_local_path,
+                config=config,
+                **model_init_kwargs_without_internal,
+                **hf_gguf_load_kwargs,
+            )
             if getattr(model, "config", None) is config:
                 model.config = copy.deepcopy(config)
             defuser.convert_model(model, cleanup_original=False)
-            model._model_init_kwargs = model_init_kwargs
+            direct_model_init_kwargs = dict(model_init_kwargs_without_internal)
+            direct_model_init_kwargs.update(hf_gguf_load_kwargs)
+            model._model_init_kwargs = direct_model_init_kwargs
             _maybe_print_module_tree(model=model)
 
             turtle_model = None
@@ -429,12 +466,20 @@ def ModelLoader(cls):
 
         import torch._dynamo
         torch._dynamo.reset()
+        model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
+            model_id_or_path,
+            kwargs,
+            api_name=f"{cls.__name__}.from_quantized",
+        )
         dtype = normalize_torch_dtype_kwarg(
             kwargs,
             api_name=f"{cls.__name__}.from_quantized",
             explicit_dtype=dtype,
         )
-        tokenizer_trust_remote_code = kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
+        hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(kwargs)
+        kwargs_without_internal = dict(kwargs)
+        kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
+        tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
         requested_device_map = device_map
         explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
 
@@ -463,7 +508,7 @@ def ModelLoader(cls):
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
-        model_local_path = get_model_local_path(model_id_or_path, **kwargs)
+        model_local_path = get_model_local_path(model_id_or_path, **kwargs_without_internal)
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
         native_support = has_native_transformers_causallm_support(model_local_path)
 
@@ -476,16 +521,16 @@ def ModelLoader(cls):
         check_versions(cls, cls.require_pkgs)
 
         # Parameters related to loading from Hugging Face Hub
-        cache_dir = kwargs.pop("cache_dir", None)
-        force_download = kwargs.pop("force_download", False)
-        resume_download = kwargs.pop("resume_download", False)
-        proxies = kwargs.pop("proxies", None)
-        local_files_only = kwargs.pop("local_files_only", False)
-        use_auth_token = kwargs.pop("use_auth_token", None)
-        revision = kwargs.pop("revision", None)
-        subfolder = kwargs.pop("subfolder", "")
-        commit_hash = kwargs.pop("_commit_hash", None)
-        attn_implementation = kwargs.pop("attn_implementation", None)
+        cache_dir = kwargs_without_internal.pop("cache_dir", None)
+        force_download = kwargs_without_internal.pop("force_download", False)
+        resume_download = kwargs_without_internal.pop("resume_download", False)
+        proxies = kwargs_without_internal.pop("proxies", None)
+        local_files_only = kwargs_without_internal.pop("local_files_only", False)
+        use_auth_token = kwargs_without_internal.pop("use_auth_token", None)
+        revision = kwargs_without_internal.pop("revision", None)
+        subfolder = kwargs_without_internal.pop("subfolder", "")
+        commit_hash = kwargs_without_internal.pop("_commit_hash", None)
+        attn_implementation = kwargs_without_internal.pop("attn_implementation", None)
 
         cached_file_kwargs = {
             "cache_dir": cache_dir,
@@ -506,6 +551,7 @@ def ModelLoader(cls):
             model_local_path,
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
+            **hf_gguf_load_kwargs,
         )
 
         defuser.replace_fused_blocks(config.model_type)
@@ -524,7 +570,7 @@ def ModelLoader(cls):
             # Ensure flash attention kernels see an explicit dtype instead of relying on defaults.
             set_hf_config_dtype(config, dtype)
 
-        qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
+        qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
         backend = normalize_backend(backend, quant_method=export_quant_method)
@@ -561,8 +607,9 @@ def ModelLoader(cls):
         qcfg.calculate_bits_per_weight()
 
         tokenizer = AutoTokenizer.from_pretrained(
-            model_id_or_path,
+            model_local_path,
             trust_remote_code=tokenizer_trust_remote_code,
+            **hf_gguf_load_kwargs,
         )
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
@@ -580,7 +627,7 @@ def ModelLoader(cls):
                 model = load_model_by_vllm(
                     model=model_local_path,
                     trust_remote_code=trust_remote_code,
-                    **kwargs,
+                    **kwargs_without_internal,
                 )
 
                 model.config = model.llm_engine.model_config
@@ -594,7 +641,7 @@ def ModelLoader(cls):
                     model=model_local_path,
                     trust_remote_code=trust_remote_code,
                     dtype=torch.float16,
-                    **kwargs,
+                    **kwargs_without_internal,
                 )
                 model.config = hf_config
                 runtime_generate = sglang_generate
@@ -689,8 +736,8 @@ def ModelLoader(cls):
 
             args = {}
             if supports_flash_attn and device in [DEVICE.CUDA, DEVICE.ROCM]:
-                if ATTN_IMPLEMENTATION in kwargs:
-                    args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
+                if attn_implementation is not None:
+                    args[ATTN_IMPLEMENTATION] = attn_implementation
                 elif is_flash_attn_2_available():
                     args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
                     log.info("Loader: Auto enabling flash attention2")

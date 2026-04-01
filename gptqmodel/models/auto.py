@@ -60,7 +60,12 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.backend import normalize_backend  # noqa: E402
-from ..utils.hf import normalize_torch_dtype_kwarg, resolve_trust_remote_code  # noqa: E402
+from ..utils.hf import (  # noqa: E402
+    get_hf_gguf_load_kwargs,
+    normalize_model_id_or_path_for_hf_gguf,
+    normalize_torch_dtype_kwarg,
+    resolve_trust_remote_code,
+)
 from ..utils.hub import create_repo, list_repo_files, repo_info, upload_large_folder  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
@@ -334,9 +339,19 @@ def _hide_unsupported_quantization_config_for_lm_eval(model):
         setattr(config, "quantization_config", quantization_config)
 
 
-def check_and_get_model_definition(model_dir, trust_remote_code=False):
+def _get_config_load_kwargs(kwargs: dict) -> dict:
+    return get_hf_gguf_load_kwargs(kwargs)
+
+
+def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_load_kwargs):
+    if "gguf_file" not in config_load_kwargs:
+        model_dir = normalize_model_id_or_path_for_hf_gguf(
+            model_dir,
+            config_load_kwargs,
+            api_name="check_and_get_model_definition",
+        )
     trust_remote_code = resolve_trust_remote_code(model_dir, trust_remote_code=trust_remote_code)
-    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
+    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
     # if model_type is not supported, use BaseQModel, will use auto_detect_module_tree to generate module tree
@@ -344,6 +359,7 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False):
         return BaseQModel
 
     return MODEL_MAP[model_type]
+
 
 class GPTQModel:
     def __init__(self):
@@ -364,6 +380,11 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **kwargs,
     ):
+        model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
+            model_id_or_path,
+            kwargs,
+            api_name="GPTQModel.load",
+        )
         if isinstance(model_id_or_path, str):
             model_id_or_path = model_id_or_path.strip()
         requested_trust_remote_code = trust_remote_code
@@ -382,7 +403,11 @@ class GPTQModel:
 
         model_cfg = None
         if not (treat_as_local_path and not isdir(model_id_or_path)):
-            model_cfg = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+            model_cfg = AutoConfig.from_pretrained(
+                model_id_or_path,
+                trust_remote_code=trust_remote_code,
+                **_get_config_load_kwargs(kwargs),
+            )
 
         if model_cfg is not None and _is_supported_quantization_config(model_cfg):
             # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
@@ -437,6 +462,11 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseQModel:
+        model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
+            model_id_or_path,
+            model_init_kwargs,
+            api_name="GPTQModel.from_pretrained",
+        )
         normalize_torch_dtype_kwarg(
             model_init_kwargs,
             api_name="GPTQModel.from_pretrained",
@@ -447,7 +477,11 @@ class GPTQModel:
             requested_trust_remote_code,
         )
         trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
-        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        config = AutoConfig.from_pretrained(
+            model_id_or_path,
+            trust_remote_code=trust_remote_code,
+            **_get_config_load_kwargs(model_init_kwargs),
+        )
         if _is_supported_quantization_config(config):
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
@@ -458,7 +492,11 @@ class GPTQModel:
             log.warn(
                 "GPTQModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
 
-        model_definition = check_and_get_model_definition(model_id_or_path, trust_remote_code)
+        model_definition = check_and_get_model_definition(
+            model_id_or_path,
+            trust_remote_code,
+            **_get_config_load_kwargs(model_init_kwargs),
+        )
 
         return model_definition.from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,
@@ -479,6 +517,11 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **kwargs,
     ) -> BaseQModel:
+        model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
+            model_id_or_path,
+            kwargs,
+            api_name="GPTQModel.from_quantized",
+        )
         normalize_torch_dtype_kwarg(
             kwargs,
             api_name="GPTQModel.from_quantized",
@@ -490,7 +533,11 @@ class GPTQModel:
         adapter = normalize_adapter(adapter)
 
         print(f"from_quantized: adapter: {adapter}")
-        model_definition = check_and_get_model_definition(model_id_or_path, trust_remote_code)
+        model_definition = check_and_get_model_definition(
+            model_id_or_path,
+            trust_remote_code,
+            **_get_config_load_kwargs(kwargs),
+        )
 
         backend = normalize_backend(backend)
 
