@@ -9,6 +9,8 @@ import sys
 
 import torch
 
+from gptqmodel.quantization.config import FOEMConfig
+
 
 TESTS_MODELS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if TESTS_MODELS_ROOT not in sys.path:
@@ -104,7 +106,7 @@ class TestLlama3_2(ModelTest):
             },
         },
     }
-    FOEM = True
+    FOEM = FOEMConfig()
     MODEL_COMPAT_FAST_LAYER_POSITION="first"
 
     def test_llama3_2(self):

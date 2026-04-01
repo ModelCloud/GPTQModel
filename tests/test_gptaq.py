@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from models.model_test import ModelTest
+from gptqmodel.quantization.config import GPTAQConfig
 
 
 class TestQwen2_5_GPTAQ(ModelTest):
@@ -17,7 +18,7 @@ class TestQwen2_5_GPTAQ(ModelTest):
     }
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
-    GPTQA = True
+    GPTAQ = GPTAQConfig()
 
     def test_qwen2_5(self):
         self.quant_lm_eval()

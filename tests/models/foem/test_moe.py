@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
+from gptqmodel.quantization.config import ExpertsRoutingOverride, FOEMConfig, MoEConfig
 
 class TestQwen3MoeFOEM(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
@@ -22,7 +22,7 @@ class TestQwen3MoeFOEM(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    FOEM = True
+    FOEM = FOEMConfig()
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
     def test_moe_awq(self):
