@@ -9,6 +9,7 @@ import hashlib
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
@@ -127,6 +128,10 @@ class TorchOpsJitExtension:
         """Hash the effective op surface and source metadata to avoid stale cache reuse."""
 
         payload: list[str] = [self.name, self.namespace, *self.required_ops]
+        payload.append(f"python={sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+        payload.append(f"torch={torch.__version__}")
+        payload.append(f"torch_cuda={torch.version.cuda or 'none'}")
+        payload.extend(self._cuda_cache_fingerprint_payload())
         for source in self._resolve_sequence(self.sources):
             payload.append(source)
             source_path = Path(source)
@@ -143,6 +148,28 @@ class TorchOpsJitExtension:
         payload.extend(self._resolve_sequence(self.extra_ldflags))
         digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
         return digest[:16]
+
+    def _cuda_cache_fingerprint_payload(self) -> list[str]:
+        """Capture the effective CUDA target set so cached binaries stay device-compatible."""
+
+        if not self.requires_cuda:
+            return ["cuda_ext=0"]
+
+        override = os.getenv("TORCH_CUDA_ARCH_LIST")
+        if override:
+            return ["cuda_ext=1", f"arch_list={override}"]
+
+        if not torch.cuda.is_available():
+            return ["cuda_ext=1", "cuda_available=0"]
+
+        capabilities: set[str] = set()
+        for device_index in range(torch.cuda.device_count()):
+            major, minor = torch.cuda.get_device_capability(device_index)
+            capabilities.add(f"{major}.{minor}")
+
+        if not capabilities:
+            return ["cuda_ext=1", "visible_caps=none"]
+        return ["cuda_ext=1", f"visible_caps={','.join(sorted(capabilities))}"]
 
     def build_root(self) -> Path:
         """Return the fingerprinted filesystem directory that caches this JIT extension."""

@@ -179,3 +179,42 @@ def test_torch_ops_jit_extension_reuses_cached_namespace_after_first_load(monkey
     assert loader.load() is True
     assert loader.namespace_object() is runtime
     assert loader.op("kernel") is runtime.kernel
+
+
+def test_torch_ops_jit_extension_cuda_fingerprint_tracks_visible_capabilities(monkeypatch, tmp_path):
+    """Guard CUDA cache keys so binaries do not get reused across incompatible GPU architectures."""
+
+    loader = _make_loader(tmp_path, requires_cuda=True)
+
+    monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(
+        cpp_module.torch.cuda,
+        "get_device_capability",
+        lambda device_index=0: (8, 9) if device_index == 0 else (8, 0),
+    )
+    first_build_root = loader.build_root()
+
+    monkeypatch.setattr(
+        cpp_module.torch.cuda,
+        "get_device_capability",
+        lambda device_index=0: (8, 9) if device_index == 0 else (9, 0),
+    )
+    second_build_root = loader.build_root()
+
+    assert first_build_root != second_build_root
+
+
+def test_torch_ops_jit_extension_cuda_fingerprint_prefers_arch_override(monkeypatch, tmp_path):
+    """Guard explicit arch overrides so manual build targets produce isolated caches."""
+
+    loader = _make_loader(tmp_path, requires_cuda=True)
+
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.0")
+    first_build_root = loader.build_root()
+
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.9+PTX")
+    second_build_root = loader.build_root()
+
+    assert first_build_root != second_build_root
