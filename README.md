@@ -20,7 +20,7 @@
 </p>
 
 ## Latest News
-* 04/01/2026 [6.0-dev `main`]: ✨New PrismAI/Bonsai 1bit model quantization (inference only) suupport. Faster ParoQuant/AWQ kernels. New ParoQuant `optimization scope` control: `module` (Paro Lite), `layer` (Paro reference).
+* 04/01/2026 [6.0-dev `main`]: ✨New PrismAI/Bonsai 1bit model quantization (inference only) support. Faster ParoQuant/AWQ kernels. New ParoQuant `optimization scope` control: `module` (Paro Lite), `layer` (Paro reference). Added `FOEM` quantization support via `FOEMConfig(alpha, beta, device)`.
 * 03/22/2026 [6.0-dev `main`]: ✨New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`. `main` is currently undergoing a major refactor and api is unstable.
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
 * 03/09/2026 [main]: ✨Qwen 3.5 MoE model support added. New HF Kernel support added for AWQ. 
@@ -165,7 +165,7 @@ PrismAI/Bonsai inference sample script. Requires gguf pypi pkg: `pip install -U 
 ## What is GPT-QModel?
 GPT-QModel is a production-ready LLM model compression/quantization toolkit with hw-accelerated inference support for both CPU/GPU via HF Transformers, vLLM, and SGLang.
 
-GPT-QModel currently supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRa, and GAR, with more quantization methods and enhancements planned. 
+GPT-QModel currently supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRa, GAR and FOEM, with more quantization methods and enhancements planned. 
 
 ## Quantization Support
 
@@ -184,6 +184,7 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 | QQQ                       | ✅          | x | x | x | x             | 
 | Rotation                  | ✅          | x | x | x | x             |  
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
+| FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
 
 `GGUF`, `FP8`, `EXL3`, and `ParoQuant` are currently native GPT-QModel quantization/runtime paths. `vLLM` and `SGLang` integration currently targets `GPTQ` and `AWQ`.
 
@@ -219,7 +220,7 @@ Current internal benchmarks have only shown a clear resource-usage benefit for `
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
-* ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, and EXL3 quantization support.
+* ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
 * ✨ Prism Bonsai `Q1_0_g128` GGUF checkpoints can be loaded for post-quantized inference through the normal `model_id_or_path` argument. GPTQModel normalizes the GGUF artifact internally for HF Transformers, requires the external `gguf` PyPI package, and does not support Prism Bonsai quantization or export.
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
@@ -599,6 +600,14 @@ Enable GPTAQ quantization by setting `gptaq = GPTAQConfig(...)`.
 # If OOM on 1 GPU, please set CUDA_VISIBLE_DEVICES=0,1 to 2 GPUs and gptqmodel will auto use second GPU
 quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=GPTAQConfig(alpha=0.25, device="auto"))
 ```
+
+#### Using FOEM
+
+FOEM (First-order error matters) adds first-order error compensation for GPTQ-style quantization. Enable FOEM by setting `foem = FOEMConfig(...)`.
+```py
+# FOEM default hyperparameters are alpha=0.0 and beta=0.2
+quant_config = QuantizeConfig(bits=4, group_size=128, foem=FOEMConfig(alpha=0.0, beta=0.2, device="auto"))
+```
 ### Migrating from AutoGPTQ and AutoAWQ:
 
 GPT-QModel has fully supplanted AutoGPTQ and AutoAWQ for HF Transformers/Optimum/Peft integration. Model inference has drop-in support with zero changes. 
@@ -618,6 +627,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * GAR: Intel, main-author: T Gafni, A Karnieli, Y Hanani, [Paper](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
 * GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
+* FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
 
 ## Citations:
 
@@ -718,6 +728,17 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   howpublished = {\url{https://github.com/turboderp-org/exllamav3}},
   note = {Project repository and EXL3 format documentation: \url{https://github.com/turboderp-org/exllamav3/blob/master/doc/exl3.md}},
   year = {2026}
+}
+
+# FOEM
+@inproceedings{zheng2026first,
+  title={First-order error matters: Accurate compensation for quantized large language models},
+  author={Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong},
+  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume={40},
+  number={34},
+  pages={28883--28891},
+  year={2026}
 }
 ```
 
