@@ -31,7 +31,14 @@ class FOEM(GPTQ):
         self.H = None
         self.dXXT = None
 
-        self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
+
+        if self.qcfg.foem.alpha == 0:
+            self.gptaq = False
+        else:
+            self.gptaq =True
+        
+        if self.gptaq:
+            self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
 
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
         with self.lock:
@@ -69,19 +76,23 @@ class FOEM(GPTQ):
 
     def process_batch(self, inp):
         inp = inp.to(dtype=torch.float32)
-        native_inp = self.native_inps.pop(0).to(device=inp.device, dtype=torch.float32)
+        if self.gptaq:
+            native_inp = self.native_inps.pop(0).to(device=inp.device, dtype=torch.float32)
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
-            native_inp = native_inp.unsqueeze(0)
+            if self.gptaq:
+                native_inp = native_inp.unsqueeze(0)
 
         batch_size = inp.shape[0]
 
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
-                native_inp = native_inp.reshape((-1, inp.shape[-1]))
+                if self.gptaq:
+                    native_inp = native_inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
-            native_inp = native_inp.t()
+            if self.gptaq:
+                native_inp = native_inp.t()
 
         if isinstance(self.module, nn.Conv2d):
             unfold = nn.Unfold(
@@ -93,24 +104,28 @@ class FOEM(GPTQ):
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
-            native_inp = unfold(native_inp)
-            native_inp = native_inp.permute([1, 0, 2]).flatten(1)
+            if self.gptaq:
+                native_inp = unfold(native_inp)
+                native_inp = native_inp.permute([1, 0, 2]).flatten(1)
 
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
                                  device=inp.device)
-            self.dXXT = self.H.clone()
+            if self.gptaq:
+                self.dXXT = self.H.clone()
         else:
             self.H *= self.nsamples / (self.nsamples + batch_size)
-            self.dXXT *= self.nsamples / (self.nsamples + batch_size)
+            if self.gptaq:
+                self.dXXT *= self.nsamples / (self.nsamples + batch_size)
 
         self.nsamples += batch_size
         inp = math.sqrt(2 / self.nsamples) * inp.float()
 
         self.H += inp.matmul(inp.t())
-        native_inp = math.sqrt(2 / self.nsamples) * native_inp
-        self.dXXT += (native_inp - inp).matmul(inp.t())
+        if self.gptaq:
+            native_inp = math.sqrt(2 / self.nsamples) * native_inp
+            self.dXXT += (native_inp - inp).matmul(inp.t())
 
     @torch.inference_mode()
     def quantize(
@@ -147,7 +162,9 @@ class FOEM(GPTQ):
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
         W[:, dead] = 0
-        self.dXXT[:, dead] = 0
+        
+        if self.gptaq:
+            self.dXXT[:, dead] = 0
 
         # g_idx = []
         scale = []
@@ -170,7 +187,8 @@ class FOEM(GPTQ):
             perm = torch.argsort(torch.diag(H), descending=True)
             W = W[:, perm]
             H = H[perm][:, perm]
-            self.dXXT = self.dXXT[perm][:, perm]
+            if self.gptaq:
+                self.dXXT = self.dXXT[perm][:, perm]
             invperm = torch.argsort(perm)
 
         W_raw = W.detach().clone()
@@ -181,8 +199,9 @@ class FOEM(GPTQ):
         Hinv, damp = self.hessian_inverse(H)
         if self.qcfg.foem is None:
             raise ValueError("FOEM requires `foem` configuration.")
-        P = self.qcfg.foem.alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
-        del self.dXXT
+        if self.gptaq:
+            P = self.qcfg.foem.alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
+            del self.dXXT
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
@@ -194,7 +213,8 @@ class FOEM(GPTQ):
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
-            P1 = P[i1:i2, i1:i2]
+            if self.gptaq:
+                P1 = P[i1:i2, i1:i2]
 
             for i in range(count):
                 w = W1[:, i]
@@ -222,8 +242,11 @@ class FOEM(GPTQ):
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
                 err1 = ((w - q) - (w - w_raw) * self.qcfg.foem.beta) / d
-                # W1[:, i:] = W1[:, i:] - err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0)) - w.unsqueeze(1).matmul(P1[i, i:].unsqueeze(0)) - self.qcfg.foem.beta * (W1[:, i:]-W1_raw[:, i:])
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                
+                if self.gptaq:
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0)) - w.unsqueeze(1).matmul(P1[i, i:].unsqueeze(0))
+                else:
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                 if i+1 < count:
                     W1[:, i+1] -= self.qcfg.foem.beta * (W1[:, i+1]-W1_raw[:, i+1])
                 Err1[:, i] = err1
@@ -231,13 +254,16 @@ class FOEM(GPTQ):
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
 
-            # W[:, i2:] = W[:, i2:] - Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:]) - self.qcfg.foem.beta * (W[:, i2:]-W_raw[:, i2:])
-            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:])
+            if self.gptaq:
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:])
+            else:
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
             if i+1 < count:
                 W[:, i2+1] -= self.qcfg.foem.beta * (W[:, i2+1]-W_raw[:, i2+1])
 
         del Hinv
-        del P
+        if self.gptaq:
+            del P
         del W_raw, W1_raw, w_raw
 
         torch_sync()
