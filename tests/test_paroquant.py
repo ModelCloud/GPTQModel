@@ -1138,6 +1138,30 @@ def test_paroquant_identity_rotation_buffers_preserve_input():
     torch.testing.assert_close(rotated, x, atol=0, rtol=0)
 
 
+def test_paroquant_module_default_rotation_buffers_are_identity():
+    """Guard fresh runtime modules against invalid all-zero pair buffers."""
+    module = ParoQuantQuantLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        register_buffers=True,
+    )
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=module.in_features,
+        group_size=module.group_size,
+        krot=module.krot,
+        dtype=module.theta.dtype,
+    )
+
+    assert torch.equal(module.pairs, pairs)
+    assert torch.equal(module.theta, theta)
+    assert torch.equal(module.channel_scales, channel_scales)
+
+
 def test_paroquant_processor_is_not_awq_subclass():
     """Guard the dedicated lifecycle split from AWQ requested by the user."""
     assert not issubclass(ParoQuantProcessor, AWQProcessor)
@@ -4199,10 +4223,10 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
     assert out.dtype == torch.bfloat16
 
 
-def test_paroquant_rotation_helper_falls_back_to_reference_for_bf16(monkeypatch):
-    """Guard bf16 activations onto the stable reference rotation path."""
+def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch):
+    """Guard bf16 activations onto the fused CUDA rotation path when ready."""
     if not torch.cuda.is_available():
-        pytest.skip("CUDA is required to validate the ParoQuant rotation bf16 fallback path.")
+        pytest.skip("CUDA is required to validate the ParoQuant rotation bf16 fused path.")
 
     module = ParoQuantQuantLinear(
         bits=4,
@@ -4219,13 +4243,22 @@ def test_paroquant_rotation_helper_falls_back_to_reference_for_bf16(monkeypatch)
     module.channel_scales.uniform_(0.75, 1.25)
     module.post_init()
 
-    load_attempts = {"count": 0}
+    calls = {}
 
     def spy_load_rotation_extension():
-        load_attempts["count"] += 1
+        calls["load_count"] = calls.get("load_count", 0) + 1
         return True
 
+    def fake_rotate(x, pairs, theta, scales, group_size):
+        calls["x_dtype"] = x.dtype
+        calls["pairs_device"] = pairs.device.type
+        calls["theta_dtype"] = theta.dtype
+        calls["scales_dtype"] = None if scales is None else scales.dtype
+        calls["group_size"] = group_size
+        return x.clone()
+
     monkeypatch.setattr(paroquant_utils_module, "_load_rotation_extension", spy_load_rotation_extension)
+    monkeypatch.setattr(paroquant_utils_module._PAROQUANT_ROTATION_EXTENSION, "op", lambda name: fake_rotate)
 
     x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
     theta = module.theta.to(device=x.device, dtype=torch.bfloat16)
@@ -4238,17 +4271,15 @@ def test_paroquant_rotation_helper_falls_back_to_reference_for_bf16(monkeypatch)
         scales=channel_scales,
         group_size=module.group_size,
     )
-    expected = apply_paroquant_rotation_reference(
-        x,
-        module.pairs,
-        theta,
-        scales=channel_scales,
-        group_size=module.group_size,
-    )
 
-    assert load_attempts["count"] == 0
+    assert calls["load_count"] == 1
+    assert calls["x_dtype"] == torch.bfloat16
+    assert calls["pairs_device"] == "cuda"
+    assert calls["theta_dtype"] == torch.bfloat16
+    assert calls["scales_dtype"] == torch.bfloat16
+    assert calls["group_size"] == 128
     assert actual.dtype == torch.bfloat16
-    assert torch.equal(actual, expected)
+    assert torch.equal(actual, x)
 
 
 def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
