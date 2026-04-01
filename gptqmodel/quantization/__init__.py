@@ -26,6 +26,7 @@ from .config import (
                      GGUFConfig,
                      GGUFQuantizeConfig,
                      GPTAQConfig,
+                     FOEMConfig,
                      GPTQQuantizeConfig,
                      HessianConfig,
                      ParoQuantizeConfig,
@@ -47,6 +48,7 @@ from .config import (
                      WeightOnlyConfig,
                      WeightOnlyMethod,
 )
+from .foem import FOEM
 from .gptaq import GPTAQ
 from .gptq import GPTQ
 from .protocol import (

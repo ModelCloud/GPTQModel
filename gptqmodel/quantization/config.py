@@ -65,6 +65,8 @@ META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
 META_FIELD_GPTAQ_ENABLED = "gptaq"
 
+META_FIELD_FOEM_ENABLED = "foem"
+
 ADAPTER_FIELD = "adapter"
 
 # saved formats
@@ -1142,6 +1144,24 @@ class GPTAQConfig:
 
 
 @dataclass
+class FOEMConfig:
+    alpha: float = field(default=0.25)
+    beta: float = field(default=0.01)
+    device: Union[str, torch.device] = field(default="auto")
+
+    def __post_init__(self):
+        if not isinstance(self.alpha, (int, float)):
+            raise ValueError("FOEMConfig: `alpha` must be a numeric value.")
+        if not isinstance(self.beta, (int, float)):
+            raise ValueError("FOEMConfig: `alpha` must be a numeric value.")
+        if isinstance(self.device, str):
+            if not self.device:
+                raise ValueError("FOEMConfig: `device` must be a non-empty string or torch.device.")
+        elif not isinstance(self.device, torch.device):
+            raise ValueError("FOEMConfig: `device` must be a string or torch.device.")
+
+
+@dataclass
 class BaseMoERouting:
     pass
 
@@ -1731,6 +1751,16 @@ def _normalize_gptaq(gptaq: Optional[Union[GPTAQConfig, Dict[str, Any]]]) -> Opt
     if not isinstance(gptaq, GPTAQConfig):
         raise ValueError("QuantizeConfig: `gptaq` must be a GPTAQConfig, dict, or None.")
     return gptaq
+
+
+def _normalize_foem(foem: Optional[Union[FOEMConfig, Dict[str, Any]]]) -> Optional[FOEMConfig]:
+    if foem is None:
+        return None
+    if isinstance(foem, dict):
+        return FOEMConfig(**foem)
+    if not isinstance(foem, FOEMConfig):
+        raise ValueError("QuantizeConfig: `foem` must be a FOEMConfig, dict, or None.")
+    return foem
 
 
 def _normalize_vram_strategy(value: Union[str, VramStrategy]) -> VramStrategy:
@@ -2364,6 +2394,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     return version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2)
         return False
 
+    def is_quantized_by_foem(self) -> bool:
+        result = self.meta_get_versionable(META_FIELD_QUANTIZER)
+        if len(result) > 0:
+            for producer, _version in result:
+                if producer == META_QUANTIZER_GPTQMODEL:
+                    return version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2)
+        return False
+
     def extract_adapter_rank_patterns(self) -> Optional[Dict[str, int]]:
         adapter_rank_patterns = {}
         if not self.dynamic or not self.adapter:
@@ -2498,6 +2536,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "fallback": "fallback",
             "hessian": "hessian",
             "gptaq": "gptaq",
+            "foem": "foem",
             "weight_only": "weight_only",
             "pre_filters": "pre_filters",
             "gc_mode": "gc_mode",
@@ -2753,6 +2792,7 @@ class GPTQQuantizeConfig(QuantizeConfig):
     static_groups: bool = field(default=False)
     mse: float = field(default=0.0)
     gptaq: Optional[GPTAQConfig] = field(default=None)
+    foem: Optional[FOEMConfig] = field(default=None)
     mock_quantization: bool = field(
         default=False,
         metadata={"help": "Skip heavy computations for fast model loading validation"},
@@ -2784,6 +2824,7 @@ class GPTQQuantizeConfig(QuantizeConfig):
 
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
+        self.foem = _normalize_foem(self.foem)
 
         if act_group_aware_user_value is None:
             self.act_group_aware = self.method == METHOD.GPTQ
@@ -2819,10 +2860,17 @@ class GPTQQuantizeConfig(QuantizeConfig):
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         if self.gptaq is None:
             meta_payload["gptaq"] = None
-        else:
+        elif self.foem is None:
             device = self.gptaq.device
             meta_payload["gptaq"] = {
                 "alpha": self.gptaq.alpha,
+                "device": device if isinstance(device, str) else str(device),
+            }
+        else:
+            device = self.foem.device
+            meta_payload["foem"] = {
+                "alpha": self.foem.alpha,
+                "beta": self.foem.beta,
                 "device": device if isinstance(device, str) else str(device),
             }
 

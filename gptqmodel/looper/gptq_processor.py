@@ -17,8 +17,8 @@ from ..models import BaseQModel
 from ..models._const import CPU
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..quantization import GPTAQ, GPTQ
-from ..quantization.config import GPTAQConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization import GPTAQ, GPTQ, FOEM
+from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.device import get_device
@@ -70,6 +70,7 @@ def clone_gptq_config_for_module(
             else:
                 raise ValueError("QuantizeConfig: dynamic `hessian` must be a HessianConfig or dict.")
         gptaq_override = qcfg.dynamic_get(module_full_name, "gptaq", None)
+        foem_override = qcfg.dynamic_get(module_full_name, "foem", None)
         if gptaq_override is not None:
             if isinstance(gptaq_override, dict):
                 qcfg_clone.gptaq = GPTAQConfig(**gptaq_override)
@@ -77,6 +78,13 @@ def clone_gptq_config_for_module(
                 qcfg_clone.gptaq = gptaq_override
             else:
                 raise ValueError("QuantizeConfig: dynamic `gptaq` must be a GPTAQConfig or dict.")
+        if foem_override is not None:
+            if isinstance(foem_override, dict):
+                qcfg_clone.foem = FOEMConfig(**foem_override)
+            elif isinstance(foem_override, FOEMConfig):
+                qcfg_clone.foem = foem_override
+            else:
+                raise ValueError("QuantizeConfig: dynamic `foem` must be a FOEMConfig or dict.")
 
         qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
 
@@ -84,7 +92,7 @@ def clone_gptq_config_for_module(
     return qcfg_clone
 
 class GPTQProcessor(LoopProcessor):
-    """Captures activations and quantizes modules with GPTQ or GPTAQ."""
+    """Captures activations and quantizes modules with GPTQ or GPTAQ/FOEM."""
 
     def __init__(
         self,
@@ -126,7 +134,7 @@ class GPTQProcessor(LoopProcessor):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
-        """Builds the per-module GPTQ/GPTAQ task after applying dynamic overrides."""
+        """Builds the per-module GPTQ/GPTAQ/FOEM task after applying dynamic overrides."""
 
         qcfg_clone = clone_gptq_config_for_module(
             self.qcfg,
@@ -141,6 +149,8 @@ class GPTQProcessor(LoopProcessor):
 
         if qcfg_clone.gptaq is not None:
             tmp = GPTAQ(module=module, qcfg=qcfg_clone)
+        elif qcfg_clone.foem is not None:
+            tmp = FOEM(module=module, qcfg=qcfg_clone)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
             tmp.fallback = qcfg_clone.fallback
@@ -478,7 +488,12 @@ class GPTQProcessor(LoopProcessor):
 
         # TODO fix me..this hacks inherited base class logic, why not override name in gptaq?
         qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
-        return "gptaq" if qcfg.gptaq is not None else "gptq"
+        if qcfg.gptaq is not None:
+            return "gptaq"
+        if qcfg.foem is not None:
+            return "foem"
+        else:
+            return "gptq"
 
     def has_captured_input_ids(self, name: str) -> bool:
         """Reports whether the module saw at least one captured forward batch."""
