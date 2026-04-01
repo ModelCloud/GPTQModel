@@ -145,6 +145,23 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 * 06/20/2924 ✨ [0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0): Thanks for all the work from ModelCloud team and the open-source ML community for their contributions!
 </details>
 
+## Special Notes: 
+
+PrismAI/Bonsai inference sample script. Requires gguf pypi pkg: ``pip install -U gguf`
+
+```py
+• from gptqmodel import GPTQModel
+
+  model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf")
+
+  tokens = model.generate(
+      "Who wrote Romeo and Juliet?",
+      max_new_tokens=128,
+  )[0]
+
+  print(model.tokenizer.decode(tokens, skip_special_tokens=True))
+  ```
+
 ## What is GPT-QModel?
 GPT-QModel is a production-ready LLM model compression/quantization toolkit with hw-accelerated inference support for both CPU/GPU via HF Transformers, vLLM, and SGLang.
 
