@@ -15,7 +15,6 @@ from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 
 class TestQwen3MoeFOEM(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
-    DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "acc": {"value": 0.5094, "floor_pct": 0.04},
@@ -23,7 +22,6 @@ class TestQwen3MoeFOEM(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride())
     FOEM = True
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
