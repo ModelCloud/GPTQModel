@@ -1218,6 +1218,12 @@ class ModuleLooper():
                 disk_path=self.gptq_model.quantize_config.offload_to_disk_path
             )
 
+        for processor in self.processors:
+            # Pre-build ParoQuant's optional fused rotation extension before the
+            # first timed layer so layer 0 does not absorb a one-time JIT cost.
+            if isinstance(processor, ParoQuantProcessor):
+                processor.prewarm_runtime()
+
         if region_timer is not None:
             region_timer.flush()
 
