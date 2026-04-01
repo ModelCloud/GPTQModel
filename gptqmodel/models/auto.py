@@ -334,9 +334,16 @@ def _hide_unsupported_quantization_config_for_lm_eval(model):
         setattr(config, "quantization_config", quantization_config)
 
 
-def check_and_get_model_definition(model_dir, trust_remote_code=False):
+def _get_config_load_kwargs(kwargs: dict) -> dict:
+    config_load_kwargs = {}
+    if kwargs.get("gguf_file") is not None:
+        config_load_kwargs["gguf_file"] = kwargs["gguf_file"]
+    return config_load_kwargs
+
+
+def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_load_kwargs):
     trust_remote_code = resolve_trust_remote_code(model_dir, trust_remote_code=trust_remote_code)
-    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
+    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
     # if model_type is not supported, use BaseQModel, will use auto_detect_module_tree to generate module tree
@@ -344,6 +351,7 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False):
         return BaseQModel
 
     return MODEL_MAP[model_type]
+
 
 class GPTQModel:
     def __init__(self):
@@ -382,7 +390,11 @@ class GPTQModel:
 
         model_cfg = None
         if not (treat_as_local_path and not isdir(model_id_or_path)):
-            model_cfg = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+            model_cfg = AutoConfig.from_pretrained(
+                model_id_or_path,
+                trust_remote_code=trust_remote_code,
+                **_get_config_load_kwargs(kwargs),
+            )
 
         if model_cfg is not None and _is_supported_quantization_config(model_cfg):
             # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
@@ -447,7 +459,11 @@ class GPTQModel:
             requested_trust_remote_code,
         )
         trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
-        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        config = AutoConfig.from_pretrained(
+            model_id_or_path,
+            trust_remote_code=trust_remote_code,
+            **_get_config_load_kwargs(model_init_kwargs),
+        )
         if _is_supported_quantization_config(config):
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
@@ -458,7 +474,11 @@ class GPTQModel:
             log.warn(
                 "GPTQModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
 
-        model_definition = check_and_get_model_definition(model_id_or_path, trust_remote_code)
+        model_definition = check_and_get_model_definition(
+            model_id_or_path,
+            trust_remote_code,
+            **_get_config_load_kwargs(model_init_kwargs),
+        )
 
         return model_definition.from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,

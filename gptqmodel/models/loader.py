@@ -181,6 +181,13 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     )
 
 
+def _get_tokenizer_load_kwargs(model_init_kwargs: Dict) -> Dict:
+    tokenizer_load_kwargs = {}
+    if model_init_kwargs.get("gguf_file") is not None:
+        tokenizer_load_kwargs["gguf_file"] = model_init_kwargs["gguf_file"]
+    return tokenizer_load_kwargs
+
+
 def ModelLoader(cls):
     @classmethod
     def from_pretrained(
@@ -232,6 +239,7 @@ def ModelLoader(cls):
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_id_or_path,
             trust_remote_code=tokenizer_trust_remote_code,
+            **_get_tokenizer_load_kwargs(model_init_kwargs),
         )
 
         if quantize_config is None:

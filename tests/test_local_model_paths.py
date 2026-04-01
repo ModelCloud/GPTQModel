@@ -122,6 +122,64 @@ def test_gptqmodel_from_pretrained_forwards_dtype_kwarg(monkeypatch):
     assert "torch_dtype" not in captured["kwargs"]
 
 
+def test_gptqmodel_load_forwards_gguf_file_to_config_probe(monkeypatch):
+    fake_config = SimpleNamespace(quantization_config=None)
+    sentinel = object()
+    config_calls = []
+
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto, "isdir", lambda path: path == "/tmp/fake-model")
+    monkeypatch.setattr(
+        auto.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: config_calls.append(kwargs) or fake_config,
+    )
+    monkeypatch.setattr(auto, "_is_supported_quantization_config", lambda config: False)
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_pretrained",
+        classmethod(lambda cls, model_id_or_path, quantize_config, **kwargs: sentinel),
+    )
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_quantized",
+        classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected quantized load"))),
+    )
+
+    result = GPTQModel.load("/tmp/fake-model", gguf_file="bonsai.gguf")
+
+    assert result is sentinel
+    assert config_calls[0]["gguf_file"] == "bonsai.gguf"
+
+
+def test_gptqmodel_from_pretrained_forwards_gguf_file(monkeypatch):
+    fake_config = SimpleNamespace(quantization_config=None)
+    sentinel = object()
+    captured = {}
+
+    class FakeModelDefinition:
+        @classmethod
+        def from_pretrained(cls, pretrained_model_id_or_path, quantize_config, **kwargs):
+            captured["path"] = pretrained_model_id_or_path
+            captured["kwargs"] = kwargs
+            return sentinel
+
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "_is_supported_quantization_config", lambda config: False)
+    monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: FakeModelDefinition)
+
+    result = GPTQModel.from_pretrained(
+        "/tmp/fake-model",
+        quantize_config=None,
+        gguf_file="bonsai.gguf",
+    )
+
+    assert result is sentinel
+    assert captured["path"] == "/tmp/fake-model"
+    assert captured["kwargs"]["gguf_file"] == "bonsai.gguf"
+
+
 def test_gptqmodel_from_quantized_forwards_dtype_kwarg(monkeypatch):
     sentinel = object()
     captured = {}
@@ -296,6 +354,77 @@ def test_model_loader_from_pretrained_forwards_dtype_kwarg(monkeypatch):
     assert len(load_calls) == 1
     assert load_calls[0]["dtype"] is torch.float16
     assert "torch_dtype" not in load_calls[0]
+
+
+def test_model_loader_from_pretrained_forwards_gguf_file(monkeypatch):
+    class FakeConfig:
+        def __init__(self):
+            self._experts_implementation = None
+            self.model_type = "llama"
+            self.sub_configs = {}
+            self.dtype = None
+
+    class FakeModel:
+        def __init__(self, config):
+            self.config = config
+
+        def eval(self):
+            return self
+
+    config_calls = []
+    model_calls = []
+    tokenizer_calls = []
+
+    class FakeInnerLoader:
+        @staticmethod
+        def from_pretrained(_path, config=None, **kwargs):
+            model_calls.append(kwargs)
+            return FakeModel(config)
+
+    @loader.ModelLoader
+    class DummyQModel:
+        loader = FakeInnerLoader
+        require_dtype = None
+        require_fast_init = False
+        require_trust_remote_code = False
+        require_pkgs = []
+        supports_desc_act = [True, False]
+        support_offload_to_disk = False
+        config_class = None
+
+        @staticmethod
+        def before_model_load(*_args, **_kwargs):
+            return None
+
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.config = model.config
+            self.quantized = kwargs.get("quantized")
+
+    monkeypatch.setattr(loader, "check_versions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader, "get_model_local_path", lambda *_args, **_kwargs: "/tmp/fake-model")
+    monkeypatch.setattr(
+        loader.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **kwargs: config_calls.append(kwargs) or FakeConfig(),
+    )
+    monkeypatch.setattr(
+        loader.AutoTokenizer,
+        "from_pretrained",
+        lambda *_args, **kwargs: tokenizer_calls.append(kwargs) or object(),
+    )
+    monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader.defuser, "replace_fused_blocks", lambda *_args, **_kwargs: None)
+
+    DummyQModel.from_pretrained(
+        "/tmp/fake-model",
+        quantize_config=None,
+        gguf_file="bonsai.gguf",
+    )
+
+    assert config_calls[0]["gguf_file"] == "bonsai.gguf"
+    assert tokenizer_calls[0]["gguf_file"] == "bonsai.gguf"
+    assert model_calls[0]["gguf_file"] == "bonsai.gguf"
 
 
 def test_model_loader_falls_back_when_meta_shell_build_hits_meta_tensor_item(monkeypatch):
