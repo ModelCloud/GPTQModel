@@ -80,6 +80,22 @@ log = setup_logger()
 ATTN_IMPLEMENTATION = "attn_implementation"
 
 
+def _should_print_module_tree() -> bool:
+    """Keep expensive module-tree dumps opt-in during model loading."""
+
+    raw = os.environ.get("GPTQMODEL_PRINT_MODULE_TREE")
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+
+def _maybe_print_module_tree(model) -> None:
+    """Print the module tree only when explicitly requested for debugging."""
+
+    if _should_print_module_tree():
+        print_module_tree(model=model)
+
+
 def parse_version_string(version_str: str):
     try:
         return Version(version_str)
@@ -353,7 +369,7 @@ def ModelLoader(cls):
                     model.config = copy.deepcopy(config)
                 defuser.convert_model(model, cleanup_original=False)
                 model._model_init_kwargs = fallback_init_kwargs
-                print_module_tree(model=model)
+                _maybe_print_module_tree(model=model)
                 turtle_model = None
             else:
                 defuser.convert_model(model, cleanup_original=False)
