@@ -147,7 +147,7 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 
 ## Special Notes: 
 
-PrismAI/Bonsai inference sample script. Requires gguf pypi pkg: ``pip install -U gguf`
+PrismAI/Bonsai inference sample script. Requires gguf pypi pkg: `pip install -U gguf`
 
 ```py
 • from gptqmodel import GPTQModel
