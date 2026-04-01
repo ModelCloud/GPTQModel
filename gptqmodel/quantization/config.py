@@ -1145,6 +1145,37 @@ class GPTAQConfig:
 
 @dataclass
 class FOEMConfig:
+    r"""Configuration parameters for the FOEM calibration process, including `alpha` and `beta`.
+
+    The parameter `alpha` follows the same definition and role as in GPTAQ. 
+    Note: although GPTAQ does not explicitly mention this coefficient in the paper, 
+    its official implementation applies it to the rightmost term of Eq.18.
+
+    The parameter `beta` is introduced by FOEM. Please refer to the paper for details:
+    https://ojs.aaai.org/index.php/AAAI/article/view/40123.
+
+    Special cases:
+        - alpha = 0, beta = 0:
+            Equivalent to GPTQ.
+        - alpha > 0, beta = 0:
+            Equivalent to GPTAQ. The recommended value for `alpha` is 0.25.
+        - alpha = 0, beta > 0:
+            Equivalent to FOEM. Empirically, setting `beta` in the range [0.1, 0.25] yields good performance.
+        - alpha > 0, beta > 0:
+            Equivalent to FOEM + GPTAQ. Using the default best settings 
+            (alpha = 0.25, beta = 0.2) generally produces strong results, 
+            although it is not consistently superior to using FOEM alone.
+
+    Note:
+        FOEM currently follows the same data processing pipeline as GPTAQ. 
+        Specifically, `native_inp` is pre-cached regardless of the value of `alpha`. 
+        However, when `alpha = 0`, the additional terms (dXXT and P) are not computed 
+        during the compensation step.
+
+    Args:
+        alpha (float, optional): Default is 0.
+        beta (float, optional): Default is 0.2.
+    """
     alpha: float = field(default=0)
     beta: float = field(default=0.2)
     device: Union[str, torch.device] = field(default="auto")
@@ -1153,7 +1184,7 @@ class FOEMConfig:
         if not isinstance(self.alpha, (int, float)):
             raise ValueError("FOEMConfig: `alpha` must be a numeric value.")
         if not isinstance(self.beta, (int, float)):
-            raise ValueError("FOEMConfig: `alpha` must be a numeric value.")
+            raise ValueError("FOEMConfig: `beta` must be a numeric value.")
         if isinstance(self.device, str):
             if not self.device:
                 raise ValueError("FOEMConfig: `device` must be a non-empty string or torch.device.")
