@@ -20,8 +20,8 @@
 </p>
 
 ## Latest News
-* 04/01/2026 [6.0-dev `main`]: ✨New PrismAI/Bonsai 1bit model quantization (inference only) suupport. Faster ParoQuant/AWQ kernels. New ParoQuant `optimization scope` control: `module` (Paro Lite), `layer` (Paro reference).
-* 04/01/2026 [6.0-dev `main`]: ✨`MiniCPM-O`, `MiniCPM-V` and `GLM4 MOE lite` model support added. 
+* 04/01/2026 [6.0-dev `main`]: ✨New PrismAI/Bonsai 1bit model quantization (inference only) suupport. Faster ParoQuant/AWQ kernels. New ParoQuant `optimization scope` control: `module` (Paro Lite), `layer` (Paro reference). `GLM4 MOE lite` model support added. 
+* 03/31/2026 [6.0-dev `main`]: ✨`MiniCPM-O` and `MiniCPM-V` model support added. 
 * 03/22/2026 [6.0-dev `main`]: ✨New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`. `main` is currently undergoing a major refactor and api is unstable.
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
 * 03/09/2026 [main]: ✨Qwen 3.5 MoE model support added. New HF Kernel support added for AWQ. 
