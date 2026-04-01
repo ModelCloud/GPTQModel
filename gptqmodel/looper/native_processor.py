@@ -80,7 +80,12 @@ class NativeProcessor(LoopProcessor):
             # gptq is mutable.
             inp = inp[0].detach()
 
-            gptaq_device = self.qcfg.gptaq.device if self.qcfg.gptaq is not None else "auto"
+            if self.qcfg.gptaq is not None:
+                gptaq_device = self.qcfg.gptaq.device
+            elif self.qcfg.foem is not None:
+                gptaq_device = self.qcfg.foem.device
+            else:
+                gptaq_device = "auto"
             if gptaq_device == "auto":
                 target_device = DEVICE_1
             elif gptaq_device == "cpu":

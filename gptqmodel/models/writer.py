@@ -28,6 +28,7 @@ from ..quantization.config import (
     META_FIELD_DAMP_AUTO_INCREMENT,
     META_FIELD_DAMP_PERCENT,
     META_FIELD_GPTAQ_ENABLED,
+    META_FIELD_FOEM_ENABLED,
     META_FIELD_MSE,
     META_FIELD_QUANTIZER,
     META_FIELD_STATIC_GROUPS,
@@ -369,6 +370,8 @@ def ModelWriter(cls):
 
         # meta: write config fields to meta if they doe not participate in inference
         gptaq_cfg = getattr(self.quantize_config, "gptaq", None)
+        
+        foem_cfg = getattr(self.quantize_config, "foem", None)
 
         self.quantize_config.meta_set(
             key=META_FIELD_DAMP_PERCENT,
@@ -403,6 +406,19 @@ def ModelWriter(cls):
                     gptaq_cfg.device
                     if isinstance(gptaq_cfg.device, str)
                     else str(gptaq_cfg.device)
+                ),
+            }
+        )
+
+        self.quantize_config.meta_set(
+            key=META_FIELD_FOEM_ENABLED,
+            value=None if foem_cfg is None else {
+                "alpha": foem_cfg.alpha,
+                "beta": foem_cfg.beta,
+                "device": (
+                    foem_cfg.device
+                    if isinstance(foem_cfg.device, str)
+                    else str(foem_cfg.device)
                 ),
             }
         )

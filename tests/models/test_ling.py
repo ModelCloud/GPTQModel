@@ -18,7 +18,7 @@ class TestLing(ModelTest):
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     TRUST_REMOTE_CODE = True
     # EVAL_BATCH_SIZE = 6
-    GPTQA = False
+    GPTAQ = None
     DEBUG = True
     ACT_GROUP_AWARE = True
     DESC_ACT = False

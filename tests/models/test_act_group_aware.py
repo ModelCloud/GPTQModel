@@ -16,7 +16,7 @@ class TestHybridActOrder(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    GPTQA = False
+    GPTAQ = None
     ACT_GROUP_AWARE = True
 
     def test_llama3_2(self):

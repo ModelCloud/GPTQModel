@@ -22,7 +22,7 @@ from ..utils.structure import print_module_tree
 if ensure_modelscope_available():
     from modelscope import snapshot_download
 else:
-    from ..utils.hub import snapshot_download
+    from huggingface_hub import snapshot_download
 
 import defuser
 from packaging.version import InvalidVersion, Version
@@ -1019,7 +1019,7 @@ def ModelLoader(cls):
 
             if format_code == FORMAT.GPTQ:
                 # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
-                if not qcfg.sym and not qcfg.is_quantized_by_gptaq():
+                if not qcfg.sym and not qcfg.is_quantized_by_gptaq() and not qcfg.is_quantized_by_foem():
                     raise ValueError(
                         f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                     )

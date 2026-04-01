@@ -895,6 +895,9 @@ class BaseQModel(nn.Module):
             if getattr(self.quantize_config, "gptaq", None) is not None:
                 raise NotImplementedError("EXL3 quantization does not support GPTAQ/native activation capture.")
 
+            if getattr(self.quantize_config, "foem", None) is not None:
+                raise NotImplementedError("EXL3 quantization does not support FOEM/native activation capture.")
+
             exl3_args = {
                 "tokenizer": self.tokenizer,
                 "qcfg": self.quantize_config,
@@ -962,6 +965,16 @@ class BaseQModel(nn.Module):
             args_clone.pop("calculate_w_wq_diff", None)
             quantize_processor.insert(0, NativeProcessor(**args_clone))
 
+        if getattr(self.quantize_config, "foem", None) is not None:
+            from ..looper.native_processor import NativeProcessor
+
+            args_to_copy = {k: v for k, v in args.items() if k != "prepare_dataset_func"}
+            args_clone = copy.deepcopy(args_to_copy)
+            args_clone["prepare_dataset_func"] = args["prepare_dataset_func"]
+
+            args_clone.pop("calculate_w_wq_diff", None)
+            quantize_processor.insert(0, NativeProcessor(**args_clone))
+
         processors = quantize_processor
         if needs_lora:
             processors.append(
@@ -1018,6 +1031,11 @@ class BaseQModel(nn.Module):
         if getattr(self.quantize_config, "gptaq", None) is not None:
             raise NotImplementedError(
                 "Weight-only quantization does not support GPTAQ/native activation capture."
+            )
+
+        if getattr(self.quantize_config, "foem", None) is not None:
+            raise NotImplementedError(
+                "Weight-only quantization does not support FOEM/native activation capture."
             )
 
         processor = WeightOnlyProcessor(

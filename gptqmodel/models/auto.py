@@ -66,7 +66,7 @@ from ..utils.hf import (  # noqa: E402
     normalize_torch_dtype_kwarg,
     resolve_trust_remote_code,
 )
-from ..utils.hub import create_repo, list_repo_files, repo_info, upload_large_folder  # noqa: E402
+from ..utils.hub import list_repo_files  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
 from .base import BaseQModel  # noqa: E402
@@ -609,34 +609,6 @@ class GPTQModel:
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
 
-    # Use HfAPI and not Transformers to do upload
-    @staticmethod
-    def push_to_hub(repo_id: str,
-                    quantized_path: str,  # saved local directory path
-                    private: bool = False,
-                    exists_ok: bool = False,  # set to true if repo already exists
-                    token: Optional[str] = None,
-                    ):
-
-        if not quantized_path:
-            raise RuntimeError("You must pass quantized model path as str to push_to_hub.")
-
-        if not repo_id:
-            raise RuntimeError("You must pass repo_id as str to push_to_hub.")
-
-        repo_type = "model"
-        # if repo does not exist, create it
-        try:
-            repo_info(repo_id=repo_id, repo_type=repo_type, token=token)
-        except Exception:
-            create_repo(repo_id=repo_id, repo_type=repo_type, token=token, private=private, exist_ok=exists_ok)
-
-        # upload the quantized save folder
-        upload_large_folder(
-            folder_path=quantized_path,
-            repo_id=repo_id,
-            repo_type=repo_type,
-        )
     class adapter:
         @classmethod
         def generate(

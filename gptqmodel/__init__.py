@@ -200,6 +200,7 @@ from .quantization import (
     GGUFConfig,
     GGUFQuantizeConfig,
     GPTAQConfig,
+    FOEMConfig,
     GPTQQuantizeConfig,
     QuantizeConfig,
     RTNQuantizeConfig,
