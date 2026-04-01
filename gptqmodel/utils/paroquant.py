@@ -18,9 +18,10 @@ import torch
 from .cpp import TorchOpsJitExtension, default_torch_ops_build_root
 
 
+# The fused CUDA kernel is still unreliable for BF16 activations, so keep that
+# runtime on the reference path until the native implementation is corrected.
 _SUPPORTED_ROTATION_KERNEL_DTYPES = {
     torch.float16,
-    torch.bfloat16,
     torch.float32,
 }
 

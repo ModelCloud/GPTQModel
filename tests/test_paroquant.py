@@ -43,6 +43,7 @@ from gptqmodel.quantization.paroquant.optimization import (
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend
 from gptqmodel.utils.paroquant import (
+    apply_paroquant_rotation,
     apply_paroquant_rotation_reference,
     build_identity_rotation_buffers,
     clear_paroquant_rotation_extension_cache,
@@ -4196,6 +4197,58 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
     assert module.scales.dtype == torch.bfloat16
     assert out is not None
     assert out.dtype == torch.bfloat16
+
+
+def test_paroquant_rotation_helper_falls_back_to_reference_for_bf16(monkeypatch):
+    """Guard bf16 activations onto the stable reference rotation path."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant rotation bf16 fallback path.")
+
+    module = ParoQuantQuantLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        register_buffers=True,
+        auto_cache_bf16_rotation_dtype=True,
+    ).to("cuda")
+    module.theta.uniform_(-0.2, 0.2)
+    module.channel_scales.uniform_(0.75, 1.25)
+    module.post_init()
+
+    load_attempts = {"count": 0}
+
+    def spy_load_rotation_extension():
+        load_attempts["count"] += 1
+        return True
+
+    monkeypatch.setattr(paroquant_utils_module, "_load_rotation_extension", spy_load_rotation_extension)
+
+    x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
+    theta = module.theta.to(device=x.device, dtype=torch.bfloat16)
+    channel_scales = module.channel_scales.to(device=x.device, dtype=torch.bfloat16)
+
+    actual = apply_paroquant_rotation(
+        x,
+        module.pairs,
+        theta,
+        scales=channel_scales,
+        group_size=module.group_size,
+    )
+    expected = apply_paroquant_rotation_reference(
+        x,
+        module.pairs,
+        theta,
+        scales=channel_scales,
+        group_size=module.group_size,
+    )
+
+    assert load_attempts["count"] == 0
+    assert actual.dtype == torch.bfloat16
+    assert torch.equal(actual, expected)
 
 
 def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
