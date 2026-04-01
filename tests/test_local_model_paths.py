@@ -5,8 +5,8 @@ import torch
 
 from gptqmodel.models import GPTQModel, auto, loader
 from gptqmodel.quantization import QuantizeConfig
-from gptqmodel.utils.hf import INTERNAL_HF_GGUF_FILE_KWARG
 from gptqmodel.utils import model as model_utils
+from gptqmodel.utils.hf import INTERNAL_HF_GGUF_FILE_KWARG
 
 
 def test_load_treats_missing_absolute_path_as_local(monkeypatch):

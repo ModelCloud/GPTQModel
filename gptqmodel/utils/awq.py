@@ -10,6 +10,7 @@ import torch
 
 from .cpp import TorchOpsJitExtension, default_torch_ops_build_root
 
+
 _AWQ_OPS_NAME = "gptqmodel_awq_ops"
 _AWQ_OPS_NAMESPACE = "gptqmodel_awq"
 
