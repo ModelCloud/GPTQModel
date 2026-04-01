@@ -33,11 +33,3 @@ def model_info(*args, **kwargs):
 
 def repo_info(*args, **kwargs):
     return _HF_API.repo_info(*args, **kwargs)
-
-
-def upload_folder(*args, **kwargs):
-    return _HF_API.upload_folder(*args, **kwargs)
-
-
-def upload_large_folder(*args, **kwargs):
-    return _HF_API.upload_large_folder(*args, **kwargs)
