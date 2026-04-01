@@ -139,6 +139,7 @@ from gptqmodel.quantization.config import (  # noqa: E402
     FP8Config,
     GGUFConfig,
     GPTAQConfig,
+    FOEMConfig,
     HessianConfig,
     MoEConfig,
     ParoQuantizeConfig,
@@ -205,6 +206,7 @@ class ModelTest(unittest.TestCase):
     DESC_ACT = False
     SYM = True
     GPTQA = False
+    FOEM = False
     ACT_GROUP_AWARE = True
     FALLBACK = Fallback()
     EORA = None
@@ -1468,6 +1470,7 @@ class ModelTest(unittest.TestCase):
             fallback=self.FALLBACK,
             sym=self.SYM,
             gptaq=GPTAQConfig() if self.GPTQA else None,
+            foem=FOEMConfig() if self.FOEM else None,
             adapter=self.EORA,
             pack_impl="cpu",
             vram_strategy=self.VRAM_STRATEGY,
