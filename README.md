@@ -20,6 +20,7 @@
 </p>
 
 ## Latest News
+* 04/02/2026 [6.0-dev `main`]: ✨New  `FOEM: First-Order Error Matters` quantization support with `FOEMConfig(alpha, beta, device)`. 
 * 04/01/2026 [6.0-dev `main`]: ✨New PrismAI/Bonsai 1bit model quantization (inference only) support. Faster ParoQuant/AWQ kernels. New ParoQuant `optimization scope` control: `module` (Paro Lite), `layer` (Paro reference). `GLM4 MOE lite` model support added. Added `FOEM` quantization support via `FOEMConfig(alpha, beta, device)`.
 * 03/31/2026 [6.0-dev `main`]: ✨`MiniCPM-O` and `MiniCPM-V` model support added.
 * 03/22/2026 [6.0-dev `main`]: ✨New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`. `main` is currently undergoing a major refactor and api is unstable.
@@ -689,22 +690,6 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   year={2024}
 }
 
-# Group Aware Reordering (GAR)
-@article{gar,
-  title={Dual Precision Quantization for Efficient and Accurate Deep Neural Networks Inference, CVPRW 2025.},
-  author={T. Gafni, A. Karnieli, Y. Hanani},
-  journal={arXiv preprint arXiv:2505.14638},
-  year={2025}
-}
-
-# GPTQ Marlin Kernel
-@article{frantar2024marlin,
-  title={MARLIN: Mixed-Precision Auto-Regressive Parallel Inference on Large Language Models},
-  author={Frantar, Elias and Castro, Roberto L and Chen, Jiale and Hoefler, Torsten and Alistarh, Dan},
-  journal={arXiv preprint arXiv:2408.11743},
-  year={2024}
-}
-
 # GPTAQ
 @article{li2025gptaq,
   title={GPTAQ: Efficient Finetuning-Free Quantization for Asymmetric Calibration}, 
@@ -741,6 +726,22 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   howpublished = {\url{https://github.com/turboderp-org/exllamav3}},
   note = {Project repository and EXL3 format documentation: \url{https://github.com/turboderp-org/exllamav3/blob/master/doc/exl3.md}},
   year = {2026}
+}
+
+# Group Aware Reordering (GAR)
+@article{gar,
+  title={Dual Precision Quantization for Efficient and Accurate Deep Neural Networks Inference, CVPRW 2025.},
+  author={T. Gafni, A. Karnieli, Y. Hanani},
+  journal={arXiv preprint arXiv:2505.14638},
+  year={2025}
+}
+
+# Marlin Kernel
+@article{frantar2024marlin,
+  title={MARLIN: Mixed-Precision Auto-Regressive Parallel Inference on Large Language Models},
+  author={Frantar, Elias and Castro, Roberto L and Chen, Jiale and Hoefler, Torsten and Alistarh, Dan},
+  journal={arXiv preprint arXiv:2408.11743},
+  year={2024}
 }
 
 ```
