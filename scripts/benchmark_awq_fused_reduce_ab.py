@@ -16,6 +16,7 @@ from typing import Any
 import torch
 from tabulate import tabulate
 
+
 @dataclass(frozen=True)
 class BenchCase:
     case_id: str
@@ -118,7 +119,15 @@ def _dense_reference(
     return torch.matmul(x, dense_weight)
 
 
-def _benchmark_ms(fn, device: torch.device, warmup: int, iters: int) -> float:
+def _set_fused_reduce_disabled(disabled: bool) -> None:
+    if disabled:
+        os.environ["GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE"] = "1"
+    else:
+        os.environ.pop("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", None)
+
+
+def _benchmark_ms(fn, device: torch.device, warmup: int, iters: int, fused_reduce_disabled: bool) -> float:
+    _set_fused_reduce_disabled(fused_reduce_disabled)
     with torch.inference_mode():
         for _ in range(warmup):
             fn()
@@ -134,8 +143,8 @@ def _format_speedup(speedup: float) -> str:
     return f"{speedup:.3f}x"
 
 
-def _mode_label(mode: str, split_k: int) -> str:
-    return f"{mode}_k{split_k}"
+def _label(disabled: bool) -> str:
+    return "fused_reduce_off" if disabled else "fused_reduce_on"
 
 
 def _run_gemm(
@@ -143,8 +152,7 @@ def _run_gemm(
     qweight: torch.Tensor,
     scales: torch.Tensor,
     qzeros: torch.Tensor,
-    split_k: int,
-    mode: str,
+    split_k_iters: int,
 ) -> torch.Tensor:
     from gptqmodel.utils.awq import awq_gemm_forward
 
@@ -153,8 +161,8 @@ def _run_gemm(
         qweight,
         scales,
         qzeros,
-        split_k,
-        fp32_accum=(mode == "fp32_accum"),
+        split_k_iters,
+        fp32_accum=True,
     )
 
 
@@ -167,17 +175,18 @@ def _run_suite(
     rotate_inputs: bool,
     shard_index: int,
     num_shards: int,
-    baseline_mode: str,
-    candidate_mode: str,
-    baseline_split_k: int,
-    candidate_split_k: int,
+    split_k_iters: int,
+    baseline_disable_fused_reduce: bool,
+    candidate_disable_fused_reduce: bool,
 ) -> dict[str, Any]:
+    from gptqmodel.utils.paroquant import apply_paroquant_rotation
+
     cases = _subset_cases(QUICK_CASES if quick else DEFAULT_CASES, shard_index=shard_index, num_shards=num_shards)
     rows = []
     speedups = []
     candidate_wins = 0
-    baseline_label = _mode_label(baseline_mode, baseline_split_k)
-    candidate_label = _mode_label(candidate_mode, candidate_split_k)
+    baseline_label = _label(baseline_disable_fused_reduce)
+    candidate_label = _label(candidate_disable_fused_reduce)
 
     for index, case in enumerate(cases):
         torch.manual_seed(1000 + index)
@@ -189,67 +198,38 @@ def _run_suite(
 
         kernel_input = x
         if rotate_inputs:
-            from gptqmodel.utils.paroquant import apply_paroquant_rotation
-
-            pairs = buffers["pairs"].to(device)
-            theta = buffers["theta"].to(device)
-            channel_scales = buffers["channel_scales"].to(device)
             kernel_input = apply_paroquant_rotation(
                 x,
-                pairs,
-                theta,
-                scales=channel_scales,
+                buffers["pairs"].to(device),
+                buffers["theta"].to(device),
+                scales=buffers["channel_scales"].to(device),
                 group_size=case.group_size,
             )
 
         with torch.inference_mode():
             dense = _dense_reference(kernel_input, qweight, qzeros, scales, bits=4, group_size=case.group_size)
-            baseline = _run_gemm(
-                kernel_input,
-                qweight,
-                scales,
-                qzeros,
-                split_k=baseline_split_k,
-                mode=baseline_mode,
-            )
-            candidate = _run_gemm(
-                kernel_input,
-                qweight,
-                scales,
-                qzeros,
-                split_k=candidate_split_k,
-                mode=candidate_mode,
-            )
+            _set_fused_reduce_disabled(baseline_disable_fused_reduce)
+            baseline = _run_gemm(kernel_input, qweight, scales, qzeros, split_k_iters)
+            _set_fused_reduce_disabled(candidate_disable_fused_reduce)
+            candidate = _run_gemm(kernel_input, qweight, scales, qzeros, split_k_iters)
 
         baseline_dense = (baseline - dense).abs()
         candidate_dense = (candidate - dense).abs()
         baseline_candidate = (baseline - candidate).abs()
 
         baseline_ms = _benchmark_ms(
-            lambda: _run_gemm(
-                kernel_input,
-                qweight,
-                scales,
-                qzeros,
-                split_k=baseline_split_k,
-                mode=baseline_mode,
-            ),
+            lambda: _run_gemm(kernel_input, qweight, scales, qzeros, split_k_iters),
             device=device,
             warmup=warmup,
             iters=iters,
+            fused_reduce_disabled=baseline_disable_fused_reduce,
         )
         candidate_ms = _benchmark_ms(
-            lambda: _run_gemm(
-                kernel_input,
-                qweight,
-                scales,
-                qzeros,
-                split_k=candidate_split_k,
-                mode=candidate_mode,
-            ),
+            lambda: _run_gemm(kernel_input, qweight, scales, qzeros, split_k_iters),
             device=device,
             warmup=warmup,
             iters=iters,
+            fused_reduce_disabled=candidate_disable_fused_reduce,
         )
         speedup = baseline_ms / candidate_ms
         speedups.append(speedup)
@@ -264,10 +244,6 @@ def _run_suite(
                 "in_features": case.in_features,
                 "out_features": case.out_features,
                 "dtype": str(dtype).replace("torch.", ""),
-                "baseline_mode": baseline_mode,
-                "candidate_mode": candidate_mode,
-                "baseline_split_k": baseline_split_k,
-                "candidate_split_k": candidate_split_k,
                 "baseline_ms": baseline_ms,
                 "candidate_ms": candidate_ms,
                 "speedup": speedup,
@@ -298,10 +274,9 @@ def run(
     quick: bool,
     shard_index: int,
     num_shards: int,
-    baseline_mode: str,
-    candidate_mode: str,
-    baseline_split_k: int,
-    candidate_split_k: int,
+    split_k_iters: int,
+    baseline_disable_fused_reduce: bool,
+    candidate_disable_fused_reduce: bool,
 ) -> dict[str, Any]:
     torch.manual_seed(0)
     torch.cuda.manual_seed_all(0)
@@ -317,10 +292,7 @@ def run(
         "quick": quick,
         "shard_index": shard_index,
         "num_shards": num_shards,
-        "baseline_mode": baseline_mode,
-        "candidate_mode": candidate_mode,
-        "baseline_split_k": baseline_split_k,
-        "candidate_split_k": candidate_split_k,
+        "split_k_iters": split_k_iters,
         "awq": _run_suite(
             device=device,
             dtype=dtype,
@@ -330,10 +302,9 @@ def run(
             rotate_inputs=False,
             shard_index=shard_index,
             num_shards=num_shards,
-            baseline_mode=baseline_mode,
-            candidate_mode=candidate_mode,
-            baseline_split_k=baseline_split_k,
-            candidate_split_k=candidate_split_k,
+            split_k_iters=split_k_iters,
+            baseline_disable_fused_reduce=baseline_disable_fused_reduce,
+            candidate_disable_fused_reduce=candidate_disable_fused_reduce,
         ),
         "paroquant": _run_suite(
             device=device,
@@ -344,10 +315,9 @@ def run(
             rotate_inputs=True,
             shard_index=shard_index,
             num_shards=num_shards,
-            baseline_mode=baseline_mode,
-            candidate_mode=candidate_mode,
-            baseline_split_k=baseline_split_k,
-            candidate_split_k=candidate_split_k,
+            split_k_iters=split_k_iters,
+            baseline_disable_fused_reduce=baseline_disable_fused_reduce,
+            candidate_disable_fused_reduce=candidate_disable_fused_reduce,
         ),
     }
 
@@ -373,7 +343,7 @@ def _print_suite(name: str, results: dict[str, Any]) -> None:
             headers=[
                 "case",
                 "batch x seq",
-                "matmul",
+                "shape",
                 "baseline vs dense max_abs",
                 "candidate vs dense max_abs",
                 "baseline vs candidate max_abs",
@@ -401,7 +371,7 @@ def _print_suite(name: str, results: dict[str, Any]) -> None:
             headers=[
                 "case",
                 "batch x seq",
-                "matmul",
+                "shape",
                 "baseline ms",
                 "candidate ms",
                 "speedup",
@@ -422,7 +392,7 @@ def _print_suite(name: str, results: dict[str, Any]) -> None:
 def _configure_awq_runtime(args: argparse.Namespace) -> None:
     if args.force_rebuild_awq:
         build_root = Path("/tmp") / (
-            f"awq_jit_bench_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
+            f"awq_jit_fusedreduce_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
         )
         os.environ["GPTQMODEL_AWQ_BUILD_ROOT"] = str(build_root)
         os.environ["GPTQMODEL_AWQ_FORCE_REBUILD"] = "1"
@@ -442,7 +412,7 @@ def _configure_awq_runtime(args: argparse.Namespace) -> None:
 def _configure_paroquant_runtime(args: argparse.Namespace, device: torch.device) -> None:
     if args.force_rebuild_paroquant:
         build_root = Path("/tmp") / (
-            f"paroquant_ext_awqbench_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
+            f"paroquant_ext_fusedreduce_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
         )
         os.environ["GPTQMODEL_PAROQUANT_BUILD_ROOT"] = str(build_root)
         os.environ["GPTQMODEL_PAROQUANT_FORCE_REBUILD"] = "1"
@@ -450,10 +420,7 @@ def _configure_paroquant_runtime(args: argparse.Namespace, device: torch.device)
         os.environ.pop("GPTQMODEL_PAROQUANT_BUILD_ROOT", None)
         os.environ.pop("GPTQMODEL_PAROQUANT_FORCE_REBUILD", None)
 
-    from gptqmodel.utils.paroquant import (
-        clear_paroquant_rotation_extension_cache,
-        prewarm_paroquant_rotation_extension,
-    )
+    from gptqmodel.utils.paroquant import clear_paroquant_rotation_extension_cache, prewarm_paroquant_rotation_extension
 
     if args.force_rebuild_paroquant:
         clear_paroquant_rotation_extension_cache()
@@ -468,35 +435,29 @@ def _configure_paroquant_runtime(args: argparse.Namespace, device: torch.device)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="A/B benchmark AWQ and ParoQuant CUDA GEMM configs with dense-reference accuracy reporting."
-    )
-    parser.add_argument("--device", type=int, default=0, help="CUDA device index within the current visible set.")
+    parser = argparse.ArgumentParser(description="A/B benchmark AWQ fused split-K reduction in AWQ and ParoQuant paths.")
+    parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--dtype", choices=("fp16", "bf16"), default="fp16")
-    parser.add_argument("--warmup", type=int, default=5, help="Warmup iterations per case.")
-    parser.add_argument("--iters", type=int, default=20, help="Measured iterations per case.")
-    parser.add_argument("--quick", action="store_true", help="Run a smaller subset of benchmark cases.")
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument("--quick", action="store_true")
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--num-shards", type=int, default=1)
-    parser.add_argument("--baseline-mode", choices=("legacy", "fp32_accum"), default="legacy")
-    parser.add_argument("--candidate-mode", choices=("legacy", "fp32_accum"), default="fp32_accum")
-    parser.add_argument("--baseline-split-k", type=int, default=8)
-    parser.add_argument("--candidate-split-k", type=int, default=8)
+    parser.add_argument("--split-k-iters", type=int, default=4)
+    parser.add_argument("--baseline-disable-fused-reduce", action="store_true")
+    parser.add_argument("--candidate-disable-fused-reduce", action="store_true")
     parser.add_argument("--json-out", type=Path, default=None)
+    parser.add_argument("--json", action="store_true")
     parser.add_argument("--force-rebuild-awq", action="store_true")
     parser.add_argument("--force-rebuild-paroquant", action="store_true")
-    parser.add_argument("--json", action="store_true", help="Also emit the full result payload as JSON.")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for the AWQ CUDA benchmark.")
-    if args.baseline_split_k <= 0 or args.candidate_split_k <= 0:
-        raise ValueError("split_k_iters must be positive.")
+        raise RuntimeError("CUDA is required for the AWQ fused-reduce benchmark.")
 
     device = torch.device(f"cuda:{args.device}")
     _configure_awq_runtime(args)
     _configure_paroquant_runtime(args, device)
-
     results = run(
         device=device,
         dtype=_resolve_dtype(args.dtype),
@@ -505,10 +466,9 @@ def main() -> int:
         quick=args.quick,
         shard_index=args.shard_index,
         num_shards=args.num_shards,
-        baseline_mode=args.baseline_mode,
-        candidate_mode=args.candidate_mode,
-        baseline_split_k=args.baseline_split_k,
-        candidate_split_k=args.candidate_split_k,
+        split_k_iters=args.split_k_iters,
+        baseline_disable_fused_reduce=args.baseline_disable_fused_reduce,
+        candidate_disable_fused_reduce=args.candidate_disable_fused_reduce,
     )
 
     print(f"Device: {results['device']} ({results['cuda_device']}, dtype={results['dtype']})")

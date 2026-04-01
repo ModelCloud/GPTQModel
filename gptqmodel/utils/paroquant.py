@@ -10,15 +10,12 @@
 
 from __future__ import annotations
 
-import logging
-from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
 
-
-log = logging.getLogger(__name__)
+from .cpp import TorchOpsJitExtension, default_torch_ops_build_root
 
 _SUPPORTED_ROTATION_KERNEL_DTYPES = {
     torch.float16,
@@ -143,28 +140,6 @@ def _rotation_sources() -> list[str]:
     ]
 
 
-def _rotation_extension_binary_paths(build_root: Path) -> list[Path]:
-    """Return any prebuilt ParoQuant extension binaries in the build directory."""
-    return [
-        build_root / "gptqmodel_paroquant_rotation.so",
-        build_root / "gptqmodel_paroquant_rotation.pyd",
-        build_root / "gptqmodel_paroquant_rotation.dylib",
-    ]
-
-
-def _try_load_prebuilt_rotation_extension(build_root: Path) -> bool:
-    """Load a previously built ParoQuant extension without re-entering cpp_extension."""
-    for library_path in _rotation_extension_binary_paths(build_root):
-        if not library_path.is_file():
-            continue
-        try:
-            torch.ops.load_library(str(library_path))
-            return True
-        except Exception as exc:  # pragma: no cover - binary/runtime mismatch depends on host
-            log.debug("ParoQuant: failed to load cached rotation library %s: %s", library_path, exc)
-    return False
-
-
 def _rotation_kernel_ready(
     x: torch.Tensor,
     pairs: torch.Tensor,
@@ -184,50 +159,48 @@ def _rotation_kernel_ready(
     )
 
 
-@lru_cache(maxsize=1)
+def _rotation_extra_cuda_cflags() -> list[str]:
+    return [
+        "-O3",
+        "-std=c++17",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "--use_fast_math",
+    ]
+
+
+# Shared singleton so ParoQuant uses the same torch.ops JIT lifecycle helpers as
+# AWQ and other custom-op extensions.
+_PAROQUANT_ROTATION_EXTENSION = TorchOpsJitExtension(
+    name="gptqmodel_paroquant_rotation",
+    namespace="gptqmodel_paroquant",
+    required_ops=("rotate",),
+    sources=_rotation_sources,
+    build_root_env="GPTQMODEL_PAROQUANT_BUILD_ROOT",
+    default_build_root=lambda: default_torch_ops_build_root("paroquant"),
+    display_name="ParoQuant rotation",
+    extra_cuda_cflags=_rotation_extra_cuda_cflags,
+    extra_cflags=["-O2", "-std=c++17"],
+    force_rebuild_env="GPTQMODEL_PAROQUANT_FORCE_REBUILD",
+    verbose_env="GPTQMODEL_EXT_VERBOSE",
+    requires_cuda=True,
+)
+
+
+def clear_paroquant_rotation_extension_cache() -> None:
+    """Delete cached ParoQuant rotation JIT artifacts before the next load attempt."""
+
+    _PAROQUANT_ROTATION_EXTENSION.clear_cache()
+
+
 def _load_rotation_extension() -> bool:
     """JIT-build and load the optional fused CUDA rotation extension once."""
-    if not torch.cuda.is_available():
-        return False
 
-    build_root = Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / "paroquant"
-    build_root.mkdir(parents=True, exist_ok=True)
-
-    # Prefer a previously built shared object so stale cpp_extension lock files
-    # cannot stall startup once the kernel has already been compiled successfully.
-    if _try_load_prebuilt_rotation_extension(build_root):
-        return True
-
-    try:
-        from torch.utils.cpp_extension import load
-    except Exception as exc:  # pragma: no cover - import depends on runtime
-        log.debug("ParoQuant: torch cpp_extension unavailable: %s", exc)
-        return False
-
-    try:
-        load(
-            name="gptqmodel_paroquant_rotation",
-            sources=_rotation_sources(),
-            build_directory=str(build_root),
-            extra_cuda_cflags=[
-                "-O3",
-                "-std=c++17",
-                "-U__CUDA_NO_HALF_OPERATORS__",
-                "-U__CUDA_NO_HALF_CONVERSIONS__",
-                "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-                "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                "--expt-relaxed-constexpr",
-                "--expt-extended-lambda",
-                "--use_fast_math",
-            ],
-            extra_cflags=["-O2", "-std=c++17"],
-            is_python_module=False,
-            verbose=False,
-        )
-        return True
-    except Exception as exc:  # pragma: no cover - build depends on runtime
-        log.debug("ParoQuant: rotation kernel build failed, using reference path: %s", exc)
-        return False
+    return _PAROQUANT_ROTATION_EXTENSION.load()
 
 
 def prewarm_paroquant_rotation_extension(
@@ -262,7 +235,7 @@ def apply_paroquant_rotation(
 ) -> torch.Tensor:
     """Apply the fused rotation when available, else fall back to the reference path."""
     if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _load_rotation_extension():
-        return torch.ops.gptqmodel_paroquant.rotate(x, pairs, theta, scales, int(group_size))
+        return _PAROQUANT_ROTATION_EXTENSION.op("rotate")(x, pairs, theta, scales, int(group_size))
     return apply_paroquant_rotation_reference(x, pairs, theta, scales=scales, group_size=group_size)
 
 
@@ -382,6 +355,7 @@ __all__ = [
     "apply_paroquant_rotation_autograd",
     "apply_paroquant_rotation_reference",
     "build_identity_rotation_buffers",
+    "clear_paroquant_rotation_extension_cache",
     "is_identity_rotation",
     "prewarm_paroquant_rotation_extension",
 ]

@@ -17,16 +17,25 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
+from ...utils.env import env_flag
 from ...utils.paroquant import apply_paroquant_rotation, is_identity_rotation
 from .gemm_awq import FP32_ACCUM, _awq_cuda_gemm_forward
 from .torch_awq import AwqTorchQuantLinear
 
 
-awq_ext, awq_import_error = try_import("gptqmodel_awq_kernels")
-# Optional AWQ GEMM extension reused after ParoQuant rotates the activations.
+# Rotated activations benchmark faster with a shallower K split than generic AWQ.
+_PAROQUANT_AWQ_SPLIT_K = 4
+_PAROQUANT_CACHE_RUNTIME_DTYPE = env_flag("GPTQMODEL_PAROQUANT_CACHE_RUNTIME_DTYPE", default=False)
+_PAROQUANT_AUTO_CACHE_BF16_RUNTIME_DTYPE = env_flag(
+    "GPTQMODEL_PAROQUANT_AUTO_CACHE_BF16_RUNTIME_DTYPE", default=True
+)
+# Cache typed rotation metadata so BF16 runs do not re-cast theta/scales every call.
+_PAROQUANT_CACHE_ROTATION_DTYPE = env_flag("GPTQMODEL_PAROQUANT_CACHE_ROTATION_DTYPE", default=False)
+_PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE = env_flag(
+    "GPTQMODEL_PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE", default=True
+)
 
 
 class ParoQuantQuantLinear(AwqTorchQuantLinear):
@@ -68,6 +77,10 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         register_buffers: bool = False,
         krot: int = 8,
         fp32_accum: bool = FP32_ACCUM,
+        cache_runtime_dtype: bool = _PAROQUANT_CACHE_RUNTIME_DTYPE,
+        auto_cache_bf16_runtime_dtype: bool = _PAROQUANT_AUTO_CACHE_BF16_RUNTIME_DTYPE,
+        cache_rotation_dtype: bool = _PAROQUANT_CACHE_ROTATION_DTYPE,
+        auto_cache_bf16_rotation_dtype: bool = _PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE,
         **kwargs,
     ):
         """Initialize AWQ buffers plus the extra ParoQuant rotation state."""
@@ -75,6 +88,14 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         if self.krot <= 0:
             raise ValueError(f"ParoQuantQuantLinear: `krot` must be positive, got {krot}.")
         self.fp32_accum = bool(fp32_accum)
+        self.cache_runtime_dtype = bool(cache_runtime_dtype)
+        self.auto_cache_bf16_runtime_dtype = bool(auto_cache_bf16_runtime_dtype)
+        self.cache_rotation_dtype = bool(cache_rotation_dtype)
+        self.auto_cache_bf16_rotation_dtype = bool(auto_cache_bf16_rotation_dtype)
+        self._rotation_runtime_dtype: Optional[torch.dtype] = None
+        self._rotation_runtime_device: Optional[torch.device] = None
+        self._runtime_theta: Optional[torch.Tensor] = None
+        self._runtime_channel_scales: Optional[torch.Tensor] = None
 
         super().__init__(
             bits=bits,
@@ -117,6 +138,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
     def post_init(self):
         """Refresh cached runtime state after weights or rotation buffers change."""
         super().post_init()
+        self._clear_rotation_runtime_cache()
         self._rotation_identity = is_identity_rotation(self.theta, self.channel_scales)
 
     @classmethod
@@ -129,18 +151,61 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
             f"bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}, "
-            f"krot={self.krot}, fp32_accum={self.fp32_accum}"
+            f"krot={self.krot}, awq_split_k={_PAROQUANT_AWQ_SPLIT_K}, "
+            f"cache_runtime_dtype={self.cache_runtime_dtype}, "
+            f"auto_cache_bf16={self.auto_cache_bf16_runtime_dtype}, "
+            f"cache_rotation_dtype={self.cache_rotation_dtype}, "
+            f"auto_cache_bf16_rotation={self.auto_cache_bf16_rotation_dtype}, "
+            f"fp32_accum={self.fp32_accum}"
         )
+
+    def _clear_rotation_runtime_cache(self) -> None:
+        self._rotation_runtime_dtype = None
+        self._rotation_runtime_device = None
+        self._runtime_theta = None
+        self._runtime_channel_scales = None
+
+    def _ensure_runtime_dtype(self, device: torch.device, dtype: torch.dtype) -> None:
+        if self.scales is not None and (self.scales.device != device or self.scales.dtype != dtype or not self.scales.is_contiguous()):
+            self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
+        if self.bias is not None and (self.bias.device != device or self.bias.dtype != dtype or not self.bias.is_contiguous()):
+            self.bias = self.bias.to(device=device, dtype=dtype).contiguous()
+
+    def _ensure_rotation_runtime_dtype(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if (
+            self._rotation_runtime_device != device
+            or self._rotation_runtime_dtype != dtype
+            or self._runtime_theta is None
+            or self._runtime_channel_scales is None
+            or not self._runtime_theta.is_contiguous()
+            or not self._runtime_channel_scales.is_contiguous()
+        ):
+            self._runtime_theta = self.theta.to(device=device, dtype=dtype).contiguous()
+            self._runtime_channel_scales = self.channel_scales.to(device=device, dtype=dtype).contiguous()
+            self._rotation_runtime_device = device
+            self._rotation_runtime_dtype = dtype
+        return self._runtime_theta, self._runtime_channel_scales
 
     def _rotate_inputs(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Apply the learned input transform before quantized matmul."""
         if self._rotation_identity:
             return x_flat
+        use_cached_rotation_dtype = self.cache_rotation_dtype or (
+            self.auto_cache_bf16_rotation_dtype and x_flat.dtype == torch.bfloat16
+        )
+        theta = self.theta
+        channel_scales = self.channel_scales
+        if use_cached_rotation_dtype:
+            theta, channel_scales = self._ensure_rotation_runtime_dtype(x_flat.device, x_flat.dtype)
         return apply_paroquant_rotation(
             x_flat,
             self.pairs,
-            self.theta,
-            scales=self.channel_scales,
+            theta,
+            scales=channel_scales,
             group_size=self.group_size,
         )
 
@@ -163,7 +228,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
 
     def _forward_cuda_awq_kernel(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
         """Fast path that feeds rotated activations into the AWQ CUDA GEMM kernel."""
-        if awq_ext is None or x_flat.device.type != "cuda":
+        if x_flat.device.type != "cuda":
             return None
 
         compute_dtype = x_flat.dtype if x_flat.dtype in (torch.float16, torch.bfloat16) else torch.float16
@@ -172,23 +237,37 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
             if x_flat.dtype == compute_dtype and x_flat.is_contiguous()
             else x_flat.to(device=x_flat.device, dtype=compute_dtype).contiguous()
         )
-        kernel_scales = self.scales
-        if (
-            kernel_scales.device != kernel_input.device
-            or kernel_scales.dtype != compute_dtype
-            or not kernel_scales.is_contiguous()
-        ):
-            kernel_scales = kernel_scales.to(device=kernel_input.device, dtype=compute_dtype).contiguous()
+        use_cached_runtime_dtype = self.cache_runtime_dtype or (
+            self.auto_cache_bf16_runtime_dtype and compute_dtype == torch.bfloat16
+        )
+        if use_cached_runtime_dtype:
+            self._ensure_runtime_dtype(kernel_input.device, compute_dtype)
+            kernel_scales = self.scales
+            kernel_bias = self.bias
+        else:
+            kernel_scales = self.scales
+            if (
+                kernel_scales.device != kernel_input.device
+                or kernel_scales.dtype != compute_dtype
+                or not kernel_scales.is_contiguous()
+            ):
+                kernel_scales = kernel_scales.to(device=kernel_input.device, dtype=compute_dtype).contiguous()
+            kernel_bias = self.bias
+            if (
+                kernel_bias is not None
+                and (kernel_bias.device != kernel_input.device or kernel_bias.dtype != compute_dtype or not kernel_bias.is_contiguous())
+            ):
+                kernel_bias = kernel_bias.to(device=kernel_input.device, dtype=compute_dtype).contiguous()
         out = _awq_cuda_gemm_forward(
             kernel_input.reshape(-1, kernel_input.shape[-1]),
             self.qweight,
             kernel_scales,
             self.qzeros,
-            8,
+            _PAROQUANT_AWQ_SPLIT_K,
             fp32_accum=self.fp32_accum,
         )
-        if self.bias is not None:
-            out = out + self.bias.to(device=kernel_input.device, dtype=out.dtype)
+        if kernel_bias is not None:
+            out = out + kernel_bias
         if out.dtype != x_flat.dtype:
             out = out.to(dtype=x_flat.dtype)
         return out
