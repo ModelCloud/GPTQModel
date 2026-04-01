@@ -76,7 +76,7 @@ class TestLlama3_2(ModelTest):
                 "stream": True,
             },
             "acc,num": {
-                "value": 0.390625,
+                "value": {"A100": 0.4749},
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
@@ -93,12 +93,12 @@ class TestLlama3_2(ModelTest):
         "arc_challenge": {
             "chat_template": True,
             "acc": {
-                "value": 0.3166,
+                "value": {"A100": 0.3148},
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
             "acc_norm": {
-                "value": 0.3430,
+                "value": {"A100": 0.3472},
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
