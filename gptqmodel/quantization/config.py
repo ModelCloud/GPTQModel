@@ -1146,7 +1146,7 @@ class GPTAQConfig:
 @dataclass
 class FOEMConfig:
     alpha: float = field(default=0.25)
-    beta: float = field(default=0.01)
+    beta: float = field(default=0.2)
     device: Union[str, torch.device] = field(default="auto")
 
     def __post_init__(self):
