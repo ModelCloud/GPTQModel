@@ -11,14 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from model_test import ModelTest
 
-from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 
-
-# |--------------------------------|----------|
-# | arc_challenge :: acc,none      |   0.5094 |
-# | arc_challenge :: acc_norm,none |   0.5486 |
-class TestQwen3MoeAwq(ModelTest):
+class TestQwen3MoeFOEM(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_SLOW = {
@@ -29,6 +24,8 @@ class TestQwen3MoeAwq(ModelTest):
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride())
+    FOEM = True
+    MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
     def test_moe_awq(self):
         self.quant_lm_eval()
