@@ -1,9 +1,11 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from gptqmodel.models import GPTQModel, auto, loader
 from gptqmodel.quantization import QuantizeConfig
+from gptqmodel.utils.hf import INTERNAL_HF_GGUF_FILE_KWARG
 from gptqmodel.utils import model as model_utils
 
 
@@ -122,12 +124,24 @@ def test_gptqmodel_from_pretrained_forwards_dtype_kwarg(monkeypatch):
     assert "torch_dtype" not in captured["kwargs"]
 
 
-def test_gptqmodel_load_forwards_gguf_file_to_config_probe(monkeypatch):
+def test_gptqmodel_load_rejects_public_gguf_file_kwarg():
+    with pytest.raises(TypeError, match="does not accept `gguf_file`"):
+        GPTQModel.load("/tmp/fake-model", gguf_file="bonsai.gguf")
+
+
+def test_gptqmodel_load_normalizes_direct_gguf_path_for_config_probe(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
     sentinel = object()
     config_calls = []
+    captured = {}
+
+    def fake_normalize(model_id_or_path, kwargs, *, api_name):
+        assert model_id_or_path == "/tmp/fake-model/bonsai.gguf"
+        kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = "bonsai.gguf"
+        return "/tmp/fake-model"
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto, "normalize_model_id_or_path_for_hf_gguf", fake_normalize)
     monkeypatch.setattr(auto, "isdir", lambda path: path == "/tmp/fake-model")
     monkeypatch.setattr(
         auto.AutoConfig,
@@ -135,27 +149,31 @@ def test_gptqmodel_load_forwards_gguf_file_to_config_probe(monkeypatch):
         lambda *args, **kwargs: config_calls.append(kwargs) or fake_config,
     )
     monkeypatch.setattr(auto, "_is_supported_quantization_config", lambda config: False)
-    monkeypatch.setattr(
-        GPTQModel,
-        "from_pretrained",
-        classmethod(lambda cls, model_id_or_path, quantize_config, **kwargs: sentinel),
-    )
+    monkeypatch.setattr(GPTQModel, "from_pretrained", classmethod(
+        lambda cls, model_id_or_path, quantize_config, **kwargs: captured.update(
+            {"path": model_id_or_path, "kwargs": kwargs}
+        ) or sentinel
+    ))
     monkeypatch.setattr(
         GPTQModel,
         "from_quantized",
         classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected quantized load"))),
     )
 
-    result = GPTQModel.load("/tmp/fake-model", gguf_file="bonsai.gguf")
+    result = GPTQModel.load("/tmp/fake-model/bonsai.gguf")
 
     assert result is sentinel
+    assert captured["path"] == "/tmp/fake-model"
+    assert captured["kwargs"][INTERNAL_HF_GGUF_FILE_KWARG] == "bonsai.gguf"
+    assert "gguf_file" not in captured["kwargs"]
     assert config_calls[0]["gguf_file"] == "bonsai.gguf"
 
 
-def test_gptqmodel_from_pretrained_forwards_gguf_file(monkeypatch):
+def test_gptqmodel_from_pretrained_normalizes_direct_gguf_path(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
     sentinel = object()
     captured = {}
+    config_calls = []
 
     class FakeModelDefinition:
         @classmethod
@@ -164,20 +182,31 @@ def test_gptqmodel_from_pretrained_forwards_gguf_file(monkeypatch):
             captured["kwargs"] = kwargs
             return sentinel
 
+    def fake_normalize(model_id_or_path, kwargs, *, api_name):
+        assert model_id_or_path == "/tmp/fake-model/bonsai.gguf"
+        kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = "bonsai.gguf"
+        return "/tmp/fake-model"
+
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "normalize_model_id_or_path_for_hf_gguf", fake_normalize)
+    monkeypatch.setattr(
+        auto.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: config_calls.append(kwargs) or fake_config,
+    )
     monkeypatch.setattr(auto, "_is_supported_quantization_config", lambda config: False)
     monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: FakeModelDefinition)
 
     result = GPTQModel.from_pretrained(
-        "/tmp/fake-model",
+        "/tmp/fake-model/bonsai.gguf",
         quantize_config=None,
-        gguf_file="bonsai.gguf",
     )
 
     assert result is sentinel
     assert captured["path"] == "/tmp/fake-model"
-    assert captured["kwargs"]["gguf_file"] == "bonsai.gguf"
+    assert config_calls[0]["gguf_file"] == "bonsai.gguf"
+    assert captured["kwargs"][INTERNAL_HF_GGUF_FILE_KWARG] == "bonsai.gguf"
+    assert "gguf_file" not in captured["kwargs"]
 
 
 def test_gptqmodel_from_quantized_forwards_dtype_kwarg(monkeypatch):
@@ -250,6 +279,7 @@ def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
     class DummyQModel:
         loader = FakeInnerLoader
         require_dtype = None
+        loader_requires_dtype = False
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
@@ -321,6 +351,7 @@ def test_model_loader_from_pretrained_forwards_dtype_kwarg(monkeypatch):
     class DummyQModel:
         loader = FakeInnerLoader
         require_dtype = None
+        loader_requires_dtype = False
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
@@ -356,7 +387,7 @@ def test_model_loader_from_pretrained_forwards_dtype_kwarg(monkeypatch):
     assert "torch_dtype" not in load_calls[0]
 
 
-def test_model_loader_from_pretrained_forwards_gguf_file(monkeypatch):
+def test_model_loader_from_pretrained_normalizes_direct_gguf_path(monkeypatch):
     class FakeConfig:
         def __init__(self):
             self._experts_implementation = None
@@ -375,16 +406,22 @@ def test_model_loader_from_pretrained_forwards_gguf_file(monkeypatch):
     model_calls = []
     tokenizer_calls = []
 
+    def fake_normalize(model_id_or_path, kwargs, *, api_name):
+        assert model_id_or_path == "/tmp/fake-model/bonsai.gguf"
+        kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = "bonsai.gguf"
+        return "/tmp/fake-model"
+
     class FakeInnerLoader:
         @staticmethod
-        def from_pretrained(_path, config=None, **kwargs):
-            model_calls.append(kwargs)
+        def from_pretrained(path, config=None, **kwargs):
+            model_calls.append({"path": path, "kwargs": kwargs})
             return FakeModel(config)
 
     @loader.ModelLoader
     class DummyQModel:
         loader = FakeInnerLoader
         require_dtype = None
+        loader_requires_dtype = False
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
@@ -402,6 +439,7 @@ def test_model_loader_from_pretrained_forwards_gguf_file(monkeypatch):
             self.quantized = kwargs.get("quantized")
 
     monkeypatch.setattr(loader, "check_versions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader, "normalize_model_id_or_path_for_hf_gguf", fake_normalize)
     monkeypatch.setattr(loader, "get_model_local_path", lambda *_args, **_kwargs: "/tmp/fake-model")
     monkeypatch.setattr(
         loader.AutoConfig,
@@ -417,14 +455,14 @@ def test_model_loader_from_pretrained_forwards_gguf_file(monkeypatch):
     monkeypatch.setattr(loader.defuser, "replace_fused_blocks", lambda *_args, **_kwargs: None)
 
     DummyQModel.from_pretrained(
-        "/tmp/fake-model",
+        "/tmp/fake-model/bonsai.gguf",
         quantize_config=None,
-        gguf_file="bonsai.gguf",
     )
 
     assert config_calls[0]["gguf_file"] == "bonsai.gguf"
     assert tokenizer_calls[0]["gguf_file"] == "bonsai.gguf"
-    assert model_calls[0]["gguf_file"] == "bonsai.gguf"
+    assert model_calls[0]["path"] == "/tmp/fake-model"
+    assert model_calls[0]["kwargs"]["gguf_file"] == "bonsai.gguf"
 
 
 def test_model_loader_falls_back_when_meta_shell_build_hits_meta_tensor_item(monkeypatch):
@@ -467,6 +505,7 @@ def test_model_loader_falls_back_when_meta_shell_build_hits_meta_tensor_item(mon
     class DummyQModel:
         loader = FakeInnerLoader
         require_dtype = None
+        loader_requires_dtype = False
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
