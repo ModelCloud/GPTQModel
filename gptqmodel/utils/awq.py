@@ -20,6 +20,8 @@ def _awq_sources() -> list[str]:
         str(root / "torch_bind.cpp"),
         str(root / "quantization" / "gemm_cuda_gen.cu"),
         str(root / "quantization" / "gemv_cuda.cu"),
+        str(root / "gemm_fast_cuda_entry.cu"),
+        str(root / "gemv_fast_cuda_entry.cu"),
     ]
 
 
@@ -72,7 +74,15 @@ def _awq_extra_cuda_cflags() -> list[str]:
 _AWQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_AWQ_OPS_NAME,
     namespace=_AWQ_OPS_NAMESPACE,
-    required_ops=("gemm_forward", "gemm_forward_fp32_reduce", "gemmv2_forward", "gemv_forward", "dequantize_weights"),
+    required_ops=(
+        "gemm_forward",
+        "gemm_forward_fp32_reduce",
+        "gemmv2_forward",
+        "gemv_forward",
+        "gemm_fast_forward_prefill",
+        "gemv_fast_forward_decode",
+        "dequantize_weights",
+    ),
     sources=_awq_sources,
     build_root_env="GPTQMODEL_AWQ_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("awq"),
@@ -124,8 +134,18 @@ def awq_gemv_forward(input, qweight, scales, qzeros, group_size):
     return _AWQ_TORCH_OPS_EXTENSION.op("gemv_forward")(input, qweight, scales, qzeros, group_size)
 
 
+def awq_fast_gemm_forward_prefill(input, qweight, scales, qzeros):
+    return _AWQ_TORCH_OPS_EXTENSION.op("gemm_fast_forward_prefill")(input, qweight, scales, qzeros)
+
+
+def awq_fast_gemv_forward_decode(input, qweight, scales, qzeros, m, n, k, group_size):
+    return _AWQ_TORCH_OPS_EXTENSION.op("gemv_fast_forward_decode")(input, qweight, scales, qzeros, m, n, k, group_size)
+
+
 __all__ = [
     "awq_dequantize_weights",
+    "awq_fast_gemm_forward_prefill",
+    "awq_fast_gemv_forward_decode",
     "awq_gemm_forward",
     "awq_gemmv2_forward",
     "awq_gemv_forward",

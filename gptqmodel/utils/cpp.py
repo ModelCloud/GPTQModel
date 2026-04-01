@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
@@ -114,13 +115,39 @@ class TorchOpsJitExtension:
         resolved = value() if callable(value) else value
         return [str(item) for item in resolved]
 
-    def build_root(self) -> Path:
-        """Return the filesystem directory that caches this JIT extension."""
+    def base_build_root(self) -> Path:
+        """Return the user-visible cache root before applying the loader fingerprint."""
 
         override = os.getenv(self.build_root_env) if self.build_root_env else None
         if override:
             return Path(override).expanduser()
         return self._resolve_path(self.default_build_root)
+
+    def _cache_fingerprint(self) -> str:
+        """Hash the effective op surface and source metadata to avoid stale cache reuse."""
+
+        payload: list[str] = [self.name, self.namespace, *self.required_ops]
+        for source in self._resolve_sequence(self.sources):
+            payload.append(source)
+            source_path = Path(source)
+            if source_path.exists():
+                stat = source_path.stat()
+                payload.append(str(stat.st_size))
+                payload.append(str(stat.st_mtime_ns))
+            else:
+                payload.append("missing")
+
+        payload.extend(self._resolve_sequence(self.extra_cflags))
+        payload.extend(self._resolve_sequence(self.extra_cuda_cflags))
+        payload.extend(self._resolve_sequence(self.extra_include_paths))
+        payload.extend(self._resolve_sequence(self.extra_ldflags))
+        digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
+        return digest[:16]
+
+    def build_root(self) -> Path:
+        """Return the fingerprinted filesystem directory that caches this JIT extension."""
+
+        return self.base_build_root() / self._cache_fingerprint()
 
     def force_rebuild_enabled(self) -> bool:
         """Check whether this extension should ignore and replace cached binaries."""
@@ -184,7 +211,7 @@ class TorchOpsJitExtension:
             self._last_error = ""
             self._namespace_cache = None
             self._op_cache = {}
-            build_root = self.build_root()
+            build_root = self.base_build_root()
             if build_root.exists():
                 shutil.rmtree(build_root, ignore_errors=True)
 
@@ -236,10 +263,11 @@ class TorchOpsJitExtension:
             if self._load_attempted and not force_rebuild:
                 return self._load_result
             build_root = self.build_root()
+            base_build_root = self.base_build_root()
 
-            if force_rebuild and build_root.exists():
-                setup_logger().info(f"{self.display_name}: clearing cached JIT extension at `{build_root}`.")
-                shutil.rmtree(build_root, ignore_errors=True)
+            if force_rebuild and base_build_root.exists():
+                setup_logger().info(f"{self.display_name}: clearing cached JIT extension at `{base_build_root}`.")
+                shutil.rmtree(base_build_root, ignore_errors=True)
 
             build_root.mkdir(parents=True, exist_ok=True)
 

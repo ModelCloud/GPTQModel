@@ -846,34 +846,18 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
                 if BUILD_AWQ:
-                    if ROCM_VERSION:
-                        print("Skipping AWQ kernels on ROCm: inline PTX is CUDA-only.")
-                    else:
-                        extensions += [
-                            # TODO only compatible with ampere?
-                            # arch_flags = get_compute_capabilities({80, 86, 89, 90})
-                            # extra_compile_args_v2 = get_extra_compile_args(arch_flags, generator_flags)
-                            cpp_ext.CUDAExtension(
-                                "gptqmodel_awq_v2_kernels",
-                                [
-                                    "gptqmodel_ext/awq/pybind_awq_v2.cpp",
-                                    "gptqmodel_ext/awq/quantization_new/gemv/gemv_cuda.cu",
-                                    "gptqmodel_ext/awq/quantization_new/gemm/gemm_cuda.cu",
-                                ],
-                                extra_link_args=extra_link_args,
-                                extra_compile_args=extra_compile_args,
-                            ),
-                            cpp_ext.CUDAExtension(
-                                "gptqmodel_exllamav2_awq_kernels",
-                                [
-                                    "gptqmodel_ext/exllamav2/ext_awq.cpp",
-                                    "gptqmodel_ext/exllamav2/cuda/q_matrix_awq.cu",
-                                    "gptqmodel_ext/exllamav2/cuda/q_gemm_awq.cu",
-                                ],
-                                extra_link_args=extra_link_args,
-                                extra_compile_args=extra_compile_args,
-                            )
-                        ]
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_exllamav2_awq_kernels",
+                            [
+                                "gptqmodel_ext/exllamav2/ext_awq.cpp",
+                                "gptqmodel_ext/exllamav2/cuda/q_matrix_awq.cu",
+                                "gptqmodel_ext/exllamav2/cuda/q_gemm_awq.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
 
         # Ensure machete kernels are compiled before other extensions
         machete_exts = [ext for ext in extensions if getattr(ext, "name", "") == "gptqmodel_machete_kernels"]
