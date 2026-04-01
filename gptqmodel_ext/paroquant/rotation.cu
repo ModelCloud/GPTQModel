@@ -5,6 +5,7 @@
 #include "rotation.cuh"
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAFunctions.h>
 #include <cstdlib>
 #include <torch/extension.h>
 
@@ -193,11 +194,53 @@ torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
 
 namespace {
 
-int resolve_cta_m() {
+struct LaunchConfig {
+  int cta_m;
+  int row_pad;
+};
+
+int current_sm_version() {
+  static thread_local c10::DeviceIndex cached_device = -1;
+  static thread_local int cached_sm = -1;
+  const c10::DeviceIndex current_device = c10::cuda::current_device();
+  if (current_device != cached_device) {
+    cached_device = current_device;
+    const cudaDeviceProp *props = at::cuda::getDeviceProperties(current_device);
+    cached_sm = props == nullptr ? -1 : (props->major * 10 + props->minor);
+  }
+  return cached_sm;
+}
+
+int resolve_cta_m(at::ScalarType dtype) {
   if (const char *override_value = std::getenv("GPTQMODEL_PAROQUANT_ROTATE_CTA_M")) {
     int parsed = std::atoi(override_value);
     if (parsed == 4 || parsed == 8 || parsed == 16) {
       return parsed;
+    }
+  }
+
+  // These defaults are pinned to manual full-sweep measurements on the A100
+  // (sm80) and RTX 4090 (sm89) available on this host. Other architectures may
+  // not benefit from these launch shapes and can regress in performance, so
+  // they stay on the legacy default until benchmarked explicitly.
+  const int sm_version = current_sm_version();
+  if (dtype == at::kHalf) {
+    switch (sm_version) {
+    case 80:
+    case 89:
+      return 8;
+    default:
+      return 4;
+    }
+  }
+  if (dtype == at::kBFloat16) {
+    switch (sm_version) {
+    case 80:
+      return 4;
+    case 89:
+      return 16;
+    default:
+      return 4;
     }
   }
   return 4;
@@ -213,6 +256,13 @@ int resolve_row_pad(at::ScalarType dtype) {
   return dtype == at::kFloat ? 0 : 2;
 }
 
+LaunchConfig resolve_launch_config(at::ScalarType dtype) {
+  return {
+      resolve_cta_m(dtype),
+      resolve_row_pad(dtype),
+  };
+}
+
 } // namespace
 
 torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
@@ -220,13 +270,22 @@ torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
   int64_t krot = theta.size(0);
   TORCH_CHECK(krot == idx.size(0), "theta.size(0) must equal idx_ij.size(0)");
   at::Tensor scales = scales_opt.value_or(at::Tensor());
-  int cta_m = resolve_cta_m();
-  int row_pad = resolve_row_pad(x.scalar_type());
+  const LaunchConfig config = resolve_launch_config(x.scalar_type());
+  int cta_m = config.cta_m;
+  int row_pad = config.row_pad;
 
   if (group_size == 128) {
     DISPATCH_KROT(128)
   }
   TORCH_CHECK(false, "Unsupported group_size: ", group_size, "; expected 128");
+}
+
+std::vector<int64_t> rotate_launch_config(at::Tensor x) {
+  const LaunchConfig config = resolve_launch_config(x.scalar_type());
+  return {
+      static_cast<int64_t>(config.cta_m),
+      static_cast<int64_t>(config.row_pad),
+  };
 }
 
 #undef DISPATCH_ROW_PAD
@@ -235,8 +294,10 @@ torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
 
 TORCH_LIBRARY(gptqmodel_paroquant, m) {
   m.def("rotate(Tensor x, Tensor idx_ij, Tensor theta, Tensor? scales=None, int group_size=128) -> Tensor");
+  m.def("launch_config(Tensor x) -> int[]");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_paroquant, CUDA, m) {
   m.impl("rotate", &rotate_dynamic);
+  m.impl("launch_config", &rotate_launch_config);
 }

@@ -43,6 +43,7 @@ from gptqmodel.quantization.paroquant.optimization import (
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend
 from gptqmodel.utils.paroquant import (
+    _rotation_launch_config,
     apply_paroquant_rotation,
     apply_paroquant_rotation_reference,
     build_identity_rotation_buffers,
@@ -1264,6 +1265,58 @@ def test_paroquant_clear_rotation_extension_cache_delegates_to_shared_loader(mon
     clear_paroquant_rotation_extension_cache()
 
     assert calls == ["clear"]
+
+
+def test_paroquant_rotation_launch_config_honors_env_overrides(monkeypatch):
+    """Guard manual launch-shape overrides so benchmarking can pin one kernel variant."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant launch-config path.")
+
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ROTATE_CTA_M", "16")
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD", "0")
+
+    assert prewarm_paroquant_rotation_extension(
+        fused_rotation=True,
+        group_size=128,
+        krot=8,
+        device=torch.device("cuda"),
+    )
+
+    cta_m, row_pad = _rotation_launch_config(torch.empty((1, 128), device="cuda", dtype=torch.float16))
+    assert (cta_m, row_pad) == (16, 0)
+
+
+def test_paroquant_rotation_launch_config_uses_hard_tuned_arch_map():
+    """Guard the manual launch table chosen from the sm80 and sm89 benchmark sweeps."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant launch-config path.")
+
+    capability = torch.cuda.get_device_capability()
+    expected = {
+        (8, 0): {
+            torch.float16: (8, 2),
+            torch.bfloat16: (4, 2),
+            torch.float32: (4, 0),
+        },
+        (8, 9): {
+            torch.float16: (8, 2),
+            torch.bfloat16: (16, 2),
+            torch.float32: (4, 0),
+        },
+    }.get(capability)
+    if expected is None:
+        pytest.skip(f"No hard-tuned launch map is defined for compute capability {capability}.")
+
+    assert prewarm_paroquant_rotation_extension(
+        fused_rotation=True,
+        group_size=128,
+        krot=8,
+        device=torch.device("cuda"),
+    )
+
+    for dtype, launch_config in expected.items():
+        cta_m, row_pad = _rotation_launch_config(torch.empty((1, 128), device="cuda", dtype=dtype))
+        assert (cta_m, row_pad) == launch_config
 
 
 def test_paroquant_processor_prewarm_runtime_runs_once(monkeypatch):

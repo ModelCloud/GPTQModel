@@ -179,7 +179,7 @@ def _rotation_extra_cuda_cflags() -> list[str]:
 _PAROQUANT_ROTATION_EXTENSION = TorchOpsJitExtension(
     name="gptqmodel_paroquant_rotation",
     namespace="gptqmodel_paroquant",
-    required_ops=("rotate",),
+    required_ops=("rotate", "launch_config"),
     sources=_rotation_sources,
     build_root_env="GPTQMODEL_PAROQUANT_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("paroquant"),
@@ -202,6 +202,16 @@ def _load_rotation_extension() -> bool:
     """JIT-build and load the optional fused CUDA rotation extension once."""
 
     return _PAROQUANT_ROTATION_EXTENSION.load()
+
+
+def _rotation_launch_config(x: torch.Tensor) -> tuple[int, int]:
+    """Return the resolved fused-kernel launch shape for one CUDA tensor."""
+    if x.device.type != "cuda":
+        raise ValueError("ParoQuant launch config requires a CUDA tensor.")
+    if not _load_rotation_extension():
+        raise RuntimeError("ParoQuant launch config requires the fused rotation extension.")
+    cta_m, row_pad = _PAROQUANT_ROTATION_EXTENSION.op("launch_config")(x)
+    return int(cta_m), int(row_pad)
 
 
 def prewarm_paroquant_rotation_extension(
@@ -355,6 +365,7 @@ __all__ = [
     "apply_paroquant_rotation",
     "apply_paroquant_rotation_autograd",
     "apply_paroquant_rotation_reference",
+    "_rotation_launch_config",
     "build_identity_rotation_buffers",
     "clear_paroquant_rotation_extension_cache",
     "is_identity_rotation",
