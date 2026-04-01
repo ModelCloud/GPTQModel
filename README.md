@@ -713,6 +713,17 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   year={2025}
 }
 
+# FOEM
+@inproceedings{zheng2026first,
+  title={First-order error matters: Accurate compensation for quantized large language models},
+  author={Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong},
+  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume={40},
+  number={34},
+  pages={28883--28891},
+  year={2026}
+}
+
 # QQQ 
 @article{zhang2024qqq,
       title={QQQ: Quality Quattuor-Bit Quantization for Large Language Models}, 
@@ -732,16 +743,6 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   year = {2026}
 }
 
-# FOEM
-@inproceedings{zheng2026first,
-  title={First-order error matters: Accurate compensation for quantized large language models},
-  author={Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong},
-  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
-  volume={40},
-  number={34},
-  pages={28883--28891},
-  year={2026}
-}
 ```
 
 ## Quick Notes
