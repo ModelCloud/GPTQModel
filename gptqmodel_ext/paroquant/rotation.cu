@@ -38,6 +38,40 @@ __global__ void rotate_kernel(const scalar_t *__restrict__ x, scalar_t *__restri
                                                                                g, t);
 }
 
+template <int CTA_M, int GROUP_SIZE, int KROT, bool USE_SCALE, int ROW_PAD>
+__global__ void rotate_kernel_bf16_half_workspace(const __nv_bfloat16 *__restrict__ x,
+                                                  __nv_bfloat16 *__restrict__ out,
+                                                  const int16_t *__restrict__ idx_ij,
+                                                  const __nv_bfloat16 *__restrict__ theta,
+                                                  const __nv_bfloat16 *__restrict__ scales, int s,
+                                                  int h) {
+  constexpr int ROW_STRIDE = CTA_M + ROW_PAD;
+  __shared__ __half x_grp[ROW_STRIDE * GROUP_SIZE];
+
+  int j = blockIdx.x;
+  int g = blockIdx.y;
+  int t = threadIdx.x;
+
+  RotateAccessBFloat16HalfWorkspace::template load_group<CTA_M, ROW_STRIDE, GROUP_SIZE, USE_SCALE>(
+      x_grp, x, scales, s, h, j, g, t);
+
+  float reg_theta[KROT];
+  int reg_idx[KROT];
+  RotateAccessBFloat16HalfWorkspace::template load_coeffs<KROT, GROUP_SIZE>(reg_theta, reg_idx,
+                                                                            idx_ij, theta, h, g,
+                                                                            t);
+  __syncthreads();
+
+#pragma unroll
+  for (int r = 0; r < KROT; r++) {
+    RotateAccess<__half>::template apply_one<CTA_M, ROW_STRIDE>(x_grp, reg_idx[r], reg_theta[r]);
+    __syncthreads();
+  }
+
+  RotateAccessBFloat16HalfWorkspace::template store_group<CTA_M, ROW_STRIDE, GROUP_SIZE>(
+      out, x_grp, s, h, j, g, t);
+}
+
 #define LAUNCH_ROTATE(CUDA_T, TORCH_T)                                                               \
   {                                                                                                  \
     auto *x_p = reinterpret_cast<CUDA_T *>(x.data_ptr<TORCH_T>());                                   \
@@ -53,6 +87,40 @@ __global__ void rotate_kernel(const scalar_t *__restrict__ x, scalar_t *__restri
     }                                                                                                \
     break;                                                                                           \
   }
+
+template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
+torch::Tensor rotate_launcher_bf16_half_workspace(at::Tensor x, at::Tensor idx_ij,
+                                                  at::Tensor theta, at::Tensor scales) {
+  int h = x.size(-1);
+  TORCH_CHECK(h % GROUP_SIZE == 0, "h must be divisible by GROUP_SIZE");
+  int groups_per_row = h / GROUP_SIZE;
+  constexpr int pn = GROUP_SIZE / 2;
+  int seq_len = x.numel() / x.size(-1);
+  auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
+  at::Tensor out = torch::empty(x.sizes(), options);
+  bool has_scale = scales.defined() && scales.numel() > 0;
+
+  auto theta_cast = theta.scalar_type() == at::kBFloat16 ? theta : theta.to(at::kBFloat16);
+  auto scales_cast = !has_scale                       ? at::Tensor()
+                     : scales.scalar_type() == at::kBFloat16 ? scales
+                                                             : scales.to(at::kBFloat16);
+
+  dim3 grid((seq_len + CTA_M - 1) / CTA_M, groups_per_row);
+  dim3 block(pn);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto *x_p = reinterpret_cast<__nv_bfloat16 *>(x.data_ptr<c10::BFloat16>());
+  auto *o_p = reinterpret_cast<__nv_bfloat16 *>(out.data_ptr<c10::BFloat16>());
+  auto *t_p = reinterpret_cast<__nv_bfloat16 *>(theta_cast.data_ptr<c10::BFloat16>());
+  if (has_scale) {
+    auto *s_p = reinterpret_cast<__nv_bfloat16 *>(scales_cast.data_ptr<c10::BFloat16>());
+    rotate_kernel_bf16_half_workspace<CTA_M, GROUP_SIZE, KROT, true, ROW_PAD><<<grid, block, 0, stream>>>(
+        x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, s_p, seq_len, h);
+  } else {
+    rotate_kernel_bf16_half_workspace<CTA_M, GROUP_SIZE, KROT, false, ROW_PAD><<<grid, block, 0, stream>>>(
+        x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, nullptr, seq_len, h);
+  }
+  return out;
+}
 
 template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
 torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
@@ -82,7 +150,7 @@ torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
   case at::kHalf:
     LAUNCH_ROTATE(__half, c10::Half)
   case at::kBFloat16:
-    LAUNCH_ROTATE(__nv_bfloat16, c10::BFloat16)
+    return rotate_launcher_bf16_half_workspace<KROT, CTA_M, GROUP_SIZE, ROW_PAD>(x, idx_ij, theta, scales);
   default:
     TORCH_CHECK(false, "rotate supports Float, Half, and BFloat16, got ", x.scalar_type());
   }

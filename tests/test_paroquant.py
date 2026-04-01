@@ -4282,6 +4282,71 @@ def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch)
     assert torch.equal(actual, x)
 
 
+def test_paroquant_rotation_fused_bf16_uses_fp16_workspace_contract():
+    """Guard bf16 fused rotation against regressing back to bf16 workspace accumulation."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant rotation bf16 fused workspace path.")
+
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 128
+    group_size = 128
+    krot = 8
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=13,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(7)
+    x = torch.randn((4, in_features), generator=generator, dtype=torch.float32).to(device="cuda", dtype=torch.bfloat16)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda", dtype=torch.bfloat16)
+    scales = torch.empty((1, in_features), dtype=torch.float32)
+    scales.uniform_(0.75, 1.25, generator=generator)
+    scales = scales.to(device="cuda", dtype=torch.bfloat16)
+
+    actual = apply_paroquant_rotation(x, pairs, theta, scales=scales, group_size=group_size)
+    bf16_reference = apply_paroquant_rotation_reference(x, pairs, theta, scales=scales, group_size=group_size)
+    fp16_workspace_reference = apply_paroquant_rotation_reference(
+        x.to(dtype=torch.float16),
+        pairs,
+        theta.to(dtype=torch.float16),
+        scales=scales.to(dtype=torch.float16),
+        group_size=group_size,
+    ).to(dtype=torch.bfloat16)
+    fp32_reference = apply_paroquant_rotation_reference(
+        x.to(dtype=torch.float32),
+        pairs,
+        theta.to(dtype=torch.float32),
+        scales=scales.to(dtype=torch.float32),
+        group_size=group_size,
+    )
+
+    actual_fp16_workspace = (actual.float() - fp16_workspace_reference.float()).abs()
+    bf16_fp16_workspace = (bf16_reference.float() - fp16_workspace_reference.float()).abs()
+    actual_fp32 = (actual.float() - fp32_reference).abs()
+    bf16_fp32 = (bf16_reference.float() - fp32_reference).abs()
+
+    assert actual.dtype == torch.bfloat16
+    assert actual_fp16_workspace.mean().item() < bf16_fp16_workspace.mean().item()
+    assert actual_fp16_workspace.max().item() < bf16_fp16_workspace.max().item()
+    assert actual_fp32.mean().item() <= bf16_fp32.mean().item()
+    assert actual_fp32.max().item() <= bf16_fp32.max().item()
+
+
 def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
     """Guard that cached BF16 rotation metadata preserves the runtime dtype and values."""
     if not torch.cuda.is_available():
