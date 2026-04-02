@@ -260,6 +260,7 @@ class TestQwen3_8B_Base_awq(ModelTest):
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
     QUANT_BATCH_SIZE = 1
+    MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
     def test_qwen3_8b_base_awq(self):
         self.quant_lm_eval()
