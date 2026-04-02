@@ -1460,6 +1460,7 @@ class AWQProcessor(LoopProcessor):
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Registers a module with its layer state and initializes input capture buckets."""
 
+        # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) is False:
             return
 
@@ -1633,7 +1634,6 @@ class AWQProcessor(LoopProcessor):
             for name, submodule in find_modules(self.gptq_model.model, [quant_linear_cls]).items()
             if name == module.full_name
         }
-        print("qModules", qModules, quant_linear_cls, self.gptq_model.model)
         pack_start = time.perf_counter() if timer is not None else None
         with log_time_block(
                 "pack",
