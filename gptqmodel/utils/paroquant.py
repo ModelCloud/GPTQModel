@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -23,6 +24,11 @@ _SUPPORTED_ROTATION_KERNEL_DTYPES = {
     torch.bfloat16,
     torch.float32,
 }
+
+# Process-local cache for resolved fused launch configs. The steady-state
+# rotation path uses this to avoid sending autotune sentinels back into the
+# native op on every invocation once a shape has already been measured.
+_ROTATION_LAUNCH_CONFIG_CACHE: dict[tuple[object, ...], tuple[int, int]] = {}
 
 
 def _normalize_group_size(group_size: int, in_features: int) -> int:
@@ -179,7 +185,7 @@ def _rotation_extra_cuda_cflags() -> list[str]:
 _PAROQUANT_ROTATION_EXTENSION = TorchOpsJitExtension(
     name="gptqmodel_paroquant_rotation",
     namespace="gptqmodel_paroquant",
-    required_ops=("rotate", "launch_config"),
+    required_ops=("rotate", "launch_config", "clear_autotune_cache", "autotune_cache_size"),
     sources=_rotation_sources,
     build_root_env="GPTQMODEL_PAROQUANT_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("paroquant"),
@@ -195,7 +201,17 @@ _PAROQUANT_ROTATION_EXTENSION = TorchOpsJitExtension(
 def clear_paroquant_rotation_extension_cache() -> None:
     """Delete cached ParoQuant rotation JIT artifacts before the next load attempt."""
 
+    clear_paroquant_rotation_autotune_cache()
     _PAROQUANT_ROTATION_EXTENSION.clear_cache()
+
+
+def clear_paroquant_rotation_autotune_cache() -> None:
+    """Drop the native launch-plan cache used by fused rotation autotune."""
+
+    _ROTATION_LAUNCH_CONFIG_CACHE.clear()
+    clear_cache = _rotation_native_op_if_loaded("clear_autotune_cache")
+    if clear_cache is not None:
+        clear_cache()
 
 
 def _load_rotation_extension() -> bool:
@@ -204,14 +220,218 @@ def _load_rotation_extension() -> bool:
     return _PAROQUANT_ROTATION_EXTENSION.load()
 
 
-def _rotation_launch_config(x: torch.Tensor) -> tuple[int, int]:
-    """Return the resolved fused-kernel launch shape for one CUDA tensor."""
+def _rotation_env_int(name: str, allowed: set[int]) -> Optional[int]:
+    """Parse a bounded integer environment override."""
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value in allowed else None
+
+
+def _rotation_env_flag(name: str, default: bool) -> bool:
+    """Parse a boolean environment flag used by rotation autotune."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _rotation_autotune_enabled() -> bool:
+    """Report whether fused rotation launch autotune is enabled for this process."""
+    return _rotation_env_flag("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE", True)
+
+
+def _rotation_native_op_if_loaded(op_name: str):
+    """Return a loaded torch.ops handle without triggering JIT compilation."""
+    namespace = _PAROQUANT_ROTATION_EXTENSION._namespace_cache
+    if namespace is None or not hasattr(namespace, op_name):
+        return None
+    cached = _PAROQUANT_ROTATION_EXTENSION._op_cache.get(op_name)
+    if cached is not None:
+        return cached
+    op = getattr(namespace, op_name)
+    _PAROQUANT_ROTATION_EXTENSION._op_cache[op_name] = op
+    return op
+
+
+def _rotation_requested_launch() -> tuple[int, int]:
+    """Resolve the requested fused launch policy from env overrides or autotune."""
+    cta_m_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_CTA_M", {4, 8, 16})
+    row_pad_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD", {0, 2})
+    if cta_m_override is not None or row_pad_override is not None:
+        return (
+            -1 if cta_m_override is None else int(cta_m_override),
+            -1 if row_pad_override is None else int(row_pad_override),
+        )
+    if _rotation_autotune_enabled():
+        return (-2, -2)
+    return (-1, -1)
+
+
+def _rotation_autotune_cache_size() -> int:
+    """Return the native fused-rotation autotune cache size for tests and benchmarks."""
+    cache_size = _rotation_native_op_if_loaded("autotune_cache_size")
+    if cache_size is not None:
+        return int(cache_size())
+    if not _load_rotation_extension():
+        return 0
+    return int(_PAROQUANT_ROTATION_EXTENSION.op("autotune_cache_size")())
+
+
+def _run_rotation_op(
+    x: torch.Tensor,
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    scales: Optional[torch.Tensor],
+    group_size: int,
+    *,
+    cta_m: int,
+    row_pad: int,
+) -> torch.Tensor:
+    """Execute the fused rotation op with one requested launch policy."""
+    return _PAROQUANT_ROTATION_EXTENSION.op("rotate")(
+        x,
+        pairs,
+        theta,
+        scales,
+        int(group_size),
+        int(cta_m),
+        int(row_pad),
+    )
+
+
+def _rotation_launch_cache_key(
+    x: torch.Tensor,
+    *,
+    krot: int,
+    has_scale: bool,
+    group_size: int,
+    requested_cta_m: int,
+    requested_row_pad: int,
+) -> tuple[object, ...]:
+    """Build the process-local cache key for one resolved launch shape."""
+    hidden = int(x.shape[-1])
+    batch_rows = int(x.numel() // hidden)
+    return (
+        int(x.device.index if x.device.index is not None else -1),
+        x.dtype,
+        batch_rows,
+        hidden,
+        int(group_size),
+        int(krot),
+        bool(has_scale),
+        int(requested_cta_m),
+        int(requested_row_pad),
+    )
+
+
+def _resolve_rotation_launch(
+    x: torch.Tensor,
+    *,
+    scales: Optional[torch.Tensor],
+    group_size: int,
+    krot: int,
+    requested_cta_m: int,
+    requested_row_pad: int,
+) -> tuple[int, int]:
+    """Resolve one fused launch config and memoize autotuned shape choices."""
+    if requested_cta_m != -2 and requested_row_pad != -2:
+        return int(requested_cta_m), int(requested_row_pad)
+
+    cache_key = _rotation_launch_cache_key(
+        x,
+        krot=krot,
+        has_scale=scales is not None,
+        group_size=group_size,
+        requested_cta_m=requested_cta_m,
+        requested_row_pad=requested_row_pad,
+    )
+    cached = _ROTATION_LAUNCH_CONFIG_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    cta_m, row_pad = _PAROQUANT_ROTATION_EXTENSION.op("launch_config")(
+        x,
+        int(krot),
+        scales is not None,
+        int(group_size),
+        int(requested_cta_m),
+        int(requested_row_pad),
+    )
+    resolved = (int(cta_m), int(row_pad))
+    _ROTATION_LAUNCH_CONFIG_CACHE[cache_key] = resolved
+    return resolved
+
+
+def _rotation_launch_config(
+    x: torch.Tensor,
+    pairs: Optional[torch.Tensor] = None,
+    theta: Optional[torch.Tensor] = None,
+    scales: Optional[torch.Tensor] = None,
+    group_size: int = 128,
+    *,
+    extension_loaded: bool = False,
+    kernel_ready: bool = False,
+) -> tuple[int, int]:
+    """Query the native fused-kernel launch shape for one CUDA tensor."""
+    del pairs, kernel_ready
     if x.device.type != "cuda":
         raise ValueError("ParoQuant launch config requires a CUDA tensor.")
-    if not _load_rotation_extension():
+    if not extension_loaded and not _load_rotation_extension():
         raise RuntimeError("ParoQuant launch config requires the fused rotation extension.")
-    cta_m, row_pad = _PAROQUANT_ROTATION_EXTENSION.op("launch_config")(x)
+    requested_cta_m, requested_row_pad = _rotation_requested_launch()
+    krot = 8 if theta is None else int(theta.shape[0])
+    if requested_cta_m == -2 or requested_row_pad == -2:
+        cta_m, row_pad = _resolve_rotation_launch(
+            x,
+            scales=scales,
+            group_size=int(group_size),
+            krot=krot,
+            requested_cta_m=requested_cta_m,
+            requested_row_pad=requested_row_pad,
+        )
+    else:
+        cta_m, row_pad = _PAROQUANT_ROTATION_EXTENSION.op("launch_config")(
+            x,
+            int(krot),
+            scales is not None,
+            int(group_size),
+            int(requested_cta_m),
+            int(requested_row_pad),
+        )
     return int(cta_m), int(row_pad)
+
+
+def _apply_fused_rotation(
+    x: torch.Tensor,
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    scales: Optional[torch.Tensor],
+    group_size: int,
+) -> torch.Tensor:
+    """Run the fused rotation op with explicit overrides or native autotune sentinels."""
+    requested_cta_m, requested_row_pad = _rotation_requested_launch()
+    cta_m, row_pad = _resolve_rotation_launch(
+        x,
+        scales=scales,
+        group_size=int(group_size),
+        krot=int(theta.shape[0]),
+        requested_cta_m=requested_cta_m,
+        requested_row_pad=requested_row_pad,
+    )
+    return _run_rotation_op(
+        x,
+        pairs,
+        theta,
+        scales,
+        group_size,
+        cta_m=cta_m,
+        row_pad=row_pad,
+    )
 
 
 def prewarm_paroquant_rotation_extension(
@@ -246,7 +466,7 @@ def apply_paroquant_rotation(
 ) -> torch.Tensor:
     """Apply the fused rotation when available, else fall back to the reference path."""
     if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _load_rotation_extension():
-        return _PAROQUANT_ROTATION_EXTENSION.op("rotate")(x, pairs, theta, scales, int(group_size))
+        return _apply_fused_rotation(x, pairs, theta, scales, int(group_size))
     return apply_paroquant_rotation_reference(x, pairs, theta, scales=scales, group_size=group_size)
 
 
@@ -271,7 +491,7 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
         ctx.needs_theta_grad = bool(theta.requires_grad)
         ctx.needs_scale_grad = bool(scale_tensor is not None and scale_tensor.requires_grad)
 
-        y = torch.ops.gptqmodel_paroquant.rotate(x, pairs, theta, scale_tensor, int(group_size))
+        y = _apply_fused_rotation(x, pairs, theta, scale_tensor, int(group_size))
         saved = (x, pairs, theta, y, scale_tensor) if ctx.has_scale else (x, pairs, theta, y)
         ctx.save_for_backward(*saved)
         return y
@@ -300,8 +520,8 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
             for rot_idx in range(pairs.shape[0] - 1, -1, -1):
                 pair_row = pairs.narrow(0, rot_idx, 1)
                 neg_theta = theta.narrow(0, rot_idx, 1).neg()
-                rotated = torch.ops.gptqmodel_paroquant.rotate(rotated, pair_row, neg_theta, None, group_size)
-                grad = torch.ops.gptqmodel_paroquant.rotate(grad, pair_row, neg_theta, None, group_size)
+                rotated = _apply_fused_rotation(rotated, pair_row, neg_theta, None, group_size)
+                grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
 
                 pair_view = pair_row.reshape(num_groups, group_size)
                 idx_i = (pair_view[:, 0::2] + offsets).reshape(-1)
@@ -327,7 +547,7 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
             for rot_idx in range(pairs.shape[0] - 1, -1, -1):
                 pair_row = pairs.narrow(0, rot_idx, 1)
                 neg_theta = theta.narrow(0, rot_idx, 1).neg()
-                grad = torch.ops.gptqmodel_paroquant.rotate(grad, pair_row, neg_theta, None, group_size)
+                grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
 
         if ctx.has_scale:
             scale_flat = scale_tensor.reshape(-1)
@@ -367,6 +587,7 @@ __all__ = [
     "apply_paroquant_rotation_reference",
     "_rotation_launch_config",
     "build_identity_rotation_buffers",
+    "clear_paroquant_rotation_autotune_cache",
     "clear_paroquant_rotation_extension_cache",
     "is_identity_rotation",
     "prewarm_paroquant_rotation_extension",

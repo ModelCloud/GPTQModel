@@ -47,6 +47,7 @@ from gptqmodel.utils.paroquant import (
     apply_paroquant_rotation,
     apply_paroquant_rotation_reference,
     build_identity_rotation_buffers,
+    clear_paroquant_rotation_autotune_cache,
     clear_paroquant_rotation_extension_cache,
     prewarm_paroquant_rotation_extension,
 )
@@ -1286,26 +1287,17 @@ def test_paroquant_rotation_launch_config_honors_env_overrides(monkeypatch):
     assert (cta_m, row_pad) == (16, 0)
 
 
-def test_paroquant_rotation_launch_config_uses_hard_tuned_arch_map():
-    """Guard the manual launch table chosen from the sm80 and sm89 benchmark sweeps."""
+def test_paroquant_rotation_launch_config_autotunes_once_per_shape(monkeypatch):
+    """Guard fused rotation autotune so one native shape plan is cached and reused."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant launch-config path.")
 
-    capability = torch.cuda.get_device_capability()
-    expected = {
-        (8, 0): {
-            torch.float16: (8, 2),
-            torch.bfloat16: (4, 2),
-            torch.float32: (4, 0),
-        },
-        (8, 9): {
-            torch.float16: (8, 2),
-            torch.bfloat16: (16, 2),
-            torch.float32: (4, 0),
-        },
-    }.get(capability)
-    if expected is None:
-        pytest.skip(f"No hard-tuned launch map is defined for compute capability {capability}.")
+    clear_paroquant_rotation_autotune_cache()
+    monkeypatch.delenv("GPTQMODEL_PAROQUANT_ROTATE_CTA_M", raising=False)
+    monkeypatch.delenv("GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD", raising=False)
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE", "1")
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_WARMUP", "1")
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_ITERS", "1")
 
     assert prewarm_paroquant_rotation_extension(
         fused_rotation=True,
@@ -1314,9 +1306,78 @@ def test_paroquant_rotation_launch_config_uses_hard_tuned_arch_map():
         device=torch.device("cuda"),
     )
 
-    for dtype, launch_config in expected.items():
-        cta_m, row_pad = _rotation_launch_config(torch.empty((1, 128), device="cuda", dtype=dtype))
-        assert (cta_m, row_pad) == launch_config
+    x = torch.empty((32, 128), device="cuda", dtype=torch.float16)
+    pairs = torch.zeros((8, 128), device="cuda", dtype=torch.int16)
+    theta = torch.zeros((8, 64), device="cuda", dtype=torch.float16)
+    scales = torch.ones((1, 128), device="cuda", dtype=torch.float16)
+    x_other = torch.empty((64, 128), device="cuda", dtype=torch.float16)
+
+    assert paroquant_utils_module._rotation_autotune_cache_size() == 0
+    first = _rotation_launch_config(x, pairs, theta, scales=scales, group_size=128)
+    assert first in {(4, 0), (4, 2), (8, 0), (8, 2), (16, 0), (16, 2)}
+    assert paroquant_utils_module._rotation_autotune_cache_size() == 1
+    second = _rotation_launch_config(x, pairs, theta, scales=scales, group_size=128)
+    third = _rotation_launch_config(x_other, pairs, theta, scales=scales, group_size=128)
+
+    assert second == first
+    assert third in {(4, 0), (4, 2), (8, 0), (8, 2), (16, 0), (16, 2)}
+    assert paroquant_utils_module._rotation_autotune_cache_size() == 2
+    clear_paroquant_rotation_autotune_cache()
+    assert paroquant_utils_module._rotation_autotune_cache_size() == 0
+
+
+def test_paroquant_rotation_helper_reuses_resolved_autotune_launch(monkeypatch):
+    """Guard the fused helper so autotune resolves once and steady-state runs explicitly."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant launch-config path.")
+
+    clear_paroquant_rotation_autotune_cache()
+    monkeypatch.setattr(paroquant_utils_module, "_load_rotation_extension", lambda: True)
+    monkeypatch.setattr(paroquant_utils_module, "_rotation_requested_launch", lambda: (-2, -2))
+
+    calls = {"launch": 0, "rotate": 0, "configs": []}
+
+    def fake_launch_config(x, krot, has_scale, group_size, cta_m, row_pad):
+        del x, krot, has_scale, group_size, cta_m, row_pad
+        calls["launch"] += 1
+        return (16, 2)
+
+    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad):
+        del pairs, theta, scales, group_size
+        calls["rotate"] += 1
+        calls["configs"].append((cta_m, row_pad))
+        return x.clone()
+
+    def fake_op(name):
+        if name == "launch_config":
+            return fake_launch_config
+        if name == "rotate":
+            return fake_rotate
+        raise AssertionError(f"unexpected op lookup: {name}")
+
+    monkeypatch.setattr(paroquant_utils_module._PAROQUANT_ROTATION_EXTENSION, "op", fake_op)
+
+    x = torch.randn((32, 128), device="cuda", dtype=torch.float16)
+    pairs = torch.zeros((8, 128), device="cuda", dtype=torch.int16)
+    theta = torch.zeros((8, 64), device="cuda", dtype=torch.float16)
+    scales = torch.ones((1, 128), device="cuda", dtype=torch.float16)
+
+    first = apply_paroquant_rotation(x, pairs, theta, scales=scales, group_size=128)
+    second = apply_paroquant_rotation(x, pairs, theta, scales=scales, group_size=128)
+
+    assert torch.equal(first, x)
+    assert torch.equal(second, x)
+    assert calls["launch"] == 1
+    assert calls["rotate"] == 2
+    assert calls["configs"] == [(16, 2), (16, 2)]
+
+    clear_paroquant_rotation_autotune_cache()
+    third = apply_paroquant_rotation(x, pairs, theta, scales=scales, group_size=128)
+
+    assert torch.equal(third, x)
+    assert calls["launch"] == 2
+    assert calls["rotate"] == 3
+    assert calls["configs"][-1] == (16, 2)
 
 
 def test_paroquant_processor_prewarm_runtime_runs_once(monkeypatch):
@@ -4302,15 +4363,18 @@ def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch)
         calls["load_count"] = calls.get("load_count", 0) + 1
         return True
 
-    def fake_rotate(x, pairs, theta, scales, group_size):
+    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad):
         calls["x_dtype"] = x.dtype
         calls["pairs_device"] = pairs.device.type
         calls["theta_dtype"] = theta.dtype
         calls["scales_dtype"] = None if scales is None else scales.dtype
         calls["group_size"] = group_size
+        calls["cta_m"] = cta_m
+        calls["row_pad"] = row_pad
         return x.clone()
 
     monkeypatch.setattr(paroquant_utils_module, "_load_rotation_extension", spy_load_rotation_extension)
+    monkeypatch.setattr(paroquant_utils_module, "_rotation_requested_launch", lambda: (8, 2))
     monkeypatch.setattr(paroquant_utils_module._PAROQUANT_ROTATION_EXTENSION, "op", lambda name: fake_rotate)
 
     x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
@@ -4331,6 +4395,8 @@ def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch)
     assert calls["theta_dtype"] == torch.bfloat16
     assert calls["scales_dtype"] == torch.bfloat16
     assert calls["group_size"] == 128
+    assert calls["cta_m"] == 8
+    assert calls["row_pad"] == 2
     assert actual.dtype == torch.bfloat16
     assert torch.equal(actual, x)
 

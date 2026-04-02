@@ -18,6 +18,7 @@ from tabulate import tabulate
 
 from gptqmodel.quantization.paroquant.optimization import build_random_rotation_buffers
 from gptqmodel.utils.paroquant import (
+    _rotation_launch_config,
     apply_paroquant_rotation,
     apply_paroquant_rotation_reference,
     clear_paroquant_rotation_extension_cache,
@@ -172,6 +173,7 @@ def run(device: torch.device, dtype: torch.dtype, warmup: int, iters: int, quick
         with torch.inference_mode():
             fused = apply_paroquant_rotation(x, pairs, theta, scales=scales, group_size=case.group_size)
             reference = apply_paroquant_rotation_reference(x, pairs, theta, scales=scales, group_size=case.group_size)
+        cta_m, row_pad = _rotation_launch_config(x, pairs, theta, scales=scales, group_size=case.group_size)
 
         diff = (fused - reference).abs()
         fp32_metrics = {
@@ -208,6 +210,8 @@ def run(device: torch.device, dtype: torch.dtype, warmup: int, iters: int, quick
             {
                 **asdict(case),
                 "dtype": str(dtype).replace("torch.", ""),
+                "cta_m": cta_m,
+                "row_pad": row_pad,
                 "latency_ms": elapsed_ms,
                 "gbps": _rotation_bandwidth_gbps(case, dtype, elapsed_ms),
                 "max_abs": diff.max().item(),
@@ -245,6 +249,8 @@ def _print_ascii(results: dict[str, Any]) -> None:
                     row["rows"],
                     row["hidden"],
                     row["dtype"],
+                    row["cta_m"],
+                    row["row_pad"],
                     f"{row['latency_ms']:.3f}",
                     f"{row['gbps']:.1f}",
                     f"{row['max_abs']:.6f}",
@@ -261,6 +267,8 @@ def _print_ascii(results: dict[str, Any]) -> None:
                 "rows",
                 "hidden",
                 "dtype",
+                "cta_m",
+                "row_pad",
                 "latency_ms",
                 "gbps",
                 "fused vs ref max_abs",
