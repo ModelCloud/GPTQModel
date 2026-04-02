@@ -1147,8 +1147,8 @@ class GPTAQConfig:
 class FOEMConfig:
     r"""Configuration parameters for the FOEM calibration process, including `alpha` and `beta`.
 
-    The parameter `alpha` follows the same definition and role as in GPTAQ. 
-    Note: although GPTAQ does not explicitly mention this coefficient in the paper, 
+    The parameter `alpha` follows the same definition and role as in GPTAQ.
+    Note: although GPTAQ does not explicitly mention this coefficient in the paper,
     its official implementation applies it to the rightmost term of Eq.18.
 
     The parameter `beta` is introduced by FOEM. Please refer to the paper for details:
@@ -1162,14 +1162,14 @@ class FOEMConfig:
         - alpha = 0, beta > 0:
             Equivalent to FOEM. Empirically, setting `beta` in the range [0.1, 0.25] yields good performance.
         - alpha > 0, beta > 0:
-            Equivalent to FOEM + GPTAQ. Using the default best settings 
-            (alpha = 0.25, beta = 0.2) generally produces strong results, 
+            Equivalent to FOEM + GPTAQ. Using the default best settings
+            (alpha = 0.25, beta = 0.2) generally produces strong results,
             although it is not consistently superior to using FOEM alone.
 
     Note:
-        FOEM currently follows the same data processing pipeline as GPTAQ. 
-        Specifically, `native_inp` is pre-cached regardless of the value of `alpha`. 
-        However, when `alpha = 0`, the additional terms (dXXT and P) are not computed 
+        FOEM currently follows the same data processing pipeline as GPTAQ.
+        Specifically, `native_inp` is pre-cached regardless of the value of `alpha`.
+        However, when `alpha = 0`, the additional terms (dXXT and P) are not computed
         during the compensation step.
 
     Args:

@@ -7,8 +7,6 @@
 import os
 import sys
 
-import torch
-
 from gptqmodel.quantization.config import FOEMConfig
 
 

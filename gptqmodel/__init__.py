@@ -197,10 +197,10 @@ from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import (
     AWQQuantizeConfig,
     BaseQuantizeConfig,
+    FOEMConfig,
     GGUFConfig,
     GGUFQuantizeConfig,
     GPTAQConfig,
-    FOEMConfig,
     GPTQQuantizeConfig,
     QuantizeConfig,
     RTNQuantizeConfig,
