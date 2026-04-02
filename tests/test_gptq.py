@@ -85,6 +85,53 @@ def _benchmark_add_batch(
     return PathStats(per_batch_seconds=per_batch, total_seconds=total, peak_bytes=peak_bytes, batches_measured=measured)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for CPU fallback regression coverage")
+def test_gptq_cpu_hessian_fallback_returns_quantized_weights_to_original_cuda_device(monkeypatch):
+    device = torch.device("cuda", 0)
+    torch.cuda.set_device(device)
+    torch.manual_seed(0)
+
+    layer = _make_module(hidden_dim=8, device=device)
+    qcfg = QuantizeConfig(bits=4, group_size=2, act_group_aware=True)
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+
+    inp = _generate_input(batch_size=1, seq_len=4, hidden_dim=8, device=device)
+    gptq.add_batch(inp, None)
+
+    calls = {"cuda": 0, "cpu": 0}
+
+    def _patched_hessian_inverse(self, hessian: torch.Tensor):
+        if hessian.device.type == "cuda":
+            calls["cuda"] += 1
+            raise RuntimeError("CUDA out of memory. simulated for regression test")
+
+        calls["cpu"] += 1
+        identity = torch.eye(hessian.shape[0], dtype=torch.float32, device=hessian.device)
+        return identity, self.qcfg.damp_percent
+
+    monkeypatch.setattr(GPTQ, "hessian_inverse", _patched_hessian_inverse)
+    log_messages = []
+
+    def _capture_warn(message, *args, **kwargs):
+        log_messages.append(message % args if args else message)
+
+    def _capture_info(message, *args, **kwargs):
+        log_messages.append(message % args if args else message)
+
+    monkeypatch.setattr(gptq_mod.log, "warn", _capture_warn)
+    monkeypatch.setattr(gptq_mod.log, "info", _capture_info)
+
+    qweight, _, _, _, *_ = gptq.quantize(blocksize=4)
+
+    assert calls == {"cuda": 1, "cpu": 1}
+    assert qweight.device == device
+    joined_logs = "\n".join(log_messages)
+    assert "falling back to CPU" in joined_logs
+    assert "may take much longer than normal" in joined_logs
+    assert "moving final quantized weights back" in joined_logs
+
+
 class TestGPTQAddBatchCPU(ModelTest):
     ######### test_gptq_add_batch_cpu.py ###########
     pytestmark = pytest.mark.skipif(
@@ -331,4 +378,3 @@ class TestGPTQProcessorStreaming(ModelTest):
             pytest.skip(
                 f"Streaming event helper subprocess unavailable: rc={result.returncode}, stderr={result.stderr.strip()}"
             )
-
