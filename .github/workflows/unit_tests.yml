@@ -581,152 +581,30 @@ jobs:
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
         run: |
-          set -Eeuo pipefail
-
-          # -------------------- Configuration --------------------
-          BASE_URL="http://${XEON5}"
-          RUN_ID="${{ github.run_id }}"
-          TEST="${{ matrix.test_script }}"
-          RUNNER="${RUNNER_NAME:-unknown}"
-
-          SLEEP_SEC=5
-          TIMEOUT_SEC=18000   # Max wait time: 300 minutes
-          # -------------------------------------------------------
-
-          # URL encode helper to avoid breaking query parameters
-          urlencode(){ python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],""))' "$1"; }
-
-          test_q=$(urlencode "$TEST")
-          runner_q=$(urlencode "$RUNNER")
-
-          start_s=$(date +%s)
-          gpu_id=""
-
-          echo "Requesting GPU from allocator"
-          echo "run_id=$RUN_ID test=$TEST runner=$RUNNER"
-
-          while true; do
-            # Refresh timestamp every request to avoid cache or duplicated requests
-            ts_ms=$(date +%s%3N)
-            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&count=${{ env.GPU_COUNT }}"
-            echo "requesting GPU with: $url"
-
-            # Call allocator
-            # - May return:
-            #   * integer >= 0  : allocated GPU ID
-            #   * integer < 0   : no GPU available yet
-            #   * empty / HTML : temporary server / proxy error
-            resp="$(
-              curl -fsSL --connect-timeout 3 --max-time 10 \
-                   --retry 3 --retry-delay 1 --retry-all-errors \
-                   "$url" 2>/dev/null || true
-            )"
-
-            echo "resp={$resp}"
-
-            # Normalize response
-            resp="${resp//$'\r'/}"
-            resp="${resp//$'\n'/}"
-
-            # If response is empty or not an integer/list of integers, treat as temporary error
-            if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+(,-?[0-9]+)*$ ]]; then
-              echo "Allocator returned invalid response: '$resp' (temporary error)"
-              curl -fsSL "$BASE_URL/gpu/status" || true
-              sleep "$SLEEP_SEC"
-              continue
-            fi
-
-            # Negative single integer means no GPU available yet
-            if [[ "$resp" =~ ^-[0-9]+$ ]]; then
-              elapsed=$(( $(date +%s) - start_s ))
-              if (( elapsed >= TIMEOUT_SEC )); then
-                echo "Timed out after ${TIMEOUT_SEC}s waiting for GPU (last response=$resp)"
-                curl -fsSL "$BASE_URL/gpu/status" || true
-                exit 1
-              fi
-
-              echo "No GPU available (response=$resp). Waiting ${SLEEP_SEC}s... elapsed=${elapsed}s"
-              curl -fsSL "$BASE_URL/gpu/status" || true
-              sleep "$SLEEP_SEC"
-              continue
-            fi
-
-            # Successful allocation
-            gpu_id="$resp"
-            echo "Allocated GPU ID: $gpu_id"
-            break
-          done
-
-          # Export environment variables for subsequent steps
-          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> "$GITHUB_ENV"
-          echo "STEP_TIMESTAMP=$(date +%s%3N)" >> "$GITHUB_ENV"
-          echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
-
-          # Final status snapshot
-          curl -fsSL "$BASE_URL/gpu/status" || true
+          python .github/scripts/allocate_gpu.py \
+            --base-url "http://${XEON5}" \
+            --run-id "${{ github.run_id }}" \
+            --test "${{ matrix.test_script }}" \
+            --runner "${RUNNER_NAME:-unknown}" \
+            --count "${{ env.GPU_COUNT }}"
 
 
       - name: Run tests
         run: |
+          extra_args=()
           if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
-            export CUDA_VISIBLE_DEVICES=""
+            extra_args+=(--clear-cuda)
           fi
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
-            export CUDA_VISIBLE_DEVICES=""
-            uv pip uninstall vllm -y
-            uv pip list
+            extra_args+=(--clear-cuda --xpu-mode)
           fi
-
-          start_monitor() {
-            keep_alive_url="http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&gpu=${CUDA_VISIBLE_DEVICES}"
-            echo "start to keep alive... ${keep_alive_url}"
-            while true; do
-              resp=$(curl -fsSL $keep_alive_url 2>/dev/null || echo "")
-
-              if [ "$(echo "$resp" | tr -d '[:space:]')" = "-1" ]; then
-                echo "Server returned -1, terminating job..."
-                pkill -9 -f "pytest.*${{ matrix.test_script }}" 2>/dev/null || true
-                exit 3
-              else
-                echo "gpu is kept alive..."
-              fi
-
-              sleep 60
-            done
-          }
-
-          start_monitor &
-          MONITOR_PID=$!
-
-          cleanup() {
-            echo "trap cleanup EXIT..."
-            kill $MONITOR_PID 2>/dev/null || true
-            wait $MONITOR_PID 2>/dev/null || true
-          }
-          trap cleanup EXIT
-
-          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
-          log_file=$log_dir/${{ matrix.test_script }}.log
-
-          mkdir -p "$(dirname "$log_file")"
-
-          start_time=$(date +%s)
-
-          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee "$log_file"
-          pipe_status=("${PIPESTATUS[@]}")
-
-          if (( pipe_status[0] != 0 )); then
-            echo "ERROR=22" >> "$GITHUB_ENV"
-            echo "pipe status wrong: ${pipe_status[*]}"
-            exit 22
-          fi
-
-          execution_time=$(( $(date +%s) - start_time ))
-          echo "$((execution_time / 60))m $((execution_time % 60))s"
-
-          ls -ahl $log_dir || true
-
-          curl "http://$XEON5/gpu/logVram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
+          python .github/scripts/run_tests.py \
+            --base-url "http://${XEON5}" \
+            --run-id "${{ github.run_id }}" \
+            --test-script "${{ matrix.test_script }}" \
+            --runner "${RUNNER_NAME}" \
+            --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
+            "${extra_args[@]}"
 
       - name: Check log
         if: ${{ !cancelled() &&  failure() }}
@@ -743,15 +621,13 @@ jobs:
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
         run: |
-          url="http://$XEON5/gpu/release?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
-          echo "$url"
-          resp=$(curl -fsSL $url)
-
-          echo "response: $resp"
-          if [ "$resp" != "${{ env.CUDA_VISIBLE_DEVICES }}" ]; then
-            echo "Error: response ($resp) != expected (${{ env.CUDA_VISIBLE_DEVICES }})"
-            exit 0
-          fi
+          python .github/scripts/release_gpu.py \
+            --base-url "http://${XEON5}" \
+            --run-id "${{ github.run_id }}" \
+            --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
+            --timestamp "${{ env.STEP_TIMESTAMP }}" \
+            --test "${{ matrix.test_script }}" \
+            --runner "${RUNNER_NAME}"
 
       - name: Clean cache
         if: always()
@@ -886,136 +762,23 @@ jobs:
       - name: Find suitable GPU
         if: ${{ !cancelled() }}
         run: |
-          set -Eeuo pipefail
-
-          BASE_URL="http://${XEON5}"
-          RUN_ID="${{ github.run_id }}"
-          TEST="${{ matrix.test_script }}"
-          RUNNER="${RUNNER_NAME:-unknown}"
-
-          SLEEP_SEC=5
-          TIMEOUT_SEC=18000
-
-          urlencode(){ python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],""))' "$1"; }
-
-          test_q=$(urlencode "$TEST")
-          runner_q=$(urlencode "$RUNNER")
-
-          count="1"
-          start_s=$(date +%s)
-          gpu_id=""
-
-          echo "Requesting GPU from allocator"
-          echo "run_id=$RUN_ID test=$TEST runner=$RUNNER count=$count"
-
-          while true; do
-            ts_ms=$(date +%s%3N)
-            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&count=$count"
-            echo "requesting GPU with: $url"
-
-            resp="$(
-              curl -fsSL --connect-timeout 3 --max-time 10 \
-                   --retry 3 --retry-delay 1 --retry-all-errors \
-                   "$url" 2>/dev/null || true
-            )"
-
-            echo "resp={$resp}"
-
-            resp="${resp//$'\r'/}"
-            resp="${resp//$'\n'/}"
-
-            if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+(,-?[0-9]+)*$ ]]; then
-              echo "Allocator returned invalid response: '$resp' (temporary error)"
-              curl -fsSL "$BASE_URL/gpu/status" || true
-              sleep "$SLEEP_SEC"
-              continue
-            fi
-
-            if [[ "$resp" =~ ^-[0-9]+$ ]]; then
-              elapsed=$(( $(date +%s) - start_s ))
-              if (( elapsed >= TIMEOUT_SEC )); then
-                echo "Timed out after ${TIMEOUT_SEC}s waiting for GPU (last response=$resp)"
-                curl -fsSL "$BASE_URL/gpu/status" || true
-                exit 1
-              fi
-
-              echo "No GPU available (response=$resp). Waiting ${SLEEP_SEC}s... elapsed=${elapsed}s"
-              curl -fsSL "$BASE_URL/gpu/status" || true
-              sleep "$SLEEP_SEC"
-              continue
-            fi
-
-            gpu_id="$resp"
-            if [[ "$gpu_id" == *,* ]]; then
-              echo "Allocator returned multiple GPUs for model compat job: $gpu_id"
-              exit 1
-            fi
-            echo "Allocated GPU ID: $gpu_id"
-            break
-          done
-
-          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> "$GITHUB_ENV"
-          echo "STEP_TIMESTAMP=$(date +%s%3N)" >> "$GITHUB_ENV"
-          echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
-
-          curl -fsSL "$BASE_URL/gpu/status" || true
+          python .github/scripts/allocate_gpu.py \
+            --base-url "http://${XEON5}" \
+            --run-id "${{ github.run_id }}" \
+            --test "${{ matrix.test_script }}" \
+            --runner "${RUNNER_NAME:-unknown}" \
+            --count "1" \
+            --require-single
 
       - name: Run tests
         run: |
-          export GPTQMODEL_MODEL_TEST_MODE="${MODEL_TEST_MODE}"
-          echo "GPTQMODEL_MODEL_TEST_MODE=$GPTQMODEL_MODEL_TEST_MODE"
-          echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
-
-          start_monitor() {
-            keep_alive_url="http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&gpu=${CUDA_VISIBLE_DEVICES}"
-            echo "start to keep alive... ${keep_alive_url}"
-            while true; do
-              resp=$(curl -fsSL $keep_alive_url 2>/dev/null || echo "")
-
-              if [ "$(echo "$resp" | tr -d '[:space:]')" = "-1" ]; then
-                echo "Server returned -1, terminating job..."
-                pkill -9 -f "pytest.*${{ matrix.test_script }}" 2>/dev/null || true
-                exit 3
-              else
-                echo "gpu is kept alive..."
-              fi
-
-              sleep 60
-            done
-          }
-
-          start_monitor &
-          MONITOR_PID=$!
-
-          cleanup() {
-            echo "trap cleanup EXIT..."
-            kill $MONITOR_PID 2>/dev/null || true
-            wait $MONITOR_PID 2>/dev/null || true
-          }
-          trap cleanup EXIT
-
-          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
-          log_file=$log_dir/${{ matrix.test_script }}.log
-
-          mkdir -p "$(dirname "$log_file")"
-
-          start_time=$(date +%s)
-
-          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee "$log_file"
-          pipe_status=("${PIPESTATUS[@]}")
-
-          if (( pipe_status[0] != 0 )); then
-            echo "ERROR=22" >> "$GITHUB_ENV"
-            echo "pipe status wrong: ${pipe_status[*]}"
-            exit 22
-          fi
-
-          execution_time=$(( $(date +%s) - start_time ))
-          echo "$((execution_time / 60))m $((execution_time % 60))s"
-
-          ls -ahl $log_dir || true
-
-          curl "http://$XEON5/gpu/logVram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
+          python .github/scripts/run_tests.py \
+            --base-url "http://${XEON5}" \
+            --run-id "${{ github.run_id }}" \
+            --test-script "${{ matrix.test_script }}" \
+            --runner "${RUNNER_NAME}" \
+            --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
+            --model-test-mode "${MODEL_TEST_MODE}"
 
       - name: Check log
         if: ${{ !cancelled() && failure() }}
@@ -1031,15 +794,13 @@ jobs:
       - name: Release GPU
         if: always()
         run: |
-          url="http://$XEON5/gpu/release?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
-          echo "$url"
-          resp=$(curl -fsSL $url)
-
-          echo "response: $resp"
-          if [ "$resp" != "${{ env.CUDA_VISIBLE_DEVICES }}" ]; then
-            echo "Error: response ($resp) != expected (${{ env.CUDA_VISIBLE_DEVICES }})"
-            exit 0
-          fi
+          python .github/scripts/release_gpu.py \
+            --base-url "http://${XEON5}" \
+            --run-id "${{ github.run_id }}" \
+            --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
+            --timestamp "${{ env.STEP_TIMESTAMP }}" \
+            --test "${{ matrix.test_script }}" \
+            --runner "${RUNNER_NAME}"
 
       - name: Clean cache
         if: always()
