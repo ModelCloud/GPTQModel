@@ -292,6 +292,10 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
         f"Input should be on CPU, got {result.layer_inputs[0][0].device}"
 
 
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Requires at least 2 CUDA devices"
+)
 def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
     """
     Test StageInputsCapture: in balanced mode, compute_device_filter is applied
@@ -613,10 +617,6 @@ class _DummyGPTQModelForLooper:
         # Don't set supported_vram_strategies so getattr uses default value
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2,
-    reason="Requires at least 2 CUDA devices"
-)
 def test_compute_device_filter_applied_to_quant_devices(monkeypatch):
     """
     Test that compute_device_filter is applied to _quant_devices in ModuleLooper.__init__.
