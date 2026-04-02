@@ -239,6 +239,12 @@ class ForwardExecutor:
                     additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=exec_device)
 
                 additional_inputs["use_cache"] = False
+                additional_inputs = self.looper.gptq_model.prepare_layer_replay_kwargs(
+                    layer=module,
+                    layer_input=layer_input,
+                    additional_inputs=additional_inputs,
+                    target_device=exec_device,
+                )
 
                 if not preserve_module_devices:
                     rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
@@ -489,6 +495,7 @@ class ForwardExecutor:
                             layer_input_kwargs[batch_idx],
                             attention_masks[batch_idx],
                             position_ids[batch_idx] if position_ids else None,
+                            gptq_model=self.looper.gptq_model,
                             support_batch_quantize=self.looper.support_batch_quantize,
                             is_lm_head_module=is_lm_head_module,
                             need_output=need_outputs,

@@ -1365,6 +1365,42 @@ class BaseQModel(nn.Module):
             # offload_to_disk(model=self.model, module=self.get_base_modules(model=self.model), disk_path=self.quantize_config.offload_to_disk_path)
             pass
 
+    def capture_first_layer_positional_inputs(
+        self,
+        args: tuple[Any, ...],
+        kwargs: Dict[str, Any],
+        batch_device: torch.device,
+    ) -> List[torch.Tensor]:
+        """Normalize first-layer positional inputs so cached forwards can replay decoder layers directly."""
+
+        if kwargs.get("hidden_states") is not None:
+            return [move_to(kwargs["hidden_states"], device=batch_device)]
+        if args:
+            return [move_to(args[0], device=batch_device)]
+        return []
+
+    def capture_first_layer_input_kwargs(
+        self,
+        args: tuple[Any, ...],
+        kwargs: Dict[str, Any],
+        batch_device: torch.device,
+        layer_input_kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Allow model definitions to persist extra first-layer replay metadata during calibration capture."""
+
+        return layer_input_kwargs
+
+    def prepare_layer_replay_kwargs(
+        self,
+        layer: nn.Module,
+        layer_input: List[torch.Tensor],
+        additional_inputs: Dict[str, Any],
+        target_device: torch.device,
+    ) -> Dict[str, Any]:
+        """Allow model definitions to refresh layer-specific kwargs before cached layer replay."""
+
+        return additional_inputs
+
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.pre_lm_head_norm_module:
             norm, _ = get_module_by_name_prefix(self.model, [self.pre_lm_head_norm_module])

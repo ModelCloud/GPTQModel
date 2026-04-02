@@ -964,8 +964,23 @@ class GPTQ:
 
         if self.qcfg.desc_act and use_hessian:
             perm = torch.argsort(torch.diag(self.H), descending=True)
-            W = W[:, perm]
-            self.H = self.H[perm][:, perm]
+            try:
+                W = W[:, perm]
+                self.H = self.H[perm][:, perm]
+            except RuntimeError as exc:
+                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                    raise
+
+                log.warn(
+                    "Quantization: Module `%s` -> CUDA OOM during Hessian permutation on %s; retrying that module on CPU.",
+                    self.name,
+                    self.H.device,
+                )
+                cpu_device = torch.device("cpu")
+                perm = perm.to(device=cpu_device)
+                W = W.to(device=cpu_device)[:, perm]
+                self.H = self.H.to(device=cpu_device)[perm][:, perm]
+                self.quantizer.find_params(W, weight=True)
             invperm = torch.argsort(perm)
 
         elif self.qcfg.act_group_aware and use_hessian:
@@ -980,16 +995,48 @@ class GPTQ:
             )
             del local_values
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
-            W = W[:, final_perm]
-            self.H = self.H[final_perm][:, final_perm]
+            try:
+                W = W[:, final_perm]
+                self.H = self.H[final_perm][:, final_perm]
+            except RuntimeError as exc:
+                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                    raise
+
+                log.warn(
+                    "Quantization: Module `%s` -> CUDA OOM during act-group Hessian permutation on %s; retrying that module on CPU.",
+                    self.name,
+                    self.H.device,
+                )
+                cpu_device = torch.device("cpu")
+                final_perm = final_perm.to(device=cpu_device)
+                W = W.to(device=cpu_device)[:, final_perm]
+                self.H = self.H.to(device=cpu_device)[final_perm][:, final_perm]
+                self.quantizer.find_params(W, weight=True)
+
+        if use_hessian:
+            try:
+                Hinv, damp = self.hessian_inverse(self.H)
+            except RuntimeError as exc:
+                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                    raise
+
+                # Full-attention blocks on very large models can exceed GPU memory during the
+                # dense Hessian inverse; finish that module on CPU instead of aborting the run.
+                log.warn(
+                    "Quantization: Module `%s` -> CUDA OOM during Hessian inverse on %s; retrying quantization on CPU.",
+                    self.name,
+                    self.H.device,
+                )
+                cpu_device = torch.device("cpu")
+                self.H = self.H.to(device=cpu_device)
+                W = W.to(device=cpu_device)
+                self.quantizer.find_params(W, weight=True)
+                Hinv, damp = self.hessian_inverse(self.H)
+        else:
+            Hinv, damp = None, 0.0
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
-
-        if use_hessian:
-            Hinv, damp = self.hessian_inverse(self.H)
-        else:
-            Hinv, damp = None, 0.0
 
         # Use simplified loop when mock_quantization is active
         if self.qcfg.mock_quantization:

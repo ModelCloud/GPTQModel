@@ -360,6 +360,7 @@ def forward_batch_worker(
     attention_mask: Optional[torch.Tensor],
     position_ids: Optional[torch.Tensor],
     *,
+    gptq_model=None,
     support_batch_quantize: bool,
     is_lm_head_module: bool,
     need_output: bool,
@@ -406,6 +407,13 @@ def forward_batch_worker(
 
     # TODO: some models does not honor generate config.use_cache property so we are forced to hack this to false
     additional_inputs["use_cache"] = False
+    if gptq_model is not None:
+        additional_inputs = gptq_model.prepare_layer_replay_kwargs(
+            layer=module,
+            layer_input=inputs,
+            additional_inputs=additional_inputs,
+            target_device=module_device,
+        )
 
     module_output = None
     kv_next = None

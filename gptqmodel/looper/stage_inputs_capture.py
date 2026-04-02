@@ -141,11 +141,11 @@ class StageInputsCapture:
             else:
                 batch_device = data_device
 
-            layer_input: List[torch.Tensor] = []
-            if kwargs.get("hidden_states") is not None:
-                layer_input.append(move_to(kwargs["hidden_states"], device=batch_device))
-            else:
-                layer_input.append(move_to(args[0], device=batch_device))
+            layer_input = self.gptq_model.capture_first_layer_positional_inputs(
+                args=args,
+                kwargs=kwargs,
+                batch_device=batch_device,
+            )
 
             layer_inputs.append(layer_input)
 
@@ -161,6 +161,12 @@ class StageInputsCapture:
             for (k, v) in kwargs.items():
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
                     one_kwargs[k] = nested_move_to(v, device=batch_device)
+            one_kwargs = self.gptq_model.capture_first_layer_input_kwargs(
+                args=args,
+                kwargs=kwargs,
+                batch_device=batch_device,
+                layer_input_kwargs=one_kwargs,
+            )
             layer_input_kwargs.append(one_kwargs)
 
             # In normal repeating layer/sbuset early stop happens on the last module forward
