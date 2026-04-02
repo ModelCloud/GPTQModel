@@ -1460,6 +1460,9 @@ class AWQProcessor(LoopProcessor):
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Registers a module with its layer state and initializes input capture buckets."""
 
+        if self.qcfg.dynamic_get(layer_name=module.full_name) is False:
+            return
+
         # Track the most recent preference so the processor can decide whether
         # to fall back to simple quantization when activations are missing.
         self.fallback = normalize_fallback(fallback, self.qcfg.fallback)
@@ -1485,9 +1488,13 @@ class AWQProcessor(LoopProcessor):
                 entry.setdefault("inputs", [])
 
     def is_skipped(self, module: NamedModule) -> bool:
-        """Reports that AWQ considers every scheduled module eligible for processing."""
+        """Reports whether preprocessing excluded this module from AWQ work."""
 
-        return False
+        t = self.tasks.get(module.name, False)
+        if t == False:
+            return True
+        else:
+            return False
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that caches module input activations for AWQ."""
@@ -1626,6 +1633,7 @@ class AWQProcessor(LoopProcessor):
             for name, submodule in find_modules(self.gptq_model.model, [quant_linear_cls]).items()
             if name == module.full_name
         }
+        print("qModules", qModules, quant_linear_cls, self.gptq_model.model)
         pack_start = time.perf_counter() if timer is not None else None
         with log_time_block(
                 "pack",
