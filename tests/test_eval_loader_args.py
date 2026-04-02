@@ -169,7 +169,7 @@ def test_build_evalution_runtime_supports_sglang_engine_options():
     assert session == "session"
     assert engine is not None
     assert model_config.kwargs["path"] == "/tmp/model"
-    assert model_config.kwargs["model_kwargs"] == {"foo": "bar",}
+    assert model_config.kwargs["model_kwargs"] == {"foo": "bar", "random_seed": '123'}
     assert captured["engine_kwargs"]["dtype"] == "float16"
     assert captured["engine_kwargs"]["device"] == "cuda"
     assert captured["engine_kwargs"]["batch_size"] == 2
@@ -182,7 +182,6 @@ def test_build_evalution_runtime_supports_sglang_engine_options():
     assert captured["engine_kwargs"]["sampling_backend"] == "pytorch"
     assert captured["engine_kwargs"]["max_running_requests"] == 16
     assert captured["engine_kwargs"]["max_total_tokens"] == 32768
-    assert captured["engine_kwargs"]["random_seed"] == 123
     assert captured["engine_kwargs"]["sampling_params"] == {"top_p": 0.9}
 
 

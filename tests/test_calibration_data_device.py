@@ -291,6 +291,10 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
         f"Input should be on CPU, got {result.layer_inputs[0][0].device}"
 
 
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Requires at least 2 CUDA devices"
+)
 def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
     """
     Test StageInputsCapture: in balanced mode, compute_device_filter is applied
@@ -691,6 +695,11 @@ def test_compute_device_filter_with_empty_result_uses_all_devices(monkeypatch):
 # FORWARD BATCH TESTS - Balanced mode batch-to-device assignment
 # ============================================================================
 
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Requires at least 2 CUDA devices"
+)
 def test_balanced_mode_assigns_batches_to_input_devices(monkeypatch):
     """
     Test that in balanced mode, batches are assigned to the device
@@ -975,6 +984,10 @@ def test_output_moved_to_input_device_in_single_mode(monkeypatch):
         f"Output should be on CPU (input device), got {outputs[0][0].device}"
 
 
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Requires at least 2 CUDA devices"
+)
 def test_output_moved_to_input_device_in_parallel_mode(monkeypatch):
     """
     Test that in _run_forward_batches_parallel, outputs are moved
