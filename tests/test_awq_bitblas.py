@@ -68,14 +68,13 @@ def _install_dummy_bitblas(monkeypatch):
 
     monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
     monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
-    monkeypatch.setattr(awq_bitblas_module, "BITBLAS_AVAILABLE", True)
-    monkeypatch.setattr(awq_bitblas_module, "import_bitblas", lambda: None)
     monkeypatch.setattr(AWQBitBlasKernel, "_get_or_create_bitblas_operator", _fake_get_or_create)
     AWQBitBlasKernel.cached_validate_once.cache_clear()
 
     return captured
 
 
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_awq_bitblas_selects_bitblas_awq_for_awq_gemm(monkeypatch):
     _install_dummy_bitblas(monkeypatch)
 
@@ -95,15 +94,18 @@ def test_awq_bitblas_selects_bitblas_awq_for_awq_gemm(monkeypatch):
     assert selected is AWQBitBlasKernel
 
 
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_awq_bitblas_kernel_mapping_uses_awq_backend():
     assert get_kernel_for_backend(BACKEND.AWQ_BITBLAS, METHOD.AWQ, FORMAT.BITBLAS) is AWQBitBlasKernel
 
 
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_awq_bitblas_kernel_mapping_rejects_gptq_bitblas_backend():
     with pytest.raises(ValueError, match="Unsupported backend"):
         get_kernel_for_backend(BACKEND.GPTQ_BITBLAS, METHOD.AWQ, FORMAT.BITBLAS)
 
 
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_awq_bitblas_uses_unsigned_weights_and_qzeros(monkeypatch):
     captured = _install_dummy_bitblas(monkeypatch)
 
@@ -122,6 +124,7 @@ def test_awq_bitblas_uses_unsigned_weights_and_qzeros(monkeypatch):
     assert captured["config"].zeros_mode == "quantized"
 
 
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_awq_bitblas_repack_from_awq_preserves_codes(monkeypatch):
     _install_dummy_bitblas(monkeypatch)
 
@@ -169,6 +172,7 @@ def test_awq_bitblas_repack_from_awq_preserves_codes(monkeypatch):
     torch.testing.assert_close(bitblas_module_instance.bias.cpu(), bias)
 
 
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_quantize_config_allows_awq_bitblas():
     cfg = QuantizeConfig(
         bits=4,
