@@ -34,6 +34,7 @@ def kill_process_group(proc: subprocess.Popen[str]) -> None:
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
+        # Process (or process group) is already gone; nothing to do.
         pass
 
 
