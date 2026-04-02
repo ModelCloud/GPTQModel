@@ -12,6 +12,7 @@ class _DummyModel:
             device=torch.device("cpu"),
             vram_strategy="exclusive",
             compute_device_filter=compute_device_filter,
+            calibration_data_device="balanced",
             auto_forward_data_parallel=True,
             moe_routing_bypass=lambda: False,
         )
