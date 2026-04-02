@@ -16,7 +16,6 @@ This feature allows specifying where calibration data is stored during quantizat
 """
 
 import os
-import traceback
 import types
 import unittest
 
