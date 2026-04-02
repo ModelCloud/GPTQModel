@@ -20,6 +20,19 @@ def _build_module() -> gemv_fast_awq.AwqGEMVFastQuantLinear:
     )
 
 
+def _build_llm_awq_module() -> gemv_fast_awq.LLMAwqQuantLinear:
+    return gemv_fast_awq.LLMAwqQuantLinear(
+        bits=4,
+        group_size=32,
+        sym=True,
+        desc_act=False,
+        in_features=32,
+        out_features=8,
+        bias=False,
+        register_buffers=True,
+    )
+
+
 def test_awq_gemv_fast_decode_uses_jit_decode_kernel(monkeypatch):
     module = _build_module()
     calls = {}
@@ -137,4 +150,23 @@ def test_awq_gemv_fast_prefill_normalizes_noncontiguous_inputs(monkeypatch):
     x = torch.randn((2, module.in_features, 4), dtype=torch.float16).transpose(1, 2)
     assert x.shape == (2, 4, module.in_features)
     assert not x.is_contiguous()
+    module(x)
+
+
+def test_llm_awq_decode_normalizes_scaled_zeros_without_dynamic_attr_access(monkeypatch):
+    module = _build_llm_awq_module()
+    module.scaled_zeros = module.scaled_zeros.t().contiguous().t()
+
+    monkeypatch.setattr(gemv_fast_awq, "awq_runtime_available", lambda: True)
+
+    def fake_decode(inputs, qweight, scales, zeros, m, n, k, group_size):
+        assert zeros.is_contiguous()
+        assert zeros.dtype == torch.float16
+        assert zeros.data_ptr() == module.scaled_zeros.data_ptr()
+        return torch.ones((inputs.shape[0], inputs.shape[1], module.out_features), dtype=torch.float16)
+
+    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemv_forward_decode", fake_decode)
+    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemm_forward_prefill", lambda *_args, **_kwargs: None)
+
+    x = torch.randn((4, 1, module.in_features), dtype=torch.float16)
     module(x)

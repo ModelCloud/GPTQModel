@@ -175,7 +175,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
         self._ensure_runtime_buffers(device=inputs.device, dtype=inputs.dtype)
 
-        zeros = getattr(self, self.zeros_name)
+        zeros = self._runtime_zeros()
         if inputs_dim == 3 and batch_size < 8 and n_tokens == 1:
             out = awq_fast_gemv_forward_decode(
                 inputs,
@@ -206,9 +206,15 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         if self.qweight.device != device or not self.qweight.is_contiguous():
             self.qweight = self.qweight.to(device=device).contiguous()
 
-        zeros = getattr(self, self.zeros_name)
+        zeros = self._runtime_zeros()
         if zeros.device != device or zeros.dtype != dtype or not zeros.is_contiguous():
-            setattr(self, self.zeros_name, zeros.to(device=device, dtype=dtype).contiguous())
+            zeros = zeros.to(device=device, dtype=dtype).contiguous()
+            if self.zeros_name == "qzeros":
+                self.qzeros = zeros
+            elif self.zeros_name == "scaled_zeros":
+                self.scaled_zeros = zeros
+            else:
+                raise ValueError(f"Unsupported zeros buffer: {self.zeros_name}")
 
         if self.scales.device != device or self.scales.dtype != dtype or not self.scales.is_contiguous():
             self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
@@ -217,6 +223,13 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             self.bias.device != device or self.bias.dtype != dtype or not self.bias.is_contiguous()
         ):
             self.bias = self.bias.to(device=device, dtype=dtype).contiguous()
+
+    def _runtime_zeros(self) -> torch.Tensor:
+        if self.zeros_name == "qzeros":
+            return self.qzeros
+        if self.zeros_name == "scaled_zeros":
+            return self.scaled_zeros
+        raise ValueError(f"Unsupported zeros buffer: {self.zeros_name}")
 
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
         # need scales and zeros info for real quantization
