@@ -254,6 +254,17 @@ class GPTQ:
         identity = torch.eye(H.shape[0], dtype=torch.float32, device=H.device)
         return identity, damp
 
+    def log_cpu_fallback(self, stage: str, source_device: torch.device) -> None:
+        """Explain when a memory-heavy GPTQ step moves from CUDA to CPU."""
+
+        log.warn(
+            "Quantization: Module `%s` -> CUDA OOM during %s on %s; falling back to CPU. "
+            "Due to this fallback, the calculation may take much longer than normal.",
+            self.name,
+            stage,
+            source_device,
+        )
+
     def clone_module(self, copy=True, device: torch.device = None):
         if not device:
             device = self.module.weight.data.device
@@ -886,6 +897,8 @@ class GPTQ:
         start = time.time()
 
         target_device = getattr(self.module, "target_device", None)
+        result_device = torch.device(self.module.weight.data.device)
+        cpu_fallback_used = False
         from ..utils.fallback import resolve_fallback_strategy, resolve_threshold, should_use_fallback
 
         resolved_strategy = resolve_fallback_strategy(self.fallback)
@@ -971,11 +984,8 @@ class GPTQ:
                 if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
                     raise
 
-                log.warn(
-                    "Quantization: Module `%s` -> CUDA OOM during Hessian permutation on %s; retrying that module on CPU.",
-                    self.name,
-                    self.H.device,
-                )
+                self.log_cpu_fallback("Hessian permutation", self.H.device)
+                cpu_fallback_used = True
                 cpu_device = torch.device("cpu")
                 perm = perm.to(device=cpu_device)
                 W = W.to(device=cpu_device)[:, perm]
@@ -1002,11 +1012,8 @@ class GPTQ:
                 if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
                     raise
 
-                log.warn(
-                    "Quantization: Module `%s` -> CUDA OOM during act-group Hessian permutation on %s; retrying that module on CPU.",
-                    self.name,
-                    self.H.device,
-                )
+                self.log_cpu_fallback("act-group Hessian permutation", self.H.device)
+                cpu_fallback_used = True
                 cpu_device = torch.device("cpu")
                 final_perm = final_perm.to(device=cpu_device)
                 W = W.to(device=cpu_device)[:, final_perm]
@@ -1022,11 +1029,8 @@ class GPTQ:
 
                 # Full-attention blocks on very large models can exceed GPU memory during the
                 # dense Hessian inverse; finish that module on CPU instead of aborting the run.
-                log.warn(
-                    "Quantization: Module `%s` -> CUDA OOM during Hessian inverse on %s; retrying quantization on CPU.",
-                    self.name,
-                    self.H.device,
-                )
+                self.log_cpu_fallback("Hessian inverse", self.H.device)
+                cpu_fallback_used = True
                 cpu_device = torch.device("cpu")
                 self.H = self.H.to(device=cpu_device)
                 W = W.to(device=cpu_device)
@@ -1233,12 +1237,13 @@ class GPTQ:
         g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
 
         if self.qcfg.desc_act and use_hessian:
+            invperm = invperm.to(device=Q.device)
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
             del perm, invperm
 
         elif self.qcfg.act_group_aware and use_hessian:
-            inv_final = invert_perm(final_perm)
+            inv_final = invert_perm(final_perm).to(device=Q.device)
             Q = Q[:, inv_final]
             inv_global_perm = invert_perm(global_perm)
             inv_global_perm_list = inv_global_perm.tolist()
@@ -1273,7 +1278,14 @@ class GPTQ:
             scale = self.truncate_last_dim(scale, valid_cols)
             zero = self.truncate_last_dim(zero, valid_cols)
 
-        Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
+        if cpu_fallback_used and Q.device != result_device:
+            log.info(
+                "Quantization: Module `%s` -> CPU fallback complete; moving final quantized weights back to %s.",
+                self.name,
+                result_device,
+            )
+
+        Q = Q.to(device=result_device, non_blocking=False)
 
         duration = time.time() - start
 
