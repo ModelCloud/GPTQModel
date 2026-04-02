@@ -127,6 +127,15 @@ def test_normalize_hf_config_compat_restores_is_parallelizable_default(monkeypat
     assert transformers.PreTrainedModel.is_parallelizable is False
 
 
+def test_normalize_hf_config_compat_restores_flash_attn_legacy_version_probe(monkeypatch):
+    monkeypatch.delattr(transformers.utils, "is_flash_attn_greater_or_equal_2_10", raising=False)
+    monkeypatch.setattr(transformers.utils, "is_flash_attn_greater_or_equal", lambda version: version == "2.1.0")
+
+    normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
+
+    assert transformers.utils.is_flash_attn_greater_or_equal_2_10() is True
+
+
 def test_normalize_hf_config_compat_restores_legacy_cache_length_helpers(monkeypatch):
     monkeypatch.delattr(cache_utils.Cache, "get_max_length", raising=False)
     monkeypatch.delattr(cache_utils.Cache, "get_usable_length", raising=False)
