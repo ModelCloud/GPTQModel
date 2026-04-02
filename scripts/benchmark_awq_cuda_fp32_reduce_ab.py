@@ -138,16 +138,34 @@ def _mode_label(mode: str, split_k: int) -> str:
     return f"{mode}_k{split_k}"
 
 
-def _run_gemm(
+def _path_label(path: str, mode: str, split_k: int) -> str:
+    if path == "dequant":
+        return "dequant"
+    return f"fused_{_mode_label(mode, split_k)}"
+
+
+def _run_path(
     x: torch.Tensor,
     qweight: torch.Tensor,
     scales: torch.Tensor,
     qzeros: torch.Tensor,
+    bits: int,
+    group_size: int,
+    path: str,
     split_k: int,
     mode: str,
 ) -> torch.Tensor:
-    from gptqmodel.utils.awq import awq_gemm_forward
+    if path == "dequant":
+        return _dense_reference(
+            x,
+            qweight,
+            qzeros,
+            scales,
+            bits=bits,
+            group_size=group_size,
+        )
 
+    from gptqmodel.utils.awq import awq_gemm_forward
     return awq_gemm_forward(
         x,
         qweight,
@@ -167,6 +185,8 @@ def _run_suite(
     rotate_inputs: bool,
     shard_index: int,
     num_shards: int,
+    baseline_path: str,
+    candidate_path: str,
     baseline_mode: str,
     candidate_mode: str,
     baseline_split_k: int,
@@ -176,8 +196,8 @@ def _run_suite(
     rows = []
     speedups = []
     candidate_wins = 0
-    baseline_label = _mode_label(baseline_mode, baseline_split_k)
-    candidate_label = _mode_label(candidate_mode, candidate_split_k)
+    baseline_label = _path_label(baseline_path, baseline_mode, baseline_split_k)
+    candidate_label = _path_label(candidate_path, candidate_mode, candidate_split_k)
 
     for index, case in enumerate(cases):
         torch.manual_seed(1000 + index)
@@ -204,19 +224,25 @@ def _run_suite(
 
         with torch.inference_mode():
             dense = _dense_reference(kernel_input, qweight, qzeros, scales, bits=4, group_size=case.group_size)
-            baseline = _run_gemm(
+            baseline = _run_path(
                 kernel_input,
                 qweight,
                 scales,
                 qzeros,
+                bits=4,
+                group_size=case.group_size,
+                path=baseline_path,
                 split_k=baseline_split_k,
                 mode=baseline_mode,
             )
-            candidate = _run_gemm(
+            candidate = _run_path(
                 kernel_input,
                 qweight,
                 scales,
                 qzeros,
+                bits=4,
+                group_size=case.group_size,
+                path=candidate_path,
                 split_k=candidate_split_k,
                 mode=candidate_mode,
             )
@@ -226,11 +252,14 @@ def _run_suite(
         baseline_candidate = (baseline - candidate).abs()
 
         baseline_ms = _benchmark_ms(
-            lambda: _run_gemm(
+            lambda: _run_path(
                 kernel_input,
                 qweight,
                 scales,
                 qzeros,
+                bits=4,
+                group_size=case.group_size,
+                path=baseline_path,
                 split_k=baseline_split_k,
                 mode=baseline_mode,
             ),
@@ -239,11 +268,14 @@ def _run_suite(
             iters=iters,
         )
         candidate_ms = _benchmark_ms(
-            lambda: _run_gemm(
+            lambda: _run_path(
                 kernel_input,
                 qweight,
                 scales,
                 qzeros,
+                bits=4,
+                group_size=case.group_size,
+                path=candidate_path,
                 split_k=candidate_split_k,
                 mode=candidate_mode,
             ),
@@ -264,6 +296,8 @@ def _run_suite(
                 "in_features": case.in_features,
                 "out_features": case.out_features,
                 "dtype": str(dtype).replace("torch.", ""),
+                "baseline_path": baseline_path,
+                "candidate_path": candidate_path,
                 "baseline_mode": baseline_mode,
                 "candidate_mode": candidate_mode,
                 "baseline_split_k": baseline_split_k,
@@ -298,6 +332,8 @@ def run(
     quick: bool,
     shard_index: int,
     num_shards: int,
+    baseline_path: str,
+    candidate_path: str,
     baseline_mode: str,
     candidate_mode: str,
     baseline_split_k: int,
@@ -317,6 +353,8 @@ def run(
         "quick": quick,
         "shard_index": shard_index,
         "num_shards": num_shards,
+        "baseline_path": baseline_path,
+        "candidate_path": candidate_path,
         "baseline_mode": baseline_mode,
         "candidate_mode": candidate_mode,
         "baseline_split_k": baseline_split_k,
@@ -330,6 +368,8 @@ def run(
             rotate_inputs=False,
             shard_index=shard_index,
             num_shards=num_shards,
+            baseline_path=baseline_path,
+            candidate_path=candidate_path,
             baseline_mode=baseline_mode,
             candidate_mode=candidate_mode,
             baseline_split_k=baseline_split_k,
@@ -344,6 +384,8 @@ def run(
             rotate_inputs=True,
             shard_index=shard_index,
             num_shards=num_shards,
+            baseline_path=baseline_path,
+            candidate_path=candidate_path,
             baseline_mode=baseline_mode,
             candidate_mode=candidate_mode,
             baseline_split_k=baseline_split_k,
@@ -478,6 +520,8 @@ def main() -> int:
     parser.add_argument("--quick", action="store_true", help="Run a smaller subset of benchmark cases.")
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--baseline-path", choices=("fused", "dequant"), default="fused")
+    parser.add_argument("--candidate-path", choices=("fused", "dequant"), default="fused")
     parser.add_argument("--baseline-mode", choices=("legacy", "fp32_accum"), default="legacy")
     parser.add_argument("--candidate-mode", choices=("legacy", "fp32_accum"), default="fp32_accum")
     parser.add_argument("--baseline-split-k", type=int, default=8)
@@ -505,6 +549,8 @@ def main() -> int:
         quick=args.quick,
         shard_index=args.shard_index,
         num_shards=args.num_shards,
+        baseline_path=args.baseline_path,
+        candidate_path=args.candidate_path,
         baseline_mode=args.baseline_mode,
         candidate_mode=args.candidate_mode,
         baseline_split_k=args.baseline_split_k,
