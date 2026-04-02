@@ -92,6 +92,7 @@ def log_vram(base_url: str, run_id: str, gpu_id: str, execution_time: int, test:
     try:
         print(fetch_text(url, timeout=30, suppress_error=True))
     except Exception:
+        # Logging VRAM usage is best-effort; failures must not affect the main test flow.
         pass
 
 
