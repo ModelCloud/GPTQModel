@@ -4,12 +4,11 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
-
+import lm_eval
 
 class TestGlmMoeLite(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/GLM-4.7-Flash/" # zai-org/GLM-4.7-Flash
     DELETE_QUANTIZED_MODEL = False
-    DATASET_SIZE = 1
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "acc": {"value": 0.5026, "floor_pct": 0.04},
