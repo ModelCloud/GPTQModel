@@ -1542,6 +1542,9 @@ class ModelTest(unittest.TestCase):
         self._post_quant_eval_records = {}
         self._effective_load_backend = None
         self._model_compat_fast_dynamic = None
+        # Tracks whether quantModel() loaded an existing quantized checkpoint
+        # instead of producing a fresh post-quant artifact + Evalution cache.
+        self._loaded_model_was_prequantized = False
         processor = None
 
         self._apply_model_compat_quant_overrides(model)
@@ -1559,6 +1562,7 @@ class ModelTest(unittest.TestCase):
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
         is_quantized = model.quantized
+        self._loaded_model_was_prequantized = bool(is_quantized)
 
         # ovis cannot load processor
         is_ovis_model = model.config.model_type == "ovis"
@@ -1922,20 +1926,25 @@ class ModelTest(unittest.TestCase):
             log.info("Reusing evaluation results for backend `%s`; skipping duplicate lm_eval run", target_backend.name)
             task_results = eval_records[target_backend]
         else:
-            # Stage-2 lm_eval fallback is intentionally disabled for all ModelTest-based suites.
-            # Keep commented-out block below for quick re-enable.
-            # with self.model_compat_test_context():
-            #     task_results = self.lm_eval(
-            #         model=self.SAVE_PATH if self.SAVE_PATH else self.model,
-            #         trust_remote_code=self.TRUST_REMOTE_CODE,
-            #         delete_quantized_model=self.DELETE_QUANTIZED_MODEL,
-            #     )
             task_results = eval_records.get(target_backend)
             if task_results is None:
-                raise AssertionError(
-                    "Post-quant eval results were not produced. "
-                    "The Stage-2 lm_eval fallback is disabled."
-                )
+                if getattr(self, "_loaded_model_was_prequantized", False):
+                    log.info(
+                        "Loaded checkpoint was already quantized; running Evalution directly for backend `%s`.",
+                        target_backend.name,
+                    )
+                    with self.model_compat_test_context():
+                        task_results = self.lm_eval(
+                            model=self.SAVE_PATH if self.SAVE_PATH else self.model,
+                            trust_remote_code=self.TRUST_REMOTE_CODE,
+                            delete_quantized_model=False,
+                        )
+                    self._post_quant_eval_records[target_backend] = task_results
+                else:
+                    raise AssertionError(
+                        "Post-quant eval results were not produced. "
+                        "The Stage-2 lm_eval fallback is disabled."
+                    )
         self.check_results(task_results)
         self._cleanup_quantized_model(self.model, enabled=self.DELETE_QUANTIZED_MODEL)
 
