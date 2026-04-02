@@ -292,12 +292,17 @@ jobs:
         - /monster/ci/uv:/opt/uv
     env:
       RELEASE_MODE: 0
+      BUILD_CUDA_EXT: '0'
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
+
+      - name: Trust workspace for git
+        run: |
+          git config --global --add safe.directory "$(pwd)"
 
       - name: Print Env
         run: |
@@ -393,6 +398,10 @@ jobs:
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
+
+      - name: Trust workspace for git
+        run: |
+          git config --global --add safe.directory "$(pwd)"
 
       - name: Fetch PR by number
         if: ${{ github.event.inputs.pr_number != 0 }}
