@@ -16,6 +16,7 @@ This feature allows specifying where calibration data is stored during quantizat
 """
 
 import os
+import traceback
 import types
 import unittest
 
@@ -612,6 +613,10 @@ class _DummyGPTQModelForLooper:
         # Don't set supported_vram_strategies so getattr uses default value
 
 
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Requires at least 2 CUDA devices"
+)
 def test_compute_device_filter_applied_to_quant_devices(monkeypatch):
     """
     Test that compute_device_filter is applied to _quant_devices in ModuleLooper.__init__.
@@ -691,6 +696,11 @@ def test_compute_device_filter_with_empty_result_uses_all_devices(monkeypatch):
 # FORWARD BATCH TESTS - Balanced mode batch-to-device assignment
 # ============================================================================
 
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Requires at least 2 CUDA devices"
+)
 def test_balanced_mode_assigns_batches_to_input_devices(monkeypatch):
     """
     Test that in balanced mode, batches are assigned to the device
@@ -975,6 +985,10 @@ def test_output_moved_to_input_device_in_single_mode(monkeypatch):
         f"Output should be on CPU (input device), got {outputs[0][0].device}"
 
 
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Requires at least 2 CUDA devices"
+)
 def test_output_moved_to_input_device_in_parallel_mode(monkeypatch):
     """
     Test that in _run_forward_batches_parallel, outputs are moved

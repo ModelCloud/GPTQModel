@@ -7,6 +7,10 @@ tests:
     gpu: 5
     py: 3.14t
 
+  test_calibration_data_device:
+    gpu: 2
+    py: 3.14t
+
 
 tests/models:
   py: 3.13
