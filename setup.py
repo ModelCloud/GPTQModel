@@ -355,6 +355,24 @@ def _get_git_commit():
     except Exception:
         return ""
 
+
+def _append_local_version(base_version: str, suffix: str | None) -> str:
+    suffix = (suffix or "").strip().strip("+")
+    if not suffix:
+        return base_version
+    return f"{base_version}+{suffix}"
+
+
+def _build_package_version(base_version: str) -> str:
+    # Public source releases uploaded to PyPI must keep the canonical version.
+    if RELEASE_MODE != "1" and BUILD_CUDA_EXT != "1":
+        return base_version
+
+    if RELEASE_MODE == "1":
+        return _append_local_version(base_version, get_cuda_tag())
+
+    return _append_local_version(base_version, _get_git_commit())
+
 # ---------------------------
 # Env and versioning
 # ---------------------------
@@ -431,12 +449,8 @@ if not TORCH_CUDA_ARCH_LIST and CUDA_ARCH_LIST:
 
 version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
-gptqmodel_version = version_vars["version"]
-
-if RELEASE_MODE == "1":
-    gptqmodel_version = f"{gptqmodel_version}+{get_cuda_tag()}"
-else:
-    gptqmodel_version = f"{gptqmodel_version}+{_get_git_commit()}"
+gptqmodel_base_version = version_vars["version"]
+gptqmodel_version = _build_package_version(gptqmodel_base_version)
 
 # -----------------------------
 # Prebuilt wheel download config
@@ -897,10 +911,10 @@ class CachedWheelsCommand(_bdist_wheel):
 
         cpython_tag = f"cp{sys.version_info.major}{sys.version_info.minor}{sys.abiflags}"
 
-        wheel_filename = f"gptqmodel-{gptqmodel_version}+{get_cuda_tag()}-{cpython_tag}-{cpython_tag}-linux_x86_64.whl"
+        wheel_filename = f"gptqmodel-{gptqmodel_version}-{cpython_tag}-{cpython_tag}-linux_x86_64.whl"
 
-        # Allow tag override via env; default to "v{gptqmodel_version}"
-        tag_name = WHEEL_TAG if WHEEL_TAG else f"v{gptqmodel_version}"
+        # Allow tag override via env; default to the public release tag.
+        tag_name = WHEEL_TAG if WHEEL_TAG else f"v{gptqmodel_base_version}"
         wheel_url = _resolve_wheel_url(tag_name=tag_name, wheel_name=wheel_filename)
 
         print(f"Resolved wheel URL: {wheel_url}\nwheel name={wheel_filename}")
