@@ -1166,12 +1166,6 @@ class FOEMConfig:
             (alpha = 0.25, beta = 0.2) generally produces strong results,
             although it is not consistently superior to using FOEM alone.
 
-    Note:
-        FOEM currently follows the same data processing pipeline as GPTAQ.
-        Specifically, `native_inp` is pre-cached regardless of the value of `alpha`.
-        However, when `alpha = 0`, the additional terms (dXXT and P) are not computed
-        during the compensation step.
-
     Args:
         alpha (float, optional): Default is 0.
         beta (float, optional): Default is 0.2.

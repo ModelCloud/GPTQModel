@@ -966,14 +966,15 @@ class BaseQModel(nn.Module):
             quantize_processor.insert(0, NativeProcessor(**args_clone))
 
         if getattr(self.quantize_config, "foem", None) is not None:
-            from ..looper.native_processor import NativeProcessor
+            if self.quantize_config.foem.alpha > 0:
+                from ..looper.native_processor import NativeProcessor
 
-            args_to_copy = {k: v for k, v in args.items() if k != "prepare_dataset_func"}
-            args_clone = copy.deepcopy(args_to_copy)
-            args_clone["prepare_dataset_func"] = args["prepare_dataset_func"]
+                args_to_copy = {k: v for k, v in args.items() if k != "prepare_dataset_func"}
+                args_clone = copy.deepcopy(args_to_copy)
+                args_clone["prepare_dataset_func"] = args["prepare_dataset_func"]
 
-            args_clone.pop("calculate_w_wq_diff", None)
-            quantize_processor.insert(0, NativeProcessor(**args_clone))
+                args_clone.pop("calculate_w_wq_diff", None)
+                quantize_processor.insert(0, NativeProcessor(**args_clone))
 
         processors = quantize_processor
         if needs_lora:
