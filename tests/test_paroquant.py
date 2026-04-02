@@ -11,6 +11,7 @@ import copy
 import inspect
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -1324,6 +1325,71 @@ def test_paroquant_rotation_launch_config_autotunes_once_per_shape(monkeypatch):
     assert paroquant_utils_module._rotation_autotune_cache_size() == 2
     clear_paroquant_rotation_autotune_cache()
     assert paroquant_utils_module._rotation_autotune_cache_size() == 0
+
+
+def test_paroquant_rotation_launch_config_serializes_concurrent_autotune(monkeypatch):
+    """Guard free-threaded launch autotune so one cold shape is measured once at a time."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant launch-config path.")
+
+    clear_paroquant_rotation_autotune_cache()
+    monkeypatch.setattr(paroquant_utils_module, "_load_rotation_extension", lambda: True)
+    monkeypatch.setattr(paroquant_utils_module, "_rotation_requested_launch", lambda: (-2, -2))
+
+    state_lock = threading.Lock()
+    result_lock = threading.Lock()
+    calls = {"launch": 0, "active": 0, "max_active": 0}
+    results = []
+    failures = []
+
+    def fake_launch_config(x, krot, has_scale, group_size, cta_m, row_pad):
+        del x, krot, has_scale, group_size, cta_m, row_pad
+        with state_lock:
+            calls["launch"] += 1
+            calls["active"] += 1
+            calls["max_active"] = max(calls["max_active"], calls["active"])
+        try:
+            time.sleep(0.05)
+            return (8, 2)
+        finally:
+            with state_lock:
+                calls["active"] -= 1
+
+    def fake_op(name):
+        if name == "launch_config":
+            return fake_launch_config
+        raise AssertionError(f"unexpected op lookup: {name}")
+
+    monkeypatch.setattr(paroquant_utils_module._PAROQUANT_ROTATION_EXTENSION, "op", fake_op)
+
+    x = torch.empty((32, 128), device="cuda", dtype=torch.float16)
+    pairs = torch.zeros((8, 128), device="cuda", dtype=torch.int16)
+    theta = torch.zeros((8, 64), device="cuda", dtype=torch.float16)
+    scales = torch.ones((1, 128), device="cuda", dtype=torch.float16)
+    start_barrier = threading.Barrier(4)
+
+    def worker():
+        try:
+            start_barrier.wait()
+            resolved = _rotation_launch_config(x, pairs, theta, scales=scales, group_size=128)
+            with result_lock:
+                results.append(resolved)
+        except BaseException as exc:  # pragma: no cover - test should fail below instead.
+            with result_lock:
+                failures.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert results == [(8, 2)] * 4
+    assert calls["launch"] == 1
+    assert calls["max_active"] == 1
+
+    clear_paroquant_rotation_autotune_cache()
 
 
 def test_paroquant_rotation_helper_reuses_resolved_autotune_launch(monkeypatch):

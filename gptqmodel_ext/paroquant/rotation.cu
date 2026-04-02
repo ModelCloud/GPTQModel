@@ -272,6 +272,13 @@ std::mutex &autotune_cache_mutex() {
   return mutex;
 }
 
+std::mutex &autotune_measurement_mutex() {
+  // Serialize cold-shape autotune so free-threaded callers do not benchmark
+  // the same or competing launch plans concurrently on cache misses.
+  static std::mutex mutex;
+  return mutex;
+}
+
 int resolve_autotune_count(const char *name, int default_value) {
   if (const char *raw = std::getenv(name)) {
     int parsed = std::atoi(raw);
@@ -545,6 +552,10 @@ LaunchConfig resolve_cached_autotune_launch_config(const AutotuneKey &key, const
   if (auto cached = lookup_autotune_cache(key)) {
     return *cached;
   }
+  std::lock_guard<std::mutex> guard(autotune_measurement_mutex());
+  if (auto cached = lookup_autotune_cache(key)) {
+    return *cached;
+  }
   LaunchConfig measured = autotune_launch_config(x, idx, theta, scales, group_size, krot);
   return store_autotune_cache(key, measured);
 }
@@ -576,6 +587,10 @@ LaunchConfig resolve_query_launch_config(const at::Tensor &x, int64_t krot, bool
     return resolve_legacy_launch_config(x.scalar_type(), requested_cta_m, requested_row_pad);
   }
   const AutotuneKey key = make_autotune_key(x, group_size, krot, has_scale);
+  if (auto cached = lookup_autotune_cache(key)) {
+    return *cached;
+  }
+  std::lock_guard<std::mutex> guard(autotune_measurement_mutex());
   if (auto cached = lookup_autotune_cache(key)) {
     return *cached;
   }

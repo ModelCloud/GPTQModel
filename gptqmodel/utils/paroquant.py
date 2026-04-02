@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -29,6 +30,11 @@ _SUPPORTED_ROTATION_KERNEL_DTYPES = {
 # rotation path uses this to avoid sending autotune sentinels back into the
 # native op on every invocation once a shape has already been measured.
 _ROTATION_LAUNCH_CONFIG_CACHE: dict[tuple[object, ...], tuple[int, int]] = {}
+# The cache lock protects the Python-side resolved launch map for free-threaded
+# runtimes, while the serialize lock prevents duplicate native autotune passes
+# from multiple threads racing the same cold shape.
+_ROTATION_LAUNCH_CONFIG_CACHE_LOCK = threading.Lock()
+_ROTATION_AUTOTUNE_SERIALIZE_LOCK = threading.Lock()
 
 
 def _normalize_group_size(group_size: int, in_features: int) -> int:
@@ -208,7 +214,8 @@ def clear_paroquant_rotation_extension_cache() -> None:
 def clear_paroquant_rotation_autotune_cache() -> None:
     """Drop the native launch-plan cache used by fused rotation autotune."""
 
-    _ROTATION_LAUNCH_CONFIG_CACHE.clear()
+    with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
+        _ROTATION_LAUNCH_CONFIG_CACHE.clear()
     clear_cache = _rotation_native_op_if_loaded("clear_autotune_cache")
     if clear_cache is not None:
         clear_cache()
@@ -350,21 +357,29 @@ def _resolve_rotation_launch(
         requested_cta_m=requested_cta_m,
         requested_row_pad=requested_row_pad,
     )
-    cached = _ROTATION_LAUNCH_CONFIG_CACHE.get(cache_key)
+    with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
+        cached = _ROTATION_LAUNCH_CONFIG_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    cta_m, row_pad = _PAROQUANT_ROTATION_EXTENSION.op("launch_config")(
-        x,
-        int(krot),
-        scales is not None,
-        int(group_size),
-        int(requested_cta_m),
-        int(requested_row_pad),
-    )
-    resolved = (int(cta_m), int(row_pad))
-    _ROTATION_LAUNCH_CONFIG_CACHE[cache_key] = resolved
-    return resolved
+    with _ROTATION_AUTOTUNE_SERIALIZE_LOCK:
+        with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
+            cached = _ROTATION_LAUNCH_CONFIG_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        cta_m, row_pad = _PAROQUANT_ROTATION_EXTENSION.op("launch_config")(
+            x,
+            int(krot),
+            scales is not None,
+            int(group_size),
+            int(requested_cta_m),
+            int(requested_row_pad),
+        )
+        resolved = (int(cta_m), int(row_pad))
+        with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
+            cached = _ROTATION_LAUNCH_CONFIG_CACHE.setdefault(cache_key, resolved)
+        return cached
 
 
 def _rotation_launch_config(
