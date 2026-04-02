@@ -28,7 +28,7 @@ class TestEval(ModelTest):
     @parameterized.expand(
         [
             ("arc_challenge", False),
-            ("mmlu_pro:math", True),
+            ("mmlu_pro:stem.math", True),
         ]
     )
     def test_evalution_gptqmodel(self, task: str, apply_chat_template: bool):
@@ -41,6 +41,8 @@ class TestEval(ModelTest):
                 apply_chat_template=apply_chat_template,
                 suite_kwargs={"max_rows": 2, "num_fewshot": 1},
             )
-
-            metrics = get_eval_task_metrics(results, task)
+            if task == "mmlu_pro:stem.math":
+                metrics = get_eval_task_metrics(results, "mmlu_pro_stem_math")
+            else:
+                metrics = get_eval_task_metrics(results, task)
             self.assertTrue(metrics, f"Expected Evalution metrics for task {task}")
