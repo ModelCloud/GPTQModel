@@ -42,10 +42,10 @@ class TestBits(unittest.TestCase):
     QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.2
 
     CUDA_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS = {
-        2: {'acc,none': 0.2150170648464164, 'acc_norm,none': 0.2696245733788396},
-        3: {'acc,none': 0.2175767918088737, 'acc_norm,none': 0.26621160409556316},
-        4: {'acc,none': 0.2363, 'acc_norm,none': 0.2517},
-        8: {'acc,none': 0.3020, 'acc_norm,none': 0.3319112627986348},
+        2: {'accuracy,loglikelihood': 0.2150170648464164, 'accuracy,loglikelihood_norm': 0.2696245733788396},
+        3: {'accuracy,loglikelihood': 0.2175767918088737, 'accuracy,loglikelihood_norm': 0.26621160409556316},
+        4: {'accuracy,loglikelihood': 0.2363, 'accuracy,loglikelihood_norm': 0.2517},
+        8: {'accuracy,loglikelihood': 0.3020, 'accuracy,loglikelihood_norm': 0.3319112627986348},
     }
 
     def calculatorPer(self, filter, value, base_value):
