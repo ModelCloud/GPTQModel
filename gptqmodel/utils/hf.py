@@ -522,6 +522,28 @@ def _patch_transformers_remote_code_compat() -> None:
 
         import_utils.is_torch_fx_available = is_torch_fx_available
 
+    try:
+        from transformers import utils
+    except Exception:
+        utils = None
+
+    if utils is not None and not hasattr(utils, "is_flash_attn_greater_or_equal_2_10"):
+        legacy_flash_attn_probe = getattr(utils, "is_flash_attn_greater_or_equal", None)
+
+        if legacy_flash_attn_probe is None:
+            legacy_flash_attn_probe = getattr(utils, "is_flash_attn_greater_or_equal", None)
+
+        # Older trust_remote_code model files import the removed
+        # `is_flash_attn_greater_or_equal_2_10` helper from
+        # `transformers.utils`; newer transformers only expose the generic
+        # comparator.
+        def is_flash_attn_greater_or_equal_2_10() -> bool:
+            if legacy_flash_attn_probe is None:
+                return False
+            return bool(legacy_flash_attn_probe("2.1.0"))
+
+        utils.is_flash_attn_greater_or_equal_2_10 = is_flash_attn_greater_or_equal_2_10
+
     if cache_utils is not None and not hasattr(cache_utils, "SlidingWindowCache") and hasattr(cache_utils, "StaticCache"):
         # transformers 5.x folds sliding-window behavior into StaticCache
         # layers, but older remote code still imports the legacy symbol.
@@ -946,6 +968,16 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
     outer_model_cls = model_cls if isinstance(model_cls, type) else None
     input_mode_enum = getattr(remote_module, "InputMode", None) if remote_module is not None else None
 
+    if config.model_type == "minicpm":
+        try_patch_legacy_flash_attn_flag(outer_model_cls)
+        base_model_cls = getattr(
+            remote_module,
+            "MiniCPMModel",
+            None,
+        )
+        if base_model_cls:
+            try_patch_legacy_flash_attn_flag(base_model_cls)
+
     if (
         outer_model_cls is not None
         and hasattr(outer_model_cls, "tie_weights")
@@ -1111,6 +1143,18 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
             peft_import_utils.is_auto_awq_available = is_auto_awq_available
             peft_awq.is_auto_awq_available = is_auto_awq_available
             peft_awq._gptqmodel_awq_probe_patch = True
+
+
+def try_patch_legacy_flash_attn_flag(model_cls):
+    if (
+            model_cls is not None
+            and getattr(model_cls, "_supports_flash_attn_2", None) is not None
+            and not bool(getattr(model_cls, "_supports_flash_attn", False))
+    ):
+        # transformers 5.x checks `_supports_flash_attn`, while older
+        # trust_remote_code classes such as MiniCPM still expose only the
+        # legacy `_supports_flash_attn_2` capability flag.
+        model_cls._supports_flash_attn = bool(getattr(model_cls, "_supports_flash_attn_2"))
 
 
 def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):

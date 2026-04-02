@@ -93,7 +93,6 @@ class TestLlama3_2_awq(ModelTest):
     METHOD = METHOD.AWQ
     SYM = True
     TORCH_DTYPE = torch.float16
-    LOAD_BACKEND = BACKEND.TORCH_AWQ
 
     def test_llama3_2_awq(self):
         self.quant_lm_eval()
