@@ -11,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import ExpertsRoutingOverride, FOEMConfig, MoEConfig
+from gptqmodel.quantization.config import FOEMConfig
+
 
 class TestQwen3MoeFOEM(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"

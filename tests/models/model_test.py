@@ -136,10 +136,10 @@ from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import (  # noqa: E402
     BitsAndBytesConfig,
     Fallback,
+    FOEMConfig,
     FP8Config,
     GGUFConfig,
     GPTAQConfig,
-    FOEMConfig,
     HessianConfig,
     MoEConfig,
     ParoQuantizeConfig,

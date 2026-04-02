@@ -36,7 +36,7 @@ class FOEM(GPTQ):
             self.gptaq = False
         else:
             self.gptaq =True
-        
+
         if self.gptaq:
             self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
 
@@ -162,7 +162,7 @@ class FOEM(GPTQ):
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
         W[:, dead] = 0
-        
+
         if self.gptaq:
             self.dXXT[:, dead] = 0
 
@@ -242,7 +242,7 @@ class FOEM(GPTQ):
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
                 err1 = ((w - q) - (w - w_raw) * self.qcfg.foem.beta) / d
-                
+
                 if self.gptaq:
                     W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0)) - w.unsqueeze(1).matmul(P1[i, i:].unsqueeze(0))
                 else:

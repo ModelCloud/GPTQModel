@@ -3,7 +3,6 @@ import pytest
 import torch
 
 import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
-import gptqmodel.nn_modules.qlinear.bitblas_awq as awq_bitblas_module
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
