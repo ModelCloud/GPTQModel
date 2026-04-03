@@ -177,13 +177,24 @@ def _rotation_kernel_ready(
     )
 
 
+def _rotation_visible_cuda_capabilities() -> set[tuple[int, int]]:
+    """Return the visible CUDA SM versions for this process."""
+
+    if not torch.cuda.is_available():
+        return set()
+    return {
+        tuple(map(int, torch.cuda.get_device_capability(device_index)))
+        for device_index in range(torch.cuda.device_count())
+    }
+
+
 def _rotation_extra_cuda_cflags() -> list[str]:
     flags = default_jit_cuda_cflags()
-    flags.extend([
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--use_fast_math",
-    ])
+    # On measured SM80/A100 builds, relaxed constexpr consistently improves the
+    # fused rotation kernel. The same flag regresses SM89/4090 here, so only
+    # enable it when the visible target set is pure SM80.
+    if _rotation_visible_cuda_capabilities() == {(8, 0)}:
+        flags.append("--expt-relaxed-constexpr")
     return flags
 
 
