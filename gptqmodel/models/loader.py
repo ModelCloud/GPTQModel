@@ -729,11 +729,10 @@ def ModelLoader(cls):
                 model_class = getattr(transformers, config.architectures[0], None)
                 if model_class is not None:
                     # backward-compatible fallback for "_supports_flash_attn" field
-                    supports_flash_attn = getattr(
-                        model_class,
-                        "_supports_flash_attn_2",
-                        getattr(model_class, "_supports_flash_attn", None),
-                    )
+                    if hasattr(model_class, "_supports_flash_attn_2"):
+                        supports_flash_attn = getattr(model_class, "_supports_flash_attn_2")
+                    elif hasattr(model_class, "_supports_flash_attn"):
+                        supports_flash_attn = getattr(model_class, "_supports_flash_attn")
                 else:
                     supports_flash_attn = None
             else:
