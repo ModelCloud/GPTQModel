@@ -169,6 +169,8 @@ jobs:
         run: |
           echo "UV_PYTHON=${{ matrix.python }}" >> "$GITHUB_ENV"
           echo "UV_TORCH_BACKEND=cu${{ matrix.cuda }}" >> "$GITHUB_ENV"
+          export UV_PYTHON=${{ matrix.python }}
+          export UV_TORCH_BACKEND=cu${{ matrix.cuda }}
 
           env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${{ matrix.python }}_release"
           source /opt/uv/setup_uv_venv.sh $env_name ${{ matrix.python }}
