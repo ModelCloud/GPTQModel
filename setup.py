@@ -587,7 +587,8 @@ def _env_enabled_any(names, default="1") -> bool:
 
 BUILD_MARLIN = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
 BUILD_MACHETE = _env_enabled(os.environ.get("GPTQMODEL_BUILD_MACHETE", "0"))
-BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
+# ExLlamaV2 GPTQ now JIT-compiles on first use via torch.ops; keep setup-time prebuild opt-in only.
+BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "0"))
 BUILD_EXLLAMA_V3 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V3", "1"))
 
 EXLLAMAV3_SOURCES = [
