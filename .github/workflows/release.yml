@@ -167,26 +167,15 @@ jobs:
 
       - name: Activate uv env
         run: |
-          if [[ "${{ matrix.cuda }}" -lt 128 ]]; then # CUDA >= 12.8 supports 12.0 (5090)
-            echo "CUDA_ARCH_LIST=8.0 8.6 8.9 9.0" >> $GITHUB_ENV
-            echo "TORCH_CUDA_ARCH_LIST=8.0 8.6 8.9 9.0" >> $GITHUB_ENV
-          fi
-          python_version=${{ matrix.python }}
-          if [[ "$python_version" != *"."* ]]; then
-            python_version="${python_version/3/3.}"
-          fi
-
-          export UV_PYTHON=$python_version
-          echo "UV_PYTHON=$python_version" >> "$GITHUB_ENV"
+          echo "UV_PYTHON=${{ matrix.python }}" >> "$GITHUB_ENV"
           echo "UV_TORCH_BACKEND=cu${{ matrix.cuda }}" >> "$GITHUB_ENV"
-          
-          env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${python_version}_release"
-          /opt/uv/setup_uv_venv.sh $env_name
 
-      - name: Setup uv env
-        if: env.SHOULD_RUN == 1
-        run: |
-          /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
+          env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${{ matrix.python }}_release"
+          /opt/uv/setup_uv_venv.sh $env_name ${{ matrix.python }}
+          python -VV
+          
+          echo "source /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON"
+          source /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
 
       - name: Print uv env
         if: env.SHOULD_RUN == 1
@@ -197,7 +186,7 @@ jobs:
           echo "::endgroup::"
           
           echo "== python =="
-          python --version
+          python -VV
           which python
           which pip || true
 
@@ -217,7 +206,6 @@ jobs:
 
           echo "::group::git status"
           git config --global --add safe.directory $(pwd)
-          git status
           echo "::endgroup::"
 
       - name: Compile
@@ -234,11 +222,11 @@ jobs:
           else
             echo "::endgroup::"
           fi
+          ls -ahl dist
 
       - name: Test install
         if: env.SHOULD_RUN == 1
         run: |
-          ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
