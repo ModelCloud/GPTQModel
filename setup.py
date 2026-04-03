@@ -615,7 +615,8 @@ EXLLAMAV3_SOURCES = [
 ]
 # QQQ now JIT-compiles on first use via torch.ops; keep setup-time prebuild opt-in only.
 BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "0"))
-BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
+# AWQ runtimes now JIT-compile on first use via torch.ops; keep setup-time prebuild opt-in only.
+BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "0"))
 
 if BUILD_CUDA_EXT == "1":
     # Import torch's cpp_extension only if we're truly building GPU extensions

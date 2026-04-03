@@ -105,6 +105,28 @@ _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     requires_cuda=True,
 )
 
+# Shared AWQ singleton so every caller reuses the same torch.ops cache and
+# first-use build policy instead of depending on setup-time wheels.
+_EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+    name="gptqmodel_exllamav2_awq_ops",
+    namespace="gptqmodel_exllamav2_awq",
+    required_ops=("make_q_matrix_awq", "gemm_half_q_half_awq"),
+    sources=lambda: [
+        str(_exllamav2_root() / "ext_awq.cpp"),
+        str(_exllamav2_root() / "cuda" / "q_matrix_awq.cu"),
+        str(_exllamav2_root() / "cuda" / "q_gemm_awq.cu"),
+    ],
+    build_root_env="GPTQMODEL_EXLLAMAV2_AWQ_BUILD_ROOT",
+    default_build_root=lambda: default_torch_ops_build_root("exllamav2_awq"),
+    display_name="ExLlamaV2 AWQ",
+    extra_cflags=_exllamav2_extra_cflags,
+    extra_cuda_cflags=_exllamav2_extra_cuda_cflags,
+    extra_include_paths=_exllamav2_include_paths,
+    force_rebuild_env="GPTQMODEL_EXLLAMAV2_AWQ_FORCE_REBUILD",
+    verbose_env="GPTQMODEL_EXT_VERBOSE",
+    requires_cuda=True,
+)
+
 
 def clear_exllamav2_gptq_extension_cache() -> None:
     _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION.clear_cache()
@@ -157,3 +179,56 @@ def exllamav2_make_q_matrix(
 
 def exllamav2_gemm_half_q_half(a, q_handle: int, c, force_cuda: bool = False) -> None:
     _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION.op("gemm_half_q_half")(a, int(q_handle), c, bool(force_cuda))
+
+
+def clear_exllamav2_awq_extension_cache() -> None:
+    _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.clear_cache()
+
+
+def exllamav2_awq_runtime_available() -> bool:
+    return _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.load()
+
+
+def exllamav2_awq_runtime_error() -> str:
+    if _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.load():
+        return ""
+    return (
+        _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.last_error_message()
+        or "ExLlamaV2 AWQ CUDA runtime unavailable."
+    )
+
+
+def prewarm_exllamav2_awq_extension() -> bool:
+    return exllamav2_awq_runtime_available()
+
+
+def exllamav2_awq_make_q_matrix(
+    q_weight,
+    q_perm,
+    q_invperm,
+    q_scale,
+    q_scale_max,
+    q_groups,
+    gptq_qzeros,
+    gptq_scales,
+    gptq_g_idx,
+    temp_dq,
+) -> int:
+    return int(
+        _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.op("make_q_matrix_awq")(
+            q_weight,
+            q_perm,
+            q_invperm,
+            q_scale,
+            q_scale_max,
+            q_groups,
+            gptq_qzeros,
+            gptq_scales,
+            gptq_g_idx,
+            temp_dq,
+        )
+    )
+
+
+def exllamav2_awq_gemm_half_q_half(a, q_handle: int, c, force_cuda: bool = False) -> None:
+    _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.op("gemm_half_q_half_awq")(a, int(q_handle), c, bool(force_cuda))
