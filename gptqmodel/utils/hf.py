@@ -530,19 +530,15 @@ def _patch_transformers_remote_code_compat() -> None:
     if utils is not None and not hasattr(utils, "is_flash_attn_greater_or_equal_2_10"):
         legacy_flash_attn_probe = getattr(utils, "is_flash_attn_greater_or_equal", None)
 
-        if legacy_flash_attn_probe is None:
-            legacy_flash_attn_probe = getattr(utils, "is_flash_attn_greater_or_equal", None)
+        if legacy_flash_attn_probe:
+            # Older trust_remote_code model files import the removed
+            # `is_flash_attn_greater_or_equal_2_10` helper from
+            # `transformers.utils`; newer transformers only expose the generic
+            # comparator.
+            def is_flash_attn_greater_or_equal_2_10() -> bool:
+                return bool(legacy_flash_attn_probe("2.1.0"))
 
-        # Older trust_remote_code model files import the removed
-        # `is_flash_attn_greater_or_equal_2_10` helper from
-        # `transformers.utils`; newer transformers only expose the generic
-        # comparator.
-        def is_flash_attn_greater_or_equal_2_10() -> bool:
-            if legacy_flash_attn_probe is None:
-                return False
-            return bool(legacy_flash_attn_probe("2.1.0"))
-
-        utils.is_flash_attn_greater_or_equal_2_10 = is_flash_attn_greater_or_equal_2_10
+            utils.is_flash_attn_greater_or_equal_2_10 = is_flash_attn_greater_or_equal_2_10
 
     if cache_utils is not None and not hasattr(cache_utils, "SlidingWindowCache") and hasattr(cache_utils, "StaticCache"):
         # transformers 5.x folds sliding-window behavior into StaticCache
