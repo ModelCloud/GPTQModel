@@ -184,11 +184,6 @@ class StageInputsCapture:
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
-        is_ovis = self.gptq_model.model.config.model_type == "ovis"
-        is_minicpmo = self.gptq_model.model.config.model_type == "minicpmo"
-        is_minicpmv = self.gptq_model.model.config.model_type == "minicpmv"
-        use_nested_input_move = is_minicpmo or is_minicpmv
-
         self.gptq_model.pre_quantize_generate_hook_start()
 
         # TODO: why data_device sometimes set to cuda (self.gptq_model.quantize_config.device) and sometimes to CPU (cur_layer_device)?
@@ -202,56 +197,17 @@ class StageInputsCapture:
                         if "pixel_values" in example.keys()
                         else cur_layer_device
                     )
-                if not use_nested_input_move:
-                    for k, v in example.items():
-                        if isinstance(v, list):
-                            for index in range(len(v)):
-                                if len(v[index].shape) == 1:
-                                    v[index] = v[index].unsqueeze(0)
-                                v[index] = move_to(
-                                    v[index].to(self.gptq_model.model.visual_tokenizer.dtype)
-                                    if is_ovis
-                                    else v[index],
-                                    device=data_device,
-                                )
-                        else:
-                            if len(v.shape) == 1:
-                                v = v.unsqueeze(0)
-                            example[k] = move_to(v, device=data_device)
+                example = self.gptq_model.move_input_capture_example(example, data_device)
                 try:
-                    if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
-                        example["attention_mask"] = example["attention_mask"].long()
-
                     with ctx(
                         DEVICE_THREAD_POOL.read_lock(self.gptq_model.quantize_config.device),
                         device_ctx(self.gptq_model.quantize_config.device),
                     ):
-                        if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
-                            self.gptq_model.model.generate(
-                                **example,
-                                **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS,
-                            )
-                        elif is_ovis:
-                            self.gptq_model.model.generate(inputs=example.pop("input_ids"), **example)
-                        elif is_minicpmo:
-                            for k, v in example.items():
-                                example[k] = nested_move_to(v, device=data_device)
-
-                            generation_config = self.gptq_model.model.prepare_generation_config(do_sample=True)
-                            generation_config["use_cache"] = use_cache
-
-                            self.gptq_model.model.generate(**example, tokenizer=self.gptq_model.model.tokenizer, **generation_config)
-                        elif is_minicpmv:
-                            # TODO Move the `generate` code section into `MiniCPMVQModel`.
-                            for k, v in example.items():
-                                example[k] = nested_move_to(v, device=data_device)
-
-                            generation_config = {"temperature": 0.7, "do_sample": True, "top_p": 0.8, "top_k": 100,
-                                                 "repetition_penalty": 1.03, "use_cache": use_cache}
-
-                            self.gptq_model.model.generate(**example, tokenizer=self.gptq_model.model.tokenizer, **generation_config)
-                        else:
-                            self.gptq_model.model(**example, use_cache=use_cache)
+                        self.gptq_model.run_input_capture(
+                            example,
+                            use_cache=use_cache,
+                            data_device=data_device,
+                        )
                 except StopForward:
                     pass
                 finally:

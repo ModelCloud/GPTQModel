@@ -23,6 +23,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization import QuantizeConfig
 
 
@@ -204,6 +205,10 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
 
     # Create fake GPTQModel with calibration_data_device="cpu"
     class FakeGPTQModel:
+        finalize_input_capture_example = BaseQModel.finalize_input_capture_example
+        move_input_capture_example = BaseQModel.move_input_capture_example
+        run_input_capture = BaseQModel.run_input_capture
+
         def __init__(self):
             self.quantize_config = types.SimpleNamespace(
                 device=torch.device("cpu"),
@@ -341,6 +346,10 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
     model = MinimalModel(hooked_layer)
 
     class FakeGPTQModel:
+        finalize_input_capture_example = BaseQModel.finalize_input_capture_example
+        move_input_capture_example = BaseQModel.move_input_capture_example
+        run_input_capture = BaseQModel.run_input_capture
+
         def __init__(self):
             self.quantize_config = types.SimpleNamespace(
                 device=torch.device("cuda:0"),
@@ -487,6 +496,10 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
     model = MinimalModel(hooked_layer)
 
     class FakeGPTQModel:
+        finalize_input_capture_example = BaseQModel.finalize_input_capture_example
+        move_input_capture_example = BaseQModel.move_input_capture_example
+        run_input_capture = BaseQModel.run_input_capture
+
         def __init__(self):
             self.quantize_config = types.SimpleNamespace(
                 device=torch.device("cuda:0"),

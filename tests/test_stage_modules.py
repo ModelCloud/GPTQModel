@@ -19,6 +19,7 @@ from gptqmodel.looper.stage_layer import (
     run_layer_stage,
 )
 from gptqmodel.looper.stage_subset import CalibrationCoveragePolicy, SubsetPlan, SubsetStageResult
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.pause_resume import PauseResumeController
 
@@ -89,6 +90,9 @@ class _TinyGptqModel:
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = False
     ATTENTION_MASKS_DTYPE = torch.long
     INPUT_EMBEDDING_EXTRA_ARGS = {}
+    finalize_input_capture_example = BaseQModel.finalize_input_capture_example
+    move_input_capture_example = BaseQModel.move_input_capture_example
+    run_input_capture = BaseQModel.run_input_capture
 
     def __init__(self):
         self.layer = _TinyLayer()
