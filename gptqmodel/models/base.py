@@ -1137,6 +1137,52 @@ class BaseQModel(nn.Module):
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
+    def move_input_capture_example(
+        self,
+        example: Dict[str, Any],
+        data_device: torch.device,
+    ) -> Dict[str, Any]:
+        for key, value in example.items():
+            if isinstance(value, list):
+                for index, item in enumerate(value):
+                    if not torch.is_tensor(item):
+                        continue
+
+                    if item.ndim == 1:
+                        item = item.unsqueeze(0)
+
+                    value[index] = move_to(item, device=data_device)
+            elif torch.is_tensor(value):
+                if value.ndim == 1:
+                    value = value.unsqueeze(0)
+
+                example[key] = move_to(value, device=data_device)
+
+        return self.finalize_input_capture_example(example)
+
+    def finalize_input_capture_example(
+        self,
+        example: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if self.ATTENTION_MASKS_DTYPE is torch.long and "attention_mask" in example:
+            example["attention_mask"] = example["attention_mask"].long()
+
+        return example
+
+    def run_input_capture(
+        self,
+        example: Dict[str, Any],
+        use_cache: bool,
+        data_device: torch.device,
+    ):
+        if self.INPUT_EMBEDDING_EXTRA_ARGS:
+            return self.model.generate(
+                **example,
+                **self.INPUT_EMBEDDING_EXTRA_ARGS,
+            )
+
+        return self.model(**example, use_cache=use_cache)
+
     def _generate_with_runtime(self, runtime_generate, inputs=None, **kwargs):
         def _normalize_generate_attention_mask(input_ids, attention_mask):
             if not torch.is_tensor(attention_mask) or attention_mask.ndim <= 2:

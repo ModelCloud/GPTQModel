@@ -14,7 +14,7 @@ from transformers.generation.utils import GenerationMixin
 from ...utils.audio import process_audio_info
 from ...utils.calibration import batched
 from ...utils.image import fetch_image
-from ...utils.model import MODALITY, move_to
+from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
@@ -401,3 +401,19 @@ class MiniCPMOQModel(BaseQModel):
                 )
             )
         return calib_data
+
+    def move_input_capture_example(self, example, data_device):
+        for key, value in example.items():
+            example[key] = nested_move_to(value, device=data_device)
+
+        return self.finalize_input_capture_example(example)
+
+    def run_input_capture(self, example, use_cache: bool, data_device):
+        generation_config = self.model.prepare_generation_config(do_sample=True)
+        generation_config["use_cache"] = use_cache
+
+        return self.model.generate(
+            **example,
+            tokenizer=self.model.tokenizer,
+            **generation_config,
+        )

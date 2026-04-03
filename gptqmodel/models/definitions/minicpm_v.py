@@ -11,7 +11,7 @@ from transformers import AutoModel, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
 from ...utils.image import fetch_image
-from ...utils.model import MODALITY, move_to
+from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
@@ -169,3 +169,25 @@ class MiniCPMVQModel(BaseQModel):
             )
         del processor
         return calib_data
+
+    def move_input_capture_example(self, example, data_device):
+        for key, value in example.items():
+            example[key] = nested_move_to(value, device=data_device)
+
+        return self.finalize_input_capture_example(example)
+
+    def run_input_capture(self, example, use_cache: bool, data_device):
+        generation_config = {
+            "temperature": 0.7,
+            "do_sample": True,
+            "top_p": 0.8,
+            "top_k": 100,
+            "repetition_penalty": 1.03,
+            "use_cache": use_cache,
+        }
+
+        return self.model.generate(
+            **example,
+            tokenizer=self.model.tokenizer,
+            **generation_config,
+        )
