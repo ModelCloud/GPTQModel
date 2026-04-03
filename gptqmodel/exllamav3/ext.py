@@ -15,7 +15,12 @@ from typing import Optional
 
 import torch
 
-from ..utils.cpp import TorchOpsJitExtension, default_torch_ops_build_root
+from ..utils.cpp import (
+    TorchOpsJitExtension,
+    default_jit_cflags,
+    default_jit_cuda_cflags,
+    default_torch_ops_build_root,
+)
 from .util.arch_list import maybe_set_arch_list_env
 
 
@@ -109,15 +114,11 @@ def _default_build_root() -> Path:
     return default_torch_ops_build_root("exllamav3")
 
 
-def _cxx11_abi_flag() -> int:
-    return int(getattr(torch._C, "_GLIBCXX_USE_CXX11_ABI", 1))
-
-
 def _extra_cflags() -> list[str]:
     if windows:
         flags = ["/O2", "/std:c++17"]
     else:
-        flags = ["-O3", "-std=c++17", f"-D_GLIBCXX_USE_CXX11_ABI={_cxx11_abi_flag()}"]
+        flags = default_jit_cflags()
 
     if ext_debug:
         if windows:
@@ -128,19 +129,10 @@ def _extra_cflags() -> list[str]:
 
 
 def _extra_cuda_cflags() -> list[str]:
-    flags = [
-        "-O3",
-        "-std=c++17",
-        "-lineinfo",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-    ]
-    if not windows:
-        flags.append(f"-D_GLIBCXX_USE_CXX11_ABI={_cxx11_abi_flag()}")
+    flags = default_jit_cuda_cflags(
+        include_abi=not windows,
+        include_lineinfo=True,
+    )
     if torch.version.hip:
         flags.append("-DHIPBLAS_USE_HIP_HALF")
     return flags

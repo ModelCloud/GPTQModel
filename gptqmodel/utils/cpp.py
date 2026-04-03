@@ -48,6 +48,75 @@ def default_torch_ops_build_root(subdir: str) -> Path:
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
 
 
+def torch_cxx11_abi_flag() -> int:
+    """Return the ABI mode local JIT extensions must match for this torch build."""
+
+    return int(getattr(torch._C, "_GLIBCXX_USE_CXX11_ABI", 1))
+
+
+def torch_cxx11_abi_define() -> str:
+    """Return the compiler define that keeps local extensions ABI-compatible."""
+
+    return f"-D_GLIBCXX_USE_CXX11_ABI={torch_cxx11_abi_flag()}"
+
+
+def default_jit_cflags(
+    *,
+    opt_level: str = "O3",
+    enable_bf16: bool = False,
+    include_abi: bool = True,
+) -> list[str]:
+    """Return the common C++ compiler flags for torch.ops JIT extensions."""
+
+    flags = [f"-{opt_level}", "-std=c++17"]
+    if enable_bf16:
+        flags.append("-DENABLE_BF16")
+    if include_abi:
+        flags.append(torch_cxx11_abi_define())
+    return flags
+
+
+def default_jit_cuda_cflags(
+    *,
+    opt_level: str = "O3",
+    enable_bf16: bool = False,
+    include_abi: bool = True,
+    include_lineinfo: bool = False,
+    include_nvcc_threads: bool = False,
+    include_ptxas_optimizations: bool = False,
+    include_fatbin_compression: bool = False,
+    include_diag_suppress: bool = False,
+) -> list[str]:
+    """Return the common NVCC flags for torch.ops JIT CUDA extensions."""
+
+    flags = default_jit_cflags(
+        opt_level=opt_level,
+        enable_bf16=enable_bf16,
+        include_abi=include_abi,
+    )
+    flags.extend([
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+    ])
+
+    optimization_level = opt_level[1:] if opt_level.startswith("O") else opt_level
+    if include_nvcc_threads:
+        flags.extend(["--threads", os.getenv("NVCC_THREADS", "2"), f"--optimize={optimization_level}"])
+    if include_ptxas_optimizations:
+        flags.extend(["-Xptxas", f"-v,-{opt_level},-dlcm=ca"])
+    if include_lineinfo:
+        flags.append("-lineinfo")
+    if include_fatbin_compression:
+        flags.extend(["-Xfatbin", "-compress-all"])
+    if include_diag_suppress:
+        flags.append("-diag-suppress=179,39,177")
+    return flags
+
+
 class TorchOpsJitExtension:
     """Manage one torch.ops JIT extension with shared cache and rebuild policy."""
 

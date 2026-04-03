@@ -8,7 +8,12 @@ from pathlib import Path
 
 import torch
 
-from .cpp import TorchOpsJitExtension, default_torch_ops_build_root
+from .cpp import (
+    TorchOpsJitExtension,
+    default_jit_cflags,
+    default_jit_cuda_cflags,
+    default_torch_ops_build_root,
+)
 
 
 _AWQ_OPS_NAME = "gptqmodel_awq_ops"
@@ -31,43 +36,19 @@ def _awq_include_paths() -> list[str]:
     return [str(root)]
 
 
-def _awq_cxx11_abi_flag() -> int:
-    return int(getattr(torch._C, "_GLIBCXX_USE_CXX11_ABI", 1))
-
-
 def _awq_extra_cflags() -> list[str]:
-    abi = _awq_cxx11_abi_flag()
-    return [
-        "-O3",
-        "-std=c++17",
-        "-DENABLE_BF16",
-        f"-D_GLIBCXX_USE_CXX11_ABI={abi}",
-    ]
+    return default_jit_cflags(enable_bf16=True)
 
 
 def _awq_extra_cuda_cflags() -> list[str]:
-    abi = _awq_cxx11_abi_flag()
-    return [
-        "-O3",
-        "-std=c++17",
-        "-DENABLE_BF16",
-        f"-D_GLIBCXX_USE_CXX11_ABI={abi}",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-        "--threads",
-        os.getenv("NVCC_THREADS", "2"),
-        "--optimize=3",
-        "-Xptxas",
-        "-v,-O3,-dlcm=ca",
-        "-lineinfo",
-        "-Xfatbin",
-        "-compress-all",
-        "-diag-suppress=179,39,177",
-    ]
+    return default_jit_cuda_cflags(
+        enable_bf16=True,
+        include_lineinfo=True,
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+        include_fatbin_compression=True,
+        include_diag_suppress=True,
+    )
 
 
 # Shared singleton so every AWQ/ParoQuant caller uses the same torch.ops JIT

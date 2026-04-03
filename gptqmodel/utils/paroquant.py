@@ -17,7 +17,12 @@ from typing import Optional, Tuple
 
 import torch
 
-from .cpp import TorchOpsJitExtension, default_torch_ops_build_root
+from .cpp import (
+    TorchOpsJitExtension,
+    default_jit_cflags,
+    default_jit_cuda_cflags,
+    default_torch_ops_build_root,
+)
 
 
 _SUPPORTED_ROTATION_KERNEL_DTYPES = {
@@ -173,17 +178,13 @@ def _rotation_kernel_ready(
 
 
 def _rotation_extra_cuda_cflags() -> list[str]:
-    return [
-        "-O3",
-        "-std=c++17",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+    flags = default_jit_cuda_cflags()
+    flags.extend([
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         "--use_fast_math",
-    ]
+    ])
+    return flags
 
 
 # Shared singleton so ParoQuant uses the same torch.ops JIT lifecycle helpers as
@@ -197,7 +198,7 @@ _PAROQUANT_ROTATION_EXTENSION = TorchOpsJitExtension(
     default_build_root=lambda: default_torch_ops_build_root("paroquant"),
     display_name="ParoQuant rotation",
     extra_cuda_cflags=_rotation_extra_cuda_cflags,
-    extra_cflags=["-O2", "-std=c++17"],
+    extra_cflags=lambda: default_jit_cflags(opt_level="O2"),
     force_rebuild_env="GPTQMODEL_PAROQUANT_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
