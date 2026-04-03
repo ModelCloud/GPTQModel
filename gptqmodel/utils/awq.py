@@ -10,7 +10,6 @@ import torch
 
 from .cpp import TorchOpsJitExtension, default_torch_ops_build_root
 
-
 _AWQ_OPS_NAME = "gptqmodel_awq_ops"
 _AWQ_OPS_NAMESPACE = "gptqmodel_awq"
 
@@ -62,7 +61,7 @@ def _awq_extra_cuda_cflags() -> list[str]:
         os.getenv("NVCC_THREADS", "2"),
         "--optimize=3",
         "-Xptxas",
-        "-v,-O3,-dlcm=ca",
+        "-O3,-dlcm=ca",  # -v, removed, or log file is too large.
         "-lineinfo",
         "-Xfatbin",
         "-compress-all",

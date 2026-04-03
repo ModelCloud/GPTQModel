@@ -66,6 +66,7 @@ def start_keepalive_monitor(
 
 def stream_process_output(proc: subprocess.Popen[str], log_file: Path) -> int:
     assert proc.stdout is not None
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     with log_file.open("w", encoding="utf-8") as fh:
         for line in proc.stdout:
             print(line, end="")

@@ -35,7 +35,7 @@ class ReleaseBuild:
         return {
             "cuda": self.cuda,
             "torch": self.torch,
-            "python": self.python,
+            "python": format_python_version(self.python),
         }
 
 
@@ -55,6 +55,15 @@ def python_key(python_version: str) -> tuple[int, int]:
     free_threaded = python_version.endswith("t")
     base = int(python_version[:-1] if free_threaded else python_version)
     return base, 0 if free_threaded else 1
+
+
+def format_python_version(python_version: str) -> str:
+    free_threaded = python_version.endswith("t")
+    base = python_version[:-1] if free_threaded else python_version
+    if len(base) < 2:
+        raise ValueError(f"unsupported python version format: {python_version}")
+    formatted = f"{base[0]}.{base[1:]}"
+    return f"{formatted}t" if free_threaded else formatted
 
 
 def fetch_torch_index(source_url: str) -> str:
