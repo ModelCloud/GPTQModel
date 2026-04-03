@@ -35,3 +35,17 @@ struct BC_LinearEXL3
 
     void run(const at::Tensor& x, at::Tensor& y);
 };
+
+void bc_linear_exl3_run
+(
+    at::Tensor trellis,
+    at::Tensor suh,
+    at::Tensor svh,
+    int64_t K,
+    const c10::optional<at::Tensor>& bias,
+    bool mcg,
+    bool mul1,
+    at::Tensor& xh,
+    const at::Tensor& x,
+    at::Tensor& y
+);
