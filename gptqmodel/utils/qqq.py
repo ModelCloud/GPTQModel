@@ -43,7 +43,6 @@ def _qqq_extra_cuda_cflags() -> list[str]:
         include_lineinfo=True,
         include_nvcc_threads=True,
         include_ptxas_optimizations=True,
-        include_fatbin_compression=True,
         include_diag_suppress=True,
     )
 
