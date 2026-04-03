@@ -232,7 +232,7 @@ jobs:
 
           [ $(stat -c%s "dist/$whl") -lt 104857600 ] && echo "wheel size < 100M" && exit 1 || echo "$whl size check passed."
 
-          if [ "${{ matrix.python }}" != "313t" ]; then # twine doesn't support python 3.13 yet
+          if [ "${{ matrix.python }}" != "3.13t" ]; then # twine doesn't support python 3.13 yet
             uv pip install twine
             twine check dist/$whl
           fi
