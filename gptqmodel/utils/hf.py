@@ -974,6 +974,15 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
         if base_model_cls:
             try_patch_legacy_flash_attn_flag(base_model_cls)
 
+    if config.model_type == "minicpmv" or config.model_type == "minicpmo":
+        vision_model_cls = getattr(
+            remote_module,
+            "SiglipVisionTransformer",
+            None,
+        )
+        if vision_model_cls:
+            try_patch_legacy_flash_attn_flag(vision_model_cls)
+
     if (
         outer_model_cls is not None
         and hasattr(outer_model_cls, "tie_weights")
