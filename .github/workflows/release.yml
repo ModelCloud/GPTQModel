@@ -174,8 +174,8 @@ jobs:
           source /opt/uv/setup_uv_venv.sh $env_name ${{ matrix.python }}
           python -VV
           
-          echo "source /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON"
-          /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
+          echo "source /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} ${{ matrix.python }}"
+          /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} ${{ matrix.python }}
 
       - name: Print uv env
         if: env.SHOULD_RUN == 1
