@@ -171,11 +171,11 @@ jobs:
           echo "UV_TORCH_BACKEND=cu${{ matrix.cuda }}" >> "$GITHUB_ENV"
 
           env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${{ matrix.python }}_release"
-          /opt/uv/setup_uv_venv.sh $env_name ${{ matrix.python }}
+          source /opt/uv/setup_uv_venv.sh $env_name ${{ matrix.python }}
           python -VV
           
           echo "source /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON"
-          source /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
+          /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
 
       - name: Print uv env
         if: env.SHOULD_RUN == 1
