@@ -170,7 +170,7 @@ def test_use_cache_false_requires_fresh_process_for_loaded_extensions(monkeypatc
     assert fakes["qqq"].load_calls == 0
 
 
-def test_op_routes_through_extension_loader(monkeypatch):
+def test_op_routes_through_extension_api(monkeypatch):
     _install_fake_extensions(monkeypatch)
 
     op = extension_api.op("awq", "test_op")
