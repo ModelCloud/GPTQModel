@@ -39,7 +39,7 @@ QUANT_METHOD_FIELD = "quant_method"
 PACK_DTYPE_FIELD = "pack_dtype"
 QUANT_CONFIG_FILENAME = "quantize_config.json"
 QUANT_CONFIG_FILENAME_COMPAT = [QUANT_CONFIG_FILENAME, "quant_config.json", "config.json"]
-# This is AwqBackendPackingMethod, not GPTQModel.BACKEND.
+# This is AwqBackendPackingMethod, not the GPT-QModel backend enum.
 # It's used to distinguish between quantization by llm-awq and autoawq; llm-awq actually uses GEMV_FAST for packing.
 AWQ_PACKING_BACKEND_FIELD = "backend"
 

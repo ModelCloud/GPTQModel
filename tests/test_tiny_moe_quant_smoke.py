@@ -10,7 +10,7 @@ flow against that fixture.
 
 The goal is not kernel benchmarking or quality evaluation. The goal is a cheap
 regression guard for the MoE lifecycle:
-1. native HF MoE model can be loaded through GPTQModel
+1. native HF MoE model can be loaded through GPT-QModel
 2. MoE routing override can drive expert quantization
 3. the quantized checkpoint can be reloaded
 4. every expert gate/up/down projection is exported as a quantized linear
@@ -47,7 +47,7 @@ _CALIBRATION_TEXTS = [
 
 
 def _build_local_tokenizer(model_dir: Path) -> PreTrainedTokenizerFast:
-    """Persist a minimal tokenizer because GPTQModel.load() expects local tokenizer files."""
+    """Persist a minimal tokenizer because the GPT-QModel `load()` path expects local tokenizer files."""
 
     tokenizer = Tokenizer(WordLevel(unk_token="[UNK]"))
     tokenizer.pre_tokenizer = Whitespace()

@@ -313,7 +313,7 @@ def _should_remap_symmetric_gptq_codes(gptq_module: BaseQuantLinear) -> bool:
 
     # The remap is only needed for the pre-v2 TorchQuantLinear symmetric pack path. That producer
     # keeps qzeros packed as all zeros while storing qweight in GPTQ's two's-complement nibble
-    # layout. GPTQModel converts external checkpoints to qzero_format=2 before BitBLAS repacking,
+    # layout. GPT-QModel converts external checkpoints to qzero_format=2 before BitBLAS repacking,
     # and those tensors must be left untouched.
     return qzeros.count_nonzero().item() == 0
 

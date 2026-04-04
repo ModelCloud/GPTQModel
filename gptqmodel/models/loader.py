@@ -1148,7 +1148,7 @@ def ModelLoader(cls):
                 from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
             except ModuleNotFoundError as exception:
                 raise type(exception)(
-                    "GPTQModel load mlx model required dependencies are not installed.",
+                    "GPT-QModel load mlx model required dependencies are not installed.",
                     "Please install via `pip install gptqmodel[mlx] --no-build-isolation`.",
                 )
 

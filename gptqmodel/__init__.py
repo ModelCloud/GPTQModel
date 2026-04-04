@@ -56,8 +56,8 @@ def _patch_transformers_paroquant_quantizer_compat():
     """Teach transformers to treat ParoQuant checkpoints as GPTQ-backed configs.
 
     Upstream transformers currently rejects `quant_method="paroquant"` before
-    the GPTQModel loader path gets a chance to handle the checkpoint. ParoQuant
-    artifacts reuse GPTQModel/Optimum loading semantics, so register the method
+    the GPT-QModel loader path gets a chance to handle the checkpoint. ParoQuant
+    artifacts reuse GPT-QModel/Optimum loading semantics, so register the method
     alongside GPTQ only when upstream has not provided native support yet.
     """
     try:

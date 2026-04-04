@@ -18,7 +18,7 @@ snapshot_download = transformers_hub.snapshot_download
 
 disable_progress_bar = transformers_logging.disable_progress_bar
 
-# Reuse the hub client instance that transformers already exposes so GPTQModel
+# Reuse the hub client instance that transformers already exposes so GPT-QModel
 # does not need to import huggingface_hub directly.
 _HF_API = list_repo_tree.__self__
 

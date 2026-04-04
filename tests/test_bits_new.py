@@ -169,7 +169,7 @@ class Test(ModelTest):
                 base_bench = bench(path=save_path, backend=backend, adapter=None) # inference using qweights only
                 # eora_bench = bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
 
-                print('--------GPTQModel + EoRA Config ---------')
+                print('--------GPT-QModel + EoRA Config ---------')
 
                 # Convert the dictionary to a list of lists for tabulate
                 table_data = [[key, value] for key, value in config_dict.items()]

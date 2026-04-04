@@ -369,9 +369,9 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
 class GPTQModel:
     def __init__(self):
         raise EnvironmentError(
-            "GPTQModel is not designed to be instantiated\n"
-            "use `GPTQModel.from_pretrained` to load pretrained model and prepare for quantization via `.quantize()`.\n"
-            "use `GPTQModel.from_quantized` to inference with post-quantized model."
+            "GPT-QModel is not designed to be instantiated\n"
+            "use `from_pretrained()` to load a pretrained model and prepare for quantization via `.quantize()`.\n"
+            "use `from_quantized()` for inference with a post-quantized model."
         )
 
     @classmethod
@@ -495,7 +495,7 @@ class GPTQModel:
 
         if quantize_config and quantize_config.dynamic:
             log.warn(
-                "GPTQModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
+                "GPT-QModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
 
         model_definition = check_and_get_model_definition(
             model_id_or_path,

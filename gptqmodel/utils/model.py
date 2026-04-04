@@ -505,7 +505,7 @@ def create_quant_module(
     validate_bits = quant_bits_width(tmp_bits)
     constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits
 
-    # when loading a quantized model, device is target device passed in GPTQModel.load()
+    # when loading a quantized model, device is the target passed through the GPT-QModel load path
     # check in_features and out_features validate
     _, err = linear_cls.validate(
         bits=validate_bits,

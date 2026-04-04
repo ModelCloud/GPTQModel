@@ -441,7 +441,7 @@ def ModelWriter(cls):
 
         if runtime_format == FORMAT.GPTQ_V2:
             log.warn(
-                f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
+                f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPT-QModel version >= {MIN_VERSION_WITH_V2}."
             )
 
         if runtime_format == FORMAT.EXL3:
