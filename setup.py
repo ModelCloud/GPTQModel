@@ -586,8 +586,10 @@ def _env_enabled_any(names, default="1") -> bool:
 
 BUILD_MARLIN = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
 BUILD_MACHETE = _env_enabled(os.environ.get("GPTQMODEL_BUILD_MACHETE", "0"))
-BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
-BUILD_EXLLAMA_V3 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V3", "1"))
+# ExLlamaV2 GPTQ now JIT-compiles on first use via torch.ops; keep setup-time prebuild opt-in only.
+BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "0"))
+# ExLlamaV3 now JIT-compiles on first use via torch.ops; keep setup-time prebuild opt-in only.
+BUILD_EXLLAMA_V3 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V3", "0"))
 
 EXLLAMAV3_SOURCES = [
     "gptqmodel_ext/exllamav3/bindings.cpp",
@@ -611,8 +613,10 @@ EXLLAMAV3_SOURCES = [
     "gptqmodel_ext/exllamav3/quant/reconstruct.cu",
     "gptqmodel_ext/exllamav3/quant/util.cu",
 ]
-BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
-BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
+# QQQ now JIT-compiles on first use via torch.ops; keep setup-time prebuild opt-in only.
+BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "0"))
+# AWQ runtimes now JIT-compile on first use via torch.ops; keep setup-time prebuild opt-in only.
+BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "0"))
 
 if BUILD_CUDA_EXT == "1":
     # Import torch's cpp_extension only if we're truly building GPU extensions

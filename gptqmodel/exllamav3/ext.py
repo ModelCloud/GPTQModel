@@ -11,15 +11,20 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 import torch
-from torch.utils.cpp_extension import load
 
-from ..utils._extension_loader import load_extension_module
+from ..utils.cpp import (
+    TorchOpsJitExtension,
+    default_jit_cflags,
+    default_jit_cuda_cflags,
+    default_torch_ops_build_root,
+)
 from .util.arch_list import maybe_set_arch_list_env
 
 
-extension_name = "gptqmodel_exllamav3_kernels"
+extension_name = "gptqmodel_exllamav3_ops"
 verbose = str(os.environ.get("GPTQMODEL_EXT_VERBOSE", "")).strip().lower() not in {"", "0", "false", "off", "no"}
 ext_debug = str(os.environ.get("GPTQMODEL_EXT_DEBUG", "")).strip().lower() in {"1", "true", "on", "yes"}
 windows = os.name == "nt"
@@ -95,65 +100,219 @@ def _source_files() -> list[str]:
     return [str((sources_dir / path).resolve()) for path in source_files]
 
 
-def _build_directory() -> str | None:
+def _legacy_build_root() -> Optional[Path]:
     build_root = os.environ.get("GPTQMODEL_EXT_BUILD")
     if not build_root:
         return None
-    return str(Path(build_root) / extension_name)
+    return Path(build_root) / extension_name
 
 
-def _load_prebuilt():
-    try:
-        return load_extension_module(extension_name, package="gptqmodel")
-    except ImportError:
-        return None
+def _default_build_root() -> Path:
+    legacy_root = _legacy_build_root()
+    if legacy_root is not None:
+        return legacy_root
+    return default_torch_ops_build_root("exllamav3")
 
 
-def _load_jit():
-    _ensure_windows_compiler()
-    maybe_set_arch_list_env()
-
-    extra_cflags = ["/O2", "/std:c++17"] if windows else ["-O3", "-std=c++17"]
-    extra_cuda_cflags = [
-        "-O3",
-        "-std=c++17",
-        "-lineinfo",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-    ]
+def _extra_cflags() -> list[str]:
+    if windows:
+        flags = ["/O2", "/std:c++17"]
+    else:
+        flags = default_jit_cflags(opt_level="O2")
 
     if ext_debug:
         if windows:
-            extra_cflags.append("/Zi")
+            flags.append("/Zi")
         else:
-            extra_cflags.extend(["-ftime-report", "-DTORCH_USE_CUDA_DSA"])
+            flags.extend(["-ftime-report", "-DTORCH_USE_CUDA_DSA"])
+    return flags
 
+
+def _extra_cuda_cflags() -> list[str]:
+    flags = default_jit_cuda_cflags(
+        opt_level="O2",
+        include_abi=not windows,
+        include_lineinfo=True,
+    )
     if torch.version.hip:
-        extra_cuda_cflags.append("-DHIPBLAS_USE_HIP_HALF")
+        flags.append("-DHIPBLAS_USE_HIP_HALF")
+    return flags
 
-    extra_ldflags: list[str] = []
-    if windows:
-        extra_ldflags.append("cublas.lib")
-        if sys.base_prefix != sys.prefix:
-            extra_ldflags.append(f"/LIBPATH:{os.path.join(sys.base_prefix, 'libs')}")
 
-    sources_dir = _source_root()
-    return load(
-        name=extension_name,
-        sources=_source_files(),
-        extra_include_paths=[str(sources_dir)],
-        build_directory=_build_directory(),
-        verbose=verbose,
-        extra_ldflags=extra_ldflags,
-        extra_cuda_cflags=extra_cuda_cflags,
-        extra_cflags=extra_cflags,
+def _extra_ldflags() -> list[str]:
+    if not windows:
+        return []
+    flags = ["cublas.lib"]
+    if sys.base_prefix != sys.prefix:
+        flags.append(f"/LIBPATH:{os.path.join(sys.base_prefix, 'libs')}")
+    return flags
+
+
+def _prepare_build_env() -> None:
+    _ensure_windows_compiler()
+    maybe_set_arch_list_env()
+
+
+# Shared singleton so EXL3 quantization and inference both reuse the same
+# torch.ops cache and first-use build policy.
+_EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+    name=extension_name,
+    namespace="gptqmodel_exllamav3",
+    required_ops=(
+        "had_paley",
+        "had_paley2",
+        "quantize_tiles",
+        "pack_trellis",
+        "unpack_trellis",
+        "pack_signs",
+        "reconstruct",
+        "had_r_128",
+        "hgemm",
+        "bc_linear_exl3_run",
+    ),
+    sources=_source_files,
+    build_root_env="GPTQMODEL_EXLLAMAV3_BUILD_ROOT",
+    default_build_root=_default_build_root,
+    display_name="ExLlamaV3",
+    extra_cflags=_extra_cflags,
+    extra_cuda_cflags=_extra_cuda_cflags,
+    extra_include_paths=lambda: [str(_source_root())],
+    extra_ldflags=_extra_ldflags,
+    force_rebuild_env="GPTQMODEL_EXLLAMAV3_FORCE_REBUILD",
+    verbose_env="GPTQMODEL_EXT_VERBOSE",
+    requires_cuda=True,
+)
+
+
+def exllamav3_runtime_available() -> bool:
+    _prepare_build_env()
+    return _EXLLAMAV3_TORCH_OPS_EXTENSION.load()
+
+
+def exllamav3_runtime_error() -> str:
+    _prepare_build_env()
+    if _EXLLAMAV3_TORCH_OPS_EXTENSION.load():
+        return ""
+    return (
+        _EXLLAMAV3_TORCH_OPS_EXTENSION.last_error_message()
+        or "ExLlamaV3 CUDA runtime unavailable."
     )
 
 
-exllamav3_ext = _load_prebuilt()
-if exllamav3_ext is None:
-    exllamav3_ext = _load_jit()
+def prewarm_exllamav3_extension() -> bool:
+    return exllamav3_runtime_available()
+
+
+def _runtime_op(name: str):
+    _prepare_build_env()
+    return _EXLLAMAV3_TORCH_OPS_EXTENSION.op(name)
+
+
+class _BCLinearEXL3:
+    """Preserve the old binding surface while dispatching through torch.ops."""
+
+    def __init__(
+        self,
+        trellis: torch.Tensor,
+        suh: torch.Tensor,
+        svh: torch.Tensor,
+        K: int,
+        bias: Optional[torch.Tensor],
+        mcg: bool,
+        mul1: bool,
+        xh: torch.Tensor,
+    ):
+        if not exllamav3_runtime_available():
+            raise ModuleNotFoundError("ExLlamaV3 torch.ops kernels are not properly installed. Error: " + exllamav3_runtime_error())
+        self.trellis = trellis
+        self.suh = suh
+        self.svh = svh
+        self.K = int(K)
+        self.bias = bias
+        self.mcg = bool(mcg)
+        self.mul1 = bool(mul1)
+        self.xh = xh
+
+    def run(self, x: torch.Tensor, y: torch.Tensor) -> None:
+        _runtime_op("bc_linear_exl3_run")(
+            self.trellis,
+            self.suh,
+            self.svh,
+            self.K,
+            self.bias,
+            self.mcg,
+            self.mul1,
+            self.xh,
+            x,
+            y,
+        )
+
+
+class _ExllamaV3TorchOpsFacade:
+    """Facade that mirrors the old pybind module API over torch.ops."""
+
+    BC_LinearEXL3 = _BCLinearEXL3
+
+    def had_paley(self, h: torch.Tensor) -> None:
+        _runtime_op("had_paley")(h)
+
+    def had_paley2(self, h: torch.Tensor) -> None:
+        _runtime_op("had_paley2")(h)
+
+    def quantize_tiles(
+        self,
+        input_tiles: torch.Tensor,
+        output_tiles: torch.Tensor,
+        output_indices: torch.Tensor,
+        temp_costs: torch.Tensor,
+        temp_edges: torch.Tensor,
+        K: int,
+        mcg: bool,
+        mul1: bool,
+    ) -> None:
+        _runtime_op("quantize_tiles")(
+            input_tiles,
+            output_tiles,
+            output_indices,
+            temp_costs,
+            temp_edges,
+            int(K),
+            bool(mcg),
+            bool(mul1),
+        )
+
+    def pack_trellis(self, packed: torch.Tensor, unpacked: torch.Tensor, K: int) -> None:
+        _runtime_op("pack_trellis")(packed, unpacked, int(K))
+
+    def unpack_trellis(self, unpacked: torch.Tensor, packed: torch.Tensor, K: int) -> None:
+        _runtime_op("unpack_trellis")(unpacked, packed, int(K))
+
+    def pack_signs(self, packed: torch.Tensor, unpacked: torch.Tensor) -> None:
+        _runtime_op("pack_signs")(packed, unpacked)
+
+    def reconstruct(self, unpacked: torch.Tensor, packed: torch.Tensor, K: int, mcg: bool, mul1: bool) -> None:
+        _runtime_op("reconstruct")(unpacked, packed, int(K), bool(mcg), bool(mul1))
+
+    def had_r_128(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        pre_scale: Optional[torch.Tensor],
+        post_scale: Optional[torch.Tensor],
+        scale: float,
+    ) -> None:
+        _runtime_op("had_r_128")(input, output, pre_scale, post_scale, float(scale))
+
+    def hgemm(self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> None:
+        _runtime_op("hgemm")(a, b, c)
+
+
+exllamav3_ext = _ExllamaV3TorchOpsFacade()
+
+
+__all__ = [
+    "exllamav3_ext",
+    "exllamav3_runtime_available",
+    "exllamav3_runtime_error",
+    "prewarm_exllamav3_extension",
+]

@@ -14,15 +14,17 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.exllamav2 import ScratchSpace
+from ...utils.exllamav2 import (
+    ScratchSpace,
+    exllamav2_gemm_half_q_half,
+    exllamav2_gptq_runtime_available,
+    exllamav2_gptq_runtime_error,
+    exllamav2_make_q_matrix,
+)
 from ...utils.logger import setup_logger
 
 
 log = setup_logger()
-
-
-# Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
-NONE_TENSOR = torch.empty((1, 1), device="meta")
 
 
 def _torch_device(idx):
@@ -59,8 +61,6 @@ class ExllamaV2QuantLinear(GPTQQuantLinear):
     QUANT_TYPE = "exllamav2"
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
-
-    gptqmodel_exllamav2_kernels = None
 
     def __init__(
         self,
@@ -107,12 +107,9 @@ class ExllamaV2QuantLinear(GPTQQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        try:
-            import gptqmodel_exllamav2_kernels
-            cls.gptqmodel_exllamav2_kernels = gptqmodel_exllamav2_kernels
-            return True, None
-        except ImportError as e:
-            return False, e
+        if not exllamav2_gptq_runtime_available():
+            return False, ImportError(exllamav2_gptq_runtime_error())
+        return True, None
 
     def post_init(self, scratch_space: ScratchSpace):
         # resize due to padding after model weights have been loaded
@@ -191,7 +188,7 @@ class ExllamaV2QuantLinear(GPTQQuantLinear):
         output_shape = x.shape[:-1] + (q4_width,)
         x = x.view(-1, x.shape[-1])
         output = torch.empty((x.shape[0], q4_width), dtype=torch.half, device=x.device)
-        self.gptqmodel_exllamav2_kernels.gemm_half_q_half(x, q_handle, output, force_cuda)
+        exllamav2_gemm_half_q_half(x, q_handle, output, force_cuda)
         return output.view(output_shape)
 
     def ext_make_q_matrix(self, w: dict, temp_dq, key: str = None):
@@ -204,18 +201,18 @@ class ExllamaV2QuantLinear(GPTQQuantLinear):
             w["q_scale_max"] /= 256
             w["q_perm"] = w["q_perm"].short()
             w["q_invperm"] = w["q_invperm"].short()
-            return self.gptqmodel_exllamav2_kernels.make_q_matrix(
+            return exllamav2_make_q_matrix(
                 w["q_weight"],
                 w["q_perm"],
                 w["q_invperm"],
                 w["q_scale"],
                 w["q_scale_max"],
                 w["q_groups"],
-                NONE_TENSOR,
-                NONE_TENSOR,
-                NONE_TENSOR,
-                temp_dq,
-            )
+                    None,
+                    None,
+                    None,
+                    temp_dq,
+                )
         # GPTQ
         elif "qweight" in w:
             if w["scales"].dtype == torch.float:
@@ -230,13 +227,13 @@ class ExllamaV2QuantLinear(GPTQQuantLinear):
                 )
                 w["q_invperm"] = torch.empty_like(w["q_perm"])
                 # make_q4 segfaults if g_idx is not on cpu in the act-order case. In the non act-order case, None needs to be passed for g_idx.
-                return self.gptqmodel_exllamav2_kernels.make_q_matrix(
+                return exllamav2_make_q_matrix(
                     w["qweight"],
                     w["q_perm"],
                     w["q_invperm"],
-                    NONE_TENSOR,
-                    NONE_TENSOR,
-                    NONE_TENSOR,
+                    None,
+                    None,
+                    None,
                     w["qzeros"],
                     w["scales"],
                     w["g_idx"].cpu(),
@@ -244,16 +241,16 @@ class ExllamaV2QuantLinear(GPTQQuantLinear):
                 )
             # GPTQ without g_idx
             else:
-                return self.gptqmodel_exllamav2_kernels.make_q_matrix(
+                return exllamav2_make_q_matrix(
                     w["qweight"],
-                    NONE_TENSOR,
-                    NONE_TENSOR,
-                    NONE_TENSOR,
-                    NONE_TENSOR,
-                    NONE_TENSOR,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                     w["qzeros"],
                     w["scales"],
-                    NONE_TENSOR,
+                    None,
                     temp_dq,
                 )
         else:

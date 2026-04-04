@@ -15,7 +15,6 @@ if TESTS_MODELS_ROOT not in sys.path:
 
 from model_test import ModelTest
 
-from gptqmodel import BACKEND
 from gptqmodel.quantization import FORMAT, METHOD
 
 

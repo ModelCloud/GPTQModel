@@ -53,6 +53,63 @@ def _make_loader(tmp_path: Path, **overrides) -> cpp_module.TorchOpsJitExtension
     return cpp_module.TorchOpsJitExtension(**params)
 
 
+def test_default_jit_cflags_allow_noopt(monkeypatch):
+    """Guard the noopt path so callers can intentionally omit all `-O*` flags."""
+
+    monkeypatch.delenv("GPTQMODEL_NVCC_COMPILE_LEVEL", raising=False)
+
+    flags = cpp_module.default_jit_cflags(opt_level=None)
+
+    assert "-std=c++17" in flags
+    assert not any(flag.startswith("-O") for flag in flags)
+
+
+def test_default_jit_cuda_cflags_respect_o2_override(monkeypatch):
+    """Guard the global override so kernels can be forced onto one explicit optimization level."""
+
+    monkeypatch.setenv("GPTQMODEL_NVCC_COMPILE_LEVEL", "O2")
+
+    flags = cpp_module.default_jit_cuda_cflags(
+        opt_level="O3",
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+    )
+
+    assert "-O2" in flags
+    assert "-O3" not in flags
+    assert "--optimize=2" in flags
+    assert flags[flags.index("-Xptxas") + 1] == "-v,-O2,-dlcm=ca"
+
+
+def test_default_jit_cuda_cflags_respect_noopt_override(monkeypatch):
+    """Guard the noopt override so users can disable every emitted `-O*` flag when needed."""
+
+    monkeypatch.setenv("GPTQMODEL_NVCC_COMPILE_LEVEL", "NONE")
+
+    flags = cpp_module.default_jit_cuda_cflags(
+        opt_level="O3",
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+    )
+
+    assert not any(flag.startswith("-O") for flag in flags)
+    assert not any(flag.startswith("--optimize=") for flag in flags)
+    assert flags[flags.index("-Xptxas") + 1] == "-v,-dlcm=ca"
+
+
+def test_default_jit_cuda_cflags_allow_quiet_ptxas(monkeypatch):
+    """Guard per-kernel PTXAS verbosity overrides so AWQ can suppress giant compile logs."""
+
+    monkeypatch.delenv("GPTQMODEL_NVCC_COMPILE_LEVEL", raising=False)
+
+    flags = cpp_module.default_jit_cuda_cflags(
+        include_ptxas_optimizations=True,
+        include_ptxas_verbosity=False,
+    )
+
+    assert flags[flags.index("-Xptxas") + 1] == "-O3,-dlcm=ca"
+
+
 def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
     """Guard cache reuse so startup skips expensive JIT rebuilds when ops are already built."""
 

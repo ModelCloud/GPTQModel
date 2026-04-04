@@ -48,6 +48,112 @@ def default_torch_ops_build_root(subdir: str) -> Path:
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
 
 
+def torch_cxx11_abi_flag() -> int:
+    """Return the ABI mode local JIT extensions must match for this torch build."""
+
+    return int(getattr(torch._C, "_GLIBCXX_USE_CXX11_ABI", 1))
+
+
+def torch_cxx11_abi_define() -> str:
+    """Return the compiler define that keeps local extensions ABI-compatible."""
+
+    return f"-D_GLIBCXX_USE_CXX11_ABI={torch_cxx11_abi_flag()}"
+
+
+def resolved_jit_opt_level(opt_level: str | None = "O3") -> str | None:
+    """Resolve the effective JIT optimization level, honoring the global env override."""
+
+    override = os.getenv("GPTQMODEL_NVCC_COMPILE_LEVEL")
+    raw_level = override if override is not None else opt_level
+    if raw_level is None:
+        return None
+
+    normalized = str(raw_level).strip()
+    if not normalized:
+        return None
+    if normalized.startswith("-"):
+        normalized = normalized[1:]
+    normalized = normalized.upper()
+
+    if normalized in {"NONE", "NOOPT", "NO_OPT", "OFF", "DISABLE", "0"}:
+        return None
+    if normalized in {"O0", "O1", "O2", "O3"}:
+        return normalized
+    raise ValueError(
+        "GPTQMODEL_NVCC_COMPILE_LEVEL must be one of O0/O1/O2/O3 or NONE/NOOPT/OFF."
+    )
+
+
+def default_jit_cflags(
+    *,
+    opt_level: str | None = "O3",
+    enable_bf16: bool = False,
+    include_abi: bool = True,
+) -> list[str]:
+    """Return the common C++ compiler flags for torch.ops JIT extensions."""
+
+    resolved_opt_level = resolved_jit_opt_level(opt_level)
+    flags = ["-std=c++17"]
+    if resolved_opt_level is not None:
+        flags.insert(0, f"-{resolved_opt_level}")
+    if enable_bf16:
+        flags.append("-DENABLE_BF16")
+    if include_abi:
+        flags.append(torch_cxx11_abi_define())
+    return flags
+
+
+def default_jit_cuda_cflags(
+    *,
+    opt_level: str | None = "O3",
+    enable_bf16: bool = False,
+    include_abi: bool = True,
+    include_lineinfo: bool = False,
+    include_nvcc_threads: bool = False,
+    include_ptxas_optimizations: bool = False,
+    include_ptxas_verbosity: bool = True,
+    include_fatbin_compression: bool = False,
+    include_diag_suppress: bool = False,
+) -> list[str]:
+    """Return the common NVCC flags for torch.ops JIT CUDA extensions."""
+
+    resolved_opt_level = resolved_jit_opt_level(opt_level)
+    flags = default_jit_cflags(
+        opt_level=resolved_opt_level,
+        enable_bf16=enable_bf16,
+        include_abi=include_abi,
+    )
+    flags.extend([
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+    ])
+
+    if include_nvcc_threads:
+        flags.extend(["--threads", os.getenv("NVCC_THREADS", "2")])
+        if resolved_opt_level is not None:
+            optimization_level = (
+                resolved_opt_level[1:] if resolved_opt_level.startswith("O") else resolved_opt_level
+            )
+            flags.append(f"--optimize={optimization_level}")
+    if include_ptxas_optimizations:
+        ptxas_flags = ["-v"] if include_ptxas_verbosity else []
+        if resolved_opt_level is not None:
+            ptxas_flags.append(f"-{resolved_opt_level}")
+        ptxas_flags.append("-dlcm=ca")
+        flags.extend(["-Xptxas", ",".join(ptxas_flags)])
+    if include_lineinfo:
+        flags.append("-lineinfo")
+    if include_fatbin_compression:
+        flags.extend(["-Xfatbin", "-compress-all"])
+    if include_diag_suppress:
+        flags.append("-diag-suppress=179,39,177")
+    return flags
+
+
 class TorchOpsJitExtension:
     """Manage one torch.ops JIT extension with shared cache and rebuild policy."""
 
