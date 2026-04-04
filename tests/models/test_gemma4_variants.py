@@ -11,6 +11,7 @@ from huggingface_hub import snapshot_download
 from gptqmodel.quantization.config import GcMode, VramStrategy
 from gptqmodel.utils.backend import BACKEND
 
+
 # Keep Gemma 4 model tests inside the requested PCI bus ordered GPU pool.
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1,2,4")
