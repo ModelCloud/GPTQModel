@@ -10,7 +10,6 @@ import sys
 import tarfile
 from pathlib import Path
 
-import pytest
 import torch
 
 import gptqmodel.utils.machete as machete_utils
