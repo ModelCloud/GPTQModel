@@ -60,15 +60,42 @@ def torch_cxx11_abi_define() -> str:
     return f"-D_GLIBCXX_USE_CXX11_ABI={torch_cxx11_abi_flag()}"
 
 
+def resolved_jit_opt_level(opt_level: str | None = "O3") -> str | None:
+    """Resolve the effective JIT optimization level, honoring the global env override."""
+
+    override = os.getenv("GPTQMODEL_NVCC_COMPILE_LEVEL")
+    raw_level = override if override is not None else opt_level
+    if raw_level is None:
+        return None
+
+    normalized = str(raw_level).strip()
+    if not normalized:
+        return None
+    if normalized.startswith("-"):
+        normalized = normalized[1:]
+    normalized = normalized.upper()
+
+    if normalized in {"NONE", "NOOPT", "NO_OPT", "OFF", "DISABLE", "0"}:
+        return None
+    if normalized in {"O0", "O1", "O2", "O3"}:
+        return normalized
+    raise ValueError(
+        "GPTQMODEL_NVCC_COMPILE_LEVEL must be one of O0/O1/O2/O3 or NONE/NOOPT/OFF."
+    )
+
+
 def default_jit_cflags(
     *,
-    opt_level: str = "O3",
+    opt_level: str | None = "O3",
     enable_bf16: bool = False,
     include_abi: bool = True,
 ) -> list[str]:
     """Return the common C++ compiler flags for torch.ops JIT extensions."""
 
-    flags = [f"-{opt_level}", "-std=c++17"]
+    resolved_opt_level = resolved_jit_opt_level(opt_level)
+    flags = ["-std=c++17"]
+    if resolved_opt_level is not None:
+        flags.insert(0, f"-{resolved_opt_level}")
     if enable_bf16:
         flags.append("-DENABLE_BF16")
     if include_abi:
@@ -78,7 +105,7 @@ def default_jit_cflags(
 
 def default_jit_cuda_cflags(
     *,
-    opt_level: str = "O3",
+    opt_level: str | None = "O3",
     enable_bf16: bool = False,
     include_abi: bool = True,
     include_lineinfo: bool = False,
@@ -89,8 +116,9 @@ def default_jit_cuda_cflags(
 ) -> list[str]:
     """Return the common NVCC flags for torch.ops JIT CUDA extensions."""
 
+    resolved_opt_level = resolved_jit_opt_level(opt_level)
     flags = default_jit_cflags(
-        opt_level=opt_level,
+        opt_level=resolved_opt_level,
         enable_bf16=enable_bf16,
         include_abi=include_abi,
     )
@@ -103,11 +131,19 @@ def default_jit_cuda_cflags(
         "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
     ])
 
-    optimization_level = opt_level[1:] if opt_level.startswith("O") else opt_level
     if include_nvcc_threads:
-        flags.extend(["--threads", os.getenv("NVCC_THREADS", "2"), f"--optimize={optimization_level}"])
+        flags.extend(["--threads", os.getenv("NVCC_THREADS", "2")])
+        if resolved_opt_level is not None:
+            optimization_level = (
+                resolved_opt_level[1:] if resolved_opt_level.startswith("O") else resolved_opt_level
+            )
+            flags.append(f"--optimize={optimization_level}")
     if include_ptxas_optimizations:
-        flags.extend(["-Xptxas", f"-v,-{opt_level},-dlcm=ca"])
+        ptxas_flags = ["-v"]
+        if resolved_opt_level is not None:
+            ptxas_flags.append(f"-{resolved_opt_level}")
+        ptxas_flags.append("-dlcm=ca")
+        flags.extend(["-Xptxas", ",".join(ptxas_flags)])
     if include_lineinfo:
         flags.append("-lineinfo")
     if include_fatbin_compression:

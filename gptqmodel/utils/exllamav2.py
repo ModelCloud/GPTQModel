@@ -55,6 +55,22 @@ def _exllamav2_include_paths() -> list[str]:
     return [str(_exllamav2_root())]
 
 
+def _exllamav2_gptq_extra_cflags() -> list[str]:
+    return default_jit_cflags(opt_level="O2", enable_bf16=True)
+
+
+def _exllamav2_gptq_extra_cuda_cflags() -> list[str]:
+    return default_jit_cuda_cflags(
+        opt_level="O2",
+        enable_bf16=True,
+        include_lineinfo=True,
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+        include_fatbin_compression=True,
+        include_diag_suppress=True,
+    )
+
+
 def _exllamav2_extra_cflags() -> list[str]:
     return default_jit_cflags(enable_bf16=True)
 
@@ -78,8 +94,8 @@ _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     build_root_env="GPTQMODEL_EXLLAMAV2_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("exllamav2"),
     display_name="ExLlamaV2 GPTQ",
-    extra_cflags=_exllamav2_extra_cflags,
-    extra_cuda_cflags=_exllamav2_extra_cuda_cflags,
+    extra_cflags=_exllamav2_gptq_extra_cflags,
+    extra_cuda_cflags=_exllamav2_gptq_extra_cuda_cflags,
     extra_include_paths=_exllamav2_include_paths,
     force_rebuild_env="GPTQMODEL_EXLLAMAV2_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
