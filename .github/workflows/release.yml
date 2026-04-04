@@ -169,13 +169,15 @@ jobs:
         run: |
           echo "UV_PYTHON=${{ matrix.python }}" >> "$GITHUB_ENV"
           echo "UV_TORCH_BACKEND=cu${{ matrix.cuda }}" >> "$GITHUB_ENV"
+          export UV_PYTHON=${{ matrix.python }}
+          export UV_TORCH_BACKEND=cu${{ matrix.cuda }}
 
           env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${{ matrix.python }}_release"
-          /opt/uv/setup_uv_venv.sh $env_name ${{ matrix.python }}
+          source /opt/uv/setup_uv_venv.sh $env_name ${{ matrix.python }}
           python -VV
           
-          echo "source /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON"
-          source /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
+          echo "source /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} ${{ matrix.python }}"
+          /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} ${{ matrix.python }}
 
       - name: Print uv env
         if: env.SHOULD_RUN == 1
@@ -232,7 +234,7 @@ jobs:
 
           [ $(stat -c%s "dist/$whl") -lt 104857600 ] && echo "wheel size < 100M" && exit 1 || echo "$whl size check passed."
 
-          if [ "${{ matrix.python }}" != "313t" ]; then # twine doesn't support python 3.13 yet
+          if [ "${{ matrix.python }}" != "3.13t" ]; then # twine doesn't support python 3.13 yet
             uv pip install twine
             twine check dist/$whl
           fi

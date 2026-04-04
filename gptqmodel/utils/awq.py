@@ -12,7 +12,6 @@ from .cpp import (
     default_torch_ops_build_root,
 )
 
-
 _AWQ_OPS_NAME = "gptqmodel_awq_ops"
 _AWQ_OPS_NAMESPACE = "gptqmodel_awq"
 
@@ -43,6 +42,7 @@ def _awq_extra_cuda_cflags() -> list[str]:
         include_lineinfo=True,
         include_nvcc_threads=True,
         include_ptxas_optimizations=True,
+        include_ptxas_verbosity=False,
         include_fatbin_compression=True,
         include_diag_suppress=True,
     )

@@ -111,6 +111,7 @@ def default_jit_cuda_cflags(
     include_lineinfo: bool = False,
     include_nvcc_threads: bool = False,
     include_ptxas_optimizations: bool = False,
+    include_ptxas_verbosity: bool = True,
     include_fatbin_compression: bool = False,
     include_diag_suppress: bool = False,
 ) -> list[str]:
@@ -139,7 +140,7 @@ def default_jit_cuda_cflags(
             )
             flags.append(f"--optimize={optimization_level}")
     if include_ptxas_optimizations:
-        ptxas_flags = ["-v"]
+        ptxas_flags = ["-v"] if include_ptxas_verbosity else []
         if resolved_opt_level is not None:
             ptxas_flags.append(f"-{resolved_opt_level}")
         ptxas_flags.append("-dlcm=ca")

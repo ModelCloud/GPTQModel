@@ -97,6 +97,19 @@ def test_default_jit_cuda_cflags_respect_noopt_override(monkeypatch):
     assert flags[flags.index("-Xptxas") + 1] == "-v,-dlcm=ca"
 
 
+def test_default_jit_cuda_cflags_allow_quiet_ptxas(monkeypatch):
+    """Guard per-kernel PTXAS verbosity overrides so AWQ can suppress giant compile logs."""
+
+    monkeypatch.delenv("GPTQMODEL_NVCC_COMPILE_LEVEL", raising=False)
+
+    flags = cpp_module.default_jit_cuda_cflags(
+        include_ptxas_optimizations=True,
+        include_ptxas_verbosity=False,
+    )
+
+    assert flags[flags.index("-Xptxas") + 1] == "-O3,-dlcm=ca"
+
+
 def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
     """Guard cache reuse so startup skips expensive JIT rebuilds when ops are already built."""
 

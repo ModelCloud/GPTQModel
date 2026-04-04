@@ -15,7 +15,6 @@ from packaging.version import Version
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
-
 if Version(setuptools.__version__) < Version("78.1.1"):
     raise RuntimeError(
         f"\033[31mYour setuptools version (`{setuptools.__version__}`) is too old and incompatible.\n"
@@ -719,7 +718,7 @@ if BUILD_CUDA_EXT == "1":
                 # Print register/shared-memory usage per kernel (debug aid, no perf effect)
                 # Ensure PTXAS uses maximum optimization
                 # Cache global loads in both L1 and L2 (better for memory-bound kernels)
-                "-Xptxas", "-v,-O3,-dlcm=ca",
+                "-Xptxas", "-O3,-dlcm=ca",  # -v, removed, or log file is too large.
                 "-lineinfo",  # keep source line info for profiling
                 # "--resource-usage",  # show per-kernel register/SMEM usage
                 "-Xfatbin", "-compress-all",  # compress fatbin
