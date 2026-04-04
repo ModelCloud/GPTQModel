@@ -118,7 +118,7 @@ def _extra_cflags() -> list[str]:
     if windows:
         flags = ["/O2", "/std:c++17"]
     else:
-        flags = default_jit_cflags()
+        flags = default_jit_cflags(opt_level="O2")
 
     if ext_debug:
         if windows:
@@ -130,6 +130,7 @@ def _extra_cflags() -> list[str]:
 
 def _extra_cuda_cflags() -> list[str]:
     flags = default_jit_cuda_cflags(
+        opt_level="O2",
         include_abi=not windows,
         include_lineinfo=True,
     )
