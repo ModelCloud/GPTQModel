@@ -86,6 +86,22 @@ def _exllamav2_extra_cuda_cflags() -> list[str]:
     )
 
 
+def _exllamav2_awq_extra_cflags() -> list[str]:
+    return default_jit_cflags(opt_level=None, enable_bf16=True)
+
+
+def _exllamav2_awq_extra_cuda_cflags() -> list[str]:
+    return default_jit_cuda_cflags(
+        opt_level=None,
+        enable_bf16=True,
+        include_lineinfo=True,
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+        include_fatbin_compression=True,
+        include_diag_suppress=True,
+    )
+
+
 _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name="gptqmodel_exllamav2_ops",
     namespace="gptqmodel_exllamav2",
@@ -116,8 +132,8 @@ _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     build_root_env="GPTQMODEL_EXLLAMAV2_AWQ_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("exllamav2_awq"),
     display_name="ExLlamaV2 AWQ",
-    extra_cflags=_exllamav2_extra_cflags,
-    extra_cuda_cflags=_exllamav2_extra_cuda_cflags,
+    extra_cflags=_exllamav2_awq_extra_cflags,
+    extra_cuda_cflags=_exllamav2_awq_extra_cuda_cflags,
     extra_include_paths=_exllamav2_include_paths,
     force_rebuild_env="GPTQMODEL_EXLLAMAV2_AWQ_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
