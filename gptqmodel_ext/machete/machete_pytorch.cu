@@ -3,6 +3,7 @@
 #include "core/scalar_type.hpp"
 
 #include "core/registration.h"
+#include <torch/library.h>
 
 namespace machete {
 
@@ -60,13 +61,19 @@ torch::Tensor prepack_B(
        .maybe_group_scales_type = maybe_group_scales_type});
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+TORCH_LIBRARY(gptqmodel_machete, m) {
+  m.def("machete_prepack_B(Tensor B, ScalarType a_type, int b_type_id, ScalarType? group_scales_type=None) -> Tensor");
+  m.def("machete_mm(Tensor A, Tensor B, int b_type_id, ScalarType? out_type=None, Tensor? group_scales=None, Tensor? group_zeros=None, int? group_size=None, Tensor? channel_scales=None, Tensor? token_scales=None, str? schedule=None) -> Tensor");
+  m.def("machete_supported_schedules(ScalarType a_type, int b_type_id, ScalarType? group_scales_type=None, ScalarType? group_zeros_type=None, ScalarType? channel_scales_type=None, ScalarType? token_scales_type=None, ScalarType? out_type=None) -> str[]");
+}
+
+TORCH_LIBRARY_IMPL(gptqmodel_machete, CUDA, m) {
   m.impl("machete_prepack_B", &prepack_B);
   m.impl("machete_mm", &mm);
 }
 
 // use CatchAll since supported_schedules has no tensor arguments
-TORCH_LIBRARY_IMPL(TORCH_EXTENSION_NAME, CatchAll, m) {
+TORCH_LIBRARY_IMPL(gptqmodel_machete, CatchAll, m) {
   m.impl("machete_supported_schedules", &supported_schedules);
 }
 

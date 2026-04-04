@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib.util
 import os
 import sys
 
@@ -26,6 +25,7 @@ from gptqmodel.quantization.protocol import (
     compile_protocol,
     compile_protocol_yaml_text,
 )
+from gptqmodel.utils.machete import _validate_machete_device_support
 
 
 LAYER0_ONLY_NEGATIVE_MATCH = r".*layers\.(?:[1-9]|[12][0-9]|3[0-2])\..*"
@@ -89,9 +89,9 @@ class _BaseLlama3_2AWQProtocol(ModelTest):
         (
             (not __import__("torch").cuda.is_available())
             or __import__("torch").cuda.device_count() <= 3
-            or importlib.util.find_spec("gptqmodel_machete_kernels") is None
+            or not _validate_machete_device_support()
         ),
-        reason="CUDA devices 2 and 3 plus `gptqmodel_machete_kernels` are required for AWQ protocol dynamic-match integration tests",
+        reason="CUDA devices 2 and 3 plus NVIDIA Hopper-or-newer GPUs are required for AWQ protocol dynamic-match integration tests",
     )
 
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"

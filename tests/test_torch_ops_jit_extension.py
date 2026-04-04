@@ -209,7 +209,7 @@ def test_torch_ops_jit_extension_emits_spinner_logs_around_compile(monkeypatch, 
     assert compile_calls[0]["extra_include_paths"] == ["/tmp/include"]
     assert compile_calls[0]["extra_ldflags"] == ["-lm"]
     assert logger.spinners
-    assert logger.spinners[0].title == "Unit Test Kernel: compiling kernel..."
+    assert logger.spinners[0].title == "Compiling extension: Unit Test Kernel..."
     assert logger.spinners[0].closed is True
     assert any("compiling torch.ops JIT extension" in message for message in logger.info_messages)
     assert any("torch.ops JIT extension ready" in message for message in logger.info_messages)

@@ -26,6 +26,7 @@ class _ExtensionSpec:
     name: str
     aliases: tuple[str, ...]
     resolve: Callable[[], TorchOpsJitExtension]
+    supported: Callable[[], bool] | None = None
 
 
 def _resolve_attr(module_name: str, attr_name: str):
@@ -72,6 +73,12 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_attr("gptqmodel.exllamav3.ext", "_EXLLAMAV3_TORCH_OPS_EXTENSION"),
     ),
     _ExtensionSpec(
+        name="machete",
+        aliases=("gptq_machete", "awq_machete"),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.machete", "_MACHETE_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.machete", "_validate_machete_device_support")(),
+    ),
+    _ExtensionSpec(
         name="marlin_fp16",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin", "_MARLIN_FP16_TORCH_OPS_EXTENSION"),
@@ -91,7 +98,6 @@ _EXTENSION_SPECS = (
 _EXTENSION_SPECS_BY_NAME = {spec.name: spec for spec in _EXTENSION_SPECS}
 
 _EXTENSION_GROUPS = {
-    "all": tuple(spec.name for spec in _EXTENSION_SPECS),
     "marlin": ("marlin_fp16", "marlin_bf16"),
 }
 
@@ -112,8 +118,19 @@ def available_extensions() -> tuple[str, ...]:
     return tuple(spec.name for spec in _EXTENSION_SPECS)
 
 
+def _spec_supported(spec: _ExtensionSpec) -> bool:
+    if spec.supported is None:
+        return True
+    try:
+        return bool(spec.supported())
+    except Exception:
+        return False
+
+
 def _resolve_requested_extensions(name: str) -> tuple[str, ...]:
     normalized = _normalize_extension_name(name or "all")
+    if normalized == "all":
+        return tuple(spec.name for spec in _EXTENSION_SPECS if _spec_supported(spec))
     if normalized in _EXTENSION_GROUPS:
         return _EXTENSION_GROUPS[normalized]
     concrete = _EXTENSION_ALIASES.get(normalized)

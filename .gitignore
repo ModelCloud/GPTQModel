@@ -189,6 +189,7 @@ example.py
 /tests/models/gptqmodel_offload*/
 /QWEN3-8B-AWQ/
 /evalplus_results/
+/cutlass/
 *.csv
 /gptqmodel_ext/machete/generated/
 AGENT.md

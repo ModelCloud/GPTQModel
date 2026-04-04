@@ -16,10 +16,10 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.machete import (
     _validate_machete_device_support,
-    gptqmodel_machete_kernels,
-    machete_import_exception,
     machete_mm,
     machete_prepack_B,
+    machete_runtime_available,
+    machete_runtime_error,
     pack_quantized_values_into_int32,
 )
 from ...utils.marlin import replace_parameter, unpack_cols
@@ -73,12 +73,6 @@ class AwqMacheteQuantLinear(AWQuantLinear):
             adapter: Adapter = None,
             register_buffers: bool = False,
             **kwargs):
-        if machete_import_exception is not None:
-            raise ValueError(
-                "Trying to use the machete backend, but could not import the "
-                f"C++/CUDA dependencies with the following error: {machete_import_exception}"
-            )
-
         if bits not in self.TYPE_MAP:
             raise ValueError(f"Unsupported num_bits = {bits}. Supported: {list(self.TYPE_MAP.keys())}")
 
@@ -101,10 +95,9 @@ class AwqMacheteQuantLinear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        if gptqmodel_machete_kernels is None:
-            return False, ImportError(machete_import_exception)
-        else:
-            return True, None
+        if not machete_runtime_available():
+            return False, ImportError(machete_runtime_error())
+        return True, None
 
     @classmethod
     def validate_device(cls, device: DEVICE):

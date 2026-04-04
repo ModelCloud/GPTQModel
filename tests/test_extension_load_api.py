@@ -14,6 +14,7 @@ import gptqmodel.extension as extension_api
 import gptqmodel.utils.awq as awq_utils
 import gptqmodel.utils.cpp as cpp_utils
 import gptqmodel.utils.exllamav2 as exllamav2_utils
+import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
 import gptqmodel.utils.paroquant as paroquant_utils
 import gptqmodel.utils.qqq as qqq_utils
@@ -66,6 +67,7 @@ def _install_fake_extensions(monkeypatch):
         "exllamav2": _FakeExtension("ExLlamaV2 GPTQ"),
         "exllamav2_awq": _FakeExtension("ExLlamaV2 AWQ"),
         "exllamav3": _FakeExtension("ExLlamaV3"),
+        "machete": _FakeExtension("Machete"),
         "marlin_fp16": _FakeExtension("Marlin fp16"),
         "marlin_bf16": _FakeExtension("Marlin bf16"),
         "paroquant": _FakeExtension("ParoQuant rotation"),
@@ -77,6 +79,8 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(exllamav2_utils, "_EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION", fakes["exllamav2"])
     monkeypatch.setattr(exllamav2_utils, "_EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION", fakes["exllamav2_awq"])
     monkeypatch.setattr(exllamav3_ext, "_EXLLAMAV3_TORCH_OPS_EXTENSION", fakes["exllamav3"])
+    monkeypatch.setattr(machete_utils, "_MACHETE_TORCH_OPS_EXTENSION", fakes["machete"])
+    monkeypatch.setattr(machete_utils, "_validate_machete_device_support", lambda: True)
     monkeypatch.setattr(marlin_utils, "_MARLIN_FP16_TORCH_OPS_EXTENSION", fakes["marlin_fp16"])
     monkeypatch.setattr(marlin_utils, "_MARLIN_BF16_TORCH_OPS_EXTENSION", fakes["marlin_bf16"])
     monkeypatch.setattr(paroquant_utils, "_PAROQUANT_ROTATION_EXTENSION", fakes["paroquant"])
@@ -100,11 +104,22 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "exllamav2": True,
         "exllamav2_awq": True,
         "exllamav3": True,
+        "machete": True,
         "marlin_fp16": True,
         "marlin_bf16": True,
         "paroquant": True,
     }
     assert all(fake.load_calls == 1 for fake in fakes.values())
+
+
+def test_load_all_skips_extensions_unsupported_on_this_host(monkeypatch):
+    fakes = _install_fake_extensions(monkeypatch)
+    monkeypatch.setattr(machete_utils, "_validate_machete_device_support", lambda: False)
+
+    result = extension_api.load()
+
+    assert "machete" not in result
+    assert fakes["machete"].load_calls == 0
 
 
 def test_load_marlin_alias_builds_both_variants(monkeypatch):
