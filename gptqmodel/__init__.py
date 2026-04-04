@@ -208,6 +208,7 @@ from .quantization import (
 )
 from .utils import BACKEND
 from .version import __version__
+from . import extension
 
 
 setup_logger().info(

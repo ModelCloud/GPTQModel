@@ -157,16 +157,18 @@ _MARLIN_BF16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
 )
 
 
+def _extension_api():
+    from gptqmodel import extension as extension_api
+
+    return extension_api
+
+
 def _marlin_runtime_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
     return torch.bfloat16 if dtype == torch.bfloat16 else torch.float16
 
 
-def _marlin_extension_for_dtype(dtype: Optional[torch.dtype]) -> TorchOpsJitExtension:
-    return (
-        _MARLIN_BF16_TORCH_OPS_EXTENSION
-        if _marlin_runtime_dtype(dtype) == torch.bfloat16
-        else _MARLIN_FP16_TORCH_OPS_EXTENSION
-    )
+def _marlin_kernel_name_for_dtype(dtype: Optional[torch.dtype]) -> str:
+    return "marlin_bf16" if _marlin_runtime_dtype(dtype) == torch.bfloat16 else "marlin_fp16"
 
 
 def clear_marlin_extension_cache() -> None:
@@ -177,21 +179,23 @@ def clear_marlin_extension_cache() -> None:
 def marlin_runtime_available(dtype: Optional[torch.dtype] = None) -> bool:
     if marlin_import_exception is not None:
         return False
-    return _marlin_extension_for_dtype(dtype).load()
+    return _extension_api().is_available(_marlin_kernel_name_for_dtype(dtype))
 
 
 def marlin_runtime_error(dtype: Optional[torch.dtype] = None) -> str:
     if marlin_import_exception is not None:
         return marlin_import_exception
 
-    extension = _marlin_extension_for_dtype(dtype)
-    if extension.load():
+    extension_name = _marlin_kernel_name_for_dtype(dtype)
+    extension_api = _extension_api()
+    if extension_api.is_available(extension_name):
         return ""
-    return extension.last_error_message() or "Marlin runtime unavailable."
+    return extension_api.error(extension_name) or "Marlin runtime unavailable."
 
 
 def prewarm_marlin_extension(dtype: Optional[torch.dtype]) -> bool:
-    return marlin_runtime_available(dtype)
+    extension_name = _marlin_kernel_name_for_dtype(dtype)
+    return _extension_api().load(name=extension_name)[extension_name]
 
 
 def _marlin_resolve_op(
@@ -199,11 +203,7 @@ def _marlin_resolve_op(
     dtype: Optional[torch.dtype],
     op_name: str,
 ):
-    primary = _marlin_extension_for_dtype(dtype)
-    if primary.load():
-        return primary.op(op_name)
-
-    raise RuntimeError(marlin_runtime_error(dtype))
+    return _extension_api().op(_marlin_kernel_name_for_dtype(dtype), op_name)
 
 
 # Validate marlin support

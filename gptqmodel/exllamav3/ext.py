@@ -184,28 +184,36 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
 )
 
 
+def _extension_api():
+    from gptqmodel import extension as extension_api
+
+    return extension_api
+
+
 def exllamav3_runtime_available() -> bool:
     _prepare_build_env()
-    return _EXLLAMAV3_TORCH_OPS_EXTENSION.load()
+    return _extension_api().is_available("exllamav3")
 
 
 def exllamav3_runtime_error() -> str:
+    extension_api = _extension_api()
     _prepare_build_env()
-    if _EXLLAMAV3_TORCH_OPS_EXTENSION.load():
+    if extension_api.is_available("exllamav3"):
         return ""
     return (
-        _EXLLAMAV3_TORCH_OPS_EXTENSION.last_error_message()
+        extension_api.error("exllamav3")
         or "ExLlamaV3 CUDA runtime unavailable."
     )
 
 
 def prewarm_exllamav3_extension() -> bool:
-    return exllamav3_runtime_available()
+    _prepare_build_env()
+    return _extension_api().load(name="exllamav3")["exllamav3"]
 
 
 def _runtime_op(name: str):
     _prepare_build_env()
-    return _EXLLAMAV3_TORCH_OPS_EXTENSION.op(name)
+    return _extension_api().op("exllamav3", name)
 
 
 class _BCLinearEXL3:

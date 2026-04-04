@@ -740,11 +740,13 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
         return None
 
     try:
+        from gptqmodel import extension as extension_api
+
         previous_verbose = os.environ.get("GPTQMODEL_EXT_VERBOSE")
         if verbose:
             os.environ["GPTQMODEL_EXT_VERBOSE"] = "1"
         try:
-            _PACK_BLOCK_EXTENSION = _pack_block_extension().load()
+            _PACK_BLOCK_EXTENSION = extension_api.load(name="pack_block_cpu")["pack_block_cpu"]
         finally:
             if verbose:
                 if previous_verbose is None:

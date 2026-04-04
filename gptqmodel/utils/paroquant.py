@@ -216,6 +216,12 @@ _PAROQUANT_ROTATION_EXTENSION = TorchOpsJitExtension(
 )
 
 
+def _extension_api():
+    from gptqmodel import extension as extension_api
+
+    return extension_api
+
+
 def clear_paroquant_rotation_extension_cache() -> None:
     """Delete cached ParoQuant rotation JIT artifacts before the next load attempt."""
 
@@ -236,7 +242,7 @@ def clear_paroquant_rotation_autotune_cache() -> None:
 def _load_rotation_extension() -> bool:
     """JIT-build and load the optional fused CUDA rotation extension once."""
 
-    return _PAROQUANT_ROTATION_EXTENSION.load()
+    return _extension_api().is_available("paroquant")
 
 
 def _rotation_env_int(name: str, allowed: set[int]) -> Optional[int]:
@@ -298,7 +304,7 @@ def _rotation_autotune_cache_size() -> int:
         return int(cache_size())
     if not _load_rotation_extension():
         return 0
-    return int(_PAROQUANT_ROTATION_EXTENSION.op("autotune_cache_size")())
+    return int(_extension_api().op("paroquant", "autotune_cache_size")())
 
 
 def _run_rotation_op(
@@ -312,7 +318,7 @@ def _run_rotation_op(
     row_pad: int,
 ) -> torch.Tensor:
     """Execute the fused rotation op with one requested launch policy."""
-    return _PAROQUANT_ROTATION_EXTENSION.op("rotate")(
+    return _extension_api().op("paroquant", "rotate")(
         x,
         pairs,
         theta,
@@ -380,7 +386,7 @@ def _resolve_rotation_launch(
         if cached is not None:
             return cached
 
-        cta_m, row_pad = _PAROQUANT_ROTATION_EXTENSION.op("launch_config")(
+        cta_m, row_pad = _extension_api().op("paroquant", "launch_config")(
             x,
             int(krot),
             scales is not None,
@@ -422,7 +428,7 @@ def _rotation_launch_config(
             requested_row_pad=requested_row_pad,
         )
     else:
-        cta_m, row_pad = _PAROQUANT_ROTATION_EXTENSION.op("launch_config")(
+        cta_m, row_pad = _extension_api().op("paroquant", "launch_config")(
             x,
             int(krot),
             scales is not None,
