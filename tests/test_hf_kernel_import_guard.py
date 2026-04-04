@@ -4,9 +4,9 @@
 import builtins
 
 import pytest
+import torch
 
-from gptqmodel.nn_modules.qlinear import gemm_hf_kernel as hf_kernel_module
-from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
+from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear, _cpu_int4pack_zero_offsets
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
 from gptqmodel.utils import python as python_utils
 
@@ -28,9 +28,7 @@ def test_free_threading_build_helper_uses_py_gil_disabled(monkeypatch):
 
 
 @pytest.mark.parametrize("kernel_cls", [HFKernelLinear, HFKernelAwqLinear])
-def test_hf_kernel_validate_once_blocks_free_threading_build(monkeypatch, kernel_cls):
-    monkeypatch.setattr(hf_kernel_module, "is_free_threading_build", lambda: True)
-
+def test_hf_kernel_validate_once_does_not_import_external_kernels(monkeypatch, kernel_cls):
     attempted = {"value": False}
     original_import = builtins.__import__
 
@@ -45,8 +43,45 @@ def test_hf_kernel_validate_once_blocks_free_threading_build(monkeypatch, kernel
     ok, err = kernel_cls.validate_once()
 
     assert not attempted["value"]
-    assert not ok
-    assert isinstance(err, RuntimeError)
-    assert kernel_cls.__name__ in str(err)
-    assert "free-threaded Python builds" in str(err)
-    assert "Py_GIL_DISABLED=1" in str(err)
+    has_ops = (
+        hasattr(torch.ops.aten, "_convert_weight_to_int4pack_for_cpu")
+        and hasattr(torch.ops.aten, "_weight_int4pack_mm_for_cpu")
+    )
+    assert ok is has_ops
+    if has_ops:
+        assert err is None
+    else:
+        assert isinstance(err, ImportError)
+
+
+@pytest.mark.skipif(
+    not (
+        hasattr(torch.ops.aten, "_convert_weight_to_int4pack_for_cpu")
+        and hasattr(torch.ops.aten, "_weight_int4pack_mm_for_cpu")
+    ),
+    reason="CPU int4pack ATen ops are unavailable in this PyTorch build.",
+)
+def test_cpu_int4pack_zero_offsets_match_dense_gptq_formula():
+    out_features = 16
+    in_features = 32
+    group_size = 32
+    code = 5
+    zero_code = 3
+    scale = 2.0
+
+    unpacked_weight = torch.full((out_features, in_features), code, dtype=torch.int32)
+    packed_weight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(unpacked_weight, 1)
+
+    scales = torch.full((1, out_features), scale, dtype=torch.bfloat16)
+    zero_codes = torch.full((1, out_features), zero_code, dtype=torch.uint8)
+    zero_offsets = _cpu_int4pack_zero_offsets(zero_codes, scales, bits=4)
+
+    scales_and_zeros = torch.zeros((1, out_features, 2), dtype=torch.bfloat16)
+    scales_and_zeros[:, :, 0] = scales
+    scales_and_zeros[:, :, 1] = zero_offsets
+
+    x = torch.zeros((1, in_features), dtype=torch.bfloat16)
+    x[0, 0] = 1
+
+    out = torch.ops.aten._weight_int4pack_mm_for_cpu(x, packed_weight, group_size, scales_and_zeros)
+    assert float(out[0, 0]) == pytest.approx(scale * (code - zero_code))

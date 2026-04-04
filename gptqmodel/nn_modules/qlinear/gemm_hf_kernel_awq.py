@@ -18,14 +18,15 @@ from ...quantization.awq.utils.packing_utils import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
-from .gemm_hf_kernel import HFKernelLinear
+from .gemm_hf_kernel import HFKernelLinear, _cpu_int4pack_zero_offsets, _has_local_int4pack_cpu_ops
+from .torch_fused import pack_scales_and_zeros
 
 
 log = setup_logger()
 
 
 class HFKernelAwqLinear(AWQuantLinear):
-    """AWQ variant of HFKernelLinear — uses kernels-community gemm_int4 with AWQ weights."""
+    """AWQ CPU int4pack backend kept under the legacy HF kernel backend name."""
 
     QUANT_TYPE = "hf_kernel_awq"
 
@@ -33,7 +34,6 @@ class HFKernelAwqLinear(AWQuantLinear):
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 110}
 
-    # inherit from HFKernelLinear
     SUPPORTS_BITS = HFKernelLinear.SUPPORTS_BITS
     SUPPORTS_GROUP_SIZE = HFKernelLinear.SUPPORTS_GROUP_SIZE
     SUPPORTS_DESC_ACT = HFKernelLinear.SUPPORTS_DESC_ACT
@@ -52,7 +52,6 @@ class HFKernelAwqLinear(AWQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     gemm_int4_forward_kernel = None
-    KERNEL_REPO_ID = HFKernelLinear.KERNEL_REPO_ID
 
     def __init__(
         self,
@@ -79,14 +78,12 @@ class HFKernelAwqLinear(AWQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             adapter=adapter,
-            # Skip base buffer init, we need to manually init buffers for awq
             register_buffers=False,
             **kwargs,
         )
 
         self.linear_mode = None
 
-        # Create awq buffers
         if register_buffers:
             pack_cols = max(1, self.out_features // self.pack_factor)
             qweight_shape = (self.in_features, pack_cols)
@@ -115,46 +112,12 @@ class HFKernelAwqLinear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        build_error = HFKernelLinear._hf_kernels_import_guard(cls.__name__)
-        if build_error is not None:
-            log.warning(str(build_error))
-            return False, build_error
-
-        if not HFKernelLinear._is_torch_release():
-            msg = (
-                f"HFKernelAwqLinear requires a release version of torch, "
-                f"but found `{torch.__version__}`. "
-                f"Please install a stable release (e.g. `pip install torch`)."
-            )
-            log.warning(msg)
-            return False, RuntimeError(msg)
-
-        try:
-            from kernels import get_kernel
-
-            repo_id = cls.KERNEL_REPO_ID
-            try:
-                cls.gemm_int4_forward_kernel = staticmethod(get_kernel(repo_id).gemm_int4_forward)
-                log.info("HFKernelAwqLinear: loaded CPU gemm_4bit kernel from `%s`.", repo_id)
-                return True, None
-            except Exception:
-                module, variant_name = HFKernelLinear._load_cpu_kernel_variant(repo_id)
-                cls.gemm_int4_forward_kernel = staticmethod(module.gemm_int4_forward)
-                log.info(
-                    "HFKernelAwqLinear: loaded CPU gemm_4bit kernel from `%s` variant `%s`.",
-                    repo_id,
-                    variant_name,
-                )
-                return True, None
-        except Exception as exc:  # pragma: no cover - best effort fallback
+        ok, err = HFKernelLinear.validate_once()
+        if ok:
+            cls.gemm_int4_forward_kernel = HFKernelLinear.gemm_int4_forward_kernel
+        else:
             cls.gemm_int4_forward_kernel = None
-            log.warning(
-                "Failed to load CPU gemm_4bit kernel from `%s`: %s. "
-                "Please make sure `pip install -U kernels` is installed.",
-                cls.KERNEL_REPO_ID,
-                str(exc),
-            )
-            return False, exc
+        return ok, err
 
     def post_init(self):
         super().post_init()
@@ -166,28 +129,21 @@ class HFKernelAwqLinear(AWQuantLinear):
 
         super().optimize()
 
-    def convert_weight_packed_zp(self, block_n: int = 32):
-        return HFKernelLinear.convert_weight_packed_zp(self, block_n=block_n)
-
     def transform_cpu(self):
-        # Unpack AWQ weights directly to integer form
         iweight, izeros = unpack_awq(self.qweight, self.qzeros, self.bits)
         iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
         max_val = (1 << self.bits) - 1
         iweight = torch.bitwise_and(iweight, max_val).to(torch.uint8)
-        izeros = torch.bitwise_and(izeros, max_val).to(torch.uint8)
+        izeros = torch.bitwise_and(izeros, max_val).reshape(self.scales.shape).to(torch.uint8)
 
         self.scales = self.scales.to(torch.bfloat16).contiguous()
-
-        # AWQ has no g_idx — weights are already in natural order, just transpose
-        # iweight: (in_features, out_features) -> (out_features, in_features)
-        self.qweight = iweight.t().contiguous()
-        self.qzeros = izeros.contiguous()
+        self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(iweight.t().int(), 1).contiguous()
+        self.qzeros = _cpu_int4pack_zero_offsets(izeros, self.scales, self.bits).contiguous()
+        self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
     def transform(self, device):
         if device == "cpu":
             self.transform_cpu()
-            self.convert_weight_packed_zp()
         else:
             raise NotImplementedError(
                 "HFKernelAwqLinear only supports fused transforms on CPU devices."
@@ -204,17 +160,32 @@ class HFKernelAwqLinear(AWQuantLinear):
 
     @torch.no_grad()
     def _fused_op_forward(self, x):
-        # AWQ has no g_idx reordering — skip ret_idx
-        if x.device.type == "cpu":
-            out = self.gemm_int4_forward_kernel(x, self.qweight, self.qzeros, self.scales, self.group_size)
-        else:
+        if x.device.type != "cpu":
             raise NotImplementedError
+
+        original_dtype = x.dtype
+        if original_dtype != torch.bfloat16:
+            x = x.to(torch.bfloat16)
+        out = torch.ops.aten._weight_int4pack_mm_for_cpu(
+            x,
+            self.qweight,
+            self.group_size,
+            self.scales_and_zeros,
+        )
+        if original_dtype != torch.bfloat16:
+            out = out.to(original_dtype)
         return out
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if not self.training and not x.requires_grad and self.linear_mode is None and self.gemm_int4_forward_kernel is not None and x.device.type == "cpu":
+        if (
+            not self.training
+            and not x.requires_grad
+            and self.linear_mode is None
+            and _has_local_int4pack_cpu_ops()
+            and x.device.type == "cpu"
+        ):
             self.transform(x.device.type)
             self.linear_mode = "inference"
         elif self.linear_mode is None:
