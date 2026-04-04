@@ -98,11 +98,11 @@ def _compile_progress_subtitle(elapsed_seconds: float, baseline_seconds: float) 
     if elapsed <= baseline:
         return (
             f"elapsed {_format_compile_duration_seconds(elapsed)} / "
-            f"baseline ~{_format_compile_duration_seconds(baseline)}"
+            f"estimated ~{_format_compile_duration_seconds(baseline)}"
         )
     return (
         f"elapsed {_format_compile_duration_seconds(elapsed)} / "
-        f"baseline ~{_format_compile_duration_seconds(baseline)} "
+        f"estimated ~{_format_compile_duration_seconds(baseline)} "
         f"(+{_format_compile_duration_seconds(elapsed - baseline)})"
     )
 
@@ -118,9 +118,9 @@ def _compile_baseline_summary(elapsed_seconds: float, baseline_seconds: Optional
     delta = elapsed_seconds - baseline_seconds
     delta_text = _format_compile_duration_seconds(abs(delta))
     if abs(delta) < 0.05:
-        return f"in {elapsed} (baseline ~{baseline})"
+        return f"in {elapsed} (estimated ~{baseline})"
     sign = "+" if delta >= 0 else "-"
-    return f"in {elapsed} (baseline ~{baseline}, {sign}{delta_text})"
+    return f"in {elapsed} (estimated ~{baseline}, {sign}{delta_text})"
 
 
 class _CompileProgressDisplay:
@@ -561,7 +561,7 @@ class TorchOpsJitExtension:
             logger.info(f"{self.display_name}: compiling torch.ops JIT extension in `{build_root}`.")
             progress_display = _CompileProgressDisplay(
                 logger=logger,
-                title=f"{self.display_name}: compiling kernel...",
+                title=f"Compiling extension: {self.display_name}...",
                 baseline_seconds=self.compile_baseline_seconds,
             )
             started = time.perf_counter()

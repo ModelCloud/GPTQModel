@@ -33,7 +33,7 @@ def test_compile_progress_step_never_reaches_final_step_before_completion():
 def test_compile_progress_subtitle_reports_overrun_against_baseline():
     subtitle = _compile_progress_subtitle(120.634, 116.863)
     assert "elapsed 121s" in subtitle
-    assert "baseline ~117s" in subtitle
+    assert "estimated ~117s" in subtitle
     assert "(+3.8s)" in subtitle
 
 
