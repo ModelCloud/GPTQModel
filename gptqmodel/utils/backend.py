@@ -21,7 +21,7 @@ class BACKEND(str, Enum):
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
-    GPTQ_HF_KERNEL = "gptq_hf_kernel"  # legacy CPU int4pack GPTQ backend name
+    GPTQ_HF_KERNEL = "gptq_hf_kernel"  # original HF CPU GPTQ kernel folded into GPTQModel
 
     # QQQ kernels
     QQQ = "qqq"  # marlin-based qqq kernel
@@ -33,7 +33,7 @@ class BACKEND(str, Enum):
     AWQ_GEMV_FAST = "awq_gemv_fast"
     AWQ_TORCH_INT8 = "awq_torch_int8"
     AWQ_TORCH_FUSED = "awq_torch_fused"
-    AWQ_HF_KERNEL = "awq_hf_kernel"  # legacy CPU int4pack AWQ backend name
+    AWQ_HF_KERNEL = "awq_hf_kernel"  # original HF CPU AWQ kernel folded into GPTQModel
     AWQ_TORCH = "awq_torch"
     AWQ_BITBLAS = "awq_bitblas"
     AWQ_MACHETE = "awq_machete"
