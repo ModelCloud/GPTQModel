@@ -1,26 +1,209 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Union
 
 import numpy
 import torch
 
 from ..utils.logger import setup_logger
-from ._extension_loader import load_extension_module
+from .cpp import (
+    TorchOpsJitExtension,
+    default_jit_cflags,
+    default_jit_cuda_cflags,
+    default_torch_ops_build_root,
+)
 from .marlin_scalar_type import ScalarType
 from .rocm import IS_ROCM
 
 
 log = setup_logger()
 
-marlin_import_exception = None
-gptqmodel_marlin_kernels = None
-try:
-    gptqmodel_marlin_kernels = load_extension_module("gptqmodel_marlin_kernels")
-except ImportError as e:
-    marlin_import_exception = str(e)
+_MARLIN_FP16_OPS_NAME = "gptqmodel_marlin_fp16_ops"
+_MARLIN_FP16_NAMESPACE = "gptqmodel_marlin_fp16"
+_MARLIN_BF16_OPS_NAME = "gptqmodel_marlin_bf16_ops"
+_MARLIN_BF16_NAMESPACE = "gptqmodel_marlin_bf16"
+
+
+def _marlin_environment_error() -> str:
+    if IS_ROCM:
+        return "Marlin kernel is not supported on ROCm."
+    if not torch.cuda.is_available():
+        return "Marlin kernel requires CUDA."
+    try:
+        major, minor = torch.cuda.get_device_capability()
+    except Exception as exc:  # pragma: no cover - depends on host CUDA runtime
+        return f"Marlin kernel failed to query CUDA device capability: {exc}"
+    if major < 8:
+        return f"Marlin kernel requires compute capability >= 8.0, got {major}.{minor}."
+    return ""
+
+
+marlin_import_exception = _marlin_environment_error() or None
+
+
+def _marlin_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "marlin"
+
+
+def _marlin_cuda_version_at_least(major: int, minor: int) -> bool:
+    raw = getattr(torch.version, "cuda", None)
+    if not raw:
+        return False
+    try:
+        parts = raw.split(".")
+        current = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    except (TypeError, ValueError):  # pragma: no cover - depends on torch build metadata
+        return False
+    return current >= (major, minor)
+
+
+def _ensure_generated_marlin_kernels() -> Path:
+    root = _marlin_root()
+    if list(root.glob("kernel_fp16_*.cu")) and list(root.glob("kernel_bf16_*.cu")):
+        return root
+
+    generator = root / "generate_kernels.py"
+    result = subprocess.run(
+        [sys.executable, str(generator)],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            "Marlin kernel generation failed"
+            + (f": {details}" if details else ".")
+        )
+    return root
+
+
+def _marlin_sources(dtype_tag: str) -> list[str]:
+    root = _ensure_generated_marlin_kernels()
+    sources = [
+        str(root / f"marlin_torch_{dtype_tag}.cpp"),
+        str(root / f"gptq_marlin_{dtype_tag}.cu"),
+        str(root / "gptq_marlin_repack.cu"),
+        str(root / "awq_marlin_repack.cu"),
+    ]
+    sources.extend(str(path) for path in sorted(root.glob(f"kernel_{dtype_tag}_*.cu")))
+    if len(sources) <= 4:
+        raise RuntimeError(f"Marlin {dtype_tag} sources are incomplete under `{root}`.")
+    return sources
+
+
+def _marlin_include_paths() -> list[str]:
+    return [str(_marlin_root())]
+
+
+def _marlin_extra_cflags() -> list[str]:
+    return default_jit_cflags(enable_bf16=True)
+
+
+def _marlin_extra_cuda_cflags() -> list[str]:
+    flags = default_jit_cuda_cflags(
+        enable_bf16=True,
+        include_lineinfo=True,
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+        include_ptxas_verbosity=False,
+        include_fatbin_compression=True,
+        include_diag_suppress=True,
+    )
+    if _marlin_cuda_version_at_least(12, 8):
+        flags.insert(0, "-static-global-template-stub=false")
+    return flags
+
+
+_MARLIN_FP16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+    name=_MARLIN_FP16_OPS_NAME,
+    namespace=_MARLIN_FP16_NAMESPACE,
+    required_ops=("gptq_marlin_gemm_fp16", "gptq_marlin_repack", "awq_marlin_repack"),
+    sources=lambda: _marlin_sources("fp16"),
+    build_root_env="GPTQMODEL_MARLIN_FP16_BUILD_ROOT",
+    default_build_root=lambda: default_torch_ops_build_root("marlin_fp16"),
+    display_name="Marlin fp16",
+    extra_cflags=_marlin_extra_cflags,
+    extra_cuda_cflags=_marlin_extra_cuda_cflags,
+    extra_include_paths=_marlin_include_paths,
+    force_rebuild_env="GPTQMODEL_MARLIN_FORCE_REBUILD",
+    verbose_env="GPTQMODEL_EXT_VERBOSE",
+    requires_cuda=True,
+)
+
+
+_MARLIN_BF16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+    name=_MARLIN_BF16_OPS_NAME,
+    namespace=_MARLIN_BF16_NAMESPACE,
+    required_ops=("gptq_marlin_gemm_bf16", "gptq_marlin_repack", "awq_marlin_repack"),
+    sources=lambda: _marlin_sources("bf16"),
+    build_root_env="GPTQMODEL_MARLIN_BF16_BUILD_ROOT",
+    default_build_root=lambda: default_torch_ops_build_root("marlin_bf16"),
+    display_name="Marlin bf16",
+    extra_cflags=_marlin_extra_cflags,
+    extra_cuda_cflags=_marlin_extra_cuda_cflags,
+    extra_include_paths=_marlin_include_paths,
+    force_rebuild_env="GPTQMODEL_MARLIN_FORCE_REBUILD",
+    verbose_env="GPTQMODEL_EXT_VERBOSE",
+    requires_cuda=True,
+)
+
+
+def _extension_api():
+    from gptqmodel import extension as extension_api
+
+    return extension_api
+
+
+def _marlin_runtime_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
+    return torch.bfloat16 if dtype == torch.bfloat16 else torch.float16
+
+
+def _marlin_kernel_name_for_dtype(dtype: Optional[torch.dtype]) -> str:
+    return "marlin_bf16" if _marlin_runtime_dtype(dtype) == torch.bfloat16 else "marlin_fp16"
+
+
+def clear_marlin_extension_cache() -> None:
+    _MARLIN_FP16_TORCH_OPS_EXTENSION.clear_cache()
+    _MARLIN_BF16_TORCH_OPS_EXTENSION.clear_cache()
+
+
+def marlin_runtime_available(dtype: Optional[torch.dtype] = None) -> bool:
+    if marlin_import_exception is not None:
+        return False
+    return _extension_api().is_available(_marlin_kernel_name_for_dtype(dtype))
+
+
+def marlin_runtime_error(dtype: Optional[torch.dtype] = None) -> str:
+    if marlin_import_exception is not None:
+        return marlin_import_exception
+
+    extension_name = _marlin_kernel_name_for_dtype(dtype)
+    extension_api = _extension_api()
+    if extension_api.is_available(extension_name):
+        return ""
+    return extension_api.error(extension_name) or "Marlin runtime unavailable."
+
+
+def prewarm_marlin_extension(dtype: Optional[torch.dtype]) -> bool:
+    extension_name = _marlin_kernel_name_for_dtype(dtype)
+    return _extension_api().load(name=extension_name)[extension_name]
+
+
+def _marlin_resolve_op(
+    *,
+    dtype: Optional[torch.dtype],
+    op_name: str,
+):
+    return _extension_api().op(_marlin_kernel_name_for_dtype(dtype), op_name)
 
 
 # Validate marlin support
@@ -296,20 +479,59 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
-    return gptqmodel_marlin_kernels.gptq_marlin_gemm(a, c, b_q_weight, b_bias, b_scales,
-                                                     global_scale, b_zeros, g_idx, perm,
-                                                     workspace, b_q_type.id, size_m,
-                                                     size_n, size_k, is_k_full,
-                                                     use_atomic_add, use_fp32_reduce,
-                                                     is_zp_float)
+    if _marlin_runtime_dtype(a.dtype) == torch.bfloat16:
+        op_name = "gptq_marlin_gemm_bf16"
+    else:
+        op_name = "gptq_marlin_gemm_fp16"
+
+    op = _marlin_resolve_op(
+        dtype=a.dtype,
+        op_name=op_name,
+    )
+    return op(
+        a,
+        c,
+        b_q_weight,
+        b_bias,
+        b_scales,
+        global_scale,
+        b_zeros,
+        g_idx,
+        perm,
+        workspace,
+        b_q_type.id,
+        size_m,
+        size_n,
+        size_k,
+        is_k_full,
+        use_atomic_add,
+        use_fp32_reduce,
+        is_zp_float,
+    )
 
 
 # gptq_marlin
 def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                        size_k: int, size_n: int,
-                       num_bits: int) -> torch.Tensor:
-    return gptqmodel_marlin_kernels.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
-                                                       num_bits)
+                       num_bits: int,
+                       dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    op = _marlin_resolve_op(
+        dtype=dtype,
+        op_name="gptq_marlin_repack",
+    )
+    return op(b_q_weight, perm, size_k, size_n, num_bits)
+
+
+def awq_marlin_repack(b_q_weight: torch.Tensor,
+                      size_k: int,
+                      size_n: int,
+                      num_bits: int,
+                      dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    op = _marlin_resolve_op(
+        dtype=dtype,
+        op_name="awq_marlin_repack",
+    )
+    return op(b_q_weight, size_k, size_n, num_bits)
 
 
 def get_pack_factor(num_bits):

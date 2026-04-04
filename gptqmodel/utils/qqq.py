@@ -61,22 +61,29 @@ _QQQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
 )
 
 
+def _extension_api():
+    from gptqmodel import extension as extension_api
+
+    return extension_api
+
+
 def clear_qqq_extension_cache() -> None:
     _QQQ_TORCH_OPS_EXTENSION.clear_cache()
 
 
 def qqq_runtime_available() -> bool:
-    return _QQQ_TORCH_OPS_EXTENSION.load()
+    return _extension_api().is_available("qqq")
 
 
 def qqq_runtime_error() -> str:
-    if _QQQ_TORCH_OPS_EXTENSION.load():
+    extension_api = _extension_api()
+    if extension_api.is_available("qqq"):
         return ""
-    return _QQQ_TORCH_OPS_EXTENSION.last_error_message() or "QQQ CUDA runtime unavailable."
+    return extension_api.error("qqq") or "QQQ CUDA runtime unavailable."
 
 
 def prewarm_qqq_extension() -> bool:
-    return qqq_runtime_available()
+    return _extension_api().load(name="qqq")["qqq"]
 
 
 def qqq_gemm(
@@ -93,7 +100,7 @@ def qqq_gemm(
     sms=-1,
     max_par=16,
 ):
-    return _QQQ_TORCH_OPS_EXTENSION.op("qqq_gemm")(
+    return _extension_api().op("qqq", "qqq_gemm")(
         A,
         B,
         C,

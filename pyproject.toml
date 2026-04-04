@@ -1,8 +1,6 @@
 [build-system]
 requires = [
     "setuptools>=78.1.1",
-    "ninja>=1.13.0", # required for faster compilataion
-    "pypcre>=0.2.14",
 ]
 build-backend = "setuptools.build_meta"
 

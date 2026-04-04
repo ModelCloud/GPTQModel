@@ -38,6 +38,8 @@ from ...utils.marlin import (
     marlin_make_workspace_new,
     marlin_permute_bias,
     marlin_permute_scales,
+    marlin_runtime_available,
+    marlin_runtime_error,
     marlin_repeat_scales_on_all_ranks,
     marlin_sort_g_idx,
     replace_parameter,
@@ -95,7 +97,8 @@ class MarlinQuantLinear(GPTQQuantLinear):
             **kwargs):
         if marlin_import_exception is not None:
             raise ValueError(
-                f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
+                "Trying to use the marlin backend, but the runtime requirements were not met: "
+                f"{marlin_import_exception}"
             )
 
         # self.original_in_features = in_features
@@ -106,6 +109,7 @@ class MarlinQuantLinear(GPTQQuantLinear):
             # (since we have only one group per output channel)
             desc_act = False
 
+        self.compute_dtype = kwargs.get("dtype") or torch.float16
         self.fp32 = env_flag("GPTQMODEL_MARLIN_USE_FP32", default=True)
 
         super().__init__(
@@ -239,6 +243,12 @@ class MarlinQuantLinear(GPTQQuantLinear):
     def post_init(self):
         device = self.qweight.device
 
+        if not marlin_runtime_available(self.compute_dtype):
+            raise ModuleNotFoundError(
+                "Marlin torch.ops kernels are not properly installed. Error: "
+                + marlin_runtime_error(self.compute_dtype)
+            )
+
         self.is_k_full = marlin_is_k_full(self.desc_act, is_row_parallel=False)
 
         # Allocate marlin workspace.
@@ -249,7 +259,8 @@ class MarlinQuantLinear(GPTQQuantLinear):
                                         perm=self.g_idx_sort_indices,
                                         size_k=self.in_features,
                                         size_n=self.out_features,
-                                        num_bits=self.bits)
+                                        num_bits=self.bits,
+                                        dtype=self.compute_dtype)
             return x
 
         def transform_w_s(x):

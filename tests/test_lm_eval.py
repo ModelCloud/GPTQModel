@@ -12,8 +12,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-import pytest
-
 from gptqmodel import BACKEND
 from tests.eval import evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
@@ -50,8 +48,6 @@ class TestLmEval(unittest.TestCase):
            self.assertGreaterEqual(acc_norm_score, 0.3400, "acc_norm score does not match expected result")
 
     def test_eval_path(self):
-       pytest.importorskip("gptqmodel_exllamav2_kernels")
-
        with tempfile.TemporaryDirectory() as tmp_dir:
            results = evaluate(
                 model_or_id_or_path=self.MODEL_ID,

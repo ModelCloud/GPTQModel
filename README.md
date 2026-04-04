@@ -289,10 +289,12 @@ GPT-QModel is validated for Linux, MacOS, and Windows 11:
 
 ```bash
 # You can install optional modules like autoround, ipex, vllm, sglang, bitblas.
-# Example: pip install -v --no-build-isolation gptqmodel[vllm,sglang,bitblas]
-pip install -v gptqmodel --no-build-isolation 
-uv pip install -v gptqmodel --no-build-isolation
+# Example: pip install -v gptqmodel[vllm,sglang,bitblas]
+pip install -v gptqmodel
+uv pip install -v gptqmodel
 ```
+
+The package depends on `ninja` for first-use JIT kernel compilation.
 
 ### Install from source
 
@@ -300,13 +302,13 @@ uv pip install -v gptqmodel --no-build-isolation
 # clone repo
 git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
-# python3-dev is required, ninja speeds up compilation, and you need to upgrade to the latest `setuptools` to avoid errors
-apt install python3-dev ninja setuptools -U
+# python3-dev is required for some source installs
+apt install python3-dev
 
-# pip: compile and install
+# pip: install from source
 # You can install optional modules like  vllm, sglang, bitblas.
-# Example: pip install -v --no-build-isolation .[vllm,sglang,bitblas]
-pip install -v . --no-build-isolation
+# Example: pip install -v .[vllm,sglang,bitblas]
+pip install -v .
 ```
 
 ### Inference

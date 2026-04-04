@@ -140,25 +140,32 @@ _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
 )
 
 
+def _extension_api():
+    from gptqmodel import extension as extension_api
+
+    return extension_api
+
+
 def clear_exllamav2_gptq_extension_cache() -> None:
     _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION.clear_cache()
 
 
 def exllamav2_gptq_runtime_available() -> bool:
-    return _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION.load()
+    return _extension_api().is_available("exllamav2")
 
 
 def exllamav2_gptq_runtime_error() -> str:
-    if _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION.load():
+    extension_api = _extension_api()
+    if extension_api.is_available("exllamav2"):
         return ""
     return (
-        _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION.last_error_message()
+        extension_api.error("exllamav2")
         or "ExLlamaV2 GPTQ CUDA runtime unavailable."
     )
 
 
 def prewarm_exllamav2_gptq_extension() -> bool:
-    return exllamav2_gptq_runtime_available()
+    return _extension_api().load(name="exllamav2")["exllamav2"]
 
 
 def exllamav2_make_q_matrix(
@@ -174,7 +181,7 @@ def exllamav2_make_q_matrix(
     temp_dq,
 ) -> int:
     return int(
-        _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION.op("make_q_matrix")(
+        _extension_api().op("exllamav2", "make_q_matrix")(
             q_weight,
             q_perm,
             q_invperm,
@@ -190,7 +197,7 @@ def exllamav2_make_q_matrix(
 
 
 def exllamav2_gemm_half_q_half(a, q_handle: int, c, force_cuda: bool = False) -> None:
-    _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION.op("gemm_half_q_half")(a, int(q_handle), c, bool(force_cuda))
+    _extension_api().op("exllamav2", "gemm_half_q_half")(a, int(q_handle), c, bool(force_cuda))
 
 
 def clear_exllamav2_awq_extension_cache() -> None:
@@ -198,20 +205,21 @@ def clear_exllamav2_awq_extension_cache() -> None:
 
 
 def exllamav2_awq_runtime_available() -> bool:
-    return _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.load()
+    return _extension_api().is_available("exllamav2_awq")
 
 
 def exllamav2_awq_runtime_error() -> str:
-    if _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.load():
+    extension_api = _extension_api()
+    if extension_api.is_available("exllamav2_awq"):
         return ""
     return (
-        _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.last_error_message()
+        extension_api.error("exllamav2_awq")
         or "ExLlamaV2 AWQ CUDA runtime unavailable."
     )
 
 
 def prewarm_exllamav2_awq_extension() -> bool:
-    return exllamav2_awq_runtime_available()
+    return _extension_api().load(name="exllamav2_awq")["exllamav2_awq"]
 
 
 def exllamav2_awq_make_q_matrix(
@@ -227,7 +235,7 @@ def exllamav2_awq_make_q_matrix(
     temp_dq,
 ) -> int:
     return int(
-        _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.op("make_q_matrix_awq")(
+        _extension_api().op("exllamav2_awq", "make_q_matrix_awq")(
             q_weight,
             q_perm,
             q_invperm,
@@ -243,4 +251,4 @@ def exllamav2_awq_make_q_matrix(
 
 
 def exllamav2_awq_gemm_half_q_half(a, q_handle: int, c, force_cuda: bool = False) -> None:
-    _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION.op("gemm_half_q_half_awq")(a, int(q_handle), c, bool(force_cuda))
+    _extension_api().op("exllamav2_awq", "gemm_half_q_half_awq")(a, int(q_handle), c, bool(force_cuda))

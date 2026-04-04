@@ -23,8 +23,8 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from gptqmodel.utils.machete import (
-    _validate_machete_device_support,
-    machete_import_exception,
+    machete_runtime_available,
+    machete_runtime_error,
 )
 from gptqmodel.utils.model import find_modules
 
@@ -305,10 +305,8 @@ class TestKernelOutput(unittest.TestCase):
             self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
 
         if backend == BACKEND.MACHETE:
-            if machete_import_exception is not None:
-                self.skipTest(f"Machete kernel unavailable: {machete_import_exception}")
-            if not _validate_machete_device_support():
-                self.skipTest("Machete requires NVIDIA Hopper or newer (SM90+)")
+            if not machete_runtime_available():
+                self.skipTest(f"Machete kernel unavailable: {machete_runtime_error()}")
 
     float16_cases = [
         (BACKEND.TORCH, torch.float16, 0.0000),
