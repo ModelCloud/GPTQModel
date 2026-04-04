@@ -7,6 +7,7 @@ from gptqmodel.utils.cpp import (
     _compile_progress_ratio,
     _compile_progress_step,
     _compile_progress_subtitle,
+    default_jit_cuda_cflags,
 )
 from gptqmodel.utils.jit_compile_baselines import get_jit_compile_baseline_seconds
 
@@ -34,3 +35,17 @@ def test_compile_progress_subtitle_reports_overrun_against_baseline():
     assert "elapsed 121s" in subtitle
     assert "baseline ~117s" in subtitle
     assert "(+3.8s)" in subtitle
+
+
+def test_default_jit_cuda_cflags_includes_nvcc_threads_by_default(monkeypatch):
+    monkeypatch.delenv("NVCC_THREADS", raising=False)
+    flags = default_jit_cuda_cflags()
+    assert "--threads" in flags
+    assert "8" in flags
+
+
+def test_default_jit_cuda_cflags_honors_nvcc_threads_override(monkeypatch):
+    monkeypatch.setenv("NVCC_THREADS", "16")
+    flags = default_jit_cuda_cflags()
+    assert "--threads" in flags
+    assert "16" in flags

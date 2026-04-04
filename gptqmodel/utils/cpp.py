@@ -44,6 +44,10 @@ _cpp_ext_initialized = False
 _SHARED_LIBRARY_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
 _COMPILE_PROGRESS_TOTAL_STEPS = 100
 _COMPILE_PROGRESS_INTERVAL_SECONDS = 1.0
+# Default NVCC internal threading for JIT builds. This is based on clean-build
+# timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
+# the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
+_DEFAULT_NVCC_THREADS = "8"
 
 
 def _format_compile_duration_seconds(seconds: float) -> str:
@@ -259,7 +263,7 @@ def default_jit_cuda_cflags(
     enable_bf16: bool = False,
     include_abi: bool = True,
     include_lineinfo: bool = False,
-    include_nvcc_threads: bool = False,
+    include_nvcc_threads: bool = True,
     include_ptxas_optimizations: bool = False,
     include_ptxas_verbosity: bool = True,
     include_fatbin_compression: bool = False,
@@ -275,7 +279,7 @@ def default_jit_cuda_cflags(
     )
 
     if include_nvcc_threads:
-        flags.extend(["--threads", os.getenv("NVCC_THREADS", "2")])
+        flags.extend(["--threads", os.getenv("NVCC_THREADS", _DEFAULT_NVCC_THREADS)])
         if resolved_opt_level is not None:
             optimization_level = (
                 resolved_opt_level[1:] if resolved_opt_level.startswith("O") else resolved_opt_level
