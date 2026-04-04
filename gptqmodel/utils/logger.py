@@ -46,7 +46,7 @@ class _SilentProgress:
     def subtitle(self, *_args, **_kwargs):
         return self
 
-    def draw(self):
+    def draw(self, force: bool = False):
         return self
 
     def refresh(self):

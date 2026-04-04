@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import shutil
 import sys
@@ -19,6 +20,7 @@ import torch
 from torch.utils.cpp_extension import _get_build_directory, load
 
 from .env import env_flag
+from .jit_compile_baselines import get_jit_compile_baseline_seconds
 from .logger import setup_logger
 
 
@@ -40,6 +42,154 @@ _cpp_ext_lock = threading.Lock()
 _cpp_ext_initialized = False
 
 _SHARED_LIBRARY_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
+_COMPILE_PROGRESS_TOTAL_STEPS = 100
+_COMPILE_PROGRESS_INTERVAL_SECONDS = 1.0
+
+
+def _format_compile_duration_seconds(seconds: float) -> str:
+    """Format one duration compactly for user-facing compile progress text."""
+
+    seconds_value = max(0.0, float(seconds))
+    if seconds_value < 10.0:
+        return f"{seconds_value:.1f}s"
+    return f"{seconds_value:.0f}s"
+
+
+def _compile_progress_ratio(elapsed_seconds: float, baseline_seconds: float) -> float:
+    """Map elapsed compile time onto a progress ratio that never reaches 100% early."""
+
+    baseline = max(float(baseline_seconds), 0.0)
+    elapsed = max(float(elapsed_seconds), 0.0)
+    if baseline <= 0.0 or elapsed <= 0.0:
+        return 0.0
+    if elapsed <= baseline:
+        return min(0.95 * (elapsed / baseline), 0.95)
+
+    overrun = elapsed - baseline
+    tail_ratio = 1.0 - math.exp(-overrun / max(baseline, 1.0))
+    return min(0.95 + (0.04 * tail_ratio), 0.99)
+
+
+def _compile_progress_step(
+    elapsed_seconds: float,
+    baseline_seconds: float,
+    *,
+    total_steps: int = _COMPILE_PROGRESS_TOTAL_STEPS,
+) -> int:
+    """Convert one elapsed/baseline pair into a bounded manual progress step."""
+
+    if total_steps <= 1:
+        return 0
+    ratio = _compile_progress_ratio(elapsed_seconds, baseline_seconds)
+    return max(0, min(total_steps - 1, int(math.floor(ratio * (total_steps - 1)))))
+
+
+def _compile_progress_subtitle(elapsed_seconds: float, baseline_seconds: float) -> str:
+    """Describe compile elapsed time against the recorded reference baseline."""
+
+    elapsed = max(float(elapsed_seconds), 0.0)
+    baseline = max(float(baseline_seconds), 0.0)
+    if baseline <= 0.0:
+        return f"elapsed {_format_compile_duration_seconds(elapsed)}"
+    if elapsed <= baseline:
+        return (
+            f"elapsed {_format_compile_duration_seconds(elapsed)} / "
+            f"baseline ~{_format_compile_duration_seconds(baseline)}"
+        )
+    return (
+        f"elapsed {_format_compile_duration_seconds(elapsed)} / "
+        f"baseline ~{_format_compile_duration_seconds(baseline)} "
+        f"(+{_format_compile_duration_seconds(elapsed - baseline)})"
+    )
+
+
+def _compile_baseline_summary(elapsed_seconds: float, baseline_seconds: Optional[float]) -> str:
+    """Format a concise compile-vs-baseline summary for durable log lines."""
+
+    elapsed = _format_compile_duration_seconds(elapsed_seconds)
+    if baseline_seconds is None or baseline_seconds <= 0:
+        return f"in {elapsed}"
+
+    baseline = _format_compile_duration_seconds(baseline_seconds)
+    delta = elapsed_seconds - baseline_seconds
+    delta_text = _format_compile_duration_seconds(abs(delta))
+    if abs(delta) < 0.05:
+        return f"in {elapsed} (baseline ~{baseline})"
+    sign = "+" if delta >= 0 else "-"
+    return f"in {elapsed} (baseline ~{baseline}, {sign}{delta_text})"
+
+
+class _CompileProgressDisplay:
+    """Render either a baseline-backed progress bar or a fallback spinner."""
+
+    def __init__(
+        self,
+        *,
+        logger,
+        title: str,
+        baseline_seconds: Optional[float],
+    ) -> None:
+        self._logger = logger
+        self._title = title
+        self._baseline_seconds = (
+            None if baseline_seconds is None or baseline_seconds <= 0 else float(baseline_seconds)
+        )
+        self._started = time.perf_counter()
+        self._stop_event: Optional[threading.Event] = None
+        self._thread: Optional[threading.Thread] = None
+        self._progress = None
+        self._spinner = None
+
+        if self._baseline_seconds is None:
+            self._spinner = logger.spinner(title=title, interval=_COMPILE_PROGRESS_INTERVAL_SECONDS)
+            return
+
+        progress = logger.pb(range(_COMPILE_PROGRESS_TOTAL_STEPS)).manual().set(show_left_steps=False)
+        progress.title(title)
+        progress.subtitle(_compile_progress_subtitle(0.0, self._baseline_seconds))
+        progress.draw(force=True)
+        self._progress = progress
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._refresh_loop,
+            name=f"jit-compile-progress-{title}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def elapsed_seconds(self) -> float:
+        return max(0.0, time.perf_counter() - self._started)
+
+    def _refresh_loop(self) -> None:
+        assert self._stop_event is not None
+        while not self._stop_event.wait(_COMPILE_PROGRESS_INTERVAL_SECONDS):
+            self._draw_current(force=False)
+
+    def _draw_current(self, *, force: bool) -> None:
+        if self._progress is None or self._baseline_seconds is None:
+            return
+        elapsed = self.elapsed_seconds()
+        self._progress.current_iter_step = _compile_progress_step(elapsed, self._baseline_seconds)
+        self._progress.subtitle(_compile_progress_subtitle(elapsed, self._baseline_seconds))
+        self._progress.draw(force=force)
+
+    def close(self, *, succeeded: bool, elapsed_seconds: Optional[float] = None) -> None:
+        elapsed = self.elapsed_seconds() if elapsed_seconds is None else max(0.0, float(elapsed_seconds))
+        if self._spinner is not None:
+            self._spinner.close()
+            return
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        if self._progress is None or self._baseline_seconds is None:
+            return
+        self._progress.current_iter_step = (
+            _COMPILE_PROGRESS_TOTAL_STEPS if succeeded else _compile_progress_step(elapsed, self._baseline_seconds)
+        )
+        self._progress.subtitle(_compile_progress_subtitle(elapsed, self._baseline_seconds))
+        self._progress.draw(force=True)
+        self._progress.close()
 
 
 def default_torch_ops_build_root(subdir: str) -> Path:
@@ -183,6 +333,7 @@ class TorchOpsJitExtension:
         self.verbose_env = verbose_env
         self.requires_cuda = bool(requires_cuda)
         self.binary_names = tuple(binary_names or (name,))
+        self.compile_baseline_seconds = get_jit_compile_baseline_seconds(name)
         self._load_attempted = False
         self._load_result = False
         self._last_error = ""
@@ -404,8 +555,13 @@ class TorchOpsJitExtension:
 
             logger = setup_logger()
             logger.info(f"{self.display_name}: compiling torch.ops JIT extension in `{build_root}`.")
-            spinner = logger.spinner(title=f"{self.display_name}: compiling kernel...", interval=0.1)
+            progress_display = _CompileProgressDisplay(
+                logger=logger,
+                title=f"{self.display_name}: compiling kernel...",
+                baseline_seconds=self.compile_baseline_seconds,
+            )
             started = time.perf_counter()
+            build_invocation_succeeded = False
             try:
                 kwargs = {
                     "name": self.name,
@@ -428,15 +584,21 @@ class TorchOpsJitExtension:
                     kwargs["extra_ldflags"] = extra_ldflags
 
                 load(**kwargs)
+                build_invocation_succeeded = True
             except Exception as exc:  # pragma: no cover - build depends on host toolchain
+                elapsed = time.perf_counter() - started
                 self._load_attempted = True
                 self._load_result = False
                 self._last_error = f"{self.display_name}: failed to build torch.ops JIT extension: {exc}"
                 log.debug("%s", self._last_error, exc_info=True)
-                logger.info(f"{self.display_name}: torch.ops JIT compilation failed; using fallback path.")
+                logger.info(
+                    f"{self.display_name}: torch.ops JIT compilation failed "
+                    f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}; using fallback path."
+                )
                 return False
             finally:
-                spinner.close()
+                elapsed = time.perf_counter() - started
+                progress_display.close(succeeded=build_invocation_succeeded, elapsed_seconds=elapsed)
 
             elapsed = time.perf_counter() - started
             ready = self._refresh_runtime_cache() or self._try_load_prebuilt_library(build_root)
@@ -445,7 +607,10 @@ class TorchOpsJitExtension:
             if ready:
                 self._refresh_runtime_cache()
                 self._last_error = ""
-                logger.info(f"{self.display_name}: torch.ops JIT extension ready in {elapsed:.1f}s.")
+                logger.info(
+                    f"{self.display_name}: torch.ops JIT extension ready "
+                    f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}."
+                )
                 return True
 
             self._last_error = f"{self.display_name}: build completed but required torch.ops were not registered."
