@@ -23,6 +23,22 @@
   #define MARLIN_NAMESPACE_NAME marlin
 #endif
 
+#ifndef MARLIN_GEMM_EXPORT_NAME
+  #define MARLIN_GEMM_EXPORT_NAME gptq_marlin_gemm
+#endif
+
+#ifndef MARLIN_ENABLE_FP16
+  #define MARLIN_ENABLE_FP16 1
+#endif
+
+#ifndef MARLIN_ENABLE_BF16
+  #define MARLIN_ENABLE_BF16 1
+#endif
+
+#if !MARLIN_ENABLE_FP16 && !MARLIN_ENABLE_BF16
+  #error "At least one Marlin compute dtype must be enabled."
+#endif
+
 #include <ATen/ATen.h>
 
 #ifndef MARLIN_SHARED_MEM_GUARD_BYTES
@@ -68,7 +84,7 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
 
 }  // namespace marlin
 
-torch::Tensor gptq_marlin_gemm(
+torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
     torch::Tensor& b_q_weight,
     std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
@@ -695,7 +711,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
 }  // namespace marlin
 
-torch::Tensor gptq_marlin_gemm(
+torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
     torch::Tensor& b_q_weight,
     std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
@@ -926,6 +942,7 @@ torch::Tensor gptq_marlin_gemm(
               " is below min_workspace_size = ", min_workspace_size);
 
   int dev = a.get_device();
+  #if MARLIN_ENABLE_FP16
   if (a.scalar_type() == at::ScalarType::Half) {
     void* scales_ptr;
     if (b_q_type == vllm::kFE2M1f) {
@@ -955,7 +972,12 @@ torch::Tensor gptq_marlin_gemm(
         is_k_full, has_zp, num_groups, group_size, dev,
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
-  } else if (a.scalar_type() == at::ScalarType::BFloat16) {
+    return c;
+  }
+  #endif
+
+  #if MARLIN_ENABLE_BF16
+  if (a.scalar_type() == at::ScalarType::BFloat16) {
     void* scales_ptr;
     if (b_q_type == vllm::kFE2M1f) {
       if (group_size == 16)
@@ -985,9 +1007,17 @@ torch::Tensor gptq_marlin_gemm(
         has_bias, has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
-  } else {
-    TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
+    return c;
   }
+  #endif
+
+  #if MARLIN_ENABLE_FP16 && MARLIN_ENABLE_BF16
+  TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
+  #elif MARLIN_ENABLE_FP16
+  TORCH_CHECK(false, "gpt_marlin_gemm_fp16 only supports float16");
+  #else
+  TORCH_CHECK(false, "gpt_marlin_gemm_bf16 only supports bfloat16");
+  #endif
 
   return c;
 }

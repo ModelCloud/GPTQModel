@@ -577,14 +577,6 @@ def _env_enabled(val: str) -> bool:
     return str(val).strip().lower() not in ("0", "false", "off", "no")
 
 
-def _env_enabled_any(names, default="1") -> bool:
-    for n in names:
-        if n in os.environ:
-            return _env_enabled(os.environ.get(n))
-    return _env_enabled(default)
-
-
-BUILD_MARLIN = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
 BUILD_MACHETE = _env_enabled(os.environ.get("GPTQMODEL_BUILD_MACHETE", "0"))
 # ExLlamaV2 GPTQ now JIT-compiles on first use via torch.ops; keep setup-time prebuild opt-in only.
 BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "0"))
@@ -753,37 +745,6 @@ if BUILD_CUDA_EXT == "1":
         # Extensions (gate marlin/qqq/exllamav2 on CUDA sm_80+ and non-ROCm)
         if sys.platform != "win32":
             if not ROCM_VERSION and HAS_CUDA_V8:
-                if BUILD_MARLIN:
-                    marlin_kernel_dir = Path("gptqmodel_ext/marlin")
-                    marlin_kernel_files = sorted(marlin_kernel_dir.glob("kernel_*.cu"))
-
-                    if not marlin_kernel_files:
-                        generator_script = marlin_kernel_dir / "generate_kernels.py"
-                        if generator_script.exists():
-                            print("Regenerating marlin template instantiations for parallel compilation...")
-                            subprocess.check_call([sys.executable, str(generator_script)])
-                            marlin_kernel_files = sorted(marlin_kernel_dir.glob("kernel_*.cu"))
-
-                    if not marlin_kernel_files:
-                        raise RuntimeError(
-                            "No generated marlin kernel templates detected. Run generate_kernels.py before building."
-                        )
-
-                    marlin_template_kernel_srcs = [str(path) for path in marlin_kernel_files]
-                    extensions += [
-                        cpp_ext.CUDAExtension(
-                            "gptqmodel_marlin_kernels",
-                            [
-                                "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                                "gptqmodel_ext/marlin/gptq_marlin.cu",
-                                "gptqmodel_ext/marlin/gptq_marlin_repack.cu",
-                                "gptqmodel_ext/marlin/awq_marlin_repack.cu",
-                            ] + marlin_template_kernel_srcs,
-                            extra_link_args=extra_link_args,
-                            extra_compile_args=extra_compile_args,
-                        )
-                    ]
-
                 if BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
                     try:
                         result = subprocess.run(

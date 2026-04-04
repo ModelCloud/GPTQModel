@@ -1059,9 +1059,12 @@ def ModelLoader(cls):
                     f"`{torch.cuda.get_device_capability()}`. Please do not use this Marlin backend."
                 )
 
-            # Validate the model can run in Marlin.
-            if dtype != torch.float16:
-                raise ValueError("Marlin kernel requires dtype=torch.float16.")
+            # GPTQ Marlin supports fp16 and bf16 compute, while AWQ Marlin
+            # remains fp16-only for now.
+            if backend == BACKEND.GPTQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
+                raise ValueError("Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
+            if backend == BACKEND.AWQ_MARLIN and dtype != torch.float16:
+                raise ValueError("AWQ Marlin kernel requires dtype=torch.float16.")
 
 
         if backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
