@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import time
+
 import pytest
 
 from gptqmodel.utils.cpp import (
+    _COMPILE_PROGRESS_TOTAL_STEPS,
+    _CompileProgressDisplay,
     _compile_progress_ratio,
     _compile_progress_step,
     _compile_progress_subtitle,
@@ -49,3 +53,86 @@ def test_default_jit_cuda_cflags_honors_nvcc_threads_override(monkeypatch):
     flags = default_jit_cuda_cflags()
     assert "--threads" in flags
     assert "16" in flags
+
+
+class _FakeProgress:
+    def __init__(self):
+        self.current_iter_step = 0
+        self._title = ""
+        self._subtitle = ""
+        self.closed = False
+
+    def manual(self):
+        return self
+
+    def set(self, **_kwargs):
+        return self
+
+    def title(self, value):
+        self._title = value
+        return self
+
+    def subtitle(self, value):
+        self._subtitle = value
+        return self
+
+    def draw(self, force: bool = False):
+        return self
+
+    def close(self):
+        self.closed = True
+        return None
+
+
+class _FakeSpinner:
+    def close(self):
+        return None
+
+
+class _FakeLogger:
+    def __init__(self):
+        self.progress = _FakeProgress()
+        self.spinner_handle = _FakeSpinner()
+
+    def pb(self, _iterable):
+        return self.progress
+
+    def spinner(self, **_kwargs):
+        return self.spinner_handle
+
+
+def test_compile_progress_close_completes_immediately_when_build_finishes_early(monkeypatch):
+    monkeypatch.setattr("gptqmodel.utils.cpp._COMPILE_PROGRESS_INTERVAL_SECONDS", 60.0)
+    logger = _FakeLogger()
+    display = _CompileProgressDisplay(
+        logger=logger,
+        title="Compiling extension: Marlin bf16...",
+        baseline_seconds=120.0,
+    )
+
+    started = time.perf_counter()
+    display.close(succeeded=True, elapsed_seconds=5.0)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.5
+    assert logger.progress.current_iter_step == _COMPILE_PROGRESS_TOTAL_STEPS
+    assert logger.progress.closed is True
+    assert logger.progress._subtitle == "elapsed 5.0s / estimated ~120s"
+
+
+def test_compile_progress_close_does_not_wait_for_refresh_interval_on_failure(monkeypatch):
+    monkeypatch.setattr("gptqmodel.utils.cpp._COMPILE_PROGRESS_INTERVAL_SECONDS", 60.0)
+    logger = _FakeLogger()
+    display = _CompileProgressDisplay(
+        logger=logger,
+        title="Compiling extension: AWQ...",
+        baseline_seconds=60.0,
+    )
+
+    started = time.perf_counter()
+    display.close(succeeded=False, elapsed_seconds=3.0)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.5
+    assert logger.progress.current_iter_step < _COMPILE_PROGRESS_TOTAL_STEPS
+    assert logger.progress.closed is True

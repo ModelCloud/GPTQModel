@@ -143,6 +143,8 @@ class _CompileProgressDisplay:
         self._thread: Optional[threading.Thread] = None
         self._progress = None
         self._spinner = None
+        self._render_lock = threading.Lock()
+        self._closed = False
 
         if self._baseline_seconds is None:
             self._spinner = logger.spinner(title=title, interval=_COMPILE_PROGRESS_INTERVAL_SECONDS)
@@ -172,10 +174,15 @@ class _CompileProgressDisplay:
     def _draw_current(self, *, force: bool) -> None:
         if self._progress is None or self._baseline_seconds is None:
             return
-        elapsed = self.elapsed_seconds()
-        self._progress.current_iter_step = _compile_progress_step(elapsed, self._baseline_seconds)
-        self._progress.subtitle(_compile_progress_subtitle(elapsed, self._baseline_seconds))
-        self._progress.draw(force=force)
+        if self._closed:
+            return
+        with self._render_lock:
+            if self._closed:
+                return
+            elapsed = self.elapsed_seconds()
+            self._progress.current_iter_step = _compile_progress_step(elapsed, self._baseline_seconds)
+            self._progress.subtitle(_compile_progress_subtitle(elapsed, self._baseline_seconds))
+            self._progress.draw(force=force)
 
     def close(self, *, succeeded: bool, elapsed_seconds: Optional[float] = None) -> None:
         elapsed = self.elapsed_seconds() if elapsed_seconds is None else max(0.0, float(elapsed_seconds))
@@ -184,16 +191,21 @@ class _CompileProgressDisplay:
             return
         if self._stop_event is not None:
             self._stop_event.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
         if self._progress is None or self._baseline_seconds is None:
             return
-        self._progress.current_iter_step = (
-            _COMPILE_PROGRESS_TOTAL_STEPS if succeeded else _compile_progress_step(elapsed, self._baseline_seconds)
-        )
-        self._progress.subtitle(_compile_progress_subtitle(elapsed, self._baseline_seconds))
-        self._progress.draw(force=True)
-        self._progress.close()
+        # Completion is driven by the actual build result and elapsed time, not
+        # by the estimated baseline. A faster-than-expected compile should exit
+        # immediately and force the bar to its final state.
+        self._closed = True
+        with self._render_lock:
+            self._progress.current_iter_step = (
+                _COMPILE_PROGRESS_TOTAL_STEPS if succeeded else _compile_progress_step(elapsed, self._baseline_seconds)
+            )
+            self._progress.subtitle(_compile_progress_subtitle(elapsed, self._baseline_seconds))
+            self._progress.draw(force=True)
+            self._progress.close()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.05)
 
 
 def default_torch_ops_build_root(subdir: str) -> Path:
