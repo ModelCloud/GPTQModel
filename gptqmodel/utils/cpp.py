@@ -123,14 +123,6 @@ def default_jit_cuda_cflags(
         enable_bf16=enable_bf16,
         include_abi=include_abi,
     )
-    flags.extend([
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-    ])
 
     if include_nvcc_threads:
         flags.extend(["--threads", os.getenv("NVCC_THREADS", "2")])
