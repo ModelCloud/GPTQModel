@@ -102,7 +102,7 @@ class METHOD(str, Enum):
     QQQ = "qqq"
     AWQ = "awq"
     EXL3 = "exl3"
-    PAROQUANT = "paroquant"
+    PARO = "paroquant"
 
 
 class VramStrategy(str, Enum):
@@ -612,7 +612,7 @@ def resolve_quant_format(
         return FORMAT.BITSANDBYTES
     if method == METHOD.EXL3:
         return FORMAT.EXL3
-    if method == METHOD.PAROQUANT:
+    if method == METHOD.PARO:
         return FORMAT.PAROQUANT
 
     if isinstance(format_value, FORMAT):
@@ -1328,7 +1328,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.BITBLAS,
         FORMAT.LLM_AWQ,
     },
-    METHOD.PAROQUANT: {
+    METHOD.PARO: {
         FORMAT.PAROQUANT,
     },
 }
@@ -1390,7 +1390,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GEMV: METHOD.AWQ,
     FORMAT.GEMV_FAST: METHOD.AWQ,
     FORMAT.LLM_AWQ: METHOD.AWQ,
-    FORMAT.PAROQUANT: METHOD.PAROQUANT,
+    FORMAT.PAROQUANT: METHOD.PARO,
     FORMAT.QQQ: METHOD.QQQ,
 }
 
@@ -1622,7 +1622,7 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
         if value == FORMAT.EXL3:
             return METHOD.EXL3
         if value == FORMAT.PAROQUANT:
-            return METHOD.PAROQUANT
+            return METHOD.PARO
         try:
             return METHOD(value)
         except ValueError as exc:
@@ -2023,7 +2023,7 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.EXL3}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.EXL3
     elif target_cls is ParoQuantizeConfig:
-        expected_method = METHOD.PAROQUANT
+        expected_method = METHOD.PARO
         format_value = normalized.get(FORMAT_FIELD_CODE)
         normalized_format = None
         if format_value is not None:
@@ -2940,7 +2940,7 @@ class AWQQuantizeConfig(QuantizeConfig):
 
 @dataclass
 class ParoQuantizeConfig(QuantizeConfig):
-    method: METHOD = field(default=METHOD.PAROQUANT)
+    method: METHOD = field(default=METHOD.PARO)
     format: FORMAT = field(default=FORMAT.PAROQUANT)
     krot: int = field(default=8)
     opt_rotation_epochs: int = field(default=10)
@@ -2974,7 +2974,7 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_channel_scale_clamp_max: float = field(default=PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
-        return (METHOD.PAROQUANT,)
+        return (METHOD.PARO,)
 
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
         return PAROQUANT_EXPORT_FORMATS
@@ -3844,7 +3844,7 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return BitsAndBytesConfig
     if method == METHOD.EXL3 or format_value == FORMAT.EXL3:
         return EXL3QuantizeConfig
-    if method == METHOD.PAROQUANT or format_value == FORMAT.PAROQUANT:
+    if method == METHOD.PARO or format_value == FORMAT.PAROQUANT:
         return ParoQuantizeConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
         return QQQQuantizeConfig

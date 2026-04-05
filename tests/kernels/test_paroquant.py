@@ -10,7 +10,7 @@
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantLinear
+from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
@@ -120,7 +120,7 @@ def test_paroquant_identity_forward_matches_awq_torch():
     awq_module.post_init()
     awq_module.eval()
 
-    paro_module = ParoQuantLinear(
+    paro_module = ParoLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -159,7 +159,7 @@ def test_paroquant_forward_matches_explicit_rotated_reference():
     group_size = 128
     qweight, qzeros, scales, bias = _make_packed_buffers(bits, in_features, out_features, group_size)
 
-    module = ParoQuantLinear(
+    module = ParoLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -231,7 +231,7 @@ def test_paroquant_cuda_matches_upstream_transformers_contract():
     qweight = _pack_awq_tensor(int_weight, bits)
     qzeros = _pack_awq_tensor(zero_points, bits)
 
-    module = ParoQuantLinear(
+    module = ParoLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -302,18 +302,18 @@ def test_paroquant_backend_selection():
         desc_act=False,
         sym=True,
         device=None,
-        backend=BACKEND.PAROQUANT,
+        backend=BACKEND.PARO,
         format=FORMAT.PAROQUANT,
-        quant_method=METHOD.PAROQUANT,
+        quant_method=METHOD.PARO,
         pack_dtype=torch.int32,
     )
-    assert qlinear_cls is ParoQuantLinear
+    assert qlinear_cls is ParoLinear
 
 
 def test_paroquant_triton_backend_mapping():
     """Guard registry lookup for the Triton ParoQuant runtime class."""
     assert (
-        get_kernel_for_backend(BACKEND.PAROQUANT_TRITON, METHOD.PAROQUANT, FORMAT.PAROQUANT)
+        get_kernel_for_backend(BACKEND.PAROQUANT_TRITON, METHOD.PARO, FORMAT.PAROQUANT)
         is ParoQuantTritonLinear
     )
 
@@ -329,7 +329,7 @@ def test_paroquant_triton_matches_existing_cuda_kernel():
     group_size = 128
     qweight, qzeros, scales, bias = _make_packed_buffers(bits, in_features, out_features, group_size)
 
-    baseline = ParoQuantLinear(
+    baseline = ParoLinear(
         bits=bits,
         group_size=group_size,
         sym=True,

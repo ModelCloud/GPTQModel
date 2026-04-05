@@ -80,7 +80,7 @@ class BACKEND(str, Enum):
     TORCH_FUSED_AWQ = "torch_fused_awq"
     TORCH_AWQ = "torch_awq"
     BITBLAS_AWQ = "bitblas_awq"
-    PAROQUANT = "paroquant"
+    PARO = "paroquant"
 
 
 _LEGACY_BACKEND_BY_METHOD = {
@@ -112,7 +112,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.EXLLAMA_V2: BACKEND.AWQ_EXLLAMA_V2,
     },
     "paroquant": {
-        BACKEND.PAROQUANT: BACKEND.PAROQUANT_CUDA,
+        BACKEND.PARO: BACKEND.PAROQUANT_CUDA,
     },
     "fp8": {
         BACKEND.TORCH: BACKEND.FP8_TORCH,

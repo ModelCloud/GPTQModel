@@ -129,10 +129,10 @@ def _make_module(
     cache_runtime_dtype: bool,
     cache_rotation_dtype: bool,
 ):
-    from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantLinear
+    from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 
     buffers = _make_quant_buffers(case, dtype=dtype)
-    module = ParoQuantLinear(
+    module = ParoLinear(
         bits=4,
         group_size=case.group_size,
         sym=True,

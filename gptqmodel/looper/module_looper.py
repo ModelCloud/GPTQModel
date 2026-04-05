@@ -86,7 +86,7 @@ def _restrict_quant_devices_for_method(method: Any, quant_devices: List[torch.de
     except (TypeError, ValueError):
         normalized_method = None
 
-    if normalized_method != METHOD.PAROQUANT or not quant_devices:
+    if normalized_method != METHOD.PARO or not quant_devices:
         return quant_devices
 
     non_cpu_devices = [device for device in quant_devices if getattr(device, "type", None) != "cpu"]
@@ -185,7 +185,7 @@ class ModuleLooper():
         )
         if restricted_quant_devices != quant_devices:
             log.warn(
-                "ModuleLooper: METHOD.PAROQUANT forcing single-device quantization on `%s`; "
+                "ModuleLooper: METHOD.PARO forcing single-device quantization on `%s`; "
                 "ignoring additional devices %s to avoid multi-GPU sync issues.",
                 restricted_quant_devices[0],
                 [str(device) for device in quant_devices if device != restricted_quant_devices[0]],

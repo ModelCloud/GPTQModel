@@ -293,7 +293,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.FP8,
         METHOD.BITSANDBYTES,
         METHOD.AWQ,
-        METHOD.PAROQUANT,
+        METHOD.PARO,
         METHOD.QQQ,
         METHOD.EXL3,
     ):
@@ -306,7 +306,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.FP8,
         METHOD.BITSANDBYTES,
         METHOD.AWQ,
-        METHOD.PAROQUANT,
+        METHOD.PARO,
         METHOD.QQQ,
         METHOD.EXL3,
     ):
@@ -576,7 +576,7 @@ class GPTQModel:
             backend = BACKEND.BITSANDBYTES
         elif normalized_method == METHOD.AWQ.value:
             backend = BACKEND.AWQ_TORCH
-        elif normalized_method == METHOD.PAROQUANT.value:
+        elif normalized_method == METHOD.PARO.value:
             backend = BACKEND.PAROQUANT_CUDA
         elif normalized_method == METHOD.FP8.value:
             backend = BACKEND.FP8_TORCH

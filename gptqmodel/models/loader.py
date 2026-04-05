@@ -136,7 +136,7 @@ def _is_meta_shell_build_error(exc: Exception) -> bool:
 
 
 def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
-    if qcfg.quant_method not in (METHOD.AWQ, METHOD.PAROQUANT):
+    if qcfg.quant_method not in (METHOD.AWQ, METHOD.PARO):
         return dtype
     if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
         return dtype

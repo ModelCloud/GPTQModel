@@ -30,7 +30,7 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.looper.stage_layer import _capture_pristine_group_context
 from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
-from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantLinear
+from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantizeConfig, QuantizeConfig
 from gptqmodel.quantization.paroquant import optimization as paroquant_optimization
 from gptqmodel.quantization.paroquant.optimization import (
@@ -58,14 +58,14 @@ from gptqmodel.utils.paroquant_benchmark import make_paroquant_config
 def test_paroquant_quantize_config_dispatches_constructor():
     """Guard that ParoQuant config fields survive direct construction."""
     cfg = QuantizeConfig(
-        quant_method=METHOD.PAROQUANT,
+        quant_method=METHOD.PARO,
         format=FORMAT.PAROQUANT,
         bits=4,
         group_size=128,
         krot=8,
     )
 
-    assert cfg.quant_method == METHOD.PAROQUANT
+    assert cfg.quant_method == METHOD.PARO
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
     assert cfg.opt_batch_size == 64
@@ -87,7 +87,7 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.opt_train_on_noisy_inputs is False
     assert cfg.opt_channel_scale_clamp_min == 1e-2
     assert cfg.opt_channel_scale_clamp_max == 1e2
-    assert cfg.export_quant_method() == METHOD.PAROQUANT
+    assert cfg.export_quant_method() == METHOD.PARO
 
 
 def test_paroquant_quantize_config_enables_gradient_checkpointing_by_default_for_layer_scope():
@@ -145,7 +145,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     )
 
     assert isinstance(cfg, ParoQuantizeConfig)
-    assert cfg.quant_method == METHOD.PAROQUANT
+    assert cfg.quant_method == METHOD.PARO
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
     assert cfg.opt_rotation_epochs == 10
@@ -284,7 +284,7 @@ def test_paroquant_benchmark_config_preserves_opt_scope():
     """Benchmark helpers should propagate the requested optimization scope."""
     cfg = make_paroquant_config(dynamic={}, opt_scope="compute_block")
 
-    assert cfg.quant_method == METHOD.PAROQUANT
+    assert cfg.quant_method == METHOD.PARO
     assert cfg.opt_scope == "compute_block"
     assert cfg.opt_gradient_checkpointing is False
 
@@ -1102,11 +1102,11 @@ def test_paroquant_registers_with_transformers_gptq_quantizer():
 
 def test_paroquant_kernel_mapping_uses_paroquant_backend():
     """Guard backend dispatch so ParoQuant does not silently fall back to AWQ."""
-    from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantLinear
+    from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 
     assert (
-        get_kernel_for_backend(BACKEND.PAROQUANT_CUDA, METHOD.PAROQUANT, FORMAT.PAROQUANT)
-        is ParoQuantLinear
+        get_kernel_for_backend(BACKEND.PAROQUANT_CUDA, METHOD.PARO, FORMAT.PAROQUANT)
+        is ParoLinear
     )
 
 
@@ -1115,7 +1115,7 @@ def test_paroquant_kernel_mapping_uses_paroquant_triton_backend():
     from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 
     assert (
-        get_kernel_for_backend(BACKEND.PAROQUANT_TRITON, METHOD.PAROQUANT, FORMAT.PAROQUANT)
+        get_kernel_for_backend(BACKEND.PAROQUANT_TRITON, METHOD.PARO, FORMAT.PAROQUANT)
         is ParoQuantTritonLinear
     )
 
@@ -1143,7 +1143,7 @@ def test_paroquant_identity_rotation_buffers_preserve_input():
 
 def test_paroquant_module_default_rotation_buffers_are_identity():
     """Guard fresh runtime modules against invalid all-zero pair buffers."""
-    module = ParoQuantLinear(
+    module = ParoLinear(
         bits=4,
         group_size=128,
         sym=True,
@@ -4322,14 +4322,14 @@ def test_paroquant_quant_device_selection_forces_single_gpu():
     cuda_devices = [torch.device("cuda:0"), torch.device("cuda:1"), torch.device("cuda:2")]
     mixed_devices = [torch.device("cpu"), torch.device("cuda:3"), torch.device("cuda:4")]
 
-    assert _restrict_quant_devices_for_method(METHOD.PAROQUANT, cuda_devices) == [torch.device("cuda:0")]
-    assert _restrict_quant_devices_for_method(METHOD.PAROQUANT, mixed_devices) == [torch.device("cuda:3")]
+    assert _restrict_quant_devices_for_method(METHOD.PARO, cuda_devices) == [torch.device("cuda:0")]
+    assert _restrict_quant_devices_for_method(METHOD.PARO, mixed_devices) == [torch.device("cuda:3")]
     assert _restrict_quant_devices_for_method(METHOD.GPTQ, cuda_devices) == cuda_devices
 
 
 def test_paroquant_kernel_rejects_sym_false():
     """Guard that runtime capability flags disable asymmetric ParoQuant."""
-    ok, err = ParoQuantLinear.validate(
+    ok, err = ParoLinear.validate(
         bits=4,
         group_size=128,
         desc_act=False,
@@ -4347,7 +4347,7 @@ def test_paroquant_kernel_rejects_sym_false():
 
 def test_paroquant_kernel_accepts_bf16():
     """Guard that saved ParoQuant checkpoints can be reloaded for bf16 inference."""
-    ok, err = ParoQuantLinear.validate(
+    ok, err = ParoLinear.validate(
         bits=4,
         group_size=128,
         desc_act=False,
@@ -4367,9 +4367,9 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant AWQ bf16 kernel path.")
 
-    paroquant_module = sys.modules[ParoQuantLinear.__module__]
+    paroquant_module = sys.modules[ParoLinear.__module__]
 
-    module = ParoQuantLinear(
+    module = ParoLinear(
         bits=4,
         group_size=128,
         sym=True,
@@ -4408,7 +4408,7 @@ def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch)
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant rotation bf16 fused path.")
 
-    module = ParoQuantLinear(
+    module = ParoLinear(
         bits=4,
         group_size=128,
         sym=True,
@@ -4537,10 +4537,10 @@ def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant rotation cache path.")
 
-    paroquant_module = sys.modules[ParoQuantLinear.__module__]
+    paroquant_module = sys.modules[ParoLinear.__module__]
     from gptqmodel.utils import paroquant as paroquant_utils
 
-    module = ParoQuantLinear(
+    module = ParoLinear(
         bits=4,
         group_size=128,
         sym=True,
