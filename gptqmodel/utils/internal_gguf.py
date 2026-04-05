@@ -12,11 +12,15 @@ from typing import Any, Literal, NamedTuple, TypeVar, Union
 
 import numpy as np
 import numpy.typing as npt
+import torch
 
-from ..nn_modules.qlinear.gguf import _dequantize_gguf_tensor_numpy, _quantize_gguf_tensor_numpy
+from ..nn_modules.qlinear.gguf import _dequantize_gguf_tensor_numpy, _dequantize_sign_only_torch, _quantize_gguf_tensor_numpy
 
 __version__ = "0.10.0"
 _GPTQMODEL_INTERNAL_GGUF_RUNTIME = True
+_INTERNAL_GGUF_DEQUANT_DEVICE_ENV = "GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE"
+_INTERNAL_GGUF_DEQUANT_MAX_BYTES_ENV = "GPTQMODEL_INTERNAL_GGUF_DEQUANT_MAX_BYTES"
+_INTERNAL_GGUF_DEQUANT_DEFAULT_MAX_BYTES = 256 * 1024 * 1024
 
 GGUF_MAGIC = 0x46554747
 GGUF_VERSION = 3
@@ -119,6 +123,10 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.Q1_0: (32, 2 + 4),
     GGMLQuantizationType.Q1_0_g128: (128, 2 + 16),
 }
+_TORCH_SIGN_ONLY_QTYPES: dict[GGMLQuantizationType, tuple[int, int]] = {
+    GGMLQuantizationType.Q1_0: GGML_QUANT_SIZES[GGMLQuantizationType.Q1_0],
+    GGMLQuantizationType.Q1_0_g128: GGML_QUANT_SIZES[GGMLQuantizationType.Q1_0_g128],
+}
 
 MODEL_ARCH_QWEN3 = "qwen3"
 MODEL_ARCH_NAMES = {
@@ -171,8 +179,102 @@ def quantize(data: np.ndarray, qtype: GGMLQuantizationType) -> np.ndarray:
     return _quantize_gguf_tensor_numpy(np.asarray(data), GGMLQuantizationType(int(qtype)))
 
 
+def _resolve_torch_dequant_device() -> torch.device | None:
+    raw = os.getenv(_INTERNAL_GGUF_DEQUANT_DEVICE_ENV)
+    if raw is None or raw.strip() == "":
+        return None
+
+    try:
+        device = torch.device(raw.strip())
+    except Exception:
+        return None
+
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            return None
+        if device.index is not None and device.index >= torch.cuda.device_count():
+            return None
+        return device
+
+    if device.type == "cpu":
+        return device
+
+    return None
+
+
+def _resolve_torch_dequant_chunk_rows(
+    *,
+    packed_row_bytes: int,
+    block_size: int,
+    type_size: int,
+) -> int:
+    output_row_bytes = packed_row_bytes // type_size * block_size * np.dtype(np.float32).itemsize
+    if output_row_bytes <= 0:
+        return 1
+
+    raw_limit = os.getenv(_INTERNAL_GGUF_DEQUANT_MAX_BYTES_ENV)
+    try:
+        byte_limit = int(raw_limit) if raw_limit is not None else _INTERNAL_GGUF_DEQUANT_DEFAULT_MAX_BYTES
+    except ValueError:
+        byte_limit = _INTERNAL_GGUF_DEQUANT_DEFAULT_MAX_BYTES
+
+    return max(1, byte_limit // output_row_bytes)
+
+
+def _dequantize_sign_only_torch_to_numpy(
+    data: np.ndarray,
+    *,
+    block_size: int,
+    type_size: int,
+    device: torch.device,
+) -> np.ndarray:
+    rows = np.asarray(data, dtype=np.uint8)
+    if rows.shape[-1] % type_size != 0:
+        raise ValueError(
+            f"GGUF sign-only row byte width must be divisible by {type_size}, got "
+            f"{rows.shape[-1]} for shape {rows.shape}."
+        )
+
+    packed_cols = rows.shape[-1]
+    output_cols = packed_cols // type_size * block_size
+    flat_rows = rows.reshape(-1, packed_cols)
+    flat_output = np.empty((flat_rows.shape[0], output_cols), dtype=np.float32)
+    chunk_rows = _resolve_torch_dequant_chunk_rows(
+        packed_row_bytes=packed_cols,
+        block_size=block_size,
+        type_size=type_size,
+    )
+
+    for start in range(0, flat_rows.shape[0], chunk_rows):
+        end = min(start + chunk_rows, flat_rows.shape[0])
+        chunk = _dequantize_sign_only_torch(
+            flat_rows[start:end],
+            block_size=block_size,
+            type_size=type_size,
+            device=device,
+            dtype=torch.float32,
+        )
+        if device.type == "cuda":
+            torch.cuda.synchronize(device=device)
+        flat_output[start:end] = chunk.cpu().numpy()
+
+    return flat_output.reshape(*rows.shape[:-1], output_cols)
+
+
 def dequantize(data: np.ndarray, qtype: GGMLQuantizationType) -> np.ndarray:
-    return _dequantize_gguf_tensor_numpy(np.asarray(data), GGMLQuantizationType(int(qtype)))
+    resolved_qtype = GGMLQuantizationType(int(qtype))
+    device = _resolve_torch_dequant_device()
+    sign_only_info = _TORCH_SIGN_ONLY_QTYPES.get(resolved_qtype)
+    if device is not None and sign_only_info is not None:
+        block_size, type_size = sign_only_info
+        return _dequantize_sign_only_torch_to_numpy(
+            np.asarray(data, dtype=np.uint8),
+            block_size=block_size,
+            type_size=type_size,
+            device=device,
+        )
+
+    return _dequantize_gguf_tensor_numpy(np.asarray(data), resolved_qtype)
 
 
 class _MinimalTensorNameMap:

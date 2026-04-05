@@ -86,6 +86,10 @@ _GGUF_TENSOR_QTYPE_BY_VALUE = {
     40: "Q1_0",
     PRISM_Q1_0_G128_VALUE: PRISM_Q1_0_G128_NAME,
 }
+_GGUF_SIGN_ONLY_LUT = (
+    np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="little").astype(np.int8) * 2 - 1
+)
+_GGUF_SIGN_ONLY_TORCH_LUT: dict[str, torch.Tensor] = {}
 
 
 def _normalize_gguf_bits(bits) -> tuple[GGUFBits, str]:
@@ -424,11 +428,78 @@ def _dequantize_sign_only_numpy(
     return weights.reshape(*rows.shape[:-1], n_blocks * block_size)
 
 
+def _get_sign_only_torch_lut(device: torch.device) -> torch.Tensor:
+    key = str(device)
+    lut = _GGUF_SIGN_ONLY_TORCH_LUT.get(key)
+    if lut is None or lut.device != device:
+        lut = torch.from_numpy(_GGUF_SIGN_ONLY_LUT).to(device=device, dtype=torch.int8)
+        _GGUF_SIGN_ONLY_TORCH_LUT[key] = lut
+    return lut
+
+
+def _dequantize_sign_only_torch(
+    data: np.ndarray | torch.Tensor,
+    *,
+    block_size: int,
+    type_size: int,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    if torch.is_tensor(data):
+        rows = data
+        if rows.dtype != torch.uint8:
+            rows = rows.to(dtype=torch.uint8)
+    else:
+        rows = torch.from_numpy(np.array(data, dtype=np.uint8, copy=True, order="C"))
+
+    target_device = rows.device if device is None else torch.device(device)
+    if rows.device != target_device:
+        rows = rows.to(device=target_device, non_blocking=rows.device.type == "cpu" and target_device.type == "cuda")
+    if not rows.is_contiguous():
+        rows = rows.contiguous()
+
+    if rows.shape[-1] % type_size != 0:
+        raise ValueError(
+            f"GGUF sign-only row byte width must be divisible by {type_size}, got "
+            f"{rows.shape[-1]} for shape {tuple(rows.shape)}."
+        )
+
+    n_blocks = rows.shape[-1] // type_size
+    blocks = rows.reshape(*rows.shape[:-1], n_blocks, type_size)
+    scales = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
+    if scales.dtype != dtype:
+        scales = scales.to(dtype)
+
+    sign_bytes = blocks[..., 2:].to(dtype=torch.long)
+    sign_lut = _get_sign_only_torch_lut(target_device)
+    signs = sign_lut[sign_bytes].reshape(*rows.shape[:-1], n_blocks, block_size)
+    if signs.dtype != dtype:
+        signs = signs.to(dtype)
+
+    weights = scales.unsqueeze(-1) * signs
+    return weights.reshape(*rows.shape[:-1], n_blocks * block_size)
+
+
 def _dequantize_prism_q1_0_g128(data: np.ndarray) -> np.ndarray:
     return _dequantize_sign_only_numpy(
         data,
         block_size=PRISM_Q1_0_G128_BLOCK_SIZE,
         type_size=PRISM_Q1_0_G128_TYPE_SIZE,
+    )
+
+
+def _dequantize_prism_q1_0_g128_torch(
+    data: np.ndarray | torch.Tensor,
+    *,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    return _dequantize_sign_only_torch(
+        data,
+        block_size=PRISM_Q1_0_G128_BLOCK_SIZE,
+        type_size=PRISM_Q1_0_G128_TYPE_SIZE,
+        device=device,
+        dtype=dtype,
     )
 
 

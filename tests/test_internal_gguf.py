@@ -22,6 +22,29 @@ def test_internal_gguf_dequantizes_prism_q1_0_g128_blocks():
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
 
 
+def test_internal_gguf_dequantize_uses_torch_sign_only_path_when_requested(monkeypatch):
+    scale = np.array([0.75], dtype=np.float16).view(np.uint8)
+    sign_bits = (np.arange(128, dtype=np.uint8) % 5 < 2).astype(np.uint8)
+    packed_bits = np.packbits(sign_bits, bitorder="little")
+    row = np.concatenate([scale, packed_bits], axis=0).reshape(1, -1)
+    expected = np.where(sign_bits == 1, np.float32(0.75), np.float32(-0.75)).reshape(1, 128)
+
+    calls = {"count": 0}
+    original = internal_gguf._dequantize_sign_only_torch_to_numpy
+
+    def _wrapped(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setenv("GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE", "cpu")
+    monkeypatch.setattr(internal_gguf, "_dequantize_sign_only_torch_to_numpy", _wrapped)
+
+    actual = internal_gguf.dequantize(row, internal_gguf.GGMLQuantizationType.Q1_0_g128)
+
+    assert calls["count"] == 1
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
 def test_internal_gguf_reader_reads_minimal_f32_tensor(tmp_path):
     tensor = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
 
