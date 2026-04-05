@@ -8,8 +8,8 @@ import torch
 
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
-from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
@@ -137,7 +137,7 @@ def test_select_quant_linear_smoke(kernel_cls, method, fmt):
 
 
 @pytest.mark.parametrize("fmt", [FORMAT.GPTQ, FORMAT.GPTQ_V2])
-def test_cpu_auto_select_prioritizes_hf_kernel_for_gptq(monkeypatch, fmt):
+def test_cpu_auto_select_prioritizes_torch_aten_for_gptq(monkeypatch, fmt):
     _force_auto_candidates_valid(monkeypatch, METHOD.GPTQ, fmt)
 
     candidates = select_quant_linear(
@@ -153,10 +153,10 @@ def test_cpu_auto_select_prioritizes_hf_kernel_for_gptq(monkeypatch, fmt):
         multi_select=True,
     )
 
-    assert candidates[0] is HFKernelLinear
+    assert candidates[0] is TorchAtenLinear
 
 
-def test_cpu_auto_select_prioritizes_hf_kernel_for_awq(monkeypatch):
+def test_cpu_auto_select_prioritizes_torch_aten_for_awq(monkeypatch):
     _force_auto_candidates_valid(monkeypatch, METHOD.AWQ, FORMAT.GEMM)
 
     candidates = select_quant_linear(
@@ -172,7 +172,7 @@ def test_cpu_auto_select_prioritizes_hf_kernel_for_awq(monkeypatch):
         multi_select=True,
     )
 
-    assert candidates[0] is HFKernelAwqLinear
+    assert candidates[0] is TorchAtenAwqLinear
 
 
 def test_cpu_auto_select_prioritizes_cpp_kernel_for_gguf(monkeypatch):

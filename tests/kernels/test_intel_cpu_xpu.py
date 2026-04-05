@@ -12,7 +12,7 @@ from parameterized import parameterized
 from torch import Tensor
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8QuantLinear
@@ -62,7 +62,7 @@ class TestKernelOutput(unittest.TestCase):
         BACKEND.TORCH: TorchQuantLinear,
         BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
         BACKEND.TORCH_INT8: TorchInt8QuantLinear,
-        BACKEND.HF_KERNEL: HFKernelLinear,
+        BACKEND.GPTQ_TORCH_ATEN: TorchAtenLinear,
     }
     target = 'model.layers.6.self_attn.v_proj'
     device = "cpu"
@@ -111,7 +111,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TORCH_FUSED,  r_tolerance, a_tolerance),
         # Int4->float->int8 re-quantization in TorchInt8 introduces extra approximation noise.
         (BACKEND.TORCH_INT8,  int8_r_tolerance, int8_a_tolerance),
-        (BACKEND.HF_KERNEL,  r_tolerance, a_tolerance),
+        (BACKEND.GPTQ_TORCH_ATEN,  r_tolerance, a_tolerance),
     ])
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
         model = GPTQModel.load(self.model_path, backend=backend, device=self.device, dtype=self.dtype)
@@ -140,7 +140,7 @@ class TestKernelOutputXPUBFloat16(TestKernelOutputXPU):
     dtype = torch.bfloat16
 
 
-class TestTorchFusedAndHFKernelDevices(unittest.TestCase):
+class TestTorchFusedAndTorchAtenDevices(unittest.TestCase):
     model_path = TestKernelOutput.model_path
     target_qliner_map = TestKernelOutput.target_qliner_map
     target = TestKernelOutput.target
@@ -157,7 +157,7 @@ class TestTorchFusedAndHFKernelDevices(unittest.TestCase):
     backend_tolerances = {
         BACKEND.TORCH_FUSED: (r_tolerance, a_tolerance),
         BACKEND.TORCH_INT8: (int8_r_tolerance, int8_a_tolerance),
-        BACKEND.HF_KERNEL: (r_tolerance, a_tolerance),
+        BACKEND.GPTQ_TORCH_ATEN: (r_tolerance, a_tolerance),
     }
 
     @classmethod
@@ -200,7 +200,7 @@ class TestTorchFusedAndHFKernelDevices(unittest.TestCase):
     @parameterized.expand([
         ("cpu", "cpu", BACKEND.TORCH_FUSED),
         ("cpu", "cpu", BACKEND.TORCH_INT8),
-        ("cpu", "cpu", BACKEND.HF_KERNEL),
+        ("cpu", "cpu", BACKEND.GPTQ_TORCH_ATEN),
         ("xpu", "xpu:0", BACKEND.TORCH_FUSED),
     ])
     def test_backends_matches_cpu_reference(self, _name: str, device: str, backend: BACKEND):
@@ -247,7 +247,7 @@ class TestTorchFusedAndHFKernelDevices(unittest.TestCase):
         if failures:
             raise AssertionError(f"{len(failures)} mismatched samples on device {device}")
 
-class TestTorchFusedAndHFKernelDevicesWithBias(TestTorchFusedAndHFKernelDevices):
+class TestTorchFusedAndTorchAtenDevicesWithBias(TestTorchFusedAndTorchAtenDevices):
     model_path = "/monster/data/model/bloom-560m-gptqmodel-4bit"
     target = 'transformer.h.6.self_attention.query_key_value'
     k = 1024

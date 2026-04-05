@@ -42,8 +42,8 @@ def _cpu_int4pack_zero_offsets(
     return (zero_center - zero_codes.to(dtype=scales.dtype)) * scales
 
 
-class HFKernelLinear(PackableQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.GPTQ_HF_KERNEL]
+class TorchAtenLinear(PackableQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH_ATEN]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 110, FORMAT.GPTQ_V2: 110}
     SUPPORTS_BITS = [4]
@@ -64,8 +64,7 @@ class HFKernelLinear(PackableQuantLinear):
 
     REQUIRES_FORMAT_V2 = True
 
-    # Legacy backend name kept for compatibility; implementation is now local.
-    QUANT_TYPE = "hf_kernel"
+    QUANT_TYPE = "torch_aten_kernel"
 
     gemm_int4_forward_kernel = None
 
@@ -92,7 +91,7 @@ class HFKernelLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.GPTQ_HF_KERNEL),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_TORCH_ATEN),
             adapter=adapter,
             register_buffers=register_buffers,
             enable_wf_unsqueeze=kwargs.pop("enable_wf_unsqueeze", True),
@@ -107,7 +106,7 @@ class HFKernelLinear(PackableQuantLinear):
         if not _has_local_int4pack_cpu_ops():
             cls.gemm_int4_forward_kernel = None
             err = ImportError(
-                "HFKernelLinear requires aten::_convert_weight_to_int4pack_for_cpu and "
+                "TorchAtenLinear requires aten::_convert_weight_to_int4pack_for_cpu and "
                 "aten::_weight_int4pack_mm_for_cpu in this PyTorch build."
             )
             log.warning(str(err))
@@ -272,13 +271,13 @@ class HFKernelLinear(PackableQuantLinear):
 
 def dequantize_model(model: PreTrainedModel):
     for name, module in model.named_modules():
-        if isinstance(module, BaseQuantLinear) and not isinstance(module, HFKernelLinear):
+        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchAtenLinear):
             raise ValueError(
-                "Only models loaded using HFKernelLinear are supported for dequantization. "
-                "Please load model using backend=BACKEND.GPTQ_HF_KERNEL"
+                "Only models loaded using TorchAtenLinear are supported for dequantization. "
+                "Please load model using backend=BACKEND.GPTQ_TORCH_ATEN"
             )
 
-        if isinstance(module, HFKernelLinear):
+        if isinstance(module, TorchAtenLinear):
             new_module = nn.Linear(module.in_features, module.out_features)
             new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
             new_module.bias = torch.nn.Parameter(module.bias)
@@ -296,4 +295,4 @@ def dequantize_model(model: PreTrainedModel):
     return model
 
 
-__all__ = ["HFKernelLinear", "dequantize_model"]
+__all__ = ["TorchAtenLinear", "dequantize_model"]

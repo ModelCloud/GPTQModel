@@ -18,35 +18,35 @@ from ...quantization.awq.utils.packing_utils import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
-from .gemm_hf_kernel import HFKernelLinear, _cpu_int4pack_zero_offsets, _has_local_int4pack_cpu_ops
+from .torch_aten_kernel import TorchAtenLinear, _cpu_int4pack_zero_offsets, _has_local_int4pack_cpu_ops
 from .torch_fused import pack_scales_and_zeros
 
 
 log = setup_logger()
 
 
-class HFKernelAwqLinear(AWQuantLinear):
-    """AWQ CPU int4pack backend kept under the legacy HF kernel backend name."""
+class TorchAtenAwqLinear(AWQuantLinear):
+    """AWQ CPU int4pack backend implemented with local ATen ops."""
 
-    QUANT_TYPE = "hf_kernel_awq"
+    QUANT_TYPE = "awq_torch_aten_kernel"
 
-    SUPPORTS_BACKENDS = [BACKEND.AWQ_HF_KERNEL]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_ATEN]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 110}
 
-    SUPPORTS_BITS = HFKernelLinear.SUPPORTS_BITS
-    SUPPORTS_GROUP_SIZE = HFKernelLinear.SUPPORTS_GROUP_SIZE
-    SUPPORTS_DESC_ACT = HFKernelLinear.SUPPORTS_DESC_ACT
-    SUPPORTS_SYM = HFKernelLinear.SUPPORTS_SYM
-    SUPPORTS_SHARDS = HFKernelLinear.SUPPORTS_SHARDS
-    SUPPORTS_TRAINING = HFKernelLinear.SUPPORTS_TRAINING
-    SUPPORTS_AUTO_PADDING = HFKernelLinear.SUPPORTS_AUTO_PADDING
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = HFKernelLinear.SUPPORTS_IN_FEATURES_DIVISIBLE_BY
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = HFKernelLinear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY
-    SUPPORTS_DEVICES = HFKernelLinear.SUPPORTS_DEVICES
-    SUPPORTS_PLATFORM = HFKernelLinear.SUPPORTS_PLATFORM
-    SUPPORTS_PACK_DTYPES = HFKernelLinear.SUPPORTS_PACK_DTYPES
-    SUPPORTS_ADAPTERS = HFKernelLinear.SUPPORTS_ADAPTERS
+    SUPPORTS_BITS = TorchAtenLinear.SUPPORTS_BITS
+    SUPPORTS_GROUP_SIZE = TorchAtenLinear.SUPPORTS_GROUP_SIZE
+    SUPPORTS_DESC_ACT = TorchAtenLinear.SUPPORTS_DESC_ACT
+    SUPPORTS_SYM = TorchAtenLinear.SUPPORTS_SYM
+    SUPPORTS_SHARDS = TorchAtenLinear.SUPPORTS_SHARDS
+    SUPPORTS_TRAINING = TorchAtenLinear.SUPPORTS_TRAINING
+    SUPPORTS_AUTO_PADDING = TorchAtenLinear.SUPPORTS_AUTO_PADDING
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = TorchAtenLinear.SUPPORTS_IN_FEATURES_DIVISIBLE_BY
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = TorchAtenLinear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY
+    SUPPORTS_DEVICES = TorchAtenLinear.SUPPORTS_DEVICES
+    SUPPORTS_PLATFORM = TorchAtenLinear.SUPPORTS_PLATFORM
+    SUPPORTS_PACK_DTYPES = TorchAtenLinear.SUPPORTS_PACK_DTYPES
+    SUPPORTS_ADAPTERS = TorchAtenLinear.SUPPORTS_ADAPTERS
     REQUIRES_FORMAT_V2 = False
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
@@ -67,7 +67,7 @@ class HFKernelAwqLinear(AWQuantLinear):
         register_buffers: bool = True,
         **kwargs,
     ):
-        kwargs.setdefault("backend", BACKEND.AWQ_HF_KERNEL)
+        kwargs.setdefault("backend", BACKEND.AWQ_TORCH_ATEN)
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -112,9 +112,9 @@ class HFKernelAwqLinear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        ok, err = HFKernelLinear.validate_once()
+        ok, err = TorchAtenLinear.validate_once()
         if ok:
-            cls.gemm_int4_forward_kernel = HFKernelLinear.gemm_int4_forward_kernel
+            cls.gemm_int4_forward_kernel = TorchAtenLinear.gemm_int4_forward_kernel
         else:
             cls.gemm_int4_forward_kernel = None
         return ok, err
@@ -146,7 +146,7 @@ class HFKernelAwqLinear(AWQuantLinear):
             self.transform_cpu()
         else:
             raise NotImplementedError(
-                "HFKernelAwqLinear only supports fused transforms on CPU devices."
+                "TorchAtenAwqLinear only supports fused transforms on CPU devices."
             )
 
     def awq_weight_dequantize(self, device, dtype):
@@ -205,4 +205,4 @@ class HFKernelAwqLinear(AWQuantLinear):
         return out
 
 
-__all__ = ["HFKernelAwqLinear"]
+__all__ = ["TorchAtenAwqLinear"]

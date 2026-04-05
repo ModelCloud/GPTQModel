@@ -18,7 +18,7 @@ from gptqmodel.nn_modules.qlinear import (
 from gptqmodel.nn_modules.qlinear.bitblas import BitblasQuantLinear
 from gptqmodel.nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8QuantLinear
-from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
@@ -37,7 +37,7 @@ def test_quant_linear_hierarchy_splits_grouped_and_weight_only_kernels():
 
 
 def test_awq_hybrid_kernels_do_not_inherit_gptq_only_base_state():
-    for cls in (TorchFusedAwqQuantLinear, HFKernelAwqLinear):
+    for cls in (TorchFusedAwqQuantLinear, TorchAtenAwqLinear):
         assert issubclass(cls, AWQuantLinear)
         assert not issubclass(cls, GPTQQuantLinear)
         assert not hasattr(cls, "qzero_format")

@@ -6,8 +6,8 @@ import builtins
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear, _cpu_int4pack_zero_offsets
-from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear, _cpu_int4pack_zero_offsets
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.utils import python as python_utils
 
 
@@ -27,8 +27,8 @@ def test_free_threading_build_helper_uses_py_gil_disabled(monkeypatch):
     assert not python_utils.is_free_threading_build()
 
 
-@pytest.mark.parametrize("kernel_cls", [HFKernelLinear, HFKernelAwqLinear])
-def test_hf_kernel_validate_once_does_not_import_external_kernels(monkeypatch, kernel_cls):
+@pytest.mark.parametrize("kernel_cls", [TorchAtenLinear, TorchAtenAwqLinear])
+def test_torch_aten_kernel_validate_once_does_not_import_external_kernels(monkeypatch, kernel_cls):
     attempted = {"value": False}
     original_import = builtins.__import__
 
