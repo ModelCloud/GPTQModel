@@ -999,13 +999,13 @@ class ModelTest(unittest.TestCase):
         fallback_backend = None
         if BACKEND.MARLIN in compare_backends:
             try:
-                from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # type: ignore
+                from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # type: ignore
             except Exception:  # pragma: no cover - fallback if module unavailable
                 marlin_group_sizes = ()
                 marlin_sym = ()
             else:
-                marlin_group_sizes = tuple(getattr(MarlinQuantLinear, "SUPPORTS_GROUP_SIZE", ()))
-                marlin_sym = tuple(getattr(MarlinQuantLinear, "SUPPORTS_SYM", ()))
+                marlin_group_sizes = tuple(getattr(MarlinLinear, "SUPPORTS_GROUP_SIZE", ()))
+                marlin_sym = tuple(getattr(MarlinLinear, "SUPPORTS_SYM", ()))
 
             requested_group_size = getattr(self, "GROUP_SIZE", None)
             requested_sym = getattr(self, "SYM", None)

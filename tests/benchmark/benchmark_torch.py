@@ -71,7 +71,7 @@ def _load_baseline_and_current(repo_root: Path):
 
     importlib.import_module("gptqmodel.nn_modules.qlinear")
     current_mod = importlib.import_module("gptqmodel.nn_modules.qlinear.torch")
-    current_cls = current_mod.TorchQuantLinear
+    current_cls = current_mod.TorchLinear
 
     baseline_src = subprocess.check_output(
         ["git", "show", "HEAD:gptqmodel/nn_modules/qlinear/torch.py"],
@@ -84,7 +84,7 @@ def _load_baseline_and_current(repo_root: Path):
     baseline_mod.__package__ = "gptqmodel.nn_modules.qlinear"
     sys.modules[baseline_name] = baseline_mod
     exec(compile(baseline_src, baseline_mod.__file__, "exec"), baseline_mod.__dict__)
-    baseline_cls = baseline_mod.TorchQuantLinear
+    baseline_cls = baseline_mod.TorchLinear
 
     return baseline_cls, current_cls
 
@@ -391,7 +391,7 @@ def _ascii_table(rows: list[dict[str, Any]]) -> str:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="A/B benchmark for TorchQuantLinear dequant path.")
+    p = argparse.ArgumentParser(description="A/B benchmark for TorchLinear dequant path.")
     p.add_argument("--worker", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument(
         "--only",

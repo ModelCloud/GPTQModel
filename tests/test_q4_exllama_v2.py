@@ -20,7 +20,7 @@ from q4_reference import REFERENCE, get_diff  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
@@ -62,7 +62,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             backend=BACKEND.EXLLAMA_V2,
         )
 
-        self.assertTrue(isinstance(linear, ExllamaV2QuantLinear))
+        self.assertTrue(isinstance(linear, ExllamaV2Linear))
 
         torch.manual_seed(42)
 

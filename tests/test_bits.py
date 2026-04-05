@@ -16,11 +16,11 @@ import unittest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
-from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.bitblas import BitBLASLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
 from tests.eval import evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
 
@@ -31,11 +31,11 @@ TASK_NAME = "arc_challenge"
 
 class TestBits(unittest.TestCase):
     QLINEAR_DICT = {
-        BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
-        BACKEND.TRITON: TritonV2QuantLinear,
-        BACKEND.TORCH: TorchQuantLinear,
-        BACKEND.BITBLAS: BitBLASQuantLinear,
-        BACKEND.MARLIN: MarlinQuantLinear,
+        BACKEND.EXLLAMA_V2: ExllamaV2Linear,
+        BACKEND.TRITON: TritonV2Linear,
+        BACKEND.TORCH: TorchLinear,
+        BACKEND.BITBLAS: BitBLASLinear,
+        BACKEND.MARLIN: MarlinLinear,
     }
 
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2

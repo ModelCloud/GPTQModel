@@ -48,7 +48,7 @@ from ..models.writer import (
     QUANT_LOG_DAMP,
 )
 from ..nn_modules.hooked_linear import HookedLinear
-from ..nn_modules.qlinear.paroquant import ParoQuantQuantLinear
+from ..nn_modules.qlinear.paroquant import ParoQuantLinear
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
 from ..quantization.paroquant.optimization import (
     _ParoQuantOptimLinear,
@@ -270,7 +270,7 @@ class ParoQuantProcessor(LoopProcessor):
         fmt = FORMAT(format_value) if not isinstance(format_value, FORMAT) else format_value
         if fmt != FORMAT.PAROQUANT:
             raise ValueError(f"METHOD.PAROQUANT does not support this FORMAT: {format_value}")
-        return ParoQuantQuantLinear
+        return ParoQuantLinear
 
     def prewarm_runtime(self) -> None:
         """Build optional fused ParoQuant runtime pieces before timed layer work starts."""
@@ -297,7 +297,7 @@ class ParoQuantProcessor(LoopProcessor):
         target_format = resolve_quant_format(format_override or self.qcfg.format, self.qcfg.method)
         if target_format != FORMAT.PAROQUANT:
             raise ValueError(f"METHOD.PAROQUANT does not support dynamic format override `{target_format}`.")
-        return ParoQuantQuantLinear
+        return ParoQuantLinear
 
     def _get_layer_state(self, layer_index: int) -> _ParoQuantLayerState:
         """Fetch or create the shared state bucket for one transformer layer."""
@@ -2601,9 +2601,9 @@ class ParoQuantProcessor(LoopProcessor):
                 )
 
         qmodule = qmodules[module.full_name]
-        if not isinstance(qmodule, ParoQuantQuantLinear):
+        if not isinstance(qmodule, ParoQuantLinear):
             raise TypeError(
-                f"Expected `{module.full_name}` to be packed as ParoQuantQuantLinear, got `{type(qmodule).__name__}`."
+                f"Expected `{module.full_name}` to be packed as ParoQuantLinear, got `{type(qmodule).__name__}`."
             )
 
         qmodule.pairs.copy_(pairs.to(device=qmodule.pairs.device, dtype=qmodule.pairs.dtype))

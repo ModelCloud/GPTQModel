@@ -18,7 +18,7 @@ from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.bitblas import BitBLASLinear  # noqa: E402
 
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
@@ -37,7 +37,7 @@ class TestQ4BitBLAS(unittest.TestCase):
 
         has_bitblas = False
         for _, module in self.model_q.named_modules():
-            if isinstance(module, BitBLASQuantLinear):
+            if isinstance(module, BitBLASLinear):
                 has_bitblas = True
                 break
         self.assertTrue(has_bitblas)

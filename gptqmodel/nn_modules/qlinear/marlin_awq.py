@@ -36,7 +36,7 @@ from ...utils.rocm import IS_ROCM
 log = setup_logger()
 
 
-class AwqMarlinQuantLinear(AWQuantLinear):
+class AwqMarlinLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_MARLIN]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 90, FORMAT.MARLIN: 90}
@@ -275,4 +275,4 @@ class AwqMarlinQuantLinear(AWQuantLinear):
         return out
 
 
-__all__ = ["AwqMarlinQuantLinear"]
+__all__ = ["AwqMarlinLinear"]

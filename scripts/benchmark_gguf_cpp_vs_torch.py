@@ -10,7 +10,7 @@ from typing import Callable
 import torch
 import torch.nn as nn
 
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel, triton_available as gguf_triton_available
 
@@ -87,7 +87,7 @@ def _build_modules(
     case: BenchCase,
     *,
     dtype: torch.dtype,
-) -> tuple[GGUFTorchQuantLinear, GGUFCppKernel, GGUFCudaKernel, GGUFTritonKernel | None]:
+) -> tuple[GGUFTorchLinear, GGUFCppKernel, GGUFCudaKernel, GGUFTritonKernel | None]:
     torch.manual_seed(0)
     linear = nn.Linear(case.in_features, case.out_features, bias=case.bias, dtype=torch.float16).cpu().eval()
     with torch.no_grad():
@@ -95,7 +95,7 @@ def _build_modules(
         if linear.bias is not None:
             linear.bias.normal_(mean=0.0, std=0.01)
 
-    torch_kernel = GGUFTorchQuantLinear(
+    torch_kernel = GGUFTorchLinear(
         bits=case.bits,
         group_size=-1,
         sym=True,

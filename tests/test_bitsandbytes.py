@@ -13,7 +13,7 @@ from safetensors.torch import save_file
 
 import gptqmodel.utils.model as model_utils
 from gptqmodel.models._const import DEVICE
-from gptqmodel.nn_modules.qlinear.bitsandbytes import BITSANDBYTES_AVAILABLE, BitsAndBytesQuantLinear
+from gptqmodel.nn_modules.qlinear.bitsandbytes import BITSANDBYTES_AVAILABLE, BitsAndBytesLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import BitsAndBytesConfig
 from gptqmodel.utils.backend import BACKEND
@@ -29,7 +29,7 @@ def _build_linear(bits: int) -> nn.Linear:
     return linear
 
 
-def _build_kernel(bits: int, linear: nn.Linear) -> BitsAndBytesQuantLinear:
+def _build_kernel(bits: int, linear: nn.Linear) -> BitsAndBytesLinear:
     kwargs = {
         "bits": bits,
         "group_size": -1,
@@ -49,7 +49,7 @@ def _build_kernel(bits: int, linear: nn.Linear) -> BitsAndBytesQuantLinear:
             }
         )
 
-    kernel = BitsAndBytesQuantLinear(**kwargs)
+    kernel = BitsAndBytesLinear(**kwargs)
     kernel.pack_original(linear=linear, scales=None, zeros=None)
     kernel.post_init()
     return kernel.eval()
@@ -57,7 +57,7 @@ def _build_kernel(bits: int, linear: nn.Linear) -> BitsAndBytesQuantLinear:
 
 @pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
 def test_bitsandbytes_kernel_selection():
-    assert get_kernel_for_backend(BACKEND.BITSANDBYTES, METHOD.BITSANDBYTES, FORMAT.BITSANDBYTES) is BitsAndBytesQuantLinear
+    assert get_kernel_for_backend(BACKEND.BITSANDBYTES, METHOD.BITSANDBYTES, FORMAT.BITSANDBYTES) is BitsAndBytesLinear
 
     for bits in (4, 8):
         selected = select_quant_linear(
@@ -71,7 +71,7 @@ def test_bitsandbytes_kernel_selection():
             device=DEVICE.CPU,
             pack_dtype=torch.int32,
         )
-        assert selected is BitsAndBytesQuantLinear
+        assert selected is BitsAndBytesLinear
 
 
 def test_create_quant_module_uses_dynamic_bits_for_bitsandbytes_format_normalization():
@@ -165,7 +165,7 @@ def test_bitsandbytes_state_dict_round_trip(bits: int):
             }
         )
 
-    reloaded = BitsAndBytesQuantLinear(**reload_kwargs).eval()
+    reloaded = BitsAndBytesLinear(**reload_kwargs).eval()
     reloaded.load_state_dict(kernel.state_dict(), strict=True)
     reloaded.post_init()
 

@@ -7,7 +7,7 @@ import torch
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
 
 
@@ -51,13 +51,13 @@ class TestLlama3_2_GGUF(ModelTest):
     FORMAT = FORMAT.GGUF
     BITS = "q4_k_m"
     LOAD_BACKEND = BACKEND.GGUF_TORCH
-    KERNEL_INFERENCE = {GGUFTorchQuantLinear}
+    KERNEL_INFERENCE = {GGUFTorchLinear}
 
     def test_llama3_2_gguf_full_model(self):
         self.quant_lm_eval()
 
         module = self.model.model.model.layers[0].self_attn.q_proj
-        assert isinstance(module, GGUFTorchQuantLinear)
+        assert isinstance(module, GGUFTorchLinear)
         assert module.gguf_tensor_qtype == "Q4_K"
         assert hasattr(module, "qweight")
         assert tuple(module.qweight.shape) == (2048, module._bytes_per_row())

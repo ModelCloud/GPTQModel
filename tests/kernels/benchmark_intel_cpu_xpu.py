@@ -14,9 +14,9 @@ from logbar import LogBar
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8QuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
+from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8Linear
 from gptqmodel.utils.model import find_modules
 
 
@@ -53,9 +53,9 @@ class BenchmarkIntelCpuXPU(unittest.TestCase):
     new_tokens = int(os.getenv("GPTQMODEL_INTEL_CPU_BENCH_NEW_TOKENS", "1"))
 
     target_qliner_map = {
-        BACKEND.TORCH: TorchQuantLinear,
-        BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
-        BACKEND.TORCH_INT8: TorchInt8QuantLinear,
+        BACKEND.TORCH: TorchLinear,
+        BACKEND.TORCH_FUSED: TorchFusedLinear,
+        BACKEND.TORCH_INT8: TorchInt8Linear,
         BACKEND.GPTQ_TORCH_ATEN: TorchAtenLinear,
     }
     skip_backends = set()

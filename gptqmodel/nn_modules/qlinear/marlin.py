@@ -51,7 +51,7 @@ from ...utils.rocm import IS_ROCM
 log = setup_logger()
 
 
-class MarlinQuantLinear(GPTQQuantLinear):
+class MarlinLinear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 90, FORMAT.MARLIN: 90}
@@ -386,4 +386,4 @@ def dequantize_qzeros(layer):
     return unpacked_qzeros
 
 
-__all__ = ["MarlinQuantLinear"]
+__all__ = ["MarlinLinear"]

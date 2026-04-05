@@ -14,8 +14,8 @@ from typing import Any
 import torch
 from tabulate import tabulate
 
-from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
-from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonQuantLinear
+from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantLinear
+from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 from gptqmodel.utils.paroquant import build_identity_rotation_buffers
 
 
@@ -117,7 +117,7 @@ def _build_module(
     return module
 
 
-def _dense_reference(module: ParoQuantQuantLinear, x: torch.Tensor) -> torch.Tensor:
+def _dense_reference(module: ParoQuantLinear, x: torch.Tensor) -> torch.Tensor:
     with torch.inference_mode():
         x_flat = x.reshape(-1, x.shape[-1])
         rotated = module._rotate_inputs(x_flat)
@@ -155,8 +155,8 @@ def run(device: torch.device, warmup: int, iters: int, quick: bool) -> dict[str,
     for index, case in enumerate(cases):
         torch.manual_seed(1000 + index)
         buffers = _make_quant_buffers(case)
-        baseline = _build_module(ParoQuantQuantLinear, case, buffers, device)
-        candidate = _build_module(ParoQuantTritonQuantLinear, case, buffers, device)
+        baseline = _build_module(ParoQuantLinear, case, buffers, device)
+        candidate = _build_module(ParoQuantTritonLinear, case, buffers, device)
 
         x = torch.randn((case.batch, case.seq, case.in_features), device=device, dtype=torch.float16)
 

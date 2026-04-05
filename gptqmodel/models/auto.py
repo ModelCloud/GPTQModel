@@ -56,7 +56,7 @@ from transformers import AutoConfig, PreTrainedTokenizerBase  # noqa: E402
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
-from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
+from ..nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.backend import normalize_backend  # noqa: E402
@@ -645,7 +645,7 @@ class GPTQModel:
             )
 
             qcfg = quantized_model.quantize_config
-            qModules: Dict[str, TorchQuantLinear] = find_modules(module=quantized_model.model, layers=[TorchQuantLinear])
+            qModules: Dict[str, TorchLinear] = find_modules(module=quantized_model.model, layers=[TorchLinear])
             # for name, module in qModules.items():
             #     quantized_weights[name] = module.dequantize_weight()
             del quantized_model

@@ -36,7 +36,7 @@ log = setup_logger()
 class _LinearWeightMetadata:
     """Tensor-like metadata shim for integrations that only inspect `weight` attrs."""
 
-    def __init__(self, module: "TorchQuantLinear", transposed: bool = False):
+    def __init__(self, module: "TorchLinear", transposed: bool = False):
         self._module = module
         self._transposed = transposed
 
@@ -97,7 +97,7 @@ class _LinearWeightMetadata:
         )
 
 
-class TorchQuantLinear(PackableQuantLinear):
+class TorchLinear(PackableQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20}
@@ -553,13 +553,13 @@ class TorchQuantLinear(PackableQuantLinear):
             self._reset_prefetch_state()
         return self
 
-    def set_lookahead_next(self, module: "TorchQuantLinear"):
+    def set_lookahead_next(self, module: "TorchLinear"):
         if module is None:
             self._lookahead_next = None
             self._reset_prefetch_state()
             return self
 
-        if isinstance(module, TorchQuantLinear):
+        if isinstance(module, TorchLinear):
             self._lookahead_next = module
             return self
 
@@ -570,12 +570,12 @@ class TorchQuantLinear(PackableQuantLinear):
                 self._reset_prefetch_state()
                 return self
             for target in targets:
-                if not isinstance(target, TorchQuantLinear):
-                    raise TypeError("lookahead targets must be TorchQuantLinear modules or None")
+                if not isinstance(target, TorchLinear):
+                    raise TypeError("lookahead targets must be TorchLinear modules or None")
             self._lookahead_next = targets
             return self
 
-        raise TypeError("lookahead target must be TorchQuantLinear, iterable of TorchQuantLinear, or None")
+        raise TypeError("lookahead target must be TorchLinear, iterable of TorchLinear, or None")
 
     def _reset_prefetch_state(self):
         for event in self._prefetch_events.values():
@@ -699,13 +699,13 @@ class TorchQuantLinear(PackableQuantLinear):
 
 def dequantize_model(model: PreTrainedModel):
     for name, module in model.named_modules():
-        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchQuantLinear):
+        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchLinear):
             raise ValueError(
-                "Only models loaded using TorchQuantLinear are supported for dequantization. "
+                "Only models loaded using TorchLinear are supported for dequantization. "
                 "Please load model using backend=BACKEND.GPTQ_TORCH."
             )
 
-        if isinstance(module, TorchQuantLinear):
+        if isinstance(module, TorchLinear):
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(module.in_features, module.out_features)
             new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
@@ -725,4 +725,4 @@ def dequantize_model(model: PreTrainedModel):
     return model
 
 
-__all__ = ["TorchQuantLinear", "dequantize_model"]
+__all__ = ["TorchLinear", "dequantize_model"]

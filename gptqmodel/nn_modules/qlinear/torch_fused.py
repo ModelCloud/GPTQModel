@@ -51,7 +51,7 @@ class Int4PackedOp(torch.nn.Module):
         return out
 
 
-class TorchFusedQuantLinear(PackableQuantLinear):
+class TorchFusedLinear(PackableQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH_FUSED]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 50, FORMAT.GPTQ_V2: 50}
@@ -301,13 +301,13 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
 def dequantize_model(model: PreTrainedModel):
     for name, module in model.named_modules():
-        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchFusedQuantLinear):
+        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchFusedLinear):
             raise ValueError(
-                "Only models loaded using TorchFusedQuantLinear are supported for dequantization. "
+                "Only models loaded using TorchFusedLinear are supported for dequantization. "
                 "Please load model using backend=BACKEND.GPTQ_TORCH_FUSED"
             )
 
-        if isinstance(module, TorchFusedQuantLinear):
+        if isinstance(module, TorchFusedLinear):
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(module.in_features, module.out_features)
             new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
@@ -327,4 +327,4 @@ def dequantize_model(model: PreTrainedModel):
     return model
 
 
-__all__ = ["TorchFusedQuantLinear", "dequantize_model"]
+__all__ = ["TorchFusedLinear", "dequantize_model"]

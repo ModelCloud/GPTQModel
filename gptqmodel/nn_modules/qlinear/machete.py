@@ -34,7 +34,7 @@ from ...utils.rocm import IS_ROCM
 log = setup_logger()
 
 
-class MacheteQuantLinear(GPTQQuantLinear):
+class MacheteLinear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_MACHETE]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 100}
@@ -290,4 +290,4 @@ class MacheteQuantLinear(GPTQQuantLinear):
         return result
 
 
-__all__ = ["MacheteQuantLinear"]
+__all__ = ["MacheteLinear"]

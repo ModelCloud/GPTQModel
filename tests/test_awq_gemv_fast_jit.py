@@ -7,8 +7,8 @@ import torch
 import gptqmodel.nn_modules.qlinear.gemv_fast_awq as gemv_fast_awq
 
 
-def _build_module() -> gemv_fast_awq.AwqGEMVFastQuantLinear:
-    return gemv_fast_awq.AwqGEMVFastQuantLinear(
+def _build_module() -> gemv_fast_awq.AwqGEMVFastLinear:
+    return gemv_fast_awq.AwqGEMVFastLinear(
         bits=4,
         group_size=32,
         sym=True,
@@ -20,8 +20,8 @@ def _build_module() -> gemv_fast_awq.AwqGEMVFastQuantLinear:
     )
 
 
-def _build_llm_awq_module() -> gemv_fast_awq.LLMAwqQuantLinear:
-    return gemv_fast_awq.LLMAwqQuantLinear(
+def _build_llm_awq_module() -> gemv_fast_awq.LLMAwqLinear:
+    return gemv_fast_awq.LLMAwqLinear(
         bits=4,
         group_size=32,
         sym=True,

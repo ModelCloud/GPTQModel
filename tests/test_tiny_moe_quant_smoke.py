@@ -32,7 +32,7 @@ from transformers import PreTrainedTokenizerFast
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 
 
@@ -158,7 +158,7 @@ def test_tiny_qwen3_moe_quantization_smoke(tmp_path: Path):
         for suffix in ("gate_proj", "up_proj", "down_proj"):
             module_name = f"model.model.layers.0.mlp.experts.{expert_index}.{suffix}"
             module = modules[module_name]
-            assert isinstance(module, TorchQuantLinear), module_name
+            assert isinstance(module, TorchLinear), module_name
             quantized_expert_modules.append(module_name)
 
     assert len(quantized_expert_modules) == expected_quantized

@@ -145,10 +145,10 @@ def _clone_module(module):
 
 
 def _make_module(case: BenchCase, dtype: torch.dtype, device: torch.device, cache_runtime_dtype: bool):
-    from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
+    from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantLinear
 
     buffers = _make_quant_buffers(case, dtype=dtype)
-    module = ParoQuantQuantLinear(
+    module = ParoQuantLinear(
         bits=4,
         group_size=case.group_size,
         sym=True,

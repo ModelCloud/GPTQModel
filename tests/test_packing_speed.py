@@ -27,7 +27,7 @@ import torch.nn as nn  # noqa: E402
 
 import pytest  # noqa: E402
 
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 
 
 pytestmark = [pytest.mark.cpu, pytest.mark.gpu]
@@ -170,8 +170,8 @@ class TestPackingSpeed(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # [TritonV2QuantLinear, BACKEND.TRITON, 9.67],
-            [TorchQuantLinear, BACKEND.TORCH, 21.05],  # A100 Z3 33.56 # 4090? 27.0297
+            # [TritonV2Linear, BACKEND.TRITON, 9.67],
+            [TorchLinear, BACKEND.TORCH, 21.05],  # A100 Z3 33.56 # 4090? 27.0297
         ]
     )
     def test_pack_speed_single_thread(self, qlinearCls, backend, expect_time):
@@ -188,8 +188,8 @@ class TestPackingSpeed(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # [TritonV2QuantLinear, BACKEND.TRITON, 9.67],
-            [TorchQuantLinear, BACKEND.TORCH, 14.71],  # A100 Z3 33.56 # 4090? 27.0297
+            # [TritonV2Linear, BACKEND.TRITON, 9.67],
+            [TorchLinear, BACKEND.TORCH, 14.71],  # A100 Z3 33.56 # 4090? 27.0297
         ]
     )
     def test_pack_speed_two_threads(self, qlinearCls, backend, expect_time):
@@ -205,7 +205,7 @@ class TestPackingSpeed(unittest.TestCase):
         self.assertLess((time_usage - expect_time) / expect_time, 0.05, msg=f"time: {time_usage:.4f}s")
 
     def test_pack_block_thread_scaling(self):
-        qlinearCls = TorchQuantLinear
+        qlinearCls = TorchLinear
         backend = BACKEND.TORCH
         repeats = 10
         thread_options = [1, 2, 4]
@@ -231,7 +231,7 @@ class TestPackingSpeed(unittest.TestCase):
         self.assertLessEqual(best_time, reference_time, "Multi-threaded pack_block did not improve over single-thread baseline")
 
     def test_pack_block_extension_speedup(self):
-        qlinearCls = TorchQuantLinear
+        qlinearCls = TorchLinear
         backend = BACKEND.TORCH
         repeats = 5
 
@@ -279,7 +279,7 @@ class TestPackingSpeed(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA device required for GPU packing speed test")
     def test_pack_speed_gpu_vs_cpu(self):
-        qlinearCls = TorchQuantLinear
+        qlinearCls = TorchLinear
         backend = BACKEND.TORCH
         repeats = 10
 
@@ -300,7 +300,7 @@ class TestPackingSpeed(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA device required for GPU packing summary test")
     def test_pack_speed_summary(self):
-        qlinearCls = TorchQuantLinear
+        qlinearCls = TorchLinear
         backend = BACKEND.TORCH
         repeats = 5
 

@@ -21,9 +21,9 @@ from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
-from ..nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
-from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear, LLMAwqQuantLinear
+from ..nn_modules.qlinear.gemm_awq import AwqGEMMLinear
+from ..nn_modules.qlinear.gemv_awq import AwqGEMVLinear
+from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
@@ -267,16 +267,16 @@ class AWQProcessor(LoopProcessor):
 
         fmt = FORMAT(format_value) if not isinstance(format_value, FORMAT) else format_value
         if fmt == FORMAT.GEMM:
-            return AwqGEMMQuantLinear
+            return AwqGEMMLinear
         if fmt == FORMAT.GEMV:
-            return AwqGEMVQuantLinear
+            return AwqGEMVLinear
         if fmt == FORMAT.GEMV_FAST:
-            return AwqGEMVFastQuantLinear
+            return AwqGEMVFastLinear
         if fmt == FORMAT.LLM_AWQ:
-            return LLMAwqQuantLinear
+            return LLMAwqLinear
         # We do not allow saving to marlin format
         # if fmt == FORMAT.MARLIN:
-        #     return AwqMarlinQuantLinear
+        #     return AwqMarlinLinear
         raise ValueError(f"METHOD.AWQ does not support this FORMAT: {format_value}")
 
     def _resolve_qlinear_kernel(self, module_name: Optional[str] = None):

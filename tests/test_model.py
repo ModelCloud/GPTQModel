@@ -9,7 +9,7 @@ import tempfile
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.utils.torch import torch_empty_cache
 
 
@@ -457,9 +457,9 @@ class TestModelSave(unittest.TestCase):
             new_model = GPTQModel.load(tmp_dir_name, device="cuda")
             print("new_model", new_model)
 
-            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].gate_proj, MarlinQuantLinear)
-            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].up_proj, MarlinQuantLinear)
-            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].down_proj, MarlinQuantLinear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].gate_proj, MarlinLinear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].up_proj, MarlinLinear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].down_proj, MarlinLinear)
 
             # No calibration data was routed to these MoE expert modules.
             self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[10].gate_proj, nn.Linear)

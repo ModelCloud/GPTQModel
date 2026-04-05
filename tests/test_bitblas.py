@@ -13,9 +13,9 @@ import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
 import gptqmodel.utils.bitblas as bitblas_utils
 import gptqmodel.utils.model as model_utils
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear, marlin_import_exception
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear, marlin_import_exception
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.utils.importer import get_kernel_for_backend
 
@@ -29,7 +29,7 @@ def test_bitblas_forward_pass1():
     device = torch.device("cuda", device_index)
     torch.cuda.set_device(device_index)
 
-    layer = bitblas_module.BitblasQuantLinear(
+    layer = bitblas_module.BitblasLinear(
         bits=4,
         group_size=32,
         desc_act=False,
@@ -68,7 +68,7 @@ def test_bitblas_target_normalization_falls_back_for_future_arch():
 
 
 def test_bitblas_supports_gptq_v2_kernel_selection():
-    assert get_kernel_for_backend(BACKEND.BITBLAS, METHOD.GPTQ, FORMAT.GPTQ_V2) is bitblas_module.BitblasQuantLinear
+    assert get_kernel_for_backend(BACKEND.BITBLAS, METHOD.GPTQ, FORMAT.GPTQ_V2) is bitblas_module.BitblasLinear
 
 
 def test_bitblas_tuning_defaults_off_for_repack(monkeypatch):
@@ -109,12 +109,12 @@ def test_bitblas_prefers_float32_accumulation_for_fp16_inputs(monkeypatch):
     monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
     monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
     monkeypatch.setattr(
-        bitblas_module.BitblasQuantLinear,
+        bitblas_module.BitblasLinear,
         "_get_or_create_bitblas_operator",
         _fake_get_or_create,
     )
 
-    bitblas_module.BitblasQuantLinear(
+    bitblas_module.BitblasLinear(
         bits=4,
         group_size=32,
         desc_act=False,
@@ -152,12 +152,12 @@ def test_bitblas_uses_bfloat16_configuration_when_requested(monkeypatch):
     monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
     monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
     monkeypatch.setattr(
-        bitblas_module.BitblasQuantLinear,
+        bitblas_module.BitblasLinear,
         "_get_or_create_bitblas_operator",
         _fake_get_or_create,
     )
 
-    layer = bitblas_module.BitblasQuantLinear(
+    layer = bitblas_module.BitblasLinear(
         bits=4,
         group_size=32,
         desc_act=False,
@@ -189,7 +189,7 @@ def test_bitblas_repack_from_symmetric_gptq_remaps_signed_codes(monkeypatch):
     monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
     monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
     monkeypatch.setattr(
-        bitblas_module.BitblasQuantLinear,
+        bitblas_module.BitblasLinear,
         "_get_or_create_bitblas_operator",
         lambda self, config, enable_tuning: _DummyMatmul(),
     )
@@ -200,7 +200,7 @@ def test_bitblas_repack_from_symmetric_gptq_remaps_signed_codes(monkeypatch):
     out_features = 32
 
     linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
-    gptq_linear = TorchQuantLinear(
+    gptq_linear = TorchLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -213,7 +213,7 @@ def test_bitblas_repack_from_symmetric_gptq_remaps_signed_codes(monkeypatch):
     gptq_linear.pack_block(linear, scales.T, zeros.T, g_idx=g_idx.to(torch.int32))
 
     captured = {}
-    layer = bitblas_module.BitblasQuantLinear(
+    layer = bitblas_module.BitblasLinear(
         bits=bits,
         group_size=group_size,
         desc_act=False,
@@ -257,7 +257,7 @@ def test_bitblas_repack_from_gptq_v2_symmetric_codes_does_not_remap(monkeypatch)
     monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
     monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
     monkeypatch.setattr(
-        bitblas_module.BitblasQuantLinear,
+        bitblas_module.BitblasLinear,
         "_get_or_create_bitblas_operator",
         lambda self, config, enable_tuning: _DummyMatmul(),
     )
@@ -268,7 +268,7 @@ def test_bitblas_repack_from_gptq_v2_symmetric_codes_does_not_remap(monkeypatch)
     out_features = 32
 
     linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
-    gptq_linear = TorchQuantLinear(
+    gptq_linear = TorchLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -282,7 +282,7 @@ def test_bitblas_repack_from_gptq_v2_symmetric_codes_does_not_remap(monkeypatch)
     model_utils.convert_gptq_v1_to_v2_format_module(gptq_linear, bits=bits, pack_dtype=torch.int32)
 
     captured = {}
-    layer = bitblas_module.BitblasQuantLinear(
+    layer = bitblas_module.BitblasLinear(
         bits=bits,
         group_size=group_size,
         desc_act=False,
@@ -315,7 +315,7 @@ def test_bitblas_repack_from_gptq_v2_symmetric_codes_does_not_remap(monkeypatch)
 
 
 def test_bitblas_validate_rejects_unsupported_bf16_signed_gptq():
-    valid, err = bitblas_module.BitblasQuantLinear.validate(
+    valid, err = bitblas_module.BitblasLinear.validate(
         bits=4,
         group_size=128,
         desc_act=False,
@@ -340,7 +340,7 @@ def test_bitblas_constructor_rejects_unsupported_bf16_signed_gptq(monkeypatch):
     )
 
     with pytest.raises(NotImplementedError, match="signed low-bit dequantization"):
-        bitblas_module.BitblasQuantLinear(
+        bitblas_module.BitblasLinear(
             bits=4,
             group_size=128,
             desc_act=False,
@@ -355,7 +355,7 @@ def test_bitblas_constructor_rejects_unsupported_bf16_signed_gptq(monkeypatch):
 
 
 def test_bitblas_validate_rejects_desc_act_gptq():
-    valid, err = bitblas_module.BitblasQuantLinear.validate(
+    valid, err = bitblas_module.BitblasLinear.validate(
         bits=4,
         group_size=128,
         desc_act=True,
@@ -380,7 +380,7 @@ def test_bitblas_constructor_rejects_desc_act_gptq(monkeypatch):
     )
 
     with pytest.raises(NotImplementedError, match="actual desc_act"):
-        bitblas_module.BitblasQuantLinear(
+        bitblas_module.BitblasLinear(
             bits=4,
             group_size=128,
             desc_act=True,
@@ -395,7 +395,7 @@ def test_bitblas_constructor_rejects_desc_act_gptq(monkeypatch):
 
 
 def test_bitblas_validate_rejects_non_divisible_in_features():
-    valid, err = bitblas_module.BitblasQuantLinear.validate(
+    valid, err = bitblas_module.BitblasLinear.validate(
         bits=4,
         group_size=32,
         desc_act=False,
@@ -412,7 +412,7 @@ def test_bitblas_validate_rejects_non_divisible_in_features():
 
 
 def test_bitblas_validate_rejects_non_divisible_out_features():
-    valid, err = bitblas_module.BitblasQuantLinear.validate(
+    valid, err = bitblas_module.BitblasLinear.validate(
         bits=4,
         group_size=32,
         desc_act=False,
@@ -527,13 +527,13 @@ def test_bitblas_rejects_unrunnable_operator(monkeypatch):
     monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
     monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
     monkeypatch.setattr(
-        bitblas_module.BitblasQuantLinear,
+        bitblas_module.BitblasLinear,
         "_get_or_create_bitblas_operator",
         lambda self, config, enable_tuning: _BrokenMatmul(),
     )
 
     with pytest.raises(NotImplementedError, match="BitBLAS could not build a runnable matmul"):
-        bitblas_module.BitblasQuantLinear(
+        bitblas_module.BitblasLinear(
             bits=4,
             group_size=32,
             desc_act=False,
@@ -560,16 +560,16 @@ def test_make_quant_falls_back_when_bitblas_operator_is_unrunnable(monkeypatch):
     monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
     monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
     monkeypatch.setattr(
-        bitblas_module.BitblasQuantLinear,
+        bitblas_module.BitblasLinear,
         "_get_or_create_bitblas_operator",
         lambda self, config, enable_tuning: _BrokenMatmul(),
     )
     monkeypatch.setattr(
         model_utils,
         "select_quant_linear",
-        lambda **kwargs: [bitblas_module.BitblasQuantLinear, TorchQuantLinear],
+        lambda **kwargs: [bitblas_module.BitblasLinear, TorchLinear],
     )
-    bitblas_module.BitblasQuantLinear.cached_validate_once.cache_clear()
+    bitblas_module.BitblasLinear.cached_validate_once.cache_clear()
 
     module = nn.Module()
     module.proj = nn.Linear(32, 32, bias=False)
@@ -593,7 +593,7 @@ def test_make_quant_falls_back_when_bitblas_operator_is_unrunnable(monkeypatch):
         dtype=torch.bfloat16,
     )
 
-    assert selected is TorchQuantLinear
+    assert selected is TorchLinear
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
@@ -616,7 +616,7 @@ def test_bitblas_forward_pass_future_target_fallback():
             bitblas_module.BITBLAS_TARGET = "cuda -arch=sm_120"
             bitblas_module.BITBLAS_DATABASE_PATH = tmpdir
 
-            layer = bitblas_module.BitblasQuantLinear(
+            layer = bitblas_module.BitblasLinear(
                 bits=4,
                 group_size=32,
                 desc_act=False,
@@ -758,7 +758,7 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
     linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
     device = torch.device("cuda")
 
-    torch_linear = TorchQuantLinear(
+    torch_linear = TorchLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -774,7 +774,7 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
     bitblas_linear = None
     bitblas_error = None
     try:
-        bitblas_linear = bitblas_module.BitblasQuantLinear(
+        bitblas_linear = bitblas_module.BitblasLinear(
             bits=bits,
             group_size=group_size,
             desc_act=False,
@@ -792,7 +792,7 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
     except Exception as exc:  # pragma: no cover - diagnostic path
         bitblas_error = str(exc)
 
-    marlin_linear = MarlinQuantLinear(
+    marlin_linear = MarlinLinear(
         bits=bits,
         group_size=group_size,
         desc_act=False,
@@ -810,7 +810,7 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
     marlin_linear.post_init()
 
     try:
-        triton_linear = TritonV2QuantLinear(
+        triton_linear = TritonV2Linear(
             bits=bits,
             group_size=group_size,
             desc_act=False,

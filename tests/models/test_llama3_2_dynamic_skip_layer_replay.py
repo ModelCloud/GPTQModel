@@ -12,7 +12,7 @@ from safetensors import safe_open
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 
 
 LAYER0_AND_LAYER2_ONLY_NEGATIVE_MATCH = r"^model\.layers\.(?!(?:0|2)\.)\d+\."
@@ -36,7 +36,7 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
     # Keep this regression on a single deterministic CUDA device in PCI bus order.
     PIN_CUDA_DEVICE = 0
     LOAD_BACKEND = BACKEND.MARLIN
-    KERNEL_INFERENCE = {MarlinQuantLinear}
+    KERNEL_INFERENCE = {MarlinLinear}
     DYNAMIC = {
         f"-:{LAYER0_AND_LAYER2_ONLY_NEGATIVE_MATCH}": {},
     }

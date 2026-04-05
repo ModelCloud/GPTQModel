@@ -30,7 +30,7 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.looper.stage_layer import _capture_pristine_group_context
 from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
-from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
+from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantLinear
 from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantizeConfig, QuantizeConfig
 from gptqmodel.quantization.paroquant import optimization as paroquant_optimization
 from gptqmodel.quantization.paroquant.optimization import (
@@ -1102,21 +1102,21 @@ def test_paroquant_registers_with_transformers_gptq_quantizer():
 
 def test_paroquant_kernel_mapping_uses_paroquant_backend():
     """Guard backend dispatch so ParoQuant does not silently fall back to AWQ."""
-    from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
+    from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantLinear
 
     assert (
         get_kernel_for_backend(BACKEND.PAROQUANT_CUDA, METHOD.PAROQUANT, FORMAT.PAROQUANT)
-        is ParoQuantQuantLinear
+        is ParoQuantLinear
     )
 
 
 def test_paroquant_kernel_mapping_uses_paroquant_triton_backend():
     """Guard Triton backend dispatch for ParoQuant-specific runtime modules."""
-    from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonQuantLinear
+    from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 
     assert (
         get_kernel_for_backend(BACKEND.PAROQUANT_TRITON, METHOD.PAROQUANT, FORMAT.PAROQUANT)
-        is ParoQuantTritonQuantLinear
+        is ParoQuantTritonLinear
     )
 
 
@@ -1143,7 +1143,7 @@ def test_paroquant_identity_rotation_buffers_preserve_input():
 
 def test_paroquant_module_default_rotation_buffers_are_identity():
     """Guard fresh runtime modules against invalid all-zero pair buffers."""
-    module = ParoQuantQuantLinear(
+    module = ParoQuantLinear(
         bits=4,
         group_size=128,
         sym=True,
@@ -4329,7 +4329,7 @@ def test_paroquant_quant_device_selection_forces_single_gpu():
 
 def test_paroquant_kernel_rejects_sym_false():
     """Guard that runtime capability flags disable asymmetric ParoQuant."""
-    ok, err = ParoQuantQuantLinear.validate(
+    ok, err = ParoQuantLinear.validate(
         bits=4,
         group_size=128,
         desc_act=False,
@@ -4347,7 +4347,7 @@ def test_paroquant_kernel_rejects_sym_false():
 
 def test_paroquant_kernel_accepts_bf16():
     """Guard that saved ParoQuant checkpoints can be reloaded for bf16 inference."""
-    ok, err = ParoQuantQuantLinear.validate(
+    ok, err = ParoQuantLinear.validate(
         bits=4,
         group_size=128,
         desc_act=False,
@@ -4367,9 +4367,9 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant AWQ bf16 kernel path.")
 
-    paroquant_module = sys.modules[ParoQuantQuantLinear.__module__]
+    paroquant_module = sys.modules[ParoQuantLinear.__module__]
 
-    module = ParoQuantQuantLinear(
+    module = ParoQuantLinear(
         bits=4,
         group_size=128,
         sym=True,
@@ -4408,7 +4408,7 @@ def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch)
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant rotation bf16 fused path.")
 
-    module = ParoQuantQuantLinear(
+    module = ParoQuantLinear(
         bits=4,
         group_size=128,
         sym=True,
@@ -4537,10 +4537,10 @@ def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant rotation cache path.")
 
-    paroquant_module = sys.modules[ParoQuantQuantLinear.__module__]
+    paroquant_module = sys.modules[ParoQuantLinear.__module__]
     from gptqmodel.utils import paroquant as paroquant_utils
 
-    module = ParoQuantQuantLinear(
+    module = ParoQuantLinear(
         bits=4,
         group_size=128,
         sym=True,

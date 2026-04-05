@@ -1396,7 +1396,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             self.register_buffer("qzeros", t.from_numpy(qzeros.astype(self.pack_np_dtype)))
 
             # assert
-            # assert isinstance(self, TorchQuantLinear), f"type: {self.__class_}"
+            # assert isinstance(self, TorchLinear), f"type: {self.__class_}"
             # wq = linear.weight.data
             # wq_dequantized = self.dequantize_weight().T
             # print(f"------ WQ -----")

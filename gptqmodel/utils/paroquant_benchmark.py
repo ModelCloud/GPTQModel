@@ -14,8 +14,8 @@ import torch
 from tabulate import tabulate
 
 from gptqmodel import GPTQModel
-from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
-from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonQuantLinear
+from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantLinear
+from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
@@ -412,8 +412,8 @@ def _tokenize_calibration_sample(model, sample: dict[str, Any]) -> dict[str, tor
     raise ValueError(f"Unsupported calibration sample keys for ParoQuant kernel benchmark: {sorted(sample.keys())}")
 
 
-def _clone_triton_module(module: ParoQuantQuantLinear) -> ParoQuantTritonQuantLinear:
-    cloned = ParoQuantTritonQuantLinear(
+def _clone_triton_module(module: ParoQuantLinear) -> ParoQuantTritonLinear:
+    cloned = ParoQuantTritonLinear(
         bits=module.bits,
         group_size=module.group_size,
         sym=module.sym,
@@ -438,7 +438,7 @@ def _clone_triton_module(module: ParoQuantQuantLinear) -> ParoQuantTritonQuantLi
     return cloned
 
 
-def _dense_forward(module: ParoQuantQuantLinear, x: torch.Tensor) -> torch.Tensor:
+def _dense_forward(module: ParoQuantLinear, x: torch.Tensor) -> torch.Tensor:
     with torch.inference_mode():
         x_flat = x.reshape(-1, x.shape[-1])
         rotated = module._rotate_inputs(x_flat)
@@ -470,7 +470,7 @@ def benchmark_quantized_first_layer_kernels(
     qmodules = {
         name: module
         for name, module in model.named_modules()
-        if isinstance(module, ParoQuantQuantLinear)
+        if isinstance(module, ParoQuantLinear)
     }
     if not qmodules:
         return []

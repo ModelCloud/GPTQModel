@@ -10,7 +10,7 @@ from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.quantization import FORMAT, METHOD
@@ -192,7 +192,7 @@ def test_cpu_auto_select_prioritizes_cpp_kernel_for_gguf(monkeypatch):
     )
 
     assert candidates[0] is GGUFCppKernel
-    assert GGUFTorchQuantLinear in candidates
+    assert GGUFTorchLinear in candidates
 
 
 def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkeypatch):
@@ -213,7 +213,7 @@ def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkey
 
     assert candidates[0] is GGUFTritonKernel
     assert candidates[1] is GGUFCudaKernel
-    assert candidates[2] is GGUFTorchQuantLinear
+    assert candidates[2] is GGUFTorchLinear
 
 
 def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):
@@ -234,7 +234,7 @@ def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):
     )
 
     assert GGUFCppKernel not in candidates
-    assert candidates[0] is GGUFTorchQuantLinear
+    assert candidates[0] is GGUFTorchLinear
 
 
 def test_cuda_pack_auto_select_prioritizes_triton_for_gguf(monkeypatch):
@@ -256,7 +256,7 @@ def test_cuda_pack_auto_select_prioritizes_triton_for_gguf(monkeypatch):
 
     assert candidates[0] is GGUFTritonKernel
     assert GGUFCudaKernel not in candidates
-    assert GGUFTorchQuantLinear in candidates
+    assert GGUFTorchLinear in candidates
 
 
 def test_explicit_gguf_cpu_backend_selects_cpp_kernel(monkeypatch):
@@ -314,7 +314,7 @@ def test_explicit_gguf_torch_backend_selects_torch_kernel():
         pack_dtype=torch.int32,
     )
 
-    assert qlinear_cls is GGUFTorchQuantLinear
+    assert qlinear_cls is GGUFTorchLinear
 
 
 def test_explicit_gguf_triton_backend_selects_triton_kernel(monkeypatch):

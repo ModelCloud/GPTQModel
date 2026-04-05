@@ -15,29 +15,29 @@ from gptqmodel.nn_modules.qlinear import (
     GroupedQuantLinear,
     PackedGroupedQuantLinear,
 )
-from gptqmodel.nn_modules.qlinear.bitblas import BitblasQuantLinear
+from gptqmodel.nn_modules.qlinear.bitblas import BitblasLinear
 from gptqmodel.nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
-from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8QuantLinear
+from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
-from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
+from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
 
 
 def test_quant_linear_hierarchy_splits_grouped_and_weight_only_kernels():
-    assert issubclass(TorchQuantLinear, GPTQQuantLinear)
-    assert issubclass(TorchQuantLinear, PackedGroupedQuantLinear)
-    assert issubclass(AwqTorchQuantLinear, AWQuantLinear)
-    assert issubclass(AwqTorchQuantLinear, PackedGroupedQuantLinear)
-    assert issubclass(AwqTorchQuantLinear, GroupedQuantLinear)
-    assert not issubclass(TorchFP8QuantLinear, GroupedQuantLinear)
-    assert not issubclass(GGUFTorchQuantLinear, GroupedQuantLinear)
+    assert issubclass(TorchLinear, GPTQQuantLinear)
+    assert issubclass(TorchLinear, PackedGroupedQuantLinear)
+    assert issubclass(AwqTorchLinear, AWQuantLinear)
+    assert issubclass(AwqTorchLinear, PackedGroupedQuantLinear)
+    assert issubclass(AwqTorchLinear, GroupedQuantLinear)
+    assert not issubclass(TorchFP8Linear, GroupedQuantLinear)
+    assert not issubclass(GGUFTorchLinear, GroupedQuantLinear)
 
 
 def test_awq_hybrid_kernels_do_not_inherit_gptq_only_base_state():
-    for cls in (TorchFusedAwqQuantLinear, TorchAtenAwqLinear):
+    for cls in (TorchFusedAwqLinear, TorchAtenAwqLinear):
         assert issubclass(cls, AWQuantLinear)
         assert not issubclass(cls, GPTQQuantLinear)
         assert not hasattr(cls, "qzero_format")
@@ -45,16 +45,16 @@ def test_awq_hybrid_kernels_do_not_inherit_gptq_only_base_state():
     assert issubclass(AWQBitBlasKernel, GroupedQuantLinear)
     assert not issubclass(AWQBitBlasKernel, GPTQQuantLinear)
     assert not issubclass(AWQBitBlasKernel, PackedGroupedQuantLinear)
-    assert not issubclass(AWQBitBlasKernel, BitblasQuantLinear)
+    assert not issubclass(AWQBitBlasKernel, BitblasLinear)
     assert not hasattr(AWQBitBlasKernel, "qzero_format")
     assert not hasattr(AWQBitBlasKernel, "repack_from_gptq")
 
 
 def test_bitblas_gptq_kernel_keeps_gptq_only_repack_surface():
-    assert issubclass(BitblasQuantLinear, GroupedQuantLinear)
-    assert not issubclass(BitblasQuantLinear, PackedGroupedQuantLinear)
-    assert hasattr(BitblasQuantLinear, "repack_from_gptq")
-    assert not hasattr(BitblasQuantLinear, "repack_from_awq")
+    assert issubclass(BitblasLinear, GroupedQuantLinear)
+    assert not issubclass(BitblasLinear, PackedGroupedQuantLinear)
+    assert hasattr(BitblasLinear, "repack_from_gptq")
+    assert not hasattr(BitblasLinear, "repack_from_awq")
 
 
 def test_base_quant_linear_init_is_method_agnostic():
@@ -67,7 +67,7 @@ def test_base_quant_linear_init_is_method_agnostic():
 
 
 def test_grouped_kernels_keep_grouped_runtime_state():
-    gptq = TorchQuantLinear(
+    gptq = TorchLinear(
         bits=4,
         group_size=32,
         sym=True,
@@ -77,7 +77,7 @@ def test_grouped_kernels_keep_grouped_runtime_state():
         bias=False,
         register_buffers=False,
     )
-    awq = AwqTorchQuantLinear(
+    awq = AwqTorchLinear(
         bits=4,
         group_size=32,
         sym=True,
@@ -129,19 +129,19 @@ def _install_dummy_bitblas(monkeypatch):
     monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
     monkeypatch.setattr(awq_bitblas_module, "BITBLAS_AVAILABLE", True)
     monkeypatch.setattr(awq_bitblas_module, "import_bitblas", lambda: None)
-    monkeypatch.setattr(BitblasQuantLinear, "_get_or_create_bitblas_operator", _fake_get_or_create)
+    monkeypatch.setattr(BitblasLinear, "_get_or_create_bitblas_operator", _fake_get_or_create)
     monkeypatch.setattr(AWQBitBlasKernel, "_get_or_create_bitblas_operator", _fake_get_or_create)
-    monkeypatch.setattr(BitblasQuantLinear, "_configure_bitblas_matmul", _fake_configure)
+    monkeypatch.setattr(BitblasLinear, "_configure_bitblas_matmul", _fake_configure)
     monkeypatch.setattr(AWQBitBlasKernel, "_configure_bitblas_matmul", _fake_configure)
-    BitblasQuantLinear.cached_validate_once.cache_clear()
+    BitblasLinear.cached_validate_once.cache_clear()
     AWQBitBlasKernel.cached_validate_once.cache_clear()
 
 
 def test_grouped_nonpacked_kernels_do_not_store_packed_runtime_state(monkeypatch):
     _install_dummy_bitblas(monkeypatch)
-    monkeypatch.setattr(QQQQuantLinear, "cached_validate_once", classmethod(lambda cls: (True, None)))
+    monkeypatch.setattr(QQQLinear, "cached_validate_once", classmethod(lambda cls: (True, None)))
 
-    gptq_bitblas = BitblasQuantLinear(
+    gptq_bitblas = BitblasLinear(
         bits=4,
         group_size=32,
         sym=True,
@@ -159,7 +159,7 @@ def test_grouped_nonpacked_kernels_do_not_store_packed_runtime_state(monkeypatch
         out_features=32,
         bias=False,
     )
-    qqq = QQQQuantLinear(
+    qqq = QQQLinear(
         bits=4,
         group_size=128,
         sym=True,
@@ -195,11 +195,11 @@ def test_grouped_nonpacked_kernels_do_not_store_packed_runtime_state(monkeypatch
 
 
 def test_weight_only_kernels_do_not_store_grouped_runtime_state():
-    ok, err = TorchFP8QuantLinear.validate_once()
+    ok, err = TorchFP8Linear.validate_once()
     if not ok:
         pytest.skip(f"FP8 unavailable: {err}")
 
-    fp8 = TorchFP8QuantLinear(
+    fp8 = TorchFP8Linear(
         bits=8,
         group_size=-1,
         sym=True,
@@ -211,7 +211,7 @@ def test_weight_only_kernels_do_not_store_grouped_runtime_state():
         weight_scale_method="block",
         weight_block_size=(16, 16),
     )
-    gguf = GGUFTorchQuantLinear(
+    gguf = GGUFTorchLinear(
         bits="q4_0",
         group_size=-1,
         sym=True,
@@ -233,7 +233,7 @@ def test_weight_only_kernels_do_not_store_grouped_runtime_state():
 
 
 def test_weight_only_kernels_do_not_declare_grouped_support_metadata():
-    for cls in (TorchFP8QuantLinear, GGUFTorchQuantLinear):
+    for cls in (TorchFP8Linear, GGUFTorchLinear):
         assert not hasattr(cls, "SUPPORTS_GROUP_SIZE")
         assert not hasattr(cls, "SUPPORTS_DESC_ACT")
         assert not hasattr(cls, "SUPPORTS_SYM")

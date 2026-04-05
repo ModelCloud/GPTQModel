@@ -289,7 +289,7 @@ def unpack_gptq_qweight(qweight: torch.Tensor, bits: int) -> torch.Tensor:
 
 
 def remap_gptq_symmetric_codes_to_bitblas(qweight_codes: torch.Tensor, bits: int) -> torch.Tensor:
-    # Some in-memory TorchQuantLinear symmetric pack paths still encode qweight as GPTQ-style
+    # Some in-memory TorchLinear symmetric pack paths still encode qweight as GPTQ-style
     # two's-complement nibbles while leaving qzeros packed as all zeros. BitBLAS' signed intN path
     # expects the corresponding biased code range instead, so flip the sign bit for that narrow
     # producer case before loading the quant state.
@@ -311,7 +311,7 @@ def _should_remap_symmetric_gptq_codes(gptq_module: BaseQuantLinear) -> bool:
         if format_id != 1:
             return False
 
-    # The remap is only needed for the pre-v2 TorchQuantLinear symmetric pack path. That producer
+    # The remap is only needed for the pre-v2 TorchLinear symmetric pack path. That producer
     # keeps qzeros packed as all zeros while storing qweight in GPTQ's two's-complement nibble
     # layout. GPT-QModel converts external checkpoints to qzero_format=2 before BitBLAS repacking,
     # and those tensors must be left untouched.
@@ -739,7 +739,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 
 # BitBLAS repacks incoming GPTQ/AWQ tensors into its own operator layout, so the
 # destination module only needs grouped quantization state, not GPTQ qzero-format state.
-class BitblasQuantLinear(BitblasBaseQuantLinear):
+class BitblasLinear(BitblasBaseQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_BITBLAS]
     SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30, FORMAT.GPTQ_V2: 30}
     SUPPORTS_BITS = BITBLAS_SUPPORTED_BITS
@@ -822,6 +822,6 @@ class BitblasQuantLinear(BitblasBaseQuantLinear):
         )
 
 
-BitBLASQuantLinear = BitblasQuantLinear
+BitBLASLinear = BitblasLinear
 
-__all__ = ["BitblasQuantLinear", "BitBLASQuantLinear"]
+__all__ = ["BitblasLinear", "BitBLASLinear"]

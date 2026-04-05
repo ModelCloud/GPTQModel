@@ -32,7 +32,7 @@ def _torch_device(idx):
         return "cpu"
     return f"cuda:{idx}"
 
-class ExllamaV2QuantLinear(GPTQQuantLinear):
+class ExllamaV2Linear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_EXLLAMA_V2]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 80, FORMAT.GPTQ_V2: 80}

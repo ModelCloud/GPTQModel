@@ -15,7 +15,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from .gguf import GGUFTorchQuantLinear
+from .gguf import GGUFTorchLinear
 
 
 try:
@@ -566,7 +566,7 @@ def _get_ggml_bridge() -> _GGMLBridge:
     return _GGML_BRIDGE
 
 
-class GGUFCppKernel(GGUFTorchQuantLinear):
+class GGUFCppKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_CPP_CPU]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 25}
@@ -655,7 +655,7 @@ class GGUFCppKernel(GGUFTorchQuantLinear):
 
         return output.reshape(original_shape)
 
-class GGUFCudaKernel(GGUFTorchQuantLinear):
+class GGUFCudaKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_CPP_CUDA]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 35}

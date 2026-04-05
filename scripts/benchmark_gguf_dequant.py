@@ -10,7 +10,7 @@ import gguf
 import torch
 import torch.nn as nn
 
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 
 
 @dataclass(frozen=True)
@@ -22,13 +22,13 @@ class BenchCase:
     group_size: int
 
 
-def _build_module(case: BenchCase, dtype: torch.dtype) -> GGUFTorchQuantLinear:
+def _build_module(case: BenchCase, dtype: torch.dtype) -> GGUFTorchLinear:
     linear = nn.Linear(case.in_features, case.out_features, bias=False, dtype=dtype).cpu().eval()
     torch.manual_seed(0)
     with torch.no_grad():
         linear.weight.normal_(mean=0.0, std=0.02)
 
-    module = GGUFTorchQuantLinear(
+    module = GGUFTorchLinear(
         bits=case.bits,
         group_size=case.group_size,
         sym=True,

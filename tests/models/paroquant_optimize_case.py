@@ -7,7 +7,7 @@ import torch
 from model_test import ModelTest, _env_choice, _env_flag, _env_int, _env_optional_flag
 
 from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
+from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, ParoQuantizeConfig
 
 
@@ -109,8 +109,8 @@ class BaseLlama3_2ParoQuantOptimizeTest(ModelTest):
     TORCH_DTYPE = torch.bfloat16
     LOAD_BACKEND = BACKEND.PAROQUANT
     QUANT_BACKEND = BACKEND.PAROQUANT
-    KERNEL_QUANT = {ParoQuantQuantLinear}
-    KERNEL_INFERENCE = {ParoQuantQuantLinear}
+    KERNEL_QUANT = {ParoQuantLinear}
+    KERNEL_INFERENCE = {ParoQuantLinear}
     MODEL_COMPAT_FAST_LAYER_COUNT = 4
     MODEL_COMPAT_FAST_LAYER_POSITION = "last"
 

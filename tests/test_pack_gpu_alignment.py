@@ -6,7 +6,7 @@ import threading
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.model import pack_module
@@ -26,7 +26,7 @@ def test_pack_gpu_raises_on_misaligned_qzeros():
 
     linear = torch.nn.Linear(in_features, out_features, bias=False)
 
-    quant_module = TorchQuantLinear(
+    quant_module = TorchLinear(
         bits=4,
         group_size=in_features,
         sym=True,
@@ -70,14 +70,14 @@ def test_pack_gpu_raises_on_misaligned_qzeros():
         q_zeros=q_zeros,
         q_g_idx=q_g_idx,
         layers=layers,
-        quant_linear_cls=TorchQuantLinear,
+        quant_linear_cls=TorchLinear,
         lock=lock,
         quantize_config=quant_config,
     )
 
     packed_module = qModules[layer_name]
 
-    assert isinstance(packed_module, TorchQuantLinear)
+    assert isinstance(packed_module, TorchLinear)
     assert packed_module.qweight.shape == torch.Size([16, 16])
     assert packed_module.qzeros.shape == torch.Size([16, 0])
     assert packed_module.scales.shape == torch.Size([16, 1])

@@ -24,7 +24,7 @@ from ...utils.logger import setup_logger
 log = setup_logger()
 
 
-class AwqExllamaV2QuantLinear(AWQuantLinear):
+class AwqExllamaV2Linear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_EXLLAMA_V2]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 80}
@@ -187,4 +187,4 @@ def next_multiple(x, multiple):
     return ((x + multiple - 1) // multiple) * multiple
 
 
-__all__ = ["AwqExllamaV2QuantLinear"]
+__all__ = ["AwqExllamaV2Linear"]

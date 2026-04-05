@@ -41,7 +41,7 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
-from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..nn_modules.qlinear.torch import TorchLinear
 from ..quantization.config import (
     FORMAT,
     METHOD,
@@ -1058,7 +1058,7 @@ class BaseQModel(nn.Module):
         self,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter,
-        quantized_modules: Dict[str, TorchQuantLinear],
+        quantized_modules: Dict[str, TorchLinear],
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         calibration_dataset_concat_size: Optional[int] = None,
         calibration_dataset_sort: Optional[str] = None,
@@ -1329,7 +1329,7 @@ class BaseQModel(nn.Module):
         if not isinstance(self.model, nn.Module):
             return
 
-        quant_modules = [module for module in self.model.modules() if isinstance(module, TorchQuantLinear)]
+        quant_modules = [module for module in self.model.modules() if isinstance(module, TorchLinear)]
         if not quant_modules:
             return
 

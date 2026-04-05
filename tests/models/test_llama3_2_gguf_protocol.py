@@ -5,7 +5,7 @@ import pytest
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.quantization import METHOD, GGUFConfig
 from gptqmodel.quantization.protocol import (
     Rule,
@@ -107,7 +107,7 @@ class _BaseLlama3_2GGUFProtocol(ModelTest):
         },
     }
     LOAD_BACKEND = BACKEND.GGUF_TORCH
-    KERNEL_INFERENCE = {GGUFTorchQuantLinear}
+    KERNEL_INFERENCE = {GGUFTorchLinear}
 
     def _compiled_protocol_plan(self):
         raise NotImplementedError
@@ -125,7 +125,7 @@ class _BaseLlama3_2GGUFProtocol(ModelTest):
         later_layer_quantized = []
 
         for name, module in model.named_modules():
-            if not isinstance(module, GGUFTorchQuantLinear):
+            if not isinstance(module, GGUFTorchLinear):
                 continue
             if ".layers.0." in name:
                 layer0_quantized.append(name)
