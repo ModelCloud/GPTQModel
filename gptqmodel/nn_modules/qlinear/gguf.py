@@ -63,6 +63,29 @@ _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE = {
 _GGUF_SCALE_QUANT_MAX = 63
 _GGUF_Q6_SCALE_QUANT_MAX = 127
 _GGUF_K_QTYPES = {"Q4_K", "Q5_K", "Q6_K"}
+PRISM_Q1_0_G128_NAME = "Q1_0_g128"
+PRISM_Q1_0_G128_VALUE = 41
+PRISM_Q1_0_G128_BLOCK_SIZE = 128
+PRISM_Q1_0_G128_TYPE_SIZE = 18
+_GGUF_SIGN_ONLY_TYPE_INFO = {
+    "Q1_0": {"block_size": 32, "type_size": 6},
+    PRISM_Q1_0_G128_NAME: {
+        "block_size": PRISM_Q1_0_G128_BLOCK_SIZE,
+        "type_size": PRISM_Q1_0_G128_TYPE_SIZE,
+    },
+}
+_GGUF_TENSOR_QTYPE_BY_VALUE = {
+    0: "F32",
+    1: "F16",
+    2: "Q4_0",
+    8: "Q8_0",
+    12: "Q4_K",
+    13: "Q5_K",
+    14: "Q6_K",
+    30: "BF16",
+    40: "Q1_0",
+    PRISM_Q1_0_G128_VALUE: PRISM_Q1_0_G128_NAME,
+}
 
 
 def _normalize_gguf_bits(bits) -> tuple[GGUFBits, str]:
@@ -348,13 +371,77 @@ def _fallback_gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray
 
 
 def _gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray:
+    return _quantize_gguf_tensor_numpy(weight, tensor_qtype)
+
+
+def _resolve_gguf_tensor_qtype(tensor_type) -> str:
+    if isinstance(tensor_type, str):
+        normalized = tensor_type.strip()
+        if normalized in _GGUF_TYPE_INFO or normalized in _GGUF_SIGN_ONLY_TYPE_INFO:
+            return normalized
+        raise NotImplementedError(f"Unsupported GGUF qtype: {tensor_type}")
+
+    tensor_name = getattr(tensor_type, "name", None)
+    if tensor_name in _GGUF_TYPE_INFO or tensor_name in _GGUF_SIGN_ONLY_TYPE_INFO:
+        return tensor_name
+
+    try:
+        tensor_value = int(tensor_type)
+    except (TypeError, ValueError):
+        tensor_value = None
+
+    if tensor_value is None:
+        raise NotImplementedError(f"Unsupported GGUF qtype: {tensor_type}")
+
+    resolved = _GGUF_TENSOR_QTYPE_BY_VALUE.get(tensor_value)
+    if resolved is None:
+        raise NotImplementedError(f"Unsupported GGUF qtype value: {tensor_value}")
+    return resolved
+
+
+def _is_prism_q1_0_g128(tensor_type) -> bool:
+    return _resolve_gguf_tensor_qtype(tensor_type) == PRISM_Q1_0_G128_NAME
+
+
+def _dequantize_sign_only_numpy(
+    data: np.ndarray,
+    *,
+    block_size: int,
+    type_size: int,
+) -> np.ndarray:
+    rows = np.asarray(data, dtype=np.uint8)
+    if rows.shape[-1] % type_size != 0:
+        raise ValueError(
+            f"GGUF sign-only row byte width must be divisible by {type_size}, got "
+            f"{rows.shape[-1]} for shape {rows.shape}."
+        )
+
+    n_blocks = rows.shape[-1] // type_size
+    blocks = rows.reshape(*rows.shape[:-1], n_blocks, type_size)
+    scales = np.ascontiguousarray(blocks[..., :2]).view(np.float16).astype(np.float32)[..., 0]
+    sign_bits = np.unpackbits(blocks[..., 2:], axis=-1, bitorder="little")
+    weights = np.where(sign_bits == 1, scales[..., None], -scales[..., None]).astype(np.float32, copy=False)
+    return weights.reshape(*rows.shape[:-1], n_blocks * block_size)
+
+
+def _dequantize_prism_q1_0_g128(data: np.ndarray) -> np.ndarray:
+    return _dequantize_sign_only_numpy(
+        data,
+        block_size=PRISM_Q1_0_G128_BLOCK_SIZE,
+        type_size=PRISM_Q1_0_G128_TYPE_SIZE,
+    )
+
+
+def _quantize_gguf_tensor_numpy(weight: np.ndarray, tensor_qtype) -> np.ndarray:
+    resolved_qtype = _resolve_gguf_tensor_qtype(tensor_qtype)
     if _GGUF_AVAILABLE:
-        qtype = getattr(gguf_lib.GGMLQuantizationType, tensor_qtype)
+        qtype = getattr(gguf_lib.GGMLQuantizationType, resolved_qtype, None)
         try:
-            return gguf_lib.quantize(weight, qtype)
+            if qtype is not None:
+                return gguf_lib.quantize(weight, qtype)
         except NotImplementedError:
             pass
-    return _fallback_gguf_quantize(weight, tensor_qtype)
+    return _fallback_gguf_quantize(weight, resolved_qtype)
 
 
 def _dequantize_q4_k_numpy(qweight: np.ndarray) -> np.ndarray:
@@ -422,6 +509,51 @@ def _dequantize_q6_k_numpy(qweight: np.ndarray) -> np.ndarray:
     q = q.reshape((-1, 16, 16)).astype(np.float32)
 
     return (d * q).reshape(rows, -1)
+
+
+def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
+    resolved_qtype = _resolve_gguf_tensor_qtype(tensor_type)
+
+    if resolved_qtype == "F32":
+        return np.asarray(data, dtype=np.float32)
+    if resolved_qtype == "F16":
+        return np.asarray(data, dtype=np.float16).astype(np.float32)
+    if resolved_qtype == "BF16":
+        rows = np.asarray(data, dtype=np.uint16).astype(np.uint32)
+        return np.left_shift(rows, np.uint32(16)).view(np.float32)
+    if resolved_qtype == "Q4_0":
+        rows = np.asarray(data, dtype=np.uint8)
+        type_size = _GGUF_TYPE_INFO["Q4_0"]["type_size"]
+        blocks = rows.reshape(-1, type_size)
+        d = blocks[:, :2].view(np.float16).astype(np.float32)
+        qs = blocks[:, 2:].reshape((-1, 1, 16))
+        low = qs & np.uint8(0x0F)
+        high = qs >> np.uint8(4)
+        q = np.concatenate([low, high], axis=1).reshape((-1, 32)).astype(np.int16) - 8
+        return (d * q.astype(np.float32)).reshape(rows.shape[0], -1)
+    if resolved_qtype == "Q8_0":
+        rows = np.asarray(data, dtype=np.uint8)
+        type_size = _GGUF_TYPE_INFO["Q8_0"]["type_size"]
+        blocks = rows.reshape(-1, type_size)
+        d = blocks[:, :2].view(np.float16).astype(np.float32)
+        q = blocks[:, 2:].view(np.int8).astype(np.float32)
+        return (d * q).reshape(rows.shape[0], -1)
+    if resolved_qtype == "Q4_K":
+        return _dequantize_q4_k_numpy(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "Q5_K":
+        return _dequantize_q5_k_numpy(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "Q6_K":
+        return _dequantize_q6_k_numpy(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "Q1_0":
+        return _dequantize_sign_only_numpy(
+            data,
+            block_size=_GGUF_SIGN_ONLY_TYPE_INFO["Q1_0"]["block_size"],
+            type_size=_GGUF_SIGN_ONLY_TYPE_INFO["Q1_0"]["type_size"],
+        )
+    if resolved_qtype == PRISM_Q1_0_G128_NAME:
+        return _dequantize_prism_q1_0_g128(np.asarray(data, dtype=np.uint8))
+
+    raise NotImplementedError(f"Unsupported GGUF qtype: {resolved_qtype}")
 
 
 class GGUFTorchLinear(WeightOnlyQuantLinear):

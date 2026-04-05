@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import importlib
 import inspect
 import json
 import os
@@ -11,15 +10,22 @@ import sys
 import warnings
 from contextlib import contextmanager
 from functools import lru_cache
-from importlib import metadata as importlib_metadata
 from typing import Any, Optional
 
-import numpy as np
 import torch
 import transformers
 from accelerate import init_empty_weights
-from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoModelForCausalLM, GenerationConfig, PreTrainedModel
+
+from ..nn_modules.qlinear.gguf import (
+    PRISM_Q1_0_G128_BLOCK_SIZE,
+    PRISM_Q1_0_G128_NAME,
+    PRISM_Q1_0_G128_TYPE_SIZE,
+    PRISM_Q1_0_G128_VALUE,
+    _dequantize_prism_q1_0_g128,
+    _is_prism_q1_0_g128,
+)
+from ..utils import internal_gguf
 
 
 # Compatibility wrapper for no_init_weights across different transformers versions
@@ -53,11 +59,6 @@ log = setup_logger()
 _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
 _MISSING = object()
 INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
-GGUF_MIN_VERSION = Version("0.10.0")
-PRISM_Q1_0_G128_NAME = "Q1_0_g128"
-PRISM_Q1_0_G128_VALUE = 41
-PRISM_Q1_0_G128_BLOCK_SIZE = 128
-PRISM_Q1_0_G128_TYPE_SIZE = 18
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
 _PRISM_GGUF_PATCH_WARNED = False
 
@@ -217,76 +218,6 @@ def _resolve_hf_gguf_artifact(model_id_or_path: str) -> Optional[tuple[str, str]
     return model_id_or_path, inferred_gguf_file
 
 
-def _is_prism_q1_0_g128(tensor_type) -> bool:
-    if getattr(tensor_type, "name", None) == PRISM_Q1_0_G128_NAME:
-        return True
-
-    try:
-        return int(tensor_type) == PRISM_Q1_0_G128_VALUE
-    except (TypeError, ValueError):
-        return False
-
-
-def _dequantize_prism_q1_0_g128(data: np.ndarray) -> np.ndarray:
-    rows = np.asarray(data, dtype=np.uint8)
-    if rows.shape[-1] % PRISM_Q1_0_G128_TYPE_SIZE != 0:
-        raise ValueError(
-            "Prism Q1_0_g128 row byte width must be divisible by 18, got "
-            f"{rows.shape[-1]} for shape {rows.shape}"
-        )
-
-    n_blocks = rows.shape[-1] // PRISM_Q1_0_G128_TYPE_SIZE
-    blocks = rows.reshape(*rows.shape[:-1], n_blocks, PRISM_Q1_0_G128_TYPE_SIZE)
-    scales = np.ascontiguousarray(blocks[..., :2]).view(np.float16).astype(np.float32)[..., 0]
-    sign_bits = np.unpackbits(blocks[..., 2:], axis=-1, bitorder="little")
-    weights = np.where(sign_bits == 1, scales[..., None], -scales[..., None]).astype(np.float32, copy=False)
-    return weights.reshape(*rows.shape[:-1], n_blocks * PRISM_Q1_0_G128_BLOCK_SIZE)
-
-
-def _ensure_valid_gguf_runtime(*, api_name: str):
-    try:
-        gguf = importlib.import_module("gguf")
-    except ImportError as exc:
-        raise ImportError(
-            f"{api_name}: GGUF model loading requires the external `gguf` PyPI package. "
-            f"Install `gguf>={GGUF_MIN_VERSION}` and retry."
-        ) from exc
-
-    missing_symbols = [symbol for symbol in ("GGUFReader", "dequantize") if not hasattr(gguf, symbol)]
-    if missing_symbols:
-        raise ImportError(
-            f"{api_name}: installed `gguf` package is not a compatible GGUF runtime. "
-            f"Missing symbols: {', '.join(missing_symbols)}. Install `gguf>={GGUF_MIN_VERSION}`."
-        )
-
-    try:
-        version_str = importlib_metadata.version("gguf")
-    except importlib_metadata.PackageNotFoundError:
-        version_str = getattr(gguf, "__version__", None)
-
-    if not version_str:
-        raise ImportError(
-            f"{api_name}: installed `gguf` package does not expose a usable version. "
-            f"Install `gguf>={GGUF_MIN_VERSION}`."
-        )
-
-    try:
-        parsed_version = Version(version_str)
-    except InvalidVersion as exc:
-        raise ImportError(
-            f"{api_name}: installed `gguf` package reports invalid version `{version_str}`. "
-            f"Install `gguf>={GGUF_MIN_VERSION}`."
-        ) from exc
-
-    if parsed_version < GGUF_MIN_VERSION:
-        raise ImportError(
-            f"{api_name}: installed `gguf` version `{parsed_version}` is too old. "
-            f"Install `gguf>={GGUF_MIN_VERSION}`."
-        )
-
-    return gguf, parsed_version
-
-
 def _transformers_has_native_prism_gguf_support() -> bool:
     try:
         import transformers.modeling_gguf_pytorch_utils as gguf_utils
@@ -305,28 +236,18 @@ def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
     except Exception:
         return
 
-    gguf, gguf_version = _ensure_valid_gguf_runtime(api_name=api_name)
+    internal_gguf.install_runtime()
+
+    def _is_gguf_available(*_args, **_kwargs) -> bool:
+        return True
 
     if not gguf_utils.is_gguf_available():
-        gguf_utils.is_gguf_available = lambda: True
+        gguf_utils.is_gguf_available = _is_gguf_available
         if hasattr(hf_import_utils, "is_gguf_available"):
-            hf_import_utils.is_gguf_available = lambda: True
+            hf_import_utils.is_gguf_available = _is_gguf_available
 
     if _transformers_has_native_prism_gguf_support():
         return
-
-    original_dequantize = gguf.dequantize
-    if not getattr(original_dequantize, "_gptqmodel_prism_q1_0_g128_patch", False):
-        def patched_dequantize(data, tensor_type):
-            try:
-                return original_dequantize(data, tensor_type)
-            except NotImplementedError:
-                if _is_prism_q1_0_g128(tensor_type):
-                    return _dequantize_prism_q1_0_g128(data)
-                raise
-
-        patched_dequantize._gptqmodel_prism_q1_0_g128_patch = True
-        gguf.dequantize = patched_dequantize
 
     gguf_utils.PRISM_Q1_0_G128_NAME = PRISM_Q1_0_G128_NAME
     gguf_utils.PRISM_Q1_0_G128_VALUE = PRISM_Q1_0_G128_VALUE
@@ -337,9 +258,9 @@ def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
 
     if not _PRISM_GGUF_PATCH_WARNED:
         log.warning(
-            "HF: installed transformers lacks native Prism GGUF support; GPT-QModel applied a local "
-            "Q1_0_g128 compatibility monkeypatch using gguf %s.",
-            gguf_version,
+            "HF: installed transformers lacks native Prism GGUF support; GPT-QModel registered its internal "
+            "GGUF runtime and local Q1_0_g128 compatibility patch for `%s`.",
+            api_name,
         )
         _PRISM_GGUF_PATCH_WARNED = True
 
