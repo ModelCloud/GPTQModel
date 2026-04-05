@@ -12,7 +12,7 @@ from parameterized import parameterized
 from tabulate import tabulate
 
 from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 
 
 class TestPackAccuracy(unittest.TestCase):
@@ -45,7 +45,7 @@ class TestPackAccuracy(unittest.TestCase):
         return linear, scales, zeros, g_idx
 
     def _quant_linear(self):
-        qlinear = TorchQuantLinear(
+        qlinear = TorchLinear(
             bits=self.current_bits,
             group_size=self.current_group_size,
             sym=True,

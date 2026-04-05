@@ -12,7 +12,7 @@ from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen
 from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeForConditionalGeneration
 
 from gptqmodel.nn_modules.converter import MODULE_CONVERTER_MAP
-from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 
 
 def _make_tiny_moe_config(config_cls):
@@ -135,7 +135,7 @@ def test_qwen3_omni_uses_defuser_for_fused_experts():
     )
 
 def test_awq_single_bit_validation_allows_skip_only_dynamic_rules():
-    ok, err = AwqTorchQuantLinear.validate(
+    ok, err = AwqTorchLinear.validate(
         bits=4,
         group_size=128,
         desc_act=False,

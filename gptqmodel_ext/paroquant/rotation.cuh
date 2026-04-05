@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 ModelCloud.ai
+// SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
+// SPDX-License-Identifier: Apache-2.0
+
 /******************************************************************************
  * Adapted from https://github.com/z-lab/paroquant
  ******************************************************************************/

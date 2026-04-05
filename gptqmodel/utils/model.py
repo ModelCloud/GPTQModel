@@ -32,7 +32,7 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
@@ -43,8 +43,8 @@ from ..models._const import (
     SUPPORTS_MODULE_TYPES,
 )
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
+from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import (
     FORMAT_FIELD_CODE,
@@ -505,7 +505,7 @@ def create_quant_module(
     validate_bits = quant_bits_width(tmp_bits)
     constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits
 
-    # when loading a quantized model, device is target device passed in GPTQModel.load()
+    # when loading a quantized model, device is the target passed through the GPT-QModel load path
     # check in_features and out_features validate
     _, err = linear_cls.validate(
         bits=validate_bits,
@@ -601,7 +601,7 @@ def hf_convert_gptq_v1_to_v2_format(
 ) -> Tuple[nn.Module, bool]:
     if checkpoint_format == "gptq":
         # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-        if qlinear_kernel is MarlinQuantLinear:
+        if qlinear_kernel is MarlinLinear:
             return model, False
 
         cfg = QuantizeConfig(bits=bits)
@@ -1094,12 +1094,12 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     model_uses_exllamav2 = False
 
     for name, submodule in model.named_modules():
-        if isinstance(submodule, ExllamaV2QuantLinear):
+        if isinstance(submodule, ExllamaV2Linear):
             model_uses_exllamav2 = True
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
             fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
-        elif isinstance(submodule, AwqExllamaV2QuantLinear):
+        elif isinstance(submodule, AwqExllamaV2Linear):
             model_uses_exllamav2 = True
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed(
@@ -1121,7 +1121,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
 
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():
-        if isinstance(submodule, (ExllamaV2QuantLinear, AwqExllamaV2QuantLinear)):
+        if isinstance(submodule, (ExllamaV2Linear, AwqExllamaV2Linear)):
             device = submodule.qweight.device
             submodule.post_init(scratch_space=model.device_tensors[device])
         elif isinstance(submodule, BaseQuantLinear):

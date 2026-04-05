@@ -14,7 +14,7 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..nn_modules.qlinear.qqq import QQQQuantLinear
+from ..nn_modules.qlinear.qqq import QQQLinear
 from ..quantization.config import METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.fallback import normalize_fallback
 from ..quantization.qqq import QQQ
@@ -261,7 +261,7 @@ class QQQProcessor(LoopProcessor):
         ):
             create_quant_module(
                 name=module.full_name,
-                linear_cls=QQQQuantLinear,
+                linear_cls=QQQLinear,
                 bits=self.qcfg.runtime_bits,
                 desc_act=self.qcfg.desc_act,
                 dynamic=self.qcfg.dynamic,
@@ -279,7 +279,7 @@ class QQQProcessor(LoopProcessor):
         # pack module
         qModules = {
             name: submodule
-            for name, submodule in find_modules(model.model, [QQQQuantLinear]).items()
+            for name, submodule in find_modules(model.model, [QQQLinear]).items()
             if name == module.full_name
         }
         with log_time_block(
@@ -294,7 +294,7 @@ class QQQProcessor(LoopProcessor):
                 q_zeros=q_zeros,
                 q_g_idx=q_g_idx,
                 layers=layers,
-                quant_linear_cls=QQQQuantLinear,
+                quant_linear_cls=QQQLinear,
                 lock=self.lock,
                 q_scales_extra=q_scales_extra,
                 quantize_config=self.qcfg,

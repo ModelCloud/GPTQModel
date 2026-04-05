@@ -102,7 +102,7 @@ def quantize_fp8_weight(
     return quantized.contiguous(), scale_inv.to(torch.float32).contiguous()
 
 
-class TorchFP8QuantLinear(WeightOnlyQuantLinear):
+class TorchFP8Linear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.FP8_TORCH]
     SUPPORTS_METHODS = [METHOD.FP8]
     SUPPORTS_FORMATS = {FORMAT.FP8: 15}
@@ -153,7 +153,7 @@ class TorchFP8QuantLinear(WeightOnlyQuantLinear):
             block_rows, block_cols = self.weight_block_size
             if out_features % block_rows != 0 or in_features % block_cols != 0:
                 raise ValueError(
-                    f"TorchFP8QuantLinear block scaling requires out_features/in_features "
+                    f"TorchFP8Linear block scaling requires out_features/in_features "
                     f"to be divisible by `weight_block_size={self.weight_block_size}`."
                 )
 
@@ -175,7 +175,7 @@ class TorchFP8QuantLinear(WeightOnlyQuantLinear):
     @classmethod
     def validate_once(cls):
         if not (hasattr(torch, "float8_e4m3fn") or hasattr(torch, "float8_e5m2")):
-            return False, RuntimeError("TorchFP8QuantLinear requires a PyTorch build with FP8 dtypes.")
+            return False, RuntimeError("TorchFP8Linear requires a PyTorch build with FP8 dtypes.")
         return True, None
 
     def smooth_block_size(self) -> int:
@@ -189,7 +189,7 @@ class TorchFP8QuantLinear(WeightOnlyQuantLinear):
         if self.weight_scale_method == "row":
             return (self.out_features,)
         if self.weight_block_size is None:
-            raise ValueError("TorchFP8QuantLinear block scaling requires `weight_block_size`.")
+            raise ValueError("TorchFP8Linear block scaling requires `weight_block_size`.")
         block_rows, block_cols = self.weight_block_size
         return (
             self.out_features // block_rows,
@@ -328,7 +328,7 @@ class TorchFP8QuantLinear(WeightOnlyQuantLinear):
         if self.weight_scale_method == "row":
             return scale_inv.view(-1, 1)
         if self.weight_block_size is None:
-            raise ValueError("TorchFP8QuantLinear block scaling requires `weight_block_size`.")
+            raise ValueError("TorchFP8Linear block scaling requires `weight_block_size`.")
 
         block_rows, block_cols = self.weight_block_size
         expanded = scale_inv.repeat_interleave(block_rows, dim=0)
@@ -428,4 +428,4 @@ class TorchFP8QuantLinear(WeightOnlyQuantLinear):
         return output.reshape(original_shape)
 
 
-__all__ = ["TorchFP8QuantLinear", "quantize_fp8_weight"]
+__all__ = ["TorchFP8Linear", "quantize_fp8_weight"]

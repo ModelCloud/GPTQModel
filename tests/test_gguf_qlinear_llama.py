@@ -14,7 +14,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.utils import logging as hf_logging
 
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 
 
 MODEL_ID = Path("/monster/data/model/Llama-3.2-1B-Instruct")
@@ -117,8 +117,8 @@ def _capture_layer0_module_io(model, tokenizer) -> dict[str, dict[str, torch.Ten
     return captured
 
 
-def _build_direct_gguf_module(native_module: torch.nn.Linear) -> GGUFTorchQuantLinear:
-    module = GGUFTorchQuantLinear(
+def _build_direct_gguf_module(native_module: torch.nn.Linear) -> GGUFTorchLinear:
+    module = GGUFTorchLinear(
         bits="q4_k_m",
         group_size=-1,
         sym=True,

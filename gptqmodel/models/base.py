@@ -41,7 +41,7 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
-from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..nn_modules.qlinear.torch import TorchLinear
 from ..quantization.config import (
     FORMAT,
     METHOD,
@@ -713,7 +713,7 @@ class BaseQModel(nn.Module):
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
             elif self.quantize_config.method == METHOD.QQQ:
                 preferred_backend = BACKEND.QQQ
-            elif self.quantize_config.method == METHOD.PAROQUANT:
+            elif self.quantize_config.method == METHOD.PARO:
                 preferred_backend = BACKEND.PAROQUANT_CUDA
             elif self.quantize_config.method == METHOD.EXL3:
                 preferred_backend = BACKEND.EXL3_EXLLAMA_V3
@@ -933,7 +933,7 @@ class BaseQModel(nn.Module):
                 TensorParallelWeightProcessor(**args),
                 AWQProcessor(**awq_args),
             ]
-        elif self.quantize_config.method == METHOD.PAROQUANT:
+        elif self.quantize_config.method == METHOD.PARO:
             from ..looper.paroquant_processor import ParoQuantProcessor
 
             os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
@@ -1058,7 +1058,7 @@ class BaseQModel(nn.Module):
         self,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter,
-        quantized_modules: Dict[str, TorchQuantLinear],
+        quantized_modules: Dict[str, TorchLinear],
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         calibration_dataset_concat_size: Optional[int] = None,
         calibration_dataset_sort: Optional[str] = None,
@@ -1329,7 +1329,7 @@ class BaseQModel(nn.Module):
         if not isinstance(self.model, nn.Module):
             return
 
-        quant_modules = [module for module in self.model.modules() if isinstance(module, TorchQuantLinear)]
+        quant_modules = [module for module in self.model.modules() if isinstance(module, TorchLinear)]
         if not quant_modules:
             return
 
@@ -2182,7 +2182,7 @@ class BaseQModel(nn.Module):
     def _auto_detect_module_tree(self, model: PreTrainedModel, quant_method: METHOD):
         log.warn("Model not yet support, attempting Module Tree AutoCompat...")
 
-        if quant_method not in {METHOD.GPTQ, METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES, METHOD.EXL3, METHOD.PAROQUANT}:
+        if quant_method not in {METHOD.GPTQ, METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES, METHOD.EXL3, METHOD.PARO}:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
                 "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT"

@@ -19,13 +19,13 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
 from . import AWQuantLinear
-from .torch_fused import Int4PackedOp, TorchFusedQuantLinear, pack_scales_and_zeros
+from .torch_fused import Int4PackedOp, TorchFusedLinear, pack_scales_and_zeros
 
 
 log = setup_logger()
 
 
-class TorchFusedAwqQuantLinear(AWQuantLinear):
+class TorchFusedAwqLinear(AWQuantLinear):
     """Torch fused AWQ variant based on GPTQ fused kernels via CPU int4 packing."""
 
     QUANT_TYPE = "torch_fused_awq"
@@ -35,19 +35,19 @@ class TorchFusedAwqQuantLinear(AWQuantLinear):
     SUPPORTS_FORMATS = {FORMAT.GEMM: 20}
 
     # inherit from torch fused
-    SUPPORTS_BITS = TorchFusedQuantLinear.SUPPORTS_BITS
-    SUPPORTS_GROUP_SIZE = TorchFusedQuantLinear.SUPPORTS_GROUP_SIZE
-    SUPPORTS_DESC_ACT = TorchFusedQuantLinear.SUPPORTS_DESC_ACT
-    SUPPORTS_SYM = TorchFusedQuantLinear.SUPPORTS_SYM
-    SUPPORTS_SHARDS = TorchFusedQuantLinear.SUPPORTS_SHARDS
-    SUPPORTS_TRAINING = TorchFusedQuantLinear.SUPPORTS_TRAINING
-    SUPPORTS_AUTO_PADDING = TorchFusedQuantLinear.SUPPORTS_AUTO_PADDING
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = TorchFusedQuantLinear.SUPPORTS_IN_FEATURES_DIVISIBLE_BY
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = TorchFusedQuantLinear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY
-    SUPPORTS_DEVICES = TorchFusedQuantLinear.SUPPORTS_DEVICES
-    SUPPORTS_PLATFORM = TorchFusedQuantLinear.SUPPORTS_PLATFORM
-    SUPPORTS_PACK_DTYPES = TorchFusedQuantLinear.SUPPORTS_PACK_DTYPES
-    SUPPORTS_ADAPTERS = TorchFusedQuantLinear.SUPPORTS_ADAPTERS
+    SUPPORTS_BITS = TorchFusedLinear.SUPPORTS_BITS
+    SUPPORTS_GROUP_SIZE = TorchFusedLinear.SUPPORTS_GROUP_SIZE
+    SUPPORTS_DESC_ACT = TorchFusedLinear.SUPPORTS_DESC_ACT
+    SUPPORTS_SYM = TorchFusedLinear.SUPPORTS_SYM
+    SUPPORTS_SHARDS = TorchFusedLinear.SUPPORTS_SHARDS
+    SUPPORTS_TRAINING = TorchFusedLinear.SUPPORTS_TRAINING
+    SUPPORTS_AUTO_PADDING = TorchFusedLinear.SUPPORTS_AUTO_PADDING
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = TorchFusedLinear.SUPPORTS_IN_FEATURES_DIVISIBLE_BY
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = TorchFusedLinear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY
+    SUPPORTS_DEVICES = TorchFusedLinear.SUPPORTS_DEVICES
+    SUPPORTS_PLATFORM = TorchFusedLinear.SUPPORTS_PLATFORM
+    SUPPORTS_PACK_DTYPES = TorchFusedLinear.SUPPORTS_PACK_DTYPES
+    SUPPORTS_ADAPTERS = TorchFusedLinear.SUPPORTS_ADAPTERS
     REQUIRES_FORMAT_V2 = False
 
     SUPPORTS_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
@@ -251,7 +251,7 @@ class TorchFusedAwqQuantLinear(AWQuantLinear):
             self.transform_xpu_awq(dtype)
         else:
             raise NotImplementedError(
-                "TorchFusedAwqQuantLinear only supports fused transforms on CPU or XPU devices."
+                "TorchFusedAwqLinear only supports fused transforms on CPU or XPU devices."
             )
 
     def forward(self, x: torch.Tensor):
@@ -305,4 +305,4 @@ class TorchFusedAwqQuantLinear(AWQuantLinear):
             )
 
 
-__all__ = ["TorchFusedAwqQuantLinear"]
+__all__ = ["TorchFusedAwqLinear"]

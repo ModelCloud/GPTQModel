@@ -120,9 +120,9 @@ def _make_module(
     buffers: dict[str, torch.Tensor],
     auto_cache_bf16_rotation_dtype: bool,
 ):
-    from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
+    from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 
-    module = ParoQuantQuantLinear(
+    module = ParoLinear(
         bits=4,
         group_size=case.group_size,
         sym=True,

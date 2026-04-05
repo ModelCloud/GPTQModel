@@ -10,7 +10,7 @@ flow against that fixture.
 
 The goal is not kernel benchmarking or quality evaluation. The goal is a cheap
 regression guard for the MoE lifecycle:
-1. native HF MoE model can be loaded through GPTQModel
+1. native HF MoE model can be loaded through GPT-QModel
 2. MoE routing override can drive expert quantization
 3. the quantized checkpoint can be reloaded
 4. every expert gate/up/down projection is exported as a quantized linear
@@ -32,7 +32,7 @@ from transformers import PreTrainedTokenizerFast
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 
 
@@ -47,7 +47,7 @@ _CALIBRATION_TEXTS = [
 
 
 def _build_local_tokenizer(model_dir: Path) -> PreTrainedTokenizerFast:
-    """Persist a minimal tokenizer because GPTQModel.load() expects local tokenizer files."""
+    """Persist a minimal tokenizer because the GPT-QModel `load()` path expects local tokenizer files."""
 
     tokenizer = Tokenizer(WordLevel(unk_token="[UNK]"))
     tokenizer.pre_tokenizer = Whitespace()
@@ -158,7 +158,7 @@ def test_tiny_qwen3_moe_quantization_smoke(tmp_path: Path):
         for suffix in ("gate_proj", "up_proj", "down_proj"):
             module_name = f"model.model.layers.0.mlp.experts.{expert_index}.{suffix}"
             module = modules[module_name]
-            assert isinstance(module, TorchQuantLinear), module_name
+            assert isinstance(module, TorchLinear), module_name
             quantized_expert_modules.append(module_name)
 
     assert len(quantized_expert_modules) == expected_quantized

@@ -85,7 +85,7 @@ class AwqGemmTritonFn(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None, None, None
 
 
-class AwqGEMMTritonQuantLinear(AWQuantLinear):
+class AwqGEMMTritonLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMM_TRITON]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 50}
@@ -191,5 +191,5 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
 
 __all__ = [
     "AwqGemmTritonFn",
-    "AwqGEMMTritonQuantLinear",
+    "AwqGEMMTritonLinear",
 ]

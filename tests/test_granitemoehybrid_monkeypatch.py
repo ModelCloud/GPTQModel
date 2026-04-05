@@ -5,13 +5,13 @@
 import torch
 
 from gptqmodel.models.definitions.granitemoehybrid import GraniteMoeHybridQModel
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 
 
 class _DummyQuantMamba(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.in_proj = TorchQuantLinear(
+        self.in_proj = TorchLinear(
             bits=4,
             group_size=32,
             sym=True,
@@ -23,7 +23,7 @@ class _DummyQuantMamba(torch.nn.Module):
             adapter=None,
             register_buffers=True,
         )
-        self.out_proj = TorchQuantLinear(
+        self.out_proj = TorchLinear(
             bits=4,
             group_size=32,
             sym=True,

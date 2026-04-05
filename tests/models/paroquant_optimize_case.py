@@ -7,7 +7,7 @@ import torch
 from model_test import ModelTest, _env_choice, _env_flag, _env_int, _env_optional_flag
 
 from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
+from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.quantization import FORMAT, METHOD, ParoQuantizeConfig
 
 
@@ -104,13 +104,13 @@ class BaseLlama3_2ParoQuantOptimizeTest(ModelTest):
     EVAL_TASKS_FAST = PAROQUANT_EVAL_TASKS_FAST
     EVAL_TASKS_SLOW = PAROQUANT_EVAL_TASKS_SLOW
     FORMAT = FORMAT.PAROQUANT
-    METHOD = METHOD.PAROQUANT
+    METHOD = METHOD.PARO
     SYM = True
     TORCH_DTYPE = torch.bfloat16
-    LOAD_BACKEND = BACKEND.PAROQUANT
-    QUANT_BACKEND = BACKEND.PAROQUANT
-    KERNEL_QUANT = {ParoQuantQuantLinear}
-    KERNEL_INFERENCE = {ParoQuantQuantLinear}
+    LOAD_BACKEND = BACKEND.PARO
+    QUANT_BACKEND = BACKEND.PARO
+    KERNEL_QUANT = {ParoLinear}
+    KERNEL_INFERENCE = {ParoLinear}
     MODEL_COMPAT_FAST_LAYER_COUNT = 4
     MODEL_COMPAT_FAST_LAYER_POSITION = "last"
 
@@ -189,7 +189,7 @@ class BaseLlama3_2ParoQuantOptimizeTest(ModelTest):
     def _build_quantize_config(self):
         return ParoQuantizeConfig(
             bits=self.BITS,
-            method=METHOD.PAROQUANT,
+            method=METHOD.PARO,
             format=FORMAT.PAROQUANT,
             opt_scope=self.OPT_SCOPE,
             opt_train_on_noisy_inputs=self._opt_train_on_noisy_inputs(),

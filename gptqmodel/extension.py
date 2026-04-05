@@ -220,7 +220,7 @@ def namespace(name: str, *, use_cache: bool = True) -> object:
 
 
 def load(name: str = "all", *, use_cache: bool = True) -> dict[str, bool]:
-    """Build one or more GPTQModel torch.ops JIT extensions ahead of first use.
+    """Build one or more GPT-QModel torch.ops JIT extensions ahead of first use.
 
     Args:
         name: One concrete extension name, `marlin` for both Marlin dtype

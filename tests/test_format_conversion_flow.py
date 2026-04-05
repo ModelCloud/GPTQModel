@@ -8,6 +8,7 @@ from unittest import mock
 
 import torch
 
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT, METHOD, GGUFQuantizeConfig, QuantizeConfig, RTNQuantizeConfig
 from gptqmodel.utils.model import pack_module
 
@@ -25,8 +26,6 @@ class _DummyQuantModule:
     def __init__(self):
         self.bits = 4
         self.pack_dtype = torch.int32
-
-    QUANT_TYPE = "gptq"
 
     def to(self, *_args, **_kwargs):
         return self
@@ -58,9 +57,8 @@ class _DummyQuantModule:
 def _make_quant_linear_cls(requires_v2: bool):
     return type(
         "DummyQuantLinear",
-        (),
+        (TorchLinear,),
         {
-            "QUANT_TYPE": "gptq",
             "REQUIRES_FORMAT_V2": requires_v2,
         },
     )
@@ -76,6 +74,7 @@ def _run_pack(quant_cfg: QuantizeConfig, requires_v2: bool) -> int:
     lock = threading.Lock()
 
     quant_linear_cls = _make_quant_linear_cls(requires_v2=requires_v2)
+    assert issubclass(quant_linear_cls, TorchLinear)
     assert getattr(quant_linear_cls, "REQUIRES_FORMAT_V2") is requires_v2
 
     with mock.patch("gptqmodel.utils.model.convert_gptq_v2_to_v1_format_module") as convert_mock:

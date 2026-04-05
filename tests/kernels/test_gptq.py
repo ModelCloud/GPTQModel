@@ -16,12 +16,12 @@ from tabulate import tabulate
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Adapter, AdapterCache, Lora
-from gptqmodel.nn_modules.qlinear.bitblas import BitblasQuantLinear
-from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from gptqmodel.nn_modules.qlinear.machete import MacheteQuantLinear
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
+from gptqmodel.nn_modules.qlinear.bitblas import BitblasLinear
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.utils.machete import (
     machete_runtime_available,
     machete_runtime_error,
@@ -42,7 +42,7 @@ os.environ.setdefault("BITBLAS_ENABLE_TENSORCORE", "0")
 
 
 def _bitblas_supports_gptq_case(dtype: torch.dtype) -> bool:
-    valid, _ = BitblasQuantLinear.validate(
+    valid, _ = BitblasLinear.validate(
         bits=4,
         group_size=128,
         desc_act=True,
@@ -72,12 +72,12 @@ class TestKernelOutput(unittest.TestCase):
     # model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
     model_path = "sliuau/Llama-3.2-3B_4bits_128group_size"
     target_qliner_map = {
-        BACKEND.TORCH: TorchQuantLinear,
-        BACKEND.MACHETE: MacheteQuantLinear,
-        BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
-        BACKEND.TRITON: TritonV2QuantLinear,
-        BACKEND.BITBLAS: BitblasQuantLinear,
-        BACKEND.MARLIN: MarlinQuantLinear,
+        BACKEND.TORCH: TorchLinear,
+        BACKEND.MACHETE: MacheteLinear,
+        BACKEND.EXLLAMA_V2: ExllamaV2Linear,
+        BACKEND.TRITON: TritonV2Linear,
+        BACKEND.BITBLAS: BitblasLinear,
+        BACKEND.MARLIN: MarlinLinear,
     }
 
     target = 'model.layers.6.self_attn.v_proj'

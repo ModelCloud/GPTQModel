@@ -16,6 +16,7 @@ if TESTS_MODELS_ROOT not in sys.path:
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
+from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 from gptqmodel.quantization import FORMAT, METHOD
 
 
@@ -72,7 +73,7 @@ class TestLlama3_2_ExllamaV3(ModelTest):
         self.quant_lm_eval()
 
         module = self.model.model.model.layers[0].self_attn.q_proj
-        assert module.QUANT_TYPE == "exl3"
+        assert isinstance(module, ExllamaV3Linear)
         assert module.trellis.dtype == torch.int16
         assert module.suh.dtype == torch.float16
         assert module.svh.dtype == torch.float16

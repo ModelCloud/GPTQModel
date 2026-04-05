@@ -106,7 +106,7 @@ def _buffer_spec_4bit(
     return tuple(spec)
 
 
-class BitsAndBytesQuantLinear(WeightOnlyQuantLinear):
+class BitsAndBytesLinear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.BITSANDBYTES]
     SUPPORTS_METHODS = [METHOD.BITSANDBYTES]
     SUPPORTS_FORMATS = {FORMAT.BITSANDBYTES: 40}
@@ -355,7 +355,7 @@ class BitsAndBytesQuantLinear(WeightOnlyQuantLinear):
             )
             if outlier_cols is not None and outlier_cols.numel() > 0:
                 raise NotImplementedError(
-                    "BitsAndBytesQuantLinear only supports the direct int8 vectorwise path without outlier routing."
+                    "BitsAndBytesLinear only supports the direct int8 vectorwise path without outlier routing."
                 )
             self._buffers["weight"] = qweight.contiguous()
             self._buffers["weight_scb"] = scales.contiguous()
@@ -392,7 +392,7 @@ class BitsAndBytesQuantLinear(WeightOnlyQuantLinear):
         )
         if outlier_cols is not None and outlier_cols.numel() > 0:
             raise NotImplementedError(
-                "BitsAndBytesQuantLinear only supports the direct int8 vectorwise path without outlier routing."
+                "BitsAndBytesLinear only supports the direct int8 vectorwise path without outlier routing."
             )
 
         mm_out = bnb.functional.int8_linear_matmul(x_int8, self.weight)
@@ -400,12 +400,12 @@ class BitsAndBytesQuantLinear(WeightOnlyQuantLinear):
         return out.to(input_dtype)
 
 
-BitsAndBytes4bitQuantLinear = BitsAndBytesQuantLinear
+BitsAndBytes4bitLinear = BitsAndBytesLinear
 
 __all__ = [
     "BITSANDBYTES_AVAILABLE",
     "BITSANDBYTES_INSTALL_HINT",
-    "BitsAndBytes4bitQuantLinear",
-    "BitsAndBytesQuantLinear",
+    "BitsAndBytes4bitLinear",
+    "BitsAndBytesLinear",
     "import_bitsandbytes",
 ]

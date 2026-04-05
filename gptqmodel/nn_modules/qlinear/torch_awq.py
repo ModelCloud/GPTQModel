@@ -17,7 +17,7 @@ from . import AWQuantLinear
 log = setup_logger()
 
 
-class AwqTorchQuantLinear(AWQuantLinear):
+class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 10}
@@ -162,4 +162,4 @@ class AwqTorchQuantLinear(AWQuantLinear):
 
         return output
 
-__all__ = ["AwqTorchQuantLinear"]
+__all__ = ["AwqTorchLinear"]

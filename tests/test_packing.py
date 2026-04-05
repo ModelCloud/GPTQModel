@@ -20,7 +20,7 @@ import torch.nn as nn  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import BACKEND  # noqa: E402
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 
 
 def gen_quant(k: int, n: int, groupsize: int, bits: int):
@@ -68,9 +68,9 @@ def gen_quant(k: int, n: int, groupsize: int, bits: int):
 
 class TestRepacking(unittest.TestCase):
     QLINEAR_DICT = {
-        # BACKEND.TRITON: TritonV2QuantLinear,
-        BACKEND.TORCH: TorchQuantLinear,
-        # BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
+        # BACKEND.TRITON: TritonV2Linear,
+        BACKEND.TORCH: TorchLinear,
+        # BACKEND.TORCH_FUSED: TorchFusedLinear,
     }
 
     # Dimensions (match your original scale)
@@ -127,7 +127,7 @@ class TestRepacking(unittest.TestCase):
 
         # Torch reference packer (compare against Torch CPU packer)
         try:
-            torch_linear = self._pack_one(TorchQuantLinear, BACKEND.TORCH, bits, group_size, linear, s, zeros, g_idx)
+            torch_linear = self._pack_one(TorchLinear, BACKEND.TORCH, bits, group_size, linear, s, zeros, g_idx)
             torch_linear.post_init()
         except (NotImplementedError, ValueError) as e:
             self.skipTest(f"Torch backend does not support bits={bits}, group_size={group_size}: {e}")

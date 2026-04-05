@@ -6,8 +6,8 @@ import torch
 import gptqmodel.nn_modules.qlinear.exllamav2_awq as exllamav2_awq_module
 
 
-def _build_module() -> exllamav2_awq_module.AwqExllamaV2QuantLinear:
-    return exllamav2_awq_module.AwqExllamaV2QuantLinear(
+def _build_module() -> exllamav2_awq_module.AwqExllamaV2Linear:
+    return exllamav2_awq_module.AwqExllamaV2Linear(
         bits=4,
         group_size=128,
         sym=True,
@@ -89,7 +89,7 @@ def test_exllamav2_awq_validate_once_surfaces_jit_error(monkeypatch):
     monkeypatch.setattr(exllamav2_awq_module, "exllamav2_awq_runtime_available", lambda: False)
     monkeypatch.setattr(exllamav2_awq_module, "exllamav2_awq_runtime_error", lambda: "missing exllamav2 awq jit ops")
 
-    ok, err = exllamav2_awq_module.AwqExllamaV2QuantLinear.validate_once()
+    ok, err = exllamav2_awq_module.AwqExllamaV2Linear.validate_once()
 
     assert ok is False
     assert isinstance(err, ImportError)

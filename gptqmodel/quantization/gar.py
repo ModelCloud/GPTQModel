@@ -58,7 +58,7 @@ def compute_local_perms(
     H = diag_H[: num_groups * groupsize].view(num_groups, groupsize)
 
     # CUDA `topk` outperforms `argsort`/`sort` for the typical
-    # group sizes (<=192) used by GPTQModel while keeping identical ordering.
+    # group sizes (<=192) used by GPT-QModel while keeping identical ordering.
     use_topk = diag_H.is_cuda and groupsize <= 192 and groupsize > 0
     if use_topk:
         values, indices = torch.topk(H, k=groupsize, dim=1, largest=True, sorted=True)

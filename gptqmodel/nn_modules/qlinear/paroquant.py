@@ -22,7 +22,7 @@ from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.paroquant import apply_paroquant_rotation, build_identity_rotation_buffers, is_identity_rotation
 from .gemm_awq import FP32_ACCUM, _awq_cuda_gemm_forward
-from .torch_awq import AwqTorchQuantLinear
+from .torch_awq import AwqTorchLinear
 
 
 # Rotated activations benchmark faster with a shallower K split than generic AWQ.
@@ -38,11 +38,11 @@ _PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE = env_flag(
 )
 
 
-class ParoQuantQuantLinear(AwqTorchQuantLinear):
+class ParoLinear(AwqTorchLinear):
     """Run ParoQuant inference by rotating inputs and reusing AWQ packed GEMM."""
 
     SUPPORTS_BACKENDS = [BACKEND.PAROQUANT_CUDA]
-    SUPPORTS_METHODS = [METHOD.PAROQUANT]
+    SUPPORTS_METHODS = [METHOD.PARO]
     SUPPORTS_FORMATS = {FORMAT.PAROQUANT: 55}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
@@ -86,7 +86,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         """Initialize AWQ buffers plus the extra ParoQuant rotation state."""
         self.krot = int(krot)
         if self.krot <= 0:
-            raise ValueError(f"ParoQuantQuantLinear: `krot` must be positive, got {krot}.")
+            raise ValueError(f"ParoLinear: `krot` must be positive, got {krot}.")
         self.fp32_accum = bool(fp32_accum)
         self.cache_runtime_dtype = bool(cache_runtime_dtype)
         self.auto_cache_bf16_runtime_dtype = bool(auto_cache_bf16_runtime_dtype)
@@ -294,4 +294,4 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         return out.reshape(original_shape)
 
 
-__all__ = ["ParoQuantQuantLinear"]
+__all__ = ["ParoLinear"]

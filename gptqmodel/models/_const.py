@@ -83,7 +83,7 @@ def validate_cuda_support(raise_exception: bool = False):
         if not at_least_one_cuda_v6:
             if raise_exception:
                 raise EnvironmentError(
-                    "GPTQModel cuda requires Pascal or later gpu with compute capability >= `6.0`.")
+                    "GPT-QModel cuda requires Pascal or later gpu with compute capability >= `6.0`.")
             else:
                 got_cuda = False
 

@@ -18,7 +18,7 @@ from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-class AwqGEMVQuantLinear(AWQuantLinear):
+class AwqGEMVLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMV]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMV: 40}
@@ -225,4 +225,4 @@ class AwqGEMVQuantLinear(AWQuantLinear):
             )
         )
 
-__all__ = ["AwqGEMVQuantLinear"]
+__all__ = ["AwqGEMVLinear"]

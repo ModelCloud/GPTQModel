@@ -25,29 +25,29 @@ from ...quantization.paroquant.modules.triton.gemm import (
 )
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
-from .paroquant import ParoQuantQuantLinear
+from .paroquant import ParoLinear
 
 
-class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
+class ParoQuantTritonLinear(ParoLinear):
     """Use Triton fused kernels for ParoQuant prefill/decode execution."""
 
     SUPPORTS_BACKENDS = [BACKEND.PAROQUANT_TRITON]
-    SUPPORTS_METHODS = ParoQuantQuantLinear.SUPPORTS_METHODS
+    SUPPORTS_METHODS = ParoLinear.SUPPORTS_METHODS
     SUPPORTS_FORMATS = {FORMAT.PAROQUANT: 0}
-    SUPPORTS_BITS = ParoQuantQuantLinear.SUPPORTS_BITS
-    SUPPORTS_GROUP_SIZE = ParoQuantQuantLinear.SUPPORTS_GROUP_SIZE
-    SUPPORTS_DESC_ACT = ParoQuantQuantLinear.SUPPORTS_DESC_ACT
-    SUPPORTS_SYM = ParoQuantQuantLinear.SUPPORTS_SYM
-    SUPPORTS_SHARDS = ParoQuantQuantLinear.SUPPORTS_SHARDS
-    SUPPORTS_TRAINING = ParoQuantQuantLinear.SUPPORTS_TRAINING
-    SUPPORTS_AUTO_PADDING = ParoQuantQuantLinear.SUPPORTS_AUTO_PADDING
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = ParoQuantQuantLinear.SUPPORTS_IN_FEATURES_DIVISIBLE_BY
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = ParoQuantQuantLinear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY
+    SUPPORTS_BITS = ParoLinear.SUPPORTS_BITS
+    SUPPORTS_GROUP_SIZE = ParoLinear.SUPPORTS_GROUP_SIZE
+    SUPPORTS_DESC_ACT = ParoLinear.SUPPORTS_DESC_ACT
+    SUPPORTS_SYM = ParoLinear.SUPPORTS_SYM
+    SUPPORTS_SHARDS = ParoLinear.SUPPORTS_SHARDS
+    SUPPORTS_TRAINING = ParoLinear.SUPPORTS_TRAINING
+    SUPPORTS_AUTO_PADDING = ParoLinear.SUPPORTS_AUTO_PADDING
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = ParoLinear.SUPPORTS_IN_FEATURES_DIVISIBLE_BY
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = ParoLinear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
-    SUPPORTS_PACK_DTYPES = ParoQuantQuantLinear.SUPPORTS_PACK_DTYPES
-    SUPPORTS_ADAPTERS = ParoQuantQuantLinear.SUPPORTS_ADAPTERS
-    SUPPORTS_DTYPES = ParoQuantQuantLinear.SUPPORTS_DTYPES
+    SUPPORTS_PACK_DTYPES = ParoLinear.SUPPORTS_PACK_DTYPES
+    SUPPORTS_ADAPTERS = ParoLinear.SUPPORTS_ADAPTERS
+    SUPPORTS_DTYPES = ParoLinear.SUPPORTS_DTYPES
     QUANT_TYPE = "awq_paroquant_triton"
     PAROQUANT_TRITON_AUTOTUNE = os.environ.get("GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE", "1") != "0"
     PAROQUANT_TRITON_AUTOTUNE_WARMUP = max(0, int(os.environ.get("GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE_WARMUP", "2")))
@@ -203,4 +203,4 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
         return out.reshape(original_shape)
 
 
-__all__ = ["ParoQuantTritonQuantLinear"]
+__all__ = ["ParoQuantTritonLinear"]

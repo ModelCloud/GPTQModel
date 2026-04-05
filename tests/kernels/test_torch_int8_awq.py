@@ -16,8 +16,8 @@ import torch
 os.environ.setdefault("GPTQMODEL_DISABLE_BITBLAS", "1")
 
 from gptqmodel.models._const import DEVICE
-from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_int8_awq import TorchInt8AwqQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.torch_int8_awq import TorchInt8AwqLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import select_quant_linear
@@ -44,7 +44,7 @@ def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
     return packed
 
 
-def _copy_awq_buffers(src: AwqTorchQuantLinear, dst: TorchInt8AwqQuantLinear) -> None:
+def _copy_awq_buffers(src: AwqTorchLinear, dst: TorchInt8AwqLinear) -> None:
     dst.qweight.copy_(src.qweight)
     dst.qzeros.copy_(src.qzeros)
     dst.scales.copy_(src.scales)
@@ -99,7 +99,7 @@ def test_torch_int8_awq_cpu_kernel_deviation_against_torch_awq(dtype: torch.dtyp
         out_features=out_features,
     )
 
-    baseline = AwqTorchQuantLinear(
+    baseline = AwqTorchLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -109,7 +109,7 @@ def test_torch_int8_awq_cpu_kernel_deviation_against_torch_awq(dtype: torch.dtyp
         bias=True,
         register_buffers=True,
     )
-    candidate = TorchInt8AwqQuantLinear(
+    candidate = TorchInt8AwqLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -153,7 +153,7 @@ def test_torch_int8_awq_cpu_kernel_deviation_against_torch_awq(dtype: torch.dtyp
 
 def test_torch_int8_awq_kernel_is_cpu_only():
     with pytest.raises(NotImplementedError):
-        TorchInt8AwqQuantLinear.validate_device(DEVICE.XPU)
+        TorchInt8AwqLinear.validate_device(DEVICE.XPU)
 
 
 def test_torch_int8_awq_backend_selection():
@@ -168,4 +168,4 @@ def test_torch_int8_awq_backend_selection():
         quant_method=METHOD.AWQ,
         pack_dtype=torch.int32,
     )
-    assert qlinear_cls is TorchInt8AwqQuantLinear
+    assert qlinear_cls is TorchInt8AwqLinear

@@ -7,8 +7,8 @@ import torch
 import gptqmodel.nn_modules.qlinear.qqq as qqq_module
 
 
-def _build_module() -> qqq_module.QQQQuantLinear:
-    return qqq_module.QQQQuantLinear(
+def _build_module() -> qqq_module.QQQLinear:
+    return qqq_module.QQQLinear(
         bits=4,
         group_size=128,
         sym=True,

@@ -424,7 +424,7 @@ def _dequantize_q6_k_numpy(qweight: np.ndarray) -> np.ndarray:
     return (d * q).reshape(rows, -1)
 
 
-class GGUFTorchQuantLinear(WeightOnlyQuantLinear):
+class GGUFTorchLinear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TORCH]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 15}
@@ -946,4 +946,4 @@ class GGUFTorchQuantLinear(WeightOnlyQuantLinear):
         return output.reshape(original_shape)
 
 
-__all__ = ["GGUFTorchQuantLinear"]
+__all__ = ["GGUFTorchLinear"]

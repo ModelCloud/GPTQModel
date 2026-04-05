@@ -5,7 +5,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8QuantLinear, quantize_fp8_weight
+from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear, quantize_fp8_weight
 
 
 def _available_fp8_formats():
@@ -23,7 +23,7 @@ def test_fp8_pack_matches_reference_quantizer(fmt: str, weight_scale_method: str
     linear = nn.Linear(64, 64, bias=True).eval()
     block_size = (16, 16) if weight_scale_method == "block" else None
 
-    kernel = TorchFP8QuantLinear(
+    kernel = TorchFP8Linear(
         bits=8,
         group_size=-1,
         desc_act=False,
@@ -58,7 +58,7 @@ def test_fp8_forward_matches_dequantized_reference(fmt: str, weight_scale_method
     linear = nn.Linear(64, 64, bias=True).eval()
     block_size = (16, 16) if weight_scale_method == "block" else None
 
-    kernel = TorchFP8QuantLinear(
+    kernel = TorchFP8Linear(
         bits=8,
         group_size=-1,
         desc_act=False,
@@ -98,7 +98,7 @@ def test_fp8_scaled_mm_matches_dense_reference(fmt: str, weight_scale_method: st
     torch.manual_seed(2)
     linear = nn.Linear(64, 64, bias=False).eval()
 
-    kernel = TorchFP8QuantLinear(
+    kernel = TorchFP8Linear(
         bits=8,
         group_size=-1,
         desc_act=False,

@@ -281,7 +281,7 @@ class Lora(Adapter):
 
 
     def to_dict(self):
-        """Serializes the minimal adapter descriptor used by GPTQModel."""
+        """Serializes the minimal adapter descriptor used by GPT-QModel."""
 
         return {
             "name": self.name(),

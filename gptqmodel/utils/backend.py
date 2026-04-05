@@ -21,7 +21,7 @@ class BACKEND(str, Enum):
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
-    GPTQ_HF_KERNEL = "gptq_hf_kernel"  # HuggingFace kernels-community GPTQ path
+    GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
 
     # QQQ kernels
     QQQ = "qqq"  # marlin-based qqq kernel
@@ -33,7 +33,7 @@ class BACKEND(str, Enum):
     AWQ_GEMV_FAST = "awq_gemv_fast"
     AWQ_TORCH_INT8 = "awq_torch_int8"
     AWQ_TORCH_FUSED = "awq_torch_fused"
-    AWQ_HF_KERNEL = "awq_hf_kernel"
+    AWQ_TORCH_ATEN = "awq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
     AWQ_TORCH = "awq_torch"
     AWQ_BITBLAS = "awq_bitblas"
     AWQ_MACHETE = "awq_machete"
@@ -72,17 +72,15 @@ class BACKEND(str, Enum):
     MACHETE = "machete"
     MARLIN = "marlin"
     BITBLAS = "bitblas"
-    HF_KERNEL = "hf_kernel"
     GEMM = "gemm"
     GEMM_TRITON = "gemm_triton"
     GEMV = "gemv"
     GEMV_FAST = "gemv_fast"
     TORCH_INT8_AWQ = "torch_int8_awq"
     TORCH_FUSED_AWQ = "torch_fused_awq"
-    HF_KERNEL_AWQ = "hf_kernel_awq"
     TORCH_AWQ = "torch_awq"
     BITBLAS_AWQ = "bitblas_awq"
-    PAROQUANT = "paroquant"
+    PARO = "paroquant"
 
 
 _LEGACY_BACKEND_BY_METHOD = {
@@ -95,7 +93,6 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.MACHETE: BACKEND.GPTQ_MACHETE,
         BACKEND.MARLIN: BACKEND.GPTQ_MARLIN,
         BACKEND.BITBLAS: BACKEND.GPTQ_BITBLAS,
-        BACKEND.HF_KERNEL: BACKEND.GPTQ_HF_KERNEL,
     },
     "awq": {
         BACKEND.GEMM: BACKEND.AWQ_GEMM,
@@ -108,8 +105,6 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.TORCH_INT8_AWQ: BACKEND.AWQ_TORCH_INT8,
         BACKEND.TORCH_FUSED: BACKEND.AWQ_TORCH_FUSED,
         BACKEND.TORCH_FUSED_AWQ: BACKEND.AWQ_TORCH_FUSED,
-        BACKEND.HF_KERNEL: BACKEND.AWQ_HF_KERNEL,
-        BACKEND.HF_KERNEL_AWQ: BACKEND.AWQ_HF_KERNEL,
         BACKEND.BITBLAS: BACKEND.AWQ_BITBLAS,
         BACKEND.BITBLAS_AWQ: BACKEND.AWQ_BITBLAS,
         BACKEND.MACHETE: BACKEND.AWQ_MACHETE,
@@ -117,7 +112,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.EXLLAMA_V2: BACKEND.AWQ_EXLLAMA_V2,
     },
     "paroquant": {
-        BACKEND.PAROQUANT: BACKEND.PAROQUANT_CUDA,
+        BACKEND.PARO: BACKEND.PAROQUANT_CUDA,
     },
     "fp8": {
         BACKEND.TORCH: BACKEND.FP8_TORCH,

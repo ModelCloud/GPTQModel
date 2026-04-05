@@ -46,7 +46,7 @@ def mul(
     qqq_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par)
 
 
-class QQQQuantLinear(GroupedQuantLinear):
+class QQQLinear(GroupedQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.QQQ]
     SUPPORTS_METHODS = [METHOD.QQQ]
     SUPPORTS_FORMATS = {FORMAT.QQQ: 100}
@@ -400,4 +400,4 @@ class QQQQuantLinear(GroupedQuantLinear):
         return D.to(dtype=A_dtype)
 
 
-__all__ = ["QQQQuantLinear"]
+__all__ = ["QQQLinear"]

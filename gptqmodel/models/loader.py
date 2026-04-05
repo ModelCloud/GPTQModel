@@ -32,7 +32,7 @@ from transformers.utils import is_flash_attn_2_available
 from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
-from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2, BaseQuantizeConfig, resolve_quant_format
 from ..utils.backend import BACKEND, normalize_backend
@@ -136,7 +136,7 @@ def _is_meta_shell_build_error(exc: Exception) -> bool:
 
 
 def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
-    if qcfg.quant_method not in (METHOD.AWQ, METHOD.PAROQUANT):
+    if qcfg.quant_method not in (METHOD.AWQ, METHOD.PARO):
         return dtype
     if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
         return dtype
@@ -1048,7 +1048,7 @@ def ModelLoader(cls):
                 )
 
         if backend in [BACKEND.GPTQ_MARLIN, BACKEND.AWQ_MARLIN] and (
-                preload_qlinear_kernel == ExllamaV2QuantLinear or format_code == FORMAT.MARLIN):
+                preload_qlinear_kernel == ExllamaV2Linear or format_code == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Marlin is currently not supported."
@@ -1148,7 +1148,7 @@ def ModelLoader(cls):
                 from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
             except ModuleNotFoundError as exception:
                 raise type(exception)(
-                    "GPTQModel load mlx model required dependencies are not installed.",
+                    "GPT-QModel load mlx model required dependencies are not installed.",
                     "Please install via `pip install gptqmodel[mlx] --no-build-isolation`.",
                 )
 

@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonQuantLinear
+from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.quantization.awq.modules.triton.gemm import awq_gemm_triton
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 
@@ -51,7 +51,7 @@ def test_awq_triton_fp32_accum_matches_manual_dequant():
     group_size = 128
     qweight, qzeros, scales, bias = _make_packed_buffers(bits, in_features, out_features, group_size)
 
-    module = AwqGEMMTritonQuantLinear(
+    module = AwqGEMMTritonLinear(
         bits=bits,
         group_size=group_size,
         sym=True,

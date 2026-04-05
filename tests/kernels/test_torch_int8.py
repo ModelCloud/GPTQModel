@@ -18,8 +18,8 @@ from logbar import LogBar
 os.environ.setdefault("GPTQMODEL_DISABLE_BITBLAS", "1")
 
 from gptqmodel.models._const import DEVICE
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8QuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8Linear
 from gptqmodel.utils.torch import TORCH_HAS_FUSED_OPS
 
 
@@ -81,7 +81,7 @@ def _mock_gptq_linear(
     return linear, scales, zeros, g_idx
 
 
-def _copy_gptq_buffers(src: TorchQuantLinear, dst: TorchInt8QuantLinear) -> None:
+def _copy_gptq_buffers(src: TorchLinear, dst: TorchInt8Linear) -> None:
     dst.qweight.copy_(src.qweight)
     dst.qzeros.copy_(src.qzeros)
     dst.scales.copy_(src.scales)
@@ -110,7 +110,7 @@ def test_torch_int8_cpu_kernel_deviation_against_torch(dtype: torch.dtype, desc_
         groups = in_features // group_size
         g_idx = (torch.arange(in_features, dtype=torch.int32) * 3) % groups
 
-    baseline = TorchQuantLinear(
+    baseline = TorchLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -120,7 +120,7 @@ def test_torch_int8_cpu_kernel_deviation_against_torch(dtype: torch.dtype, desc_
         pack_dtype=torch.int32,
         bias=False,
     )
-    candidate = TorchInt8QuantLinear(
+    candidate = TorchInt8Linear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -175,8 +175,8 @@ def test_torch_int8_cpu_kernel_deviation_against_torch(dtype: torch.dtype, desc_
 
 def test_torch_int8_kernel_is_cpu_only():
     with pytest.raises(NotImplementedError):
-        TorchInt8QuantLinear.validate_device(DEVICE.XPU)
+        TorchInt8Linear.validate_device(DEVICE.XPU)
 
 
 def test_torch_int8_supports_expected_bits():
-    assert TorchInt8QuantLinear.SUPPORTS_BITS == [2, 4, 8]
+    assert TorchInt8Linear.SUPPORTS_BITS == [2, 4, 8]

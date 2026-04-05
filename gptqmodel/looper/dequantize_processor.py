@@ -10,7 +10,7 @@ import torch
 from ..looper.loop_processor import ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..nn_modules.qlinear.torch import TorchLinear
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -18,7 +18,7 @@ log = setup_logger()
 class DequantizeProcessor(LoopProcessor):
     """Restores quantized weights to dense tensors for comparison or recovery flows."""
 
-    def __init__(self, quantized_modules: Dict[str, TorchQuantLinear]):
+    def __init__(self, quantized_modules: Dict[str, TorchLinear]):
         """Initializes the processor with the quantized modules to dequantize."""
 
         super().__init__(

@@ -17,11 +17,11 @@ from models.model_test import ModelTest
 from parameterized import parameterized
 from transformers import AutoTokenizer
 
-from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
-from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
-from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
-from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
-from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
+from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear
+from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear
+from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
+from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.machete import machete_runtime_available, machete_runtime_error
 
@@ -167,15 +167,15 @@ class TestAwq(unittest.TestCase):
         has_qqq = False
         for _, module in model.named_modules():
             if backend == BACKEND.GEMM:
-                linear = AwqGEMMQuantLinear
+                linear = AwqGEMMLinear
             elif backend == BACKEND.MACHETE:
-                linear = AwqMacheteQuantLinear
+                linear = AwqMacheteLinear
             elif backend == BACKEND.MARLIN:
-                linear = AwqMarlinQuantLinear
+                linear = AwqMarlinLinear
             elif backend == BACKEND.GEMV:
-                linear = AwqGEMVQuantLinear
+                linear = AwqGEMVLinear
             elif backend == BACKEND.GEMV_FAST:
-                linear = AwqGEMVFastQuantLinear
+                linear = AwqGEMVFastLinear
             else:
                 raise Exception("unknown backend: " + backend)
             if isinstance(module, linear):

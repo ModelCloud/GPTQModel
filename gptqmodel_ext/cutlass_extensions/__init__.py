@@ -1,1 +1,1 @@
-# Cutlass extension helpers for GPTQModel
+# Cutlass extension helpers for GPT-QModel

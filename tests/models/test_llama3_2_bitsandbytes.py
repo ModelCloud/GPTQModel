@@ -7,7 +7,7 @@ import torch
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.bitsandbytes import BITSANDBYTES_AVAILABLE, BitsAndBytesQuantLinear
+from gptqmodel.nn_modules.qlinear.bitsandbytes import BITSANDBYTES_AVAILABLE, BitsAndBytesLinear
 from gptqmodel.quantization import FORMAT, METHOD
 
 
@@ -65,8 +65,8 @@ class TestLlama3_2_BitsAndBytes(ModelTest):
     GROUP_SIZE = -1
     LOAD_BACKEND = BACKEND.BITSANDBYTES
     QUANT_BACKEND = BACKEND.BITSANDBYTES
-    KERNEL_QUANT = {BitsAndBytesQuantLinear}
-    KERNEL_INFERENCE = {BitsAndBytesQuantLinear}
+    KERNEL_QUANT = {BitsAndBytesLinear}
+    KERNEL_INFERENCE = {BitsAndBytesLinear}
     BNB_BLOCK_SIZE = 64
     BNB_COMPRESS_STATISTICS = False
 
@@ -77,7 +77,7 @@ class TestLlama3_2_BitsAndBytes(ModelTest):
         self.quant_lm_eval()
 
         module = self.model.model.model.layers[0].self_attn.q_proj
-        assert module.QUANT_TYPE == "bitsandbytes"
+        assert isinstance(module, BitsAndBytesLinear)
         for name in ("weight", "weight_scb"):
             assert hasattr(module, name), f"missing `{name}`"
         assert tuple(module.weight.shape) == (24, 48)

@@ -21,7 +21,7 @@ SERIAL_BG_QUEUE = SerialWorker()
 if os.environ.get("GPTQMODEL_DISABLE_GIL_WARNING") == "1":
     pass
 elif has_gil_disabled():
-    log.info("Python GIL is disabled and GPTQModel will auto enable multi-gpu quant acceleration for MoE models plus multi-cpu accelerated packing.")
+    log.info("Python GIL is disabled and GPT-QModel will auto enable multi-gpu quant acceleration for MoE models plus multi-cpu accelerated packing.")
 else:
     if has_gil_control():
         log.warn(

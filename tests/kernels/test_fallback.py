@@ -9,7 +9,7 @@ import torch
 from logbar import LogBar
 from transformers import AutoModelForCausalLM
 
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import (
     Fallback,
     FallbackStrategy,
@@ -55,7 +55,7 @@ def _quantize_to_torch_linear(
     layer: torch.nn.Module,
     fallback: Fallback,
     device: torch.device,
-) -> TorchQuantLinear:
+) -> TorchLinear:
     qcfg = QuantizeConfig(
         bits=4,
         group_size=128,
@@ -81,7 +81,7 @@ def _quantize_to_torch_linear(
     if layer.bias is not None:
         packed_linear.bias.data = layer.bias.detach().to(device="cpu", dtype=layer.bias.dtype)
 
-    qlinear = TorchQuantLinear(
+    qlinear = TorchLinear(
         bits=qcfg.bits,
         group_size=qcfg.group_size,
         sym=qcfg.sym,

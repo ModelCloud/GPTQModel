@@ -16,7 +16,7 @@ from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
+from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.quantization import FORMAT, METHOD, AWQQuantizeConfig
 from gptqmodel.quantization.protocol import (
     Rule,
@@ -131,7 +131,7 @@ class _BaseLlama3_2AWQProtocol(ModelTest):
     TORCH_DTYPE = torch.float16
     QUANT_BACKEND = BACKEND.MACHETE
     LOAD_BACKEND = BACKEND.MACHETE
-    KERNEL_INFERENCE = {AwqMacheteQuantLinear}
+    KERNEL_INFERENCE = {AwqMacheteLinear}
 
     def _compiled_protocol_plan(self):
         raise NotImplementedError

@@ -13,10 +13,10 @@ import torch
 from logbar import LogBar
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8QuantLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
+from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8Linear
 from gptqmodel.utils.model import find_modules
 
 
@@ -53,10 +53,10 @@ class BenchmarkIntelCpuXPU(unittest.TestCase):
     new_tokens = int(os.getenv("GPTQMODEL_INTEL_CPU_BENCH_NEW_TOKENS", "1"))
 
     target_qliner_map = {
-        BACKEND.TORCH: TorchQuantLinear,
-        BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
-        BACKEND.TORCH_INT8: TorchInt8QuantLinear,
-        BACKEND.HF_KERNEL: HFKernelLinear,
+        BACKEND.TORCH: TorchLinear,
+        BACKEND.TORCH_FUSED: TorchFusedLinear,
+        BACKEND.TORCH_INT8: TorchInt8Linear,
+        BACKEND.GPTQ_TORCH_ATEN: TorchAtenLinear,
     }
     skip_backends = set()
 
@@ -131,7 +131,7 @@ class BenchmarkIntelCpuXPU(unittest.TestCase):
         success_count = 0
 
         for backend, qlinear_cls in self.target_qliner_map.items():
-            if backend in self.skip_backends and os.getenv("GPTQMODEL_INTEL_CPU_BENCH_ENABLE_HF", "0") != "1":
+            if backend in self.skip_backends and os.getenv("GPTQMODEL_INTEL_CPU_BENCH_ENABLE_TORCH_ATEN", "0") != "1":
                 bench_cols.info(
                     backend.name,
                     qlinear_cls.__name__,
@@ -144,7 +144,7 @@ class BenchmarkIntelCpuXPU(unittest.TestCase):
                     "-",
                     "-",
                     "SKIP",
-                    "Temporarily skipped (set GPTQMODEL_INTEL_CPU_BENCH_ENABLE_HF=1 to enable).",
+                    "Temporarily skipped (set GPTQMODEL_INTEL_CPU_BENCH_ENABLE_TORCH_ATEN=1 to enable).",
                 )
                 continue
             try:

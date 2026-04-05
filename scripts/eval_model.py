@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-FileCopyrightText: 2024-2025 gptqmodel contributors
 # SPDX-License-Identifier: Apache-2.0
-"""CLI helper to run Evalution-backed tasks against a GPTQModel checkpoint."""
+"""CLI helper to run Evalution-backed tasks against a GPT-QModel checkpoint."""
 
 import argparse
 import json
@@ -234,7 +234,7 @@ def main() -> None:
     )
 
     if not isinstance(model, BaseQModel):
-        raise RuntimeError("Failed to load GPTQModel; received unexpected object type.")
+        raise RuntimeError("Failed to load GPT-QModel; received unexpected object type.")
 
     model_args = _parse_key_value_pairs(args.model_arg)
 

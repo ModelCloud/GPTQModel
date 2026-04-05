@@ -186,7 +186,7 @@ def test_marlin_quant_linear_post_init_uses_compute_dtype_for_repack(monkeypatch
     )
     monkeypatch.setattr(marlin_qlinear_module, "marlin_permute_bias", lambda bias: bias)
 
-    module = marlin_qlinear_module.MarlinQuantLinear(
+    module = marlin_qlinear_module.MarlinLinear(
         bits=4,
         group_size=128,
         desc_act=False,

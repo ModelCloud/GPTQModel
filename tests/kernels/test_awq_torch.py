@@ -6,7 +6,7 @@
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.utils.backend import BACKEND
@@ -31,8 +31,8 @@ def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
 
 @pytest.mark.parametrize("dtype", [torch.float16])
 def test_awq_torch_matches_manual_dequant(dtype):
-    if dtype not in AwqTorchQuantLinear.SUPPORTS_DTYPES:
-        pytest.skip(f"dtype {dtype} not supported by AwqTorchQuantLinear")
+    if dtype not in AwqTorchLinear.SUPPORTS_DTYPES:
+        pytest.skip(f"dtype {dtype} not supported by AwqTorchLinear")
     torch.manual_seed(0)
 
     bits = 4
@@ -54,7 +54,7 @@ def test_awq_torch_matches_manual_dequant(dtype):
     qweight = _pack_awq_tensor(int_weight, bits)
     qzeros = _pack_awq_tensor(zero_points, bits)
 
-    module = AwqTorchQuantLinear(
+    module = AwqTorchLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -110,4 +110,4 @@ def test_awq_torch_backend_selection():
         quant_method=METHOD.AWQ,
         pack_dtype=torch.int32,
     )
-    assert qlinear_cls is AwqTorchQuantLinear
+    assert qlinear_cls is AwqTorchLinear

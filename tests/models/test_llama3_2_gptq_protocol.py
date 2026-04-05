@@ -6,7 +6,7 @@ from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.quantization import FORMAT, METHOD, GPTQQuantizeConfig
 from gptqmodel.quantization.protocol import (
     Rule,
@@ -114,7 +114,7 @@ class _BaseLlama3_2GPTQProtocol(ModelTest):
         },
     }
     LOAD_BACKEND = BACKEND.MARLIN
-    KERNEL_INFERENCE = {MarlinQuantLinear}
+    KERNEL_INFERENCE = {MarlinLinear}
 
     def _compiled_protocol_plan(self):
         raise NotImplementedError

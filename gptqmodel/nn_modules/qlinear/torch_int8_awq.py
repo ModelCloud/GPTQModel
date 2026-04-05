@@ -25,7 +25,7 @@ from .torch_int8 import (
 )
 
 
-class TorchInt8AwqQuantLinear(AWQuantLinear):
+class TorchInt8AwqLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_INT8]
     SUPPORTS_METHODS = [METHOD.AWQ]
     # Keep auto-selection unchanged; this kernel is enabled via explicit backend selection.
@@ -141,7 +141,7 @@ class TorchInt8AwqQuantLinear(AWQuantLinear):
             return dequantized
 
         if not self._has_all_awq_buffers():
-            raise RuntimeError("TorchInt8AwqQuantLinear missing AWQ buffers for dequantization.")
+            raise RuntimeError("TorchInt8AwqLinear missing AWQ buffers for dequantization.")
 
         return dequantize_gemm(
             qweight=self.qweight,
@@ -162,7 +162,7 @@ class TorchInt8AwqQuantLinear(AWQuantLinear):
         workers: int = 1,
     ):
         raise NotImplementedError(
-            "TorchInt8AwqQuantLinear is not packable. Load AWQ int4 tensors and let post_init() convert to int8."
+            "TorchInt8AwqLinear is not packable. Load AWQ int4 tensors and let post_init() convert to int8."
         )
 
     def pack(
@@ -175,7 +175,7 @@ class TorchInt8AwqQuantLinear(AWQuantLinear):
         workers: int = 1,
     ):
         raise NotImplementedError(
-            "TorchInt8AwqQuantLinear is not packable. Load AWQ int4 tensors and let post_init() convert to int8."
+            "TorchInt8AwqLinear is not packable. Load AWQ int4 tensors and let post_init() convert to int8."
         )
 
     def transform_cpu(self, dtype: torch.dtype):
@@ -184,15 +184,15 @@ class TorchInt8AwqQuantLinear(AWQuantLinear):
 
     def transform(self, dtype: torch.dtype, device: str):
         if device != "cpu":
-            raise NotImplementedError("TorchInt8AwqQuantLinear only supports CPU.")
+            raise NotImplementedError("TorchInt8AwqLinear only supports CPU.")
         self.transform_cpu(dtype)
 
     def forward(self, x: torch.Tensor):
         if self.training:
-            raise NotImplementedError("TorchInt8AwqQuantLinear does not support training mode.")
+            raise NotImplementedError("TorchInt8AwqLinear does not support training mode.")
         if self.int8_module is None:
             raise RuntimeError(
-                "TorchInt8AwqQuantLinear int8 module is not initialized. Ensure post_init() has been called."
+                "TorchInt8AwqLinear int8 module is not initialized. Ensure post_init() has been called."
             )
 
         if x.dim() == 2:
@@ -218,10 +218,10 @@ class TorchInt8AwqQuantLinear(AWQuantLinear):
     @torch.no_grad
     def _fused_op_forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.device.type != "cpu":
-            raise NotImplementedError("TorchInt8AwqQuantLinear fused path is CPU-only.")
+            raise NotImplementedError("TorchInt8AwqLinear fused path is CPU-only.")
         if self.int8_module is None:
-            raise RuntimeError("TorchInt8AwqQuantLinear int8 module is not initialized.")
+            raise RuntimeError("TorchInt8AwqLinear int8 module is not initialized.")
         return self.int8_module(x.contiguous())
 
 
-__all__ = ["TorchInt8AwqQuantLinear"]
+__all__ = ["TorchInt8AwqLinear"]
