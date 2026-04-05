@@ -77,7 +77,7 @@ class TestLlama3_2_BitsAndBytes(ModelTest):
         self.quant_lm_eval()
 
         module = self.model.model.model.layers[0].self_attn.q_proj
-        assert module.QUANT_TYPE == "bitsandbytes"
+        assert isinstance(module, BitsAndBytesQuantLinear)
         for name in ("weight", "weight_scb"):
             assert hasattr(module, name), f"missing `{name}`"
         assert tuple(module.weight.shape) == (24, 48)

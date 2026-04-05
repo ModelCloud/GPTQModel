@@ -57,7 +57,7 @@ class TestLlama3_2_GGUF(ModelTest):
         self.quant_lm_eval()
 
         module = self.model.model.model.layers[0].self_attn.q_proj
-        assert module.QUANT_TYPE == "gguf"
+        assert isinstance(module, GGUFTorchQuantLinear)
         assert module.gguf_tensor_qtype == "Q4_K"
         assert hasattr(module, "qweight")
         assert tuple(module.qweight.shape) == (2048, module._bytes_per_row())
