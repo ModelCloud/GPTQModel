@@ -42,6 +42,7 @@ from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profi
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
+    configure_bonsai_dense_fast_generation,
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
     has_native_transformers_causallm_support,
@@ -97,6 +98,35 @@ def _maybe_print_module_tree(model) -> None:
 
     if _should_print_module_tree():
         print_module_tree(model=model)
+
+
+def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
+    """Detect whether the resolved HF architecture exposes FA2 kernels."""
+
+    if not getattr(config, "architectures", None):
+        return False
+
+    model_class = getattr(transformers, config.architectures[0], None)
+    if model_class is None:
+        return False
+
+    if hasattr(model_class, "_supports_flash_attn_2"):
+        return bool(getattr(model_class, "_supports_flash_attn_2"))
+    if hasattr(model_class, "_supports_flash_attn"):
+        return bool(getattr(model_class, "_supports_flash_attn"))
+    return False
+
+
+def _is_accelerated_attention_device(device: object) -> bool:
+    """Return True when the selected device can run CUDA/ROCm flash attention."""
+
+    if isinstance(device, torch.device):
+        return device.type in {"cuda", "hip"}
+    if isinstance(device, DEVICE):
+        return device in {DEVICE.CUDA, DEVICE.ROCM}
+    if isinstance(device, str):
+        return device in {"cuda", "rocm", "hip"}
+    return False
 
 
 def _resolve_native_gguf_profile(
@@ -418,11 +448,12 @@ def ModelLoader(cls):
             log.info(f"Loader: overriding attn_implementation in config to `{atten_impl}`")
             config._attn_implementation = atten_impl
 
+        resolved_device = normalize_device_device_map(device, device_map)
+        resolved_device = auto_select_device(resolved_device, backend)
+
         if cls.require_dtype:
             dtype = cls.require_dtype
         elif dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
-            resolved_device = normalize_device_device_map(device, device_map)
-            resolved_device = auto_select_device(resolved_device, backend)
             dtype = auto_dtype(config=config, device=resolved_device, quant_inference=False)
 
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
@@ -481,9 +512,25 @@ def ModelLoader(cls):
             hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"
             hf_model_init_kwargs["dtype"] = dtype
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
+            if (
+                native_gguf_qspec is not None
+                and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+                and atten_impl in {None, "auto"}
+                and _is_accelerated_attention_device(resolved_device)
+                and (config.model_type == "qwen3" or _supports_flash_attn_2(config))
+                and is_flash_attn_2_available()
+            ):
+                hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
+                log.info("Loader: Auto enabling flash_attention_2 for dense Bonsai PROFILE.%s.", effective_profile.name)
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
             model = cls.loader.from_pretrained(model_local_path, config=config, **hf_model_init_kwargs)
             model._model_init_kwargs = hf_model_init_kwargs
+            if (
+                native_gguf_qspec is not None
+                and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+                and getattr(model.config, "_attn_implementation", None) == "flash_attention_2"
+            ):
+                configure_bonsai_dense_fast_generation(model)
             _maybe_print_module_tree(model=model)
 
             turtle_model = None

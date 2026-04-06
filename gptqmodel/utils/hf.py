@@ -16,7 +16,9 @@ import numpy as np
 import torch
 import transformers
 from accelerate import init_empty_weights
-from transformers import AutoConfig, AutoModelForCausalLM, GenerationConfig, PreTrainedModel
+from transformers import AutoConfig, AutoModelForCausalLM, ContinuousBatchingConfig, GenerationConfig, PreTrainedModel
+from transformers.modeling_flash_attention_utils import lazy_import_paged_flash_attention
+from transformers.utils.generic import is_flash_attention_requested
 
 from ..nn_modules.qlinear.gguf import (
     PRISM_Q1_0_G128_BLOCK_SIZE,
@@ -64,6 +66,12 @@ _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
 _PRISM_GGUF_PATCH_WARNED = False
 _INTERNAL_GGUF_TORCH_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER"
 _FALSEY_ENV_VALUES = {"", "0", "false", "off", "no"}
+# Dense Bonsai continuous batching benefits from a small block table on
+# mid-size active batches, and a larger one once max_batch_tokens grows.
+_BONSAI_FAST_CB_SMALL_MAX_BATCH_TOKENS = 4096
+_BONSAI_FAST_CB_SMALL_BLOCKS_PER_REQUEST = 1
+_BONSAI_FAST_CB_LARGE_BLOCKS_PER_REQUEST = 16
+_BONSAI_FAST_CB_CONFIG_ATTR = "_gptqmodel_bonsai_dense_fast_cb"
 
 
 def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
@@ -1187,6 +1195,87 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
             peft_awq._gptqmodel_awq_probe_patch = True
 
 
+def _patch_transformers_fa2_continuous_batching_decode_fast_path() -> None:
+    """Allow FA2 Bonsai dense continuous batching to use the decode block-table path."""
+
+    try:
+        from transformers.generation.continuous_batching import continuous_api
+    except Exception:
+        return
+
+    manager_cls = getattr(continuous_api, "ContinuousBatchingManager", None)
+    processor_cls = getattr(continuous_api, "ContinuousBatchProcessor", None)
+    cb_logger = getattr(continuous_api, "logger", log)
+    if manager_cls is not None and not getattr(manager_cls, "_gptqmodel_bonsai_fa2_cb_patch", False):
+        original_create_batch_processor = manager_cls._create_batch_processor
+
+        def _create_batch_processor_with_bonsai_fa2_defaults(self):
+            cb_config = getattr(self, "continuous_batching_config", None)
+            model_config = getattr(getattr(self, "model", None), "config", None)
+            if (
+                isinstance(cb_config, ContinuousBatchingConfig)
+                and getattr(model_config, _BONSAI_FAST_CB_CONFIG_ATTR, False)
+                and getattr(model_config, "_attn_implementation", None) == "flash_attention_2"
+            ):
+                if cb_config.use_cuda_graph is None:
+                    # FA2 already wins on Bonsai CB without the graph-private-pool overhead.
+                    cb_config.use_cuda_graph = False
+                if not cb_config.max_blocks_per_request:
+                    max_batch_tokens = cb_config.max_batch_tokens or 0
+                    cb_config.max_blocks_per_request = (
+                        _BONSAI_FAST_CB_SMALL_BLOCKS_PER_REQUEST
+                        if max_batch_tokens <= _BONSAI_FAST_CB_SMALL_MAX_BATCH_TOKENS
+                        else _BONSAI_FAST_CB_LARGE_BLOCKS_PER_REQUEST
+                    )
+            return original_create_batch_processor(self)
+
+        manager_cls._create_batch_processor = _create_batch_processor_with_bonsai_fa2_defaults
+        manager_cls._gptqmodel_bonsai_fa2_cb_patch = True
+
+    if processor_cls is not None and not getattr(processor_cls, "_gptqmodel_fa2_decode_fast_path_patch", False):
+        def _ensure_decode_fast_path_is_available(self) -> None:
+            """Accept FA2 and FA3 when paged flash attention exposes kvcache decode."""
+
+            if self.cache.max_blocks_per_request <= 0:
+                return
+
+            if is_flash_attention_requested(self.config, version=2) or is_flash_attention_requested(self.config, version=3):
+                flash_attn_with_kvcache = lazy_import_paged_flash_attention(self.config._attn_implementation)[1]
+                conditions = [
+                    self.cache.num_sliding_attention_groups == 0,
+                    torch.cuda.is_available(),
+                    flash_attn_with_kvcache is not None,
+                ]
+                if not all(conditions):
+                    cb_logger.warning(
+                        "Although self.cache.max_blocks_per_request=%s, the decode fast path is not available "
+                        "because one condition is not met: %s.",
+                        self.cache.max_blocks_per_request,
+                        conditions,
+                    )
+                    self.cache.max_blocks_per_request = 0
+            else:
+                cb_logger.warning(
+                    "Although self.cache.max_blocks_per_request=%s, the decode fast path is not available "
+                    "because attention is not FA2/FA3. Got self.config._attn_implementation=%s.",
+                    self.cache.max_blocks_per_request,
+                    getattr(self.config, "_attn_implementation", None),
+                )
+                self.cache.max_blocks_per_request = 0
+
+        processor_cls._ensure_decode_fast_path_is_available = _ensure_decode_fast_path_is_available
+        processor_cls._gptqmodel_fa2_decode_fast_path_patch = True
+
+
+def configure_bonsai_dense_fast_generation(model: PreTrainedModel) -> None:
+    """Mark dense Bonsai FA2 models so CB can seed safe defaults lazily."""
+
+    if not hasattr(model, "config"):
+        return
+
+    setattr(model.config, _BONSAI_FAST_CB_CONFIG_ATTR, True)
+
+
 def try_patch_legacy_flash_attn_flag(model_cls):
     if (
             model_cls is not None
@@ -1212,6 +1301,7 @@ def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
 
 
 _patch_transformers_remote_code_compat()
+_patch_transformers_fa2_continuous_batching_decode_fast_path()
 
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False
