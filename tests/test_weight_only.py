@@ -849,7 +849,7 @@ def test_gguf_triton_selects_large_config_bank_for_large_q1_0_g128(monkeypatch):
     assert calls[-1] is large_kernel
 
 
-def test_select_q1_0_g128_fixed_launch_config_targets_sm80_decode_shapes():
+def test_select_q1_0_g128_fixed_launch_config_targets_arch_decode_shapes():
     from gptqmodel.nn_modules.qlinear.gguf_triton import _select_q1_0_g128_fixed_launch_config
 
     assert _select_q1_0_g128_fixed_launch_config(capability=(8, 0), rows=1, cols=2048) == {
@@ -864,7 +864,19 @@ def test_select_q1_0_g128_fixed_launch_config_targets_sm80_decode_shapes():
         "num_warps": 4,
         "num_stages": 4,
     }
-    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, cols=6144) is None
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, cols=2048) == {
+        "BLOCK_SIZE_M": 8,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 8,
+        "num_stages": 2,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, cols=6144) == {
+        "BLOCK_SIZE_M": 2,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 8,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, cols=4096) is None
     assert _select_q1_0_g128_fixed_launch_config(capability=(8, 0), rows=2, cols=6144) is None
 
 
