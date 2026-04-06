@@ -173,6 +173,12 @@ if _TRITON_AVAILABLE:
         "num_warps": 8,
         "num_stages": 2,
     }
+    _Q1_0_G128_SM89_DECODE_2048_TO_2048_CONFIG = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
     _Q1_0_G128_SM89_DECODE_WIDE_CONFIG = {
         "BLOCK_SIZE_M": 2,
         "BLOCK_SIZE_N": 32,
@@ -853,6 +859,7 @@ def _select_q1_0_g128_fixed_launch_config(
     *,
     capability: tuple[int, int] | None,
     rows: int,
+    in_features: int | None = None,
     cols: int,
 ) -> dict[str, int] | None:
     if capability == (8, 0):
@@ -869,6 +876,8 @@ def _select_q1_0_g128_fixed_launch_config(
         if rows == 1:
             if cols == 1024:
                 return dict(_Q1_0_G128_SM89_DECODE_NARROW_CONFIG)
+            if in_features == 2048 and cols == 2048:
+                return dict(_Q1_0_G128_SM89_DECODE_2048_TO_2048_CONFIG)
             if cols == 2048:
                 return dict(_Q1_0_G128_SM89_DECODE_NARROW_CONFIG)
             if cols == 6144:
@@ -1448,6 +1457,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
                 "fixed_decode_config": _select_q1_0_g128_fixed_launch_config(
                     capability=capability,
                     rows=1,
+                    in_features=self.padded_in_features,
                     cols=scale.shape[1],
                 ),
                 "qweight_ptr": self.qweight.data_ptr(),
