@@ -12,9 +12,6 @@ if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# Default single-GPU model tests to the requested physical GPU unless a caller
-# already pinned a different CUDA_VISIBLE_DEVICES set (for example multi-GPU cases).
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", os.environ.get("GPTQMODEL_TEST_CUDA_VISIBLE_DEVICES", "9"))
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7" #"expandable_segments:True"
 
 # Following makes test results more deterministic but much slower
