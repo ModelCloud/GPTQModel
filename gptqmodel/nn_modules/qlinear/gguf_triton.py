@@ -179,6 +179,12 @@ if _TRITON_AVAILABLE:
         "num_warps": 4,
         "num_stages": 2,
     }
+    _Q1_0_G128_SM89_DECODE_2048_TO_6144_CONFIG = {
+        "BLOCK_SIZE_M": 8,
+        "BLOCK_SIZE_N": 64,
+        "num_warps": 8,
+        "num_stages": 2,
+    }
     _Q1_0_G128_SM89_DECODE_WIDE_CONFIG = {
         "BLOCK_SIZE_M": 2,
         "BLOCK_SIZE_N": 32,
@@ -878,6 +884,8 @@ def _select_q1_0_g128_fixed_launch_config(
                 return dict(_Q1_0_G128_SM89_DECODE_NARROW_CONFIG)
             if in_features == 2048 and cols == 2048:
                 return dict(_Q1_0_G128_SM89_DECODE_2048_TO_2048_CONFIG)
+            if in_features == 2048 and cols == 6144:
+                return dict(_Q1_0_G128_SM89_DECODE_2048_TO_6144_CONFIG)
             if cols == 2048:
                 return dict(_Q1_0_G128_SM89_DECODE_NARROW_CONFIG)
             if cols == 6144:
