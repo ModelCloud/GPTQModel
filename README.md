@@ -146,7 +146,7 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 
 ## Special Notes: 
 
-PrismAI/Bonsai inference sample script. Earlier Bonsai support depended on the external `gguf` PyPI package plus a GPT-QModel compatibility monkeypatch for Prism GGUF tensors. GPT-QModel now applies that Prism/Bonsai GGUF compatibility in its own native GGUF loading path and internal runtime shim instead, so no external `gguf` PyPI package is required.
+PrismAI/Bonsai inference sample script. GPT-QModel loads Prism/Bonsai GGUF checkpoints through its native GGUF loading path and internal GGUF runtime shim. No external `gguf` PyPI package is required.
 
 ```py
 • from gptqmodel import GPTQModel
@@ -266,7 +266,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | XVERSE            | ✅ | Brumby        | ✅ | Hymba                  | ✅ | Mistral                      | ✅ | Qwen 1/2/3/3.5     | ✅ |
 | Minimax M2        | ✅ |               |   |                        |   |                              |   |                     |   |
 
-Prism Bonsai GGUF checkpoints are supported for inference only. Earlier Bonsai inference relied on monkeypatching the external `gguf` package to handle Prism's post-quantized `Q1_0_g128` tensors. Current support moves that compatibility into GPT-QModel's native GGUF path and internal GGUF runtime, so Bonsai checkpoints load through the normal model path or repo argument without the external `gguf` dependency. Prism model quantization is still not included.
+Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 
 
 ## Platform and HW Support 
