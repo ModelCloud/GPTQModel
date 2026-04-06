@@ -106,6 +106,37 @@ def test_patch_transformers_prism_gguf_compat_registers_internal_runtime(monkeyp
     assert gguf_utils._dequantize_prism_q1_0_g128 is hf_utils._dequantize_prism_q1_0_g128
 
 
+def test_patch_transformers_prism_gguf_compat_wraps_load_checkpoint_for_torch_loader(monkeypatch):
+    import transformers.modeling_gguf_pytorch_utils as gguf_utils
+    from transformers.utils import import_utils as hf_import_utils
+
+    calls = {"direct": 0}
+
+    def _original_load_gguf_checkpoint(*args, **kwargs):
+        return {"variant": "original"}
+
+    def _direct_loader(**kwargs):
+        calls["direct"] += 1
+        return {"variant": "direct", "path": kwargs["gguf_checkpoint_path"]}
+
+    monkeypatch.setenv("GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER", "1")
+    monkeypatch.delitem(sys.modules, "gguf", raising=False)
+    monkeypatch.setattr(gguf_utils, "load_gguf_checkpoint", _original_load_gguf_checkpoint)
+    monkeypatch.delattr(gguf_utils, "_GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER_PATCHED", raising=False)
+    monkeypatch.delattr(gguf_utils, "_gptqmodel_original_load_gguf_checkpoint", raising=False)
+    monkeypatch.setattr(gguf_utils, "is_gguf_available", lambda *args, **kwargs: False)
+    monkeypatch.setattr(hf_import_utils, "is_gguf_available", lambda *args, **kwargs: False)
+    monkeypatch.setattr(hf_utils, "_transformers_has_native_prism_gguf_support", lambda: False)
+    monkeypatch.setattr(hf_utils, "_PRISM_GGUF_PATCH_WARNED", False)
+    monkeypatch.setattr(hf_utils, "_load_gguf_checkpoint_torch_direct", _direct_loader)
+
+    hf_utils._patch_transformers_prism_gguf_compat(api_name="test")
+    result = gguf_utils.load_gguf_checkpoint("bonsai.gguf", return_tensors=True, model_to_load=object())
+
+    assert calls["direct"] == 1
+    assert result == {"variant": "direct", "path": "bonsai.gguf"}
+
+
 def test_normalize_hf_config_compat_drops_default_remote_rope_scaling_dict():
     config = SimpleNamespace(rope_scaling={"rope_type": "default", "rope_theta": 10000.0})
 

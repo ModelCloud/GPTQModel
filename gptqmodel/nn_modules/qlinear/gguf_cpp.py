@@ -623,7 +623,10 @@ class GGUFCppKernel(GGUFTorchLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        return _get_ggml_bridge().cpu_available()
+        try:
+            return _get_ggml_bridge().cpu_available()
+        except Exception as exc:
+            return False, exc
 
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
@@ -713,7 +716,10 @@ class GGUFCudaKernel(GGUFTorchLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        return _get_ggml_bridge().cuda_available()
+        try:
+            return _get_ggml_bridge().cuda_available()
+        except Exception as exc:
+            return False, exc
 
     def clear_weight_cache(self) -> None:
         for plan in self._ggml_cuda_plans.values():

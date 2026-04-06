@@ -148,6 +148,8 @@ class PreFilterCode(str, Enum):
 
 
 _GGUF_BITS_ALIAS_INFO = {
+    "q1_0": {"bits": 1, "version": "q", "variant": "0", "quality": None},
+    "q1_0_g128": {"bits": 1, "version": "q", "variant": "0", "quality": "g128"},
     "q4_0": {"bits": 4, "version": "q", "variant": "0", "quality": None},
     "q8_0": {"bits": 8, "version": "q", "variant": "0", "quality": None},
     "q4_k": {"bits": 4, "version": "q", "variant": "k", "quality": None},
@@ -159,12 +161,15 @@ _GGUF_BITS_ALIAS_INFO = {
     "q6_k": {"bits": 6, "version": "q", "variant": "k", "quality": None},
 }
 _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH = {
+    1: "q1_0",
     4: "q4_0",
     5: "q5_k_m",
     6: "q6_k",
     8: "q8_0",
 }
 _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS = {
+    "q1_0": 1.5,
+    "q1_0_g128": 1.125,
     "q4_0": 4.5,
     "q8_0": 8.5,
     "q4_k": 4.5,
@@ -389,8 +394,8 @@ class GGUFBits(BaseComplexBits):
             raise ValueError("GGUFBits: `version` must be `q` or `iq`.")
         if self.variant not in {"0", "k"}:
             raise ValueError("GGUFBits: `variant` must be `0` or `k`.")
-        if self.quality not in {None, "xs", "s", "m", "l"}:
-            raise ValueError("GGUFBits: `quality` must be one of `[None, xs, s, m, l]`.")
+        if self.quality not in {None, "xs", "s", "m", "l", "g128"}:
+            raise ValueError("GGUFBits: `quality` must be one of `[None, xs, s, m, l, g128]`.")
 
     @classmethod
     def from_string(cls, value: str) -> "GGUFBits":
@@ -445,7 +450,7 @@ class GGUFBits(BaseComplexBits):
 QuantBits = GGUFBits
 
 
-_GGUF_PUBLIC_FORMAT_RE = re.compile(r"^(q|iq)_(0|k)(?:_(xs|s|m|l))?$")
+_GGUF_PUBLIC_FORMAT_RE = re.compile(r"^(q|iq)_(0|k)(?:_(xs|s|m|l|g128))?$")
 
 
 def _gguf_public_format_from_bits(bits: GGUFBits) -> str:
@@ -529,8 +534,8 @@ def _normalize_gguf_config_spec(
         raise ValueError(f"GGUFConfig: unsupported bits specification `{bits}`.")
 
     normalized_bits = int(normalized_bits)
-    if normalized_bits not in [2, 3, 4, 5, 6, 8]:
-        raise ValueError("GGUFConfig: `bits` must resolve to one of `[2, 3, 4, 5, 6, 8]`.")
+    if normalized_bits not in [1, 2, 3, 4, 5, 6, 8]:
+        raise ValueError("GGUFConfig: `bits` must resolve to one of `[1, 2, 3, 4, 5, 6, 8]`.")
 
     normalized_format = _normalize_gguf_public_format(format_value)
     if normalized_format is None:
@@ -574,8 +579,9 @@ def _normalize_quant_bits(bits: Union[int, float, str, GGUFBits], format_value: 
         raise ValueError(f"QuantizeConfig: unsupported bits specification `{bits}`.")
 
     normalized_width = normalized.bits if isinstance(normalized, GGUFBits) else normalized
-    if normalized_width not in [2, 3, 4, 5, 6, 8]:
-        raise ValueError("QuantizeConfig: `bits` must resolve to one of `[2, 3, 4, 5, 6, 8]`.")
+    valid_bit_widths = [1, 2, 3, 4, 5, 6, 8]
+    if normalized_width not in valid_bit_widths:
+        raise ValueError(f"QuantizeConfig: `bits` must resolve to one of `{valid_bit_widths}`.")
 
     if format_value == FORMAT.GGUF and not isinstance(normalized, GGUFBits):
         default_alias = _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH.get(normalized_width)
@@ -3556,6 +3562,7 @@ class RTNQuantizeConfig(PreFilterQuantizeConfig):
 
 @dataclass
 class GGUFConfig(PreFilterQuantizeConfig):
+    bits: Union[int, str, GGUFBits] = field(default=4, metadata={"choices": [1, 2, 3, 4, 5, 6, 8]})
     format: Optional[str] = field(default=None)
     method: METHOD = field(default=METHOD.GGUF, init=False)
     group_size: int = field(default=-1, init=False, repr=False)
@@ -3581,7 +3588,7 @@ class GGUFConfig(PreFilterQuantizeConfig):
         return FORMAT.GGUF
 
     def _normalize_bits_field(self, bits_value, checkpoint_format: FORMAT):
-        normalized = _normalize_quant_bits(bits_value, format_value=None)
+        normalized = _normalize_quant_bits(bits_value, format_value=FORMAT.GGUF)
         return normalized.bits if isinstance(normalized, GGUFBits) else normalized
 
     def _normalize_dynamic_layer_config(

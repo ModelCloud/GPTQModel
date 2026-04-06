@@ -136,7 +136,7 @@ def test_gptqmodel_load_normalizes_direct_gguf_path_for_config_probe(monkeypatch
     captured = {}
 
     def fake_normalize(model_id_or_path, kwargs, *, api_name):
-        assert model_id_or_path == "/tmp/fake-model/bonsai.gguf"
+        assert model_id_or_path in {"/tmp/fake-model/bonsai.gguf", "/tmp/fake-model"}
         kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = "bonsai.gguf"
         return "/tmp/fake-model"
 
@@ -183,7 +183,7 @@ def test_gptqmodel_from_pretrained_normalizes_direct_gguf_path(monkeypatch):
             return sentinel
 
     def fake_normalize(model_id_or_path, kwargs, *, api_name):
-        assert model_id_or_path == "/tmp/fake-model/bonsai.gguf"
+        assert model_id_or_path in {"/tmp/fake-model/bonsai.gguf", "/tmp/fake-model"}
         kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = "bonsai.gguf"
         return "/tmp/fake-model"
 
@@ -407,7 +407,7 @@ def test_model_loader_from_pretrained_normalizes_direct_gguf_path(monkeypatch):
     tokenizer_calls = []
 
     def fake_normalize(model_id_or_path, kwargs, *, api_name):
-        assert model_id_or_path == "/tmp/fake-model/bonsai.gguf"
+        assert model_id_or_path in {"/tmp/fake-model/bonsai.gguf", "/tmp/fake-model"}
         kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = "bonsai.gguf"
         return "/tmp/fake-model"
 
@@ -463,6 +463,81 @@ def test_model_loader_from_pretrained_normalizes_direct_gguf_path(monkeypatch):
     assert tokenizer_calls[0]["gguf_file"] == "bonsai.gguf"
     assert model_calls[0]["path"] == "/tmp/fake-model"
     assert model_calls[0]["kwargs"]["gguf_file"] == "bonsai.gguf"
+
+
+def test_model_loader_from_pretrained_redirects_native_quantized_gguf(monkeypatch):
+    class FakeConfig:
+        def __init__(self):
+            self._experts_implementation = None
+            self.model_type = "qwen3"
+            self.sub_configs = {}
+            self.dtype = None
+
+    config_calls = []
+    tokenizer_calls = []
+    captured = {}
+    sentinel = object()
+    native_spec = loader.internal_gguf.GGUFQuantizedCheckpointSpec(
+        model_type="qwen3",
+        bits_alias="q1_0_g128",
+        tensor_qtype=loader.internal_gguf.GGMLQuantizationType.Q1_0_g128,
+        lm_head_quantized=True,
+    )
+
+    def fake_normalize(model_id_or_path, kwargs, *, api_name):
+        assert model_id_or_path in {"/tmp/fake-model/bonsai.gguf", "/tmp/fake-model"}
+        kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = "bonsai.gguf"
+        return "/tmp/fake-model"
+
+    @loader.ModelLoader
+    class DummyQModel:
+        loader = object()
+        require_dtype = None
+        loader_requires_dtype = False
+        require_fast_init = False
+        require_trust_remote_code = False
+        require_pkgs = []
+        supports_desc_act = [True, False]
+        support_offload_to_disk = False
+        config_class = None
+
+        @staticmethod
+        def before_model_load(*_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(loader, "check_versions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader, "normalize_model_id_or_path_for_hf_gguf", fake_normalize)
+    monkeypatch.setattr(loader, "get_model_local_path", lambda *_args, **_kwargs: "/tmp/fake-model")
+    monkeypatch.setattr(
+        loader.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **kwargs: config_calls.append(kwargs) or FakeConfig(),
+    )
+    monkeypatch.setattr(
+        loader.AutoTokenizer,
+        "from_pretrained",
+        lambda *_args, **kwargs: tokenizer_calls.append(kwargs) or object(),
+    )
+    monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader.defuser, "replace_fused_blocks", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        loader,
+        "_resolve_native_quantized_gguf_checkpoint",
+        lambda *_args, **_kwargs: ("/tmp/fake-model/bonsai.gguf", native_spec),
+    )
+    monkeypatch.setattr(
+        DummyQModel,
+        "from_quantized",
+        classmethod(lambda cls, model_id_or_path, **kwargs: captured.update(path=model_id_or_path, kwargs=kwargs) or sentinel),
+    )
+
+    result = DummyQModel.from_pretrained("/tmp/fake-model/bonsai.gguf", quantize_config=None)
+
+    assert result is sentinel
+    assert config_calls[0]["gguf_file"] == "bonsai.gguf"
+    assert tokenizer_calls[0]["gguf_file"] == "bonsai.gguf"
+    assert captured["path"] == "/tmp/fake-model"
+    assert captured["kwargs"][INTERNAL_HF_GGUF_FILE_KWARG] == "bonsai.gguf"
 
 
 def test_model_loader_falls_back_when_meta_shell_build_hits_meta_tensor_item(monkeypatch):

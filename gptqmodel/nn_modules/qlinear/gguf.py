@@ -43,6 +43,8 @@ except Exception:  # pragma: no cover - optional dependency
 setup_logger()
 
 _GGUF_TYPE_INFO = {
+    "Q1_0": {"bits": 1, "block_size": 32, "type_size": 6},
+    "Q1_0_g128": {"bits": 1, "block_size": 128, "type_size": 18},
     "Q4_0": {"bits": 4, "block_size": 32, "type_size": 18},
     "Q8_0": {"bits": 8, "block_size": 32, "type_size": 34},
     "Q4_K": {"bits": 4, "block_size": 256, "type_size": 144},
@@ -50,6 +52,8 @@ _GGUF_TYPE_INFO = {
     "Q6_K": {"bits": 6, "block_size": 256, "type_size": 210},
 }
 _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE = {
+    "q1_0": "Q1_0",
+    "q1_0_g128": "Q1_0_g128",
     "q4_0": "Q4_0",
     "q8_0": "Q8_0",
     "q4_k": "Q4_K",
@@ -631,7 +635,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TORCH]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 15}
-    SUPPORTS_BITS = [4, 5, 6, 8]
+    SUPPORTS_BITS = [1, 4, 5, 6, 8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True
@@ -909,6 +913,22 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         weight = d.unsqueeze(-1) * x
         return weight.reshape(rows, self.padded_in_features)
 
+    def _dequantize_sign_only(
+        self,
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
+        weight = _dequantize_sign_only_torch(
+            self.qweight,
+            block_size=self.gguf_block_size,
+            type_size=self.gguf_type_size,
+            device=target_device,
+            dtype=target_dtype,
+        )
+        return weight.reshape(self.out_features, self.padded_in_features)
+
     def _dequantize_numpy(
         self,
         fn,
@@ -1012,6 +1032,8 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             weight = self._dequantize_q4_0(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q8_0":
             weight = self._dequantize_q8_0(device=device, dtype=dtype)
+        elif self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+            weight = self._dequantize_sign_only(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q4_K":
             target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
             blocks, _, _ = self._reshape_blocks(device=target_device)
@@ -1040,7 +1062,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             return False
 
         return (
-            self.gguf_tensor_qtype in _GGUF_K_QTYPES
+            self.gguf_tensor_qtype in (_GGUF_K_QTYPES | set(_GGUF_SIGN_ONLY_TYPE_INFO))
             and self.adapter is None
             and not self.training
             and max_rows > 0
@@ -1120,6 +1142,14 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
                 weight_chunk = self._dequantize_q5_k_blocks(block_chunk, target_dtype)
             elif self.gguf_tensor_qtype == "Q6_K":
                 weight_chunk = self._dequantize_q6_k_blocks(block_chunk, target_dtype)
+            elif self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+                weight_chunk = _dequantize_sign_only_torch(
+                    block_chunk.reshape(block_chunk.shape[0], -1),
+                    block_size=self.gguf_block_size,
+                    type_size=self.gguf_type_size,
+                    device=x_flat.device,
+                    dtype=target_dtype,
+                )
             else:  # pragma: no cover - guarded by _should_use_fused_k_forward
                 raise NotImplementedError(f"Unsupported GGUF fused qtype: {self.gguf_tensor_qtype}")
 

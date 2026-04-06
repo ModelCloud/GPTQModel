@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Optional
 
+import numpy as np
 import torch
 import transformers
 from accelerate import init_empty_weights
@@ -61,6 +62,8 @@ _MISSING = object()
 INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
 _PRISM_GGUF_PATCH_WARNED = False
+_INTERNAL_GGUF_TORCH_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER"
+_FALSEY_ENV_VALUES = {"", "0", "false", "off", "no"}
 
 
 def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
@@ -227,6 +230,118 @@ def _transformers_has_native_prism_gguf_support() -> bool:
     return hasattr(gguf_utils, "_dequantize_prism_q1_0_g128")
 
 
+def _internal_gguf_torch_loader_enabled() -> bool:
+    raw = os.getenv(_INTERNAL_GGUF_TORCH_LOADER_ENV)
+    if raw is not None:
+        return str(raw).strip().lower() not in _FALSEY_ENV_VALUES
+    return bool(os.getenv("GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE", "").strip())
+
+
+def _load_gguf_checkpoint_torch_direct(
+    *,
+    gguf_utils,
+    original_load_gguf_checkpoint,
+    gguf_checkpoint_path,
+    return_tensors: bool = False,
+    model_to_load=None,
+):
+    if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled():
+        return original_load_gguf_checkpoint(
+            gguf_checkpoint_path,
+            return_tensors=return_tensors,
+            model_to_load=model_to_load,
+        )
+
+    parsed_parameters = original_load_gguf_checkpoint(
+        gguf_checkpoint_path,
+        return_tensors=False,
+        model_to_load=model_to_load,
+    )
+    config = parsed_parameters.get("config", {})
+    model_type = config.get("model_type")
+    if model_type != internal_gguf.MODEL_ARCH_QWEN3:
+        return original_load_gguf_checkpoint(
+            gguf_checkpoint_path,
+            return_tensors=True,
+            model_to_load=model_to_load,
+        )
+
+    processor_cls = gguf_utils.TENSOR_PROCESSORS.get(model_type, gguf_utils.TensorProcessor)
+    if processor_cls is not gguf_utils.TensorProcessor:
+        return original_load_gguf_checkpoint(
+            gguf_checkpoint_path,
+            return_tensors=True,
+            model_to_load=model_to_load,
+        )
+
+    processor = processor_cls(config=config)
+    tensor_key_mapping = gguf_utils.get_gguf_hf_weights_map(model_to_load, processor)
+    target_device = internal_gguf._resolve_torch_dequant_device()
+    reader = internal_gguf.GGUFReader(gguf_checkpoint_path)
+    parsed_parameters["tensors"] = {}
+
+    for tensor in gguf_utils.tqdm(reader.tensors, desc="Converting GGUF tensors directly to torch..."):
+        name = tensor.name
+        weights = internal_gguf.dequantize_to_torch(
+            tensor.data,
+            tensor.tensor_type,
+            device=target_device,
+        )
+
+        result = processor.process(
+            weights=weights,
+            name=name,
+            tensor_key_mapping=tensor_key_mapping,
+            parsed_parameters=parsed_parameters,
+        )
+
+        weights = result.weights
+        name = result.name
+        if name not in tensor_key_mapping:
+            continue
+
+        if not torch.is_tensor(weights):
+            weights = torch.from_numpy(np.array(weights, copy=True, order="C"))
+            if target_device is not None:
+                weights = weights.to(device=target_device)
+
+        parsed_parameters["tensors"][tensor_key_mapping[name]] = weights.contiguous()
+
+    return parsed_parameters
+
+
+def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
+    if getattr(gguf_utils, "_GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER_PATCHED", False):
+        return
+
+    original_load_gguf_checkpoint = gguf_utils.load_gguf_checkpoint
+
+    def _wrapped_load_gguf_checkpoint(gguf_checkpoint_path, return_tensors=False, model_to_load=None):
+        try:
+            return _load_gguf_checkpoint_torch_direct(
+                gguf_utils=gguf_utils,
+                original_load_gguf_checkpoint=original_load_gguf_checkpoint,
+                gguf_checkpoint_path=gguf_checkpoint_path,
+                return_tensors=return_tensors,
+                model_to_load=model_to_load,
+            )
+        except Exception as exc:
+            log.debug(
+                "HF: internal torch GGUF loader fell back to the stock loader for `%s`: %s",
+                gguf_checkpoint_path,
+                exc,
+            )
+            return original_load_gguf_checkpoint(
+                gguf_checkpoint_path,
+                return_tensors=return_tensors,
+                model_to_load=model_to_load,
+            )
+
+    gguf_utils._gptqmodel_original_load_gguf_checkpoint = original_load_gguf_checkpoint
+    gguf_utils.load_gguf_checkpoint = _wrapped_load_gguf_checkpoint
+    gguf_utils._GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER_PATCHED = True
+
+
 def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
     global _PRISM_GGUF_PATCH_WARNED
 
@@ -237,6 +352,7 @@ def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
         return
 
     internal_gguf.install_runtime()
+    _patch_transformers_internal_gguf_torch_loader(gguf_utils)
 
     def _is_gguf_available(*_args, **_kwargs) -> bool:
         return True

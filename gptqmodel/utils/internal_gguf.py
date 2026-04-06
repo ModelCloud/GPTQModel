@@ -21,6 +21,7 @@ _GPTQMODEL_INTERNAL_GGUF_RUNTIME = True
 _INTERNAL_GGUF_DEQUANT_DEVICE_ENV = "GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE"
 _INTERNAL_GGUF_DEQUANT_MAX_BYTES_ENV = "GPTQMODEL_INTERNAL_GGUF_DEQUANT_MAX_BYTES"
 _INTERNAL_GGUF_DEQUANT_DEFAULT_MAX_BYTES = 256 * 1024 * 1024
+_INTERNAL_GGUF_QUANTIZED_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER"
 
 GGUF_MAGIC = 0x46554747
 GGUF_VERSION = 3
@@ -164,6 +165,25 @@ _QWEN3_BLOCK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^model\.layers\.(\d+)\.input_layernorm$"), "blk.{bid}.attn_norm"),
     (re.compile(r"^model\.layers\.(\d+)\.post_attention_layernorm$"), "blk.{bid}.ffn_norm"),
 )
+_QWEN3_LINEAR_TENSOR_RE = re.compile(
+    r"^blk\.\d+\.(attn_q|attn_k|attn_v|attn_output|ffn_gate|ffn_up|ffn_down)\.weight$"
+)
+_GGUF_BITS_ALIAS_BY_QTYPE: dict[GGMLQuantizationType, str] = {
+    GGMLQuantizationType.Q1_0: "q1_0",
+    GGMLQuantizationType.Q1_0_g128: "q1_0_g128",
+    GGMLQuantizationType.Q4_0: "q4_0",
+    GGMLQuantizationType.Q8_0: "q8_0",
+    GGMLQuantizationType.Q4_K: "q4_k",
+    GGMLQuantizationType.Q5_K: "q5_k",
+    GGMLQuantizationType.Q6_K: "q6_k",
+}
+
+
+class GGUFQuantizedCheckpointSpec(NamedTuple):
+    model_type: str
+    bits_alias: str
+    tensor_qtype: GGMLQuantizationType
+    lm_head_quantized: bool
 
 
 def quant_shape_to_byte_shape(shape: tuple[int, ...] | list[int], quant_type: GGMLQuantizationType) -> tuple[int, ...]:
@@ -177,6 +197,56 @@ def quant_shape_to_byte_shape(shape: tuple[int, ...] | list[int], quant_type: GG
 
 def quantize(data: np.ndarray, qtype: GGMLQuantizationType) -> np.ndarray:
     return _quantize_gguf_tensor_numpy(np.asarray(data), GGMLQuantizationType(int(qtype)))
+
+
+def native_quantized_loader_enabled() -> bool:
+    raw = os.getenv(_INTERNAL_GGUF_QUANTIZED_LOADER_ENV)
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in {"", "0", "false", "off", "no"}
+
+
+def _reader_field_value(reader: "GGUFReader", key: str):
+    field = reader.get_field(key)
+    if field is None:
+        return None
+    return field.contents()
+
+
+def inspect_quantized_checkpoint(
+    source: "GGUFReader | os.PathLike[str] | str",
+) -> GGUFQuantizedCheckpointSpec | None:
+    if hasattr(source, "tensors") and hasattr(source, "get_field"):
+        reader = source
+    else:
+        reader = GGUFReader(source)
+    architecture = _reader_field_value(reader, "general.architecture")
+    if architecture != MODEL_ARCH_QWEN3:
+        return None
+
+    linear_qtypes = {
+        GGMLQuantizationType(int(tensor.tensor_type))
+        for tensor in reader.tensors
+        if _QWEN3_LINEAR_TENSOR_RE.fullmatch(tensor.name)
+    }
+    if len(linear_qtypes) != 1:
+        return None
+
+    tensor_qtype = next(iter(linear_qtypes))
+    bits_alias = _GGUF_BITS_ALIAS_BY_QTYPE.get(tensor_qtype)
+    if bits_alias is None:
+        return None
+
+    lm_head_quantized = any(
+        tensor.name == "output.weight" and GGMLQuantizationType(int(tensor.tensor_type)) == tensor_qtype
+        for tensor in reader.tensors
+    )
+    return GGUFQuantizedCheckpointSpec(
+        model_type=MODEL_ARCH_QWEN3,
+        bits_alias=bits_alias,
+        tensor_qtype=tensor_qtype,
+        lm_head_quantized=lm_head_quantized,
+    )
 
 
 def _resolve_torch_dequant_device() -> torch.device | None:
@@ -259,6 +329,42 @@ def _dequantize_sign_only_torch_to_numpy(
         flat_output[start:end] = chunk.cpu().numpy()
 
     return flat_output.reshape(*rows.shape[:-1], output_cols)
+
+
+def dequantize_to_torch(
+    data: np.ndarray,
+    qtype: GGMLQuantizationType,
+    *,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    resolved_qtype = GGMLQuantizationType(int(qtype))
+    target_device = torch.device("cpu") if device is None else torch.device(device)
+
+    sign_only_info = _TORCH_SIGN_ONLY_QTYPES.get(resolved_qtype)
+    if sign_only_info is not None:
+        block_size, type_size = sign_only_info
+        return _dequantize_sign_only_torch(
+            np.asarray(data, dtype=np.uint8),
+            block_size=block_size,
+            type_size=type_size,
+            device=target_device,
+            dtype=dtype,
+        ).contiguous()
+
+    if resolved_qtype == GGMLQuantizationType.F32:
+        tensor = torch.from_numpy(np.array(data, dtype=np.float32, copy=True, order="C"))
+    elif resolved_qtype == GGMLQuantizationType.F16:
+        tensor = torch.from_numpy(np.array(data, dtype=np.float16, copy=True, order="C")).to(torch.float32)
+    elif resolved_qtype == GGMLQuantizationType.BF16:
+        rows = np.asarray(data, dtype=np.uint16).astype(np.uint32)
+        tensor = torch.from_numpy(np.left_shift(rows, np.uint32(16)).view(np.float32).copy())
+    else:
+        tensor = torch.from_numpy(np.ascontiguousarray(_dequantize_gguf_tensor_numpy(np.asarray(data), resolved_qtype)))
+
+    if tensor.device != target_device or tensor.dtype != dtype:
+        tensor = tensor.to(device=target_device, dtype=dtype)
+    return tensor.contiguous()
 
 
 def dequantize(data: np.ndarray, qtype: GGMLQuantizationType) -> np.ndarray:
@@ -584,6 +690,7 @@ def install_runtime():
 __all__ = [
     "GGML_QUANT_SIZES",
     "GGMLQuantizationType",
+    "GGUFQuantizedCheckpointSpec",
     "GGUF_DEFAULT_ALIGNMENT",
     "GGUF_MAGIC",
     "GGUF_VERSION",
@@ -594,8 +701,11 @@ __all__ = [
     "ReaderField",
     "ReaderTensor",
     "dequantize",
+    "dequantize_to_torch",
     "get_tensor_name_map",
+    "inspect_quantized_checkpoint",
     "install_runtime",
+    "native_quantized_loader_enabled",
     "quant_shape_to_byte_shape",
     "quantize",
 ]
