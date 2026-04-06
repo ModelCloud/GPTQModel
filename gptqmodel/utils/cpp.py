@@ -214,6 +214,39 @@ def default_torch_ops_build_root(subdir: str) -> Path:
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
 
 
+def _dedupe_path_strings(paths: Sequence[str]) -> list[str]:
+    """Normalize and deduplicate include/library path strings while preserving order."""
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        normalized = str(Path(raw_path).expanduser())
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def detected_cuda_wheel_include_paths() -> list[str]:
+    """Discover CUDA developer headers shipped via NVIDIA Python wheels."""
+
+    try:
+        import nvidia  # type: ignore
+    except Exception:
+        return []
+
+    include_paths: list[str] = []
+    for base_text in getattr(nvidia, "__path__", []):
+        base_path = Path(base_text)
+        candidate_paths = list(base_path.glob("cu*/include"))
+        candidate_paths.extend(base_path.glob("*/include"))
+        for candidate in sorted(candidate_paths):
+            if candidate.is_dir():
+                include_paths.append(str(candidate))
+    return _dedupe_path_strings(include_paths)
+
+
 def torch_cxx11_abi_flag() -> int:
     """Return the ABI mode local JIT extensions must match for this torch build."""
 
@@ -381,6 +414,14 @@ class TorchOpsJitExtension:
         resolved = value() if callable(value) else value
         return [str(item) for item in resolved]
 
+    def _resolved_extra_include_paths(self) -> list[str]:
+        """Resolve explicit include paths and append CUDA wheel headers when needed."""
+
+        include_paths = self._resolve_sequence(self.extra_include_paths)
+        if self.requires_cuda:
+            include_paths.extend(detected_cuda_wheel_include_paths())
+        return _dedupe_path_strings(include_paths)
+
     def base_build_root(self) -> Path:
         """Return the user-visible cache root before applying the loader fingerprint."""
 
@@ -409,7 +450,7 @@ class TorchOpsJitExtension:
 
         payload.extend(self._resolve_sequence(self.extra_cflags))
         payload.extend(self._resolve_sequence(self.extra_cuda_cflags))
-        payload.extend(self._resolve_sequence(self.extra_include_paths))
+        payload.extend(self._resolved_extra_include_paths())
         payload.extend(self._resolve_sequence(self.extra_ldflags))
         digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
         return digest[:16]
@@ -592,7 +633,7 @@ class TorchOpsJitExtension:
                 extra_cuda_cflags = self._resolve_sequence(self.extra_cuda_cflags)
                 if extra_cuda_cflags:
                     kwargs["extra_cuda_cflags"] = extra_cuda_cflags
-                extra_include_paths = self._resolve_sequence(self.extra_include_paths)
+                extra_include_paths = self._resolved_extra_include_paths()
                 if extra_include_paths:
                     kwargs["extra_include_paths"] = extra_include_paths
                 extra_ldflags = self._resolve_sequence(self.extra_ldflags)
