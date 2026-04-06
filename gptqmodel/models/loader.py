@@ -42,7 +42,6 @@ from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profi
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
-    configure_bonsai_dense_fast_generation,
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
     has_native_transformers_causallm_support,
@@ -525,12 +524,6 @@ def ModelLoader(cls):
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
             model = cls.loader.from_pretrained(model_local_path, config=config, **hf_model_init_kwargs)
             model._model_init_kwargs = hf_model_init_kwargs
-            if (
-                native_gguf_qspec is not None
-                and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
-                and getattr(model.config, "_attn_implementation", None) == "flash_attention_2"
-            ):
-                configure_bonsai_dense_fast_generation(model)
             _maybe_print_module_tree(model=model)
 
             turtle_model = None

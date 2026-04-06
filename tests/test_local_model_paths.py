@@ -793,7 +793,6 @@ def test_model_loader_from_pretrained_native_bonsai_fast_auto_enables_fa2_on_cud
     )
 
     assert model_calls[0]["kwargs"]["attn_implementation"] == "flash_attention_2"
-    assert getattr(result.model.config, "_gptqmodel_bonsai_dense_fast_cb", False) is True
 
 
 def test_model_loader_from_pretrained_native_bonsai_fast_keeps_explicit_attn_impl(monkeypatch):

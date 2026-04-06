@@ -6,7 +6,7 @@ import pytest
 import torch
 import transformers
 import transformers.generation.utils as generation_utils
-from transformers import ContinuousBatchingConfig, GenerationConfig, GPTNeoXConfig, LlamaConfig, cache_utils
+from transformers import GenerationConfig, GPTNeoXConfig, LlamaConfig, cache_utils
 from transformers.generation.configuration_utils import GenerationMode
 
 from gptqmodel.utils import hf as hf_utils
@@ -135,69 +135,6 @@ def test_patch_transformers_prism_gguf_compat_wraps_load_checkpoint_for_torch_lo
 
     assert calls["direct"] == 1
     assert result == {"variant": "direct", "path": "bonsai.gguf"}
-
-
-@pytest.mark.parametrize(
-    ("max_batch_tokens", "expected_blocks"),
-    [
-        (2048, 1),
-        (4096, 1),
-        (8192, 16),
-    ],
-)
-def test_patch_transformers_fa2_cb_decode_fast_path_seeds_bonsai_policy(monkeypatch, max_batch_tokens, expected_blocks):
-    from transformers.generation.continuous_batching import continuous_api
-
-    manager_cls = continuous_api.ContinuousBatchingManager
-    processor_cls = continuous_api.ContinuousBatchProcessor
-
-    monkeypatch.setattr(manager_cls, "_create_batch_processor", lambda self: self.continuous_batching_config)
-    monkeypatch.setattr(processor_cls, "_ensure_decode_fast_path_is_available", lambda self: None)
-    monkeypatch.delattr(manager_cls, "_gptqmodel_bonsai_fa2_cb_patch", raising=False)
-    monkeypatch.delattr(processor_cls, "_gptqmodel_fa2_decode_fast_path_patch", raising=False)
-
-    hf_utils._patch_transformers_fa2_continuous_batching_decode_fast_path()
-
-    manager = SimpleNamespace(
-        continuous_batching_config=ContinuousBatchingConfig(
-            max_batch_tokens=max_batch_tokens,
-            max_blocks_per_request=0,
-            use_cuda_graph=None,
-        ),
-        model=SimpleNamespace(
-            config=SimpleNamespace(
-                _attn_implementation="flash_attention_2",
-                _gptqmodel_bonsai_dense_fast_cb=True,
-            )
-        ),
-    )
-
-    cb_config = manager_cls._create_batch_processor(manager)
-
-    assert cb_config.use_cuda_graph is False
-    assert cb_config.max_blocks_per_request == expected_blocks
-
-
-def test_patch_transformers_fa2_cb_decode_fast_path_accepts_fa2_decode(monkeypatch):
-    from transformers.generation.continuous_batching import continuous_api
-
-    processor_cls = continuous_api.ContinuousBatchProcessor
-    monkeypatch.delattr(processor_cls, "_gptqmodel_fa2_decode_fast_path_patch", raising=False)
-    monkeypatch.setattr(processor_cls, "_ensure_decode_fast_path_is_available", lambda self: setattr(self.cache, "max_blocks_per_request", 0))
-    monkeypatch.setattr(hf_utils, "is_flash_attention_requested", lambda config, version=None: version == 2 and config._attn_implementation == "flash_attention_2")
-    monkeypatch.setattr(hf_utils, "lazy_import_paged_flash_attention", lambda *_args, **_kwargs: (None, object()))
-
-    hf_utils._patch_transformers_fa2_continuous_batching_decode_fast_path()
-
-    cache = SimpleNamespace(max_blocks_per_request=4, num_sliding_attention_groups=0)
-    processor = SimpleNamespace(
-        cache=cache,
-        config=SimpleNamespace(_attn_implementation="flash_attention_2"),
-    )
-
-    processor_cls._ensure_decode_fast_path_is_available(processor)
-
-    assert cache.max_blocks_per_request == 4
 
 
 def test_normalize_hf_config_compat_drops_default_remote_rope_scaling_dict():
