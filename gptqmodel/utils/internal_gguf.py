@@ -14,7 +14,12 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from ..nn_modules.qlinear.gguf import _dequantize_gguf_tensor_numpy, _dequantize_sign_only_torch, _quantize_gguf_tensor_numpy
+from ..nn_modules.qlinear.gguf import (
+    _dequantize_gguf_tensor_numpy,
+    _dequantize_sign_only_torch,
+    _quantize_gguf_tensor_numpy,
+)
+
 
 __version__ = "0.10.0"
 _GPTQMODEL_INTERNAL_GGUF_RUNTIME = True

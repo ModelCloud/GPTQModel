@@ -18,10 +18,10 @@ from gptqmodel.nn_modules.qlinear import (
 from gptqmodel.nn_modules.qlinear.bitblas import BitblasLinear
 from gptqmodel.nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
-from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
 

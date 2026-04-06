@@ -33,10 +33,11 @@ from transformers.utils import is_flash_attn_2_available
 from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
-from ..nn_modules.qlinear.gguf import GGUFTorchLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from ..nn_modules.qlinear.gguf import GGUFTorchLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2, BaseQuantizeConfig, resolve_quant_format
+from ..utils import internal_gguf
 from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
@@ -52,7 +53,6 @@ from ..utils.hf import (
     set_hf_config_dtype,
     suspend_hf_weight_init,
 )
-from ..utils import internal_gguf
 from ..utils.importer import (
     auto_select_device,
     get_kernel_for_backend,

@@ -8,11 +8,11 @@ import torch
 
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
-from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
