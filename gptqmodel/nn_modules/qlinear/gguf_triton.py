@@ -867,6 +867,8 @@ def _select_q1_0_g128_fixed_launch_config(
                 return dict(_Q1_0_G128_SM80_PREFILL_WIDE_CONFIG)
     if capability == (8, 9):
         if rows == 1:
+            if cols == 1024:
+                return dict(_Q1_0_G128_SM89_DECODE_NARROW_CONFIG)
             if cols == 2048:
                 return dict(_Q1_0_G128_SM89_DECODE_NARROW_CONFIG)
             if cols == 6144:
