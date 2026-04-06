@@ -236,7 +236,7 @@ def test_marlin_runtime_error_appends_cuda_extra_install_hint_for_missing_header
     assert fake_extension_api.is_available_calls == ["marlin_fp16"]
     assert fake_extension_api.error_calls == ["marlin_fp16"]
     assert "cusparse.h" in error_text
-    assert 'pip install "gptqmodel[marlin-cu13]"' in error_text
+    assert 'pip install "gptqmodel[marlin-cuda]"' in error_text
     assert "A local `nvcc` on PATH is still required for Marlin JIT." in error_text
 
 

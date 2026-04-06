@@ -82,9 +82,9 @@ def _marlin_cuda_extra_name() -> str | None:
     except (TypeError, ValueError):  # pragma: no cover - depends on torch build metadata
         return None
     if major >= 13:
-        return "marlin-cu13"
+        return "marlin-cuda"
     if major == 12:
-        return "marlin-cu12"
+        return "marlin-cuda12"
     return None
 
 
