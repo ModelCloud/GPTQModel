@@ -34,6 +34,22 @@ class _FakeLoader:
         return None
 
 
+class _FakeExtensionApi:
+    def __init__(self, *, available: bool = False, error_text: str = ""):
+        self.available = available
+        self.error_text = error_text
+        self.is_available_calls: list[str] = []
+        self.error_calls: list[str] = []
+
+    def is_available(self, extension_name: str) -> bool:
+        self.is_available_calls.append(extension_name)
+        return self.available
+
+    def error(self, extension_name: str) -> str:
+        self.error_calls.append(extension_name)
+        return self.error_text
+
+
 def test_gptq_marlin_gemm_dispatches_fp16_to_torch_ops(monkeypatch):
     fp16_loader = _FakeLoader()
     bf16_loader = _FakeLoader()
@@ -199,3 +215,46 @@ def test_marlin_quant_linear_post_init_uses_compute_dtype_for_repack(monkeypatch
     module.post_init()
 
     assert captured == {"dtype": torch.bfloat16, "shape": tuple(module.qweight.shape)}
+
+
+def test_marlin_runtime_error_appends_cuda_extra_install_hint_for_missing_headers(monkeypatch):
+    fake_extension_api = _FakeExtensionApi(
+        error_text=(
+            "Marlin fp16: failed to build torch.ops JIT extension: "
+            "fatal error: cusparse.h: No such file or directory"
+        ),
+    )
+
+    monkeypatch.setattr(marlin_utils, "marlin_import_exception", None)
+    monkeypatch.setattr(marlin_utils, "_extension_api", lambda: fake_extension_api)
+    monkeypatch.setattr(marlin_utils, "detected_cuda_wheel_include_paths", lambda: [])
+    monkeypatch.setattr(marlin_utils, "which", lambda name: "/usr/local/cuda/bin/nvcc")
+    monkeypatch.setattr(torch.version, "cuda", "13.0", raising=False)
+
+    error_text = marlin_utils.marlin_runtime_error(torch.float16)
+
+    assert fake_extension_api.is_available_calls == ["marlin_fp16"]
+    assert fake_extension_api.error_calls == ["marlin_fp16"]
+    assert "cusparse.h" in error_text
+    assert 'pip install "gptqmodel[marlin-cu13]"' in error_text
+    assert "A local `nvcc` on PATH is still required for Marlin JIT." in error_text
+
+
+def test_marlin_runtime_error_skips_install_hint_when_cuda_wheel_headers_are_detected(monkeypatch):
+    fake_extension_api = _FakeExtensionApi(
+        error_text=(
+            "Marlin bf16: failed to build torch.ops JIT extension: "
+            "fatal error: cublas_v2.h: No such file or directory"
+        ),
+    )
+
+    monkeypatch.setattr(marlin_utils, "marlin_import_exception", None)
+    monkeypatch.setattr(marlin_utils, "_extension_api", lambda: fake_extension_api)
+    monkeypatch.setattr(marlin_utils, "detected_cuda_wheel_include_paths", lambda: ["/tmp/nvidia/cu13/include"])
+    monkeypatch.setattr(torch.version, "cuda", "13.0", raising=False)
+
+    error_text = marlin_utils.marlin_runtime_error(torch.bfloat16)
+
+    assert fake_extension_api.is_available_calls == ["marlin_bf16"]
+    assert fake_extension_api.error_calls == ["marlin_bf16"]
+    assert error_text == fake_extension_api.error_text
