@@ -364,6 +364,133 @@ if _TRITON_AVAILABLE:
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
+    @triton.jit
+    def _gguf_q1_0_g128_k2048_fused_matmul_kernel_impl(
+        x_ptr,
+        sign_ptr,
+        scale_ptr,
+        out_ptr,
+        M,
+        N,
+        stride_xm,
+        stride_xk,
+        stride_qb,
+        stride_qq,
+        stride_qn,
+        stride_sb,
+        stride_sn,
+        stride_om,
+        stride_on,
+        BLOCK_SIZE_M: tl.constexpr,
+        BLOCK_SIZE_N: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+
+        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        m_mask = offs_m < M
+        n_mask = offs_n < N
+
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+        bit_shifts = tl.arange(0, 8)
+
+        for block_idx in range(0, 16):
+            scale = tl.load(
+                scale_ptr + block_idx * stride_sb + offs_n * stride_sn,
+                mask=n_mask,
+                other=0.0,
+            )
+
+            for sign_group in range(0, 4):
+                offs_k = block_idx * 128 + sign_group * 32 + tl.arange(0, 32)
+                a = tl.load(
+                    x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk,
+                    mask=m_mask[:, None],
+                    other=0.0,
+                )
+
+                packed = tl.load(
+                    sign_ptr
+                    + block_idx * stride_qb
+                    + (sign_group * 4 + tl.arange(0, 4))[:, None] * stride_qq
+                    + offs_n[None, :] * stride_qn,
+                    mask=n_mask[None, :],
+                    other=0,
+                )
+                sign_bits = (packed[:, None, :] >> bit_shifts[None, :, None]) & 0x01
+                signs = tl.reshape(sign_bits, (32, BLOCK_SIZE_N))
+                weight = (tl.cast(signs, tl.float16) * 2.0 - 1.0) * scale[None, :]
+                accumulator += tl.dot(a, weight)
+
+        tl.store(
+            out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
+            tl.cast(accumulator, tl.float16),
+            mask=m_mask[:, None] & n_mask[None, :],
+        )
+
+    @triton.jit
+    def _gguf_q1_0_g128_u32_k2048_fused_matmul_kernel_impl(
+        x_ptr,
+        sign_ptr,
+        scale_ptr,
+        out_ptr,
+        M,
+        N,
+        stride_xm,
+        stride_xk,
+        stride_qb,
+        stride_qg,
+        stride_qn,
+        stride_sb,
+        stride_sn,
+        stride_om,
+        stride_on,
+        BLOCK_SIZE_M: tl.constexpr,
+        BLOCK_SIZE_N: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+
+        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        m_mask = offs_m < M
+        n_mask = offs_n < N
+
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+        bit_shifts = tl.arange(0, 32)
+
+        for block_idx in range(0, 16):
+            scale = tl.load(
+                scale_ptr + block_idx * stride_sb + offs_n * stride_sn,
+                mask=n_mask,
+                other=0.0,
+            )
+
+            for sign_group in range(0, 4):
+                offs_k = block_idx * 128 + sign_group * 32 + tl.arange(0, 32)
+                a = tl.load(
+                    x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk,
+                    mask=m_mask[:, None],
+                    other=0.0,
+                )
+
+                packed = tl.load(
+                    sign_ptr + block_idx * stride_qb + sign_group * stride_qg + offs_n * stride_qn,
+                    mask=n_mask,
+                    other=0,
+                )
+                packed = tl.cast(packed, tl.uint32)
+                sign_bits = (packed[None, :] >> bit_shifts[:, None]) & 0x01
+                weight = (tl.cast(sign_bits, tl.float16) * 2.0 - 1.0) * scale[None, :]
+                accumulator += tl.dot(a, weight)
+
+        tl.store(
+            out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
+            tl.cast(accumulator, tl.float16),
+            mask=m_mask[:, None] & n_mask[None, :],
+        )
+
     _gguf_q1_0_g128_fused_matmul_kernel_small = custom_autotune.autotune(
         configs=_GGUF_TRITON_SMALL_CONFIGS,
         key=["M", "N"],
@@ -384,6 +511,16 @@ if _TRITON_AVAILABLE:
         key=["M", "N", "NUM_BLOCKS"],
         nearest_power_of_two=True,
     )(_gguf_q1_0_g128_u32_fused_matmul_kernel_impl)
+    _gguf_q1_0_g128_k2048_fused_matmul_kernel = custom_autotune.autotune(
+        configs=_GGUF_TRITON_LARGE_CONFIGS,
+        key=["M", "N"],
+        nearest_power_of_two=True,
+    )(_gguf_q1_0_g128_k2048_fused_matmul_kernel_impl)
+    _gguf_q1_0_g128_u32_k2048_fused_matmul_kernel = custom_autotune.autotune(
+        configs=_GGUF_TRITON_LARGE_CONFIGS,
+        key=["M", "N"],
+        nearest_power_of_two=True,
+    )(_gguf_q1_0_g128_u32_k2048_fused_matmul_kernel_impl)
 
     @triton.jit
     def _gguf_q4_k_fused_matmul_kernel_impl(
@@ -782,6 +919,14 @@ def _select_q1_0_g128_u32_fixed_launch_config(
     return None
 
 
+def _use_q1_0_g128_k2048_decode_specialization(
+    *,
+    rows: int,
+    in_features: int,
+) -> bool:
+    return rows == 1 and in_features == 2048
+
+
 def _cuda_device_capability(device: torch.device) -> tuple[int, int] | None:
     if device.type != "cuda":
         return None
@@ -874,6 +1019,37 @@ def fused_q1_0_g128_matmul(
     )
 
 
+def fused_q1_0_g128_k2048_matmul(
+    x: torch.Tensor,
+    sign_bytes: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    if not _TRITON_AVAILABLE:
+        raise RuntimeError("Triton is not available for GGUF Q1_0_g128 fused matmul.")
+
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    return _launch(
+        _gguf_q1_0_g128_k2048_fused_matmul_kernel,
+        x,
+        output,
+        x,
+        sign_bytes,
+        scale,
+        output,
+        x.shape[0],
+        output.shape[1],
+        x.stride(0),
+        x.stride(1),
+        sign_bytes.stride(0),
+        sign_bytes.stride(1),
+        sign_bytes.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        output.stride(0),
+        output.stride(1),
+    )
+
+
 def fused_q1_0_g128_u32_matmul(
     x: torch.Tensor,
     sign_words: torch.Tensor,
@@ -899,6 +1075,37 @@ def fused_q1_0_g128_u32_matmul(
         x.shape[0],
         output.shape[1],
         sign_words.shape[0],
+        x.stride(0),
+        x.stride(1),
+        sign_words.stride(0),
+        sign_words.stride(1),
+        sign_words.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        output.stride(0),
+        output.stride(1),
+    )
+
+
+def fused_q1_0_g128_u32_k2048_matmul(
+    x: torch.Tensor,
+    sign_words: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    if not _TRITON_AVAILABLE:
+        raise RuntimeError("Triton is not available for GGUF Q1_0_g128 fused matmul.")
+
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    return _launch(
+        _gguf_q1_0_g128_u32_k2048_fused_matmul_kernel,
+        x,
+        output,
+        x,
+        sign_words,
+        scale,
+        output,
+        x.shape[0],
+        output.shape[1],
         x.stride(0),
         x.stride(1),
         sign_words.stride(0),
@@ -943,6 +1150,37 @@ def _launch_q1_0_g128_u32_fixed_matmul(
     )
 
 
+def _launch_q1_0_g128_u32_k2048_fixed_matmul(
+    x: torch.Tensor,
+    sign_words: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    fixed_config: dict[str, int],
+) -> torch.Tensor:
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    return _launch_with_meta(
+        _gguf_q1_0_g128_u32_k2048_fused_matmul_kernel_impl,
+        x,
+        output,
+        x,
+        sign_words,
+        scale,
+        output,
+        x.shape[0],
+        output.shape[1],
+        x.stride(0),
+        x.stride(1),
+        sign_words.stride(0),
+        sign_words.stride(1),
+        sign_words.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        output.stride(0),
+        output.stride(1),
+        **fixed_config,
+    )
+
+
 def _launch_q1_0_g128_fixed_matmul(
     x: torch.Tensor,
     sign_bytes: torch.Tensor,
@@ -962,6 +1200,37 @@ def _launch_q1_0_g128_fixed_matmul(
         x.shape[0],
         output.shape[1],
         sign_bytes.shape[0],
+        x.stride(0),
+        x.stride(1),
+        sign_bytes.stride(0),
+        sign_bytes.stride(1),
+        sign_bytes.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        output.stride(0),
+        output.stride(1),
+        **fixed_config,
+    )
+
+
+def _launch_q1_0_g128_k2048_fixed_matmul(
+    x: torch.Tensor,
+    sign_bytes: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    fixed_config: dict[str, int],
+) -> torch.Tensor:
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    return _launch_with_meta(
+        _gguf_q1_0_g128_k2048_fused_matmul_kernel_impl,
+        x,
+        output,
+        x,
+        sign_bytes,
+        scale,
+        output,
+        x.shape[0],
+        output.shape[1],
         x.stride(0),
         x.stride(1),
         sign_bytes.stride(0),
@@ -1263,6 +1532,16 @@ class GGUFTritonKernel(GGUFTorchLinear):
                     out_features=cache["scale"].shape[1],
                 )
                 if fixed_u32_config is not None:
+                    if _use_q1_0_g128_k2048_decode_specialization(
+                        rows=x_work.shape[0],
+                        in_features=self.padded_in_features,
+                    ):
+                        return _launch_q1_0_g128_u32_k2048_fixed_matmul(
+                            x_work,
+                            cache["sign_words"],
+                            cache["scale"],
+                            fixed_config=fixed_u32_config,
+                        )
                     return _launch_q1_0_g128_u32_fixed_matmul(
                         x_work,
                         cache["sign_words"],
@@ -1272,12 +1551,27 @@ class GGUFTritonKernel(GGUFTorchLinear):
                 return fused_q1_0_g128_matmul(x_work, cache["sign_bytes"], cache["scale"])
             fixed_decode_config = cache.get("fixed_decode_config")
             if fixed_decode_config is not None and x_work.shape[0] == 1:
+                if _use_q1_0_g128_k2048_decode_specialization(
+                    rows=x_work.shape[0],
+                    in_features=self.padded_in_features,
+                ):
+                    return _launch_q1_0_g128_k2048_fixed_matmul(
+                        x_work,
+                        cache["sign_bytes"],
+                        cache["scale"],
+                        fixed_config=fixed_decode_config,
+                    )
                 return _launch_q1_0_g128_fixed_matmul(
                     x_work,
                     cache["sign_bytes"],
                     cache["scale"],
                     fixed_config=fixed_decode_config,
                 )
+            if _use_q1_0_g128_k2048_decode_specialization(
+                rows=x_work.shape[0],
+                in_features=self.padded_in_features,
+            ):
+                return fused_q1_0_g128_k2048_matmul(x_work, cache["sign_bytes"], cache["scale"])
             return fused_q1_0_g128_matmul(x_work, cache["sign_bytes"], cache["scale"])
         if self.gguf_tensor_qtype == "Q4_K":
             return fused_q4_k_matmul(x_work, cache["qs"], cache["scale"], cache["min"])
@@ -1320,8 +1614,11 @@ __all__ = [
     "_select_q1_0_g128_fixed_launch_config",
     "_select_q1_0_g128_u32_fixed_launch_config",
     "_select_q1_0_g128_u32_layout",
+    "_use_q1_0_g128_k2048_decode_specialization",
     "fused_q1_0_g128_matmul",
+    "fused_q1_0_g128_k2048_matmul",
     "fused_q1_0_g128_u32_matmul",
+    "fused_q1_0_g128_u32_k2048_matmul",
     "fused_q4_k_matmul",
     "fused_q5_k_matmul",
     "fused_q6_k_matmul",
