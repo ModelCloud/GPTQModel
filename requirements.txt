@@ -1,4 +1,4 @@
-setuptools>=78.1.1
+setuptools==82.0.1
 accelerate>=1.13.0
 numpy==2.2.6; python_version < "3.14"
 numpy>=2.3.0; python_version >= "3.14"
@@ -19,5 +19,5 @@ maturin>=1.9.4
 datasets>=3.6.0
 pyarrow>=21.0
 dill>=0.3.8
-torchao>=0.16.0
+torchao==0.17.0
 defuser>=0.0.18

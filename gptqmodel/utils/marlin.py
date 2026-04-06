@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from shutil import which
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Union
 
@@ -18,6 +19,7 @@ from .cpp import (
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
+    detected_cuda_wheel_include_paths,
 )
 from .marlin_scalar_type import ScalarType
 from .rocm import IS_ROCM
@@ -29,6 +31,13 @@ _MARLIN_FP16_OPS_NAME = "gptqmodel_marlin_fp16_ops"
 _MARLIN_FP16_NAMESPACE = "gptqmodel_marlin_fp16"
 _MARLIN_BF16_OPS_NAME = "gptqmodel_marlin_bf16_ops"
 _MARLIN_BF16_NAMESPACE = "gptqmodel_marlin_bf16"
+_MARLIN_REQUIRED_CUDA_HEADERS = (
+    "cuda_runtime_api.h",
+    "cusparse.h",
+    "cublas_v2.h",
+    "cublasLt.h",
+    "cusolverDn.h",
+)
 
 
 def _marlin_environment_error() -> str:
@@ -62,6 +71,59 @@ def _marlin_cuda_version_at_least(major: int, minor: int) -> bool:
     except (TypeError, ValueError):  # pragma: no cover - depends on torch build metadata
         return False
     return current >= (major, minor)
+
+
+def _marlin_cuda_extra_name() -> str | None:
+    raw = getattr(torch.version, "cuda", None)
+    if not raw:
+        return None
+    try:
+        major = int(str(raw).split(".", maxsplit=1)[0])
+    except (TypeError, ValueError):  # pragma: no cover - depends on torch build metadata
+        return None
+    if major >= 13:
+        return "marlin-cuda"
+    if major == 12:
+        return "marlin-cuda12"
+    return None
+
+
+def _marlin_missing_header_names(error_text: str) -> list[str]:
+    return [
+        header_name for header_name in _MARLIN_REQUIRED_CUDA_HEADERS
+        if f"{header_name}: No such file or directory" in error_text
+    ]
+
+
+def _marlin_header_install_hint(error_text: str) -> str:
+    missing_headers = _marlin_missing_header_names(error_text)
+    if not missing_headers:
+        return ""
+
+    if detected_cuda_wheel_include_paths():
+        return ""
+
+    extra_name = _marlin_cuda_extra_name()
+    missing_headers_text = ", ".join(missing_headers)
+    if extra_name is not None:
+        install_text = (
+            f"Install the wheel-provided CUDA headers with "
+            f"`pip install \"gptqmodel[{extra_name}]\"`."
+        )
+    else:
+        install_text = (
+            "Install the CUDA runtime/developer headers that match your Torch CUDA build."
+        )
+
+    nvcc_text = (
+        "A local `nvcc` on PATH is still required for Marlin JIT."
+        if which("nvcc")
+        else "Marlin JIT also requires a local `nvcc` on PATH."
+    )
+    return (
+        f"Missing CUDA developer headers for Marlin JIT ({missing_headers_text}). "
+        f"{install_text} {nvcc_text}"
+    )
 
 
 def _ensure_generated_marlin_kernels() -> Path:
@@ -190,7 +252,11 @@ def marlin_runtime_error(dtype: Optional[torch.dtype] = None) -> str:
     extension_api = _extension_api()
     if extension_api.is_available(extension_name):
         return ""
-    return extension_api.error(extension_name) or "Marlin runtime unavailable."
+    error_text = extension_api.error(extension_name) or "Marlin runtime unavailable."
+    install_hint = _marlin_header_install_hint(error_text)
+    if install_hint:
+        return f"{error_text} {install_hint}"
+    return error_text
 
 
 def prewarm_marlin_extension(dtype: Optional[torch.dtype]) -> bool:
