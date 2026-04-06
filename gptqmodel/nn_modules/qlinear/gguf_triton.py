@@ -215,6 +215,25 @@ if _TRITON_AVAILABLE:
         "num_warps": 4,
         "num_stages": 4,
     }
+    # These exact-shape decode configs target the dominant post-down-proj A100 decode hotspots.
+    _Q1_0_G128_SM80_U32_DECODE_2048_TO_1024_CONFIG = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "num_warps": 2,
+        "num_stages": 2,
+    }
+    _Q1_0_G128_SM80_U32_DECODE_2048_TO_2048_CONFIG = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+    _Q1_0_G128_SM80_U32_DECODE_2048_TO_6144_CONFIG = {
+        "BLOCK_SIZE_M": 8,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
 
     @triton.jit
     def _gguf_q1_0_g128_fused_matmul_kernel_impl(
@@ -729,20 +748,36 @@ def _select_q1_0_g128_u32_layout(
     in_features: int,
     out_features: int,
 ) -> bool:
-    return capability == (8, 0) and in_features == 6144 and out_features == 2048
+    if capability != (8, 0):
+        return False
+    return (in_features, out_features) in {
+        (2048, 1024),
+        (2048, 2048),
+        (2048, 6144),
+        (6144, 2048),
+    }
 
 
 def _select_q1_0_g128_u32_fixed_launch_config(
     *,
     capability: tuple[int, int] | None,
     rows: int,
-    cols: int,
+    in_features: int,
+    out_features: int,
 ) -> dict[str, int] | None:
-    if capability != (8, 0) or cols != 2048:
+    if capability != (8, 0):
         return None
     if rows == 1:
-        return dict(_Q1_0_G128_SM80_U32_DECODE_CONFIG)
-    if 8 <= rows <= 128:
+        if in_features == 6144 and out_features == 2048:
+            return dict(_Q1_0_G128_SM80_U32_DECODE_CONFIG)
+        if in_features == 2048 and out_features == 1024:
+            return dict(_Q1_0_G128_SM80_U32_DECODE_2048_TO_1024_CONFIG)
+        if in_features == 2048 and out_features == 2048:
+            return dict(_Q1_0_G128_SM80_U32_DECODE_2048_TO_2048_CONFIG)
+        if in_features == 2048 and out_features == 6144:
+            return dict(_Q1_0_G128_SM80_U32_DECODE_2048_TO_6144_CONFIG)
+        return None
+    if 8 <= rows <= 128 and in_features == 6144 and out_features == 2048:
         return dict(_Q1_0_G128_SM80_U32_PREFILL_CONFIG)
     return None
 
@@ -1224,7 +1259,8 @@ class GGUFTritonKernel(GGUFTorchLinear):
                 fixed_u32_config = _select_q1_0_g128_u32_fixed_launch_config(
                     capability=_cuda_device_capability(x_work.device),
                     rows=x_work.shape[0],
-                    cols=cache["scale"].shape[1],
+                    in_features=self.padded_in_features,
+                    out_features=cache["scale"].shape[1],
                 )
                 if fixed_u32_config is not None:
                     return _launch_q1_0_g128_u32_fixed_matmul(
