@@ -6,6 +6,7 @@ import os
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", os.environ.get("GPTQMODEL_TEST_CUDA_VISIBLE_DEVICES", "9"))
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
