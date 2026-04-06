@@ -876,8 +876,33 @@ def test_select_q1_0_g128_fixed_launch_config_targets_arch_decode_shapes():
         "num_warps": 8,
         "num_stages": 4,
     }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 0), rows=64, cols=2048) == {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 16,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 0), rows=64, cols=6144) == {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=64, cols=2048) == {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 16,
+        "num_warps": 8,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=64, cols=6144) == {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
     assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, cols=4096) is None
     assert _select_q1_0_g128_fixed_launch_config(capability=(8, 0), rows=2, cols=6144) is None
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=256, cols=2048) is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")

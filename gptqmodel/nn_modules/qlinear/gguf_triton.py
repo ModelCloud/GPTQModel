@@ -179,6 +179,30 @@ if _TRITON_AVAILABLE:
         "num_warps": 8,
         "num_stages": 4,
     }
+    _Q1_0_G128_SM80_PREFILL_NARROW_CONFIG = {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 16,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    _Q1_0_G128_SM80_PREFILL_WIDE_CONFIG = {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    _Q1_0_G128_SM89_PREFILL_NARROW_CONFIG = {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 16,
+        "num_warps": 8,
+        "num_stages": 4,
+    }
+    _Q1_0_G128_SM89_PREFILL_WIDE_CONFIG = {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
 
     @triton.jit
     def _gguf_q1_0_g128_fused_matmul_kernel_impl(
@@ -590,17 +614,27 @@ def _select_q1_0_g128_fixed_launch_config(
     rows: int,
     cols: int,
 ) -> dict[str, int] | None:
-    if rows != 1:
-        return None
     if capability == (8, 0):
-        if cols <= 2048:
-            return dict(_Q1_0_G128_SM80_DECODE_NARROW_CONFIG)
-        return dict(_Q1_0_G128_SM80_DECODE_WIDE_CONFIG)
+        if rows == 1:
+            if cols <= 2048:
+                return dict(_Q1_0_G128_SM80_DECODE_NARROW_CONFIG)
+            return dict(_Q1_0_G128_SM80_DECODE_WIDE_CONFIG)
+        if 8 <= rows <= 128:
+            if cols == 2048:
+                return dict(_Q1_0_G128_SM80_PREFILL_NARROW_CONFIG)
+            if cols == 6144:
+                return dict(_Q1_0_G128_SM80_PREFILL_WIDE_CONFIG)
     if capability == (8, 9):
-        if cols == 2048:
-            return dict(_Q1_0_G128_SM89_DECODE_NARROW_CONFIG)
-        if cols == 6144:
-            return dict(_Q1_0_G128_SM89_DECODE_WIDE_CONFIG)
+        if rows == 1:
+            if cols == 2048:
+                return dict(_Q1_0_G128_SM89_DECODE_NARROW_CONFIG)
+            if cols == 6144:
+                return dict(_Q1_0_G128_SM89_DECODE_WIDE_CONFIG)
+        if 8 <= rows <= 128:
+            if cols == 2048:
+                return dict(_Q1_0_G128_SM89_PREFILL_NARROW_CONFIG)
+            if cols == 6144:
+                return dict(_Q1_0_G128_SM89_PREFILL_WIDE_CONFIG)
     return None
 
 
