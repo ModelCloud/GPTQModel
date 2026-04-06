@@ -5,7 +5,7 @@
 
 import os
 
-from .backend import BACKEND
+from .backend import BACKEND, PROFILE
 from .logger import setup_logger
 from .python import gte_python_3_13_3, gte_python_3_14, has_gil_control, has_gil_disabled, log_gil_requirements_for
 from .threads import AsyncManager, SerialWorker

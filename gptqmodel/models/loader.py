@@ -37,7 +37,7 @@ from ..nn_modules.qlinear.gguf import GGUFTorchLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2, BaseQuantizeConfig, resolve_quant_format
-from ..utils.backend import BACKEND, normalize_backend
+from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
@@ -97,6 +97,37 @@ def _maybe_print_module_tree(model) -> None:
 
     if _should_print_module_tree():
         print_module_tree(model=model)
+
+
+def _resolve_native_gguf_profile(
+    *,
+    native_gguf_qspec: Optional["internal_gguf.GGUFQuantizedCheckpointSpec"],
+    profile: PROFILE,
+) -> PROFILE:
+    """Resolve user profile intent for native GGUF checkpoints."""
+
+    if (
+        native_gguf_qspec is not None
+        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+        and profile == PROFILE.AUTO
+    ):
+        log.info("Loader: Bonsai/Prism Q1_0_g128 PROFILE.AUTO resolved to PROFILE.FAST.")
+        return PROFILE.FAST
+    return profile
+
+
+def _should_use_dense_native_gguf_path(
+    *,
+    native_gguf_qspec: Optional["internal_gguf.GGUFQuantizedCheckpointSpec"],
+    profile: PROFILE,
+) -> bool:
+    """Fast Bonsai mode stays on the dense HF GGUF import path."""
+
+    return (
+        native_gguf_qspec is not None
+        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+        and profile == PROFILE.FAST
+    )
 
 
 def parse_version_string(version_str: str):
@@ -339,6 +370,8 @@ def ModelLoader(cls):
             cls,
             pretrained_model_id_or_path: str,
             quantize_config: BaseQuantizeConfig,
+            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             dtype: [str | torch.dtype] = "auto",
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
@@ -360,6 +393,8 @@ def ModelLoader(cls):
             api_name=f"{cls.__name__}.from_pretrained",
             explicit_dtype=dtype,
         )
+        backend = normalize_backend(backend)
+        profile = normalize_profile(profile)
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(model_init_kwargs)
         model_init_kwargs_without_internal = dict(model_init_kwargs)
         model_init_kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
@@ -385,6 +420,10 @@ def ModelLoader(cls):
 
         if cls.require_dtype:
             dtype = cls.require_dtype
+        elif dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
+            resolved_device = normalize_device_device_map(device, device_map)
+            resolved_device = auto_select_device(resolved_device, backend)
+            dtype = auto_dtype(config=config, device=resolved_device, quant_inference=False)
 
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
             # Align config metadata with the dtype we will materialize weights in.
@@ -400,25 +439,43 @@ def ModelLoader(cls):
             model_local_path,
             hf_gguf_load_kwargs,
         )
+        effective_profile = _resolve_native_gguf_profile(
+            native_gguf_qspec=native_gguf_qspec,
+            profile=profile,
+        )
 
         if quantize_config is None:
             if native_gguf_qspec is not None:
-                redirect_kwargs = dict(model_init_kwargs)
-                redirect_kwargs.pop("tokenizer_trust_remote_code", None)
-                log.info(
-                    "Loader: detected native quantized GGUF checkpoint `%s`; redirecting `%s` to from_quantized().",
-                    gguf_checkpoint_path,
-                    cls.__name__,
-                )
-                return cls.from_quantized(
-                    model_id_or_path=pretrained_model_id_or_path,
-                    device_map=device_map,
-                    device=device,
-                    dtype=dtype,
-                    trust_remote_code=trust_remote_code,
-                    tokenizer_trust_remote_code=tokenizer_trust_remote_code,
-                    **redirect_kwargs,
-                )
+                if _should_use_dense_native_gguf_path(
+                    native_gguf_qspec=native_gguf_qspec,
+                    profile=effective_profile,
+                ):
+                    if backend != BACKEND.AUTO:
+                        log.info(
+                            "Loader: PROFILE.%s uses dense GGUF import for `%s`; backend `%s` is ignored.",
+                            effective_profile.name,
+                            gguf_checkpoint_path,
+                            backend.value,
+                        )
+                else:
+                    redirect_kwargs = dict(model_init_kwargs)
+                    redirect_kwargs.pop("tokenizer_trust_remote_code", None)
+                    log.info(
+                        "Loader: detected native quantized GGUF checkpoint `%s`; redirecting `%s` to from_quantized() with PROFILE.%s.",
+                        gguf_checkpoint_path,
+                        cls.__name__,
+                        effective_profile.name,
+                    )
+                    return cls.from_quantized(
+                        model_id_or_path=pretrained_model_id_or_path,
+                        device_map=device_map,
+                        device=device,
+                        backend=backend,
+                        dtype=dtype,
+                        trust_remote_code=trust_remote_code,
+                        tokenizer_trust_remote_code=tokenizer_trust_remote_code,
+                        **redirect_kwargs,
+                    )
 
             hf_model_init_kwargs = dict(model_init_kwargs_without_internal)
             hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"

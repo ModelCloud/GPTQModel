@@ -83,6 +83,13 @@ class BACKEND(str, Enum):
     PARO = "paroquant"
 
 
+class PROFILE(str, Enum):
+    # Inference profile selects between alternative runtime/load strategies.
+    AUTO = "auto"
+    FAST = "fast"
+    LOW_MEMORY = "low_memory"
+
+
 _LEGACY_BACKEND_BY_METHOD = {
     "gptq": {
         BACKEND.TORCH_FUSED: BACKEND.GPTQ_TORCH_FUSED,
@@ -123,6 +130,12 @@ _LEGACY_BACKEND_BY_METHOD = {
     },
 }
 
+_PROFILE_BY_INDEX = {
+    0: PROFILE.AUTO,
+    1: PROFILE.FAST,
+    2: PROFILE.LOW_MEMORY,
+}
+
 
 def _normalize_method(method: Optional[Union[str, Any]]) -> Optional[str]:
     if method is None:
@@ -155,3 +168,29 @@ def normalize_backend(
     if method is None:
         return resolved
     return _LEGACY_BACKEND_BY_METHOD.get(method, {}).get(resolved, resolved)
+
+
+def normalize_profile(profile: Optional[Union[str, int, PROFILE]]) -> PROFILE:
+    if profile is None:
+        return PROFILE.AUTO
+
+    if isinstance(profile, PROFILE):
+        return profile
+
+    if isinstance(profile, int):
+        if profile in _PROFILE_BY_INDEX:
+            return _PROFILE_BY_INDEX[profile]
+        raise ValueError(f"Unknown profile index `{profile}`. Expected one of {sorted(_PROFILE_BY_INDEX)}.")
+
+    if not isinstance(profile, str):
+        raise TypeError(f"profile must be a string, int, or PROFILE, got `{type(profile)}`")
+
+    normalized = profile.strip()
+    if not normalized:
+        return PROFILE.AUTO
+
+    alias = normalized.replace("-", "_").replace(" ", "_")
+    resolved = PROFILE.__members__.get(alias.upper())
+    if resolved is not None:
+        return resolved
+    return PROFILE(alias.lower())

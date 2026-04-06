@@ -206,7 +206,7 @@ from .quantization import (
     RTNQuantizeConfig,
     WeightOnlyConfig,
 )
-from .utils import BACKEND
+from .utils import BACKEND, PROFILE
 from .version import __version__
 from . import extension
 

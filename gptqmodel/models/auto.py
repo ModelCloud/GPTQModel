@@ -58,8 +58,8 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
-from ..utils import BACKEND  # noqa: E402
-from ..utils.backend import normalize_backend  # noqa: E402
+from ..utils import BACKEND, PROFILE  # noqa: E402
+from ..utils.backend import normalize_backend, normalize_profile  # noqa: E402
 from ..utils.hf import (  # noqa: E402
     get_hf_gguf_load_kwargs,
     normalize_model_id_or_path_for_hf_gguf,
@@ -382,6 +382,7 @@ class GPTQModel:
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, torch.device]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
+            profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             **kwargs,
     ):
@@ -400,6 +401,7 @@ class GPTQModel:
             quantize_config = QuantizeConfig(**quantize_config)
 
         backend = normalize_backend(backend)
+        profile = normalize_profile(profile)
 
         is_gptqmodel_quantized = False
         treat_as_local_path = isinstance(model_id_or_path, str) and (
@@ -447,6 +449,8 @@ class GPTQModel:
                 quantize_config=quantize_config,
                 device_map=device_map,
                 device=device,
+                backend=backend,
+                profile=profile,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
                 **kwargs,
@@ -464,6 +468,8 @@ class GPTQModel:
             cls,
             model_id_or_path: str,
             quantize_config: QuantizeConfig,
+            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseQModel:
@@ -476,6 +482,8 @@ class GPTQModel:
             model_init_kwargs,
             api_name="GPTQModel.from_pretrained",
         )
+        backend = normalize_backend(backend)
+        profile = normalize_profile(profile)
         requested_trust_remote_code = trust_remote_code
         tokenizer_trust_remote_code = model_init_kwargs.pop(
             "tokenizer_trust_remote_code",
@@ -506,6 +514,8 @@ class GPTQModel:
         return model_definition.from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,
             quantize_config=quantize_config,
+            backend=backend,
+            profile=profile,
             trust_remote_code=trust_remote_code,
             tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             **model_init_kwargs,
