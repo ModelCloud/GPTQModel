@@ -953,7 +953,6 @@ def ModelLoader(cls):
         model_local_path = str(model_local_path)
         if native_gguf_qspec is not None:
             is_sharded = False
-            resolved_archive_file = gguf_checkpoint_path
             model_save_name = gguf_checkpoint_path
         else:
             if format_code == FORMAT.EXL3:
