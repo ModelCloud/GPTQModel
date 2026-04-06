@@ -758,18 +758,24 @@ def ModelLoader(cls):
         # formats or depend on optional external runtimes.
         if (
             native_gguf_qspec is not None
-            and native_gguf_qspec.tensor_qtype in {
-                internal_gguf.GGMLQuantizationType.Q1_0,
-                internal_gguf.GGMLQuantizationType.Q1_0_g128,
-            }
+            and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
         ):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.GGUF_TORCH
             elif backend != BACKEND.GGUF_TORCH:
                 raise ValueError(
-                    "Native sign-only GGUF checkpoints currently require BACKEND.GGUF_TORCH. "
+                    "Native Q1_0 GGUF checkpoints currently require BACKEND.GGUF_TORCH. "
                     f"Actual backend: `{backend}`."
                 )
+        elif (
+            native_gguf_qspec is not None
+            and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON}
+        ):
+            raise ValueError(
+                "Native Q1_0_g128 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or BACKEND.GGUF_TRITON. "
+                f"Actual backend: `{backend}`."
+            )
 
         if format_code == FORMAT.EXL3:
             if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH):

@@ -178,6 +178,16 @@ def _gguf_quantize_q8_0(blocks: np.ndarray) -> np.ndarray:
     return np.concatenate([d, qs], axis=-1)
 
 
+def _gguf_quantize_sign_only(blocks: np.ndarray, *, block_size: int) -> np.ndarray:
+    scales = np.mean(np.abs(blocks), axis=-1).astype(np.float16, copy=False)
+    sign_bits = np.packbits((blocks >= 0).astype(np.uint8, copy=False), axis=-1, bitorder="little")
+
+    packed = np.empty((blocks.shape[0], 2 + (block_size // 8)), dtype=np.uint8)
+    packed[:, :2] = scales.view(np.uint8).reshape(-1, 2)
+    packed[:, 2:] = sign_bits
+    return packed
+
+
 def _pack_q4_k_scale_min(scales: np.ndarray, mins: np.ndarray) -> np.ndarray:
     scales = scales.astype(np.uint8, copy=False)
     mins = mins.astype(np.uint8, copy=False)
@@ -360,7 +370,9 @@ def _fallback_gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray
         )
 
     blocks = weight.reshape(-1, block_size)
-    if tensor_qtype == "Q4_0":
+    if tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+        quantized_blocks = _gguf_quantize_sign_only(blocks, block_size=block_size)
+    elif tensor_qtype == "Q4_0":
         quantized_blocks = _gguf_quantize_q4_0(blocks)
     elif tensor_qtype == "Q8_0":
         quantized_blocks = _gguf_quantize_q8_0(blocks)
