@@ -456,7 +456,7 @@ def test_copy_existing_file(tmp_path, monkeypatch):
     assert mtp_keys == {"model.weight"}
 
 
-def test_copy_existing_file_from_real_glm4_moe_config(tmp_path, monkeypatch):
+def test_copy_existing_file_with_glm4_moe(tmp_path, monkeypatch):
     original_dir = tmp_path / "original"
     original_dir.mkdir()
     _write_real_glm4_moe_config(str(original_dir))
@@ -482,7 +482,7 @@ def test_copy_existing_file_from_real_glm4_moe_config(tmp_path, monkeypatch):
     assert saved_config["model_type"] == "glm4_moe"
 
 
-def test_merge_prefixed_tensors_from_real_qwen3_5_moe_config(tmp_path, monkeypatch):
+def test_merge_prefixed_tensors_with_qwen3_5(tmp_path, monkeypatch):
     original_dir = tmp_path / "original"
     original_dir.mkdir()
     _write_real_qwen3_5_moe_config(str(original_dir))
