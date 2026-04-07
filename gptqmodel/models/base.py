@@ -210,8 +210,9 @@ class BaseQModel(nn.Module):
 
     # Some models have optional layers that are not loaded or supported by HF so even when they exist in the original
     # model, they are not properly saved on save(). GLM 4.5/4.6 (air) with MTP layers is such example.
-    # List the `dangling` optional tensor files here, and we will merge them in on model.save()
-    out_of_model_tensor_files: Optional[List[str]] = None
+    # Provide either a safetensors filename (the file is copied through if present) or a prefix (all `prefix.` tensors
+    # are merged into the main state dict so they end up in model.safetensors).
+    out_of_model_tensors: Optional[Dict[str, Union[str | List[str]]]] = None
 
     supports_desc_act = [True, False]
 

@@ -49,6 +49,7 @@ from ..utils.hf import (
 )
 from ..utils.logger import setup_logger
 from ..utils.model import (
+    TensorSource,
     copy_py_files,
     find_modules,
     get_model_files_size,
@@ -118,6 +119,128 @@ def _cleanup_saved_weight_files(
             continue
         if shard_pattern.fullmatch(filename) and filename not in expected:
             os.remove(full_filename)
+
+
+
+def _resolve_out_of_model_source_files(
+    model_local_path: str,
+    source_files: Optional[List[str]] = None,
+) -> List[str]:
+    if source_files:
+        return sorted(dict.fromkeys(source_files))
+
+    index_path = join(model_local_path, "model.safetensors.index.json")
+    if os.path.exists(index_path):
+        try:
+            with open(index_path, "r", encoding="utf-8") as handle:
+                index_data = json.load(handle)
+            weight_map = index_data.get("weight_map", {})
+            if isinstance(weight_map, dict):
+                return sorted(
+                    {
+                        filename
+                        for filename in weight_map.values()
+                        if isinstance(filename, str) and filename.endswith(".safetensors")
+                    }
+                )
+        except Exception as exc:
+            log.warn(f"Model: Failed to inspect original safetensors index at '{index_path}': {exc}")
+
+    return sorted(
+        filename
+        for filename in os.listdir(model_local_path)
+        if filename.endswith(".safetensors") and isfile(join(model_local_path, filename))
+    )
+
+
+def _load_tensors_by_prefixes(
+    model_local_path: str,
+    prefixes: List[str],
+    source_files: Optional[List[str]] = None,
+) -> Dict[str, torch.Tensor]:
+    # Gather tensors whose names match any of the requested prefixes.
+    # Gather tensors whose names match any of the requested prefixes from all available shards.
+    tensors: Dict[str, torch.Tensor] = {}
+    source_file_names = _resolve_out_of_model_source_files(model_local_path, source_files)
+    for source_file_name in source_file_names:
+        source_tensor_path = os.path.join(model_local_path, source_file_name)
+        if not os.path.exists(source_tensor_path):
+            continue
+        try:
+            with safe_open(source_tensor_path, framework="pt", device="cpu") as f:
+                for tensor_name in f.keys():
+                    if any(tensor_name.startswith(prefix) for prefix in prefixes):
+                        if tensor_name not in tensors:
+                            tensors[tensor_name] = f.get_tensor(tensor_name)
+        except Exception as exc:
+            log.warn(
+                f"Model: Failed to read tensors from {source_file_name} while scanning for prefixes "
+                f"{prefixes}: {exc}"
+            )
+    return tensors
+
+
+def _tensor_source_from_tensor(name: str, tensor: torch.Tensor) -> TensorSource:
+    # Create a TensorSource wrapper so the merged tensor behaves like original state_dict entries.
+    # Wrap a raw tensor into a TensorSource so it can be merged into state_dict.
+    return TensorSource(
+        name=name,
+        torch_dtype=tensor.dtype,
+        shape=tuple(tensor.shape),
+        source=tensor,
+    )
+
+
+def _merge_prefix_tensors_into_state_dict(
+    prefixes: List[str], model_local_path: str, state_dict: Dict[str, TensorSource]
+) -> None:
+    # Inject matched tensors into the ongoing state_dict before sharding.
+    merged = 0
+    normalized_prefixes = [prefix if prefix.endswith(".") else f"{prefix}." for prefix in prefixes]
+    tensors = _load_tensors_by_prefixes(model_local_path, normalized_prefixes)
+    for name, tensor in tensors.items():
+        state_dict[name] = _tensor_source_from_tensor(name, tensor)
+        merged += 1
+    if merged:
+        log.info(f"Model: Merged {merged} tensors with prefixes {normalized_prefixes} into the state dict")
+    else:
+        log.warn(f"Model: No tensors matched prefixes {normalized_prefixes} while merging into the state dict")
+
+
+def _normalize_out_of_model_tensors_entries(
+    entries: Optional[List[Union[str, Dict[str, Any]]]]
+) -> tuple[List[str], List[str]]:
+    # Normalize configured files/prefixes into explicit lists.
+    copy_files: List[str] = []
+    prefixes: List[str] = []
+    if not entries:
+        return copy_files, prefixes
+
+    raw_entries = list(entries) if isinstance(entries, (list, tuple)) else [entries]
+    for entry in raw_entries:
+        if isinstance(entry, str):
+            copy_files.append(entry)
+            continue
+        if not isinstance(entry, dict):
+            raise TypeError("out_of_model_tensors entries must be dict.")
+
+        files_value = entry.get("files")
+        if files_value is not None:
+            files = [files_value] if isinstance(files_value, str) else list(files_value)
+            for file in files:
+                if not isinstance(file, str) or not file:
+                    raise ValueError("`files` entries must be non-empty strings.")
+                copy_files.append(file)
+
+        prefixes_value = entry.get("prefixes")
+        if prefixes_value is not None:
+            prefix_list = [prefixes_value] if isinstance(prefixes_value, str) else list(prefixes_value)
+            for prefix in prefix_list:
+                if not isinstance(prefix, str) or not prefix:
+                    raise ValueError("`prefixes` entries must be non-empty strings.")
+                prefixes.append(prefix)
+
+    return copy_files, prefixes
 
 
 def _resolve_layer_split_group(tensor_name: str, layer_prefixes: List[str]) -> tuple[str, bool]:
@@ -529,6 +652,11 @@ def ModelWriter(cls):
 
         offload_root = self.quantize_config.offload_to_disk_path if getattr(self.quantize_config, "offload_to_disk", False) else None
         state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
+        copy_tensor_files, prefix_entries = _normalize_out_of_model_tensors_entries(
+            getattr(self, "out_of_model_tensors", None)
+        )
+        if prefix_entries:
+            _merge_prefix_tensors_into_state_dict(prefix_entries, self.model_local_path, state_dict)
 
         model_base_name = "model"
         model_save_name = model_base_name + ".safetensors"
@@ -636,82 +764,21 @@ def ModelWriter(cls):
         if self.quantize_config.adapter:
             _eora_save(self, save_dir=eora_path if eora_path else self.quantize_config.adapter.path, model_save_dir=save_dir)
 
-        # Handle `dangling` tensor files that HF doesn't support (optional) but very useful
-        extra_tensor_files = getattr(self, "out_of_model_tensor_files", None)
-        if extra_tensor_files:
-            if isinstance(extra_tensor_files, str):
-                extra_tensor_files = [extra_tensor_files]
-            else:
-                extra_tensor_files = list(extra_tensor_files)
-
-            index_save_name = model_save_name + ".index.json"
-            index_save_path = join(save_dir, index_save_name)
-
-            if os.path.exists(index_save_path):
-                with open(index_save_path, "r", encoding="utf-8") as f:
-                    index_data = json.load(f)
-            else:
-                index_data = {
-                    "metadata": {"total_size": total_size_bytes},
-                    "weight_map": dict(tensor_to_filename),
-                }
-
-            if "metadata" not in index_data:
-                index_data["metadata"] = {}
-            if "weight_map" not in index_data:
-                index_data["weight_map"] = {}
-
-            total_size_value = index_data["metadata"].get("total_size", total_size_bytes)
-            index_updated = False
-
-            for tensor_file_name in extra_tensor_files:
-                original_tensor_path = os.path.join(self.model_local_path, tensor_file_name)
-                if not os.path.exists(original_tensor_path):
-                    log.warn(
-                        f"Model: out_of_model_tensor_files configured with '{tensor_file_name}', "
-                        f"but the file was not found at '{original_tensor_path}'"
-                    )
-                    continue
-
-                target_tensor_path = os.path.join(save_dir, tensor_file_name)
-                shutil.copy2(original_tensor_path, target_tensor_path)
-                log.info(
-                    f"Model: Copied {tensor_file_name} from original model directory to quantized model directory"
+        # Copy any requested safetensors files without modifying the index
+        for tensor_file_name in copy_tensor_files:
+            original_tensor_path = os.path.join(self.model_local_path, tensor_file_name)
+            if not os.path.exists(original_tensor_path):
+                log.warn(
+                    f"Model: out_of_model_tensors configured with '{tensor_file_name}', "
+                    f"but the file was not found at '{original_tensor_path}'"
                 )
+                continue
 
-                tensor_names = []
-                try:
-                    with safe_open(original_tensor_path, framework="pt", device="cpu") as f:
-                        tensor_names = list(f.keys())
-                except Exception as exc:
-                    log.warn(
-                        f"Model: Failed to read tensor names from {tensor_file_name}: {exc}"
-                    )
-
-                for tensor_name in tensor_names:
-                    index_data["weight_map"][tensor_name] = tensor_file_name
-
-                if tensor_names:
-                    log.info(
-                        f"Model: Added {len(tensor_names)} tensors from {tensor_file_name} to weight_map"
-                    )
-
-                try:
-                    tensor_file_size = os.path.getsize(target_tensor_path)
-                except OSError:
-                    tensor_file_size = 0
-
-                total_size_value += tensor_file_size
-                index_updated = True
-
-            if index_updated:
-                index_data["metadata"]["total_size"] = total_size_value
-                with open(index_save_path, "w", encoding="utf-8") as f:
-                    content = json.dumps(index_data, indent=2, sort_keys=True) + "\n"
-                    f.write(content)
-                log.info(
-                    f"Model: Updated {index_save_name} to include `out_of_model_tensor_files`"
-                )
+            target_tensor_path = os.path.join(save_dir, tensor_file_name)
+            shutil.copy2(original_tensor_path, target_tensor_path)
+            log.info(
+                f"Model: Copied {tensor_file_name} from original model directory to quantized model directory"
+            )
 
         # If the saved model is a loaded quantized model, do not calculate the size diff.
         if not self.load_quantized_model:
