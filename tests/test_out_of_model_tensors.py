@@ -12,7 +12,9 @@ import torch
 from gptqmodel.utils.model import TensorSource
 from safetensors import safe_open
 from safetensors.torch import save_file
+from transformers import AutoConfig
 
+from gptqmodel.models.auto import check_and_get_model_definition
 from gptqmodel.models.writer import ModelWriter
 from gptqmodel.quantization.config import FORMAT, METHOD
 
@@ -81,6 +83,118 @@ class _DummyGenerationConfig(_DummyConfig):
     pass
 
 
+_REAL_GLM4_MOE_CONFIG = {
+    # Based on a real GLM-4.5-Air MoE config.json, reduced for a fast unit test.
+    "architectures": ["Glm4MoeForCausalLM"],
+    "attention_bias": True,
+    "attention_dropout": 0.0,
+    "bos_token_id": None,
+    "dtype": "bfloat16",
+    "eos_token_id": [1, 2, 3],
+    "first_k_dense_replace": 1,
+    "head_dim": 16,
+    "hidden_act": "silu",
+    "hidden_size": 64,
+    "initializer_range": 0.02,
+    "intermediate_size": 128,
+    "max_position_embeddings": 256,
+    "model_type": "glm4_moe",
+    "moe_intermediate_size": 32,
+    "n_group": 1,
+    "n_routed_experts": 2,
+    "n_shared_experts": 1,
+    "norm_topk_prob": True,
+    "num_attention_heads": 4,
+    "num_experts_per_tok": 1,
+    "num_hidden_layers": 1,
+    "num_key_value_heads": 1,
+    "num_nextn_predict_layers": 1,
+    "pad_token_id": 0,
+    "partial_rotary_factor": 0.5,
+    "rms_norm_eps": 1e-5,
+    "rope_parameters": {
+        "partial_rotary_factor": 0.5,
+        "rope_theta": 1_000_000,
+        "rope_type": "default",
+    },
+    "routed_scaling_factor": 2.5,
+    "tie_word_embeddings": False,
+    "topk_group": 1,
+    "transformers_version": "5.5.0",
+    "use_cache": True,
+    "use_qk_norm": True,
+    "vocab_size": 256,
+}
+
+_REAL_QWEN3_5_MOE_CONFIG = {
+    # Based on a real Qwen3.5-MoE config.json, reduced for a fast unit test.
+    "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+    "dtype": "bfloat16",
+    "model_type": "qwen3_5_moe",
+    "image_token_id": 1,
+    "video_token_id": 2,
+    "vision_start_token_id": 3,
+    "vision_end_token_id": 4,
+    "tie_word_embeddings": False,
+    "transformers_version": "5.5.0",
+    "text_config": {
+        "dtype": "bfloat16",
+        "model_type": "qwen3_5_moe_text",
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": None,
+        "eos_token_id": 5,
+        "hidden_act": "silu",
+        "hidden_size": 64,
+        "initializer_range": 0.02,
+        "head_dim": 16,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 1,
+        "num_hidden_layers": 1,
+        "num_experts": 2,
+        "num_experts_per_tok": 1,
+        "moe_intermediate_size": 32,
+        "shared_expert_intermediate_size": 32,
+        "layer_types": ["full_attention"],
+        "linear_conv_kernel_dim": 4,
+        "linear_key_head_dim": 16,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_value_head_dim": 16,
+        "max_position_embeddings": 256,
+        "output_router_logits": False,
+        "pad_token_id": 5,
+        "partial_rotary_factor": 0.25,
+        "rms_norm_eps": 1e-6,
+        "rope_parameters": {
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 10_000,
+            "rope_type": "default",
+        },
+        "router_aux_loss_coef": 0.001,
+        "tie_word_embeddings": False,
+        "use_cache": True,
+        "vocab_size": 256,
+    },
+    "vision_config": {
+        "model_type": "qwen3_5_moe",
+        "depth": 1,
+        "dtype": "bfloat16",
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_size": 32,
+        "in_channels": 3,
+        "initializer_range": 0.02,
+        "intermediate_size": 64,
+        "num_heads": 4,
+        "num_position_embeddings": 64,
+        "out_hidden_size": 64,
+        "patch_size": 4,
+        "spatial_merge_size": 1,
+        "temporal_patch_size": 2,
+    },
+}
+
+
 class _DummyModel:
     def __init__(self):
         self.config = _DummyConfig()
@@ -117,6 +231,60 @@ def _build_writer_with_out_of_model_file(model_local_path, out_of_model_tensor_f
     instance.turtle_model = SimpleNamespace()
     instance.model = _DummyModel()
     return instance
+
+
+def _write_real_glm4_moe_config(model_dir):
+    with open(os.path.join(model_dir, "config.json"), "w", encoding="utf-8") as handle:
+        json.dump(_REAL_GLM4_MOE_CONFIG, handle)
+
+
+def _write_real_qwen3_5_moe_config(model_dir):
+    with open(os.path.join(model_dir, "config.json"), "w", encoding="utf-8") as handle:
+        json.dump(_REAL_QWEN3_5_MOE_CONFIG, handle)
+
+
+def _build_writer_from_real_model_config(model_local_path, expected_out_of_model_tensors, monkeypatch=None):
+    model_definition = check_and_get_model_definition(model_local_path, trust_remote_code=False)
+    assert model_definition.out_of_model_tensors == expected_out_of_model_tensors
+
+    if getattr(model_definition, "require_load_processor", False):
+        assert monkeypatch is not None
+        monkeypatch.setattr(
+            "gptqmodel.models.base.AutoProcessor.from_pretrained",
+            lambda *args, **kwargs: None,
+        )
+
+    config = AutoConfig.from_pretrained(model_local_path, trust_remote_code=False)
+    model = model_definition.loader.from_config(config, trust_remote_code=False)
+
+    instance = model_definition(
+        model=model,
+        quantized=True,
+        quantize_config=_DummyQuantizeConfig(),
+        tokenizer=None,
+        qlinear_kernel=_DummyKernel(),
+        load_quantized_model=False,
+        trust_remote_code=False,
+        model_local_path=model_local_path,
+        turtle_model=SimpleNamespace(),
+    )
+    return instance
+
+
+def _build_writer_from_real_glm4_moe_config(model_local_path, monkeypatch=None):
+    return _build_writer_from_real_model_config(
+        model_local_path,
+        expected_out_of_model_tensors={"files": ["mtp.safetensors"]},
+        monkeypatch=monkeypatch,
+    )
+
+
+def _build_writer_from_real_qwen3_5_moe_config(model_local_path, monkeypatch):
+    return _build_writer_from_real_model_config(
+        model_local_path,
+        expected_out_of_model_tensors={"prefixes": ["mtp"]},
+        monkeypatch=monkeypatch,
+    )
 
 
 def _patch_streaming(monkeypatch, shard_count=1):
@@ -286,3 +454,84 @@ def test_copy_existing_file(tmp_path, monkeypatch):
     with safe_open(save_dir / "model.safetensors", framework="pt", device="cpu") as handle:
         mtp_keys = set(handle.keys())
     assert mtp_keys == {"model.weight"}
+
+
+def test_copy_existing_file_from_real_glm4_moe_config(tmp_path, monkeypatch):
+    original_dir = tmp_path / "original"
+    original_dir.mkdir()
+    _write_real_glm4_moe_config(str(original_dir))
+
+    mtp_file = original_dir / "mtp.safetensors"
+    save_file({"mtp.linear.weight": torch.ones(1)}, str(mtp_file))
+
+    writer = _build_writer_from_real_glm4_moe_config(str(original_dir))
+    state_dict_data = {"model.weight": _tensor_source("model.weight", torch.zeros(1))}
+
+    _patch_basic_env(monkeypatch, state_dict_data)
+    _patch_streaming(monkeypatch)
+
+    save_dir = tmp_path / "save"
+    writer.save_quantized(save_dir=str(save_dir))
+
+    with safe_open(save_dir / "mtp.safetensors", framework="pt", device="cpu") as handle:
+        mtp_keys = set(handle.keys())
+    assert mtp_keys == {"mtp.linear.weight"}
+
+    with open(save_dir / "config.json", "r", encoding="utf-8") as handle:
+        saved_config = json.load(handle)
+    assert saved_config["model_type"] == "glm4_moe"
+
+
+def test_merge_prefixed_tensors_from_real_qwen3_5_moe_config(tmp_path, monkeypatch):
+    original_dir = tmp_path / "original"
+    original_dir.mkdir()
+    _write_real_qwen3_5_moe_config(str(original_dir))
+
+    shard_a_name = "model-00001-of-00002.safetensors"
+    shard_b_name = "model-00002-of-00002.safetensors"
+
+    save_file(
+        {
+            "base.weight": torch.zeros(1),
+            "mtp.fc.weight": torch.ones(2),
+        },
+        str(original_dir / shard_a_name),
+    )
+    save_file(
+        {
+            "model.layers.0.weight": torch.full((1,), 2.0),
+            "mtp.model.layers.0.weight": torch.full((3,), 3.0),
+        },
+        str(original_dir / shard_b_name),
+    )
+
+    with open(original_dir / "model.safetensors.index.json", "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "metadata": {"total_size": 0},
+                "weight_map": {
+                    "mtp.fc.weight": shard_a_name,
+                    "mtp.model.layers.0.weight": shard_b_name,
+                },
+            },
+            handle,
+        )
+
+    writer = _build_writer_from_real_qwen3_5_moe_config(str(original_dir), monkeypatch=monkeypatch)
+    state_dict_data = {"model.weight": _tensor_source("model.weight", torch.zeros(1))}
+
+    _patch_basic_env(monkeypatch, state_dict_data)
+    _patch_streaming(monkeypatch)
+
+    save_dir = tmp_path / "save"
+    writer.save_quantized(save_dir=str(save_dir))
+
+    assert not (save_dir / "mtp.safetensors").exists()
+
+    with safe_open(save_dir / "model.safetensors", framework="pt", device="cpu") as handle:
+        keys = set(handle.keys())
+    assert {"mtp.fc.weight", "mtp.model.layers.0.weight"} <= keys
+
+    with open(save_dir / "config.json", "r", encoding="utf-8") as handle:
+        saved_config = json.load(handle)
+    assert saved_config["model_type"] == "qwen3_5_moe"
