@@ -7,10 +7,10 @@ import pytest
 
 from gptqmodel.utils.cpp import (
     _COMPILE_PROGRESS_TOTAL_STEPS,
-    _CompileProgressDisplay,
     _compile_progress_ratio,
     _compile_progress_step,
     _compile_progress_subtitle,
+    _CompileProgressDisplay,
     default_jit_cuda_cflags,
 )
 from gptqmodel.utils.jit_compile_baselines import get_jit_compile_baseline_seconds

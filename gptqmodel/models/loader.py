@@ -12,6 +12,7 @@ from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
 from typing import Dict, List, Optional, Union
 
+import numpy as np
 import torch
 import transformers
 
@@ -33,9 +34,11 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from ..nn_modules.qlinear.gguf import GGUFTorchLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2, BaseQuantizeConfig, resolve_quant_format
-from ..utils.backend import BACKEND, normalize_backend
+from ..utils import internal_gguf
+from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
@@ -94,6 +97,66 @@ def _maybe_print_module_tree(model) -> None:
 
     if _should_print_module_tree():
         print_module_tree(model=model)
+
+
+def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
+    """Detect whether the resolved HF architecture exposes FA2 kernels."""
+
+    if not getattr(config, "architectures", None):
+        return False
+
+    model_class = getattr(transformers, config.architectures[0], None)
+    if model_class is None:
+        return False
+
+    if hasattr(model_class, "_supports_flash_attn_2"):
+        return bool(getattr(model_class, "_supports_flash_attn_2"))
+    if hasattr(model_class, "_supports_flash_attn"):
+        return bool(getattr(model_class, "_supports_flash_attn"))
+    return False
+
+
+def _is_accelerated_attention_device(device: object) -> bool:
+    """Return True when the selected device can run CUDA/ROCm flash attention."""
+
+    if isinstance(device, torch.device):
+        return device.type in {"cuda", "hip"}
+    if isinstance(device, DEVICE):
+        return device in {DEVICE.CUDA, DEVICE.ROCM}
+    if isinstance(device, str):
+        return device in {"cuda", "rocm", "hip"}
+    return False
+
+
+def _resolve_native_gguf_profile(
+    *,
+    native_gguf_qspec: Optional["internal_gguf.GGUFQuantizedCheckpointSpec"],
+    profile: PROFILE,
+) -> PROFILE:
+    """Resolve user profile intent for native GGUF checkpoints."""
+
+    if (
+        native_gguf_qspec is not None
+        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+        and profile == PROFILE.AUTO
+    ):
+        log.info("Loader: Bonsai/Prism Q1_0_g128 PROFILE.AUTO resolved to PROFILE.FAST.")
+        return PROFILE.FAST
+    return profile
+
+
+def _should_use_dense_native_gguf_path(
+    *,
+    native_gguf_qspec: Optional["internal_gguf.GGUFQuantizedCheckpointSpec"],
+    profile: PROFILE,
+) -> bool:
+    """Fast Bonsai mode stays on the dense HF GGUF import path."""
+
+    return (
+        native_gguf_qspec is not None
+        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+        and profile == PROFILE.FAST
+    )
 
 
 def parse_version_string(version_str: str):
@@ -189,12 +252,155 @@ def _get_tokenizer_load_kwargs(model_init_kwargs: Dict) -> Dict:
     return get_hf_gguf_load_kwargs(model_init_kwargs)
 
 
+def _resolve_local_gguf_checkpoint_path(model_local_path: str, hf_gguf_load_kwargs: Dict[str, str]) -> Optional[str]:
+    gguf_file = hf_gguf_load_kwargs.get("gguf_file")
+    if not gguf_file:
+        return None
+
+    checkpoint_path = os.path.join(str(model_local_path), gguf_file)
+    if not os.path.isfile(checkpoint_path):
+        return None
+    return checkpoint_path
+
+
+def _resolve_native_quantized_gguf_checkpoint(
+    model_local_path: str,
+    hf_gguf_load_kwargs: Dict[str, str],
+) -> tuple[Optional[str], Optional[internal_gguf.GGUFQuantizedCheckpointSpec]]:
+    if not internal_gguf.native_quantized_loader_enabled():
+        return None, None
+
+    gguf_checkpoint_path = _resolve_local_gguf_checkpoint_path(model_local_path, hf_gguf_load_kwargs)
+    if gguf_checkpoint_path is None:
+        return None, None
+
+    try:
+        spec = internal_gguf.inspect_quantized_checkpoint(gguf_checkpoint_path)
+    except Exception as exc:
+        log.debug("Loader: failed to inspect GGUF checkpoint `%s`: %s", gguf_checkpoint_path, exc)
+        return None, None
+
+    if spec is None:
+        return None, None
+    return gguf_checkpoint_path, spec
+
+
+def _resolve_model_slot(model: torch.nn.Module, name: str) -> tuple[torch.nn.Module, str]:
+    module_name, _, attr_name = name.rpartition(".")
+    module = model.get_submodule(module_name) if module_name else model
+    return module, attr_name
+
+
+def _lookup_model_slot_tensor(model: torch.nn.Module, name: str) -> torch.Tensor:
+    module, attr_name = _resolve_model_slot(model, name)
+    if attr_name in module._parameters:
+        return module._parameters[attr_name]
+    if attr_name in module._buffers:
+        return module._buffers[attr_name]
+    raise KeyError(f"Loader: model slot `{name}` does not exist.")
+
+
+def _assign_model_slot_tensor(model: torch.nn.Module, name: str, tensor: torch.Tensor) -> None:
+    module, attr_name = _resolve_model_slot(model, name)
+    tensor = tensor.contiguous()
+
+    if attr_name in module._parameters:
+        current = module._parameters[attr_name]
+        if current is not None and (tensor.device != current.device or tensor.dtype != current.dtype):
+            tensor = tensor.to(device=current.device, dtype=current.dtype)
+        requires_grad = current.requires_grad if isinstance(current, torch.nn.Parameter) else False
+        module._parameters[attr_name] = torch.nn.Parameter(tensor, requires_grad=requires_grad)
+        return
+
+    if attr_name in module._buffers:
+        current = module._buffers[attr_name]
+        if current is not None and (tensor.device != current.device or tensor.dtype != current.dtype):
+            tensor = tensor.to(device=current.device, dtype=current.dtype)
+        module._buffers[attr_name] = tensor
+        return
+
+    raise KeyError(f"Loader: model slot `{name}` does not exist.")
+
+
+def _build_gguf_tensor_key_mapping(model: torch.nn.Module, config: PretrainedConfig) -> dict[str, str]:
+    import transformers.modeling_gguf_pytorch_utils as gguf_utils
+
+    processor_cls = gguf_utils.TENSOR_PROCESSORS.get(config.model_type, gguf_utils.TensorProcessor)
+    if processor_cls is not gguf_utils.TensorProcessor:
+        raise NotImplementedError(
+            f"Loader: native quantized GGUF loading only supports the default tensor processor. "
+            f"Actual processor for `{config.model_type}`: `{processor_cls.__name__}`."
+        )
+
+    processor = processor_cls(config=config.to_dict())
+    return gguf_utils.get_gguf_hf_weights_map(model, processor)
+
+
+def _load_quantized_gguf_checkpoint_into_model(
+    *,
+    model: torch.nn.Module,
+    gguf_checkpoint_path: str,
+    tensor_key_mapping: dict[str, str],
+) -> None:
+    reader = internal_gguf.GGUFReader(gguf_checkpoint_path)
+    loaded: set[str] = set()
+
+    for tensor in reader.tensors:
+        target_name = tensor_key_mapping.get(tensor.name)
+        if target_name is None:
+            continue
+
+        module_name, _, attr_name = target_name.rpartition(".")
+        target_module = model.get_submodule(module_name) if module_name else model
+        resolved_target_name = target_name
+
+        if isinstance(target_module, GGUFTorchLinear) and attr_name == "weight":
+            resolved_target_name = f"{module_name}.qweight" if module_name else "qweight"
+            packed = torch.from_numpy(np.array(tensor.data, dtype=np.uint8, copy=True, order="C"))
+            expected = _lookup_model_slot_tensor(model, resolved_target_name)
+            if tuple(packed.shape) != tuple(expected.shape):
+                raise RuntimeError(
+                    f"Loader: GGUF qweight shape mismatch for `{resolved_target_name}`. "
+                    f"Expected {tuple(expected.shape)}, got {tuple(packed.shape)}."
+                )
+            _assign_model_slot_tensor(model, resolved_target_name, packed)
+            loaded.add(resolved_target_name)
+            continue
+
+        reference = _lookup_model_slot_tensor(model, resolved_target_name)
+        weights = internal_gguf.dequantize_to_torch(
+            tensor.data,
+            tensor.tensor_type,
+            device=reference.device,
+            dtype=reference.dtype,
+        )
+        _assign_model_slot_tensor(model, resolved_target_name, weights)
+        loaded.add(resolved_target_name)
+
+    missing_qweights = []
+    for module_name, module in model.named_modules():
+        if not isinstance(module, GGUFTorchLinear):
+            continue
+        qweight_name = f"{module_name}.qweight" if module_name else "qweight"
+        if qweight_name not in loaded:
+            missing_qweights.append(qweight_name)
+    if missing_qweights:
+        raise RuntimeError(
+            "Loader: GGUF checkpoint did not populate required quantized weights: "
+            + ", ".join(sorted(missing_qweights))
+        )
+
+    model.tie_weights()
+
+
 def ModelLoader(cls):
     @classmethod
     def from_pretrained(
             cls,
             pretrained_model_id_or_path: str,
             quantize_config: BaseQuantizeConfig,
+            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             dtype: [str | torch.dtype] = "auto",
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
@@ -216,6 +422,8 @@ def ModelLoader(cls):
             api_name=f"{cls.__name__}.from_pretrained",
             explicit_dtype=dtype,
         )
+        backend = normalize_backend(backend)
+        profile = normalize_profile(profile)
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(model_init_kwargs)
         model_init_kwargs_without_internal = dict(model_init_kwargs)
         model_init_kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
@@ -239,8 +447,13 @@ def ModelLoader(cls):
             log.info(f"Loader: overriding attn_implementation in config to `{atten_impl}`")
             config._attn_implementation = atten_impl
 
+        resolved_device = normalize_device_device_map(device, device_map)
+        resolved_device = auto_select_device(resolved_device, backend)
+
         if cls.require_dtype:
             dtype = cls.require_dtype
+        elif dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
+            dtype = auto_dtype(config=config, device=resolved_device, quant_inference=False)
 
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
             # Align config metadata with the dtype we will materialize weights in.
@@ -252,11 +465,62 @@ def ModelLoader(cls):
             **_get_tokenizer_load_kwargs(model_init_kwargs),
         )
 
+        gguf_checkpoint_path, native_gguf_qspec = _resolve_native_quantized_gguf_checkpoint(
+            model_local_path,
+            hf_gguf_load_kwargs,
+        )
+        effective_profile = _resolve_native_gguf_profile(
+            native_gguf_qspec=native_gguf_qspec,
+            profile=profile,
+        )
+
         if quantize_config is None:
+            if native_gguf_qspec is not None:
+                if _should_use_dense_native_gguf_path(
+                    native_gguf_qspec=native_gguf_qspec,
+                    profile=effective_profile,
+                ):
+                    if backend != BACKEND.AUTO:
+                        log.info(
+                            "Loader: PROFILE.%s uses dense GGUF import for `%s`; backend `%s` is ignored.",
+                            effective_profile.name,
+                            gguf_checkpoint_path,
+                            backend.value,
+                        )
+                else:
+                    redirect_kwargs = dict(model_init_kwargs)
+                    redirect_kwargs.pop("tokenizer_trust_remote_code", None)
+                    log.info(
+                        "Loader: detected native quantized GGUF checkpoint `%s`; redirecting `%s` to from_quantized() with PROFILE.%s.",
+                        gguf_checkpoint_path,
+                        cls.__name__,
+                        effective_profile.name,
+                    )
+                    return cls.from_quantized(
+                        model_id_or_path=pretrained_model_id_or_path,
+                        device_map=device_map,
+                        device=device,
+                        backend=backend,
+                        dtype=dtype,
+                        trust_remote_code=trust_remote_code,
+                        tokenizer_trust_remote_code=tokenizer_trust_remote_code,
+                        **redirect_kwargs,
+                    )
+
             hf_model_init_kwargs = dict(model_init_kwargs_without_internal)
             hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"
             hf_model_init_kwargs["dtype"] = dtype
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
+            if (
+                native_gguf_qspec is not None
+                and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+                and atten_impl in {None, "auto"}
+                and _is_accelerated_attention_device(resolved_device)
+                and (config.model_type == "qwen3" or _supports_flash_attn_2(config))
+                and is_flash_attn_2_available()
+            ):
+                hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
+                log.info("Loader: Auto enabling flash_attention_2 for dense Bonsai PROFILE.%s.", effective_profile.name)
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
             model = cls.loader.from_pretrained(model_local_path, config=config, **hf_model_init_kwargs)
             model._model_init_kwargs = hf_model_init_kwargs
@@ -570,10 +834,45 @@ def ModelLoader(cls):
             # Ensure flash attention kernels see an explicit dtype instead of relying on defaults.
             set_hf_config_dtype(config, dtype)
 
-        qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
+        gguf_checkpoint_path, native_gguf_qspec = _resolve_native_quantized_gguf_checkpoint(
+            model_local_path,
+            hf_gguf_load_kwargs,
+        )
+        if native_gguf_qspec is not None:
+            qcfg = QuantizeConfig(
+                bits=native_gguf_qspec.bits_alias,
+                method=METHOD.GGUF,
+                lm_head=native_gguf_qspec.lm_head_quantized,
+            )
+        else:
+            qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
         backend = normalize_backend(backend, quant_method=export_quant_method)
+
+        # Prism/Bonsai sign-only GGUF tensors only have a torch runtime today.
+        # Bypass higher-priority GGUF backends that either do not support 1-bit
+        # formats or depend on optional external runtimes.
+        if (
+            native_gguf_qspec is not None
+            and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
+        ):
+            if backend == BACKEND.AUTO:
+                backend = BACKEND.GGUF_TORCH
+            elif backend != BACKEND.GGUF_TORCH:
+                raise ValueError(
+                    "Native Q1_0 GGUF checkpoints currently require BACKEND.GGUF_TORCH. "
+                    f"Actual backend: `{backend}`."
+                )
+        elif (
+            native_gguf_qspec is not None
+            and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON}
+        ):
+            raise ValueError(
+                "Native Q1_0_g128 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or BACKEND.GGUF_TRITON. "
+                f"Actual backend: `{backend}`."
+            )
 
         if format_code == FORMAT.EXL3:
             if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH):
@@ -691,37 +990,41 @@ def ModelLoader(cls):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        if format_code == FORMAT.EXL3:
-            possible_model_basenames = ["model"]
-        else:
-            possible_model_basenames = [
-                f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g",
-                "model",
-            ]
-
-        extensions = [".safetensors"]
-
         model_local_path = str(model_local_path)
+        if native_gguf_qspec is not None:
+            is_sharded = False
+            model_save_name = gguf_checkpoint_path
+        else:
+            if format_code == FORMAT.EXL3:
+                possible_model_basenames = ["model"]
+            else:
+                possible_model_basenames = [
+                    f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g",
+                    "model",
+                ]
 
-        # Retrieve (and if necessary download) the quantized checkpoint(s).
-        is_sharded, resolved_archive_file, true_model_basename = get_checkpoints(
-            model_id_or_path=model_local_path,
-            extensions=extensions,
-            possible_model_basenames=possible_model_basenames,
-            **cached_file_kwargs,
-        )
+            extensions = [".safetensors"]
 
-        # bin files have security issues: disable loading by default
-        if ".bin" in resolved_archive_file:
-            raise ValueError(
-                "Loading of .bin files are not allowed due to safety. Please convert your model to safetensor or pytorch format."
+            # Retrieve (and if necessary download) the quantized checkpoint(s).
+            is_sharded, resolved_archive_file, true_model_basename = get_checkpoints(
+                model_id_or_path=model_local_path,
+                extensions=extensions,
+                possible_model_basenames=possible_model_basenames,
+                **cached_file_kwargs,
             )
+
+            # bin files have security issues: disable loading by default
+            if ".bin" in resolved_archive_file:
+                raise ValueError(
+                    "Loading of .bin files are not allowed due to safety. Please convert your model to safetensor or pytorch format."
+                )
+
+            model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
 
         qcfg.runtime_format = format_code
 
-        model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
-
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
+        gguf_tensor_key_mapping = None
         with suspend_hf_weight_init():
             cls.before_model_load(cls, model_local_path=model_local_path, load_quantized_model=True)
 
@@ -754,6 +1057,8 @@ def ModelLoader(cls):
             )
             defuser.convert_model(model, cleanup_original=True)
             model.checkpoint_file_name = model_save_name
+            if native_gguf_qspec is not None:
+                gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
 
             extract_layers_node = cls.extract_layers_node()
             # Get the first layer to determine layer type
@@ -1006,7 +1311,7 @@ def ModelLoader(cls):
             log.info(f"Loader: honoring explicit device_map request: {device_map}")
         log.info(f"Loader: device_map = {device_map}")
 
-        load_checkpoint_in_model = True
+        load_checkpoint_in_model = native_gguf_qspec is None
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
         if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PAROQUANT]:
             load_checkpoint_in_model_then_tie_weights(
@@ -1104,8 +1409,16 @@ def ModelLoader(cls):
                 # offload_buffers=True,
             )
 
-        # TODO: Why are we using this custom function and not dispatch_model?
-        model = simple_dispatch_model(model, device_map)
+        if native_gguf_qspec is not None:
+            model = simple_dispatch_model(model, device_map)
+            _load_quantized_gguf_checkpoint_into_model(
+                model=model,
+                gguf_checkpoint_path=gguf_checkpoint_path,
+                tensor_key_mapping=gguf_tensor_key_mapping,
+            )
+        else:
+            # TODO: Why are we using this custom function and not dispatch_model?
+            model = simple_dispatch_model(model, device_map)
 
         if format_code == FORMAT.EXL3:
             qlinear_kernel = ExllamaV3TorchLinear if backend == BACKEND.EXL3_TORCH else ExllamaV3Linear

@@ -713,8 +713,66 @@ def test_gguf_triton_fused_forward_matches_dense_baseline(bits: str):
     assert output_stats["max"] < 3e-3
 
 
-def test_gguf_triton_kernel_rejects_non_k_formats():
-    with pytest.raises(ValueError, match="only supports GGUF K-block formats"):
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton sign-only tests")
+def test_gguf_triton_q1_0_g128_fused_forward_matches_dense_baseline():
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear.gguf_triton import triton_available
+
+    if not triton_available():
+        pytest.skip("Triton GGUF fused kernel unavailable")
+
+    torch.manual_seed(1234)
+    cpu_linear = nn.Linear(256, 192, bias=True, dtype=torch.float16).cpu().eval()
+    with torch.no_grad():
+        cpu_linear.weight.normal_(mean=0.0, std=0.01)
+        cpu_linear.bias.normal_(mean=0.0, std=0.001)
+
+    module = GGUFTorchLinear(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=256,
+        out_features=192,
+        bias=True,
+        register_buffers=False,
+    )
+    module.pack(
+        linear=cpu_linear,
+        scales=torch.empty(0),
+        zeros=torch.empty(0),
+        g_idx=None,
+    )
+    module.post_init()
+    module = module.to("cuda").eval()
+
+    triton_module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=256,
+        out_features=192,
+        bias=True,
+        register_buffers=True,
+    ).to("cuda").eval()
+    triton_module.load_state_dict(module.state_dict(), strict=True)
+    triton_module.clear_weight_cache()
+
+    inputs = torch.randn(16, 256, device="cuda", dtype=torch.float16) * 0.1
+    baseline = module._forward_dequant_matmul(inputs)
+    if module.bias is not None:
+        baseline = baseline + module.bias.to(device=baseline.device, dtype=baseline.dtype)
+    fused = triton_module(inputs)
+
+    output_stats = _error_stats(baseline.to(torch.float32), fused.to(torch.float32))
+    assert output_stats["mae"] < 2e-4
+    assert output_stats["max"] < 3e-3
+
+
+def test_gguf_triton_kernel_rejects_unsupported_formats():
+    with pytest.raises(NotImplementedError, match="only supports fused GGUF Triton formats"):
         GGUFTritonKernel(
             bits="q4_0",
             group_size=-1,
@@ -758,6 +816,796 @@ def test_gguf_triton_selects_large_config_bank_for_large_k(monkeypatch):
     min_large = torch.empty((16, 8, 32), device="cuda", dtype=torch.float16)
     gguf_triton.fused_q4_k_matmul(x_large, qs_large, scale_large, min_large)
     assert calls[-1] is large_kernel
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_selects_large_config_bank_for_large_q1_0_g128(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[object] = []
+    small_kernel = object()
+    large_kernel = object()
+
+    def _fake_launch(kernel, x, output, *args):
+        calls.append(kernel)
+        return output
+
+    monkeypatch.setattr(gguf_triton, "_gguf_q1_0_g128_fused_matmul_kernel_small", small_kernel)
+    monkeypatch.setattr(gguf_triton, "_gguf_q1_0_g128_fused_matmul_kernel_large", large_kernel)
+    monkeypatch.setattr(gguf_triton, "_launch", _fake_launch)
+
+    x_small = torch.randn(2, 1024, device="cuda", dtype=torch.float16)
+    sign_small = torch.empty((8, 16, 32), device="cuda", dtype=torch.uint8)
+    scale_small = torch.empty((8, 32), device="cuda", dtype=torch.float16)
+    gguf_triton.fused_q1_0_g128_matmul(x_small, sign_small, scale_small)
+    assert calls[-1] is small_kernel
+
+    x_large = torch.randn(2, 2048, device="cuda", dtype=torch.float16)
+    sign_large = torch.empty((16, 16, 32), device="cuda", dtype=torch.uint8)
+    scale_large = torch.empty((16, 32), device="cuda", dtype=torch.float16)
+    gguf_triton.fused_q1_0_g128_matmul(x_large, sign_large, scale_large)
+    assert calls[-1] is large_kernel
+
+
+def test_select_q1_0_g128_fixed_launch_config_targets_arch_decode_shapes():
+    from gptqmodel.nn_modules.qlinear.gguf_triton import _select_q1_0_g128_fixed_launch_config
+
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 0), rows=1, cols=2048) == {
+        "BLOCK_SIZE_M": 4,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 0), rows=1, cols=6144) == {
+        "BLOCK_SIZE_M": 2,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, cols=2048) == {
+        "BLOCK_SIZE_M": 8,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 8,
+        "num_stages": 2,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, in_features=2048, cols=2048) == {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, in_features=6144, cols=2048) == {
+        "BLOCK_SIZE_M": 8,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 8,
+        "num_stages": 2,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, cols=1024) == {
+        "BLOCK_SIZE_M": 8,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 8,
+        "num_stages": 2,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, cols=6144) == {
+        "BLOCK_SIZE_M": 2,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 8,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, in_features=2048, cols=6144) == {
+        "BLOCK_SIZE_M": 8,
+        "BLOCK_SIZE_N": 64,
+        "num_warps": 8,
+        "num_stages": 2,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 0), rows=64, cols=2048) == {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 16,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 0), rows=64, cols=6144) == {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=64, cols=2048) == {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 16,
+        "num_warps": 8,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=64, cols=6144) == {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=1, cols=4096) is None
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 0), rows=2, cols=6144) is None
+    assert _select_q1_0_g128_fixed_launch_config(capability=(8, 9), rows=256, cols=2048) is None
+
+
+def test_select_q1_0_g128_u32_layout_targets_sm80_down_proj():
+    from gptqmodel.nn_modules.qlinear.gguf_triton import _select_q1_0_g128_u32_layout
+
+    assert _select_q1_0_g128_u32_layout(capability=(8, 0), in_features=6144, out_features=2048) is True
+    assert _select_q1_0_g128_u32_layout(capability=(8, 0), in_features=2048, out_features=1024) is True
+    assert _select_q1_0_g128_u32_layout(capability=(8, 0), in_features=2048, out_features=2048) is True
+    assert _select_q1_0_g128_u32_layout(capability=(8, 0), in_features=2048, out_features=6144) is True
+    assert _select_q1_0_g128_u32_layout(capability=(8, 0), in_features=1024, out_features=2048) is False
+    assert _select_q1_0_g128_u32_layout(capability=(8, 9), in_features=6144, out_features=2048) is False
+    assert _select_q1_0_g128_u32_layout(capability=None, in_features=6144, out_features=2048) is False
+
+
+def test_select_q1_0_g128_u32_fixed_launch_config_targets_sm80_down_proj_ranges():
+    from gptqmodel.nn_modules.qlinear.gguf_triton import _select_q1_0_g128_u32_fixed_launch_config
+
+    assert _select_q1_0_g128_u32_fixed_launch_config(
+        capability=(8, 0),
+        rows=1,
+        in_features=6144,
+        out_features=2048,
+    ) == {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 16,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_u32_fixed_launch_config(
+        capability=(8, 0),
+        rows=64,
+        in_features=6144,
+        out_features=2048,
+    ) == {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_u32_fixed_launch_config(
+        capability=(8, 0),
+        rows=1,
+        in_features=2048,
+        out_features=1024,
+    ) == {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "num_warps": 2,
+        "num_stages": 2,
+    }
+    assert _select_q1_0_g128_u32_fixed_launch_config(
+        capability=(8, 0),
+        rows=1,
+        in_features=2048,
+        out_features=2048,
+    ) == {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+    assert _select_q1_0_g128_u32_fixed_launch_config(
+        capability=(8, 0),
+        rows=1,
+        in_features=2048,
+        out_features=6144,
+    ) == {
+        "BLOCK_SIZE_M": 8,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    assert _select_q1_0_g128_u32_fixed_launch_config(
+        capability=(8, 0),
+        rows=4,
+        in_features=6144,
+        out_features=2048,
+    ) is None
+    assert _select_q1_0_g128_u32_fixed_launch_config(
+        capability=(8, 0),
+        rows=256,
+        in_features=6144,
+        out_features=2048,
+    ) is None
+    assert _select_q1_0_g128_u32_fixed_launch_config(
+        capability=(8, 9),
+        rows=64,
+        in_features=6144,
+        out_features=2048,
+    ) is None
+
+
+def test_use_q1_0_g128_k2048_decode_specialization_only_targets_decode_k2048():
+    from gptqmodel.nn_modules.qlinear.gguf_triton import _use_q1_0_g128_k2048_decode_specialization
+
+    assert _use_q1_0_g128_k2048_decode_specialization(rows=1, in_features=2048) is True
+    assert _use_q1_0_g128_k2048_decode_specialization(rows=4, in_features=2048) is False
+    assert _use_q1_0_g128_k2048_decode_specialization(rows=1, in_features=6144) is False
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_uses_fixed_decode_launch_for_sm80_q1_0_g128(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[tuple[str, object, dict[str, int] | None]] = []
+    fixed_config = {
+        "BLOCK_SIZE_M": 2,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+
+    def _fake_fixed_matmul(x, sign_bytes, scale, *, fixed_config):
+        calls.append(("fixed", gguf_triton._gguf_q1_0_g128_fused_matmul_kernel_impl, fixed_config))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    def _fake_fused_matmul(x, sign_bytes, scale):
+        calls.append(("generic", None, None))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(gguf_triton, "_launch_q1_0_g128_fixed_matmul", _fake_fixed_matmul)
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_matmul", _fake_fused_matmul)
+
+    module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=256,
+        out_features=192,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    monkeypatch.setattr(
+        module,
+        "_get_triton_cache",
+        lambda _device: {
+            "fixed_decode_config": fixed_config,
+            "sign_bytes": torch.empty((2, 16, 192), device="cuda", dtype=torch.uint8),
+            "scale": torch.empty((2, 192), device="cuda", dtype=torch.float16),
+        },
+    )
+
+    x = torch.randn(1, 256, device="cuda", dtype=torch.float16)
+    module._forward_triton(x)
+
+    assert calls == [("fixed", gguf_triton._gguf_q1_0_g128_fused_matmul_kernel_impl, fixed_config)]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton u32 tests")
+def test_gguf_triton_q1_0_g128_u32_fused_matches_byte_fused():
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    torch.manual_seed(1234)
+    x = torch.randn(8, 256, device="cuda", dtype=torch.float16)
+    sign_bytes = torch.randint(0, 256, (2, 16, 192), device="cuda", dtype=torch.uint8)
+    sign_words = (
+        sign_bytes.to(torch.int32)[:, 0::4, :]
+        | torch.bitwise_left_shift(sign_bytes.to(torch.int32)[:, 1::4, :], 8)
+        | torch.bitwise_left_shift(sign_bytes.to(torch.int32)[:, 2::4, :], 16)
+        | torch.bitwise_left_shift(sign_bytes.to(torch.int32)[:, 3::4, :], 24)
+    ).contiguous()
+    scale = (torch.rand((2, 192), device="cuda", dtype=torch.float16) + 0.05).contiguous()
+
+    byte_out = gguf_triton.fused_q1_0_g128_matmul(x, sign_bytes, scale)
+    u32_out = gguf_triton.fused_q1_0_g128_u32_matmul(x, sign_words, scale)
+
+    output_stats = _error_stats(byte_out.to(torch.float32), u32_out.to(torch.float32))
+    assert output_stats["mae"] < 2e-4
+    assert output_stats["max"] < 3e-3
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_routes_sm80_down_proj_to_u32_path(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[tuple[str, dict[str, int] | None]] = []
+
+    fixed_config = {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+
+    def _fake_u32_fixed(x, sign_words, scale, *, fixed_config):
+        calls.append(("u32_fixed", fixed_config))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    def _fake_byte(x, sign_bytes, scale):
+        calls.append(("byte", None))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(gguf_triton, "_cuda_device_capability", lambda _device: (8, 0))
+    monkeypatch.setattr(gguf_triton, "_launch_q1_0_g128_u32_fixed_matmul", _fake_u32_fixed)
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_matmul", _fake_byte)
+
+    module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=6144,
+        out_features=2048,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    monkeypatch.setattr(
+        module,
+        "_get_triton_cache",
+        lambda _device: {
+            "use_u32": True,
+            "fixed_decode_config": None,
+            "sign_bytes": torch.empty((48, 16, 2048), device="cuda", dtype=torch.uint8),
+            "sign_words": torch.empty((48, 4, 2048), device="cuda", dtype=torch.int32),
+            "scale": torch.empty((48, 2048), device="cuda", dtype=torch.float16),
+        },
+    )
+
+    x = torch.randn(64, 6144, device="cuda", dtype=torch.float16)
+    module._forward_triton(x)
+
+    assert calls == [("u32_fixed", fixed_config)]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_routes_sm80_decode_2048x2048_to_k2048_specialized_u32_path(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[tuple[str, dict[str, int] | None]] = []
+
+    fixed_config = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+
+    def _fake_u32_k2048_fixed(x, sign_words, scale, *, fixed_config):
+        calls.append(("u32_k2048_fixed", fixed_config))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    def _fake_u32_fixed(x, sign_words, scale, *, fixed_config):
+        calls.append(("u32_fixed", fixed_config))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(gguf_triton, "_cuda_device_capability", lambda _device: (8, 0))
+    monkeypatch.setattr(gguf_triton, "_launch_q1_0_g128_u32_k2048_fixed_matmul", _fake_u32_k2048_fixed)
+    monkeypatch.setattr(gguf_triton, "_launch_q1_0_g128_u32_fixed_matmul", _fake_u32_fixed)
+
+    module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=2048,
+        out_features=2048,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    monkeypatch.setattr(
+        module,
+        "_get_triton_cache",
+        lambda _device: {
+            "use_u32": True,
+            "fixed_decode_config": None,
+            "sign_bytes": torch.empty((16, 16, 2048), device="cuda", dtype=torch.uint8),
+            "sign_words": torch.empty((16, 4, 2048), device="cuda", dtype=torch.int32),
+            "scale": torch.empty((16, 2048), device="cuda", dtype=torch.float16),
+        },
+    )
+
+    x = torch.randn(1, 2048, device="cuda", dtype=torch.float16)
+    module._forward_triton(x)
+
+    assert calls == [("u32_k2048_fixed", fixed_config)]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_routes_sm80_decode_6144x2048_to_u32_path(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[tuple[str, dict[str, int] | None]] = []
+
+    fixed_config = {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 16,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+
+    def _fake_u32_fixed(x, sign_words, scale, *, fixed_config):
+        calls.append(("u32_fixed", fixed_config))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    def _fake_byte(x, sign_bytes, scale):
+        calls.append(("byte", None))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(gguf_triton, "_cuda_device_capability", lambda _device: (8, 0))
+    monkeypatch.setattr(gguf_triton, "_launch_q1_0_g128_u32_fixed_matmul", _fake_u32_fixed)
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_matmul", _fake_byte)
+
+    module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=6144,
+        out_features=2048,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    monkeypatch.setattr(
+        module,
+        "_get_triton_cache",
+        lambda _device: {
+            "use_u32": True,
+            "fixed_decode_config": None,
+            "sign_bytes": torch.empty((48, 16, 2048), device="cuda", dtype=torch.uint8),
+            "sign_words": torch.empty((48, 4, 2048), device="cuda", dtype=torch.int32),
+            "scale": torch.empty((48, 2048), device="cuda", dtype=torch.float16),
+        },
+    )
+
+    x = torch.randn(1, 6144, device="cuda", dtype=torch.float16)
+    module._forward_triton(x)
+
+    assert calls == [("u32_fixed", fixed_config)]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_routes_decode_2048x1024_to_k2048_specialized_byte_path(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[str] = []
+
+    def _fake_k2048(x, sign_bytes, scale):
+        calls.append("k2048")
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    def _fake_generic(x, sign_bytes, scale):
+        calls.append("generic")
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_k2048_matmul", _fake_k2048)
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_matmul", _fake_generic)
+
+    module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=2048,
+        out_features=1024,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    monkeypatch.setattr(
+        module,
+        "_get_triton_cache",
+        lambda _device: {
+            "use_u32": False,
+            "fixed_decode_config": None,
+            "sign_bytes": torch.empty((16, 16, 1024), device="cuda", dtype=torch.uint8),
+            "scale": torch.empty((16, 1024), device="cuda", dtype=torch.float16),
+        },
+    )
+
+    x = torch.randn(1, 2048, device="cuda", dtype=torch.float16)
+    module._forward_triton(x)
+
+    assert calls == ["k2048"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_routes_out_of_range_sm80_down_proj_to_byte_path(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[str] = []
+
+    def _fake_byte(x, sign_bytes, scale):
+        calls.append("byte")
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(gguf_triton, "_cuda_device_capability", lambda _device: (8, 0))
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_matmul", _fake_byte)
+
+    module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=6144,
+        out_features=2048,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    monkeypatch.setattr(
+        module,
+        "_get_triton_cache",
+        lambda _device: {
+            "use_u32": True,
+            "fixed_decode_config": None,
+            "sign_bytes": torch.empty((48, 16, 2048), device="cuda", dtype=torch.uint8),
+            "sign_words": torch.empty((48, 4, 2048), device="cuda", dtype=torch.int32),
+            "scale": torch.empty((48, 2048), device="cuda", dtype=torch.float16),
+        },
+    )
+
+    x = torch.randn(4, 6144, device="cuda", dtype=torch.float16)
+    module._forward_triton(x)
+
+    assert calls == ["byte"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_routes_non_decode_2048x1024_to_generic_byte_path(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[str] = []
+
+    def _fake_k2048(x, sign_bytes, scale):
+        calls.append("k2048")
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    def _fake_generic(x, sign_bytes, scale):
+        calls.append("generic")
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_k2048_matmul", _fake_k2048)
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_matmul", _fake_generic)
+
+    module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=2048,
+        out_features=1024,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    monkeypatch.setattr(
+        module,
+        "_get_triton_cache",
+        lambda _device: {
+            "use_u32": False,
+            "fixed_decode_config": None,
+            "sign_bytes": torch.empty((16, 16, 1024), device="cuda", dtype=torch.uint8),
+            "scale": torch.empty((16, 1024), device="cuda", dtype=torch.float16),
+        },
+    )
+
+    x = torch.randn(4, 2048, device="cuda", dtype=torch.float16)
+    module._forward_triton(x)
+
+    assert calls == ["generic"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_routes_sm89_decode_2048x1024_to_fixed_byte_path(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[tuple[str, dict[str, int] | None]] = []
+
+    fixed_config = {
+        "BLOCK_SIZE_M": 8,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 8,
+        "num_stages": 2,
+    }
+
+    def _fake_fixed(x, sign_bytes, scale, *, fixed_config):
+        calls.append(("fixed", fixed_config))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    def _fake_generic(x, sign_bytes, scale):
+        calls.append(("generic", None))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(gguf_triton, "_cuda_device_capability", lambda _device: (8, 9))
+    monkeypatch.setattr(gguf_triton, "_launch_q1_0_g128_k2048_fixed_matmul", _fake_fixed)
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_k2048_matmul", _fake_generic)
+
+    module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=2048,
+        out_features=1024,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    monkeypatch.setattr(
+        module,
+        "_get_triton_cache",
+        lambda _device: {
+            "use_u32": False,
+            "fixed_decode_config": fixed_config,
+            "sign_bytes": torch.empty((16, 16, 1024), device="cuda", dtype=torch.uint8),
+            "scale": torch.empty((16, 1024), device="cuda", dtype=torch.float16),
+        },
+    )
+
+    x = torch.randn(1, 2048, device="cuda", dtype=torch.float16)
+    module._forward_triton(x)
+
+    assert calls == [("fixed", fixed_config)]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_routes_sm89_decode_2048x2048_to_exact_fixed_byte_path(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[tuple[str, dict[str, int] | None]] = []
+
+    fixed_config = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 32,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+
+    def _fake_fixed(x, sign_bytes, scale, *, fixed_config):
+        calls.append(("fixed", fixed_config))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    def _fake_generic(x, sign_bytes, scale):
+        calls.append(("generic", None))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(gguf_triton, "_cuda_device_capability", lambda _device: (8, 9))
+    monkeypatch.setattr(gguf_triton, "_launch_q1_0_g128_k2048_fixed_matmul", _fake_fixed)
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_k2048_matmul", _fake_generic)
+
+    module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=2048,
+        out_features=2048,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    monkeypatch.setattr(
+        module,
+        "_get_triton_cache",
+        lambda _device: {
+            "use_u32": False,
+            "fixed_decode_config": fixed_config,
+            "sign_bytes": torch.empty((16, 16, 2048), device="cuda", dtype=torch.uint8),
+            "scale": torch.empty((16, 2048), device="cuda", dtype=torch.float16),
+        },
+    )
+
+    x = torch.randn(1, 2048, device="cuda", dtype=torch.float16)
+    module._forward_triton(x)
+
+    assert calls == [("fixed", fixed_config)]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_routes_sm89_decode_2048x6144_to_exact_fixed_byte_path(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[tuple[str, dict[str, int] | None]] = []
+
+    fixed_config = {
+        "BLOCK_SIZE_M": 8,
+        "BLOCK_SIZE_N": 64,
+        "num_warps": 8,
+        "num_stages": 2,
+    }
+
+    def _fake_fixed(x, sign_bytes, scale, *, fixed_config):
+        calls.append(("fixed", fixed_config))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    def _fake_generic(x, sign_bytes, scale):
+        calls.append(("generic", None))
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(gguf_triton, "_cuda_device_capability", lambda _device: (8, 9))
+    monkeypatch.setattr(gguf_triton, "_launch_q1_0_g128_k2048_fixed_matmul", _fake_fixed)
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_k2048_matmul", _fake_generic)
+
+    module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=2048,
+        out_features=6144,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    monkeypatch.setattr(
+        module,
+        "_get_triton_cache",
+        lambda _device: {
+            "use_u32": False,
+            "fixed_decode_config": fixed_config,
+            "sign_bytes": torch.empty((16, 16, 6144), device="cuda", dtype=torch.uint8),
+            "scale": torch.empty((16, 6144), device="cuda", dtype=torch.float16),
+        },
+    )
+
+    x = torch.randn(1, 2048, device="cuda", dtype=torch.float16)
+    module._forward_triton(x)
+
+    assert calls == [("fixed", fixed_config)]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_routes_sm80_decode_2048x2048_out_of_range_to_byte_path(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[str] = []
+
+    def _fake_byte(x, sign_bytes, scale):
+        calls.append("byte")
+        return torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr(gguf_triton, "_cuda_device_capability", lambda _device: (8, 0))
+    monkeypatch.setattr(gguf_triton, "fused_q1_0_g128_matmul", _fake_byte)
+
+    module = GGUFTritonKernel(
+        bits="q1_0_g128",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=2048,
+        out_features=2048,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    monkeypatch.setattr(
+        module,
+        "_get_triton_cache",
+        lambda _device: {
+            "use_u32": True,
+            "fixed_decode_config": None,
+            "sign_bytes": torch.empty((16, 16, 2048), device="cuda", dtype=torch.uint8),
+            "sign_words": torch.empty((16, 4, 2048), device="cuda", dtype=torch.int32),
+            "scale": torch.empty((16, 2048), device="cuda", dtype=torch.float16),
+        },
+    )
+
+    x = torch.randn(4, 2048, device="cuda", dtype=torch.float16)
+    module._forward_triton(x)
+
+    assert calls == ["byte"]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF fused K routing test")

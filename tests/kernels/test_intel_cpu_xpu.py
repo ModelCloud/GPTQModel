@@ -12,8 +12,8 @@ from parameterized import parameterized
 from torch import Tensor
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
 from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8Linear
 from gptqmodel.utils.model import find_modules

@@ -8,11 +8,11 @@ import torch
 
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
-from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
@@ -214,6 +214,27 @@ def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkey
     assert candidates[0] is GGUFTritonKernel
     assert candidates[1] is GGUFCudaKernel
     assert candidates[2] is GGUFTorchLinear
+
+
+def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
+
+    candidates = select_quant_linear(
+        bits=1,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert candidates[0] is GGUFTritonKernel
+    assert GGUFCudaKernel not in candidates
+    assert candidates[1] is GGUFTorchLinear
 
 
 def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):

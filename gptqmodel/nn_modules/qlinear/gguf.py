@@ -43,6 +43,8 @@ except Exception:  # pragma: no cover - optional dependency
 setup_logger()
 
 _GGUF_TYPE_INFO = {
+    "Q1_0": {"bits": 1, "block_size": 32, "type_size": 6},
+    "Q1_0_g128": {"bits": 1, "block_size": 128, "type_size": 18},
     "Q4_0": {"bits": 4, "block_size": 32, "type_size": 18},
     "Q8_0": {"bits": 8, "block_size": 32, "type_size": 34},
     "Q4_K": {"bits": 4, "block_size": 256, "type_size": 144},
@@ -50,6 +52,8 @@ _GGUF_TYPE_INFO = {
     "Q6_K": {"bits": 6, "block_size": 256, "type_size": 210},
 }
 _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE = {
+    "q1_0": "Q1_0",
+    "q1_0_g128": "Q1_0_g128",
     "q4_0": "Q4_0",
     "q8_0": "Q8_0",
     "q4_k": "Q4_K",
@@ -63,6 +67,33 @@ _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE = {
 _GGUF_SCALE_QUANT_MAX = 63
 _GGUF_Q6_SCALE_QUANT_MAX = 127
 _GGUF_K_QTYPES = {"Q4_K", "Q5_K", "Q6_K"}
+PRISM_Q1_0_G128_NAME = "Q1_0_g128"
+PRISM_Q1_0_G128_VALUE = 41
+PRISM_Q1_0_G128_BLOCK_SIZE = 128
+PRISM_Q1_0_G128_TYPE_SIZE = 18
+_GGUF_SIGN_ONLY_TYPE_INFO = {
+    "Q1_0": {"block_size": 32, "type_size": 6},
+    PRISM_Q1_0_G128_NAME: {
+        "block_size": PRISM_Q1_0_G128_BLOCK_SIZE,
+        "type_size": PRISM_Q1_0_G128_TYPE_SIZE,
+    },
+}
+_GGUF_TENSOR_QTYPE_BY_VALUE = {
+    0: "F32",
+    1: "F16",
+    2: "Q4_0",
+    8: "Q8_0",
+    12: "Q4_K",
+    13: "Q5_K",
+    14: "Q6_K",
+    30: "BF16",
+    40: "Q1_0",
+    PRISM_Q1_0_G128_VALUE: PRISM_Q1_0_G128_NAME,
+}
+_GGUF_SIGN_ONLY_LUT = (
+    np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="little").astype(np.int8) * 2 - 1
+)
+_GGUF_SIGN_ONLY_TORCH_LUT: dict[str, torch.Tensor] = {}
 
 
 def _normalize_gguf_bits(bits) -> tuple[GGUFBits, str]:
@@ -145,6 +176,16 @@ def _gguf_quantize_q8_0(blocks: np.ndarray) -> np.ndarray:
     qs = np.round(blocks * inv_d).astype(np.int8).view(np.uint8)
     d = d.astype(np.float16).view(np.uint8)
     return np.concatenate([d, qs], axis=-1)
+
+
+def _gguf_quantize_sign_only(blocks: np.ndarray, *, block_size: int) -> np.ndarray:
+    scales = np.mean(np.abs(blocks), axis=-1).astype(np.float16, copy=False)
+    sign_bits = np.packbits((blocks >= 0).astype(np.uint8, copy=False), axis=-1, bitorder="little")
+
+    packed = np.empty((blocks.shape[0], 2 + (block_size // 8)), dtype=np.uint8)
+    packed[:, :2] = scales.view(np.uint8).reshape(-1, 2)
+    packed[:, 2:] = sign_bits
+    return packed
 
 
 def _pack_q4_k_scale_min(scales: np.ndarray, mins: np.ndarray) -> np.ndarray:
@@ -329,7 +370,9 @@ def _fallback_gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray
         )
 
     blocks = weight.reshape(-1, block_size)
-    if tensor_qtype == "Q4_0":
+    if tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+        quantized_blocks = _gguf_quantize_sign_only(blocks, block_size=block_size)
+    elif tensor_qtype == "Q4_0":
         quantized_blocks = _gguf_quantize_q4_0(blocks)
     elif tensor_qtype == "Q8_0":
         quantized_blocks = _gguf_quantize_q8_0(blocks)
@@ -348,13 +391,144 @@ def _fallback_gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray
 
 
 def _gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray:
+    return _quantize_gguf_tensor_numpy(weight, tensor_qtype)
+
+
+def _resolve_gguf_tensor_qtype(tensor_type) -> str:
+    if isinstance(tensor_type, str):
+        normalized = tensor_type.strip()
+        if normalized in _GGUF_TYPE_INFO or normalized in _GGUF_SIGN_ONLY_TYPE_INFO:
+            return normalized
+        raise NotImplementedError(f"Unsupported GGUF qtype: {tensor_type}")
+
+    tensor_name = getattr(tensor_type, "name", None)
+    if tensor_name in _GGUF_TYPE_INFO or tensor_name in _GGUF_SIGN_ONLY_TYPE_INFO:
+        return tensor_name
+
+    try:
+        tensor_value = int(tensor_type)
+    except (TypeError, ValueError):
+        tensor_value = None
+
+    if tensor_value is None:
+        raise NotImplementedError(f"Unsupported GGUF qtype: {tensor_type}")
+
+    resolved = _GGUF_TENSOR_QTYPE_BY_VALUE.get(tensor_value)
+    if resolved is None:
+        raise NotImplementedError(f"Unsupported GGUF qtype value: {tensor_value}")
+    return resolved
+
+
+def _is_prism_q1_0_g128(tensor_type) -> bool:
+    return _resolve_gguf_tensor_qtype(tensor_type) == PRISM_Q1_0_G128_NAME
+
+
+def _dequantize_sign_only_numpy(
+    data: np.ndarray,
+    *,
+    block_size: int,
+    type_size: int,
+) -> np.ndarray:
+    rows = np.asarray(data, dtype=np.uint8)
+    if rows.shape[-1] % type_size != 0:
+        raise ValueError(
+            f"GGUF sign-only row byte width must be divisible by {type_size}, got "
+            f"{rows.shape[-1]} for shape {rows.shape}."
+        )
+
+    n_blocks = rows.shape[-1] // type_size
+    blocks = rows.reshape(*rows.shape[:-1], n_blocks, type_size)
+    scales = np.ascontiguousarray(blocks[..., :2]).view(np.float16).astype(np.float32)[..., 0]
+    sign_bits = np.unpackbits(blocks[..., 2:], axis=-1, bitorder="little")
+    weights = np.where(sign_bits == 1, scales[..., None], -scales[..., None]).astype(np.float32, copy=False)
+    return weights.reshape(*rows.shape[:-1], n_blocks * block_size)
+
+
+def _get_sign_only_torch_lut(device: torch.device) -> torch.Tensor:
+    key = str(device)
+    lut = _GGUF_SIGN_ONLY_TORCH_LUT.get(key)
+    if lut is None or lut.device != device:
+        lut = torch.from_numpy(_GGUF_SIGN_ONLY_LUT).to(device=device, dtype=torch.int8)
+        _GGUF_SIGN_ONLY_TORCH_LUT[key] = lut
+    return lut
+
+
+def _dequantize_sign_only_torch(
+    data: np.ndarray | torch.Tensor,
+    *,
+    block_size: int,
+    type_size: int,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    if torch.is_tensor(data):
+        rows = data
+        if rows.dtype != torch.uint8:
+            rows = rows.to(dtype=torch.uint8)
+    else:
+        rows = torch.from_numpy(np.array(data, dtype=np.uint8, copy=True, order="C"))
+
+    target_device = rows.device if device is None else torch.device(device)
+    if rows.device != target_device:
+        rows = rows.to(device=target_device, non_blocking=rows.device.type == "cpu" and target_device.type == "cuda")
+    if not rows.is_contiguous():
+        rows = rows.contiguous()
+
+    if rows.shape[-1] % type_size != 0:
+        raise ValueError(
+            f"GGUF sign-only row byte width must be divisible by {type_size}, got "
+            f"{rows.shape[-1]} for shape {tuple(rows.shape)}."
+        )
+
+    n_blocks = rows.shape[-1] // type_size
+    blocks = rows.reshape(*rows.shape[:-1], n_blocks, type_size)
+    scales = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
+    if scales.dtype != dtype:
+        scales = scales.to(dtype)
+
+    sign_bytes = blocks[..., 2:].to(dtype=torch.long)
+    sign_lut = _get_sign_only_torch_lut(target_device)
+    signs = sign_lut[sign_bytes].reshape(*rows.shape[:-1], n_blocks, block_size)
+    if signs.dtype != dtype:
+        signs = signs.to(dtype)
+
+    weights = scales.unsqueeze(-1) * signs
+    return weights.reshape(*rows.shape[:-1], n_blocks * block_size)
+
+
+def _dequantize_prism_q1_0_g128(data: np.ndarray) -> np.ndarray:
+    return _dequantize_sign_only_numpy(
+        data,
+        block_size=PRISM_Q1_0_G128_BLOCK_SIZE,
+        type_size=PRISM_Q1_0_G128_TYPE_SIZE,
+    )
+
+
+def _dequantize_prism_q1_0_g128_torch(
+    data: np.ndarray | torch.Tensor,
+    *,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    return _dequantize_sign_only_torch(
+        data,
+        block_size=PRISM_Q1_0_G128_BLOCK_SIZE,
+        type_size=PRISM_Q1_0_G128_TYPE_SIZE,
+        device=device,
+        dtype=dtype,
+    )
+
+
+def _quantize_gguf_tensor_numpy(weight: np.ndarray, tensor_qtype) -> np.ndarray:
+    resolved_qtype = _resolve_gguf_tensor_qtype(tensor_qtype)
     if _GGUF_AVAILABLE:
-        qtype = getattr(gguf_lib.GGMLQuantizationType, tensor_qtype)
+        qtype = getattr(gguf_lib.GGMLQuantizationType, resolved_qtype, None)
         try:
-            return gguf_lib.quantize(weight, qtype)
+            if qtype is not None:
+                return gguf_lib.quantize(weight, qtype)
         except NotImplementedError:
             pass
-    return _fallback_gguf_quantize(weight, tensor_qtype)
+    return _fallback_gguf_quantize(weight, resolved_qtype)
 
 
 def _dequantize_q4_k_numpy(qweight: np.ndarray) -> np.ndarray:
@@ -424,11 +598,56 @@ def _dequantize_q6_k_numpy(qweight: np.ndarray) -> np.ndarray:
     return (d * q).reshape(rows, -1)
 
 
+def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
+    resolved_qtype = _resolve_gguf_tensor_qtype(tensor_type)
+
+    if resolved_qtype == "F32":
+        return np.asarray(data, dtype=np.float32)
+    if resolved_qtype == "F16":
+        return np.asarray(data, dtype=np.float16).astype(np.float32)
+    if resolved_qtype == "BF16":
+        rows = np.asarray(data, dtype=np.uint16).astype(np.uint32)
+        return np.left_shift(rows, np.uint32(16)).view(np.float32)
+    if resolved_qtype == "Q4_0":
+        rows = np.asarray(data, dtype=np.uint8)
+        type_size = _GGUF_TYPE_INFO["Q4_0"]["type_size"]
+        blocks = rows.reshape(-1, type_size)
+        d = blocks[:, :2].view(np.float16).astype(np.float32)
+        qs = blocks[:, 2:].reshape((-1, 1, 16))
+        low = qs & np.uint8(0x0F)
+        high = qs >> np.uint8(4)
+        q = np.concatenate([low, high], axis=1).reshape((-1, 32)).astype(np.int16) - 8
+        return (d * q.astype(np.float32)).reshape(rows.shape[0], -1)
+    if resolved_qtype == "Q8_0":
+        rows = np.asarray(data, dtype=np.uint8)
+        type_size = _GGUF_TYPE_INFO["Q8_0"]["type_size"]
+        blocks = rows.reshape(-1, type_size)
+        d = blocks[:, :2].view(np.float16).astype(np.float32)
+        q = blocks[:, 2:].view(np.int8).astype(np.float32)
+        return (d * q).reshape(rows.shape[0], -1)
+    if resolved_qtype == "Q4_K":
+        return _dequantize_q4_k_numpy(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "Q5_K":
+        return _dequantize_q5_k_numpy(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "Q6_K":
+        return _dequantize_q6_k_numpy(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "Q1_0":
+        return _dequantize_sign_only_numpy(
+            data,
+            block_size=_GGUF_SIGN_ONLY_TYPE_INFO["Q1_0"]["block_size"],
+            type_size=_GGUF_SIGN_ONLY_TYPE_INFO["Q1_0"]["type_size"],
+        )
+    if resolved_qtype == PRISM_Q1_0_G128_NAME:
+        return _dequantize_prism_q1_0_g128(np.asarray(data, dtype=np.uint8))
+
+    raise NotImplementedError(f"Unsupported GGUF qtype: {resolved_qtype}")
+
+
 class GGUFTorchLinear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TORCH]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 15}
-    SUPPORTS_BITS = [4, 5, 6, 8]
+    SUPPORTS_BITS = [1, 4, 5, 6, 8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True
@@ -706,6 +925,22 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         weight = d.unsqueeze(-1) * x
         return weight.reshape(rows, self.padded_in_features)
 
+    def _dequantize_sign_only(
+        self,
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
+        weight = _dequantize_sign_only_torch(
+            self.qweight,
+            block_size=self.gguf_block_size,
+            type_size=self.gguf_type_size,
+            device=target_device,
+            dtype=target_dtype,
+        )
+        return weight.reshape(self.out_features, self.padded_in_features)
+
     def _dequantize_numpy(
         self,
         fn,
@@ -809,6 +1044,8 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             weight = self._dequantize_q4_0(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q8_0":
             weight = self._dequantize_q8_0(device=device, dtype=dtype)
+        elif self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+            weight = self._dequantize_sign_only(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q4_K":
             target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
             blocks, _, _ = self._reshape_blocks(device=target_device)
@@ -837,7 +1074,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             return False
 
         return (
-            self.gguf_tensor_qtype in _GGUF_K_QTYPES
+            self.gguf_tensor_qtype in (_GGUF_K_QTYPES | set(_GGUF_SIGN_ONLY_TYPE_INFO))
             and self.adapter is None
             and not self.training
             and max_rows > 0
@@ -917,6 +1154,14 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
                 weight_chunk = self._dequantize_q5_k_blocks(block_chunk, target_dtype)
             elif self.gguf_tensor_qtype == "Q6_K":
                 weight_chunk = self._dequantize_q6_k_blocks(block_chunk, target_dtype)
+            elif self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+                weight_chunk = _dequantize_sign_only_torch(
+                    block_chunk.reshape(block_chunk.shape[0], -1),
+                    block_size=self.gguf_block_size,
+                    type_size=self.gguf_type_size,
+                    device=x_flat.device,
+                    dtype=target_dtype,
+                )
             else:  # pragma: no cover - guarded by _should_use_fused_k_forward
                 raise NotImplementedError(f"Unsupported GGUF fused qtype: {self.gguf_tensor_qtype}")
 

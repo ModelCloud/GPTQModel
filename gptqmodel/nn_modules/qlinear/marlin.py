@@ -38,9 +38,9 @@ from ...utils.marlin import (
     marlin_make_workspace_new,
     marlin_permute_bias,
     marlin_permute_scales,
+    marlin_repeat_scales_on_all_ranks,
     marlin_runtime_available,
     marlin_runtime_error,
-    marlin_repeat_scales_on_all_ranks,
     marlin_sort_g_idx,
     replace_parameter,
 )
