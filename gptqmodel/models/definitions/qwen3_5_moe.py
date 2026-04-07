@@ -26,6 +26,8 @@ class Qwen3_5_MoeQModel(BaseQModel):
 
     rotary_embedding = "model.language_model.rotary_emb"
 
+    out_of_model_tensors = {"prefixes": ["mtp"]}
+
     # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module
     # the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]

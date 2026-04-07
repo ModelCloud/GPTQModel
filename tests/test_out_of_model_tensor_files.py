@@ -9,6 +9,8 @@ import os
 from types import SimpleNamespace
 
 import torch
+from gptqmodel.utils.model import TensorSource
+from safetensors import safe_open
 from safetensors.torch import save_file
 
 from gptqmodel.models.writer import ModelWriter
@@ -91,9 +93,15 @@ class _DummyModel:
             json.dump({"do_sample": True}, handle)
 
 
-def _build_writer_with_out_of_model_file(model_local_path):
+def _tensor_source(name: str, tensor: torch.Tensor) -> TensorSource:
+    return TensorSource(name=name, torch_dtype=tensor.dtype, shape=tuple(tensor.shape), source=tensor)
+
+
+def _build_writer_with_out_of_model_file(model_local_path, out_of_model_tensor_files=None):
     class _Base:
-        out_of_model_tensor_files = ["dangling.safetensors"]
+        pass
+
+    _Base.out_of_model_tensors = out_of_model_tensor_files or []
 
     DummyWriter = ModelWriter(_Base)
     instance = DummyWriter()
@@ -111,54 +119,170 @@ def _build_writer_with_out_of_model_file(model_local_path):
     return instance
 
 
-def test_out_of_model_tensor_files_are_copied_and_indexed(tmp_path, monkeypatch):
-    original_dir = tmp_path / "original"
-    original_dir.mkdir()
-
-    dangling_path = original_dir / "dangling.safetensors"
-    save_file({"dangling.weight": torch.ones(1)}, str(dangling_path))
-
-    writer = _build_writer_with_out_of_model_file(str(original_dir))
-
-    monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
-    monkeypatch.setattr("gptqmodel.models.writer.alias_all_from_turtle_if_meta", lambda *args, **kwargs: None)
-    monkeypatch.setattr("gptqmodel.models.writer.sanitize_model_config", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("gptqmodel.models.writer.sanitize_generation_config_file", lambda *_args, **_kwargs: False)
-
-    base_state_dict = {"model.weight": torch.zeros(1)}
-
-    def _fake_get_state_dict_for_save(*_args, **_kwargs):
-        return dict(base_state_dict)
-
-    monkeypatch.setattr("gptqmodel.models.writer.get_state_dict_for_save", _fake_get_state_dict_for_save)
-
+def _patch_streaming(monkeypatch, shard_count=1):
     def _fake_streaming_state_dict_to_shards(state_dict, save_dir, model_base_name, single_file_name, metadata, *_args, **_kwargs):
-        file_path = os.path.join(save_dir, single_file_name)
-        save_file(state_dict, file_path, metadata=metadata)
-        tensor_to_filename = dict.fromkeys(state_dict.keys(), single_file_name)
-        total_size = os.path.getsize(file_path)
-        return [single_file_name], tensor_to_filename, total_size
+        expected_files = []
+        tensor_to_filename = {}
+        for idx in range(shard_count):
+            if shard_count == 1:
+                shard_name = "model.safetensors"
+            else:
+                shard_name = f"{model_base_name}-{idx+1:05d}-of-{shard_count:05d}.safetensors"
+            file_path = os.path.join(save_dir, shard_name)
+            tensor_data = {
+                name: ts.source if isinstance(ts, TensorSource) else ts
+                for name, ts in state_dict.items()
+            }
+            save_file(tensor_data, file_path, metadata=metadata)
+            expected_files.append(shard_name)
+            for name in state_dict:
+                tensor_to_filename.setdefault(name, shard_name)
+        total_size = sum(os.path.getsize(os.path.join(save_dir, fname)) for fname in expected_files)
+        return expected_files, tensor_to_filename, total_size
 
     monkeypatch.setattr(
         "gptqmodel.models.writer.streaming_state_dict_to_shards",
         _fake_streaming_state_dict_to_shards,
     )
 
+
+def _patch_basic_env(monkeypatch, state_dict_tensor):
+    monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
+    monkeypatch.setattr("gptqmodel.models.writer.alias_all_from_turtle_if_meta", lambda *args, **kwargs: None)
+    monkeypatch.setattr("gptqmodel.models.writer.sanitize_model_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("gptqmodel.models.writer.sanitize_generation_config_file", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "gptqmodel.models.writer.get_state_dict_for_save",
+        lambda *_args, **_kwargs: state_dict_tensor,
+    )
+
+
+def test_merge_prefixed_tensors(tmp_path, monkeypatch):
+    original_dir = tmp_path / "original"
+    original_dir.mkdir()
+
+    shard_a_name = "model-00001-of-00002.safetensors"
+    shard_b_name = "model-00002-of-00002.safetensors"
+
+    save_file(
+        {
+            "base.weight": torch.zeros(1),
+            "mtp.fc.weight": torch.ones(2),
+        },
+        str(original_dir / shard_a_name),
+    )
+    save_file(
+        {
+            "model.layers.0.weight": torch.full((1,), 2.0),
+            "mtp.model.layers.0.weight": torch.full((3,), 3.0),
+        },
+        str(original_dir / shard_b_name),
+    )
+
+    with open(original_dir / "model.safetensors.index.json", "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "metadata": {"total_size": 0},
+                "weight_map": {
+                    "mtp.fc.weight": shard_a_name,
+                    "mtp.model.layers.0.weight": shard_b_name,
+                },
+            },
+            handle,
+        )
+
+    writer = _build_writer_with_out_of_model_file(
+        str(original_dir), out_of_model_tensor_files=[{"prefixes": ["mtp"]}]
+    )
+    state_dict_data = {"model.weight": _tensor_source("model.weight", torch.zeros(1))}
+
+    _patch_basic_env(monkeypatch, state_dict_data)
+    _patch_streaming(monkeypatch)
+
     save_dir = tmp_path / "save"
     writer.save_quantized(save_dir=str(save_dir))
 
-    copied_path = save_dir / "dangling.safetensors"
-    assert copied_path.exists()
+    assert not (save_dir / "mtp.safetensors").exists()
 
-    index_path = save_dir / "model.safetensors.index.json"
-    assert index_path.exists()
+    with safe_open(save_dir / "model.safetensors", framework="pt", device="cpu") as handle:
+        keys = set(handle.keys())
+    assert {"mtp.fc.weight", "mtp.model.layers.0.weight"} <= keys
 
-    with open(index_path, "r", encoding="utf-8") as handle:
+
+def test_merge_prefixed_tensors_with_multiple_shards(tmp_path, monkeypatch):
+    original_dir = tmp_path / "original"
+    original_dir.mkdir()
+
+    for shard_idx in range(2):
+        shard_name = f"model-{shard_idx+1:05d}-of-00002.safetensors"
+        save_file(
+            {
+                "model.weight": torch.zeros(1),
+                "mtp.fc.weight": torch.ones(2),
+            },
+            str(original_dir / shard_name),
+        )
+
+    with open(original_dir / "model.safetensors.index.json", "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "metadata": {"total_size": 0},
+                "weight_map": {
+                    "mtp.fc.weight": "model-00001-of-00002.safetensors",
+                },
+            },
+            handle,
+        )
+
+    writer = _build_writer_with_out_of_model_file(
+        str(original_dir), out_of_model_tensor_files=[{"prefixes": ["mtp"]}]
+    )
+    state_dict_data = {"model.weight": _tensor_source("model.weight", torch.zeros(1))}
+
+    _patch_basic_env(monkeypatch, state_dict_data)
+    _patch_streaming(monkeypatch, shard_count=2)
+
+    save_dir = tmp_path / "save"
+    writer.save_quantized(save_dir=str(save_dir))
+
+    assert (save_dir / "model-00001-of-00002.safetensors").exists()
+    assert (save_dir / "model-00002-of-00002.safetensors").exists()
+    assert (save_dir / "model.safetensors.index.json").exists()
+
+    keys = []
+    with safe_open(save_dir / "model-00001-of-00002.safetensors", framework="pt", device="cpu") as handle:
+        keys += handle.keys()
+    with safe_open(save_dir / "model-00002-of-00002.safetensors", framework="pt", device="cpu") as handle:
+        keys += handle.keys()
+    assert {"mtp.fc.weight"} <= set(keys)
+
+    with open(save_dir / "model.safetensors.index.json", "r", encoding="utf-8") as handle:
         index_data = json.load(handle)
+    assert index_data["weight_map"]["mtp.fc.weight"] == "model-00001-of-00002.safetensors"
 
-    assert index_data["weight_map"]["model.weight"] == "model.safetensors"
-    assert index_data["weight_map"]["dangling.weight"] == "dangling.safetensors"
 
-    model_size = os.path.getsize(save_dir / "model.safetensors")
-    dangling_size = os.path.getsize(copied_path)
-    assert index_data["metadata"]["total_size"] == model_size + dangling_size
+def test_copy_existing_file(tmp_path, monkeypatch):
+    original_dir = tmp_path / "original"
+    original_dir.mkdir()
+
+    mtp_file = original_dir / "mtp.safetensors"
+    save_file({"mtp.linear.weight": torch.ones(1)}, str(mtp_file))
+
+    writer = _build_writer_with_out_of_model_file(
+        str(original_dir), out_of_model_tensor_files=[{"files": ["mtp.safetensors"]}]
+    )
+    state_dict_data = {"model.weight": _tensor_source("model.weight", torch.zeros(1))}
+
+    _patch_basic_env(monkeypatch, state_dict_data)
+    _patch_streaming(monkeypatch)
+
+    save_dir = tmp_path / "save"
+    writer.save_quantized(save_dir=str(save_dir))
+
+    with safe_open(save_dir / "mtp.safetensors", framework="pt", device="cpu") as handle:
+        mtp_keys = set(handle.keys())
+    assert mtp_keys == {"mtp.linear.weight"}
+
+    with safe_open(save_dir / "model.safetensors", framework="pt", device="cpu") as handle:
+        mtp_keys = set(handle.keys())
+    assert mtp_keys == {"model.weight"}

@@ -23,7 +23,7 @@ class GLM4MoEGPTQ(BaseQModel):
     # Set to False since GLM-4.5-Air may have dynamic module structures
     layer_modules_strict = False
 
-    out_of_model_tensor_files = ["mtp.safetensors"]
+    out_of_model_tensors = {"files": ["mtp.safetensors"]}
 
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
