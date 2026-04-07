@@ -6,17 +6,27 @@
 import copy
 import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 from gptqmodel.utils.model import TensorSource
 from safetensors import safe_open
 from safetensors.torch import save_file
-from transformers import AutoConfig
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.trainers import WordLevelTrainer
+from transformers import PreTrainedTokenizerFast
+from transformers.models.glm4_moe.configuration_glm4_moe import Glm4MoeConfig
+from transformers.models.glm4_moe.modeling_glm4_moe import Glm4MoeForCausalLM
+from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeConfig
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForConditionalGeneration
 
-from gptqmodel.models.auto import check_and_get_model_definition
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
 from gptqmodel.models.writer import ModelWriter
 from gptqmodel.quantization.config import FORMAT, METHOD
+from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 
 
 class _DummyKernel:
@@ -131,10 +141,10 @@ _REAL_QWEN3_5_MOE_CONFIG = {
     "architectures": ["Qwen3_5MoeForConditionalGeneration"],
     "dtype": "bfloat16",
     "model_type": "qwen3_5_moe",
-    "image_token_id": 1,
-    "video_token_id": 2,
-    "vision_start_token_id": 3,
-    "vision_end_token_id": 4,
+    "image_token_id": 252,
+    "video_token_id": 253,
+    "vision_start_token_id": 254,
+    "vision_end_token_id": 255,
     "tie_word_embeddings": False,
     "transformers_version": "5.5.0",
     "text_config": {
@@ -142,8 +152,8 @@ _REAL_QWEN3_5_MOE_CONFIG = {
         "model_type": "qwen3_5_moe_text",
         "attention_bias": False,
         "attention_dropout": 0.0,
-        "bos_token_id": None,
-        "eos_token_id": 5,
+        "bos_token_id": 2,
+        "eos_token_id": 3,
         "hidden_act": "silu",
         "hidden_size": 64,
         "initializer_range": 0.02,
@@ -163,7 +173,7 @@ _REAL_QWEN3_5_MOE_CONFIG = {
         "linear_value_head_dim": 16,
         "max_position_embeddings": 256,
         "output_router_logits": False,
-        "pad_token_id": 5,
+        "pad_token_id": 0,
         "partial_rotary_factor": 0.25,
         "rms_norm_eps": 1e-6,
         "rope_parameters": {
@@ -193,6 +203,12 @@ _REAL_QWEN3_5_MOE_CONFIG = {
         "temporal_patch_size": 2,
     },
 }
+
+_CALIBRATION_TEXTS = [
+    "tiny moe calibration sample one with enough tokens to keep the real quantization path active",
+    "tiny moe calibration sample two repeats expert friendly words so the dummy model save path stays exercised",
+    "another synthetic calibration example that is intentionally verbose to avoid minimum length filtering",
+] * 2
 
 
 class _DummyModel:
@@ -233,58 +249,106 @@ def _build_writer_with_out_of_model_file(model_local_path, out_of_model_tensor_f
     return instance
 
 
-def _write_real_glm4_moe_config(model_dir):
-    with open(os.path.join(model_dir, "config.json"), "w", encoding="utf-8") as handle:
-        json.dump(_REAL_GLM4_MOE_CONFIG, handle)
+def _build_local_tokenizer(model_dir: Path) -> PreTrainedTokenizerFast:
+    tokenizer = Tokenizer(WordLevel(unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+    trainer = WordLevelTrainer(
+        special_tokens=["[PAD]", "[UNK]", "[BOS]", "[EOS]"],
+    )
+    tokenizer.train_from_iterator(_CALIBRATION_TEXTS, trainer=trainer)
+
+    fast_tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        bos_token="[BOS]",
+        eos_token="[EOS]",
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+    )
+    fast_tokenizer.save_pretrained(model_dir)
+    return fast_tokenizer
 
 
-def _write_real_qwen3_5_moe_config(model_dir):
-    with open(os.path.join(model_dir, "config.json"), "w", encoding="utf-8") as handle:
-        json.dump(_REAL_QWEN3_5_MOE_CONFIG, handle)
+def _build_calibration_dataset(tokenizer: PreTrainedTokenizerFast) -> list[dict[str, object]]:
+    dataset = []
+    for text in _CALIBRATION_TEXTS:
+        encoded = tokenizer(text, return_tensors="pt")
+        dataset.append(
+            {
+                "input_ids": encoded["input_ids"],
+                "attention_mask": encoded["attention_mask"],
+            }
+        )
+    return dataset
 
 
-def _build_writer_from_real_model_config(model_local_path, expected_out_of_model_tensors, monkeypatch=None):
-    model_definition = check_and_get_model_definition(model_local_path, trust_remote_code=False)
-    assert model_definition.out_of_model_tensors == expected_out_of_model_tensors
+def _write_mtp_tensor_file(model_dir: Path, tensors: dict[str, torch.Tensor]) -> None:
+    save_file(tensors, str(model_dir / "mtp.safetensors"))
 
-    if getattr(model_definition, "require_load_processor", False):
-        assert monkeypatch is not None
+
+def _build_tiny_glm4_moe_fixture(model_dir: Path) -> list[dict[str, object]]:
+    model_dir.mkdir()
+    config = Glm4MoeConfig(**_REAL_GLM4_MOE_CONFIG)
+    model = Glm4MoeForCausalLM(config)
+    model.save_pretrained(model_dir, safe_serialization=True)
+    tokenizer = _build_local_tokenizer(model_dir)
+    _write_mtp_tensor_file(
+        model_dir,
+        {
+            "mtp.linear.weight": torch.ones(2, 2),
+        },
+    )
+    return _build_calibration_dataset(tokenizer)
+
+
+def _build_tiny_qwen3_5_moe_fixture(model_dir: Path) -> list[dict[str, object]]:
+    model_dir.mkdir()
+    config = Qwen3_5MoeConfig(**_REAL_QWEN3_5_MOE_CONFIG)
+    model = Qwen3_5MoeForConditionalGeneration(config)
+    model.save_pretrained(model_dir, safe_serialization=True)
+    tokenizer = _build_local_tokenizer(model_dir)
+    _write_mtp_tensor_file(
+        model_dir,
+        {
+            "mtp.fc.weight": torch.ones(2),
+            "mtp.model.layers.0.weight": torch.full((3,), 3.0),
+        },
+    )
+    return _build_calibration_dataset(tokenizer)
+
+
+def _quantize_and_save(
+    *,
+    model_dir: Path,
+    save_dir: Path,
+    calibration_dataset: list[dict[str, object]],
+    monkeypatch=None,
+):
+    if monkeypatch is not None:
         monkeypatch.setattr(
             "gptqmodel.models.base.AutoProcessor.from_pretrained",
             lambda *args, **kwargs: None,
         )
 
-    config = AutoConfig.from_pretrained(model_local_path, trust_remote_code=False)
-    model = model_definition.loader.from_config(config, trust_remote_code=False)
-
-    instance = model_definition(
-        model=model,
-        quantized=True,
-        quantize_config=_DummyQuantizeConfig(),
-        tokenizer=None,
-        qlinear_kernel=_DummyKernel(),
-        load_quantized_model=False,
-        trust_remote_code=False,
-        model_local_path=model_local_path,
-        turtle_model=SimpleNamespace(),
-    )
-    return instance
-
-
-def _build_writer_from_real_glm4_moe_config(model_local_path, monkeypatch=None):
-    return _build_writer_from_real_model_config(
-        model_local_path,
-        expected_out_of_model_tensors={"files": ["mtp.safetensors"]},
-        monkeypatch=monkeypatch,
+    quantize_config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        device="cpu",
+        moe=MoEConfig(routing=ExpertsRoutingOverride()),
     )
 
-
-def _build_writer_from_real_qwen3_5_moe_config(model_local_path, monkeypatch):
-    return _build_writer_from_real_model_config(
-        model_local_path,
-        expected_out_of_model_tensors={"prefixes": ["mtp"]},
-        monkeypatch=monkeypatch,
+    model = GPTQModel.load(
+        str(model_dir),
+        quantize_config=quantize_config,
+        backend=BACKEND.TORCH,
     )
+    model.quantize(
+        calibration_dataset,
+        batch_size=1,
+        backend=BACKEND.TORCH,
+        calibration_data_min_length=1,
+    )
+    model.save(str(save_dir))
 
 
 def _patch_streaming(monkeypatch, shard_count=1):
@@ -456,22 +520,16 @@ def test_copy_existing_file(tmp_path, monkeypatch):
     assert mtp_keys == {"model.weight"}
 
 
-def test_copy_existing_file_with_glm4_moe(tmp_path, monkeypatch):
+def test_copy_existing_file_with_glm4_moe(tmp_path):
     original_dir = tmp_path / "original"
-    original_dir.mkdir()
-    _write_real_glm4_moe_config(str(original_dir))
-
-    mtp_file = original_dir / "mtp.safetensors"
-    save_file({"mtp.linear.weight": torch.ones(1)}, str(mtp_file))
-
-    writer = _build_writer_from_real_glm4_moe_config(str(original_dir))
-    state_dict_data = {"model.weight": _tensor_source("model.weight", torch.zeros(1))}
-
-    _patch_basic_env(monkeypatch, state_dict_data)
-    _patch_streaming(monkeypatch)
-
     save_dir = tmp_path / "save"
-    writer.save_quantized(save_dir=str(save_dir))
+
+    calibration_dataset = _build_tiny_glm4_moe_fixture(original_dir)
+    _quantize_and_save(
+        model_dir=original_dir,
+        save_dir=save_dir,
+        calibration_dataset=calibration_dataset,
+    )
 
     with safe_open(save_dir / "mtp.safetensors", framework="pt", device="cpu") as handle:
         mtp_keys = set(handle.keys())
@@ -484,47 +542,15 @@ def test_copy_existing_file_with_glm4_moe(tmp_path, monkeypatch):
 
 def test_merge_prefixed_tensors_with_qwen3_5_moe(tmp_path, monkeypatch):
     original_dir = tmp_path / "original"
-    original_dir.mkdir()
-    _write_real_qwen3_5_moe_config(str(original_dir))
-
-    shard_a_name = "model-00001-of-00002.safetensors"
-    shard_b_name = "model-00002-of-00002.safetensors"
-
-    save_file(
-        {
-            "base.weight": torch.zeros(1),
-            "mtp.fc.weight": torch.ones(2),
-        },
-        str(original_dir / shard_a_name),
-    )
-    save_file(
-        {
-            "model.layers.0.weight": torch.full((1,), 2.0),
-            "mtp.model.layers.0.weight": torch.full((3,), 3.0),
-        },
-        str(original_dir / shard_b_name),
-    )
-
-    with open(original_dir / "model.safetensors.index.json", "w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "metadata": {"total_size": 0},
-                "weight_map": {
-                    "mtp.fc.weight": shard_a_name,
-                    "mtp.model.layers.0.weight": shard_b_name,
-                },
-            },
-            handle,
-        )
-
-    writer = _build_writer_from_real_qwen3_5_moe_config(str(original_dir), monkeypatch=monkeypatch)
-    state_dict_data = {"model.weight": _tensor_source("model.weight", torch.zeros(1))}
-
-    _patch_basic_env(monkeypatch, state_dict_data)
-    _patch_streaming(monkeypatch)
-
     save_dir = tmp_path / "save"
-    writer.save_quantized(save_dir=str(save_dir))
+
+    calibration_dataset = _build_tiny_qwen3_5_moe_fixture(original_dir)
+    _quantize_and_save(
+        model_dir=original_dir,
+        save_dir=save_dir,
+        calibration_dataset=calibration_dataset,
+        monkeypatch=monkeypatch,
+    )
 
     assert not (save_dir / "mtp.safetensors").exists()
 
