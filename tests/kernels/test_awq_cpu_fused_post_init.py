@@ -7,9 +7,9 @@ import pytest
 import torch
 
 from gptqmodel.adapter.adapter import Lora
-from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
-from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_int8_awq import TorchInt8AwqQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
+from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
+from gptqmodel.nn_modules.qlinear.torch_int8_awq import TorchInt8AwqLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import select_quant_linear
@@ -18,15 +18,15 @@ from gptqmodel.utils.importer import select_quant_linear
 @pytest.mark.parametrize(
     "kernel_cls",
     [
-        pytest.param(TorchFusedAwqQuantLinear, id="torch_fused_awq"),
-        pytest.param(HFKernelAwqLinear, id="hf_kernel_awq"),
-        pytest.param(TorchInt8AwqQuantLinear, id="torch_int8_awq"),
+        pytest.param(TorchFusedAwqLinear, id="torch_fused_awq"),
+        pytest.param(TorchAtenAwqLinear, id="torch_aten_awq"),
+        pytest.param(TorchInt8AwqLinear, id="torch_int8_awq"),
     ],
 )
 def test_awq_fused_post_init_calls_adapter(monkeypatch, kernel_cls):
-    if kernel_cls is HFKernelAwqLinear:
+    if kernel_cls is TorchAtenAwqLinear:
         monkeypatch.setattr(
-            HFKernelAwqLinear,
+            TorchAtenAwqLinear,
             "cached_validate_once",
             classmethod(lambda cls: (True, None)),
         )
@@ -61,9 +61,9 @@ def test_awq_fused_post_init_calls_adapter(monkeypatch, kernel_cls):
     assert getattr(module, "wf_unsqueeze_neg_one", None) is None
 
 
-def test_hf_kernel_awq_backend_selection(monkeypatch):
+def test_torch_aten_awq_backend_selection(monkeypatch):
     monkeypatch.setattr(
-        HFKernelAwqLinear,
+        TorchAtenAwqLinear,
         "cached_validate_once",
         classmethod(lambda cls: (True, None)),
     )
@@ -74,9 +74,9 @@ def test_hf_kernel_awq_backend_selection(monkeypatch):
         desc_act=False,
         sym=True,
         device=None,
-        backend=BACKEND.HF_KERNEL_AWQ,
+        backend=BACKEND.AWQ_TORCH_ATEN,
         format=FORMAT.GEMM,
         quant_method=METHOD.AWQ,
         pack_dtype=torch.int32,
     )
-    assert qlinear_cls is HFKernelAwqLinear
+    assert qlinear_cls is TorchAtenAwqLinear

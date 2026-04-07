@@ -5,7 +5,7 @@ import torch
 import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
-from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
+from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend, select_quant_linear
@@ -139,7 +139,7 @@ def test_awq_bitblas_repack_from_awq_preserves_codes(monkeypatch):
     bias = torch.randn(out_features, dtype=torch.float16)
     qweight, qzeros = _pack_awq(intweight.t().contiguous(), intzeros, bits)
 
-    awq_module = AwqGEMMQuantLinear(
+    awq_module = AwqGEMMLinear(
         bits=bits,
         group_size=group_size,
         sym=True,

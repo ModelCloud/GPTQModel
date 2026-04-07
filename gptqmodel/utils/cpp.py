@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import shutil
 import sys
@@ -19,6 +20,7 @@ import torch
 from torch.utils.cpp_extension import _get_build_directory, load
 
 from .env import env_flag
+from .jit_compile_baselines import get_jit_compile_baseline_seconds
 from .logger import setup_logger
 
 
@@ -40,12 +42,307 @@ _cpp_ext_lock = threading.Lock()
 _cpp_ext_initialized = False
 
 _SHARED_LIBRARY_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
+_COMPILE_PROGRESS_TOTAL_STEPS = 100
+_COMPILE_PROGRESS_INTERVAL_SECONDS = 1.0
+# Default NVCC internal threading for JIT builds. This is based on clean-build
+# timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
+# the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
+_DEFAULT_NVCC_THREADS = "8"
+
+
+def _format_compile_duration_seconds(seconds: float) -> str:
+    """Format one duration compactly for user-facing compile progress text."""
+
+    seconds_value = max(0.0, float(seconds))
+    if seconds_value < 10.0:
+        return f"{seconds_value:.1f}s"
+    return f"{seconds_value:.0f}s"
+
+
+def _compile_progress_ratio(elapsed_seconds: float, baseline_seconds: float) -> float:
+    """Map elapsed compile time onto a progress ratio that never reaches 100% early."""
+
+    baseline = max(float(baseline_seconds), 0.0)
+    elapsed = max(float(elapsed_seconds), 0.0)
+    if baseline <= 0.0 or elapsed <= 0.0:
+        return 0.0
+    if elapsed <= baseline:
+        return min(0.95 * (elapsed / baseline), 0.95)
+
+    overrun = elapsed - baseline
+    tail_ratio = 1.0 - math.exp(-overrun / max(baseline, 1.0))
+    return min(0.95 + (0.04 * tail_ratio), 0.99)
+
+
+def _compile_progress_step(
+    elapsed_seconds: float,
+    baseline_seconds: float,
+    *,
+    total_steps: int = _COMPILE_PROGRESS_TOTAL_STEPS,
+) -> int:
+    """Convert one elapsed/baseline pair into a bounded manual progress step."""
+
+    if total_steps <= 1:
+        return 0
+    ratio = _compile_progress_ratio(elapsed_seconds, baseline_seconds)
+    return max(0, min(total_steps - 1, int(math.floor(ratio * (total_steps - 1)))))
+
+
+def _compile_progress_subtitle(elapsed_seconds: float, baseline_seconds: float) -> str:
+    """Describe compile elapsed time against the recorded reference baseline."""
+
+    elapsed = max(float(elapsed_seconds), 0.0)
+    baseline = max(float(baseline_seconds), 0.0)
+    if baseline <= 0.0:
+        return f"elapsed {_format_compile_duration_seconds(elapsed)}"
+    if elapsed <= baseline:
+        return (
+            f"elapsed {_format_compile_duration_seconds(elapsed)} / "
+            f"estimated ~{_format_compile_duration_seconds(baseline)}"
+        )
+    return (
+        f"elapsed {_format_compile_duration_seconds(elapsed)} / "
+        f"estimated ~{_format_compile_duration_seconds(baseline)} "
+        f"(+{_format_compile_duration_seconds(elapsed - baseline)})"
+    )
+
+
+def _compile_baseline_summary(elapsed_seconds: float, baseline_seconds: Optional[float]) -> str:
+    """Format a concise compile-vs-baseline summary for durable log lines."""
+
+    elapsed = _format_compile_duration_seconds(elapsed_seconds)
+    if baseline_seconds is None or baseline_seconds <= 0:
+        return f"in {elapsed}"
+
+    baseline = _format_compile_duration_seconds(baseline_seconds)
+    delta = elapsed_seconds - baseline_seconds
+    delta_text = _format_compile_duration_seconds(abs(delta))
+    if abs(delta) < 0.05:
+        return f"in {elapsed} (estimated ~{baseline})"
+    sign = "+" if delta >= 0 else "-"
+    return f"in {elapsed} (estimated ~{baseline}, {sign}{delta_text})"
+
+
+class _CompileProgressDisplay:
+    """Render either a baseline-backed progress bar or a fallback spinner."""
+
+    def __init__(
+        self,
+        *,
+        logger,
+        title: str,
+        baseline_seconds: Optional[float],
+    ) -> None:
+        self._logger = logger
+        self._title = title
+        self._baseline_seconds = (
+            None if baseline_seconds is None or baseline_seconds <= 0 else float(baseline_seconds)
+        )
+        self._started = time.perf_counter()
+        self._stop_event: Optional[threading.Event] = None
+        self._thread: Optional[threading.Thread] = None
+        self._progress = None
+        self._spinner = None
+        self._render_lock = threading.Lock()
+        self._closed = False
+
+        if self._baseline_seconds is None:
+            self._spinner = logger.spinner(title=title, interval=_COMPILE_PROGRESS_INTERVAL_SECONDS)
+            return
+
+        progress = logger.pb(range(_COMPILE_PROGRESS_TOTAL_STEPS)).manual().set(show_left_steps=False)
+        progress.title(title)
+        progress.subtitle(_compile_progress_subtitle(0.0, self._baseline_seconds))
+        progress.draw(force=True)
+        self._progress = progress
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._refresh_loop,
+            name=f"jit-compile-progress-{title}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def elapsed_seconds(self) -> float:
+        return max(0.0, time.perf_counter() - self._started)
+
+    def _refresh_loop(self) -> None:
+        assert self._stop_event is not None
+        while not self._stop_event.wait(_COMPILE_PROGRESS_INTERVAL_SECONDS):
+            self._draw_current(force=False)
+
+    def _draw_current(self, *, force: bool) -> None:
+        if self._progress is None or self._baseline_seconds is None:
+            return
+        if self._closed:
+            return
+        with self._render_lock:
+            if self._closed:
+                return
+            elapsed = self.elapsed_seconds()
+            self._progress.current_iter_step = _compile_progress_step(elapsed, self._baseline_seconds)
+            self._progress.subtitle(_compile_progress_subtitle(elapsed, self._baseline_seconds))
+            self._progress.draw(force=force)
+
+    def close(self, *, succeeded: bool, elapsed_seconds: Optional[float] = None) -> None:
+        elapsed = self.elapsed_seconds() if elapsed_seconds is None else max(0.0, float(elapsed_seconds))
+        if self._spinner is not None:
+            self._spinner.close()
+            return
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._progress is None or self._baseline_seconds is None:
+            return
+        # Completion is driven by the actual build result and elapsed time, not
+        # by the estimated baseline. A faster-than-expected compile should exit
+        # immediately and force the bar to its final state.
+        self._closed = True
+        with self._render_lock:
+            self._progress.current_iter_step = (
+                _COMPILE_PROGRESS_TOTAL_STEPS if succeeded else _compile_progress_step(elapsed, self._baseline_seconds)
+            )
+            self._progress.subtitle(_compile_progress_subtitle(elapsed, self._baseline_seconds))
+            self._progress.draw(force=True)
+            self._progress.close()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.05)
 
 
 def default_torch_ops_build_root(subdir: str) -> Path:
     """Return the default on-disk cache root for torch.ops JIT extensions."""
 
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
+
+
+def _dedupe_path_strings(paths: Sequence[str]) -> list[str]:
+    """Normalize and deduplicate include/library path strings while preserving order."""
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        normalized = str(Path(raw_path).expanduser())
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def detected_cuda_wheel_include_paths() -> list[str]:
+    """Discover CUDA developer headers shipped via NVIDIA Python wheels."""
+
+    try:
+        import nvidia  # type: ignore
+    except Exception:
+        return []
+
+    include_paths: list[str] = []
+    for base_text in getattr(nvidia, "__path__", []):
+        base_path = Path(base_text)
+        candidate_paths = list(base_path.glob("cu*/include"))
+        candidate_paths.extend(base_path.glob("*/include"))
+        for candidate in sorted(candidate_paths):
+            if candidate.is_dir():
+                include_paths.append(str(candidate))
+    return _dedupe_path_strings(include_paths)
+
+
+def torch_cxx11_abi_flag() -> int:
+    """Return the ABI mode local JIT extensions must match for this torch build."""
+
+    return int(getattr(torch._C, "_GLIBCXX_USE_CXX11_ABI", 1))
+
+
+def torch_cxx11_abi_define() -> str:
+    """Return the compiler define that keeps local extensions ABI-compatible."""
+
+    return f"-D_GLIBCXX_USE_CXX11_ABI={torch_cxx11_abi_flag()}"
+
+
+def resolved_jit_opt_level(opt_level: str | None = "O3") -> str | None:
+    """Resolve the effective JIT optimization level, honoring the global env override."""
+
+    override = os.getenv("GPTQMODEL_NVCC_COMPILE_LEVEL")
+    raw_level = override if override is not None else opt_level
+    if raw_level is None:
+        return None
+
+    normalized = str(raw_level).strip()
+    if not normalized:
+        return None
+    if normalized.startswith("-"):
+        normalized = normalized[1:]
+    normalized = normalized.upper()
+
+    if normalized in {"NONE", "NOOPT", "NO_OPT", "OFF", "DISABLE", "0"}:
+        return None
+    if normalized in {"O0", "O1", "O2", "O3"}:
+        return normalized
+    raise ValueError(
+        "GPTQMODEL_NVCC_COMPILE_LEVEL must be one of O0/O1/O2/O3 or NONE/NOOPT/OFF."
+    )
+
+
+def default_jit_cflags(
+    *,
+    opt_level: str | None = "O3",
+    enable_bf16: bool = False,
+    include_abi: bool = True,
+) -> list[str]:
+    """Return the common C++ compiler flags for torch.ops JIT extensions."""
+
+    resolved_opt_level = resolved_jit_opt_level(opt_level)
+    flags = ["-std=c++17"]
+    if resolved_opt_level is not None:
+        flags.insert(0, f"-{resolved_opt_level}")
+    if enable_bf16:
+        flags.append("-DENABLE_BF16")
+    if include_abi:
+        flags.append(torch_cxx11_abi_define())
+    return flags
+
+
+def default_jit_cuda_cflags(
+    *,
+    opt_level: str | None = "O3",
+    enable_bf16: bool = False,
+    include_abi: bool = True,
+    include_lineinfo: bool = False,
+    include_nvcc_threads: bool = True,
+    include_ptxas_optimizations: bool = False,
+    include_ptxas_verbosity: bool = True,
+    include_fatbin_compression: bool = False,
+    include_diag_suppress: bool = False,
+) -> list[str]:
+    """Return the common NVCC flags for torch.ops JIT CUDA extensions."""
+
+    resolved_opt_level = resolved_jit_opt_level(opt_level)
+    flags = default_jit_cflags(
+        opt_level=resolved_opt_level,
+        enable_bf16=enable_bf16,
+        include_abi=include_abi,
+    )
+
+    if include_nvcc_threads:
+        flags.extend(["--threads", os.getenv("NVCC_THREADS", _DEFAULT_NVCC_THREADS)])
+        if resolved_opt_level is not None:
+            optimization_level = (
+                resolved_opt_level[1:] if resolved_opt_level.startswith("O") else resolved_opt_level
+            )
+            flags.append(f"--optimize={optimization_level}")
+    if include_ptxas_optimizations:
+        ptxas_flags = ["-v"] if include_ptxas_verbosity else []
+        if resolved_opt_level is not None:
+            ptxas_flags.append(f"-{resolved_opt_level}")
+        ptxas_flags.append("-dlcm=ca")
+        flags.extend(["-Xptxas", ",".join(ptxas_flags)])
+    if include_lineinfo:
+        flags.append("-lineinfo")
+    if include_fatbin_compression:
+        flags.extend(["-Xfatbin", "-compress-all"])
+    if include_diag_suppress:
+        flags.append("-diag-suppress=179,39,177")
+    return flags
 
 
 class TorchOpsJitExtension:
@@ -85,6 +382,7 @@ class TorchOpsJitExtension:
         self.verbose_env = verbose_env
         self.requires_cuda = bool(requires_cuda)
         self.binary_names = tuple(binary_names or (name,))
+        self.compile_baseline_seconds = get_jit_compile_baseline_seconds(name)
         self._load_attempted = False
         self._load_result = False
         self._last_error = ""
@@ -116,6 +414,14 @@ class TorchOpsJitExtension:
         resolved = value() if callable(value) else value
         return [str(item) for item in resolved]
 
+    def _resolved_extra_include_paths(self) -> list[str]:
+        """Resolve explicit include paths and append CUDA wheel headers when needed."""
+
+        include_paths = self._resolve_sequence(self.extra_include_paths)
+        if self.requires_cuda:
+            include_paths.extend(detected_cuda_wheel_include_paths())
+        return _dedupe_path_strings(include_paths)
+
     def base_build_root(self) -> Path:
         """Return the user-visible cache root before applying the loader fingerprint."""
 
@@ -144,7 +450,7 @@ class TorchOpsJitExtension:
 
         payload.extend(self._resolve_sequence(self.extra_cflags))
         payload.extend(self._resolve_sequence(self.extra_cuda_cflags))
-        payload.extend(self._resolve_sequence(self.extra_include_paths))
+        payload.extend(self._resolved_extra_include_paths())
         payload.extend(self._resolve_sequence(self.extra_ldflags))
         digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
         return digest[:16]
@@ -306,8 +612,13 @@ class TorchOpsJitExtension:
 
             logger = setup_logger()
             logger.info(f"{self.display_name}: compiling torch.ops JIT extension in `{build_root}`.")
-            spinner = logger.spinner(title=f"{self.display_name}: compiling kernel...", interval=0.1)
+            progress_display = _CompileProgressDisplay(
+                logger=logger,
+                title=f"Compiling extension: {self.display_name}...",
+                baseline_seconds=self.compile_baseline_seconds,
+            )
             started = time.perf_counter()
+            build_invocation_succeeded = False
             try:
                 kwargs = {
                     "name": self.name,
@@ -322,7 +633,7 @@ class TorchOpsJitExtension:
                 extra_cuda_cflags = self._resolve_sequence(self.extra_cuda_cflags)
                 if extra_cuda_cflags:
                     kwargs["extra_cuda_cflags"] = extra_cuda_cflags
-                extra_include_paths = self._resolve_sequence(self.extra_include_paths)
+                extra_include_paths = self._resolved_extra_include_paths()
                 if extra_include_paths:
                     kwargs["extra_include_paths"] = extra_include_paths
                 extra_ldflags = self._resolve_sequence(self.extra_ldflags)
@@ -330,15 +641,21 @@ class TorchOpsJitExtension:
                     kwargs["extra_ldflags"] = extra_ldflags
 
                 load(**kwargs)
+                build_invocation_succeeded = True
             except Exception as exc:  # pragma: no cover - build depends on host toolchain
+                elapsed = time.perf_counter() - started
                 self._load_attempted = True
                 self._load_result = False
                 self._last_error = f"{self.display_name}: failed to build torch.ops JIT extension: {exc}"
                 log.debug("%s", self._last_error, exc_info=True)
-                logger.info(f"{self.display_name}: torch.ops JIT compilation failed; using fallback path.")
+                logger.info(
+                    f"{self.display_name}: torch.ops JIT compilation failed "
+                    f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}; using fallback path."
+                )
                 return False
             finally:
-                spinner.close()
+                elapsed = time.perf_counter() - started
+                progress_display.close(succeeded=build_invocation_succeeded, elapsed_seconds=elapsed)
 
             elapsed = time.perf_counter() - started
             ready = self._refresh_runtime_cache() or self._try_load_prebuilt_library(build_root)
@@ -347,7 +664,10 @@ class TorchOpsJitExtension:
             if ready:
                 self._refresh_runtime_cache()
                 self._last_error = ""
-                logger.info(f"{self.display_name}: torch.ops JIT extension ready in {elapsed:.1f}s.")
+                logger.info(
+                    f"{self.display_name}: torch.ops JIT extension ready "
+                    f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}."
+                )
                 return True
 
             self._last_error = f"{self.display_name}: build completed but required torch.ops were not registered."
@@ -473,11 +793,13 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
         return None
 
     try:
+        from gptqmodel import extension as extension_api
+
         previous_verbose = os.environ.get("GPTQMODEL_EXT_VERBOSE")
         if verbose:
             os.environ["GPTQMODEL_EXT_VERBOSE"] = "1"
         try:
-            _PACK_BLOCK_EXTENSION = _pack_block_extension().load()
+            _PACK_BLOCK_EXTENSION = extension_api.load(name="pack_block_cpu")["pack_block_cpu"]
         finally:
             if verbose:
                 if previous_verbose is None:

@@ -3,13 +3,14 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-import torch
-
-from .cpp import TorchOpsJitExtension, default_torch_ops_build_root
-
+from .cpp import (
+    TorchOpsJitExtension,
+    default_jit_cflags,
+    default_jit_cuda_cflags,
+    default_torch_ops_build_root,
+)
 
 _AWQ_OPS_NAME = "gptqmodel_awq_ops"
 _AWQ_OPS_NAMESPACE = "gptqmodel_awq"
@@ -31,43 +32,20 @@ def _awq_include_paths() -> list[str]:
     return [str(root)]
 
 
-def _awq_cxx11_abi_flag() -> int:
-    return int(getattr(torch._C, "_GLIBCXX_USE_CXX11_ABI", 1))
-
-
 def _awq_extra_cflags() -> list[str]:
-    abi = _awq_cxx11_abi_flag()
-    return [
-        "-O3",
-        "-std=c++17",
-        "-DENABLE_BF16",
-        f"-D_GLIBCXX_USE_CXX11_ABI={abi}",
-    ]
+    return default_jit_cflags(enable_bf16=True)
 
 
 def _awq_extra_cuda_cflags() -> list[str]:
-    abi = _awq_cxx11_abi_flag()
-    return [
-        "-O3",
-        "-std=c++17",
-        "-DENABLE_BF16",
-        f"-D_GLIBCXX_USE_CXX11_ABI={abi}",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-        "--threads",
-        os.getenv("NVCC_THREADS", "2"),
-        "--optimize=3",
-        "-Xptxas",
-        "-v,-O3,-dlcm=ca",
-        "-lineinfo",
-        "-Xfatbin",
-        "-compress-all",
-        "-diag-suppress=179,39,177",
-    ]
+    return default_jit_cuda_cflags(
+        enable_bf16=True,
+        include_lineinfo=True,
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+        include_ptxas_verbosity=False,
+        include_fatbin_compression=True,
+        include_diag_suppress=True,
+    )
 
 
 # Shared singleton so every AWQ/ParoQuant caller uses the same torch.ops JIT
@@ -97,50 +75,57 @@ _AWQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
 )
 
 
+def _extension_api():
+    from gptqmodel import extension as extension_api
+
+    return extension_api
+
+
 def clear_awq_extension_cache() -> None:
     _AWQ_TORCH_OPS_EXTENSION.clear_cache()
 
 
 def awq_runtime_available() -> bool:
-    return _AWQ_TORCH_OPS_EXTENSION.load()
+    return _extension_api().is_available("awq")
 
 
 def awq_runtime_error() -> str:
-    if _AWQ_TORCH_OPS_EXTENSION.load():
+    extension_api = _extension_api()
+    if extension_api.is_available("awq"):
         return ""
-    return _AWQ_TORCH_OPS_EXTENSION.last_error_message() or "CUDA AWQ runtime unavailable."
+    return extension_api.error("awq") or "CUDA AWQ runtime unavailable."
 
 
 def prewarm_awq_extension() -> bool:
-    return awq_runtime_available()
+    return _extension_api().load(name="awq")["awq"]
 
 
 def _awq_runtime_namespace():
-    return _AWQ_TORCH_OPS_EXTENSION.namespace_object()
+    return _extension_api().namespace("awq")
 
 
 def awq_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool):
-    return _AWQ_TORCH_OPS_EXTENSION.op("gemm_forward")(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
+    return _extension_api().op("awq", "gemm_forward")(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
 
 
 def awq_dequantize_weights(qweight, scales, qzeros, split_k_iters, thx, thy, dbg):
-    return _AWQ_TORCH_OPS_EXTENSION.op("dequantize_weights")(qweight, scales, qzeros, split_k_iters, thx, thy, dbg)
+    return _extension_api().op("awq", "dequantize_weights")(qweight, scales, qzeros, split_k_iters, thx, thy, dbg)
 
 
 def awq_gemmv2_forward(input, qweight, scales, qzeros, group_size, split_k_iters):
-    return _AWQ_TORCH_OPS_EXTENSION.op("gemmv2_forward")(input, qweight, scales, qzeros, group_size, split_k_iters)
+    return _extension_api().op("awq", "gemmv2_forward")(input, qweight, scales, qzeros, group_size, split_k_iters)
 
 
 def awq_gemv_forward(input, qweight, scales, qzeros, group_size):
-    return _AWQ_TORCH_OPS_EXTENSION.op("gemv_forward")(input, qweight, scales, qzeros, group_size)
+    return _extension_api().op("awq", "gemv_forward")(input, qweight, scales, qzeros, group_size)
 
 
 def awq_fast_gemm_forward_prefill(input, qweight, scales, qzeros):
-    return _AWQ_TORCH_OPS_EXTENSION.op("gemm_fast_forward_prefill")(input, qweight, scales, qzeros)
+    return _extension_api().op("awq", "gemm_fast_forward_prefill")(input, qweight, scales, qzeros)
 
 
 def awq_fast_gemv_forward_decode(input, qweight, scales, qzeros, m, n, k, group_size):
-    return _AWQ_TORCH_OPS_EXTENSION.op("gemv_fast_forward_decode")(input, qweight, scales, qzeros, m, n, k, group_size)
+    return _extension_api().op("awq", "gemv_fast_forward_decode")(input, qweight, scales, qzeros, m, n, k, group_size)
 
 
 __all__ = [

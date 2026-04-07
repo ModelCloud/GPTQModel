@@ -18,13 +18,15 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
     apply_awq_marlin_linear,
+    awq_marlin_repack,
     awq_to_marlin_zero_points,
-    gptqmodel_marlin_kernels,
     marlin_import_exception,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_permute_bias,
     marlin_permute_scales,
+    marlin_runtime_available,
+    marlin_runtime_error,
     replace_parameter,
 )
 from ...utils.marlin_scalar_type import scalar_types
@@ -34,7 +36,7 @@ from ...utils.rocm import IS_ROCM
 log = setup_logger()
 
 
-class AwqMarlinQuantLinear(AWQuantLinear):
+class AwqMarlinLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_MARLIN]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 90, FORMAT.MARLIN: 90}
@@ -79,6 +81,7 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             register_buffers=False,
             **kwargs):
         self.max_par = 8  # partitioning for large inputs
+        self.compute_dtype = kwargs.get("dtype") or torch.float16
 
         super().__init__(
             bits=bits,
@@ -185,15 +188,22 @@ class AwqMarlinQuantLinear(AWQuantLinear):
     def post_init(self):
         device = self.qweight.device
 
+        if not marlin_runtime_available(self.compute_dtype):
+            raise ModuleNotFoundError(
+                "Marlin torch.ops kernels are not properly installed. Error: "
+                + marlin_runtime_error(self.compute_dtype)
+            )
+
         # Allocate marlin workspace
         self.workspace = marlin_make_workspace_new(device)
 
         # Repack weights from AWQ format to marlin format.
-        marlin_qweight = gptqmodel_marlin_kernels.awq_marlin_repack(
+        marlin_qweight = awq_marlin_repack(
             self.qweight,
             self.in_features,
             self.out_features,
-            self.bits)
+            self.bits,
+            dtype=self.compute_dtype)
         replace_parameter(self, "qweight", marlin_qweight)
 
         # Permute scales from AWQ format to marlin format.
@@ -265,4 +275,4 @@ class AwqMarlinQuantLinear(AWQuantLinear):
         return out
 
 
-__all__ = ["AwqMarlinQuantLinear"]
+__all__ = ["AwqMarlinLinear"]

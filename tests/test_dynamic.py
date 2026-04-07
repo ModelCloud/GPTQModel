@@ -23,9 +23,9 @@ from gptqmodel.looper.loop_processor import LoopProcessor  # noqa: E402
 from gptqmodel.looper.named_module import NamedModule  # noqa: E402
 from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import safetensor  # noqa: E402
 
@@ -97,9 +97,9 @@ class TestDynamic(ModelTest):
     @parameterized.expand(
         [
             # exllama v1/v2 only supports 4bit so does not support dynamic bits control
-            (BACKEND.TORCH, TorchQuantLinear),
-            (BACKEND.TRITON, TritonV2QuantLinear),
-            (BACKEND.MARLIN, MarlinQuantLinear),
+            (BACKEND.TORCH, TorchLinear),
+            (BACKEND.TRITON, TritonV2Linear),
+            (BACKEND.MARLIN, MarlinLinear),
         ]
     )
     def test_dynamic_bits(self, backend, backendQLinear):

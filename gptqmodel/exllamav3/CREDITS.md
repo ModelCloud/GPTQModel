@@ -10,4 +10,4 @@ Ported components in this repo:
 - `gptqmodel/exllamav3/util/*`
 - `gptqmodel_ext/exllamav3/*`
 
-The code remains self-contained inside GPTQModel and does not depend on the external `exllamav3` Python package.
+The code remains self-contained inside GPT-QModel and does not depend on the external `exllamav3` Python package.

@@ -9,22 +9,22 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.packing_utils import unpack_reorder_pack
 from ...utils.backend import BACKEND
-from ...utils.exllamav2 import ScratchSpace
+from ...utils.exllamav2 import (
+    ScratchSpace,
+    exllamav2_awq_gemm_half_q_half,
+    exllamav2_awq_make_q_matrix,
+    exllamav2_awq_runtime_available,
+    exllamav2_awq_runtime_error,
+)
 from ...utils.logger import setup_logger
 
 
 log = setup_logger()
 
-exlv2_ext, msg = try_import("gptqmodel_exllamav2_awq_kernels")
 
-# Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
-none_tensor = torch.empty((1, 1), device="meta")
-
-
-class AwqExllamaV2QuantLinear(AWQuantLinear):
+class AwqExllamaV2Linear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_EXLLAMA_V2]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 80}
@@ -78,6 +78,29 @@ class AwqExllamaV2QuantLinear(AWQuantLinear):
             adapter=adapter,
             **kwargs)
 
+    @classmethod
+    def validate_once(cls):
+        # Validate through the shared JIT loader so import-time checks match the
+        # runtime build path used on first kernel access.
+        if not exllamav2_awq_runtime_available():
+            return False, ImportError(exllamav2_awq_runtime_error())
+        return True, None
+
+    def ext_make_q_matrix_awq(self, qweight, qzeros, scales, temp_dq) -> int:
+        runtime_scales = scales if scales.dtype == torch.float16 else scales.to(dtype=torch.float16)
+        return exllamav2_awq_make_q_matrix(
+            qweight,
+            None,
+            None,
+            None,
+            None,
+            None,
+            qzeros,
+            runtime_scales,
+            None,
+            temp_dq,
+        )
+
     def post_init(self, scratch_space: ScratchSpace):
         # if self.padded_infeatures != self.in_features:
         #     self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
@@ -89,8 +112,8 @@ class AwqExllamaV2QuantLinear(AWQuantLinear):
         #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
         #                               device=self.g_idx.device)
 
-        if exlv2_ext is None:
-            raise ModuleNotFoundError("External ExLlama kernels are not properly installed." + msg)
+        if not exllamav2_awq_runtime_available():
+            raise ModuleNotFoundError("ExLlamaV2 AWQ torch.ops kernels are not properly installed. Error: " + exllamav2_awq_runtime_error())
 
         # awq only accepts float16
         self.scales = self.scales.to(dtype=torch.float16)
@@ -104,18 +127,7 @@ class AwqExllamaV2QuantLinear(AWQuantLinear):
 
         temp_dq_size = self.temp_dq_size()
         temp_dq = scratch_space.get_slice(temp_dq_size)
-        self.q_handle = exlv2_ext.make_q_matrix_awq(
-            self.qweight,
-            none_tensor,
-            none_tensor,
-            none_tensor,
-            none_tensor,
-            none_tensor,
-            self.qzeros,
-            self.scales,
-            none_tensor,
-            temp_dq,
-        )
+        self.q_handle = self.ext_make_q_matrix_awq(self.qweight, self.qzeros, self.scales, temp_dq)
 
         super().post_init()
 
@@ -123,8 +135,8 @@ class AwqExllamaV2QuantLinear(AWQuantLinear):
         assert self.q_handle is not None, (
             "module.post_init() must be called before module.forward(). "
         )
-        if exlv2_ext is None:
-            raise ModuleNotFoundError("External ExLlamaV2 kernels are not properly installed." + msg)
+        if not exllamav2_awq_runtime_available():
+            raise ModuleNotFoundError("ExLlamaV2 AWQ torch.ops kernels are not properly installed. Error: " + exllamav2_awq_runtime_error())
 
         input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.out_features,)
@@ -139,7 +151,7 @@ class AwqExllamaV2QuantLinear(AWQuantLinear):
             dtype=torch.float16,
             device=x.device,
         )
-        exlv2_ext.gemm_half_q_half_awq(x, self.q_handle, out, False)
+        exllamav2_awq_gemm_half_q_half(x, self.q_handle, out, False)
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)
@@ -175,4 +187,4 @@ def next_multiple(x, multiple):
     return ((x + multiple - 1) // multiple) * multiple
 
 
-__all__ = ["AwqExllamaV2QuantLinear"]
+__all__ = ["AwqExllamaV2Linear"]

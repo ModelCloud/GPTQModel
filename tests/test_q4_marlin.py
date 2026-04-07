@@ -16,7 +16,7 @@ from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
 
 
 class TestQ4Marlin(ModelTest):
@@ -58,7 +58,7 @@ class TestQ4Marlin(ModelTest):
         model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
         has_marlin = False
         for _, module in model_q.named_modules():
-            linear = MarlinQuantLinear
+            linear = MarlinLinear
             if isinstance(module, linear):
                 has_marlin = True
                 break

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Environment variable helpers used across GPTQModel."""
+"""Environment variable helpers used across GPT-QModel."""
 
 from __future__ import annotations
 

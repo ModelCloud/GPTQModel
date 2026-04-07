@@ -87,7 +87,7 @@ class AwqGemmFn(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None, None, None, None
 
 
-class AwqGEMMQuantLinear(AWQuantLinear):
+class AwqGEMMLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMM]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 60}
@@ -116,7 +116,7 @@ class AwqGEMMQuantLinear(AWQuantLinear):
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if not awq_runtime_available():
-            return False, ValueError(awq_runtime_error() or "CUDA AWQ extension not available; cannot select AwqGEMMQuantLinear")
+            return False, ValueError(awq_runtime_error() or "CUDA AWQ extension not available; cannot select AwqGEMMLinear")
         else:
             return True, None
 
@@ -276,5 +276,5 @@ class AwqGEMMQuantLinear(AWQuantLinear):
 
 __all__ = [
     "AwqGemmFn",
-    "AwqGEMMQuantLinear",
+    "AwqGEMMLinear",
 ]

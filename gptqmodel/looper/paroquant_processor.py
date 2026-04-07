@@ -48,7 +48,7 @@ from ..models.writer import (
     QUANT_LOG_DAMP,
 )
 from ..nn_modules.hooked_linear import HookedLinear
-from ..nn_modules.qlinear.paroquant import ParoQuantQuantLinear
+from ..nn_modules.qlinear.paroquant import ParoLinear
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
 from ..quantization.paroquant.optimization import (
     _ParoQuantOptimLinear,
@@ -269,8 +269,8 @@ class ParoQuantProcessor(LoopProcessor):
         """Resolve the only supported runtime kernel class for ParoQuant."""
         fmt = FORMAT(format_value) if not isinstance(format_value, FORMAT) else format_value
         if fmt != FORMAT.PAROQUANT:
-            raise ValueError(f"METHOD.PAROQUANT does not support this FORMAT: {format_value}")
-        return ParoQuantQuantLinear
+            raise ValueError(f"METHOD.PARO does not support this FORMAT: {format_value}")
+        return ParoLinear
 
     def prewarm_runtime(self) -> None:
         """Build optional fused ParoQuant runtime pieces before timed layer work starts."""
@@ -296,8 +296,8 @@ class ParoQuantProcessor(LoopProcessor):
         format_override = self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
         target_format = resolve_quant_format(format_override or self.qcfg.format, self.qcfg.method)
         if target_format != FORMAT.PAROQUANT:
-            raise ValueError(f"METHOD.PAROQUANT does not support dynamic format override `{target_format}`.")
-        return ParoQuantQuantLinear
+            raise ValueError(f"METHOD.PARO does not support dynamic format override `{target_format}`.")
+        return ParoLinear
 
     def _get_layer_state(self, layer_index: int) -> _ParoQuantLayerState:
         """Fetch or create the shared state bucket for one transformer layer."""
@@ -2601,9 +2601,9 @@ class ParoQuantProcessor(LoopProcessor):
                 )
 
         qmodule = qmodules[module.full_name]
-        if not isinstance(qmodule, ParoQuantQuantLinear):
+        if not isinstance(qmodule, ParoLinear):
             raise TypeError(
-                f"Expected `{module.full_name}` to be packed as ParoQuantQuantLinear, got `{type(qmodule).__name__}`."
+                f"Expected `{module.full_name}` to be packed as ParoLinear, got `{type(qmodule).__name__}`."
             )
 
         qmodule.pairs.copy_(pairs.to(device=qmodule.pairs.device, dtype=qmodule.pairs.dtype))
@@ -2616,7 +2616,7 @@ class ParoQuantProcessor(LoopProcessor):
     def finalize(self, model: BaseQModel, **kwargs):
         """Mark the model as ParoQuant-quantized before shared finalization work."""
         model.quantized = True
-        model.quantize_config.method = METHOD.PAROQUANT
+        model.quantize_config.method = METHOD.PARO
         super().finalize(model=model, **kwargs)
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:

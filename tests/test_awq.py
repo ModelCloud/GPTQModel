@@ -17,13 +17,13 @@ from models.model_test import ModelTest
 from parameterized import parameterized
 from transformers import AutoTokenizer
 
-from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
-from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
-from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
-from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
-from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
+from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear
+from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear
+from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
+from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
-from gptqmodel.utils.machete import _validate_machete_device_support, machete_import_exception
+from gptqmodel.utils.machete import machete_runtime_available, machete_runtime_error
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -130,10 +130,8 @@ class TestAwq(unittest.TestCase):
     ])
     def test_quant_and_inference(self, checkpoint_format, backend, group_size: int):
         if backend == BACKEND.MACHETE:
-            if machete_import_exception is not None:
-                self.skipTest(f"machete unavailable: {machete_import_exception}")
-            if not _validate_machete_device_support():
-                self.skipTest("Machete requires NVIDIA Hopper or newer (SM90+)")
+            if not machete_runtime_available():
+                self.skipTest(f"machete unavailable: {machete_runtime_error()}")
 
         key = (checkpoint_format, group_size)
         model_path = self.quantized_model_paths[key]
@@ -169,15 +167,15 @@ class TestAwq(unittest.TestCase):
         has_qqq = False
         for _, module in model.named_modules():
             if backend == BACKEND.GEMM:
-                linear = AwqGEMMQuantLinear
+                linear = AwqGEMMLinear
             elif backend == BACKEND.MACHETE:
-                linear = AwqMacheteQuantLinear
+                linear = AwqMacheteLinear
             elif backend == BACKEND.MARLIN:
-                linear = AwqMarlinQuantLinear
+                linear = AwqMarlinLinear
             elif backend == BACKEND.GEMV:
-                linear = AwqGEMVQuantLinear
+                linear = AwqGEMVLinear
             elif backend == BACKEND.GEMV_FAST:
-                linear = AwqGEMVFastQuantLinear
+                linear = AwqGEMVFastLinear
             else:
                 raise Exception("unknown backend: " + backend)
             if isinstance(module, linear):

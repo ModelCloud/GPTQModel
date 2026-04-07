@@ -8,7 +8,7 @@ from contextlib import nullcontext
 
 import torch
 
-from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
+from ..nn_modules.qlinear.bitblas import BitBLASLinear
 from ..nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
 from ..quantization import FORMAT, METHOD, QuantizeConfig
 from ..quantization.config import resolve_quant_format
@@ -24,7 +24,7 @@ log = setup_logger()
 def _select_bitblas_kernel_class(qcfg: QuantizeConfig):
     if qcfg.quant_method == METHOD.AWQ:
         return AWQBitBlasKernel
-    return BitBLASQuantLinear
+    return BitBLASLinear
 
 
 def _should_enable_bitblas_tuning(repack: bool) -> bool:

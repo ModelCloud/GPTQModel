@@ -5,6 +5,7 @@ run-name: "${{ github.event.inputs.title }}"
 defaults:
   run:
     shell: bash -le {0}
+
 on:
   release:
     types: [ published ]
@@ -27,10 +28,6 @@ on:
         description: 'PR Number'
         required: false
         type: number
-      max-parallel:
-        description: 'max parallel jobs'
-        required: false
-        default: '10'
       upload_release:
         description: 'upload to release (it only works with a tag ref)'
         type: boolean
@@ -46,33 +43,11 @@ on:
         type: boolean
         required: false
         default: false
-# for github limits, test only
-#      cuda-version:
-#        description: 'cuda version(128)'
-#        required: false
-#        default: ''
-#      torch-version:
-#        description: 'torch version(2.10.0)'
-#        required: false
-#        default: ''
-#      python-version:
-#        description: 'python version(313)'
-#        required: false
-#        default: ''
 
 env:
-  CUDA_DEVICE_ORDER: PCI_BUS_ID
   RUNNER: 10.0.13.31
-  TORCH_CUDA_ARCH_LIST: '8.0 8.6 8.9 9.0 12.0'
-  CUDA_ARCH_LIST: '8.0 8.6 8.9 9.0 12.0'
-  RELEASE_MODE: 1
-  CI: 1
-  GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
-  GPTQMODEL_BUILD_QQQ: 0
-  GPTQMODEL_BUILD_EORA: 0
-  GPTQMODEL_BUILD_EXLLAMA_V1: 0
 
 concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-release
@@ -85,8 +60,6 @@ jobs:
       image: modelcloud/gptqmodel:alpine-ci-v1
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
-      matrix: ${{ steps.build_matrix.outputs.matrix }}
-      max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
     if: ${{ inputs.github_vm == false }}
     steps:
@@ -101,171 +74,14 @@ jobs:
           echo "event name: ${{ github.event_name }}"
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
-          echo "max-parallel: ${{ inputs.max-parallel }}"
           echo "upload_release: ${{ inputs.upload_release }}"
           echo "upload_pypi: ${{ inputs.upload_pypi }}"
+
       - name: Select server
         id: get_ip
         run: |
           echo "ip=${RUNNER}" >> "$GITHUB_OUTPUT"
-          echo "GPU_IP=${RUNNER}" >> $GITHUB_ENV
           echo "run_id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
-          echo "ip: $ip"
-          max_p=${{ github.event.inputs.max-parallel }}
-          max_p="{\"size\": ${max_p:-10}}"
-          echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
-          echo "max-parallel=$max_p"
-
-      - name: Generate release matrix
-        id: build_matrix
-        run: |
-          matrix=$(python .github/scripts/generate_release_matrix.py)
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "$matrix"
-  release:
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
-      matrix: ${{ fromJson(needs.check-vm.outputs.matrix) }}
-    runs-on: [ self-hosted, xeon5 ]
-    needs:
-      - check-vm
-    container:
-      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu24.04_0325
-      volumes:
-        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
-        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
-        - /monster/ci/uv:/opt/uv
-        - /monster/ci/env:/opt/env
-    steps:
-      - name: Check matrix
-        run: |
-          # // for github limits, test only
-          # // shouldRun=${{ (inputs['cuda-version'] == '' || matrix.cuda == inputs['cuda-version']) && (inputs['torch-version'] == '' || matrix.torch == inputs['torch-version']) && (inputs['python-version'] == ''|| matrix.python == inputs['python-version']) }}
-          shouldRun=true
-          if [ "$shouldRun" == "true" ]; then
-            echo "SHOULD_RUN=1" >> $GITHUB_ENV
-          else
-            echo "SHOULD_RUN=0" >> $GITHUB_ENV
-          fi
-
-      - name: Checkout Codes
-        if: env.SHOULD_RUN == 1
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
-
-      - name: Fetch PR by number
-        if: ${{ github.event.inputs.pr_number != 0 && env.SHOULD_RUN == 1 }}
-        run: |
-          PR_NUMBER=${{ github.event.inputs.pr_number }}
-          echo "pr number $PR_NUMBER"
-          git config --global --add safe.directory $(pwd)
-          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
-          git checkout pr-${PR_NUMBER}
-
-      - name: Activate uv env
-        run: |
-          echo "UV_PYTHON=${{ matrix.python }}" >> "$GITHUB_ENV"
-          echo "UV_TORCH_BACKEND=cu${{ matrix.cuda }}" >> "$GITHUB_ENV"
-
-          env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${{ matrix.python }}_release"
-          /opt/uv/setup_uv_venv.sh $env_name ${{ matrix.python }}
-          python -VV
-          
-          echo "source /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON"
-          source /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
-
-      - name: Print uv env
-        if: env.SHOULD_RUN == 1
-        run: |
-          echo "::group::uv python list"
-          uv python list
-          ls -ahl /opt/uv/venvs
-          echo "::endgroup::"
-          
-          echo "== python =="
-          python -VV
-          which python
-          which pip || true
-
-          echo "== nvcc =="
-          nvcc --version
-
-          echo "::group::pip list"
-          uv pip list
-          echo "::endgroup::"
-
-          echo "== torch =="
-          uv pip show torch || true
-
-          echo "::group::project files"
-          ls -ahl
-          echo "::endgroup::"
-
-          echo "::group::git status"
-          git config --global --add safe.directory $(pwd)
-          echo "::endgroup::"
-
-      - name: Compile
-        if: env.SHOULD_RUN == 1
-        run: |
-          set -e
-          echo "::group::First Run"
-          if ! python -m build -v --no-isolation; then
-            echo "::endgroup::"
-          
-            echo "::group::Retry"
-            python setup.py bdist_wheel
-            echo "::endgroup::"
-          else
-            echo "::endgroup::"
-          fi
-          ls -ahl dist
-
-      - name: Test install
-        if: env.SHOULD_RUN == 1
-        run: |
-          whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
-          echo "WHL_NAME=$whl" >> $GITHUB_ENV
-
-          [ $(stat -c%s "dist/$whl") -lt 104857600 ] && echo "wheel size < 100M" && exit 1 || echo "$whl size check passed."
-
-          if [ "${{ matrix.python }}" != "313t" ]; then # twine doesn't support python 3.13 yet
-            uv pip install twine
-            twine check dist/$whl
-          fi
-
-      - name: Upload wheel
-        if: env.SHOULD_RUN == 1
-        continue-on-error: true
-        run: |
-          sha256=$(sha256sum dist/${{ env.WHL_NAME }})
-          
-          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
-          [ -d $DIR ] || mkdir -p $DIR
-          cp dist/${{ env.WHL_NAME }} $DIR/
-          echo "UPLOADED=1" >> $GITHUB_ENV
-
-      - name: Upload artifact
-        if: env.SHOULD_RUN == 1
-        uses: actions/upload-artifact@v7
-        continue-on-error: ${{ env.UPLOADED == '1' }}
-        with:
-          overwrite: false
-          name: ${{ env.WHL_NAME }}
-          path: dist/${{ env.WHL_NAME }}
-
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
-        if: env.SHOULD_RUN == 1 && (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled()
-        with:
-          repo_name: ${{ env.repo }}
-          tag: ${{ env.ref }}
-          file: dist/${{ env.WHL_NAME }}
-          file_glob: true
-          overwrite: true
 
   release-source:
     permissions:
@@ -273,14 +89,12 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
+    if: ${{ inputs.github_vm == false }}
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu24.04_0325
       volumes:
         - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
         - /monster/ci/uv:/opt/uv
-    env:
-      RELEASE_MODE: 0
-      BUILD_CUDA_EXT: '0'
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
@@ -292,56 +106,55 @@ jobs:
         run: |
           git config --global --add safe.directory "$(pwd)"
 
-      - name: Print Env
+      - name: Print env
         run: |
           export UV_PYTHON=3.14
           echo "UV_PYTHON=3.14" >> "$GITHUB_ENV"
 
-          env_name="cu128_torch2.8.0_py314_release_source"
+          env_name="py314_release_source"
           /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Fetch PR by number
         if: ${{ github.event.inputs.pr_number != 0 }}
         run: |
           PR_NUMBER=${{ github.event.inputs.pr_number }}
-          echo "pr number $PR_NUMBER"
-          git config --global --add safe.directory $(pwd)
+          git config --global --add safe.directory "$(pwd)"
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Compile
+      - name: Build sdist
         run: |
-          uv pip install build wheel twine setuptools torch ninja pypcre -U
-          python -m build --no-isolation --sdist
+          python -m pip install -U build twine setuptools
+          python -m build --sdist
 
       - name: Check dist
         run: |
           ls -ahl dist
-          whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
-          echo "WHL_NAME=$whl" >> $GITHUB_ENV
-          twine check dist/$whl
+          pkg=$(ls -t dist/*.tar.gz | head -n 1 | xargs basename)
+          echo "PKG_NAME=$pkg" >> "$GITHUB_ENV"
+          twine check "dist/$pkg"
 
       - name: Upload to local
         continue-on-error: true
         run: |
-          sha256=$(sha256sum dist/${{ env.WHL_NAME }})
+          sha256sum "dist/${{ env.PKG_NAME }}"
           DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
-          [ -d $DIR ] || mkdir -p $DIR
-          cp dist/${{ env.WHL_NAME }} $DIR/
-          echo "UPLOADED=1" >> $GITHUB_ENV
+          [ -d "$DIR" ] || mkdir -p "$DIR"
+          cp "dist/${{ env.PKG_NAME }}" "$DIR/"
+          echo "UPLOADED=1" >> "$GITHUB_ENV"
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v7
         continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
-          name: ${{ env.WHL_NAME }}
-          path: dist/${{ env.WHL_NAME }}
+          name: ${{ env.PKG_NAME }}
+          path: dist/${{ env.PKG_NAME }}
 
       - name: Upload package to release
         uses: svenstaro/upload-release-action@v2
         if: (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled()
         with:
-          file: dist/${{ env.WHL_NAME }}
+          file: dist/${{ env.PKG_NAME }}
           tag: ${{ env.ref }}
           file_glob: true
           overwrite: true
@@ -357,12 +170,12 @@ jobs:
           while [ "$status" -lt 0 ]; do
             status=$(curl -s "http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp")
             if [ "$status" == "2" ]; then
-                echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
+              echo "PYPI_RELEASE_CONFIRMATION=$status" >> "$GITHUB_ENV"
             elif [ "$status" -lt 0 ]; then
               sleep 5
             else
               echo "release has been confirmed"
-              echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
+              echo "PYPI_RELEASE_CONFIRMATION=$status" >> "$GITHUB_ENV"
             fi
           done
 
@@ -372,13 +185,10 @@ jobs:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
         run: |
-          python -m twine upload dist/*gz
+          python -m twine upload dist/*.tar.gz
 
   release-source-github:
     runs-on: ubuntu-24.04
-    env:
-      RELEASE_MODE: 0
-      BUILD_CUDA_EXT: '0'
     if: ${{ inputs.github_vm == true }}
     steps:
       - name: Checkout Codes
@@ -395,43 +205,41 @@ jobs:
         if: ${{ github.event.inputs.pr_number != 0 }}
         run: |
           PR_NUMBER=${{ github.event.inputs.pr_number }}
-          echo "pr number $PR_NUMBER"
-          git config --global --add safe.directory $(pwd)
+          git config --global --add safe.directory "$(pwd)"
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
       - uses: actions/setup-python@v6
         with:
-          python-version: 3.14
+          python-version: '3.14'
           cache: 'pip'
 
       - name: Install requirements
         run: |
-          uv pip install torch twine ninja setuptools setuptools-scm[toml]>=8.0 pypcre --system
+          python -m pip install -U build twine setuptools
 
-      - name: Compile
+      - name: Build sdist
         run: |
-          python -m build --no-isolation --sdist
-
+          python -m build --sdist
 
       - name: Check dist
         run: |
           ls -ahl dist
-          whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
-          echo "WHL_NAME=$whl" >> $GITHUB_ENV
-          twine check dist/$whl
+          pkg=$(ls -t dist/*.tar.gz | head -n 1 | xargs basename)
+          echo "PKG_NAME=$pkg" >> "$GITHUB_ENV"
+          twine check "dist/$pkg"
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.WHL_NAME }}
-          path: dist/${{ env.WHL_NAME }}
+          name: ${{ env.PKG_NAME }}
+          path: dist/${{ env.PKG_NAME }}
 
       - name: Upload package to release
         uses: svenstaro/upload-release-action@v2
         if: (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled()
         with:
-          file: dist/${{ env.WHL_NAME }}
+          file: dist/${{ env.PKG_NAME }}
           tag: ${{ env.ref }}
           file_glob: true
           overwrite: true
@@ -447,4 +255,4 @@ jobs:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
         run: |
-          python -m twine upload dist/*gz
+          python -m twine upload dist/*.tar.gz

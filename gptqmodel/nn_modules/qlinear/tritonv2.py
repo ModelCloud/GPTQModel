@@ -13,13 +13,13 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
-from .torch import TorchQuantLinear
+from .torch import TorchLinear
 
 
 log = setup_logger()
 
 
-class TritonV2QuantLinear(TorchQuantLinear):
+class TritonV2Linear(TorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TRITON]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 40, FORMAT.GPTQ_V2: 40}
@@ -164,7 +164,7 @@ class TritonV2QuantLinear(TorchQuantLinear):
         return out.to(dtype=x.dtype)
 
 
-__all__ = ["TritonV2QuantLinear"]
+__all__ = ["TritonV2Linear"]
 
 
 # test triton on XPU to ensure special Intel/Triton is installed as we cannot check based on triton package meta data

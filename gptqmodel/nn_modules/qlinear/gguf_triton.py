@@ -12,7 +12,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.python import has_gil_disabled
-from .gguf import GGUFTorchQuantLinear, _unpack_q4_k_scale_min_torch
+from .gguf import GGUFTorchLinear, _unpack_q4_k_scale_min_torch
 
 
 try:
@@ -598,7 +598,7 @@ def fused_q6_k_matmul(
     )
 
 
-class GGUFTritonKernel(GGUFTorchQuantLinear):
+class GGUFTritonKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TRITON]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 45}

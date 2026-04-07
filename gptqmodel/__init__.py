@@ -12,6 +12,12 @@ from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noq
 
 # isort: on
 
+import threading
+
+
+_patch_lock = threading.Lock()
+
+
 patch_safetensors_save_file()
 
 # TODO: waiting for official fix from triton
@@ -56,8 +62,8 @@ def _patch_transformers_paroquant_quantizer_compat():
     """Teach transformers to treat ParoQuant checkpoints as GPTQ-backed configs.
 
     Upstream transformers currently rejects `quant_method="paroquant"` before
-    the GPTQModel loader path gets a chance to handle the checkpoint. ParoQuant
-    artifacts reuse GPTQModel/Optimum loading semantics, so register the method
+    the GPT-QModel loader path gets a chance to handle the checkpoint. ParoQuant
+    artifacts reuse GPT-QModel/Optimum loading semantics, so register the method
     alongside GPTQ only when upstream has not provided native support yet.
     """
     try:
@@ -73,6 +79,26 @@ def _patch_transformers_paroquant_quantizer_compat():
     hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault("paroquant", GPTQConfig)
     hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault("paroquant", GptqHfQuantizer)
     hf_quant_auto._gptqmodel_paroquant_quantizer_compat = True
+
+
+def _patch_openvino_gptqmodel_compat():
+    """Extend OpenVINO's GPTQ patcher to understand GPTQModel new kernels."""
+    try:
+        from openvino.frontend.pytorch import gptq as ov_gptq
+    except Exception:
+        return
+
+    with _patch_lock:
+        if getattr(ov_gptq, "_gptqmodel_torch_quant_compat", False):
+            return
+
+        class MatchAll(list):
+            def __contains__(self, item):
+                return True
+
+        ov_gptq.supported_quant_types = MatchAll()
+        ov_gptq._gptqmodel_torch_quant_compat = True
+
 
 from .utils.env import env_flag
 from .utils.logger import setup_logger
@@ -174,6 +200,7 @@ DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
 _patch_transformers_paroquant_quantizer_compat()
+_patch_openvino_gptqmodel_compat()
 
 
 def exllama_set_max_input_length(model, max_input_length: int):
@@ -208,6 +235,7 @@ from .quantization import (
 )
 from .utils import BACKEND
 from .version import __version__
+from . import extension
 
 
 setup_logger().info(

@@ -57,25 +57,22 @@ on:
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
-  TORCH_CUDA_ARCH_LIST: '8.6 8.9 9.0 12.0'
+  # CI can allocate A100-class devices (sm_80), so the shared JIT arch list
+  # must include 8.0 in addition to the newer targets.
+  TORCH_CUDA_ARCH_LIST: '8.0 8.6 8.9 9.0 12.0'
   PYTORCH_ALLOC_CONF: 'expandable_segments:True'
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.249
   UV_INDEX_URL: http://10.0.14.249/simple
   LOGBAR_ANIMATION: '0'
-  CUDA_VERSION: 131
+  CUDA_VERSION: 130
   UV_TORCH_BACKEND: cu130
   TORCH_VERSION: 2.11.0
   # vllm doesn't support 3.14
   PYTHON_VERSION: 3.13
   UV_PYTHON: python3.13
   # PYTHON_GIL: 0 // test libs don't support yet
-  BUILD_QQQ: 1
-  BUILD_EORA: 1
-  GPTQMODEL_BUILD_EXLLAMA_V1: 1
-  GPTQMODEL_BUILD_EORA: 1
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py,models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
-  GPTQMODEL_FORCE_BUILD: 1
   MODEL_TEST_MODE: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
   MODEL_TEST_GPU_COUNT: '1'
   repo: ${{ github.event.inputs.repo || github.repository }}
@@ -270,95 +267,6 @@ jobs:
           name: source
           path: dist/gptqmodel_source.tar.gz
 
-      - name: Compile
-        if: github.event.inputs.artifact_id == '' && !cancelled()
-        timeout-minutes: 45
-        run: |
-          set -euo pipefail
-
-          echo "::group::python version"
-          which python
-          which pip || true
-          python --version
-          echo "::endgroup::"
-
-          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
-          [ -d $log_dir ] || mkdir -p $log_dir
-          log_file=$log_dir/build.log
-
-          build_once() {
-            echo "::group::compile logs"
-            python -m build -w --no-isolation 2>&1 | tee $log_file
-            echo "::endgroup::"
-          }
-
-          echo "==> Attempt #1 (no extra env)"
-          if build_once; then
-            echo "Build succeeded on attempt #1"
-            exit 0
-          fi
-
-          echo "==> Attempt #1 failed, retrying with env vars..."
-          export VERBOSE=1
-          export CMAKE_VERBOSE_MAKEFILE=ON
-          export TORCH_EXTENSIONS_DIR=/tmp/torch_extensions
-          export MAX_JOBS=1
-          export NVCC_THREADS=1
-
-          echo "==> Attempt #2 (with env)"
-          build_once
-
-      - name: check wheel
-        if: github.event.inputs.artifact_id == '' && !cancelled()
-        run: |
-          ls -ahl dist
-          whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
-          sha256=$(sha256sum dist/$whl)
-          echo "hash=$sha256"
-
-          echo "WHL_HASH=$sha256" >> $GITHUB_ENV
-          echo "WHL_NAME=$whl" >> $GITHUB_ENV
-
-          twine check dist/$whl
-          [ $(stat -c%s "dist/$whl") -lt 104857600 ] && echo "wheel size < 100M" && exit 1 || echo "$whl size check passed."
-
-      - name: Upload wheel to local
-        if: github.event.inputs.artifact_id == '' && !cancelled()
-        continue-on-error: true
-        run: |
-          WHEEL="$(readlink -f dist/*.whl)"
-          SHA256="$(sha256sum "$WHEEL" | awk '{print $1}')"
-
-          DIR=/opt/dist/GPTQModel/${{ github.run_id }}
-          [ -d $DIR ] || mkdir -p $DIR
-          cp $WHEEL $DIR/
-
-      - name: Check log
-        if: ${{ github.event.inputs.artifact_id == '' && !cancelled() && failure() }}
-        continue-on-error: true
-        run: |
-          ls -ahl dist
-          
-          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
-          log_file=$log_dir/build.log
-          grep -nE "ptxas fatal|nvcc fatal|error:|fatal error|ninja: build stopped" $log_file | head -n 50 || true
-
-          if grep -qE "bitblas_.*invalid ELF header" $log_file; then
-            echo "Detected invalid ELF header, cleaning bitblas cache..."
-            rm -rf ~/.cache/bitblas_*/nvidia
-          fi
-          
-          echo "::group::last 200 lines"
-            tail -n 200 $log_file
-          echo "::endgroup::"
-
-      - name: Upload wheel to github artifact
-        if: github.event.inputs.artifact_id == '' && !cancelled()
-        uses: actions/upload-artifact@v7
-        with:
-          name: whl
-          path: dist/${{ env.WHL_NAME }}
-
       - name: Clean cache
         if: always()
         run: rm -rf ./* .[^.] .??* # pip cache purge && uv cache clean &&
@@ -485,63 +393,15 @@ jobs:
       #     ls -ahl .
       #    tar -zxf gptqmodel_source.tar.gz
 
-      - name: Download wheel from local
-        continue-on-error: true
+      - name: Install package from source
         run: |
-          DIR=/opt/dist/GPTQModel/${{ needs.check-vm.outputs.run_id }}
-          [ -d $DIR ] || exit 1
-          echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
-
-          ls -ahl $DIR
-
-          mkdir dist || true
-
-          cp $DIR/*.whl dist/
-
-      #          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://$RUNNER/gpu/whl/download")
-
-      #          echo "file_name=$file_name"
-      #
-      #          if echo "$file_name" | grep -q "gptqmodel"; then
-      #              mkdir dist || true
-      #              cd dist
-      #              curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/$file_name
-      #              ls -ahl .
-      #              sha256=$(sha256sum $file_name)
-      #              echo "sha256=$sha256"
-      #              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
-      #          fi
-
-      - name: Download artifact from github
-        if: env.WHL_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v8
-        with:
-          name: whl
-          path: dist
-          run-id: ${{ needs.check-vm.outputs.run_id }}
-
-      - name: Install wheel
-        run: |
-          uv pip uninstall gptqmodel
+          uv pip uninstall gptqmodel || true
           # make sure torch & torchvision are corresponded
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
           uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
-          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
-            echo "===== switching to xpu env ====="
-            # source /etc/profile.d/pyenv.sh && pyenv activate xpu
-          fi
-
-          # ipex doesn't need to compile kernels. xpu can't install cuda package
-          if [[ "${{ matrix.test_script }}" != *ipex* && "${{ matrix.test_script }}" != *xpu* ]]; then
-            echo "===== install dist/whl ====="
-            uv pip install dist/*.whl -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          else
-            echo "===== install with local files for xpu env ====="
-            export CUDA_VISIBLE_DEVICES=""
-            unset TORCH_CUDA_ARCH_LIST
-            uv pip install . --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
+          echo "===== install package from checkout ====="
+          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
           # deps may reinstalled torch
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
@@ -701,33 +561,12 @@ jobs:
           python .github/scripts/install_deps.py ${{ matrix.test_script }}
           python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
 
-      - name: Download wheel from local
-        continue-on-error: true
+      - name: Install package from source
         run: |
-          DIR=/opt/dist/GPTQModel/${{ needs.check-vm.outputs.run_id }}
-          [ -d $DIR ] || exit 1
-          echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
-
-          ls -ahl $DIR
-
-          mkdir dist || true
-
-          cp $DIR/*.whl dist/
-
-      - name: Download artifact from github
-        if: env.WHL_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v8
-        with:
-          name: whl
-          path: dist
-          run-id: ${{ needs.check-vm.outputs.run_id }}
-
-      - name: Install wheel
-        run: |
-          uv pip uninstall gptqmodel
+          uv pip uninstall gptqmodel || true
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
           uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          uv pip install dist/*.whl -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
 
       - name: Print uv env
@@ -864,7 +703,7 @@ jobs:
 #          uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm -U -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 #
 #          echo "=== installing gptqmodel"
-#          uv pip install . --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+#          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 #
 #          echo "replacing model path"
 #          find tests -name "*.py" -exec sed -i '' 's/\/monster\/data\/model/..\/..\/..\/monster/g' {} +
@@ -934,7 +773,7 @@ jobs:
 #          pip install meson-python -U
 #          pip install numpy==2.2.6 -U
 #
-#          uv pip install -e . --no-build-isolation
+#          uv pip install -e .
 #          pip install pip Pillow device_smi pypcre tokenicer threadpoolctl accelerate logbar transformers optimum torch -U
 #
 #      - name: Run test

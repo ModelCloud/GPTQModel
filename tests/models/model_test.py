@@ -962,8 +962,8 @@ class ModelTest(unittest.TestCase):
     def _torch_backend(self) -> BACKEND:
         if self.METHOD == METHOD.AWQ:
             return BACKEND.TORCH_AWQ
-        if self.METHOD == METHOD.PAROQUANT:
-            return BACKEND.PAROQUANT
+        if self.METHOD == METHOD.PARO:
+            return BACKEND.PARO
         if self.METHOD == METHOD.GGUF:
             return BACKEND.GGUF_TORCH
         return BACKEND.TORCH
@@ -999,13 +999,13 @@ class ModelTest(unittest.TestCase):
         fallback_backend = None
         if BACKEND.MARLIN in compare_backends:
             try:
-                from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # type: ignore
+                from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # type: ignore
             except Exception:  # pragma: no cover - fallback if module unavailable
                 marlin_group_sizes = ()
                 marlin_sym = ()
             else:
-                marlin_group_sizes = tuple(getattr(MarlinQuantLinear, "SUPPORTS_GROUP_SIZE", ()))
-                marlin_sym = tuple(getattr(MarlinQuantLinear, "SUPPORTS_SYM", ()))
+                marlin_group_sizes = tuple(getattr(MarlinLinear, "SUPPORTS_GROUP_SIZE", ()))
+                marlin_sym = tuple(getattr(MarlinLinear, "SUPPORTS_SYM", ()))
 
             requested_group_size = getattr(self, "GROUP_SIZE", None)
             requested_sym = getattr(self, "SYM", None)
@@ -1404,10 +1404,10 @@ class ModelTest(unittest.TestCase):
                     moe=self.MOE_CONFIG,
                     offload_to_disk=self.OFFLOAD_TO_DISK,
                 )
-            elif self.METHOD == METHOD.PAROQUANT:
+            elif self.METHOD == METHOD.PARO:
                 return ParoQuantizeConfig(
                     bits=self.BITS,
-                    method=METHOD.PAROQUANT,
+                    method=METHOD.PARO,
                     format=FORMAT.PAROQUANT,
                     opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
                     opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,

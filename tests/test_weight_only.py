@@ -14,10 +14,10 @@ import torch.nn.functional as F
 
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.quantization.config import (
     FORMAT,
@@ -192,8 +192,8 @@ def _build_rtn_microbench_case(
     }
 
 
-def _build_rtn_gptq_module(case: dict[str, torch.Tensor | int | torch.dtype | torch.device]) -> TorchQuantLinear:
-    module = TorchQuantLinear(
+def _build_rtn_gptq_module(case: dict[str, torch.Tensor | int | torch.dtype | torch.device]) -> TorchLinear:
+    module = TorchLinear(
         bits=case["bit_width"],
         group_size=case["group_size"],
         sym=True,
@@ -210,7 +210,7 @@ def _build_rtn_gptq_module(case: dict[str, torch.Tensor | int | torch.dtype | to
         g_idx=case["g_idx_cpu"],
     )
     # `pack_block()` gives us the in-memory GPTQ runtime layout that
-    # `TorchQuantLinear` executes with. That is not the same thing as the
+    # `TorchLinear` executes with. That is not the same thing as the
     # serialized GPTQ checkpoint layout this project can export.
     #
     # The real checkpoint round-trip is:
@@ -228,14 +228,14 @@ def _build_rtn_gptq_module(case: dict[str, torch.Tensor | int | torch.dtype | to
         bits=module.bits,
         pack_dtype=module.pack_dtype,
     )
-    # Skip the compile-heavy TorchQuantLinear override; the microbench only
+    # Skip the compile-heavy TorchLinear override; the microbench only
     # needs unpack buffers initialized for numerical comparisons.
     PackableQuantLinear.post_init(module)
     return module.to(case["device"]).eval()
 
 
-def _build_rtn_awq_module(case: dict[str, torch.Tensor | int | torch.dtype | torch.device]) -> AwqTorchQuantLinear:
-    module = AwqTorchQuantLinear(
+def _build_rtn_awq_module(case: dict[str, torch.Tensor | int | torch.dtype | torch.device]) -> AwqTorchLinear:
+    module = AwqTorchLinear(
         bits=case["bit_width"],
         group_size=case["group_size"],
         sym=True,
@@ -256,8 +256,8 @@ def _build_rtn_awq_module(case: dict[str, torch.Tensor | int | torch.dtype | tor
 
 def _build_rtn_gguf_module(
     case: dict[str, torch.Tensor | int | str | GGUFBits | torch.dtype | torch.device | None],
-) -> GGUFTorchQuantLinear:
-    module = GGUFTorchQuantLinear(
+) -> GGUFTorchLinear:
+    module = GGUFTorchLinear(
         bits=case["bits"],
         group_size=-1,
         sym=True,
@@ -307,7 +307,7 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
     assert "weight_only_rtn" in result
     assert model.quantized is True
 
-    qmodules = find_modules(model.model, [TorchQuantLinear])
+    qmodules = find_modules(model.model, [TorchLinear])
     assert len(qmodules) == 4
 
     for name, qmodule in qmodules.items():
@@ -370,7 +370,7 @@ def test_baseqmodel_quantize_allows_rtn_awq_export():
     assert model.quantized is True
     assert model.quantize_config.format == FORMAT.GEMM
     assert model.quantize_config.export_quant_method() == METHOD.AWQ
-    assert getattr(model.qlinear_kernel, "__name__", "") == "AwqTorchQuantLinear"
+    assert getattr(model.qlinear_kernel, "__name__", "") == "AwqTorchLinear"
 
     qmodules = find_modules(model.model, [model.qlinear_kernel])
     assert len(qmodules) == 4
@@ -426,7 +426,7 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
     assert model.quantize_config.bits == bit_width
     assert model.quantize_config.quant_method == METHOD.GGUF
     assert model.quantize_config.export_quant_method() == METHOD.GGUF
-    expected_kernel = GGUFTritonKernel if device_type == "cuda" else GGUFTorchQuantLinear
+    expected_kernel = GGUFTritonKernel if device_type == "cuda" else GGUFTorchLinear
     assert model.qlinear_kernel is expected_kernel
 
     qmodules = find_modules(model.model, [model.qlinear_kernel])
@@ -495,7 +495,7 @@ def test_gguf_pack_original_auto_pads_non_aligned_k_in_features(bits: str):
         linear.weight.normal_(mean=0.0, std=0.02)
         linear.bias.normal_(mean=0.0, std=0.01)
 
-    module = GGUFTorchQuantLinear(
+    module = GGUFTorchLinear(
         bits=bits,
         group_size=-1,
         sym=True,
@@ -622,14 +622,14 @@ def test_gguf_forward_requests_dequantized_weight_in_input_dtype(monkeypatch):
     module = _build_rtn_gguf_module(case)
 
     observed: dict[str, torch.device | torch.dtype | None] = {"device": None, "dtype": None}
-    original = GGUFTorchQuantLinear.dequantize_weight
+    original = GGUFTorchLinear.dequantize_weight
 
     def _wrapped(self, *, device=None, dtype=None):
         observed["device"] = None if device is None else torch.device(device)
         observed["dtype"] = dtype
         return original(self, device=device, dtype=dtype)
 
-    monkeypatch.setattr(GGUFTorchQuantLinear, "dequantize_weight", _wrapped)
+    monkeypatch.setattr(GGUFTorchLinear, "dequantize_weight", _wrapped)
 
     module(case["inputs"])
 
@@ -780,8 +780,8 @@ def test_gguf_forward_uses_fused_k_path_for_small_cuda_batches():
         calls["fused"] += 1
         return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 
-    module._forward_dequant_matmul = _dense.__get__(module, GGUFTorchQuantLinear)
-    module._forward_fused_k = _fused.__get__(module, GGUFTorchQuantLinear)
+    module._forward_dequant_matmul = _dense.__get__(module, GGUFTorchLinear)
+    module._forward_fused_k = _fused.__get__(module, GGUFTorchLinear)
 
     module(case["inputs"])
     assert calls == {"dense": 0, "fused": 1}
@@ -830,8 +830,8 @@ def test_gguf_forward_uses_fused_k_path_for_small_cpu_batches():
         calls["fused"] += 1
         return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 
-    module._forward_dequant_matmul = _dense.__get__(module, GGUFTorchQuantLinear)
-    module._forward_fused_k = _fused.__get__(module, GGUFTorchQuantLinear)
+    module._forward_dequant_matmul = _dense.__get__(module, GGUFTorchLinear)
+    module._forward_fused_k = _fused.__get__(module, GGUFTorchLinear)
 
     module(inputs)
     assert calls == {"dense": 0, "fused": 1}
@@ -863,8 +863,8 @@ def test_gguf_forward_autotunes_once_per_instance_with_fused_plan_on_cpu(monkeyp
         calls["fused"] += 1
         return 1.0
 
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _dense)
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fused)
+    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _dense)
+    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fused)
 
     module(inputs)
 
@@ -874,8 +874,8 @@ def test_gguf_forward_autotunes_once_per_instance_with_fused_plan_on_cpu(monkeyp
     def _fail(self, x_flat):
         raise AssertionError("autotune benchmark should not rerun for cached fused plan")
 
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _fail)
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fail)
+    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _fail)
+    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fail)
 
     module(inputs)
     assert module.get_autotune_result() is True
@@ -902,8 +902,8 @@ def test_gguf_forward_autotunes_once_per_instance_with_dense_plan_on_cpu(monkeyp
         calls["fused"] += 1
         return 2.0
 
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _dense)
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fused)
+    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _dense)
+    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fused)
 
     module(inputs)
 
@@ -913,8 +913,8 @@ def test_gguf_forward_autotunes_once_per_instance_with_dense_plan_on_cpu(monkeyp
     def _fail(self, x_flat):
         raise AssertionError("autotune benchmark should not rerun for cached dense plan")
 
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _fail)
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fail)
+    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _fail)
+    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fail)
 
     module(inputs)
     assert module.get_autotune_result() is False
@@ -943,8 +943,8 @@ def test_gguf_forward_autotunes_once_per_module_instance(monkeypatch):
         calls["fused"] += 1
         return 1.0
 
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _dense)
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fused)
+    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _dense)
+    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fused)
 
     module_a(inputs)
 
@@ -1039,7 +1039,7 @@ def test_rtn_microbench_gguf_reload_from_state_dict_stays_close_to_rtn(
     case = _build_rtn_microbench_case(torch.float16, bits=bits)
     module = _build_rtn_gguf_module(case)
 
-    reloaded = GGUFTorchQuantLinear(
+    reloaded = GGUFTorchLinear(
         bits=bits,
         group_size=-1,
         sym=True,

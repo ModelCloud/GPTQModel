@@ -95,7 +95,7 @@ Fixed `bits=3` packing and `group_size=-1` regression in v1.7.4.
 * 01/26/2025 [1.7.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.4): New `compile()` API for ~4-8% inference TPS improvement. Faster `pack()` for post-quantization model save. `Triton` kernel validated for Intel/`XPU` when Intel Triton packages are installed. Fixed Transformers (bug) downcasting tokenizer class on save. 
 * 01/20/2025 [1.7.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.3): New Telechat2 (China Telecom) and PhiMoE model support. Fixed `lm_head` weights duplicated in post-quantize save() for models with tied-embedding. 
 * 01/19/2025 [1.7.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.2): Effective BPW (bits per weight) will now be logged during `load()`. Reduce loading time on Intel Arc A770/B580 `XPU` by 3.3x. Reduce memory usage in MLX conversion and fix Marlin kernel auto-select not checking CUDA compute version. 
-* 01/17/2025 [1.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.0): 👀 ✨ `backend.MLX` added for runtime-conversion and execution of GPTQ models on Apple's `MLX` framework on Apple Silicon (M1+). ✨ `lm_head` quantization now fully supported by GPTQModel without external pkg dependency. 
+* 01/17/2025 [1.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.0): 👀 ✨ `backend.MLX` added for runtime-conversion and execution of GPTQ models on Apple's `MLX` framework on Apple Silicon (M1+). ✨ `lm_head` quantization now fully supported by GPT-QModel without external pkg dependency.
 * 01/07/2025 [1.6.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.6.1): 🎉 New OpenAI API compatible endpoint via `model.serve(host, port)`. Auto-enable flash-attention2 for inference. Fixed `sym=False` loading regression. 
 * 01/06/2025 [1.6.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.6.0): ⚡25% faster quantization. 35% reduction in VRAM usage vs v1.5. 👀 AMD ROCm (6.2+) support added and validated for 7900XT+ GPU. Auto-tokenizer loader via `load()` API. For most models you no longer need to manually init a tokenizer for both inference and quantization.
 * 01/01/2025 [1.5.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.1): 🎉 2025! Added `QuantizeConfig.device` to clearly define which device is used for quantization: default = `auto`. Non-quantized models are always loaded on CPU by-default and each layer is moved to `QuantizeConfig.device` during quantization to minimize VRAM usage. Compatibility fixes for `attn_implementation_autoset` in latest transformers. 
@@ -103,7 +103,7 @@ Fixed `bits=3` packing and `group_size=-1` regression in v1.7.4.
 * 12/23/2024 [1.5.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.0): Multi-modal (image-to-text) optimized quantization support has been added for Qwen 2-VL and Ovis 1.6-VL. Previous image-to-text model quantizations did not use image calibration data, resulting in less than optimal post-quantization results. Version 1.5.0 is the first release to provide a stable path for multi-modal quantization: only text layers are quantized.
 * 12/19/2024 [1.4.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.5): Windows 11 support added/validated. Ovis VL model support with image dataset calibration. Fixed `dynamic` loading. Reduced quantization VRAM usage.
 * 12/15/2024 [1.4.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.2): MacOS `GPU` (Metal) and `CPU` (M+) support added/validated for inference and quantization. Cohere 2 model support added. 
-* 12/13/2024 [1.4.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.1): Added Qwen2-VL model support. `mse` quantization control exposed in `QuantizeConfig`. Monkey patch `patch_vllm()` and `patch_hf()` API added to allow Transformers/Optimum/PEFT and vLLM to correctly load GPTQModel quantized models while upstream PRs are in pending status. 
+* 12/13/2024 [1.4.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.1): Added Qwen2-VL model support. `mse` quantization control exposed in `QuantizeConfig`. Monkey patch `patch_vllm()` and `patch_hf()` API added to allow Transformers/Optimum/PEFT and vLLM to correctly load GPT-QModel quantized models while upstream PRs are in pending status.
 * 12/10/2024 [1.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.0) `EvalPlus` harness integration merged upstream. We now support both `lm-eval` and `EvalPlus`. Added pure torch `Torch` kernel. Refactored `Cuda` kernel to be `DynamicCuda` kernel. `Triton` kernel now auto-padded for max model support. `Dynamic` quantization now supports both positive `+:`:default, and `-:` negative matching which allows matched modules to be skipped entirely for quantization. Fixed auto-`Marlin` kernel selection. Added auto-kernel fallback for unsupported kernel/module pairs. Lots of internal refactor and cleanup in preparation for transformers/optimum/peft upstream PR merge. Deprecated the saving of `Marlin` weight format since `Marlin` supports auto conversion of `gptq` format to `Marlin` during runtime. 
 
 * 11/29/2024 [1.3.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.1) Olmo2 model support. Intel XPU acceleration via IPEX. Model sharding Transformer compatibility fix due to API deprecation in HF. Removed triton dependency. Triton kernel now optionally dependent on triton package. 
@@ -131,7 +131,7 @@ Fixed `bits=3` packing and `group_size=-1` regression in v1.7.4.
 * 07/31/2024 🚀 [0.9.10](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.10) Ported vllm/nm `gptq_marlin` inference kernel with expanded bits (8bits), group_size (64,32), and desc_act support for all GPTQ models with `FORMAT.GPTQ`. Auto-calculate auto-round nsamples/seglen parameters based on calibration dataset. Fixed save_quantized() called on pre-quantized models with non-supported backends. HF transformers dependency updated to ensure Llama 3.1 fixes are correctly applied to both quant and inference.
 * 07/25/2024 🚀 [0.9.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.9): Added Llama-3.1 support, Gemma2 27B quant inference support via vLLM, auto pad_token normalization, fixed auto-round quant compatibility for vLLM/SGLang, and more.  
 * 07/13/2024 🚀 [0.9.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.8):
-Run quantized models directly using GPTQModel with fast `vLLM` or `SGLang` backend! Both vLLM and SGLang are optimized for dynamic batching inference for maximum `TPS` (check usage under examples). Marlin backend also
+Run quantized models directly using GPT-QModel with fast `vLLM` or `SGLang` backend! Both vLLM and SGLang are optimized for dynamic batching inference for maximum `TPS` (check usage under examples). Marlin backend also
 got full end-to-end in/out features padding to enhance current/future model compatibility.
 * 07/08/2024 🚀 [0.9.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.7): InternLM 2.5 model support added.
 * 07/08/2024 🚀 [0.9.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.6): [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more VRAM reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
@@ -189,13 +189,13 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 
 ### Quant Method / Format / Backend Matrix
 
-Canonical backend names are shown below. Legacy aliases such as `BACKEND.TORCH`, `BACKEND.MARLIN`, `BACKEND.GEMM`, and `BACKEND.PAROQUANT` are still accepted and normalized to the matching canonical backend for the selected quant method.
+Canonical backend names are shown below. Legacy aliases such as `BACKEND.TORCH`, `BACKEND.MARLIN`, `BACKEND.GEMM`, and `BACKEND.PARO` are still accepted and normalized to the matching canonical backend for the selected quant method.
 
 | Quant Method | Formats | Backends / Kernels |
 | --- | --- | --- |
-| `METHOD.GPTQ` | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GPTQ`: `BACKEND.GPTQ_HF_KERNEL`, `BACKEND.GPTQ_MACHETE`, `BACKEND.GPTQ_MARLIN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.GPTQ_V2`: `BACKEND.GPTQ_HF_KERNEL`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.MARLIN`: `BACKEND.GPTQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.GPTQ_BITBLAS` |
-| `METHOD.AWQ` | `FORMAT.GEMM`, `FORMAT.GEMV`, `FORMAT.GEMV_FAST`, `FORMAT.LLM_AWQ`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GEMM`: `BACKEND.AWQ_HF_KERNEL`, `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`, `BACKEND.AWQ_EXLLAMA_V2`, `BACKEND.AWQ_GEMM`, `BACKEND.AWQ_GEMM_TRITON`, `BACKEND.AWQ_TORCH_FUSED`, `BACKEND.AWQ_TORCH`, `BACKEND.AWQ_TORCH_INT8`, `BACKEND.AWQ_BITBLAS`<br>`FORMAT.GEMV`: `BACKEND.AWQ_GEMV`<br>`FORMAT.GEMV_FAST`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.LLM_AWQ`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.MARLIN`: `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.AWQ_BITBLAS` |
-| `METHOD.PAROQUANT` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
+| `METHOD.GPTQ` | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GPTQ`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.GPTQ_MACHETE`, `BACKEND.GPTQ_MARLIN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.GPTQ_V2`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.MARLIN`: `BACKEND.GPTQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.GPTQ_BITBLAS` |
+| `METHOD.AWQ` | `FORMAT.GEMM`, `FORMAT.GEMV`, `FORMAT.GEMV_FAST`, `FORMAT.LLM_AWQ`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GEMM`: `BACKEND.AWQ_TORCH_ATEN`, `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`, `BACKEND.AWQ_EXLLAMA_V2`, `BACKEND.AWQ_GEMM`, `BACKEND.AWQ_GEMM_TRITON`, `BACKEND.AWQ_TORCH_FUSED`, `BACKEND.AWQ_TORCH`, `BACKEND.AWQ_TORCH_INT8`, `BACKEND.AWQ_BITBLAS`<br>`FORMAT.GEMV`: `BACKEND.AWQ_GEMV`<br>`FORMAT.GEMV_FAST`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.LLM_AWQ`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.MARLIN`: `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.AWQ_BITBLAS` |
+| `METHOD.PARO` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
 | `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ` |
 | `METHOD.GGUF` | `FORMAT.GGUF` | `BACKEND.GGUF_TRITON`, `BACKEND.GGUF_CPP_CUDA`, `BACKEND.GGUF_CPP_CPU`, `BACKEND.GGUF_TORCH` |
 | `METHOD.FP8` | `FORMAT.FP8` | `BACKEND.FP8_TORCH` |
@@ -220,7 +220,7 @@ Current internal benchmarks have only shown a clear resource-usage benefit for `
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
-* ✨ Prism Bonsai `Q1_0_g128` GGUF checkpoints can be loaded for post-quantized inference through the normal `model_id_or_path` argument. GPTQModel normalizes the GGUF artifact internally for HF Transformers, requires the external `gguf` PyPI package, and does not support Prism Bonsai quantization or export.
+* ✨ Prism Bonsai `Q1_0_g128` GGUF checkpoints can be loaded for post-quantized inference through the normal `model_id_or_path` argument. GPT-QModel normalizes the GGUF artifact internally for HF Transformers, requires the external `gguf` PyPI package, and does not support Prism Bonsai quantization or export.
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
@@ -235,7 +235,7 @@ Current internal benchmarks have only shown a clear resource-usage benefit for `
 
 ## Who's Using GPT-QModel?
 
-Selected public references where teams or companies explicitly mention `GPTQModel` in documentation, integration notes, or quantized model usage. This is not an exhaustive customer list.
+Selected public references where teams or companies explicitly mention GPT-QModel in documentation, integration notes, or quantized model usage. This is not an exhaustive customer list.
 
 * <img src="https://cdn.simpleicons.org/huggingface/FFD21E" alt="Hugging Face logo" height="14"> Hugging Face
 * <img src="https://cdn.simpleicons.org/intel/0071C5" alt="Intel logo" height="14"> Intel
@@ -289,10 +289,12 @@ GPT-QModel is validated for Linux, MacOS, and Windows 11:
 
 ```bash
 # You can install optional modules like autoround, ipex, vllm, sglang, bitblas.
-# Example: pip install -v --no-build-isolation gptqmodel[vllm,sglang,bitblas]
-pip install -v gptqmodel --no-build-isolation 
-uv pip install -v gptqmodel --no-build-isolation
+# Example: pip install -v gptqmodel[vllm,sglang,bitblas]
+pip install -v gptqmodel
+uv pip install -v gptqmodel
 ```
+
+The package depends on `ninja` for first-use JIT kernel compilation.
 
 ### Install from source
 
@@ -300,13 +302,13 @@ uv pip install -v gptqmodel --no-build-isolation
 # clone repo
 git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
-# python3-dev is required, ninja speeds up compilation, and you need to upgrade to the latest `setuptools` to avoid errors
-apt install python3-dev ninja setuptools -U
+# python3-dev is required for some source installs
+apt install python3-dev
 
-# pip: compile and install
+# pip: install from source
 # You can install optional modules like  vllm, sglang, bitblas.
-# Example: pip install -v --no-build-isolation .[vllm,sglang,bitblas]
-pip install -v . --no-build-isolation
+# Example: pip install -v .[vllm,sglang,bitblas]
+pip install -v .
 ```
 
 ### Inference
@@ -510,7 +512,7 @@ Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/b
 
 ### Evaluation and Quality Benchmarks
 
-GPTQModel evaluation is integrated into [Evalution](https://github.com/modelcloud/Evalution).  
+GPT-QModel evaluation is integrated into [Evalution](https://github.com/modelcloud/Evalution).
 We highly recommend using Evalution to validate post-quantization model quality. Regression-only language-model metrics are deprecated in this guide.
 
 ```
@@ -518,7 +520,7 @@ We highly recommend using Evalution to validate post-quantization model quality.
 pip install Evalution
 ```
 
-Below is a basic sample using Evalution's `GPTQModel` engine directly.
+Below is a basic sample using Evalution's GPT-QModel engine directly via `engines.GPTQModel`.
 
 ```py
 import evalution as eval
@@ -747,7 +749,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 
 ### Limit log level
 
-`GPTQModel` uses a shared `LogBar` logger. Set the level once near process startup:
+`GPT-QModel` uses a shared `LogBar` logger. Set the level once near process startup:
 
 ```python
 from logbar import LogBar

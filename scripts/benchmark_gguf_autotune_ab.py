@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 
 
 @dataclass(frozen=True)
@@ -46,13 +46,13 @@ def _build_module(
     device: str,
     autotune: bool,
     force_candidate: bool,
-) -> GGUFTorchQuantLinear:
+) -> GGUFTorchLinear:
     linear = nn.Linear(case.in_features, case.out_features, bias=False, dtype=dtype).cpu().eval()
     torch.manual_seed(0)
     with torch.no_grad():
         linear.weight.normal_(mean=0.0, std=0.02)
 
-    module = GGUFTorchQuantLinear(
+    module = GGUFTorchLinear(
         bits=case.bits,
         group_size=case.group_size,
         sym=True,
@@ -85,7 +85,7 @@ def _bench_once(fn, *, sync_cuda: bool) -> float:
     return (time.perf_counter() - t0) * 1000.0
 
 
-def _plan_label(module: GGUFTorchQuantLinear, x: torch.Tensor) -> str:
+def _plan_label(module: GGUFTorchLinear, x: torch.Tensor) -> str:
     if not module.autotune_enabled:
         return "fused" if module._is_fused_k_forward_candidate(x) else "none"
     decision = module.get_autotune_result()

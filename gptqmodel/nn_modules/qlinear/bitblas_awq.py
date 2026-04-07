@@ -165,6 +165,6 @@ class AWQBitBlasKernel(BitblasBaseQuantLinear):
         )
 
 
-AwqBitBLASQuantLinear = AWQBitBlasKernel
+AwqBitBLASLinear = AWQBitBlasKernel
 
-__all__ = ["AWQBitBlasKernel", "AwqBitBLASQuantLinear"]
+__all__ = ["AWQBitBlasKernel", "AwqBitBLASLinear"]

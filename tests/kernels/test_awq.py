@@ -21,25 +21,25 @@ from tabulate import tabulate
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
 from gptqmodel.nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
-from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
+from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import (
-    AwqMarlinQuantLinear,
+    AwqMarlinLinear,
     marlin_import_exception,
 )
-from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
-from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
 from gptqmodel.utils.marlin import marlin_make_workspace_new
 
 
 try:
-    from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonQuantLinear
+    from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 
     awq_triton_import_exception: Optional[Exception] = None
 except Exception as exc:  # pragma: no cover - triton import may fail in CI
-    AwqGEMMTritonQuantLinear = None  # type: ignore[assignment]
+    AwqGEMMTritonLinear = None  # type: ignore[assignment]
     awq_triton_import_exception = exc
 
-from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
+from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
 from gptqmodel.utils.exllamav2 import ScratchSpace
 
 
@@ -246,8 +246,8 @@ class TestAwqKernelOutput(unittest.TestCase):
         qzeros_cpu: torch.Tensor,
         scales_cpu: torch.Tensor,
         bias_cpu: torch.Tensor,
-    ) -> AwqGEMMQuantLinear:
-        module = AwqGEMMQuantLinear(
+    ) -> AwqGEMMLinear:
+        module = AwqGEMMLinear(
             bits=cls.BITS,
             group_size=cls.GROUP_SIZE,
             sym=True,
@@ -304,10 +304,10 @@ class TestAwqKernelOutput(unittest.TestCase):
         qzeros_cpu: torch.Tensor,
         scales_cpu: torch.Tensor,
         bias_cpu: torch.Tensor,
-    ) -> AwqGEMMTritonQuantLinear:
-        if AwqGEMMTritonQuantLinear is None:
+    ) -> AwqGEMMTritonLinear:
+        if AwqGEMMTritonLinear is None:
             raise RuntimeError("AWQ Triton kernel not available.")
-        module = AwqGEMMTritonQuantLinear(
+        module = AwqGEMMTritonLinear(
             bits=cls.BITS,
             group_size=cls.GROUP_SIZE,
             sym=True,
@@ -335,7 +335,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         qzeros_cpu: torch.Tensor,
         scales_cpu: torch.Tensor,
         bias_cpu: torch.Tensor,
-    ) -> Optional[AwqMarlinQuantLinear]:
+    ) -> Optional[AwqMarlinLinear]:
         if marlin_import_exception is not None:
             cls.backend_skip_reason[BACKEND.MARLIN] = f"AWQ Marlin kernel unavailable: {marlin_import_exception}"
             return None
@@ -348,7 +348,7 @@ class TestAwqKernelOutput(unittest.TestCase):
             cls.backend_skip_reason[BACKEND.MARLIN] = f"Unable to allocate Marlin workspace: {exc}"
             return None
 
-        module = AwqMarlinQuantLinear(
+        module = AwqMarlinLinear(
             bits=cls.BITS,
             group_size=cls.GROUP_SIZE,
             sym=True,
@@ -376,8 +376,8 @@ class TestAwqKernelOutput(unittest.TestCase):
         qzeros_cpu: torch.Tensor,
         scales_cpu: torch.Tensor,
         bias_cpu: torch.Tensor,
-    ) -> AwqTorchQuantLinear:
-        module = AwqTorchQuantLinear(
+    ) -> AwqTorchLinear:
+        module = AwqTorchLinear(
             bits=cls.BITS,
             group_size=cls.GROUP_SIZE,
             sym=True,
@@ -405,9 +405,9 @@ class TestAwqKernelOutput(unittest.TestCase):
         qzeros_cpu: torch.Tensor,
         scales_cpu: torch.Tensor,
         bias_cpu: torch.Tensor,
-    ) -> Optional[AwqExllamaV2QuantLinear]:
+    ) -> Optional[AwqExllamaV2Linear]:
         try:
-            module = AwqExllamaV2QuantLinear(
+            module = AwqExllamaV2Linear(
                 bits=cls.BITS,
                 group_size=cls.GROUP_SIZE,
                 sym=True,
@@ -444,8 +444,8 @@ class TestAwqKernelOutput(unittest.TestCase):
         bias_cpu: torch.Tensor,
         *,
         device: torch.device = CPU_DEVICE,
-    ) -> TorchFusedAwqQuantLinear:
-        module = TorchFusedAwqQuantLinear(
+    ) -> TorchFusedAwqLinear:
+        module = TorchFusedAwqLinear(
             bits=cls.BITS,
             group_size=cls.GROUP_SIZE,
             sym=True,

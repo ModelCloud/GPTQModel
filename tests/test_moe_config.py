@@ -11,7 +11,7 @@ from torch import nn
 
 from gptqmodel import GPTQModel
 from gptqmodel.models.writer import QUANT_LOG_NSAMPLES
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.quantization.config import (
     ExpertsRoutingBypass,
     ExpertsRoutingOverride,
@@ -149,7 +149,7 @@ class TestMoEConfig(ModelTest):
             torch.cuda.empty_cache()
 
             quantized_model = GPTQModel.load(tmp_dir, device_map="auto")
-            target_cls = MarlinQuantLinear if self.MOE_CONFIG else nn.Linear
+            target_cls = MarlinLinear if self.MOE_CONFIG else nn.Linear
             assert_results(quantized_model, target_cls, self.MOE_CONFIG)
 
     def test_none_moe_config(self):

@@ -83,7 +83,7 @@ if __name__ == "__main__":
 
     model = load_model(args.model_path)
 
-    print(Fore.CYAN + "Welcome to GPTQModel Chat Assistant!\n")
+    print(Fore.CYAN + "Welcome to GPT-QModel Chat Assistant!\n")
     print(Fore.YELLOW + "You can enter questions or commands as follows:\n")
     print(Fore.YELLOW + "1. Type your question for the model.\n")
     print(Fore.YELLOW + "2. Type 'exit' to quit the program.\n")

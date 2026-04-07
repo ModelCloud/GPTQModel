@@ -337,7 +337,7 @@ def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
 
     if not _PRISM_GGUF_PATCH_WARNED:
         log.warning(
-            "HF: installed transformers lacks native Prism GGUF support; GPTQModel applied a local "
+            "HF: installed transformers lacks native Prism GGUF support; GPT-QModel applied a local "
             "Q1_0_g128 compatibility monkeypatch using gguf %s.",
             gguf_version,
         )

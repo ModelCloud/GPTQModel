@@ -203,7 +203,7 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
 
     model = MinimalModel(hooked_layer)
 
-    # Create fake GPTQModel with calibration_data_device="cpu"
+    # Create fake GPT-QModel with calibration_data_device="cpu"
     class FakeGPTQModel:
         finalize_input_capture_example = BaseQModel.finalize_input_capture_example
         move_input_capture_example = BaseQModel.move_input_capture_example
@@ -601,7 +601,7 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
 # ============================================================================
 
 class _DummyGPTQModelForLooper:
-    """Minimal fake GPTQModel for testing ModuleLooper."""
+    """Minimal fake GPT-QModel for testing ModuleLooper."""
 
     def __init__(
         self,

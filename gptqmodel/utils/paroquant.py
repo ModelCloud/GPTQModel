@@ -17,7 +17,12 @@ from typing import Optional, Tuple
 
 import torch
 
-from .cpp import TorchOpsJitExtension, default_torch_ops_build_root
+from .cpp import (
+    TorchOpsJitExtension,
+    default_jit_cflags,
+    default_jit_cuda_cflags,
+    default_torch_ops_build_root,
+)
 
 
 _SUPPORTED_ROTATION_KERNEL_DTYPES = {
@@ -172,18 +177,25 @@ def _rotation_kernel_ready(
     )
 
 
+def _rotation_visible_cuda_capabilities() -> set[tuple[int, int]]:
+    """Return the visible CUDA SM versions for this process."""
+
+    if not torch.cuda.is_available():
+        return set()
+    return {
+        tuple(map(int, torch.cuda.get_device_capability(device_index)))
+        for device_index in range(torch.cuda.device_count())
+    }
+
+
 def _rotation_extra_cuda_cflags() -> list[str]:
-    return [
-        "-O3",
-        "-std=c++17",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--use_fast_math",
-    ]
+    flags = default_jit_cuda_cflags()
+    # On measured SM80/A100 builds, relaxed constexpr consistently improves the
+    # fused rotation kernel. The same flag regresses SM89/4090 here, so only
+    # enable it when the visible target set is pure SM80.
+    if _rotation_visible_cuda_capabilities() == {(8, 0)}:
+        flags.append("--expt-relaxed-constexpr")
+    return flags
 
 
 # Shared singleton so ParoQuant uses the same torch.ops JIT lifecycle helpers as
@@ -197,11 +209,17 @@ _PAROQUANT_ROTATION_EXTENSION = TorchOpsJitExtension(
     default_build_root=lambda: default_torch_ops_build_root("paroquant"),
     display_name="ParoQuant rotation",
     extra_cuda_cflags=_rotation_extra_cuda_cflags,
-    extra_cflags=["-O2", "-std=c++17"],
+    extra_cflags=lambda: default_jit_cflags(opt_level="O2"),
     force_rebuild_env="GPTQMODEL_PAROQUANT_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
 )
+
+
+def _extension_api():
+    from gptqmodel import extension as extension_api
+
+    return extension_api
 
 
 def clear_paroquant_rotation_extension_cache() -> None:
@@ -224,7 +242,7 @@ def clear_paroquant_rotation_autotune_cache() -> None:
 def _load_rotation_extension() -> bool:
     """JIT-build and load the optional fused CUDA rotation extension once."""
 
-    return _PAROQUANT_ROTATION_EXTENSION.load()
+    return _extension_api().is_available("paroquant")
 
 
 def _rotation_env_int(name: str, allowed: set[int]) -> Optional[int]:
@@ -286,7 +304,7 @@ def _rotation_autotune_cache_size() -> int:
         return int(cache_size())
     if not _load_rotation_extension():
         return 0
-    return int(_PAROQUANT_ROTATION_EXTENSION.op("autotune_cache_size")())
+    return int(_extension_api().op("paroquant", "autotune_cache_size")())
 
 
 def _run_rotation_op(
@@ -300,7 +318,7 @@ def _run_rotation_op(
     row_pad: int,
 ) -> torch.Tensor:
     """Execute the fused rotation op with one requested launch policy."""
-    return _PAROQUANT_ROTATION_EXTENSION.op("rotate")(
+    return _extension_api().op("paroquant", "rotate")(
         x,
         pairs,
         theta,
@@ -368,7 +386,7 @@ def _resolve_rotation_launch(
         if cached is not None:
             return cached
 
-        cta_m, row_pad = _PAROQUANT_ROTATION_EXTENSION.op("launch_config")(
+        cta_m, row_pad = _extension_api().op("paroquant", "launch_config")(
             x,
             int(krot),
             scales is not None,
@@ -410,7 +428,7 @@ def _rotation_launch_config(
             requested_row_pad=requested_row_pad,
         )
     else:
-        cta_m, row_pad = _PAROQUANT_ROTATION_EXTENSION.op("launch_config")(
+        cta_m, row_pad = _extension_api().op("paroquant", "launch_config")(
             x,
             int(krot),
             scales is not None,

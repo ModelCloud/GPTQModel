@@ -11,8 +11,8 @@ import torch.nn as nn
 import gptqmodel.utils.torch as torch_utils
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.lookahead import configure_default_lookahead
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 
 
 def _mock_gptq_linear(bits: int, group_size: int, in_features: int, out_features: int) -> tuple[nn.Linear, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -73,7 +73,7 @@ def test_torch_triton_large_group_sizes(group_size: int, dtype: torch.dtype) -> 
 
     linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
 
-    torch_module = TorchQuantLinear(
+    torch_module = TorchLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -87,7 +87,7 @@ def test_torch_triton_large_group_sizes(group_size: int, dtype: torch.dtype) -> 
     torch_module.post_init()
 
     try:
-        triton_module = TritonV2QuantLinear(
+        triton_module = TritonV2Linear(
             bits=bits,
             group_size=group_size,
             desc_act=False,
@@ -124,7 +124,7 @@ def test_torch_triton_large_group_sizes(group_size: int, dtype: torch.dtype) -> 
 
 
 def _make_module(device: torch.device):
-    module = TorchQuantLinear(
+    module = TorchLinear(
         bits=4,
         group_size=32,
         sym=True,
@@ -150,7 +150,7 @@ def _make_module(device: torch.device):
 
 
 def test_gptq_post_init_creates_wf_unpack_buffers():
-    module = TorchQuantLinear(
+    module = TorchLinear(
         bits=4,
         group_size=32,
         sym=True,
@@ -171,7 +171,7 @@ def test_gptq_post_init_creates_wf_unpack_buffers():
 
 
 def test_torch_quant_linear_exposes_weight_metadata():
-    module = TorchQuantLinear(
+    module = TorchLinear(
         bits=4,
         group_size=32,
         sym=True,
@@ -311,7 +311,7 @@ def test_configure_default_lookahead_chain():
 
     model = DummyModel()
     for module in model.modules():
-        if isinstance(module, TorchQuantLinear):
+        if isinstance(module, TorchLinear):
             module.enable_lookahead(True)
 
     configure_default_lookahead(model)
@@ -346,7 +346,7 @@ def test_cpu_dequant_parity_and_g_idx_cache_allocation():
     torch.manual_seed(0)
     linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
 
-    module = TorchQuantLinear(
+    module = TorchLinear(
         bits=bits,
         group_size=group_size,
         sym=True,
@@ -407,7 +407,7 @@ def test_cpu_cached_dequant_num_itr_matches_packable():
     torch.manual_seed(0)
     linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
 
-    module = TorchQuantLinear(
+    module = TorchLinear(
         bits=bits,
         group_size=group_size,
         sym=True,

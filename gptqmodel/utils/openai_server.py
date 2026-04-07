@@ -16,7 +16,7 @@ try:
     from pydantic import BaseModel
 except ModuleNotFoundError as exception:
     raise type(exception)(
-        "GPTQModel OpenAi serve required dependencies are not installed.",
+        "GPT-QModel OpenAi serve required dependencies are not installed.",
         "Please install via `pip install gptqmodel[openai] --no-build-isolation`.",
     )
 
@@ -107,7 +107,7 @@ class OpenAiServer:
 
         @self.app.get("/")
         def read_root():
-            return {"message": "GPTQModel OpenAI Compatible Server is running."}
+            return {"message": "GPT-QModel OpenAI Compatible Server is running."}
 
         @self.app.get("/shutdown")
         def shutdown():
@@ -124,19 +124,19 @@ class OpenAiServer:
         if async_mode:
             thread = threading.Thread(target=run_server, daemon=False)
             thread.start()
-            print(f"GPTQModel OpenAi Server has started asynchronously at http://{host}:{port}.")
+            print(f"GPT-QModel OpenAi Server has started asynchronously at http://{host}:{port}.")
         else:
             run_server()
-            print(f"GPTQModel OpenAi Server has started synchronously at http://{host}:{port}.")
+            print(f"GPT-QModel OpenAi Server has started synchronously at http://{host}:{port}.")
 
     def shutdown(self):
         if self.uvicorn_server is not None:
             self.uvicorn_server.should_exit = True
-            print("GPTQModel OpenAi Server is shutting down...")
+            print("GPT-QModel OpenAi Server is shutting down...")
 
     def wait_until_ready(self, timeout: int = 30, check_interval: float = 0.1):
         start_time = time.time()
         while not self.uvicorn_server.started:
             if time.time() - start_time > timeout:
-                raise TimeoutError("GPTQModel OpenAi server failed to start within the specified time.")
+                raise TimeoutError("GPT-QModel OpenAi server failed to start within the specified time.")
             time.sleep(check_interval)

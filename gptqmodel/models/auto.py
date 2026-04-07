@@ -56,7 +56,7 @@ from transformers import AutoConfig, PreTrainedTokenizerBase  # noqa: E402
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
-from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
+from ..nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.backend import normalize_backend  # noqa: E402
@@ -293,7 +293,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.FP8,
         METHOD.BITSANDBYTES,
         METHOD.AWQ,
-        METHOD.PAROQUANT,
+        METHOD.PARO,
         METHOD.QQQ,
         METHOD.EXL3,
     ):
@@ -306,7 +306,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.FP8,
         METHOD.BITSANDBYTES,
         METHOD.AWQ,
-        METHOD.PAROQUANT,
+        METHOD.PARO,
         METHOD.QQQ,
         METHOD.EXL3,
     ):
@@ -369,9 +369,9 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
 class GPTQModel:
     def __init__(self):
         raise EnvironmentError(
-            "GPTQModel is not designed to be instantiated\n"
-            "use `GPTQModel.from_pretrained` to load pretrained model and prepare for quantization via `.quantize()`.\n"
-            "use `GPTQModel.from_quantized` to inference with post-quantized model."
+            "GPT-QModel is not designed to be instantiated\n"
+            "use `from_pretrained()` to load a pretrained model and prepare for quantization via `.quantize()`.\n"
+            "use `from_quantized()` for inference with a post-quantized model."
         )
 
     @classmethod
@@ -495,7 +495,7 @@ class GPTQModel:
 
         if quantize_config and quantize_config.dynamic:
             log.warn(
-                "GPTQModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
+                "GPT-QModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
 
         model_definition = check_and_get_model_definition(
             model_id_or_path,
@@ -576,7 +576,7 @@ class GPTQModel:
             backend = BACKEND.BITSANDBYTES
         elif normalized_method == METHOD.AWQ.value:
             backend = BACKEND.AWQ_TORCH
-        elif normalized_method == METHOD.PAROQUANT.value:
+        elif normalized_method == METHOD.PARO.value:
             backend = BACKEND.PAROQUANT_CUDA
         elif normalized_method == METHOD.FP8.value:
             backend = BACKEND.FP8_TORCH
@@ -645,7 +645,7 @@ class GPTQModel:
             )
 
             qcfg = quantized_model.quantize_config
-            qModules: Dict[str, TorchQuantLinear] = find_modules(module=quantized_model.model, layers=[TorchQuantLinear])
+            qModules: Dict[str, TorchLinear] = find_modules(module=quantized_model.model, layers=[TorchLinear])
             # for name, module in qModules.items():
             #     quantized_weights[name] = module.dequantize_weight()
             del quantized_model

@@ -14,8 +14,8 @@ import torch
 from tabulate import tabulate
 
 from gptqmodel import GPTQModel
-from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
-from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonQuantLinear
+from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
@@ -217,7 +217,7 @@ def make_paroquant_config(
     if sym is not True:
         raise ValueError("ParoQuant benchmark: `sym=False` is disabled; use `sym=True`.")
     return QuantizeConfig(
-        method=METHOD.PAROQUANT,
+        method=METHOD.PARO,
         format=FORMAT.PAROQUANT,
         bits=bits,
         group_size=group_size,
@@ -412,8 +412,8 @@ def _tokenize_calibration_sample(model, sample: dict[str, Any]) -> dict[str, tor
     raise ValueError(f"Unsupported calibration sample keys for ParoQuant kernel benchmark: {sorted(sample.keys())}")
 
 
-def _clone_triton_module(module: ParoQuantQuantLinear) -> ParoQuantTritonQuantLinear:
-    cloned = ParoQuantTritonQuantLinear(
+def _clone_triton_module(module: ParoLinear) -> ParoQuantTritonLinear:
+    cloned = ParoQuantTritonLinear(
         bits=module.bits,
         group_size=module.group_size,
         sym=module.sym,
@@ -438,7 +438,7 @@ def _clone_triton_module(module: ParoQuantQuantLinear) -> ParoQuantTritonQuantLi
     return cloned
 
 
-def _dense_forward(module: ParoQuantQuantLinear, x: torch.Tensor) -> torch.Tensor:
+def _dense_forward(module: ParoLinear, x: torch.Tensor) -> torch.Tensor:
     with torch.inference_mode():
         x_flat = x.reshape(-1, x.shape[-1])
         rotated = module._rotate_inputs(x_flat)
@@ -470,7 +470,7 @@ def benchmark_quantized_first_layer_kernels(
     qmodules = {
         name: module
         for name, module in model.named_modules()
-        if isinstance(module, ParoQuantQuantLinear)
+        if isinstance(module, ParoLinear)
     }
     if not qmodules:
         return []
@@ -699,7 +699,7 @@ def run_paroquant_first_layer_case(
     normalized_dtype = _normalize_model_dtype(model_dtype)
     probe_model = GPTQModel.load(
         model_path,
-        quantize_config=QuantizeConfig(method=METHOD.PAROQUANT, format=FORMAT.PAROQUANT),
+        quantize_config=QuantizeConfig(method=METHOD.PARO, format=FORMAT.PAROQUANT),
         trust_remote_code=False,
         dtype=normalized_dtype,
         device_map=_single_gpu_device_map(),
@@ -806,7 +806,7 @@ def run_paroquant_selected_modules_case(
     normalized_dtype = _normalize_model_dtype(model_dtype)
     probe_model = GPTQModel.load(
         model_path,
-        quantize_config=QuantizeConfig(method=METHOD.PAROQUANT, format=FORMAT.PAROQUANT),
+        quantize_config=QuantizeConfig(method=METHOD.PARO, format=FORMAT.PAROQUANT),
         trust_remote_code=False,
         dtype=normalized_dtype,
         device_map=_single_gpu_device_map(),

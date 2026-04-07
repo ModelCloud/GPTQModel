@@ -17,14 +17,9 @@ from ...nn_modules.qlinear import GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
 from ...utils.rocm import IS_ROCM
 
-
-qqq_import_exception = None
-try:
-    import gptqmodel_qqq_kernels
-except ImportError as e:
-    qqq_import_exception = str(e)
 
 log = setup_logger()
 
@@ -46,10 +41,12 @@ def mul(
     @sms: number of SMs to use for the kernel (can usually be left as auto -1)
     @max_par: maximum number of batch 64 problems to solve in parallel for large input sizes
     """
-    gptqmodel_qqq_kernels.qqq_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par)
+    if not qqq_runtime_available():
+        raise ModuleNotFoundError("QQQ torch.ops kernels are not properly installed. Error: " + qqq_runtime_error())
+    qqq_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par)
 
 
-class QQQQuantLinear(GroupedQuantLinear):
+class QQQLinear(GroupedQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.QQQ]
     SUPPORTS_METHODS = [METHOD.QQQ]
     SUPPORTS_FORMATS = {FORMAT.QQQ: 100}
@@ -210,8 +207,8 @@ class QQQQuantLinear(GroupedQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        if qqq_import_exception is not None:
-            return False, ImportError(qqq_import_exception)
+        if not qqq_runtime_available():
+            return False, ImportError(qqq_runtime_error())
         return True, None
 
     @classmethod
@@ -403,4 +400,4 @@ class QQQQuantLinear(GroupedQuantLinear):
         return D.to(dtype=A_dtype)
 
 
-__all__ = ["QQQQuantLinear"]
+__all__ = ["QQQLinear"]

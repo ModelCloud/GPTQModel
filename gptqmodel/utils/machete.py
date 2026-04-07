@@ -1,33 +1,318 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+from pathlib import Path
 from typing import List, Optional
 
 import torch
 
-from ._extension_loader import load_extension_module
+from .cpp import (
+    TorchOpsJitExtension,
+    default_jit_cflags,
+    default_jit_cuda_cflags,
+    default_torch_ops_build_root,
+)
 from .logger import setup_logger
 from .marlin_scalar_type import ScalarType, scalar_types
+from .rocm import IS_ROCM
 
 
 log = setup_logger()
 
-machete_import_exception: Optional[str] = None
-try:
-    gptqmodel_machete_kernels = load_extension_module("gptqmodel_machete_kernels")
-except ImportError as e:  # pragma: no cover - surfaced at runtime
-    machete_import_exception = str(e)
-    gptqmodel_machete_kernels = None
+_MACHETE_OPS_NAME = "gptqmodel_machete_ops"
+_MACHETE_OPS_NAMESPACE = "gptqmodel_machete"
+
+_CUTLASS_VERSION = "3.5.0"
+_CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{_CUTLASS_VERSION}.tar.gz"
 
 MACHETE_PREPACKED_BLOCK_SHAPE = (64, 128)
 
 
+def _machete_project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _machete_source_root() -> Path:
+    return _machete_project_root() / "gptqmodel_ext" / "machete"
+
+
+def _repo_local_cutlass_root() -> Path:
+    return _machete_project_root() / "cutlass"
+
+
+def _cutlass_download_cache_dir() -> Path:
+    return _machete_project_root() / "build" / "_deps"
+
+
+def _cutlass_python_bindings_present(cutlass_root: Path) -> bool:
+    python_dir = cutlass_root / "python"
+    return (
+        (python_dir / "cutlass_library.py").is_file()
+        or (python_dir / "cutlass_library" / "__init__.py").is_file()
+    )
+
+
+def _cutlass_checkout_complete(cutlass_root: Path) -> bool:
+    return (
+        (cutlass_root / "include" / "cutlass" / "cutlass.h").is_file()
+        and (cutlass_root / "examples" / "common" / "include").is_dir()
+        and (cutlass_root / "tools" / "library" / "include").is_dir()
+        and _cutlass_python_bindings_present(cutlass_root)
+    )
+
+
+def _download_cutlass_archive(url: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_suffix(destination.suffix + ".part")
+    if partial.exists():
+        partial.unlink()
+
+    log.info("Machete: downloading CUTLASS v%s into `%s`.", _CUTLASS_VERSION, destination)
+    with urllib.request.urlopen(url) as response, partial.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
+    partial.replace(destination)
+
+
+def _extract_cutlass_archive(archive_path: Path, destination_parent: Path) -> None:
+    with tarfile.open(archive_path, "r:gz") as archive:
+        extract_kwargs = {"path": destination_parent}
+        if sys.version_info >= (3, 12):
+            extract_kwargs["filter"] = "data"
+        archive.extractall(**extract_kwargs)
+
+
+def _ensure_cutlass_source() -> Path:
+    configured_root = os.getenv("GPTQMODEL_CUTLASS_DIR")
+    if configured_root:
+        configured_path = Path(configured_root).expanduser().resolve()
+        if _cutlass_checkout_complete(configured_path):
+            return configured_path
+        log.info(
+            "Machete: GPTQMODEL_CUTLASS_DIR=`%s` is incomplete; falling back to repo-local CUTLASS checkout.",
+            configured_path,
+        )
+
+    repo_local_root = _repo_local_cutlass_root().resolve()
+    if _cutlass_checkout_complete(repo_local_root):
+        os.environ["GPTQMODEL_CUTLASS_DIR"] = str(repo_local_root)
+        return repo_local_root
+
+    archive_path = _cutlass_download_cache_dir() / f"cutlass-v{_CUTLASS_VERSION}.tar.gz"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    if not archive_path.exists():
+        _download_cutlass_archive(_CUTLASS_RELEASE_URL, archive_path)
+
+    parent = repo_local_root.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    if repo_local_root.exists():
+        shutil.rmtree(repo_local_root, ignore_errors=True)
+
+    with tempfile.TemporaryDirectory(dir=parent, prefix="cutlass-unpack-") as temp_dir:
+        temp_root = Path(temp_dir)
+        _extract_cutlass_archive(archive_path, temp_root)
+        extracted_root = temp_root / f"cutlass-{_CUTLASS_VERSION}"
+        if not extracted_root.exists():
+            raise RuntimeError(f"Machete: failed to extract CUTLASS archive `{archive_path}`.")
+        extracted_root.replace(repo_local_root)
+
+    os.environ["GPTQMODEL_CUTLASS_DIR"] = str(repo_local_root)
+    return repo_local_root
+
+
+def _machete_generated_dir() -> Path:
+    return _machete_source_root() / "generated"
+
+
+def _machete_generation_marker() -> Path:
+    return _machete_generated_dir() / ".gptqmodel_complete"
+
+
+def _machete_generator_inputs() -> list[Path]:
+    project_root = _machete_project_root()
+    return [
+        _machete_source_root() / "generate.py",
+        project_root / "gptqmodel_ext" / "cutlass_extensions" / "vllm_cutlass_library_extension.py",
+    ]
+
+
+def _generated_machete_sources() -> list[Path]:
+    return sorted(_machete_generated_dir().glob("*.cu"))
+
+
+def _generated_machete_sources_current() -> bool:
+    marker = _machete_generation_marker()
+    generated_sources = _generated_machete_sources()
+    if not marker.exists() or not generated_sources:
+        return False
+    marker_mtime_ns = marker.stat().st_mtime_ns
+    return not any(path.stat().st_mtime_ns > marker_mtime_ns for path in _machete_generator_inputs())
+
+
+def _run_machete_generator(cutlass_root: Path) -> None:
+    generator = _machete_source_root() / "generate.py"
+    env = os.environ.copy()
+    env["GPTQMODEL_CUTLASS_DIR"] = str(cutlass_root)
+
+    log.info("Machete: generating CUTLASS-backed kernel sources in `%s`.", _machete_generated_dir())
+    result = subprocess.run(
+        [sys.executable, str(generator)],
+        cwd=str(_machete_project_root()),
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Machete: failed to generate kernel sources.\n"
+            f"Return code: {result.returncode}\n"
+            f"Stdout: {result.stdout}\n"
+            f"Stderr: {result.stderr}"
+        )
+
+
+def _ensure_generated_machete_sources() -> list[Path]:
+    cutlass_root = _ensure_cutlass_source()
+    if _generated_machete_sources_current():
+        return _generated_machete_sources()
+
+    generated_dir = _machete_generated_dir()
+    if generated_dir.exists():
+        shutil.rmtree(generated_dir, ignore_errors=True)
+
+    _run_machete_generator(cutlass_root)
+
+    generated_sources = _generated_machete_sources()
+    if not generated_sources:
+        raise RuntimeError(
+            "Machete: generator completed without producing any CUDA sources."
+        )
+
+    _machete_generation_marker().touch()
+    return generated_sources
+
+
+def _machete_sources() -> list[str]:
+    machete_root = _machete_source_root()
+    generated_sources = _ensure_generated_machete_sources()
+    return [str(machete_root / "machete_pytorch.cu"), *[str(path) for path in generated_sources]]
+
+
+def _machete_include_paths() -> list[str]:
+    project_root = _machete_project_root()
+    cutlass_root = _ensure_cutlass_source()
+    return [
+        str((project_root / "gptqmodel_ext").resolve()),
+        str((project_root / "gptqmodel_ext" / "cutlass_extensions").resolve()),
+        str((cutlass_root / "include").resolve()),
+        str((cutlass_root / "examples" / "common" / "include").resolve()),
+        str((cutlass_root / "tools" / "library" / "include").resolve()),
+    ]
+
+
+def _machete_extra_cflags() -> list[str]:
+    return default_jit_cflags(enable_bf16=True)
+
+
+def _machete_extra_cuda_cflags() -> list[str]:
+    return [
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+        *default_jit_cuda_cflags(
+            enable_bf16=True,
+            include_lineinfo=True,
+            include_nvcc_threads=True,
+            include_ptxas_optimizations=True,
+            include_ptxas_verbosity=False,
+            include_fatbin_compression=True,
+            include_diag_suppress=True,
+        ),
+    ]
+
+
+def _machete_extra_ldflags() -> list[str]:
+    # Hopper tensor-map entry points such as cuTensorMapEncodeTiled live in the
+    # CUDA driver library, not libcudart. Link libcuda explicitly so the JIT
+    # extension remains loadable after a successful compile on non-SM90 hosts.
+    return ["-lcuda"]
+
+
+_MACHETE_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+    name=_MACHETE_OPS_NAME,
+    namespace=_MACHETE_OPS_NAMESPACE,
+    required_ops=("machete_prepack_B", "machete_mm", "machete_supported_schedules"),
+    sources=_machete_sources,
+    build_root_env="GPTQMODEL_MACHETE_BUILD_ROOT",
+    default_build_root=lambda: default_torch_ops_build_root("machete"),
+    display_name="Machete",
+    extra_cflags=_machete_extra_cflags,
+    extra_cuda_cflags=_machete_extra_cuda_cflags,
+    extra_include_paths=_machete_include_paths,
+    extra_ldflags=_machete_extra_ldflags,
+    force_rebuild_env="GPTQMODEL_MACHETE_FORCE_REBUILD",
+    verbose_env="GPTQMODEL_EXT_VERBOSE",
+    requires_cuda=True,
+)
+
+
+def _extension_api():
+    from gptqmodel import extension as extension_api
+
+    return extension_api
+
+
+def _machete_static_runtime_error() -> str:
+    if IS_ROCM:
+        return "Machete kernel is not supported on ROCm."
+    if not torch.cuda.is_available():
+        return "Machete kernel requires CUDA."
+    if torch.cuda.get_device_capability()[0] < 9:
+        return "Machete kernel requires compute capability >= 9.0."
+    return ""
+
+
+def clear_machete_extension_cache() -> None:
+    _MACHETE_TORCH_OPS_EXTENSION.clear_cache()
+
+
+def machete_runtime_available() -> bool:
+    static_error = _machete_static_runtime_error()
+    if static_error:
+        return False
+    return _extension_api().is_available("machete")
+
+
+def machete_runtime_error() -> str:
+    static_error = _machete_static_runtime_error()
+    if static_error:
+        return static_error
+
+    extension_api = _extension_api()
+    if extension_api.is_available("machete"):
+        return ""
+    return extension_api.error("machete") or "Machete runtime unavailable."
+
+
+def prewarm_machete_extension() -> bool:
+    return _extension_api().load(name="machete")["machete"]
+
+
 def _validate_machete_device_support() -> bool:
-    return (torch.cuda.is_available()
-            and torch.cuda.get_device_capability()[0] >= 9)
+    return _machete_static_runtime_error() == ""
 
 
 def query_machete_supported_quant_types(zero_points: bool) -> List[ScalarType]:
@@ -46,35 +331,30 @@ def query_machete_supported_group_sizes(act_type: torch.dtype) -> List[int]:
     return [-1, 128]
 
 
-def check_machete_supports_shape(in_features: int,
-                                 out_features: int) -> tuple[bool, Optional[str]]:
+def check_machete_supports_shape(
+    in_features: int,
+    out_features: int,
+) -> tuple[bool, Optional[str]]:
     if in_features % MACHETE_PREPACKED_BLOCK_SHAPE[0] != 0:
-        return (False,
-                f"Input features size must be divisible by {MACHETE_PREPACKED_BLOCK_SHAPE[0]}")
+        return (
+            False,
+            f"Input features size must be divisible by {MACHETE_PREPACKED_BLOCK_SHAPE[0]}",
+        )
     if out_features % MACHETE_PREPACKED_BLOCK_SHAPE[1] != 0:
-        return (False,
-                f"Output features size must be divisible by {MACHETE_PREPACKED_BLOCK_SHAPE[1]}")
+        return (
+            False,
+            f"Output features size must be divisible by {MACHETE_PREPACKED_BLOCK_SHAPE[1]}",
+        )
     return (True, None)
 
 
-def _ensure_machete_loaded():
-    if machete_import_exception is not None:
-        raise ImportError(
-            f"Trying to use the machete backend, but could not import the C++/CUDA dependencies: {machete_import_exception}"
-        )
-
-
-def _maybe_scalar_type(t: Optional[torch.Tensor]) -> Optional[torch.dtype]:
-    return t.dtype if t is not None else None
-
-
 def machete_prepack_B(
-        weight: torch.Tensor,
-        a_type: torch.dtype,
-        b_type: ScalarType,
-        group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
-    _ensure_machete_loaded()
-    return gptqmodel_machete_kernels.machete_prepack_B(
+    weight: torch.Tensor,
+    a_type: torch.dtype,
+    b_type: ScalarType,
+    group_scales_type: Optional[torch.dtype],
+) -> torch.Tensor:
+    return _extension_api().op("machete", "machete_prepack_B")(
         weight,
         a_type,
         b_type.id,
@@ -83,15 +363,15 @@ def machete_prepack_B(
 
 
 def machete_supported_schedules(
-        a_type: torch.dtype,
-        b_type: ScalarType,
-        group_scales_type: Optional[torch.dtype] = None,
-        group_zeros_type: Optional[torch.dtype] = None,
-        channel_scales_type: Optional[torch.dtype] = None,
-        token_scales_type: Optional[torch.dtype] = None,
-        out_type: Optional[torch.dtype] = None) -> List[str]:
-    _ensure_machete_loaded()
-    return gptqmodel_machete_kernels.machete_supported_schedules(
+    a_type: torch.dtype,
+    b_type: ScalarType,
+    group_scales_type: Optional[torch.dtype] = None,
+    group_zeros_type: Optional[torch.dtype] = None,
+    channel_scales_type: Optional[torch.dtype] = None,
+    token_scales_type: Optional[torch.dtype] = None,
+    out_type: Optional[torch.dtype] = None,
+) -> List[str]:
+    return _extension_api().op("machete", "machete_supported_schedules")(
         a_type,
         b_type.id,
         group_scales_type,
@@ -103,19 +383,19 @@ def machete_supported_schedules(
 
 
 def machete_mm(
-        *,
-        a: torch.Tensor,
-        b_q: torch.Tensor,
-        b_type: ScalarType,
-        b_group_scales: Optional[torch.Tensor] = None,
-        b_group_zeros: Optional[torch.Tensor] = None,
-        b_group_size: Optional[int] = None,
-        b_channel_scales: Optional[torch.Tensor] = None,
-        a_token_scales: Optional[torch.Tensor] = None,
-        out_type: Optional[torch.dtype] = None,
-        schedule: Optional[str] = None) -> torch.Tensor:
-    _ensure_machete_loaded()
-    return gptqmodel_machete_kernels.machete_mm(
+    *,
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    b_type: ScalarType,
+    b_group_scales: Optional[torch.Tensor] = None,
+    b_group_zeros: Optional[torch.Tensor] = None,
+    b_group_size: Optional[int] = None,
+    b_channel_scales: Optional[torch.Tensor] = None,
+    a_token_scales: Optional[torch.Tensor] = None,
+    out_type: Optional[torch.dtype] = None,
+    schedule: Optional[str] = None,
+) -> torch.Tensor:
+    return _extension_api().op("machete", "machete_mm")(
         a,
         b_q,
         b_type.id,
@@ -130,9 +410,10 @@ def machete_mm(
 
 
 def pack_quantized_values_into_int32(
-        tensor: torch.Tensor,
-        qtype: ScalarType,
-        packed_dim: int = 0) -> torch.Tensor:
+    tensor: torch.Tensor,
+    qtype: ScalarType,
+    packed_dim: int = 0,
+) -> torch.Tensor:
     perm = tuple(i for i in range(tensor.ndim) if i != packed_dim) + (packed_dim,)
     inv_perm = tuple(perm.index(i) for i in range(len(perm)))
     temp = tensor.permute(perm)
@@ -152,9 +433,10 @@ def pack_quantized_values_into_int32(
 
 
 def unpack_quantized_values_into_int32(
-        tensor: torch.Tensor,
-        qtype: ScalarType,
-        packed_dim: int = 0) -> torch.Tensor:
+    tensor: torch.Tensor,
+    qtype: ScalarType,
+    packed_dim: int = 0,
+) -> torch.Tensor:
     perm = tuple(i for i in range(tensor.ndim) if i != packed_dim) + (packed_dim,)
     inv_perm = tuple(perm.index(i) for i in range(len(perm)))
     temp = tensor.permute(perm)
@@ -173,13 +455,18 @@ def unpack_quantized_values_into_int32(
 
 
 __all__ = [
+    "_ensure_cutlass_source",
+    "_ensure_generated_machete_sources",
     "_validate_machete_device_support",
     "check_machete_supports_shape",
-    "machete_import_exception",
+    "clear_machete_extension_cache",
     "machete_mm",
     "machete_prepack_B",
+    "machete_runtime_available",
+    "machete_runtime_error",
     "machete_supported_schedules",
     "pack_quantized_values_into_int32",
+    "prewarm_machete_extension",
     "query_machete_supported_act_types",
     "query_machete_supported_group_sizes",
     "query_machete_supported_quant_types",

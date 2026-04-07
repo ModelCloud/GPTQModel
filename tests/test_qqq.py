@@ -15,7 +15,7 @@ from models.model_test import ModelTest
 from parameterized import parameterized
 from transformers import AutoTokenizer
 
-from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
+from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.torch import torch_empty_cache
 
@@ -102,7 +102,7 @@ class TestGroupSize(unittest.TestCase):
     def assert_qqq_linear(self, model):
         has_qqq = False
         for _, module in model.named_modules():
-            linear = QQQQuantLinear
+            linear = QQQLinear
             if isinstance(module, linear):
                 has_qqq = True
                 break

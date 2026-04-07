@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
 # Copied/adapted from the AWQ Triton kernels used in vLLM and GPT-QModel.
 #
 # Copyright 2024 The vLLM team.

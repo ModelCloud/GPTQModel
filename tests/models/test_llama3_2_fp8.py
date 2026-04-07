@@ -14,7 +14,7 @@ if TESTS_MODELS_ROOT not in sys.path:
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8QuantLinear
+from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.quantization import METHOD
 from gptqmodel.quantization.config import WeightOnlyConfig
 
@@ -67,8 +67,8 @@ class TestLlama3_2_FP8(ModelTest):
     WEIGHT_ONLY = WeightOnlyConfig(method="fp8")
     QUANT_BACKEND = BACKEND.TORCH
     LOAD_BACKEND = BACKEND.TORCH
-    KERNEL_QUANT = {TorchFP8QuantLinear}
-    KERNEL_INFERENCE = {TorchFP8QuantLinear}
+    KERNEL_QUANT = {TorchFP8Linear}
+    KERNEL_INFERENCE = {TorchFP8Linear}
     PIN_CUDA_DEVICE = 0
 
     def test_llama3_2_fp8(self):

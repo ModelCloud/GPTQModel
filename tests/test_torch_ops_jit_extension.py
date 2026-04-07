@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from gptqmodel.utils import cpp as cpp_module
@@ -51,6 +52,81 @@ def _make_loader(tmp_path: Path, **overrides) -> cpp_module.TorchOpsJitExtension
     }
     params.update(overrides)
     return cpp_module.TorchOpsJitExtension(**params)
+
+
+def test_default_jit_cflags_allow_noopt(monkeypatch):
+    """Guard the noopt path so callers can intentionally omit all `-O*` flags."""
+
+    monkeypatch.delenv("GPTQMODEL_NVCC_COMPILE_LEVEL", raising=False)
+
+    flags = cpp_module.default_jit_cflags(opt_level=None)
+
+    assert "-std=c++17" in flags
+    assert not any(flag.startswith("-O") for flag in flags)
+
+
+def test_default_jit_cuda_cflags_respect_o2_override(monkeypatch):
+    """Guard the global override so kernels can be forced onto one explicit optimization level."""
+
+    monkeypatch.setenv("GPTQMODEL_NVCC_COMPILE_LEVEL", "O2")
+
+    flags = cpp_module.default_jit_cuda_cflags(
+        opt_level="O3",
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+    )
+
+    assert "-O2" in flags
+    assert "-O3" not in flags
+    assert "--optimize=2" in flags
+    assert flags[flags.index("-Xptxas") + 1] == "-v,-O2,-dlcm=ca"
+
+
+def test_default_jit_cuda_cflags_respect_noopt_override(monkeypatch):
+    """Guard the noopt override so users can disable every emitted `-O*` flag when needed."""
+
+    monkeypatch.setenv("GPTQMODEL_NVCC_COMPILE_LEVEL", "NONE")
+
+    flags = cpp_module.default_jit_cuda_cflags(
+        opt_level="O3",
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+    )
+
+    assert not any(flag.startswith("-O") for flag in flags)
+    assert not any(flag.startswith("--optimize=") for flag in flags)
+    assert flags[flags.index("-Xptxas") + 1] == "-v,-dlcm=ca"
+
+
+def test_default_jit_cuda_cflags_allow_quiet_ptxas(monkeypatch):
+    """Guard per-kernel PTXAS verbosity overrides so AWQ can suppress giant compile logs."""
+
+    monkeypatch.delenv("GPTQMODEL_NVCC_COMPILE_LEVEL", raising=False)
+
+    flags = cpp_module.default_jit_cuda_cflags(
+        include_ptxas_optimizations=True,
+        include_ptxas_verbosity=False,
+    )
+
+    assert flags[flags.index("-Xptxas") + 1] == "-O3,-dlcm=ca"
+
+
+def test_detected_cuda_wheel_include_paths_discovers_merged_and_split_layouts(monkeypatch, tmp_path):
+    """Guard CUDA wheel header discovery so JIT kernels can see NVIDIA pip headers."""
+
+    nvidia_root = tmp_path / "site-packages" / "nvidia"
+    (nvidia_root / "cu13" / "include").mkdir(parents=True)
+    (nvidia_root / "cusparse" / "include").mkdir(parents=True)
+    (nvidia_root / "cublas" / "include").mkdir(parents=True)
+
+    fake_nvidia = type("FakeNvidia", (), {"__path__": [str(nvidia_root)]})()
+    monkeypatch.setitem(sys.modules, "nvidia", fake_nvidia)
+
+    assert cpp_module.detected_cuda_wheel_include_paths() == [
+        str(nvidia_root / "cu13" / "include"),
+        str(nvidia_root / "cublas" / "include"),
+        str(nvidia_root / "cusparse" / "include"),
+    ]
 
 
 def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
@@ -152,10 +228,46 @@ def test_torch_ops_jit_extension_emits_spinner_logs_around_compile(monkeypatch, 
     assert compile_calls[0]["extra_include_paths"] == ["/tmp/include"]
     assert compile_calls[0]["extra_ldflags"] == ["-lm"]
     assert logger.spinners
-    assert logger.spinners[0].title == "Unit Test Kernel: compiling kernel..."
+    assert logger.spinners[0].title == "Compiling extension: Unit Test Kernel..."
     assert logger.spinners[0].closed is True
     assert any("compiling torch.ops JIT extension" in message for message in logger.info_messages)
     assert any("torch.ops JIT extension ready" in message for message in logger.info_messages)
+
+
+def test_torch_ops_jit_extension_appends_detected_cuda_include_paths(monkeypatch, tmp_path):
+    """Guard CUDA JIT kwargs so detected NVIDIA wheel headers reach the compiler."""
+
+    loader = _make_loader(
+        tmp_path,
+        requires_cuda=True,
+        extra_include_paths=["/tmp/include"],
+    )
+
+    state = {"ready": False}
+    compile_calls = []
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        cpp_module,
+        "detected_cuda_wheel_include_paths",
+        lambda: ["/tmp/nvidia/cu13/include", "/tmp/nvidia/cusparse/include"],
+    )
+
+    def fake_compile(**kwargs):
+        compile_calls.append(kwargs)
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert compile_calls[0]["extra_include_paths"] == [
+        "/tmp/include",
+        "/tmp/nvidia/cu13/include",
+        "/tmp/nvidia/cusparse/include",
+    ]
 
 
 def test_torch_ops_jit_extension_reuses_cached_namespace_after_first_load(monkeypatch, tmp_path):
@@ -215,6 +327,25 @@ def test_torch_ops_jit_extension_cuda_fingerprint_prefers_arch_override(monkeypa
     first_build_root = loader.build_root()
 
     monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.9+PTX")
+    second_build_root = loader.build_root()
+
+    assert first_build_root != second_build_root
+
+
+def test_torch_ops_jit_extension_cuda_fingerprint_tracks_detected_include_paths(monkeypatch, tmp_path):
+    """Guard cache keys so CUDA wheel header layout changes invalidate old JIT binaries."""
+
+    loader = _make_loader(tmp_path, requires_cuda=True)
+
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.0")
+    monkeypatch.setattr(cpp_module, "detected_cuda_wheel_include_paths", lambda: ["/tmp/nvidia/cu13/include"])
+    first_build_root = loader.build_root()
+
+    monkeypatch.setattr(
+        cpp_module,
+        "detected_cuda_wheel_include_paths",
+        lambda: ["/tmp/nvidia/cu13/include", "/tmp/nvidia/cusparse/include"],
+    )
     second_build_root = loader.build_root()
 
     assert first_build_root != second_build_root

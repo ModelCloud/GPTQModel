@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 ModelCloud.ai
+// SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
+// SPDX-License-Identifier: Apache-2.0
+
 /******************************************************************************
  * Adapted from https://github.com/z-lab/paroquant
  ******************************************************************************/
@@ -161,8 +165,8 @@ template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessH
 struct HalfTraits {
   __device__ static float2 to_float2(__half2 v) { return __half22float2(v); }
   __device__ static __half2 from_floats(float a, float b) { return __floats2half2_rn(a, b); }
-  __device__ static float to_float(__half v) { return static_cast<float>(v); }
-  __device__ static __half from_float(float v) { return __half(v); }
+  __device__ static float to_float(__half v) { return __half2float(v); }
+  __device__ static __half from_float(float v) { return __float2half_rn(v); }
   __device__ static __half low(__half2 v) { return __low2half(v); }
   __device__ static __half high(__half2 v) { return __high2half(v); }
   __device__ static __half hmul(__half a, __half b) { return __hmul(a, b); }
