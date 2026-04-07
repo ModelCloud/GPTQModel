@@ -152,6 +152,7 @@ PrismAI/Bonsai inference sample script. GPT-QModel loads Prism/Bonsai GGUF check
 • from gptqmodel import GPTQModel
 
   model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf")
+  # or: model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf", profile="low_memory")
 
   tokens = model.generate(
       "Who wrote Romeo and Juliet?",
