@@ -786,7 +786,7 @@ def test_model_loader_from_pretrained_native_bonsai_fast_auto_enables_fa2_on_cud
         raising=False,
     )
 
-    result = DummyQModel.from_pretrained(
+    DummyQModel.from_pretrained(
         "/tmp/fake-model/bonsai.gguf",
         quantize_config=None,
         profile=PROFILE.FAST,
