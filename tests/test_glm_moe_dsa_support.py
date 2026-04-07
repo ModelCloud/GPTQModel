@@ -1,11 +1,65 @@
 from types import SimpleNamespace
 
+import pytest
 from defuser import convert_model
 from transformers.models.glm_moe_dsa.configuration_glm_moe_dsa import GlmMoeDsaConfig
 from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.glm_moe_dsa import GlmMoeDsaQModel
+
+
+_UPSTREAM_GLM5_MODELING_SIGNATURE = {
+    "architectures": ["GlmMoeDsaForCausalLM"],
+    "first_k_dense_replace": 3,
+    "hidden_act": "silu",
+    "hidden_size": 6144,
+    "index_head_dim": 128,
+    "index_n_heads": 32,
+    "index_topk": 2048,
+    "intermediate_size": 12288,
+    "kv_lora_rank": 512,
+    "max_position_embeddings": 202752,
+    "model_type": "glm_moe_dsa",
+    "moe_intermediate_size": 2048,
+    "n_routed_experts": 256,
+    "n_shared_experts": 1,
+    "num_attention_heads": 64,
+    "num_experts_per_tok": 8,
+    "num_hidden_layers": 78,
+    "num_key_value_heads": 64,
+    "q_lora_rank": 2048,
+    "qk_nope_head_dim": 192,
+    "qk_rope_head_dim": 64,
+    "rope_parameters": {"rope_theta": 1000000, "rope_type": "default"},
+    "v_head_dim": 256,
+}
+
+_UPSTREAM_GLM5_1_MODELING_SIGNATURE = {
+    "architectures": ["GlmMoeDsaForCausalLM"],
+    "first_k_dense_replace": 3,
+    "hidden_act": "silu",
+    "hidden_size": 6144,
+    "index_head_dim": 128,
+    "index_n_heads": 32,
+    "index_topk": 2048,
+    "intermediate_size": 12288,
+    "kv_lora_rank": 512,
+    "max_position_embeddings": 202752,
+    "model_type": "glm_moe_dsa",
+    "moe_intermediate_size": 2048,
+    "n_routed_experts": 256,
+    "n_shared_experts": 1,
+    "num_attention_heads": 64,
+    "num_experts_per_tok": 8,
+    "num_hidden_layers": 78,
+    "num_key_value_heads": 64,
+    "q_lora_rank": 2048,
+    "qk_nope_head_dim": 192,
+    "qk_rope_head_dim": 64,
+    "rope_parameters": {"rope_theta": 1000000, "rope_type": "default"},
+    "v_head_dim": 256,
+}
 
 
 def _tiny_glm_moe_dsa_config(num_hidden_layers: int = 4) -> GlmMoeDsaConfig:
@@ -34,13 +88,19 @@ def _tiny_glm_moe_dsa_config(num_hidden_layers: int = 4) -> GlmMoeDsaConfig:
     )
 
 
-def test_glm_moe_dsa_model_type_selects_definition(monkeypatch):
+@pytest.mark.parametrize("model_path", ["/tmp/glm-5", "/tmp/glm-5.1"])
+def test_glm_moe_dsa_model_type_selects_definition_for_glm5_variants(monkeypatch, model_path):
     fake_config = SimpleNamespace(model_type="glm_moe_dsa")
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
     monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
 
-    assert auto.check_and_get_model_definition("/tmp/glm-5.1") is GlmMoeDsaQModel
+    assert auto.check_and_get_model_definition(model_path) is GlmMoeDsaQModel
+
+
+def test_glm5_and_glm5_1_share_same_upstream_modeling_signature():
+    # Snapshot from the current upstream config.json files fetched on 2026-04-07.
+    assert _UPSTREAM_GLM5_MODELING_SIGNATURE == _UPSTREAM_GLM5_1_MODELING_SIGNATURE
 
 
 def test_glm_moe_dsa_module_tree_expands_dense_and_sparse_paths():

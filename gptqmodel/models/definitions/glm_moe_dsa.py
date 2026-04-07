@@ -8,9 +8,10 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class GlmMoeDsaQModel(BaseQModel):
-    # GLM-5.1 (zai-org/GLM-5.1) resolves to transformers model_type `glm_moe_dsa`.
-    # The first three decoder blocks are dense MLPs, with later blocks switching to
-    # routed experts plus a shared-expert branch.
+    # GLM-5 and GLM-5.1 currently share the same modeling config and both resolve
+    # to transformers model_type `glm_moe_dsa`.
+    # The first three decoder blocks are dense MLPs, with later blocks switching
+    # to routed experts plus a shared-expert branch.
     layer_modules_strict = False
 
     dynamic_expert_index = "n_routed_experts"
@@ -26,8 +27,8 @@ class GlmMoeDsaQModel(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
-                # GLM-5.1 uses MLA attention plus a DSA indexer. `q_proj` is an
-                # optional fallback path; the released GLM-5.1 config uses q_a/q_b.
+                # GLM-5 / GLM-5.1 use MLA attention plus a DSA indexer. `q_proj`
+                # is an optional fallback path; current public configs use q_a/q_b.
                 "q_proj:0",
                 "q_a_proj:0",
                 "kv_a_proj_with_mqa:0",
