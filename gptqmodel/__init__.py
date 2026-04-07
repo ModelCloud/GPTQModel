@@ -74,6 +74,28 @@ def _patch_transformers_paroquant_quantizer_compat():
     hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault("paroquant", GptqHfQuantizer)
     hf_quant_auto._gptqmodel_paroquant_quantizer_compat = True
 
+
+def _patch_openvino_gptqmodel_compat():
+    """Extend OpenVINO's GPTQ patcher to understand GPTQModel new kernels."""
+    try:
+        from openvino.frontend.pytorch import gptq as ov_gptq
+    except Exception:
+        return
+
+    if getattr(ov_gptq, "_gptqmodel_torch_quant_compat", False):
+        return
+
+    class MatchAll(list):
+        def __contains__(self, item):
+            return True
+
+    supported_quant_types = MatchAll()
+
+    ov_gptq.supported_quant_types = supported_quant_types
+
+    ov_gptq._gptqmodel_torch_quant_compat = True
+
+
 from .utils.env import env_flag
 from .utils.logger import setup_logger
 from .utils.modelscope import ensure_modelscope_available
@@ -174,6 +196,7 @@ DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
 _patch_transformers_paroquant_quantizer_compat()
+_patch_openvino_gptqmodel_compat()
 
 
 def exllama_set_max_input_length(model, max_input_length: int):
