@@ -12,6 +12,12 @@ from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noq
 
 # isort: on
 
+import threading
+
+
+_patch_lock = threading.Lock()
+
+
 patch_safetensors_save_file()
 
 # TODO: waiting for official fix from triton
@@ -82,18 +88,16 @@ def _patch_openvino_gptqmodel_compat():
     except Exception:
         return
 
-    if getattr(ov_gptq, "_gptqmodel_torch_quant_compat", False):
-        return
+    with _patch_lock:
+        if getattr(ov_gptq, "_gptqmodel_torch_quant_compat", False):
+            return
 
-    class MatchAll(list):
-        def __contains__(self, item):
-            return True
+        class MatchAll(list):
+            def __contains__(self, item):
+                return True
 
-    supported_quant_types = MatchAll()
-
-    ov_gptq.supported_quant_types = supported_quant_types
-
-    ov_gptq._gptqmodel_torch_quant_compat = True
+        ov_gptq.supported_quant_types = MatchAll()
+        ov_gptq._gptqmodel_torch_quant_compat = True
 
 
 from .utils.env import env_flag
