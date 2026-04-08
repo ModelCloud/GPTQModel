@@ -65,7 +65,7 @@ env:
   XEON5: 10.0.14.249
   UV_INDEX_URL: http://10.0.14.249/simple
   LOGBAR_ANIMATION: '0'
-  CUDA_VERSION: 130
+  CUDA_VERSION: 131
   UV_TORCH_BACKEND: cu130
   TORCH_VERSION: 2.11.0
   # vllm doesn't support 3.14
