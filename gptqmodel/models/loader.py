@@ -76,7 +76,7 @@ from ..utils.model import (
     simple_dispatch_model,
 )
 from ._const import DEVICE, normalize_device
-
+from packaging.version import Version
 
 log = setup_logger()
 
@@ -231,6 +231,20 @@ def check_versions(model_class, requirements: List[str]):
         except PackageNotFoundError:
             raise ValueError(f"{model_class} requires version {req}, but {pkg} not installed.")
 
+
+def set_dtype_compat(model_init_kwargs: dict, torch_dtype):
+    """
+    Set dtype argument in a version-compatible way for Transformers.
+    See: https://github.com/huggingface/transformers/releases/tag/v4.56.0
+
+    Args:
+        model_init_kwargs (dict): kwargs used to initialize model
+        torch_dtype: torch dtype (e.g. torch.float16)
+    """
+    if Version(transformers.__version__) >= Version("4.56.0"):
+        model_init_kwargs["dtype"] = torch_dtype
+    else:
+        model_init_kwargs["torch_dtype"] = torch_dtype
 
 def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
@@ -509,7 +523,7 @@ def ModelLoader(cls):
 
             hf_model_init_kwargs = dict(model_init_kwargs_without_internal)
             hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"
-            hf_model_init_kwargs["dtype"] = dtype
+            set_dtype_compat(hf_model_init_kwargs, dtype)
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
             if (
                 native_gguf_qspec is not None
@@ -586,7 +600,7 @@ def ModelLoader(cls):
         # enforce some values despite user specified
         # non-quantized models are always loaded into cpu
         model_init_kwargs_without_internal["device_map"] = cpu_device_map
-        model_init_kwargs_without_internal["dtype"] = dtype
+        set_dtype_compat(model_init_kwargs_without_internal, dtype)
         model_init_kwargs_without_internal["_fast_init"] = cls.require_fast_init
         #model_init_kwargs["low_cpu_mem_usage"] = True
 
@@ -602,9 +616,6 @@ def ModelLoader(cls):
         if not cls.support_offload_to_disk:
             quantize_config.offload_to_disk = False
             log.warn(f"{cls} doesn't support offload_to_disk, set quantize_config.offload_to_disk to False.")
-
-        if not cls.loader_requires_dtype:
-            model_init_kwargs_without_internal.pop("dtype")
 
         if quantize_config.offload_to_disk:
             shell_config = copy.deepcopy(config)
@@ -1048,9 +1059,7 @@ def ModelLoader(cls):
                 elif is_flash_attn_2_available():
                     args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
                     log.info("Loader: Auto enabling flash attention2")
-            args["dtype"] = dtype
-            if not cls.loader_requires_dtype:
-                args.pop("dtype")
+            set_dtype_compat(args, dtype)
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, **args
