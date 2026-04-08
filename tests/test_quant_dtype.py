@@ -183,6 +183,27 @@ def _realistic_fp8_benchmark_source() -> tuple[torch.Tensor, torch.Tensor, str, 
     return src, scale_inv, source, rows, cols
 
 
+@lru_cache(maxsize=1)
+def _realistic_fp8_native_benchmark_source() -> tuple[torch.Tensor, torch.Tensor, str, int, int]:
+    spec = _realistic_fp8_benchmark_spec()
+    if spec is None:
+        src, scale_inv, source, rows, cols = _synthetic_fp8_benchmark_source()
+        packed = src.to(torch.float8_e4m3fn)
+        return packed, scale_inv, f"{source} native_format=float8_e4m3fn", rows, cols
+
+    path, weight_key, scale_key, rows, cols, scale_shape = spec
+    with safe_open(path, framework="pt", device="cpu") as tensors:
+        packed = tensors.get_tensor(weight_key)
+        scale_inv = tensors.get_tensor(scale_key)
+
+    source = (
+        f"source: {path.name}:{weight_key} rows={rows} cols={cols} "
+        f"scale={list(scale_shape)} native_format={str(packed.dtype).split('.')[-1]} "
+        f"model_root={FLOATX_BENCH_MODEL_ROOT}"
+    )
+    return packed, scale_inv, source, rows, cols
+
+
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
 def test_dequantize_f8_e4m3_basic_conversion():
     values = torch.linspace(-1, 1, steps=8, dtype=torch.float32)
@@ -471,6 +492,64 @@ def test_dequantize_fp8_cpu_ab_benchmark_table(target_dtype: torch.dtype):
             "max|diff|",
         ],
         note=source_note,
+    )
+
+
+@pytest.mark.parametrize("target_dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_dequantize_fp8_cpu_real_format_ab_benchmark_table(target_dtype: torch.dtype):
+    packed, scale_inv, source_note, rows, cols = _realistic_fp8_native_benchmark_source()
+    warmup, iters = _benchmark_profile(rows * cols)
+
+    ref_fn = lambda: dtype_module._dequantize_f8_reference(  # noqa: E731
+        packed,
+        scale_inv=scale_inv,
+        axis=None,
+        target_dtype=target_dtype,
+    )
+    fast_fn = lambda: dequantize_f8_e4m3(  # noqa: E731
+        packed,
+        scale_inv=scale_inv,
+        axis=None,
+        target_dtype=target_dtype,
+    )
+
+    ref, ref_stats = _benchmark_cpu_impl(ref_fn, warmup=warmup, iters=iters)
+    fast, fast_stats = _benchmark_cpu_impl(fast_fn, warmup=warmup, iters=iters)
+    diff = float(torch.max(torch.abs(ref.to(torch.float32) - fast.to(torch.float32))).item())
+
+    input_mib = _tensor_mib(packed) + _tensor_mib(scale_inv)
+    ref_throughput = (input_mib + ref_stats["output_mib"]) / max(ref_stats["median_ms"] / 1e3, 1e-9)
+    fast_throughput = (input_mib + fast_stats["output_mib"]) / max(fast_stats["median_ms"] / 1e3, 1e-9)
+    speedup = ref_stats["median_ms"] / max(fast_stats["median_ms"], 1e-9)
+    throughput_gain_pct = ((fast_throughput - ref_throughput) / max(ref_throughput, 1e-9)) * 100.0
+
+    assert torch.equal(fast, ref)
+
+    _print_benchmark(
+        f"fp8_cpu_real_format_ab_{str(target_dtype).split('.')[-1]}",
+        [[
+            str(packed.dtype).split(".")[-1],
+            str(target_dtype).split(".")[-1],
+            ref_stats["median_ms"],
+            fast_stats["median_ms"],
+            speedup,
+            ref_throughput,
+            fast_throughput,
+            throughput_gain_pct,
+            diff,
+        ]],
+        [
+            "format",
+            "target",
+            "ref ms",
+            "native ms",
+            "speedup x",
+            "ref MiB/s",
+            "native MiB/s",
+            "throughput delta %",
+            "max|diff|",
+        ],
+        note=f"{source_note} threads={dtype_module._cpu_floatx_threads(rows * cols)}",
     )
 
 

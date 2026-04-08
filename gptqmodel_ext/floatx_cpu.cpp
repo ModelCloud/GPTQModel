@@ -82,7 +82,7 @@ struct ScaleSpec2D {
 };
 
 inline int64_t clamped_threads(int64_t requested) {
-  const int64_t limit = 8;
+  const int64_t limit = 32;
   if (requested > 0) {
     return std::max<int64_t>(1, std::min<int64_t>(requested, limit));
   }

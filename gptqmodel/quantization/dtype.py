@@ -82,13 +82,14 @@ def is_fp4_packed_dtype(dtype: torch.dtype) -> bool:
     return dtype in _FLOAT4_PACKED_DTYPES
 
 
-def _cpu_floatx_threads() -> int:
-    raw = os.environ.get("GPTQMODEL_FLOATX_CPU_THREADS", "8").strip()
+def _cpu_floatx_threads(numel: Optional[int] = None) -> int:
+    raw = os.environ.get("GPTQMODEL_FLOATX_CPU_THREADS", "").strip()
+    default_value = 32 if numel is not None and numel >= 64 * 1024 * 1024 else 8
     try:
-        value = int(raw)
+        value = int(raw) if raw else default_value
     except ValueError:
-        value = 8
-    return max(1, min(value, 8, os.cpu_count() or 1))
+        value = default_value
+    return max(1, min(value, 32, os.cpu_count() or 1))
 
 
 def _can_use_fast_path(
@@ -349,10 +350,14 @@ def dequantize_f8_e4m3(
 
     if scale is not None and scale_inv is not None:
         raise ValueError("Provide either scale or scale_inv, not both")
-    ops = None
-    fast_scale = None
-    scale_mode = 0
-    if tensor.dtype in _FLOAT8_DTYPES and _can_use_fast_path(tensor, scale if scale is not None else scale_inv, target_dtype=target_dtype):
+    if tensor.dtype in _FLOAT8_DTYPES and _can_use_fast_path(
+        tensor,
+        scale if scale is not None else scale_inv,
+        target_dtype=target_dtype,
+    ):
+        if scale is None and scale_inv is None:
+            return tensor.to(target_dtype)
+
         ops = _load_floatx_cpu_ops()
         if ops is not None:
             fast_scale, scale_mode = _fast_scale_arg(scale=scale, scale_inv=scale_inv)
@@ -367,7 +372,7 @@ def dequantize_f8_e4m3(
                     axis is None,
                     _TARGET_DTYPE_CODES[target_dtype],
                     int(format_code),
-                    _cpu_floatx_threads(),
+                    _cpu_floatx_threads(tensor.numel()),
                 )
 
     return _dequantize_f8_reference(
@@ -427,7 +432,7 @@ def dequantize_f4_e2m1(
                 0 if axis is None else int(axis),
                 axis is None,
                 _TARGET_DTYPE_CODES[target_dtype],
-                _cpu_floatx_threads(),
+                _cpu_floatx_threads(source.numel() * 2),
             )
 
     return _dequantize_f4_reference(
