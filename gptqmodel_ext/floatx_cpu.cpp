@@ -380,6 +380,288 @@ inline bool cpu_supports_f16c() {
   return __builtin_cpu_supports("f16c");
 }
 
+inline bool cpu_supports_avx512_core() {
+  if (env_flag_enabled("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2") ||
+      env_flag_enabled("GPTQMODEL_FLOATX_CPU_DISABLE_AVX512")) {
+    return false;
+  }
+  return __builtin_cpu_supports("avx512f") &&
+      __builtin_cpu_supports("avx512bw") &&
+      __builtin_cpu_supports("avx512vl");
+}
+
+inline bool cpu_supports_avx512bf16() {
+  return cpu_supports_avx512_core() && __builtin_cpu_supports("avx512bf16");
+}
+
+inline bool cpu_supports_avx512fp16() {
+  return cpu_supports_avx512_core() && __builtin_cpu_supports("avx512fp16");
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl")))
+inline __m512 load_fp8x16_to_ps_avx512(const uint8_t* src, const float* table) {
+  const __m128i raw = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src));
+  const __m512i indices = _mm512_cvtepu8_epi32(raw);
+  return _mm512_i32gather_ps(indices, table, 4);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl")))
+inline void fill_scale16(
+    float* dst,
+    const ScaleSpec2D& spec,
+    int64_t row,
+    int64_t col_base) {
+  for (int i = 0; i < 16; ++i) {
+    dst[i] = scale_value_2d(spec, row, col_base + i);
+  }
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16")))
+inline __m512 round_ps_to_bf16_ps_avx512(__m512 values) {
+  return _mm512_cvtpbh_ps(_mm512_cvtneps_pbh(values));
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512fp16")))
+inline __m512 round_ps_to_fp16_ps_avx512(__m512 values) {
+  const __m256i fp16 =
+      (__m256i)_mm512_cvtps_ph(values, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  return _mm512_cvtph_ps(fp16);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl")))
+inline __m512 load_scale16_ps_avx512(
+    const ScaleSpec2D& spec,
+    int64_t row,
+    int64_t col_base) {
+  switch (spec.layout) {
+    case ScaleLayout2D::kNone:
+      return _mm512_set1_ps(1.0f);
+    case ScaleLayout2D::kScalar:
+      return _mm512_set1_ps(spec.ptr[0]);
+    case ScaleLayout2D::kFull:
+      return _mm512_loadu_ps(spec.ptr + row * spec.cols + col_base);
+    case ScaleLayout2D::kRowRepeat:
+      return _mm512_set1_ps(spec.ptr[row / spec.row_repeat]);
+    case ScaleLayout2D::kColRepeat: {
+      if (spec.col_repeat == 1) {
+        return _mm512_loadu_ps(spec.ptr + col_base);
+      }
+      if ((col_base / spec.col_repeat) == ((col_base + 15) / spec.col_repeat)) {
+        return _mm512_set1_ps(spec.ptr[col_base / spec.col_repeat]);
+      }
+      alignas(64) float scales[16];
+      fill_scale16(scales, spec, row, col_base);
+      return _mm512_load_ps(scales);
+    }
+    case ScaleLayout2D::kBlock: {
+      const int64_t block_row = row / spec.row_repeat;
+      if (spec.col_repeat == 1) {
+        return _mm512_loadu_ps(spec.ptr + block_row * spec.scale_cols + col_base);
+      }
+      if ((col_base / spec.col_repeat) == ((col_base + 15) / spec.col_repeat)) {
+        return _mm512_set1_ps(spec.ptr[block_row * spec.scale_cols + (col_base / spec.col_repeat)]);
+      }
+      alignas(64) float scales[16];
+      fill_scale16(scales, spec, row, col_base);
+      return _mm512_load_ps(scales);
+    }
+  }
+  return _mm512_set1_ps(1.0f);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16")))
+inline void store_bf16x16(c10::BFloat16* dst, __m512 values) {
+  const __m256bh packed = _mm512_cvtneps_pbh(values);
+  _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst), (__m256i)packed);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16")))
+inline void apply_scale_and_store_bf16x16(
+    c10::BFloat16* dst,
+    __m512 values,
+    ScaleMode scale_mode,
+    const ScaleSpec2D& spec,
+    int64_t row,
+    int64_t col_base) {
+  if (scale_mode != ScaleMode::kNone) {
+    __m512 scales = round_ps_to_bf16_ps_avx512(load_scale16_ps_avx512(spec, row, col_base));
+    values = scale_mode == ScaleMode::kMultiply ? _mm512_mul_ps(values, scales) : _mm512_div_ps(values, scales);
+  }
+  store_bf16x16(dst, values);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16")))
+inline void apply_scale_and_store_bf16x16_const(
+    c10::BFloat16* dst,
+    __m512 values,
+    ScaleMode scale_mode,
+    __m512 rounded_scale) {
+  if (scale_mode != ScaleMode::kNone) {
+    values = scale_mode == ScaleMode::kMultiply ? _mm512_mul_ps(values, rounded_scale) : _mm512_div_ps(values, rounded_scale);
+  }
+  store_bf16x16(dst, values);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512fp16")))
+inline void store_fp16x16(c10::Half* dst, __m512 values) {
+  const __m256i packed =
+      (__m256i)_mm512_cvtps_ph(values, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst), packed);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512fp16")))
+inline void apply_scale_and_store_fp16x16(
+    c10::Half* dst,
+    __m512 values,
+    ScaleMode scale_mode,
+    const ScaleSpec2D& spec,
+    int64_t row,
+    int64_t col_base) {
+  if (scale_mode != ScaleMode::kNone) {
+    __m512 scales = round_ps_to_fp16_ps_avx512(load_scale16_ps_avx512(spec, row, col_base));
+    values = scale_mode == ScaleMode::kMultiply ? _mm512_mul_ps(values, scales) : _mm512_div_ps(values, scales);
+  }
+  store_fp16x16(dst, values);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512fp16")))
+inline void apply_scale_and_store_fp16x16_const(
+    c10::Half* dst,
+    __m512 values,
+    ScaleMode scale_mode,
+    __m512 rounded_scale) {
+  if (scale_mode != ScaleMode::kNone) {
+    values = scale_mode == ScaleMode::kMultiply ? _mm512_mul_ps(values, rounded_scale) : _mm512_div_ps(values, rounded_scale);
+  }
+  store_fp16x16(dst, values);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16")))
+void dequantize_fp8_row_avx512_bf16(
+    const uint8_t* src_row,
+    c10::BFloat16* dst_row,
+    int64_t cols,
+    const std::array<float, 256>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  int64_t col = 0;
+  for (; col + 16 <= cols; col += 16) {
+    const __m512 values = load_fp8x16_to_ps_avx512(src_row + col, table.data());
+    apply_scale_and_store_bf16x16(dst_row + col, values, scale_mode, spec, row, col);
+  }
+  if (col < cols) {
+    alignas(64) float tail[16] = {};
+    const int64_t tail_count = cols - col;
+    for (int64_t i = 0; i < tail_count; ++i) {
+      tail[i] = table[src_row[col + i]];
+    }
+    apply_scale_and_store_scalar(dst_row + col, tail, tail_count, scale_mode, spec, row, col);
+  }
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16")))
+void dequantize_fp8_row_avx512_bf16_block_scale(
+    const uint8_t* src_row,
+    c10::BFloat16* dst_row,
+    int64_t cols,
+    const std::array<float, 256>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  const int64_t block_row = row / spec.row_repeat;
+  int64_t col = 0;
+  while (col < cols) {
+    const int64_t block_col = col / spec.col_repeat;
+    const int64_t block_end = std::min<int64_t>(cols, (block_col + 1) * spec.col_repeat);
+    const float rounded_scale = static_cast<float>(c10::BFloat16(spec.ptr[block_row * spec.scale_cols + block_col]));
+    const __m512 scale_vec = _mm512_set1_ps(rounded_scale);
+
+    for (; col + 16 <= block_end; col += 16) {
+      const __m512 values = load_fp8x16_to_ps_avx512(src_row + col, table.data());
+      apply_scale_and_store_bf16x16_const(dst_row + col, values, scale_mode, scale_vec);
+    }
+    if (col < block_end) {
+      alignas(64) float tail[16] = {};
+      const int64_t tail_count = block_end - col;
+      for (int64_t i = 0; i < tail_count; ++i) {
+        float value = table[src_row[col + i]];
+        if (scale_mode != ScaleMode::kNone) {
+          value = scale_mode == ScaleMode::kMultiply ? value * rounded_scale : value / rounded_scale;
+        }
+        tail[i] = value;
+      }
+      for (int64_t i = 0; i < tail_count; ++i) {
+        store_scalar(dst_row + col + i, tail[i]);
+      }
+      col = block_end;
+    }
+  }
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512fp16")))
+void dequantize_fp8_row_avx512_fp16(
+    const uint8_t* src_row,
+    c10::Half* dst_row,
+    int64_t cols,
+    const std::array<float, 256>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  int64_t col = 0;
+  for (; col + 16 <= cols; col += 16) {
+    const __m512 values = load_fp8x16_to_ps_avx512(src_row + col, table.data());
+    apply_scale_and_store_fp16x16(dst_row + col, values, scale_mode, spec, row, col);
+  }
+  if (col < cols) {
+    alignas(64) float tail[16] = {};
+    const int64_t tail_count = cols - col;
+    for (int64_t i = 0; i < tail_count; ++i) {
+      tail[i] = table[src_row[col + i]];
+    }
+    apply_scale_and_store_scalar(dst_row + col, tail, tail_count, scale_mode, spec, row, col);
+  }
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512fp16")))
+void dequantize_fp8_row_avx512_fp16_block_scale(
+    const uint8_t* src_row,
+    c10::Half* dst_row,
+    int64_t cols,
+    const std::array<float, 256>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  const int64_t block_row = row / spec.row_repeat;
+  int64_t col = 0;
+  while (col < cols) {
+    const int64_t block_col = col / spec.col_repeat;
+    const int64_t block_end = std::min<int64_t>(cols, (block_col + 1) * spec.col_repeat);
+    const float rounded_scale = static_cast<float>(c10::Half(spec.ptr[block_row * spec.scale_cols + block_col]));
+    const __m512 scale_vec = _mm512_set1_ps(rounded_scale);
+
+    for (; col + 16 <= block_end; col += 16) {
+      const __m512 values = load_fp8x16_to_ps_avx512(src_row + col, table.data());
+      apply_scale_and_store_fp16x16_const(dst_row + col, values, scale_mode, scale_vec);
+    }
+    if (col < block_end) {
+      alignas(64) float tail[16] = {};
+      const int64_t tail_count = block_end - col;
+      for (int64_t i = 0; i < tail_count; ++i) {
+        float value = table[src_row[col + i]];
+        if (scale_mode != ScaleMode::kNone) {
+          value = scale_mode == ScaleMode::kMultiply ? value * rounded_scale : value / rounded_scale;
+        }
+        tail[i] = value;
+      }
+      for (int64_t i = 0; i < tail_count; ++i) {
+        store_scalar(dst_row + col + i, tail[i]);
+      }
+      col = block_end;
+    }
+  }
+}
+
 __attribute__((target("avx2")))
 inline __m256 load_fp8x8_to_ps(const uint8_t* src, const float* table) {
   const __m128i raw = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src));
@@ -730,6 +1012,14 @@ inline bool cpu_supports_avx2() {
 inline bool cpu_supports_f16c() {
   return false;
 }
+
+inline bool cpu_supports_avx512bf16() {
+  return false;
+}
+
+inline bool cpu_supports_avx512fp16() {
+  return false;
+}
 #endif
 
 template <typename T>
@@ -769,6 +1059,33 @@ void dequantize_fp8_2d(
   if (output.scalar_type() == at::kBFloat16) {
     c10::BFloat16* dst = output.data_ptr<c10::BFloat16>();
 #if GPTQMODEL_FLOATX_X86 && (defined(__GNUC__) || defined(__clang__))
+    if (cpu_supports_avx512bf16()) {
+      const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
+      at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
+        for (int64_t row = begin; row < end; ++row) {
+          if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 16) {
+            dequantize_fp8_row_avx512_bf16_block_scale(
+                src + row * cols,
+                dst + row * cols,
+                cols,
+                table,
+                spec,
+                scale_mode,
+                row);
+          } else {
+            dequantize_fp8_row_avx512_bf16(
+                src + row * cols,
+                dst + row * cols,
+                cols,
+                table,
+                spec,
+                scale_mode,
+                row);
+          }
+        }
+      });
+      return;
+    }
     if (cpu_supports_avx2()) {
       const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
       at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
@@ -803,6 +1120,33 @@ void dequantize_fp8_2d(
 
   c10::Half* dst = output.data_ptr<c10::Half>();
 #if GPTQMODEL_FLOATX_X86 && (defined(__GNUC__) || defined(__clang__))
+  if (cpu_supports_avx512fp16()) {
+    const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
+    at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
+      for (int64_t row = begin; row < end; ++row) {
+        if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 16) {
+          dequantize_fp8_row_avx512_fp16_block_scale(
+              src + row * cols,
+              dst + row * cols,
+              cols,
+              table,
+              spec,
+              scale_mode,
+              row);
+        } else {
+          dequantize_fp8_row_avx512_fp16(
+              src + row * cols,
+              dst + row * cols,
+              cols,
+              table,
+              spec,
+              scale_mode,
+              row);
+        }
+      }
+    });
+    return;
+  }
   if (cpu_supports_avx2() && cpu_supports_f16c()) {
     const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
     at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
