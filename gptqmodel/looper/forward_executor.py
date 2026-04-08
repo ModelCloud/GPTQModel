@@ -411,7 +411,7 @@ class ForwardExecutor:
                     moe_contexts.append(ctx)
 
             prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
-            results: Dict[int, torch.Tensor | tuple | None] = {}
+            results: Dict[int, torch.Tensor | None] = {}
             processed_rows = 0
 
             if self.looper.gptq_model.quantize_config.compute_device_filter is not None:
@@ -507,7 +507,12 @@ class ForwardExecutor:
                 for fut in futures:
                     batch_idx, module_output, kv_next = fut.result()
                     if need_outputs and module_output is not None:
-                        results[batch_idx] = module_output
+                        input_device = layer_inputs[batch_idx][0].device if layer_inputs[batch_idx] else cur_layer_device
+                        target_device = input_device if calib_device_cfg is not None else cur_layer_device
+                        # Move each batch result to its final target device as
+                        # soon as the worker finishes.
+                        results[batch_idx] = move_to(module_output, device=target_device)
+                        del module_output
                     if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
                         shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)
 
@@ -538,16 +543,9 @@ class ForwardExecutor:
 
         ordered_outputs: List[List[torch.Tensor]] = []
         for idx in range(total_batches):
-            module_output = results.get(idx)
-            if module_output is None:
+            primary = results.get(idx)
+            if primary is None:
                 raise RuntimeError("Forward batch returned no output; data-parallel execution produced empty result.")
-            primary = module_output[0] if isinstance(module_output, tuple) else module_output
-            # Move output back to the same device where input was stored
-            # This preserves calibration data placement when calibration_data_device is set
-            calib_device_cfg = self.looper.gptq_model.quantize_config.calibration_data_device
-            input_device = layer_inputs[idx][0].device if layer_inputs[idx] else cur_layer_device
-            target_device = input_device if calib_device_cfg is not None else cur_layer_device
-            primary = move_to(primary, device=target_device)
             ordered_outputs.append([primary])
 
         return ordered_outputs
