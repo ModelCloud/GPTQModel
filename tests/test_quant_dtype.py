@@ -2,9 +2,12 @@ import gc
 import os
 import statistics
 import time
+from functools import lru_cache
+from pathlib import Path
 
 import pytest
 import torch
+from safetensors import safe_open
 from tabulate import tabulate
 
 import gptqmodel.quantization.dtype as dtype_module
@@ -16,14 +19,19 @@ from gptqmodel.quantization.dtype import (
 )
 
 
+# Default to the largest realistic FP8 checkpoint available locally for A/B decode tables.
+FLOATX_BENCH_MODEL_ROOT = Path(os.environ.get("GPTQMODEL_FLOATX_BENCH_MODEL", "/monster/data/model/GLM-5.1-FP8"))
+
+
 def _print_accuracy(title: str, rows, headers) -> None:
     table = tabulate(rows, headers=headers, floatfmt=".6f")
     print(f"\n{title}\n{table}\n")
 
 
-def _print_benchmark(title: str, rows, headers) -> None:
+def _print_benchmark(title: str, rows, headers, note: str | None = None) -> None:
     table = tabulate(rows, headers=headers, floatfmt=".4f", tablefmt="github")
-    print(f"\n{title}\n{table}\n")
+    note_block = f"{note}\n" if note else ""
+    print(f"\n{title}\n{note_block}{table}\n")
 
 
 try:  # pragma: no cover - optional dependency
@@ -57,6 +65,13 @@ def _tensor_mib(tensor: torch.Tensor) -> float:
     return float(tensor.numel() * tensor.element_size()) / (1024.0 * 1024.0)
 
 
+def _benchmark_profile(numel: int) -> tuple[int, int]:
+    # Huge realistic layers still need one untimed pass so lazy native setup does not skew A/B stats.
+    if numel >= 64 * 1024 * 1024:
+        return 1, 2
+    return 1, 4
+
+
 def _benchmark_cpu_impl(fn, *, warmup: int = 1, iters: int = 4):
     for _ in range(warmup):
         tmp = fn()
@@ -84,6 +99,74 @@ def _benchmark_cpu_impl(fn, *, warmup: int = 1, iters: int = 4):
         "output_mib": _tensor_mib(result),
     }
     return result, stats
+
+
+def _synthetic_fp8_benchmark_source() -> tuple[torch.Tensor, torch.Tensor, str, int, int]:
+    rows = 256
+    cols = 384
+    src = torch.randn(rows, cols, dtype=torch.float32)
+    scale_inv = torch.rand(rows // 64, cols // 64, dtype=torch.float32) * 0.5
+    source = "source: synthetic fallback rows=256 cols=384 scale=[4, 6]"
+    return src, scale_inv, source, rows, cols
+
+
+@lru_cache(maxsize=1)
+def _realistic_fp8_benchmark_spec() -> tuple[Path, str, str, int, int, tuple[int, ...]] | None:
+    if not FLOATX_BENCH_MODEL_ROOT.exists():
+        return None
+
+    largest: tuple[int, Path, str, str, int, int, tuple[int, ...]] | None = None
+    for path in sorted(FLOATX_BENCH_MODEL_ROOT.glob("model-*.safetensors")):
+        with safe_open(path, framework="pt", device="cpu") as tensors:
+            tensor_keys = set(tensors.keys())
+            for key in tensor_keys:
+                if not key.endswith(".weight"):
+                    continue
+                tensor_slice = tensors.get_slice(key)
+                shape = tensor_slice.get_shape()
+                if len(shape) != 2:
+                    continue
+                dtype_name = str(tensor_slice.get_dtype())
+                if not dtype_name.startswith("F8_"):
+                    continue
+                scale_key = key.replace(".weight", ".weight_scale_inv")
+                if scale_key not in tensor_keys:
+                    continue
+                area = int(shape[0]) * int(shape[1])
+                if largest is None or area > largest[0]:
+                    scale_shape = tuple(int(dim) for dim in tensors.get_slice(scale_key).get_shape())
+                    largest = (area, path, key, scale_key, int(shape[0]), int(shape[1]), scale_shape)
+
+    if largest is None:
+        return None
+
+    _, path, key, scale_key, rows, cols, scale_shape = largest
+    return path, key, scale_key, rows, cols, scale_shape
+
+
+@lru_cache(maxsize=1)
+def _realistic_fp8_benchmark_source() -> tuple[torch.Tensor, torch.Tensor, str, int, int]:
+    spec = _realistic_fp8_benchmark_spec()
+    if spec is None:
+        return _synthetic_fp8_benchmark_source()
+
+    path, weight_key, scale_key, rows, cols, scale_shape = spec
+    with safe_open(path, framework="pt", device="cpu") as tensors:
+        packed = tensors.get_tensor(weight_key)
+        scale_inv = tensors.get_tensor(scale_key)
+
+    # Reuse the checkpoint's real FP8 distribution as the float source for both FP8 and FP4 decode tables.
+    src = dtype_module._dequantize_f8_reference(
+        packed,
+        scale_inv=scale_inv,
+        axis=None,
+        target_dtype=torch.bfloat16,
+    ).to(torch.float32)
+    source = (
+        f"source: {path.name}:{weight_key} rows={rows} cols={cols} "
+        f"scale={list(scale_shape)} model_root={FLOATX_BENCH_MODEL_ROOT}"
+    )
+    return src, scale_inv, source, rows, cols
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
@@ -313,15 +396,14 @@ def test_dequantize_f8_e4m3_cpu_vs_gpu_benchmark():
 
 @pytest.mark.parametrize("target_dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
 def test_dequantize_fp8_cpu_ab_benchmark_table(target_dtype: torch.dtype):
-    rows = 256
-    cols = 384
+    src, scale_inv, source_note, rows, cols = _realistic_fp8_benchmark_source()
+    warmup, iters = _benchmark_profile(rows * cols)
     bench_rows = []
 
     for fmt_name in _available_fp8_formats():
         fmt = getattr(torch, fmt_name)
-        src = torch.rand(rows, cols, dtype=torch.float32) if "e8m0" in fmt_name else torch.randn(rows, cols, dtype=torch.float32)
-        packed = src.to(fmt)
-        scale_inv = torch.rand(rows // 64, cols // 64, dtype=torch.float32) * 0.5
+        fmt_src = src.abs() if "e8m0" in fmt_name else src
+        packed = fmt_src.to(fmt)
 
         ref_fn = lambda: dtype_module._dequantize_f8_reference(  # noqa: E731
             packed,
@@ -336,8 +418,8 @@ def test_dequantize_fp8_cpu_ab_benchmark_table(target_dtype: torch.dtype):
             target_dtype=target_dtype,
         )
 
-        ref, ref_stats = _benchmark_cpu_impl(ref_fn)
-        fast, fast_stats = _benchmark_cpu_impl(fast_fn)
+        ref, ref_stats = _benchmark_cpu_impl(ref_fn, warmup=warmup, iters=iters)
+        fast, fast_stats = _benchmark_cpu_impl(fast_fn, warmup=warmup, iters=iters)
         diff = float(torch.max(torch.abs(ref.to(torch.float32) - fast.to(torch.float32))).item())
 
         input_mib = _tensor_mib(packed) + _tensor_mib(scale_inv)
@@ -380,13 +462,15 @@ def test_dequantize_fp8_cpu_ab_benchmark_table(target_dtype: torch.dtype):
             "rss delta MiB",
             "max|diff|",
         ],
+        note=source_note,
     )
 
 
 @pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")
 @pytest.mark.parametrize("target_dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
 def test_dequantize_fp4_cpu_ab_benchmark_table(target_dtype: torch.dtype):
-    data = torch.randn(256, 384, dtype=torch.float32)
+    data, _, source_note, rows, cols = _realistic_fp8_benchmark_source()
+    warmup, iters = _benchmark_profile(rows * cols)
     scales, packed = nvfp4_quantize(data, block_size=16)
     packed_float4 = packed.view(torch.float4_e2m1fn_x2) if hasattr(torch, "float4_e2m1fn_x2") else None
 
@@ -403,8 +487,8 @@ def test_dequantize_fp4_cpu_ab_benchmark_table(target_dtype: torch.dtype):
         target_dtype=target_dtype,
     )
 
-    ref, ref_stats = _benchmark_cpu_impl(ref_fn)
-    fast_uint8, fast_uint8_stats = _benchmark_cpu_impl(fast_uint8_fn)
+    ref, ref_stats = _benchmark_cpu_impl(ref_fn, warmup=warmup, iters=iters)
+    fast_uint8, fast_uint8_stats = _benchmark_cpu_impl(fast_uint8_fn, warmup=warmup, iters=iters)
     bench_rows = []
     input_mib = _tensor_mib(packed) + _tensor_mib(scales)
 
@@ -433,7 +517,7 @@ def test_dequantize_fp4_cpu_ab_benchmark_table(target_dtype: torch.dtype):
             axis=None,
             target_dtype=target_dtype,
         )
-        fast_float4, fast_float4_stats = _benchmark_cpu_impl(fast_float4_fn)
+        fast_float4, fast_float4_stats = _benchmark_cpu_impl(fast_float4_fn, warmup=warmup, iters=iters)
         throughput = (input_mib + fast_float4_stats["output_mib"]) / max(fast_float4_stats["median_ms"] / 1e3, 1e-9)
         diff = float(torch.max(torch.abs(ref.to(torch.float32) - fast_float4.to(torch.float32))).item())
         bench_rows.append([
@@ -459,4 +543,5 @@ def test_dequantize_fp4_cpu_ab_benchmark_table(target_dtype: torch.dtype):
             "rss delta MiB",
             "max|diff|",
         ],
+        note=f"{source_note} fp4_block_size=16",
     )
