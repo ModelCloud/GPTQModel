@@ -649,9 +649,7 @@ def ModelLoader(cls):
 
                 if turtle_model is None:
                     raise RuntimeError(
-                        "Loader: offload_to_disk now requires a LazySafetensorsTurtle-compatible "
-                        f"local safetensors checkpoint for `{model_local_path}`. "
-                        "The legacy eager turtle model path has been removed."
+                        f"Loader: can't open model path `{model_local_path}` for offload_to_disk."
                     )
 
                 log.info(
