@@ -118,7 +118,7 @@ def _realistic_fp8_benchmark_spec() -> tuple[Path, str, str, int, int, tuple[int
     largest: tuple[int, Path, str, str, int, int, tuple[int, ...]] | None = None
     for path in sorted(FLOATX_BENCH_MODEL_ROOT.glob("model-*.safetensors")):
         with safe_open(path, framework="pt", device="cpu") as tensors:
-            tensor_keys = set(tensors.keys())
+            tensor_keys = tuple(sorted(tensors.keys()))
             for key in tensor_keys:
                 if not key.endswith(".weight"):
                     continue
