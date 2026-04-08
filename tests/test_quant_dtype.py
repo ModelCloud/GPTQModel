@@ -4,9 +4,12 @@ import pytest
 import torch
 from tabulate import tabulate
 
+import gptqmodel.quantization.dtype as dtype_helpers
 from gptqmodel.quantization.dtype import (
+    get_device_dtype_support,
     dequantize_f4_e2m1,
     dequantize_f8_e4m3,
+    device_supports_dtype,
     device_supports_native_fp8,
 )
 
@@ -107,13 +110,31 @@ def test_dequantize_f8_e4m3_raises_on_both_scale_and_inverse():
         dequantize_f8_e4m3(tensor, scale=torch.ones(2), scale_inv=torch.ones(2))
 
 
-def test_device_supports_native_fp8_reports_capability(monkeypatch):
+def test_device_dtype_support_reports_arch_mapping(monkeypatch):
+    dtype_helpers._DTYPE_SUPPORT_CACHE.clear()
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
-    monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (9, 0))
-    assert device_supports_native_fp8(torch.device("cuda", 0)) is True
+    monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (8, 9))
 
+    support = get_device_dtype_support(torch.device("cuda", 0))
+
+    assert support.capability == (8, 9)
+    assert torch.float16 in support.advertised_linear_dtypes
+    assert torch.float32 in support.advertised_linear_dtypes
+    assert torch.bfloat16 in support.advertised_linear_dtypes
+    assert torch.float8_e4m3fn in support.advertised_linear_dtypes
+
+
+def test_device_supports_native_fp8_reports_capability(monkeypatch):
+    dtype_helpers._DTYPE_SUPPORT_CACHE.clear()
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (8, 9))
+    assert device_supports_native_fp8(torch.device("cuda", 0)) is True
+    assert device_supports_dtype(torch.device("cuda", 0), torch.float8_e4m3fn) is True
+
+    dtype_helpers._DTYPE_SUPPORT_CACHE.clear()
     monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (8, 0))
     assert device_supports_native_fp8(torch.device("cuda", 0)) is False
+    assert device_supports_dtype(torch.device("cuda", 0), torch.float8_e4m3fn) is False
 
 
 @pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")
