@@ -19,6 +19,7 @@ from ...quantization.config import (
     _normalize_fp8_weight_block_size,
     _normalize_fp8_weight_scale_method,
 )
+from ...quantization.dtype import dequantize_fp8, device_supports_native_fp8
 from ...utils.backend import BACKEND
 from . import WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
@@ -342,17 +343,33 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         target_device, target_dtype = self._resolve_target(device=device, dtype=dtype)
-        weight = self.weight if self.weight.device == target_device else self.weight.to(device=target_device)
-        weight = weight.to(target_dtype)
-        scale_inv = self._expanded_scale_inv(target_device=target_device, target_dtype=target_dtype)
 
         if self.weight_scale_semantics != "inverse":
             raise NotImplementedError(
                 f"Unsupported FP8 scale semantics `{self.weight_scale_semantics}`."
             )
 
-        weight = weight / scale_inv
-        return weight.transpose(0, 1).contiguous()
+        # Older GPUs can store the module on CUDA but still miss native FP8 math.
+        # In that case, dequantize on CPU directly to fp16/bf16 and only then move.
+        prefer_cpu_dequant = target_device.type == "cpu"
+        if target_device.type == "cuda" and not device_supports_native_fp8(target_device):
+            prefer_cpu_dequant = True
+
+        if prefer_cpu_dequant:
+            weight = dequantize_fp8(
+                self.weight.to(device="cpu"),
+                scale_inv=self.weight_scale_inv.to(device="cpu"),
+                axis=None if self.weight_scale_method == "block" else (0 if self.weight_scale_method == "row" else 0),
+                target_dtype=target_dtype,
+            )
+            if target_device.type != "cpu":
+                weight = weight.to(device=target_device)
+            return weight.transpose(0, 1).contiguous()
+
+        weight = self.weight if self.weight.device == target_device else self.weight.to(device=target_device)
+        weight = weight.to(target_dtype)
+        scale_inv = self._expanded_scale_inv(target_device=target_device, target_dtype=target_dtype)
+        return (weight / scale_inv).transpose(0, 1).contiguous()
 
     def _scaled_mm_weight_scale(self, *, device: torch.device) -> torch.Tensor:
         scale_inv = self.weight_scale_inv

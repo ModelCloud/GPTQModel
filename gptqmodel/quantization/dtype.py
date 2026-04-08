@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
@@ -31,6 +32,215 @@ _FLOAT8_DTYPES = tuple(
     for name in ("float8_e4m3fn", "float8_e5m2")
     if hasattr(torch, name)
 )
+for _extra_name in ("float8_e4m3fnuz", "float8_e5m2fnuz", "float8_e8m0fnu"):
+    if hasattr(torch, _extra_name):
+        _FLOAT8_DTYPES = (*_FLOAT8_DTYPES, getattr(torch, _extra_name))
+
+_FLOAT4_PACKED_DTYPE = getattr(torch, "float4_e2m1fn_x2", None)
+_TARGET_DTYPE_CODES = {
+    torch.bfloat16: 0,
+    torch.float16: 1,
+}
+_FP8_FORMAT_CODES = {
+    getattr(torch, "float8_e4m3fn", None): 0,
+    getattr(torch, "float8_e5m2", None): 1,
+    getattr(torch, "float8_e4m3fnuz", None): 2,
+    getattr(torch, "float8_e5m2fnuz", None): 3,
+    getattr(torch, "float8_e8m0fnu", None): 4,
+}
+
+
+def _cpu_floatx_threads() -> int:
+    raw = os.environ.get("GPTQMODEL_FLOATX_CPU_THREADS", "8").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 8
+    return max(1, min(value, 8, os.cpu_count() or 1))
+
+
+def _can_use_fast_path(
+    tensor: torch.Tensor,
+    scale_tensor: Optional[torch.Tensor],
+    *,
+    target_dtype: torch.dtype,
+    allow_float4_storage: bool = False,
+) -> bool:
+    if target_dtype not in _TARGET_DTYPE_CODES:
+        return False
+    if tensor.device.type != "cpu":
+        return False
+    if tensor.ndim not in (1, 2):
+        return False
+    if tensor.dtype not in _FLOAT8_DTYPES:
+        if allow_float4_storage:
+            if tensor.dtype != torch.uint8 and (_FLOAT4_PACKED_DTYPE is None or tensor.dtype != _FLOAT4_PACKED_DTYPE):
+                return False
+        else:
+            return False
+    if scale_tensor is None:
+        return True
+    if scale_tensor.device.type != "cpu" or scale_tensor.ndim > 2:
+        return False
+    return True
+
+
+def _load_floatx_cpu_ops():
+    try:
+        from ..utils.cpp import load_floatx_cpu_extension
+    except Exception:
+        return None
+
+    ext = load_floatx_cpu_extension()
+    if not ext:
+        return None
+
+    namespace = getattr(torch.ops, "gptqmodel_floatx", None)
+    if namespace is None:
+        return None
+    if not hasattr(namespace, "dequantize_fp8_cpu") or not hasattr(namespace, "dequantize_fp4_cpu"):
+        return None
+    return namespace
+
+
+def _fast_scale_arg(
+    *,
+    scale: Optional[torch.Tensor],
+    scale_inv: Optional[torch.Tensor],
+) -> tuple[Optional[torch.Tensor], int]:
+    if scale is not None:
+        return scale.to(device="cpu", dtype=torch.float32).contiguous(), 1
+    if scale_inv is None:
+        return None, 0
+
+    scale_tensor = scale_inv.to(device="cpu", dtype=torch.float32).contiguous()
+    max_abs = float(torch.max(torch.abs(scale_tensor)).item()) if scale_tensor.numel() else 0.0
+    return scale_tensor, 1 if max_abs <= 1.0 else 2
+
+
+def _expand_scale(
+    scale_tensor: torch.Tensor,
+    result: torch.Tensor,
+    *,
+    axis_hint: Optional[int],
+) -> torch.Tensor:
+    if scale_tensor.ndim == 0:
+        return scale_tensor
+
+    target_shape = result.shape
+    if scale_tensor.shape == target_shape:
+        return scale_tensor
+
+    if scale_tensor.ndim == 2 and len(target_shape) == 2:
+        blocks_r, blocks_c = scale_tensor.shape
+        rows, cols = target_shape
+        if rows % blocks_r == 0 and cols % blocks_c == 0:
+            repeat_r = rows // blocks_r
+            repeat_c = cols // blocks_c
+            expanded = scale_tensor.repeat_interleave(repeat_r, dim=0)
+            expanded = expanded.repeat_interleave(repeat_c, dim=1)
+            return expanded
+
+    if scale_tensor.ndim == 1 and len(target_shape) == 2:
+        rows, cols = target_shape
+        count = scale_tensor.shape[0]
+        axis = axis_hint if axis_hint is not None else 0
+        axis = axis if axis >= 0 else axis + len(target_shape)
+        if axis == 0 and rows % count == 0:
+            repeat = rows // count
+            expanded = scale_tensor.repeat_interleave(repeat, dim=0).view(rows, 1)
+            return expanded.expand(rows, cols)
+        if axis == 1 and cols % count == 0:
+            repeat = cols // count
+            expanded = scale_tensor.repeat_interleave(repeat, dim=0).view(1, cols)
+            return expanded.expand(rows, cols)
+
+    if scale_tensor.ndim == result.ndim:
+        expanded = scale_tensor
+        for dim, (target_size, current_size) in enumerate(zip(result.shape, expanded.shape)):
+            if target_size == current_size:
+                continue
+            if current_size == 1:
+                expanded = expanded.expand(*[
+                    target_size if i == dim else expanded.shape[i]
+                    for i in range(expanded.ndim)
+                ])
+                continue
+            if target_size % current_size != 0:
+                raise ValueError(
+                    f"Cannot broadcast scale dimension {current_size} to target {target_size}"
+                )
+            repeat = target_size // current_size
+            expanded = expanded.repeat_interleave(repeat, dim=dim)
+        return expanded
+
+    reshaped = _reshape_for_axis(scale_tensor, axis_hint, result.ndim)
+    return reshaped.expand(result.shape)
+
+
+def _dequantize_f8_reference(
+    tensor: torch.Tensor,
+    *,
+    scale: Optional[torch.Tensor] = None,
+    scale_inv: Optional[torch.Tensor] = None,
+    axis: Optional[int] = 0,
+    target_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    if not _FLOAT8_DTYPES:
+        raise RuntimeError("Current PyTorch build does not provide FP8 tensors")
+
+    if scale is not None and scale_inv is not None:
+        raise ValueError("Provide either scale or scale_inv, not both")
+
+    result = tensor.to(target_dtype)
+    if scale is not None:
+        scale_tensor = _expand_scale(scale.to(result.dtype), result, axis_hint=axis)
+        result = result * scale_tensor
+    elif scale_inv is not None:
+        scale_tensor = _expand_scale(scale_inv.to(result.dtype), result, axis_hint=axis)
+        if torch.max(torch.abs(scale_tensor)) <= 1:
+            result = result * scale_tensor
+        else:
+            result = result / scale_tensor
+    return result
+
+
+def _dequantize_f4_reference(
+    tensor: torch.Tensor,
+    *,
+    scale: Optional[torch.Tensor] = None,
+    scale_inv: Optional[torch.Tensor] = None,
+    axis: Optional[int] = 0,
+    target_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    if unpack_uint4 is None or f4_unpacked_to_f32 is None:
+        raise RuntimeError("torchao with nvfp4 support is required for FP4 dequantization")
+
+    if scale is not None and scale_inv is not None:
+        raise ValueError("Provide either scale or scale_inv, not both")
+
+    if tensor.dtype is not torch.uint8:
+        raise ValueError("FP4 packed tensors must use torch.uint8 storage")
+
+    orig_shape = list(tensor.shape)
+    if not orig_shape:
+        raise ValueError("Tensor must have at least one dimension")
+
+    unpacked = unpack_uint4(tensor.reshape(-1))
+    expanded_shape = orig_shape[:-1] + [orig_shape[-1] * 2]
+    unpacked = unpacked.view(*expanded_shape)
+    result = f4_unpacked_to_f32(unpacked).to(target_dtype)
+
+    if scale is not None:
+        scale_tensor = _expand_scale(scale.to(result.dtype), result, axis_hint=axis)
+        result = result * scale_tensor
+    elif scale_inv is not None:
+        scale_tensor = _expand_scale(scale_inv.to(result.dtype), result, axis_hint=axis)
+        if torch.max(torch.abs(scale_tensor)) <= 1:
+            result = result * scale_tensor
+        else:
+            result = result / scale_tensor
+    return result
 
 
 def device_supports_native_fp8(device: Optional[torch.device] = None) -> bool:
@@ -105,79 +315,34 @@ def dequantize_f8_e4m3(
 
     if scale is not None and scale_inv is not None:
         raise ValueError("Provide either scale or scale_inv, not both")
+    ops = None
+    fast_scale = None
+    scale_mode = 0
+    if tensor.dtype in _FLOAT8_DTYPES and _can_use_fast_path(tensor, scale if scale is not None else scale_inv, target_dtype=target_dtype):
+        ops = _load_floatx_cpu_ops()
+        if ops is not None:
+            fast_scale, scale_mode = _fast_scale_arg(scale=scale, scale_inv=scale_inv)
+            format_code = _FP8_FORMAT_CODES.get(tensor.dtype)
+            if format_code is not None:
+                source = tensor.contiguous().view(torch.uint8)
+                return ops.dequantize_fp8_cpu(
+                    source,
+                    fast_scale,
+                    scale_mode,
+                    0 if axis is None else int(axis),
+                    axis is None,
+                    _TARGET_DTYPE_CODES[target_dtype],
+                    int(format_code),
+                    _cpu_floatx_threads(),
+                )
 
-    if tensor.dtype not in _FLOAT8_DTYPES:
-        result = tensor.to(target_dtype)
-    else:
-        result = tensor.to(target_dtype)
-
-    def _expand_scale(scale_tensor: torch.Tensor, *, axis_hint: Optional[int]) -> torch.Tensor:
-        if scale_tensor.ndim == 0:
-            return scale_tensor
-
-        target_shape = result.shape
-
-        if scale_tensor.shape == target_shape:
-            return scale_tensor
-
-        # Block-wise expansion (e.g. [num_row_blocks, num_col_blocks])
-        if scale_tensor.ndim == 2 and len(target_shape) == 2:
-            blocks_r, blocks_c = scale_tensor.shape
-            rows, cols = target_shape
-            if rows % blocks_r == 0 and cols % blocks_c == 0:
-                repeat_r = rows // blocks_r
-                repeat_c = cols // blocks_c
-                expanded = scale_tensor.repeat_interleave(repeat_r, dim=0)
-                expanded = expanded.repeat_interleave(repeat_c, dim=1)
-                return expanded
-
-        if scale_tensor.ndim == 1 and len(target_shape) == 2:
-            rows, cols = target_shape
-            count = scale_tensor.shape[0]
-            axis = axis_hint if axis_hint is not None else 0
-            axis = axis if axis >= 0 else axis + len(target_shape)
-            if axis == 0 and rows % count == 0:
-                repeat = rows // count
-                expanded = scale_tensor.repeat_interleave(repeat, dim=0).view(rows, 1)
-                return expanded.expand(rows, cols)
-            if axis == 1 and cols % count == 0:
-                repeat = cols // count
-                expanded = scale_tensor.repeat_interleave(repeat, dim=0).view(1, cols)
-                return expanded.expand(rows, cols)
-
-        if scale_tensor.ndim == result.ndim:
-            expanded = scale_tensor
-            for dim, (target_size, current_size) in enumerate(zip(result.shape, expanded.shape)):
-                if target_size == current_size:
-                    continue
-                if current_size == 1:
-                    expanded = expanded.expand(*[
-                        target_size if i == dim else expanded.shape[i]
-                        for i in range(expanded.ndim)
-                    ])
-                    continue
-                if target_size % current_size != 0:
-                    raise ValueError(
-                        f"Cannot broadcast scale dimension {current_size} to target {target_size}"
-                    )
-                repeat = target_size // current_size
-                expanded = expanded.repeat_interleave(repeat, dim=dim)
-            return expanded
-
-        reshaped = _reshape_for_axis(scale_tensor, axis_hint, result.ndim)
-        return reshaped.expand(result.shape)
-
-    if scale is not None:
-        scale_tensor = _expand_scale(scale.to(result.dtype), axis_hint=axis)
-        result = result * scale_tensor
-    elif scale_inv is not None:
-        scale_tensor = _expand_scale(scale_inv.to(result.dtype), axis_hint=axis)
-        if torch.max(torch.abs(scale_tensor)) <= 1:
-            result = result * scale_tensor
-        else:
-            result = result / scale_tensor
-
-    return result
+    return _dequantize_f8_reference(
+        tensor,
+        scale=scale,
+        scale_inv=scale_inv,
+        axis=axis,
+        target_dtype=target_dtype,
+    )
 
 
 def dequantize_fp8(
@@ -207,74 +372,34 @@ def dequantize_f4_e2m1(
 ) -> torch.Tensor:
     """Dequantize FP4 (E2M1) values packed as two nibbles per byte."""
 
-    if unpack_uint4 is None or f4_unpacked_to_f32 is None:
-        raise RuntimeError("torchao with nvfp4 support is required for FP4 dequantization")
-
     if scale is not None and scale_inv is not None:
         raise ValueError("Provide either scale or scale_inv, not both")
+    if _can_use_fast_path(
+        tensor,
+        scale if scale is not None else scale_inv,
+        target_dtype=target_dtype,
+        allow_float4_storage=True,
+    ):
+        ops = _load_floatx_cpu_ops()
+        if ops is not None:
+            fast_scale, scale_mode = _fast_scale_arg(scale=scale, scale_inv=scale_inv)
+            source = tensor.contiguous()
+            if source.dtype is not torch.uint8:
+                source = source.view(torch.uint8)
+            return ops.dequantize_fp4_cpu(
+                source,
+                fast_scale,
+                scale_mode,
+                0 if axis is None else int(axis),
+                axis is None,
+                _TARGET_DTYPE_CODES[target_dtype],
+                _cpu_floatx_threads(),
+            )
 
-    if tensor.dtype is not torch.uint8:
-        raise ValueError("FP4 packed tensors must use torch.uint8 storage")
-
-    orig_shape = list(tensor.shape)
-    if not orig_shape:
-        raise ValueError("Tensor must have at least one dimension")
-
-    unpacked = unpack_uint4(tensor.reshape(-1))
-    expanded_shape = orig_shape[:-1] + [orig_shape[-1] * 2]
-    unpacked = unpacked.view(*expanded_shape)
-
-    result = f4_unpacked_to_f32(unpacked).to(target_dtype)
-
-    def _expand_scale_fp4(scale_tensor: torch.Tensor, *, axis_hint: Optional[int]) -> torch.Tensor:
-        if scale_tensor.ndim == 0:
-            return scale_tensor
-
-        target_shape = result.shape
-
-        if scale_tensor.shape == target_shape:
-            return scale_tensor
-
-        if scale_tensor.ndim == 2 and len(target_shape) == 2:
-            blocks_r, blocks_c = scale_tensor.shape
-            rows, cols = target_shape
-            if rows % blocks_r == 0 and cols % blocks_c == 0:
-                repeat_r = rows // blocks_r
-                repeat_c = cols // blocks_c
-                expanded = scale_tensor.repeat_interleave(repeat_r, dim=0)
-                expanded = expanded.repeat_interleave(repeat_c, dim=1)
-                return expanded
-
-        if scale_tensor.ndim == result.ndim:
-            expanded = scale_tensor
-            for dim, (target_size, current_size) in enumerate(zip(result.shape, expanded.shape)):
-                if target_size == current_size:
-                    continue
-                if current_size == 1:
-                    expanded = expanded.expand(*[
-                        target_size if i == dim else expanded.shape[i]
-                        for i in range(expanded.ndim)
-                    ])
-                    continue
-                if target_size % current_size != 0:
-                    raise ValueError(
-                        f"Cannot broadcast scale dimension {current_size} to target {target_size}"
-                    )
-                repeat = target_size // current_size
-                expanded = expanded.repeat_interleave(repeat, dim=dim)
-            return expanded
-
-        reshaped = _reshape_for_axis(scale_tensor, axis_hint, result.ndim)
-        return reshaped.expand(result.shape)
-
-    if scale is not None:
-        scale_tensor = _expand_scale_fp4(scale.to(result.dtype), axis_hint=axis)
-        result = result * scale_tensor
-    elif scale_inv is not None:
-        scale_tensor = _expand_scale_fp4(scale_inv.to(result.dtype), axis_hint=axis)
-        if torch.max(torch.abs(scale_tensor)) <= 1:
-            result = result * scale_tensor
-        else:
-            result = result / scale_tensor
-
-    return result
+    return _dequantize_f4_reference(
+        tensor,
+        scale=scale,
+        scale_inv=scale_inv,
+        axis=axis,
+        target_dtype=target_dtype,
+    )
