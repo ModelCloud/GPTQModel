@@ -45,8 +45,17 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from gptqmodel.quantization.dtype import dequantize_f8_e4m3
+from gptqmodel.quantization.dtype import (
+    available_float8_dtype_names,
+    dequantize_f4_e2m1,
+    dequantize_fp8,
+)
 from gptqmodel.utils.model_dequant import dequantize_model
+
+try:
+    from torchao.prototype.mx_formats.nvfp4_tensor import nvfp4_quantize
+except Exception:
+    nvfp4_quantize = None
 
 
 pytestmark = [pytest.mark.model, pytest.mark.slow, pytest.mark.gpu]
@@ -78,9 +87,22 @@ def write_index(path: Path, shard: str, keys: list[str]) -> None:
     payload = {"weight_map": weight_map}
     (path / "model.safetensors.index.json").write_text(json.dumps(payload))
 
+def _checkpoint_roundtrip_fp8_formats() -> list[str]:
+    formats = []
+    for format_name in available_float8_dtype_names():
+        dtype = getattr(torch, format_name)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "probe.safetensors"
+            try:
+                save_file({"probe.weight": torch.zeros((2, 2), dtype=dtype)}, str(path))
+            except Exception:
+                continue
+        formats.append(format_name)
+    return formats
 
-@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
-def test_dequantize_model_fp8_infers_block_size(tmp_path):
+
+@pytest.mark.parametrize("format_name", _checkpoint_roundtrip_fp8_formats())
+def test_dequantize_model_fp8_infers_block_size(tmp_path, format_name: str):
     model_dir = tmp_path / "fp8_model_infer"
     output_dir = tmp_path / "fp8_output_infer"
     model_dir.mkdir()
@@ -88,13 +110,13 @@ def test_dequantize_model_fp8_infers_block_size(tmp_path):
     config = {
         "architectures": ["TestModel"],
         "quantization_config": {
-            "format": "float8_e4m3fn",
+            "format": format_name,
             "quant_method": "fp8",
         },
     }
     (model_dir / "config.json").write_text(json.dumps(config))
 
-    weight = torch.randn(4, 8, dtype=torch.float32).to(torch.float8_e4m3fn)
+    weight = torch.randn(4, 8, dtype=torch.float32).to(getattr(torch, format_name))
     scale_inv = torch.ones(2, 2, dtype=torch.float32)
     shard_name = "model.safetensors"
     save_file(
@@ -112,12 +134,12 @@ def test_dequantize_model_fp8_infers_block_size(tmp_path):
         weight_out = reader.get_tensor("linear.weight")
         assert weight_out.dtype is torch.bfloat16
 
-    expected = dequantize_f8_e4m3(weight, scale_inv=scale_inv, axis=None, target_dtype=torch.bfloat16)
+    expected = dequantize_fp8(weight, scale_inv=scale_inv, axis=None, target_dtype=torch.bfloat16)
     assert torch.equal(weight_out, expected)
 
 
-@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
-def test_dequantize_model_fp8(tmp_path):
+@pytest.mark.parametrize("format_name", _checkpoint_roundtrip_fp8_formats())
+def test_dequantize_model_fp8(tmp_path, format_name: str):
     model_dir = tmp_path / "fp8_model"
     output_dir = tmp_path / "fp8_output"
     model_dir.mkdir()
@@ -125,14 +147,14 @@ def test_dequantize_model_fp8(tmp_path):
     config = {
         "architectures": ["TestModel"],
         "quantization_config": {
-            "format": "float8_e4m3fn",
+            "format": format_name,
             "quant_method": "fp8",
             "weight_block_size": [2, 4],
         },
     }
     (model_dir / "config.json").write_text(json.dumps(config))
 
-    weight = torch.randn(2, 4, dtype=torch.float32).to(torch.float8_e4m3fn)
+    weight = torch.randn(2, 4, dtype=torch.float32).to(getattr(torch, format_name))
     scale_inv = torch.ones(1, 1, dtype=torch.float32)
     shard_name = "model.safetensors"
     save_file(
@@ -153,7 +175,7 @@ def test_dequantize_model_fp8(tmp_path):
         weight_out = reader.get_tensor("linear.weight")
         bias_out = reader.get_tensor("linear.bias")
 
-    expected = dequantize_f8_e4m3(weight, scale_inv=scale_inv, axis=None, target_dtype=torch.bfloat16)
+    expected = dequantize_fp8(weight, scale_inv=scale_inv, axis=None, target_dtype=torch.bfloat16)
     assert torch.equal(weight_out, expected)
     assert bias_out.dtype is torch.bfloat16
 
@@ -165,6 +187,49 @@ def test_dequantize_model_fp8(tmp_path):
     new_index = json.loads((output_dir / "model.safetensors.index.json").read_text())
     assert "linear.weight" in new_index["weight_map"]
     assert "linear.weight_scale_inv" not in new_index["weight_map"]
+
+
+@pytest.mark.skipif(nvfp4_quantize is None, reason="torchao NVFP4 support required")
+@pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="float4 packed dtype not available")
+def test_dequantize_model_nvfp4_float4_storage(tmp_path):
+    model_dir = tmp_path / "nvfp4_model"
+    output_dir = tmp_path / "nvfp4_output"
+    model_dir.mkdir()
+
+    config = {
+        "architectures": ["TestModel"],
+        "quantization_config": {
+            "format": "nvfp4",
+        },
+    }
+    (model_dir / "config.json").write_text(json.dumps(config))
+
+    data = torch.randn(4, 16, dtype=torch.float32)
+    scales, packed = nvfp4_quantize(data, block_size=16)
+    packed_float4 = packed.view(torch.float4_e2m1fn_x2)
+    shard_name = "model.safetensors"
+    save_file(
+        {
+            "linear.weight": packed_float4,
+            "linear.weight_scale": scales,
+        },
+        str(model_dir / shard_name),
+    )
+    write_index(model_dir, shard_name, ["linear.weight", "linear.weight_scale"])
+
+    dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
+
+    with safe_open(output_dir / shard_name, framework="pt", device="cpu") as reader:
+        assert "linear.weight" in reader.keys()
+        assert "linear.weight_scale" not in reader.keys()
+        weight_out = reader.get_tensor("linear.weight")
+
+    expected = dequantize_f4_e2m1(packed_float4, scale=scales, axis=None, target_dtype=torch.bfloat16)
+    assert torch.allclose(weight_out, expected, atol=1e-3, rtol=1e-3)
+
+    new_index = json.loads((output_dir / "model.safetensors.index.json").read_text())
+    assert "linear.weight" in new_index["weight_map"]
+    assert "linear.weight_scale" not in new_index["weight_map"]
 
 
 def test_dequantize_model_awq(tmp_path):

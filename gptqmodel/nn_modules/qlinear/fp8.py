@@ -19,7 +19,11 @@ from ...quantization.config import (
     _normalize_fp8_weight_block_size,
     _normalize_fp8_weight_scale_method,
 )
-from ...quantization.dtype import dequantize_fp8, device_supports_native_fp8
+from ...quantization.dtype import (
+    available_float8_dtype_names,
+    dequantize_fp8,
+    device_supports_native_fp8,
+)
 from ...utils.backend import BACKEND
 from . import WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
@@ -59,6 +63,11 @@ def quantize_fp8_weight(
         raise ValueError(f"FP8 quantization expects a 2D weight matrix, got shape {tuple(weight.shape)}.")
 
     format = _normalize_fp8_fmt(format)
+    if format == "float8_e8m0fnu":
+        raise ValueError(
+            "TorchFP8Linear does not quantize dense weights to float8_e8m0fnu; "
+            "use that format only for dequantization of existing checkpoints."
+        )
     block_size = _normalize_fp8_weight_block_size(weight_block_size)
     weight_scale_method = _normalize_fp8_weight_scale_method(
         weight_scale_method,
@@ -175,7 +184,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
     @classmethod
     def validate_once(cls):
-        if not (hasattr(torch, "float8_e4m3fn") or hasattr(torch, "float8_e5m2")):
+        if not available_float8_dtype_names():
             return False, RuntimeError("TorchFP8Linear requires a PyTorch build with FP8 dtypes.")
         return True, None
 
@@ -352,6 +361,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         # Older GPUs can store the module on CUDA but still miss native FP8 math.
         # In that case, dequantize on CPU directly to fp16/bf16 and only then move.
         prefer_cpu_dequant = target_device.type == "cpu"
+        # PyTorch's CUDA cast path for E8M0 currently produces NaNs when used as a
+        # dense weight matrix, so force the validated CPU LUT path for that format.
+        if self.fp8_format == "float8_e8m0fnu":
+            prefer_cpu_dequant = True
         if target_device.type == "cuda" and not device_supports_native_fp8(target_device):
             prefer_cpu_dequant = True
 
@@ -398,6 +411,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             and hasattr(torch, "_scaled_mm")
             and x_flat.device.type == "cuda"
             and self.weight_scale_method == "tensor"
+            and self.fp8_format != "float8_e8m0fnu"
             and x_flat.dtype in {torch.float16, torch.bfloat16}
             and x_flat.shape[-1] == self.in_features
             and self.in_features % 16 == 0

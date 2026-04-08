@@ -9,6 +9,7 @@ from tabulate import tabulate
 
 import gptqmodel.quantization.dtype as dtype_module
 from gptqmodel.quantization.dtype import (
+    available_float8_dtype_names,
     dequantize_f4_e2m1,
     dequantize_f8_e4m3,
     device_supports_native_fp8,
@@ -41,17 +42,7 @@ pytestmark = [pytest.mark.cpu, pytest.mark.gpu]
 
 
 def _available_fp8_formats() -> list[str]:
-    names = []
-    for name in (
-        "float8_e4m3fn",
-        "float8_e5m2",
-        "float8_e4m3fnuz",
-        "float8_e5m2fnuz",
-        "float8_e8m0fnu",
-    ):
-        if hasattr(torch, name):
-            names.append(name)
-    return names
+    return list(available_float8_dtype_names())
 
 
 def _rss_bytes() -> int:

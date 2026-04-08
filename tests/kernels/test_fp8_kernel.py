@@ -6,17 +6,14 @@ import torch
 import torch.nn as nn
 
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear, quantize_fp8_weight
+from gptqmodel.quantization.dtype import available_float8_dtype_names
 
 
-def _available_fp8_formats():
-    fmts = []
-    for name in ("float8_e4m3fn", "float8_e5m2"):
-        if hasattr(torch, name):
-            fmts.append(name)
-    return fmts
+def _available_fp8_quant_formats():
+    return [fmt for fmt in available_float8_dtype_names() if fmt != "float8_e8m0fnu"]
 
 
-@pytest.mark.parametrize("fmt", _available_fp8_formats())
+@pytest.mark.parametrize("fmt", _available_fp8_quant_formats())
 @pytest.mark.parametrize("weight_scale_method", ["tensor", "row", "block"])
 def test_fp8_pack_matches_reference_quantizer(fmt: str, weight_scale_method: str):
     torch.manual_seed(0)
@@ -50,7 +47,32 @@ def test_fp8_pack_matches_reference_quantizer(fmt: str, weight_scale_method: str
     assert torch.equal(kernel.weight_scale_inv, expected_scale_inv)
 
 
-@pytest.mark.parametrize("fmt", _available_fp8_formats())
+@pytest.mark.skipif(not hasattr(torch, "float8_e8m0fnu"), reason="float8_e8m0fnu unavailable")
+@pytest.mark.parametrize("weight_scale_method", ["tensor", "row", "block"])
+def test_fp8_pack_rejects_e8m0fnu(weight_scale_method: str):
+    linear = nn.Linear(64, 64, bias=True).eval()
+    block_size = (16, 16) if weight_scale_method == "block" else None
+
+    kernel = TorchFP8Linear(
+        bits=8,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        in_features=64,
+        out_features=64,
+        bias=True,
+        pack_dtype=torch.int32,
+        format="float8_e8m0fnu",
+        weight_scale_method=weight_scale_method,
+        weight_block_size=block_size,
+        register_buffers=False,
+    )
+
+    with pytest.raises(ValueError, match="dequantization of existing checkpoints"):
+        kernel.pack_original(linear=linear, scales=None, zeros=None)
+
+
+@pytest.mark.parametrize("fmt", _available_fp8_quant_formats())
 @pytest.mark.parametrize("weight_scale_method", ["tensor", "row", "block"])
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"))])
 def test_fp8_forward_matches_dequantized_reference(fmt: str, weight_scale_method: str, device: str):
@@ -92,7 +114,7 @@ def test_fp8_forward_matches_dequantized_reference(fmt: str, weight_scale_method
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("fmt", _available_fp8_formats())
+@pytest.mark.parametrize("fmt", _available_fp8_quant_formats())
 @pytest.mark.parametrize("weight_scale_method", ["tensor", "row"])
 def test_fp8_scaled_mm_matches_dense_reference(fmt: str, weight_scale_method: str):
     torch.manual_seed(2)

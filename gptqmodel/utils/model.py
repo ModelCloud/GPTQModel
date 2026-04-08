@@ -92,6 +92,31 @@ if hasattr(torch, "float8_e4m3fn"):
 if hasattr(torch, "float8_e5m2"):
     _DTYPE_SAFE_MAP[torch.float8_e5m2] = ("F8_E5M2", 1)
 
+_FLOAT8_DTYPE_NAMES = tuple(
+    name
+    for name in (
+        "float8_e4m3fn",
+        "float8_e5m2",
+        "float8_e4m3fnuz",
+        "float8_e5m2fnuz",
+        "float8_e8m0fnu",
+    )
+    if hasattr(torch, name)
+)
+_FLOAT4_PACKED_DTYPE_NAMES = tuple(
+    name for name in ("float4_e2m1fn_x2",) if hasattr(torch, name)
+)
+
+# Byte-size fallbacks keep ancillary metadata math working for torch floatx
+# dtypes even when the current safetensors header schema cannot serialize them.
+_DTYPE_NUM_BYTES = {
+    dtype: 1
+    for dtype in (
+        *[getattr(torch, name) for name in _FLOAT8_DTYPE_NAMES],
+        *[getattr(torch, name) for name in _FLOAT4_PACKED_DTYPE_NAMES],
+    )
+}
+
 
 _DTYPE_STR_MAP = {
     "float32": torch.float32,
@@ -112,12 +137,23 @@ _DTYPE_STR_MAP = {
     "bool": torch.bool,
 }
 
+for name in _FLOAT8_DTYPE_NAMES:
+    dtype = getattr(torch, name)
+    _DTYPE_STR_MAP[name] = dtype
+    _DTYPE_STR_MAP[f"f8_{name.removeprefix('float8_')}"] = dtype
+
 if hasattr(torch, "float8_e4m3fn"):
-    _DTYPE_STR_MAP["float8_e4m3fn"] = torch.float8_e4m3fn
     _DTYPE_STR_MAP["f8_e4m3"] = torch.float8_e4m3fn
 if hasattr(torch, "float8_e5m2"):
-    _DTYPE_STR_MAP["float8_e5m2"] = torch.float8_e5m2
     _DTYPE_STR_MAP["f8_e5m2"] = torch.float8_e5m2
+if hasattr(torch, "float8_e8m0fnu"):
+    _DTYPE_STR_MAP["float8_e8m0"] = torch.float8_e8m0fnu
+    _DTYPE_STR_MAP["f8_e8m0"] = torch.float8_e8m0fnu
+
+for name in _FLOAT4_PACKED_DTYPE_NAMES:
+    dtype = getattr(torch, name)
+    _DTYPE_STR_MAP[name] = dtype
+    _DTYPE_STR_MAP[f"f4_{name.removeprefix('float4_')}"] = dtype
 
 MoETopKState = List[Tuple[nn.Module, str, int]]
 
@@ -133,9 +169,11 @@ MOE_NUM_EXPERTS_FIELD_NAMES = [
 
 
 def _torch_dtype_num_bytes(dtype: torch.dtype) -> int:
-    if dtype not in _DTYPE_SAFE_MAP:
-        raise NotImplementedError(f"Unsupported dtype for safetensors export: {dtype}")
-    return _DTYPE_SAFE_MAP[dtype][1]
+    if dtype in _DTYPE_SAFE_MAP:
+        return _DTYPE_SAFE_MAP[dtype][1]
+    if dtype in _DTYPE_NUM_BYTES:
+        return _DTYPE_NUM_BYTES[dtype]
+    raise NotImplementedError(f"Unsupported dtype for safetensors export: {dtype}")
 
 
 def _torch_dtype_to_safetensors(dtype: torch.dtype) -> str:

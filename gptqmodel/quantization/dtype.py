@@ -20,23 +20,35 @@ except Exception:
     f4_unpacked_to_f32 = None
 
 __all__ = [
+    "available_float4_packed_dtype_names",
+    "available_float4_packed_dtypes",
+    "available_float8_dtype_names",
+    "available_float8_dtypes",
     "device_supports_native_fp8",
     "dequantize_fp8",
     "dequantize_f8_e4m3",
     "dequantize_f4_e2m1",
+    "is_fp4_packed_dtype",
 ]
 
 
-_FLOAT8_DTYPES = tuple(
-    getattr(torch, name)
-    for name in ("float8_e4m3fn", "float8_e5m2")
-    if hasattr(torch, name)
+# Keep the canonical floatx registries in one place so CPU dequant, config
+# normalization, model conversion, and tests all follow the same torch surface.
+_FLOAT8_CANDIDATE_NAMES = (
+    "float8_e4m3fn",
+    "float8_e5m2",
+    "float8_e4m3fnuz",
+    "float8_e5m2fnuz",
+    "float8_e8m0fnu",
 )
-for _extra_name in ("float8_e4m3fnuz", "float8_e5m2fnuz", "float8_e8m0fnu"):
-    if hasattr(torch, _extra_name):
-        _FLOAT8_DTYPES = (*_FLOAT8_DTYPES, getattr(torch, _extra_name))
+_FLOAT8_DTYPE_NAMES = tuple(name for name in _FLOAT8_CANDIDATE_NAMES if hasattr(torch, name))
+_FLOAT8_DTYPES = tuple(getattr(torch, name) for name in _FLOAT8_DTYPE_NAMES)
 
-_FLOAT4_PACKED_DTYPE = getattr(torch, "float4_e2m1fn_x2", None)
+_FLOAT4_PACKED_CANDIDATE_NAMES = ("float4_e2m1fn_x2",)
+_FLOAT4_PACKED_DTYPE_NAMES = tuple(name for name in _FLOAT4_PACKED_CANDIDATE_NAMES if hasattr(torch, name))
+_FLOAT4_PACKED_DTYPES = tuple(getattr(torch, name) for name in _FLOAT4_PACKED_DTYPE_NAMES)
+_FLOAT4_PACKED_DTYPE = _FLOAT4_PACKED_DTYPES[0] if _FLOAT4_PACKED_DTYPES else None
+
 _TARGET_DTYPE_CODES = {
     torch.bfloat16: 0,
     torch.float16: 1,
@@ -48,6 +60,26 @@ _FP8_FORMAT_CODES = {
     getattr(torch, "float8_e5m2fnuz", None): 3,
     getattr(torch, "float8_e8m0fnu", None): 4,
 }
+
+
+def available_float8_dtype_names() -> tuple[str, ...]:
+    return _FLOAT8_DTYPE_NAMES
+
+
+def available_float8_dtypes() -> tuple[torch.dtype, ...]:
+    return _FLOAT8_DTYPES
+
+
+def available_float4_packed_dtype_names() -> tuple[str, ...]:
+    return _FLOAT4_PACKED_DTYPE_NAMES
+
+
+def available_float4_packed_dtypes() -> tuple[torch.dtype, ...]:
+    return _FLOAT4_PACKED_DTYPES
+
+
+def is_fp4_packed_dtype(dtype: torch.dtype) -> bool:
+    return dtype in _FLOAT4_PACKED_DTYPES
 
 
 def _cpu_floatx_threads() -> int:
@@ -74,7 +106,7 @@ def _can_use_fast_path(
         return False
     if tensor.dtype not in _FLOAT8_DTYPES:
         if allow_float4_storage:
-            if tensor.dtype != torch.uint8 and (_FLOAT4_PACKED_DTYPE is None or tensor.dtype != _FLOAT4_PACKED_DTYPE):
+            if tensor.dtype != torch.uint8 and tensor.dtype not in _FLOAT4_PACKED_DTYPES:
                 return False
         else:
             return False
