@@ -1,9 +1,13 @@
+import gc
+import os
+import statistics
 import time
 
 import pytest
 import torch
 from tabulate import tabulate
 
+import gptqmodel.quantization.dtype as dtype_module
 from gptqmodel.quantization.dtype import (
     dequantize_f4_e2m1,
     dequantize_f8_e4m3,
@@ -16,14 +20,79 @@ def _print_accuracy(title: str, rows, headers) -> None:
     print(f"\n{title}\n{table}\n")
 
 
+def _print_benchmark(title: str, rows, headers) -> None:
+    table = tabulate(rows, headers=headers, floatfmt=".4f", tablefmt="github")
+    print(f"\n{title}\n{table}\n")
+
+
 try:  # pragma: no cover - optional dependency
     from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor, nvfp4_quantize
 except Exception:  # pragma: no cover
     NVFP4Tensor = None
     nvfp4_quantize = None
 
+try:  # pragma: no cover - optional dependency
+    import psutil
+except Exception:  # pragma: no cover
+    psutil = None
+
 
 pytestmark = [pytest.mark.cpu, pytest.mark.gpu]
+
+
+def _available_fp8_formats() -> list[str]:
+    names = []
+    for name in (
+        "float8_e4m3fn",
+        "float8_e5m2",
+        "float8_e4m3fnuz",
+        "float8_e5m2fnuz",
+        "float8_e8m0fnu",
+    ):
+        if hasattr(torch, name):
+            names.append(name)
+    return names
+
+
+def _rss_bytes() -> int:
+    if psutil is not None:
+        return int(psutil.Process(os.getpid()).memory_info().rss)
+    with open("/proc/self/statm", "r", encoding="utf-8") as fh:
+        pages = int(fh.readline().split()[1])
+    return pages * os.sysconf("SC_PAGE_SIZE")
+
+
+def _tensor_mib(tensor: torch.Tensor) -> float:
+    return float(tensor.numel() * tensor.element_size()) / (1024.0 * 1024.0)
+
+
+def _benchmark_cpu_impl(fn, *, warmup: int = 1, iters: int = 4):
+    for _ in range(warmup):
+        tmp = fn()
+        del tmp
+    gc.collect()
+
+    samples_ms: list[float] = []
+    rss_deltas: list[float] = []
+    for _ in range(iters):
+        gc.collect()
+        rss_before = _rss_bytes()
+        start = time.perf_counter()
+        out = fn()
+        elapsed_ms = (time.perf_counter() - start) * 1e3
+        rss_after = _rss_bytes()
+        samples_ms.append(elapsed_ms)
+        rss_deltas.append(max(0, rss_after - rss_before) / (1024.0 * 1024.0))
+        del out
+
+    gc.collect()
+    result = fn()
+    stats = {
+        "median_ms": float(statistics.median(samples_ms)),
+        "rss_delta_mib": float(max(rss_deltas) if rss_deltas else 0.0),
+        "output_mib": _tensor_mib(result),
+    }
+    return result, stats
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
@@ -210,3 +279,154 @@ def test_dequantize_f8_e4m3_cpu_vs_gpu_benchmark():
 
     # GPU should not be dramatically slower than CPU
     assert gpu_time <= cpu_time * 2, f"GPU dequant slower than expected (cpu={cpu_time:.4f}s, gpu={gpu_time:.4f}s)"
+
+
+@pytest.mark.parametrize("target_dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_dequantize_fp8_cpu_ab_benchmark_table(target_dtype: torch.dtype):
+    rows = 256
+    cols = 384
+    bench_rows = []
+
+    for fmt_name in _available_fp8_formats():
+        fmt = getattr(torch, fmt_name)
+        src = torch.rand(rows, cols, dtype=torch.float32) if "e8m0" in fmt_name else torch.randn(rows, cols, dtype=torch.float32)
+        packed = src.to(fmt)
+        scale_inv = torch.rand(rows // 64, cols // 64, dtype=torch.float32) * 0.5
+
+        ref_fn = lambda: dtype_module._dequantize_f8_reference(  # noqa: E731
+            packed,
+            scale_inv=scale_inv,
+            axis=None,
+            target_dtype=target_dtype,
+        )
+        fast_fn = lambda: dequantize_f8_e4m3(  # noqa: E731
+            packed,
+            scale_inv=scale_inv,
+            axis=None,
+            target_dtype=target_dtype,
+        )
+
+        ref, ref_stats = _benchmark_cpu_impl(ref_fn)
+        fast, fast_stats = _benchmark_cpu_impl(fast_fn)
+        diff = float(torch.max(torch.abs(ref.to(torch.float32) - fast.to(torch.float32))).item())
+
+        input_mib = _tensor_mib(packed) + _tensor_mib(scale_inv)
+        ref_throughput = (input_mib + ref_stats["output_mib"]) / max(ref_stats["median_ms"] / 1e3, 1e-9)
+        fast_throughput = (input_mib + fast_stats["output_mib"]) / max(fast_stats["median_ms"] / 1e3, 1e-9)
+
+        bench_rows.append([
+            fmt_name,
+            str(target_dtype).split(".")[-1],
+            "reference",
+            ref_stats["median_ms"],
+            ref_throughput,
+            ref_stats["output_mib"],
+            ref_stats["rss_delta_mib"],
+            0.0,
+        ])
+        bench_rows.append([
+            fmt_name,
+            str(target_dtype).split(".")[-1],
+            "native",
+            fast_stats["median_ms"],
+            fast_throughput,
+            fast_stats["output_mib"],
+            fast_stats["rss_delta_mib"],
+            diff,
+        ])
+
+        assert torch.equal(fast, ref)
+
+    _print_benchmark(
+        f"fp8_cpu_ab_{str(target_dtype).split('.')[-1]}",
+        bench_rows,
+        [
+            "format",
+            "target",
+            "impl",
+            "median ms",
+            "throughput MiB/s",
+            "output MiB",
+            "rss delta MiB",
+            "max|diff|",
+        ],
+    )
+
+
+@pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")
+@pytest.mark.parametrize("target_dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_dequantize_fp4_cpu_ab_benchmark_table(target_dtype: torch.dtype):
+    data = torch.randn(256, 384, dtype=torch.float32)
+    scales, packed = nvfp4_quantize(data, block_size=16)
+    packed_float4 = packed.view(torch.float4_e2m1fn_x2) if hasattr(torch, "float4_e2m1fn_x2") else None
+
+    ref_fn = lambda: dtype_module._dequantize_f4_reference(  # noqa: E731
+        packed,
+        scale=scales,
+        axis=None,
+        target_dtype=target_dtype,
+    )
+    fast_uint8_fn = lambda: dequantize_f4_e2m1(  # noqa: E731
+        packed,
+        scale=scales,
+        axis=None,
+        target_dtype=target_dtype,
+    )
+
+    ref, ref_stats = _benchmark_cpu_impl(ref_fn)
+    fast_uint8, fast_uint8_stats = _benchmark_cpu_impl(fast_uint8_fn)
+    bench_rows = []
+    input_mib = _tensor_mib(packed) + _tensor_mib(scales)
+
+    for impl_name, tensor_result, stats in (
+        ("reference:uint8", ref, ref_stats),
+        ("native:uint8", fast_uint8, fast_uint8_stats),
+    ):
+        throughput = (input_mib + stats["output_mib"]) / max(stats["median_ms"] / 1e3, 1e-9)
+        diff = 0.0 if impl_name.startswith("reference") else float(torch.max(torch.abs(ref.to(torch.float32) - tensor_result.to(torch.float32))).item())
+        bench_rows.append([
+            str(target_dtype).split(".")[-1],
+            impl_name,
+            stats["median_ms"],
+            throughput,
+            stats["output_mib"],
+            stats["rss_delta_mib"],
+            diff,
+        ])
+
+    assert torch.allclose(fast_uint8, ref, atol=1e-3, rtol=1e-3)
+
+    if packed_float4 is not None:
+        fast_float4_fn = lambda: dequantize_f4_e2m1(  # noqa: E731
+            packed_float4,
+            scale=scales,
+            axis=None,
+            target_dtype=target_dtype,
+        )
+        fast_float4, fast_float4_stats = _benchmark_cpu_impl(fast_float4_fn)
+        throughput = (input_mib + fast_float4_stats["output_mib"]) / max(fast_float4_stats["median_ms"] / 1e3, 1e-9)
+        diff = float(torch.max(torch.abs(ref.to(torch.float32) - fast_float4.to(torch.float32))).item())
+        bench_rows.append([
+            str(target_dtype).split(".")[-1],
+            "native:float4_x2",
+            fast_float4_stats["median_ms"],
+            throughput,
+            fast_float4_stats["output_mib"],
+            fast_float4_stats["rss_delta_mib"],
+            diff,
+        ])
+        assert torch.allclose(fast_float4, ref, atol=1e-3, rtol=1e-3)
+
+    _print_benchmark(
+        f"fp4_cpu_ab_{str(target_dtype).split('.')[-1]}",
+        bench_rows,
+        [
+            "target",
+            "impl",
+            "median ms",
+            "throughput MiB/s",
+            "output MiB",
+            "rss delta MiB",
+            "max|diff|",
+        ],
+    )
