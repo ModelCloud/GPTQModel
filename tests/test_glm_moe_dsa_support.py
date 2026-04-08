@@ -11,7 +11,7 @@ from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCau
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.glm_moe_dsa import GlmMoeDsaQModel
-from gptqmodel.utils.structure import LazySafetensorsTurtle, alias_from_turtle_for_submodule
+from gptqmodel.utils.structure import LazyTurtle, alias_from_turtle_for_submodule
 
 
 _UPSTREAM_GLM5_MODELING_SIGNATURE = {
@@ -93,7 +93,7 @@ def _tiny_glm_moe_dsa_config(num_hidden_layers: int = 4) -> GlmMoeDsaConfig:
     )
 
 
-def _build_lazy_turtle(tmp_path: Path, model: GlmMoeDsaForCausalLM) -> LazySafetensorsTurtle:
+def _build_lazy_turtle(tmp_path: Path, model: GlmMoeDsaForCausalLM) -> LazyTurtle:
     # Persist a tiny real GLM checkpoint so the test exercises the checkpoint-backed lazy path.
     model_dir = tmp_path / "glm_source_model"
     model_dir.mkdir()
@@ -104,7 +104,7 @@ def _build_lazy_turtle(tmp_path: Path, model: GlmMoeDsaForCausalLM) -> LazySafet
         json.dumps({"weight_map": dict.fromkeys(state_dict, shard_name)}),
         encoding="utf-8",
     )
-    source = LazySafetensorsTurtle.maybe_create(
+    source = LazyTurtle.maybe_create(
         model_local_path=str(model_dir),
         config=SimpleNamespace(_experts_implementation=None),
         model_init_kwargs={"device_map": {"": "cpu"}},

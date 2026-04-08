@@ -527,7 +527,7 @@ def _ensure_target_storage_on_device_(param: torch.nn.Parameter, device: torch.d
     return param
 
 
-class LazySafetensorsTurtle:
+class LazyTurtle:
     """Checkpoint-backed shell materializer for local safetensors models.
 
     The traditional offload path builds a meta shell model and then instantiates
@@ -562,7 +562,7 @@ class LazySafetensorsTurtle:
         model_local_path: Optional[str],
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Optional["LazySafetensorsTurtle"]:
+    ) -> Optional["LazyTurtle"]:
         if not model_local_path or not os.path.isdir(model_local_path):
             return None
 
@@ -574,13 +574,13 @@ class LazySafetensorsTurtle:
             )
         except Exception as exc:
             log.debug(
-                "LazySafetensorsTurtle: disabled for `%s`: %s",
+                "LazyTurtle: disabled for `%s`: %s",
                 model_local_path,
                 exc,
             )
             return None
 
-    def eval(self) -> "LazySafetensorsTurtle":
+    def eval(self) -> "LazyTurtle":
         return self
 
     def materialize_submodule(
@@ -813,7 +813,7 @@ class LazySafetensorsTurtle:
             return module_type(*args, **kwargs)
         except Exception as exc:
             log.debug(
-                "LazySafetensorsTurtle: failed to build template for `%s`: %s",
+                "LazyTurtle: failed to build template for `%s`: %s",
                 module_type.__name__,
                 exc,
             )
@@ -936,7 +936,7 @@ class LazySafetensorsTurtle:
 
 def alias_from_turtle_for_submodule(
     target_model: torch.nn.Module,
-    turtle_model: "LazySafetensorsTurtle",
+    turtle_model: "LazyTurtle",
     target_submodule: torch.nn.Module,
     device: torch.device,
     non_blocking: bool = False,
@@ -945,7 +945,7 @@ def alias_from_turtle_for_submodule(
     assert device not in [None, torch.device("meta")]
     if not hasattr(turtle_model, "materialize_submodule"):
         raise TypeError(
-            f"Expected LazySafetensorsTurtle-compatible source, got `{type(turtle_model).__name__}`."
+            f"Expected LazyTurtle-compatible source, got `{type(turtle_model).__name__}`."
         )
 
     return turtle_model.materialize_submodule(
@@ -960,7 +960,7 @@ def _is_meta_tensor(t: torch.Tensor) -> bool:
 
 def alias_all_from_turtle_if_meta(
     shell_model: nn.Module,
-    turtle_model: Optional["LazySafetensorsTurtle"],
+    turtle_model: Optional["LazyTurtle"],
     *,
     require_class_match: bool = True,
     verify_shapes: bool = True,
@@ -974,7 +974,7 @@ def alias_all_from_turtle_if_meta(
 
     if not hasattr(turtle_model, "sync_all_meta"):
         raise TypeError(
-            f"Expected LazySafetensorsTurtle-compatible source, got `{type(turtle_model).__name__}`."
+            f"Expected LazyTurtle-compatible source, got `{type(turtle_model).__name__}`."
         )
     return turtle_model.sync_all_meta(
         shell_model=shell_model,

@@ -11,7 +11,7 @@ from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.utils import BACKEND, PROFILE
 from gptqmodel.utils import model as model_utils
 from gptqmodel.utils.hf import INTERNAL_HF_GGUF_FILE_KWARG
-from gptqmodel.utils.structure import LazySafetensorsTurtle
+from gptqmodel.utils.structure import LazyTurtle
 
 
 def test_load_treats_missing_absolute_path_as_local(monkeypatch):
@@ -418,9 +418,9 @@ def test_model_loader_requires_lazy_turtle_for_offload_to_disk(monkeypatch):
     monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("gptqmodel.utils.hf.build_shell_model", fake_build_shell_model)
     monkeypatch.setattr(loader.defuser, "convert_model", fake_convert_model)
-    monkeypatch.setattr(loader.LazySafetensorsTurtle, "maybe_create", classmethod(lambda cls, **_kwargs: None))
+    monkeypatch.setattr(loader.LazyTurtle, "maybe_create", classmethod(lambda cls, **_kwargs: None))
 
-    with pytest.raises(RuntimeError, match="LazySafetensorsTurtle-compatible local safetensors checkpoint"):
+    with pytest.raises(RuntimeError, match="can't open model path"):
         DummyQModel.from_pretrained(
             "/tmp/fake-model",
             quantize_config=QuantizeConfig(offload_to_disk=True),
@@ -521,7 +521,7 @@ def test_model_loader_uses_lazy_turtle_for_local_safetensors(monkeypatch, tmp_pa
 
     assert shell_configs
     assert load_calls == []
-    assert isinstance(instance.turtle_model, LazySafetensorsTurtle)
+    assert isinstance(instance.turtle_model, LazyTurtle)
     assert instance.turtle_model.config._experts_implementation == "linear_loop"
     assert instance.turtle_model.config is not instance.model.config
 

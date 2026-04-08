@@ -20,7 +20,7 @@ from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
 from gptqmodel.utils.structure import (
-    LazySafetensorsTurtle,
+    LazyTurtle,
     alias_all_from_turtle_if_meta,
     alias_from_turtle_for_submodule,
 )
@@ -117,7 +117,7 @@ def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, t
     (path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
 
 
-def _build_lazy_turtle_from_module(tmp_path: Path, model: nn.Module) -> LazySafetensorsTurtle:
+def _build_lazy_turtle_from_module(tmp_path: Path, model: nn.Module) -> LazyTurtle:
     """Persist cloned checkpoint values and reopen them through the lazy turtle source."""
 
     model_dir = tmp_path / "source_model"
@@ -127,7 +127,7 @@ def _build_lazy_turtle_from_module(tmp_path: Path, model: nn.Module) -> LazySafe
     state_dict = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
     save_file(state_dict, str(model_dir / shard_name))
     _write_checkpoint_index(model_dir, shard_name, state_dict)
-    source = LazySafetensorsTurtle.maybe_create(
+    source = LazyTurtle.maybe_create(
         model_local_path=str(model_dir),
         config=SimpleNamespace(_experts_implementation=None),
         model_init_kwargs={"device_map": {"": "cpu"}},
@@ -287,7 +287,7 @@ def test_alias_all_from_turtle_materializes_custom_parameter_checkpoint_values(t
     torch.testing.assert_close(shell_model.block.dt_bias, source_model.block.dt_bias)
 
 
-def test_lazy_safetensors_turtle_materializes_recursive_submodule(tmp_path):
+def test_lazy_turtle_materializes_recursive_submodule(tmp_path):
     source_model = _HybridWrapper(width=16)
     model_dir = tmp_path / "source_model"
     model_dir.mkdir()
@@ -312,7 +312,7 @@ def test_lazy_safetensors_turtle_materializes_recursive_submodule(tmp_path):
         persistent=True,
     )
 
-    source = LazySafetensorsTurtle.maybe_create(
+    source = LazyTurtle.maybe_create(
         model_local_path=str(model_dir),
         config=SimpleNamespace(_experts_implementation=None),
         model_init_kwargs={"device_map": {"": "cpu"}},
@@ -332,7 +332,7 @@ def test_lazy_safetensors_turtle_materializes_recursive_submodule(tmp_path):
     torch.testing.assert_close(shell_model.block.dt_scale, source_model.block.dt_scale)
 
 
-def test_lazy_safetensors_turtle_restores_nonpersistent_buffers_from_module_init(tmp_path):
+def test_lazy_turtle_restores_nonpersistent_buffers_from_module_init(tmp_path):
     config = _tiny_llama_config()
     source_model = _RotaryWrapper(config)
     shell_model = _RotaryWrapper(config)
@@ -390,7 +390,7 @@ def test_alias_all_from_lazy_turtle_restores_direct_meta_tensors(tmp_path):
         persistent=True,
     )
 
-    source = LazySafetensorsTurtle.maybe_create(
+    source = LazyTurtle.maybe_create(
         model_local_path=str(model_dir),
         config=SimpleNamespace(_experts_implementation=None),
         model_init_kwargs={"device_map": {"": "cpu"}},

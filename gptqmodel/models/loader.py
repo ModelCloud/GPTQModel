@@ -17,7 +17,7 @@ import torch
 import transformers
 
 from ..utils.modelscope import ensure_modelscope_available
-from ..utils.structure import LazySafetensorsTurtle, print_module_tree
+from ..utils.structure import LazyTurtle, print_module_tree
 
 
 if ensure_modelscope_available():
@@ -641,7 +641,7 @@ def ModelLoader(cls):
                 shell_model_init_kwargs.update(hf_gguf_load_kwargs)
                 model._model_init_kwargs = shell_model_init_kwargs
                 _maybe_print_module_tree(model=model)
-                turtle_model = LazySafetensorsTurtle.maybe_create(
+                turtle_model = LazyTurtle.maybe_create(
                     model_local_path=model_local_path,
                     config=model.config,
                     model_init_kwargs=shell_model_init_kwargs,

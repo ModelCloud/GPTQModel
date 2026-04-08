@@ -60,7 +60,7 @@ from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
 from ..utils.model import MODALITY, _module_has_meta_tensors, find_modules, get_module_by_name_prefix, move_to
-from ..utils.structure import LazySafetensorsTurtle, alias_from_turtle_for_submodule
+from ..utils.structure import LazyTurtle, alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from ._const import (
     CPU,
@@ -242,7 +242,7 @@ class BaseQModel(nn.Module):
         trust_remote_code: bool = False,
         model_local_path: str = None,
         # Lazy turtle is the checkpoint-backed source used to materialize shell modules on demand.
-        turtle_model: Optional[LazySafetensorsTurtle] = None,
+        turtle_model: Optional[LazyTurtle] = None,
     ):
         super().__init__()
 
