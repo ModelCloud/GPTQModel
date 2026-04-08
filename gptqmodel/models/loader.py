@@ -17,7 +17,7 @@ import torch
 import transformers
 
 from ..utils.modelscope import ensure_modelscope_available
-from ..utils.structure import print_module_tree
+from ..utils.structure import LazySafetensorsTurtle, print_module_tree
 
 
 if ensure_modelscope_available():
@@ -641,29 +641,23 @@ def ModelLoader(cls):
                 shell_model_init_kwargs.update(hf_gguf_load_kwargs)
                 model._model_init_kwargs = shell_model_init_kwargs
                 _maybe_print_module_tree(model=model)
+                turtle_model = LazySafetensorsTurtle.maybe_create(
+                    model_local_path=model_local_path,
+                    config=model.config,
+                    model_init_kwargs=shell_model_init_kwargs,
+                )
 
-                # enable mmap with low_cpu_mem_usage
-                turtle_spinner = log.spinner(title="Turtle model loading...", interval=0.1)
-                try:
-                    turtle_model = cls.loader.from_pretrained(
-                        model_local_path,
-                        config=config,
-                        low_cpu_mem_usage=True,
-                        **model_init_kwargs_without_internal,
-                        **hf_gguf_load_kwargs,
+                if turtle_model is None:
+                    raise RuntimeError(
+                        "Loader: offload_to_disk now requires a LazySafetensorsTurtle-compatible "
+                        f"local safetensors checkpoint for `{model_local_path}`. "
+                        "The legacy eager turtle model path has been removed."
                     )
-                finally:
-                    turtle_spinner.close()
 
-                if getattr(turtle_model, "config", None) is config:
-                    turtle_model.config = copy.deepcopy(config)
-                defuser.convert_model(turtle_model, cleanup_original=False)
-                # TODO FIX ME...temp store model_init args
-                turtle_model_init_kwargs = dict(model_init_kwargs_without_internal)
-                turtle_model_init_kwargs.update(hf_gguf_load_kwargs)
-                turtle_model._model_init_kwargs = turtle_model_init_kwargs
-                # print("actual turtle model-----------")
-                # print_module_tree(model=turtle_model)
+                log.info(
+                    "Loader: using checkpoint-backed lazy turtle source for `%s`",
+                    model_local_path,
+                )
         else:
             log.info("Loader: loading model directly to CPU (not using meta device or turtle_model)")
             model = cls.loader.from_pretrained(
