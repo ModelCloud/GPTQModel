@@ -91,7 +91,10 @@ class _TinyGptqModel:
     ATTENTION_MASKS_DTYPE = torch.long
     INPUT_EMBEDDING_EXTRA_ARGS = {}
     finalize_input_capture_example = BaseQModel.finalize_input_capture_example
+    capture_first_layer_positional_inputs = BaseQModel.capture_first_layer_positional_inputs
+    capture_first_layer_input_kwargs = BaseQModel.capture_first_layer_input_kwargs
     move_input_capture_example = BaseQModel.move_input_capture_example
+    prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
     run_input_capture = BaseQModel.run_input_capture
 
     def __init__(self):
@@ -104,7 +107,8 @@ class _TinyGptqModel:
         self._hook_started = False
         self._hook_finished = False
 
-    def shell_module_materialize(self, target_submodule, device):
+    def shell_module_materialize(self, target_submodule, device, **kwargs):
+        del kwargs
         target_submodule.to(device)
         return target_submodule
 

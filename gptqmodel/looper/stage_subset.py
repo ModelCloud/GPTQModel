@@ -481,6 +481,14 @@ def _run_single_subset_pass(
     handle = []
     subset_size = len(subset)
 
+    if execute_forward:
+        for named_module in subset.values():
+            if isinstance(named_module, NamedModule):
+                looper._prepare_named_module_for_forward(
+                    named_module=named_module,
+                    fallback_device=cur_layer_device,
+                )
+
     # Determine MoE block name for hook selection
     moe_block_name = None
     if looper.gptq_model and hasattr(looper.gptq_model, 'moe_lifecycle_hooks'):

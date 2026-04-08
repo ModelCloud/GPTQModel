@@ -39,6 +39,7 @@ from .. import DEVICE_THREAD_POOL
 from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..quantization.config import (
@@ -51,6 +52,7 @@ from ..quantization.config import (
     dynamic_get,
     resolve_quant_format,
 )
+from ..quantization.dtype import device_supports_dtype
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND, normalize_backend
@@ -60,7 +62,13 @@ from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
 from ..utils.model import MODALITY, _module_has_meta_tensors, find_modules, get_module_by_name_prefix, move_to
-from ..utils.structure import LazyTurtle, alias_from_turtle_for_submodule
+from ..utils.model_dequant import infer_block_shape
+from ..utils.structure import (
+    LazyTurtle,
+    _get_parent_and_leaf_by_path,
+    _get_qualified_name,
+    alias_from_turtle_for_submodule,
+)
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from ._const import (
     CPU,
@@ -274,6 +282,8 @@ class BaseQModel(nn.Module):
 
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
         self.turtle_model = turtle_model
+        # Captures forward-role auto-decoder choices for regression tests and debug logs.
+        self.auto_module_decoder_events: List[Dict[str, Any]] = []
 
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
@@ -1469,6 +1479,191 @@ class BaseQModel(nn.Module):
         #return self.offload_to_disk(module=module)
         return move_to(module, device=CPU)
 
+    def _replace_live_submodule(
+        self,
+        current_submodule: nn.Module,
+        replacement: nn.Module,
+    ) -> nn.Module:
+        """Replace one live model submodule in place and return the replacement."""
+
+        module_path = _get_qualified_name(self.model, current_submodule)
+        parent, leaf = _get_parent_and_leaf_by_path(self.model, module_path)
+        setattr(parent, leaf, replacement)
+        return replacement
+
+    def _build_decoder_quant_source_module(
+        self,
+        target_submodule: nn.Module,
+        *,
+        target_dtype: torch.dtype,
+    ) -> nn.Module:
+        """Clone the decoded shell module into a dense CPU source for quantization."""
+
+        quant_source = copy.deepcopy(target_submodule).to(device=CPU)
+        quant_source = quant_source.to(dtype=target_dtype)
+        quant_source.eval()
+        setattr(quant_source, "target_device", torch.device(CPU))
+        return quant_source
+
+    def _infer_fp8_forward_layout(
+        self,
+        *,
+        weight: torch.Tensor,
+        scale_inv: torch.Tensor,
+    ) -> tuple[str, Optional[tuple[int, int]]]:
+        """Infer the FP8 scale layout needed to rebuild a TorchFP8Linear wrapper."""
+
+        if scale_inv.numel() == 1:
+            return "tensor", None
+        if scale_inv.ndim == 1 and scale_inv.shape[0] == weight.shape[0]:
+            return "row", None
+        return "block", infer_block_shape(tuple(weight.shape), scale_inv)
+
+    def _build_fp8_forward_module(
+        self,
+        *,
+        target_submodule: nn.Module,
+        checkpoint_tensors: Dict[str, torch.Tensor],
+        device: torch.device,
+        target_dtype: torch.dtype,
+    ) -> Optional[nn.Module]:
+        """Rebuild one linear submodule as a TorchFP8Linear forward wrapper."""
+
+        if not isinstance(target_submodule, nn.Linear):
+            return None
+
+        weight = checkpoint_tensors.get("weight")
+        scale_inv = checkpoint_tensors.get("weight_scale_inv")
+        if not isinstance(weight, torch.Tensor) or not isinstance(scale_inv, torch.Tensor):
+            return None
+
+        format_name = str(weight.dtype).split(".")[-1]
+        weight_scale_method, weight_block_size = self._infer_fp8_forward_layout(
+            weight=weight,
+            scale_inv=scale_inv,
+        )
+        forward_module = TorchFP8Linear(
+            bits=8,
+            group_size=-1,
+            desc_act=False,
+            sym=True,
+            in_features=target_submodule.in_features,
+            out_features=target_submodule.out_features,
+            bias=target_submodule.bias is not None,
+            pack_dtype=torch.int32,
+            format=format_name,
+            weight_scale_method=weight_scale_method,
+            weight_block_size=weight_block_size,
+            register_buffers=False,
+        ).to(device=device)
+        forward_module.register_buffer("weight", weight.to(device=device))
+        forward_module.register_buffer(
+            "weight_scale_inv",
+            scale_inv.to(device=device, dtype=torch.float32),
+        )
+
+        bias = checkpoint_tensors.get("bias")
+        if isinstance(bias, torch.Tensor):
+            forward_module.register_buffer(
+                "bias",
+                bias.to(device=device, dtype=target_dtype),
+            )
+        else:
+            forward_module.bias = None
+
+        forward_module.eval()
+        setattr(forward_module, "target_device", torch.device(device))
+        return forward_module
+
+    def _record_auto_module_decoder_event(
+        self,
+        *,
+        named_module: "NamedModule",
+        device: torch.device,
+        forward_mode: str,
+        source_dtype: torch.dtype,
+        target_dtype: torch.dtype,
+    ) -> None:
+        """Store one auto-decoder decision so tests can assert the chosen path."""
+
+        if named_module.state.get("_auto_module_decoder_event_recorded"):
+            return
+
+        self.auto_module_decoder_events.append(
+            {
+                "module": named_module.full_name,
+                "device": str(device),
+                "forward_mode": forward_mode,
+                "source_dtype": str(source_dtype).split(".")[-1],
+                "target_dtype": str(target_dtype).split(".")[-1],
+            }
+        )
+        named_module.state["_auto_module_decoder_event_recorded"] = True
+
+    def _prepare_auto_decoder_forward_module(
+        self,
+        *,
+        target_submodule: nn.Module,
+        device: torch.device,
+        named_module: "NamedModule",
+    ) -> nn.Module:
+        """Swap one decoded shell module to an FP8 forward view when supported."""
+
+        decoder_plan = named_module.state.get("auto_module_decoder")
+        turtle_model = self.turtle_model
+        if not isinstance(decoder_plan, dict) or turtle_model is None:
+            return target_submodule
+
+        checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
+            target_model=self.model,
+            target_submodule=target_submodule,
+            recurse=False,
+        )
+        weight = checkpoint_tensors.get("weight")
+        if not isinstance(weight, torch.Tensor):
+            return target_submodule
+
+        float8_dtypes = tuple(
+            getattr(torch, attr)
+            for attr in ("float8_e4m3fn", "float8_e5m2")
+            if hasattr(torch, attr)
+        )
+        if weight.dtype not in float8_dtypes:
+            return target_submodule
+
+        target_dtype = decoder_plan.get("target_dtype", target_submodule.weight.dtype)
+        if not isinstance(named_module.state.get("quant_source_module"), nn.Module):
+            named_module.state["quant_source_module"] = self._build_decoder_quant_source_module(
+                target_submodule,
+                target_dtype=target_dtype,
+            )
+
+        forward_mode = "decode"
+        replacement = target_submodule
+        if (
+            decoder_plan.get("forward_policy") == "native_or_decode"
+            and device_supports_dtype(device, weight.dtype, require_validation=False)
+        ):
+            fp8_module = self._build_fp8_forward_module(
+                target_submodule=target_submodule,
+                checkpoint_tensors=checkpoint_tensors,
+                device=device,
+                target_dtype=target_dtype,
+            )
+            if fp8_module is not None:
+                replacement = self._replace_live_submodule(target_submodule, fp8_module)
+                forward_mode = "native"
+
+        named_module.state["auto_module_decoder_forward_mode"] = forward_mode
+        self._record_auto_module_decoder_event(
+            named_module=named_module,
+            device=torch.device(device),
+            forward_mode=forward_mode,
+            source_dtype=weight.dtype,
+            target_dtype=target_dtype,
+        )
+        return replacement
+
     def move_embed(self, device: str):
         for embed_module_name in self.get_base_modules(self.model):
             embed_module, _ = get_module_by_name_prefix(self.model, embed_module_name)
@@ -1677,22 +1872,48 @@ class BaseQModel(nn.Module):
             target_submodule: torch.nn.Module,
             device: torch.device,
             non_blocking: bool = False,
+            role: str = "default",
+            named_module: Optional["NamedModule"] = None,
     ) -> torch.nn.Module:
         with self._turtle_lock:
-            turtle_model = self.turtle_model
+            if role == "quant_source" and named_module is not None:
+                quant_source = named_module.state.get("quant_source_module")
+                if not isinstance(quant_source, nn.Module):
+                    decoder_plan = named_module.state.get("auto_module_decoder") or {}
+                    target_dtype = decoder_plan.get(
+                        "target_dtype",
+                        getattr(getattr(target_submodule, "weight", None), "dtype", torch.float16),
+                    )
+                    quant_source = self._build_decoder_quant_source_module(
+                        target_submodule,
+                        target_dtype=target_dtype,
+                    )
+                    named_module.state["quant_source_module"] = quant_source
 
+                module = self._replace_live_submodule(target_submodule, quant_source)
+                if get_device(module) != device:
+                    module.to(device)
+                return module
+
+            turtle_model = self.turtle_model
             if turtle_model is None:
                 if get_device(target_submodule) != device:
                     target_submodule.to(device)
+                module = target_submodule
+            else:
+                module = alias_from_turtle_for_submodule(
+                    target_model=self.model,
+                    turtle_model=turtle_model,
+                    target_submodule=target_submodule,
+                    device=device,
+                )
 
-                return target_submodule
-
-            module = alias_from_turtle_for_submodule(
-                target_model=self.model,
-                turtle_model=turtle_model,
-                target_submodule=target_submodule,
-                device=device,
-            )
+            if role == "forward" and named_module is not None:
+                module = self._prepare_auto_decoder_forward_module(
+                    target_submodule=module,
+                    device=torch.device(device),
+                    named_module=named_module,
+                )
         return module
 
     ## overrides nn.module.train()

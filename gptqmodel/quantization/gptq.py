@@ -136,6 +136,17 @@ def get_number_of_rows_and_cols(layer: nn.Module):
 
 
 class GPTQ:
+    @staticmethod
+    def resolve_module_source(module: nn.Module) -> nn.Module:
+        """Resolve the dense module view GPTQ should quantize for one wrapper."""
+
+        if isinstance(module, NamedModule):
+            quant_source = module.state.get("quant_source_module")
+            if isinstance(quant_source, nn.Module):
+                return quant_source
+            return module.module
+        return module
+
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig] = None):
         self.lock = threading.Lock()
 
@@ -149,14 +160,15 @@ class GPTQ:
         # self.issue_non_invertible = False
 
         # self.W = module.weight
-        self.rows, self.columns = get_number_of_rows_and_cols(module)
+        resolved_module = self.resolve_module_source(module)
+        self.rows, self.columns = get_number_of_rows_and_cols(resolved_module)
         if isinstance(module, NamedModule):
-            self.module = module.module
+            self.module = resolved_module
             self.name = module.name
             self._named_module = module
         else:
             self.name = HF_OPTIMUM
-            self.module = module
+            self.module = resolved_module
             self._named_module = None
 
         self._original_rows = self.rows
