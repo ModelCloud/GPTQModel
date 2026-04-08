@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <type_traits>
 
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
@@ -304,11 +305,35 @@ inline void apply_scale_and_store_scalar_1d(
 }
 
 #if GPTQMODEL_FLOATX_X86 && (defined(__GNUC__) || defined(__clang__))
+inline bool env_flag_enabled(const char* name) {
+  // Allow tests and compatibility debugging to force the scalar fallback.
+  const char* value = std::getenv(name);
+  if (value == nullptr || value[0] == '\0') {
+    return false;
+  }
+  switch (value[0]) {
+    case '1':
+    case 'Y':
+    case 'y':
+    case 'T':
+    case 't':
+      return true;
+    default:
+      return false;
+  }
+}
+
 inline bool cpu_supports_avx2() {
+  if (env_flag_enabled("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2")) {
+    return false;
+  }
   return __builtin_cpu_supports("avx2");
 }
 
 inline bool cpu_supports_f16c() {
+  if (env_flag_enabled("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2")) {
+    return false;
+  }
   return __builtin_cpu_supports("f16c");
 }
 
@@ -564,12 +589,8 @@ void dequantize_fp8_scalar(
       const uint8_t* src_row = src + row * cols;
       T* dst_row = dst + row * cols;
       for (int64_t col = 0; col < cols; ++col) {
-        float value = table[src_row[col]];
-        if (scale_mode != ScaleMode::kNone) {
-          const float scale = scale_value_2d(spec, row, col);
-          value = scale_mode == ScaleMode::kMultiply ? value * scale : value / scale;
-        }
-        store_scalar(dst_row + col, value);
+        const float value[1] = {table[src_row[col]]};
+        apply_scale_and_store_scalar(dst_row + col, value, 1, scale_mode, spec, row, col);
       }
     }
   });
@@ -651,16 +672,11 @@ void dequantize_fp4_scalar(
       for (int64_t packed_col = 0; packed_col < packed_cols; ++packed_col) {
         const uint8_t byte = src_row[packed_col];
         const int64_t col = packed_col * 2;
-        float lo = table[byte & 0x0F];
-        float hi = table[(byte >> 4) & 0x0F];
-        if (scale_mode != ScaleMode::kNone) {
-          const float scale_lo = scale_value_2d(spec, row, col);
-          const float scale_hi = scale_value_2d(spec, row, col + 1);
-          lo = scale_mode == ScaleMode::kMultiply ? lo * scale_lo : lo / scale_lo;
-          hi = scale_mode == ScaleMode::kMultiply ? hi * scale_hi : hi / scale_hi;
-        }
-        store_scalar(dst_row + col, lo);
-        store_scalar(dst_row + col + 1, hi);
+        const float values[2] = {
+            table[byte & 0x0F],
+            table[(byte >> 4) & 0x0F],
+        };
+        apply_scale_and_store_scalar(dst_row + col, values, 2, scale_mode, spec, row, col);
       }
     }
   });

@@ -167,6 +167,25 @@ def test_dequantize_f8_e4m3_raises_on_both_scale_and_inverse():
         dequantize_f8_e4m3(tensor, scale=torch.ones(2), scale_inv=torch.ones(2))
 
 
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
+@pytest.mark.parametrize("target_dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_dequantize_f8_e4m3_disable_avx2_override_matches_reference(monkeypatch, target_dtype: torch.dtype):
+    src = torch.randn(32, 64, dtype=torch.float32)
+    fp8 = src.to(torch.float8_e4m3fn)
+    scale_inv = torch.rand(2, 4, dtype=torch.float32) * 0.5
+
+    monkeypatch.setenv("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2", "1")
+    got = dequantize_f8_e4m3(fp8, scale_inv=scale_inv, axis=None, target_dtype=target_dtype)
+    expected = dtype_module._dequantize_f8_reference(
+        fp8,
+        scale_inv=scale_inv,
+        axis=None,
+        target_dtype=target_dtype,
+    )
+
+    assert torch.equal(got, expected)
+
+
 def test_device_supports_native_fp8_reports_capability(monkeypatch):
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (9, 0))
@@ -196,6 +215,26 @@ def test_dequantize_f4_e2m1_matches_nvfp4tensor():
         ["variant", "dtype", "max|value|", "max|diff vs baseline|"],
     )
     assert torch.allclose(dequant, expected, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")
+@pytest.mark.parametrize("target_dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_dequantize_f4_e2m1_disable_avx2_override_matches_reference(monkeypatch, target_dtype: torch.dtype):
+    torch.manual_seed(4)
+    data = torch.randn(32, 64, dtype=torch.float32)
+    scales, packed = nvfp4_quantize(data, block_size=16)
+    packed_float4 = packed.view(torch.float4_e2m1fn_x2) if hasattr(torch, "float4_e2m1fn_x2") else packed
+
+    monkeypatch.setenv("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2", "1")
+    got = dequantize_f4_e2m1(packed_float4, scale=scales, axis=None, target_dtype=target_dtype)
+    expected = dtype_module._dequantize_f4_reference(
+        packed,
+        scale=scales,
+        axis=None,
+        target_dtype=target_dtype,
+    )
+
+    assert torch.allclose(got, expected, atol=1e-3, rtol=1e-3)
 
 
 @pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")
