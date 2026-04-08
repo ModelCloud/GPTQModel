@@ -13,6 +13,8 @@ class Qwen3QModel(LlamaQModel):
     non-quantized so the layer walker captures the complete structure.
     """
 
+    loader_requires_dtype = False
+
     module_tree = [
         "model",
         "layers",
