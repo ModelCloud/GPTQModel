@@ -17,6 +17,7 @@ class TestQwen3(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
+    MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
 
     def test_qwen3(self):
