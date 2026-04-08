@@ -22,8 +22,19 @@ from gptqmodel.quantization.dtype import (
 )
 
 
-# Default to the largest realistic FP8 checkpoint available locally for A/B decode tables.
-FLOATX_BENCH_MODEL_ROOT = Path(os.environ.get("GPTQMODEL_FLOATX_BENCH_MODEL", "/monster/data/model/GLM-5.1-FP8"))
+# Default to the preferred GLM FP8 checkpoint, but fall back to a real local FP8 model
+# so CPU A/B runs stay realistic on machines where the original mount is absent.
+_FLOATX_BENCH_ENV = os.environ.get("GPTQMODEL_FLOATX_BENCH_MODEL")
+_FLOATX_BENCH_MODEL_CANDIDATES = (
+    [Path(_FLOATX_BENCH_ENV)] if _FLOATX_BENCH_ENV else [
+        Path("/monster/data/model/GLM-5.1-FP8"),
+        Path("/root/model/DeepSeek-V3-0324"),
+    ]
+)
+FLOATX_BENCH_MODEL_ROOT = next(
+    (candidate for candidate in _FLOATX_BENCH_MODEL_CANDIDATES if candidate.exists()),
+    _FLOATX_BENCH_MODEL_CANDIDATES[0],
+)
 
 
 def _print_accuracy(title: str, rows, headers) -> None:
