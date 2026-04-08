@@ -509,6 +509,18 @@ inline void apply_scale_and_store_bf16x8(
 }
 
 __attribute__((target("avx2")))
+inline void apply_scale_and_store_bf16x8_const(
+    c10::BFloat16* dst,
+    __m256 values,
+    ScaleMode scale_mode,
+    __m256 rounded_scale) {
+  if (scale_mode != ScaleMode::kNone) {
+    values = scale_mode == ScaleMode::kMultiply ? _mm256_mul_ps(values, rounded_scale) : _mm256_div_ps(values, rounded_scale);
+  }
+  store_bf16x8(dst, values);
+}
+
+__attribute__((target("avx2")))
 inline void store_bf16x8(c10::BFloat16* dst, __m256 values) {
   const __m256i bits = _mm256_castps_si256(values);
   const __m256i lsb = _mm256_and_si256(_mm256_srli_epi32(bits, 16), _mm256_set1_epi32(1));
@@ -539,6 +551,18 @@ inline void apply_scale_and_store_fp16x8(
   if (scale_mode != ScaleMode::kNone) {
     __m256 scales = round_ps_to_fp16_ps(load_scale8_ps(spec, row, col_base));
     values = scale_mode == ScaleMode::kMultiply ? _mm256_mul_ps(values, scales) : _mm256_div_ps(values, scales);
+  }
+  store_fp16x8(dst, values);
+}
+
+__attribute__((target("avx2,f16c")))
+inline void apply_scale_and_store_fp16x8_const(
+    c10::Half* dst,
+    __m256 values,
+    ScaleMode scale_mode,
+    __m256 rounded_scale) {
+  if (scale_mode != ScaleMode::kNone) {
+    values = scale_mode == ScaleMode::kMultiply ? _mm256_mul_ps(values, rounded_scale) : _mm256_div_ps(values, rounded_scale);
   }
   store_fp16x8(dst, values);
 }
@@ -574,6 +598,53 @@ void dequantize_fp8_row_avx2_bf16(
   }
 }
 
+__attribute__((target("avx2")))
+void dequantize_fp8_row_avx2_bf16_block_scale(
+    const uint8_t* src_row,
+    c10::BFloat16* dst_row,
+    int64_t cols,
+    const std::array<float, 256>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  const int64_t block_row = row / spec.row_repeat;
+  int64_t col = 0;
+  while (col < cols) {
+    const int64_t block_col = col / spec.col_repeat;
+    const int64_t block_end = std::min<int64_t>(cols, (block_col + 1) * spec.col_repeat);
+    const float rounded_scale = static_cast<float>(c10::BFloat16(spec.ptr[block_row * spec.scale_cols + block_col]));
+    const __m256 scale_vec = _mm256_set1_ps(rounded_scale);
+
+    // Real FP8 checkpoints reuse one scale across an entire block, so keep it hot for the whole span.
+    for (; col + 16 <= block_end; col += 16) {
+      __m256 values_lo;
+      __m256 values_hi;
+      load_fp8x16_to_ps(src_row + col, table.data(), &values_lo, &values_hi);
+      apply_scale_and_store_bf16x8_const(dst_row + col, values_lo, scale_mode, scale_vec);
+      apply_scale_and_store_bf16x8_const(dst_row + col + 8, values_hi, scale_mode, scale_vec);
+    }
+    for (; col + 8 <= block_end; col += 8) {
+      __m256 values = load_fp8x8_to_ps(src_row + col, table.data());
+      apply_scale_and_store_bf16x8_const(dst_row + col, values, scale_mode, scale_vec);
+    }
+    if (col < block_end) {
+      alignas(32) float tail[8] = {};
+      const int64_t tail_count = block_end - col;
+      for (int64_t i = 0; i < tail_count; ++i) {
+        float value = table[src_row[col + i]];
+        if (scale_mode != ScaleMode::kNone) {
+          value = scale_mode == ScaleMode::kMultiply ? value * rounded_scale : value / rounded_scale;
+        }
+        tail[i] = value;
+      }
+      for (int64_t i = 0; i < tail_count; ++i) {
+        store_scalar(dst_row + col + i, tail[i]);
+      }
+      col = block_end;
+    }
+  }
+}
+
 __attribute__((target("avx2,f16c")))
 void dequantize_fp8_row_avx2_fp16(
     const uint8_t* src_row,
@@ -602,6 +673,53 @@ void dequantize_fp8_row_avx2_fp16(
       tail[i] = table[src_row[col + i]];
     }
     apply_scale_and_store_scalar(dst_row + col, tail, tail_count, scale_mode, spec, row, col);
+  }
+}
+
+__attribute__((target("avx2,f16c")))
+void dequantize_fp8_row_avx2_fp16_block_scale(
+    const uint8_t* src_row,
+    c10::Half* dst_row,
+    int64_t cols,
+    const std::array<float, 256>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  const int64_t block_row = row / spec.row_repeat;
+  int64_t col = 0;
+  while (col < cols) {
+    const int64_t block_col = col / spec.col_repeat;
+    const int64_t block_end = std::min<int64_t>(cols, (block_col + 1) * spec.col_repeat);
+    const float rounded_scale = static_cast<float>(c10::Half(spec.ptr[block_row * spec.scale_cols + block_col]));
+    const __m256 scale_vec = _mm256_set1_ps(rounded_scale);
+
+    // Real FP8 checkpoints reuse one scale across an entire block, so keep it hot for the whole span.
+    for (; col + 16 <= block_end; col += 16) {
+      __m256 values_lo;
+      __m256 values_hi;
+      load_fp8x16_to_ps(src_row + col, table.data(), &values_lo, &values_hi);
+      apply_scale_and_store_fp16x8_const(dst_row + col, values_lo, scale_mode, scale_vec);
+      apply_scale_and_store_fp16x8_const(dst_row + col + 8, values_hi, scale_mode, scale_vec);
+    }
+    for (; col + 8 <= block_end; col += 8) {
+      __m256 values = load_fp8x8_to_ps(src_row + col, table.data());
+      apply_scale_and_store_fp16x8_const(dst_row + col, values, scale_mode, scale_vec);
+    }
+    if (col < block_end) {
+      alignas(32) float tail[8] = {};
+      const int64_t tail_count = block_end - col;
+      for (int64_t i = 0; i < tail_count; ++i) {
+        float value = table[src_row[col + i]];
+        if (scale_mode != ScaleMode::kNone) {
+          value = scale_mode == ScaleMode::kMultiply ? value * rounded_scale : value / rounded_scale;
+        }
+        tail[i] = value;
+      }
+      for (int64_t i = 0; i < tail_count; ++i) {
+        store_scalar(dst_row + col + i, tail[i]);
+      }
+      col = block_end;
+    }
   }
 }
 #else
@@ -655,14 +773,25 @@ void dequantize_fp8_2d(
       const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
       at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
-          dequantize_fp8_row_avx2_bf16(
-              src + row * cols,
-              dst + row * cols,
-              cols,
-              table,
-              spec,
-              scale_mode,
-              row);
+          if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 16) {
+            dequantize_fp8_row_avx2_bf16_block_scale(
+                src + row * cols,
+                dst + row * cols,
+                cols,
+                table,
+                spec,
+                scale_mode,
+                row);
+          } else {
+            dequantize_fp8_row_avx2_bf16(
+                src + row * cols,
+                dst + row * cols,
+                cols,
+                table,
+                spec,
+                scale_mode,
+                row);
+          }
         }
       });
       return;
@@ -678,14 +807,25 @@ void dequantize_fp8_2d(
     const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
     at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
       for (int64_t row = begin; row < end; ++row) {
-        dequantize_fp8_row_avx2_fp16(
-            src + row * cols,
-            dst + row * cols,
-            cols,
-            table,
-            spec,
-            scale_mode,
-            row);
+        if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 16) {
+          dequantize_fp8_row_avx2_fp16_block_scale(
+              src + row * cols,
+              dst + row * cols,
+              cols,
+              table,
+              spec,
+              scale_mode,
+              row);
+        } else {
+          dequantize_fp8_row_avx2_fp16(
+              src + row * cols,
+              dst + row * cols,
+              cols,
+              table,
+              spec,
+              scale_mode,
+              row);
+        }
       }
     });
     return;
