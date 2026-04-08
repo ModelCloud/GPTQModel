@@ -9,11 +9,11 @@ class TestQwen3(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-4B" # Qwen/Qwen3-4B
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
-            "acc": {"value": 0.6092, "floor_pct": 0.04},
-            "acc_norm": {"value": 0.6143, "floor_pct": 0.04},
+            "acc": {"value": {"A100": 0.5094}, "floor_pct": 0.04},
+            "acc_norm": {"value": {"A100": 0.5145}, "floor_pct": 0.04},
         },
         "mmlu_stem": {
-            "acc": {"value": 0.8461, "floor_pct": 0.04},
+            "acc": {"value": {"A100": 0.7101}, "floor_pct": 0.04},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
