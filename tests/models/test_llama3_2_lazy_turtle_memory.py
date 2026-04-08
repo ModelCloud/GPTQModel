@@ -170,6 +170,8 @@ class TestLlama3_2LazyTurtleMemory(ModelTest):
                     batch_size=self.QUANT_BATCH_SIZE,
                 )
             except StopMainLoop:
+                # The layer callback raises this sentinel once layers 0-3 have
+                # produced the finalized memory samples this regression needs.
                 pass
 
             self._assert_memory_records(records)
