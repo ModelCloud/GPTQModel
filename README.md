@@ -20,6 +20,7 @@
 </p>
 
 ## Latest News
+* 04/08/2026 [main]: ✨ All CUDA kernels are now JIT compiled. The PyPI package is now about 300x smaller. On first use, GPT-QModel compiles only the kernels your workload actually needs. Improved Bonsai kernels now support execution `profile` control for `fast` or `low_memory` inference. Model weight loading during quantization has been optimized for large models like `GLM 5.1`. Added `GLM 5` and `GLM 5.1` model support.
 * 04/03/2026 [6.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.0.3): 🎉 New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`, and `FOEM: First-Order Error Matters`. Added PrismML/Bonsai 1bit model quantization (inference only), faster ParoQuant/AWQ kernels, ParoQuant `optimization scope` control: `module` (Paro Lite) or `layer` (Paro reference), plus `Gemma4`, `MiniCPM-O`, `MiniCPM-V`, and `GLM4 MOE lite` model support.
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
 * 03/09/2026 [main]: ✨Qwen 3.5 MoE model support added. New HF Kernel support added for AWQ. 

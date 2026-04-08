@@ -9,7 +9,6 @@ import os
 from types import SimpleNamespace
 
 import torch
-from gptqmodel.utils.model import TensorSource
 from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig
@@ -17,6 +16,7 @@ from transformers import AutoConfig
 from gptqmodel.models.auto import check_and_get_model_definition
 from gptqmodel.models.writer import ModelWriter
 from gptqmodel.quantization.config import FORMAT, METHOD
+from gptqmodel.utils.model import TensorSource
 
 
 class _DummyKernel:

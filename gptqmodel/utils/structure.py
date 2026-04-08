@@ -25,10 +25,16 @@ Notes:
 - Large layer stacks are capped to the first 4 children by default.
 """
 
-from typing import Dict, Iterable, Optional, Set, Tuple
+import copy
+import inspect
+import json
+import os
+import threading
+from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
 import pcre as re
 import torch
+from safetensors import safe_open
 from torch import nn
 
 from ..utils.logger import setup_logger
@@ -520,283 +526,459 @@ def _ensure_target_storage_on_device_(param: torch.nn.Parameter, device: torch.d
     param.data = param.data.to(device, copy=True)  # alloc new storage on device; keeps Parameter identity
     return param
 
+
+class LazyTurtle:
+    """Checkpoint-backed shell materializer for local safetensors models.
+
+    The traditional offload path builds a meta shell model and then instantiates
+    a full CPU "turtle" model from `from_pretrained()` so submodules can be
+    copied over on demand. For very large local sharded checkpoints this upfront
+    load is dominated by walking every shard.
+
+    This source keeps only the checkpoint index in memory and materializes the
+    requested shell submodule directly from the relevant safetensors shards.
+    """
+
+    supports_reload = False
+    is_lazy_checkpoint_source = True
+
+    def __init__(
+        self,
+        *,
+        model_local_path: str,
+        config: Any,
+        model_init_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.model_local_path = model_local_path
+        self.config = copy.deepcopy(config)
+        self._model_init_kwargs = dict(model_init_kwargs or {})
+        self._weight_map = self._load_weight_map(model_local_path)
+        self._lock = threading.RLock()
+
+    @classmethod
+    def maybe_create(
+        cls,
+        *,
+        model_local_path: Optional[str],
+        config: Any,
+        model_init_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Optional["LazyTurtle"]:
+        if not model_local_path or not os.path.isdir(model_local_path):
+            return None
+
+        try:
+            return cls(
+                model_local_path=model_local_path,
+                config=config,
+                model_init_kwargs=model_init_kwargs,
+            )
+        except Exception as exc:
+            log.debug(
+                "LazyTurtle: disabled for `%s`: %s",
+                model_local_path,
+                exc,
+            )
+            return None
+
+    def eval(self) -> "LazyTurtle":
+        return self
+
+    def materialize_submodule(
+        self,
+        *,
+        target_model: torch.nn.Module,
+        target_submodule: torch.nn.Module,
+        device: torch.device,
+        non_blocking: bool = False,
+    ) -> torch.nn.Module:
+        path = _get_qualified_name(target_model, target_submodule)
+        with self._lock:
+            self._copy_checkpoint_tensors_into_submodule(
+                target_model=target_model,
+                target_submodule=target_submodule,
+                module_path=path,
+                device=device,
+                recurse=True,
+                non_blocking=non_blocking,
+            )
+        if hasattr(target_model, "tie_weights"):
+            target_model.tie_weights()
+        return target_submodule
+
+    def sync_all_meta(
+        self,
+        *,
+        shell_model: nn.Module,
+        require_class_match: bool = True,
+        verify_shapes: bool = True,
+        tie_after: bool = True,
+    ) -> int:
+        del require_class_match, verify_shapes
+
+        materialized = 0
+        param_cache: Dict[tuple[str, torch.dtype, bool], nn.Parameter] = {}
+        buffer_cache: Dict[tuple[str, torch.dtype], torch.Tensor] = {}
+
+        with self._lock, torch.inference_mode():
+            for qname, shell_sub in list(shell_model.named_modules()):
+                materialized += self._materialize_direct_meta_tensors(
+                    shell_sub=shell_sub,
+                    module_path=qname,
+                    param_cache=param_cache,
+                    buffer_cache=buffer_cache,
+                )
+
+        if tie_after and hasattr(shell_model, "tie_weights") and getattr(shell_model.config, "tie_word_embeddings", False):
+            try:
+                shell_model.tie_weights()
+                log.info("Module: Re-tied embedding weights on shell model after lazy sync")
+            except Exception as exc:
+                log.info(f"Module: tie_weights failed: {exc}")
+
+        log.info("Module: Total direct tensors materialized from lazy checkpoint source: %s", materialized)
+        return materialized
+
+    def _load_weight_map(self, model_local_path: str) -> Dict[str, str]:
+        from .model import get_checkpoints
+
+        is_sharded, resolved_archive_file, _ = get_checkpoints(
+            model_local_path,
+            extensions=[".safetensors"],
+            possible_model_basenames=["model", "pytorch_model"],
+        )
+
+        if is_sharded:
+            with open(resolved_archive_file, encoding="utf-8") as fp:
+                index = json.load(fp)
+            weight_map = index.get("weight_map", {})
+            if not isinstance(weight_map, dict) or not weight_map:
+                raise ValueError(f"Invalid safetensors index: {resolved_archive_file}")
+            return {str(name): str(filename) for name, filename in weight_map.items()}
+
+        shard_name = os.path.basename(resolved_archive_file)
+        with safe_open(resolved_archive_file, framework="pt", device="cpu") as handler:
+            keys = list(handler.keys())
+        if not keys:
+            raise ValueError(f"No tensors found in safetensors file: {resolved_archive_file}")
+        return {str(name): shard_name for name in keys}
+
+    @staticmethod
+    def _join_tensor_name(module_path: str, rel_name: str) -> str:
+        if not module_path:
+            return rel_name
+        if not rel_name:
+            return module_path
+        return f"{module_path}.{rel_name}"
+
+    def _copy_checkpoint_tensors_into_submodule(
+        self,
+        *,
+        target_model: nn.Module,
+        target_submodule: nn.Module,
+        module_path: str,
+        device: torch.device,
+        recurse: bool,
+        non_blocking: bool,
+    ) -> None:
+        t_params = dict(target_submodule.named_parameters(recurse=recurse))
+        t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
+        missing_nonpersistent_buffers: list[tuple[str, str]] = []
+
+        grouped_names: Dict[str, list[tuple[str, str, str]]] = {}
+        for rel_name in t_params:
+            full_name = self._join_tensor_name(module_path, rel_name)
+            shard = self._weight_map.get(full_name)
+            if shard is None:
+                continue
+            grouped_names.setdefault(shard, []).append(("param", rel_name, full_name))
+
+        for rel_name, target_buffer in list(t_bufs.items()):
+            full_name = self._join_tensor_name(module_path, rel_name)
+            shard = self._weight_map.get(full_name)
+            if shard is None:
+                t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+                non_persistent = leaf in getattr(t_parent, "_non_persistent_buffers_set", set())
+                if non_persistent:
+                    if (
+                        getattr(target_buffer, "is_meta", False)
+                        or target_buffer.device.type == "meta"
+                        or target_buffer.device != device
+                    ):
+                        missing_nonpersistent_buffers.append((rel_name, leaf))
+                    continue
+                if getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
+                    if leaf in getattr(t_parent, "_buffers", {}):
+                        del t_parent._buffers[leaf]
+                continue
+            grouped_names.setdefault(shard, []).append(("buffer", rel_name, full_name))
+
+        with torch.inference_mode():
+            for shard, entries in grouped_names.items():
+                shard_path = os.path.join(self.model_local_path, shard)
+                with safe_open(shard_path, framework="pt", device="cpu") as handler:
+                    for kind, rel_name, full_name in entries:
+                        tensor = handler.get_tensor(full_name)
+                        if kind == "param":
+                            target_param = t_params.get(rel_name)
+                            if target_param is None or target_param.shape != tensor.shape:
+                                continue
+                            target_param_new = _ensure_target_storage_on_device_(target_param, device)
+                            if target_param_new is not target_param:
+                                t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+                                setattr(t_parent, leaf, target_param_new)
+                                target_param = target_param_new
+                            source = tensor.detach()
+                            if source.dtype != target_param.dtype:
+                                source = source.to(dtype=target_param.dtype)
+                            target_param.detach().copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                            continue
+
+                        target_buffer = t_bufs.get(rel_name)
+                        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+                        persistent = leaf not in getattr(t_parent, "_non_persistent_buffers_set", set())
+
+                        source = tensor.detach()
+                        if target_buffer is None:
+                            new_buffer = source.to(device=device)
+                            t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
+                            t_bufs[rel_name] = new_buffer
+                            continue
+
+                        if getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
+                            new_buffer = torch.empty_like(target_buffer, device=device)
+                            new_buffer.copy_(source.to(dtype=new_buffer.dtype), non_blocking=(non_blocking and source.is_pinned()))
+                            t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
+                            t_bufs[rel_name] = new_buffer
+                            continue
+
+                        if target_buffer.device != device:
+                            new_buffer = torch.empty_like(target_buffer, device=device)
+                            new_buffer.copy_(source.to(dtype=new_buffer.dtype), non_blocking=(non_blocking and source.is_pinned()))
+                            t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
+                            t_bufs[rel_name] = new_buffer
+                        else:
+                            if source.dtype != target_buffer.dtype:
+                                source = source.to(dtype=target_buffer.dtype)
+                            target_buffer.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+
+        self._restore_missing_nonpersistent_buffers(
+            target_model=target_model,
+            target_submodule=target_submodule,
+            t_bufs=t_bufs,
+            missing_nonpersistent_buffers=missing_nonpersistent_buffers,
+            device=device,
+        )
+
+    def _build_nonpersistent_buffer_template(
+        self,
+        *,
+        owner_module: nn.Module,
+        target_model: nn.Module,
+    ) -> Optional[nn.Module]:
+        """Construct a CPU module template when missing buffers must come from init logic."""
+
+        config_source = getattr(owner_module, "config", None)
+        if config_source is None:
+            config_source = getattr(target_model, "config", None)
+        if config_source is None:
+            config_source = self.config
+        if config_source is None:
+            return None
+
+        module_type = type(owner_module)
+        try:
+            signature = inspect.signature(module_type)
+        except (TypeError, ValueError):
+            return None
+
+        params = list(signature.parameters.values())
+        if not params or params[0].name != "config":
+            return None
+
+        args = []
+        kwargs = {}
+        if params[0].kind is inspect.Parameter.POSITIONAL_ONLY:
+            args.append(copy.deepcopy(config_source))
+        else:
+            kwargs["config"] = copy.deepcopy(config_source)
+
+        device_param = signature.parameters.get("device")
+        if device_param is not None:
+            if device_param.kind is inspect.Parameter.POSITIONAL_ONLY:
+                args.append(torch.device("cpu"))
+            else:
+                kwargs["device"] = torch.device("cpu")
+
+        try:
+            return module_type(*args, **kwargs)
+        except Exception as exc:
+            log.debug(
+                "LazyTurtle: failed to build template for `%s`: %s",
+                module_type.__name__,
+                exc,
+            )
+            return None
+
+    def _restore_missing_nonpersistent_buffers(
+        self,
+        *,
+        target_model: nn.Module,
+        target_submodule: nn.Module,
+        t_bufs: Dict[str, torch.Tensor],
+        missing_nonpersistent_buffers: list[tuple[str, str]],
+        device: torch.device,
+    ) -> None:
+        """Restore constructor-owned buffers that are intentionally absent from checkpoints."""
+
+        owner_templates: Dict[str, Optional[nn.Module]] = {}
+        for rel_name, leaf in missing_nonpersistent_buffers:
+            parent_rel_path, _, _ = rel_name.rpartition(".")
+            owner_module = target_submodule if not parent_rel_path else dict(target_submodule.named_modules()).get(parent_rel_path)
+            if owner_module is None:
+                continue
+
+            current_buffer = t_bufs.get(rel_name)
+            if (
+                current_buffer is not None
+                and not getattr(current_buffer, "is_meta", False)
+                and current_buffer.device.type != "meta"
+            ):
+                source_buffer = current_buffer.detach()
+            else:
+                if parent_rel_path not in owner_templates:
+                    owner_templates[parent_rel_path] = self._build_nonpersistent_buffer_template(
+                        owner_module=owner_module,
+                        target_model=target_model,
+                    )
+                template = owner_templates[parent_rel_path]
+                if template is None:
+                    continue
+                source_buffer = dict(template.named_buffers(recurse=False)).get(leaf)
+                if source_buffer is None:
+                    continue
+                source_buffer = source_buffer.detach()
+
+            target_dtype = source_buffer.dtype if current_buffer is None else current_buffer.dtype
+            materialized = source_buffer.to(device=device, dtype=target_dtype)
+            owner_module.register_buffer(leaf, materialized, persistent=False)
+            t_bufs[rel_name] = materialized
+
+    def _materialize_direct_meta_tensors(
+        self,
+        *,
+        shell_sub: nn.Module,
+        module_path: str,
+        param_cache: Dict[tuple[str, torch.dtype, bool], nn.Parameter],
+        buffer_cache: Dict[tuple[str, torch.dtype], torch.Tensor],
+    ) -> int:
+        synced = 0
+
+        with torch.inference_mode():
+            for name, shell_param in dict(shell_sub.named_parameters(recurse=False)).items():
+                if not _is_meta_tensor(shell_param):
+                    continue
+
+                full_name = self._join_tensor_name(module_path, name)
+                shard = self._weight_map.get(full_name)
+                if shard is None:
+                    continue
+
+                source_path = os.path.join(self.model_local_path, shard)
+                with safe_open(source_path, framework="pt", device="cpu") as handler:
+                    source_param = handler.get_tensor(full_name)
+
+                if shell_param.shape != source_param.shape:
+                    continue
+
+                cache_key = (full_name, shell_param.dtype, shell_param.requires_grad)
+                new_param = param_cache.get(cache_key)
+                if new_param is None:
+                    if source_param.dtype != shell_param.dtype:
+                        source_param = source_param.to(dtype=shell_param.dtype)
+                    new_param = nn.Parameter(
+                        source_param.clone(),
+                        requires_grad=shell_param.requires_grad,
+                    )
+                    param_cache[cache_key] = new_param
+
+                shell_sub.register_parameter(name, new_param)
+                synced += 1
+
+            for name, shell_buffer in list(dict(shell_sub.named_buffers(recurse=False)).items()):
+                if not _is_meta_tensor(shell_buffer):
+                    continue
+
+                full_name = self._join_tensor_name(module_path, name)
+                shard = self._weight_map.get(full_name)
+                if shard is None:
+                    continue
+
+                source_path = os.path.join(self.model_local_path, shard)
+                with safe_open(source_path, framework="pt", device="cpu") as handler:
+                    source_buffer = handler.get_tensor(full_name)
+
+                if shell_buffer.shape != source_buffer.shape:
+                    continue
+
+                persistent = name not in getattr(shell_sub, "_non_persistent_buffers_set", set())
+                cache_key = (full_name, shell_buffer.dtype)
+                new_buffer = buffer_cache.get(cache_key)
+                if new_buffer is None:
+                    if source_buffer.dtype != shell_buffer.dtype:
+                        source_buffer = source_buffer.to(dtype=shell_buffer.dtype)
+                    new_buffer = source_buffer.clone()
+                    buffer_cache[cache_key] = new_buffer
+
+                shell_sub.register_buffer(name, new_buffer, persistent=persistent)
+                synced += 1
+
+        return synced
+
 def alias_from_turtle_for_submodule(
     target_model: torch.nn.Module,
-    turtle_model: torch.nn.Module,
+    turtle_model: "LazyTurtle",
     target_submodule: torch.nn.Module,
     device: torch.device,
     non_blocking: bool = False,
 ) -> torch.nn.Module:
-    # removed cpu from list to allow materialize from meta to cpu
+    # Lazy turtle supports materialization from checkpoint storage into CPU or accelerator devices.
     assert device not in [None, torch.device("meta")]
-    # print(f"alias device = {device}")
+    if not hasattr(turtle_model, "materialize_submodule"):
+        raise TypeError(
+            f"Expected LazyTurtle-compatible source, got `{type(turtle_model).__name__}`."
+        )
 
-    # Resolve path & source submodule (on CPU/mmap)
-    path = _get_qualified_name(target_model, target_submodule)
-    src_map: Dict[str, nn.Module] = dict(turtle_model.named_modules())
-    if path not in src_map:
-        raise KeyError(f"Path '{path}' not found in turtle_model.")
-    src_sub = src_map[path]
-
-    # ---- copy params/buffers CPU->GPU into target_submodule (your existing code) ----
-    t_params = dict(target_submodule.named_parameters(recurse=True))
-    s_params = dict(src_sub.named_parameters(recurse=True))
-    with torch.inference_mode():
-        for name, s_p in s_params.items():
-            t_p = t_params.get(name)
-            if t_p is None or t_p.shape != s_p.shape:
-                continue
-            t_p_new = _ensure_target_storage_on_device_(t_p, device)
-            if t_p_new is not t_p:
-                t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)
-                setattr(t_parent, leaf, t_p_new)
-                t_p = t_p_new
-            t_p.detach().copy_(s_p.detach(), non_blocking=(non_blocking and s_p.is_pinned()))
-
-    t_bufs = dict(target_submodule.named_buffers(recurse=True))
-    s_bufs = dict(src_sub.named_buffers(recurse=True))
-
-    # Drop stale shell-only meta buffers when the source module no longer exposes them.
-    # This can happen when the shell module preallocates generic buffers like `g_idx`
-    # but the concrete packed kernel does not persist that buffer after quantization.
-    for name, t_b in list(t_bufs.items()):
-        if name in s_bufs:
-            continue
-        if not (getattr(t_b, "is_meta", False) or t_b.device.type == "meta"):
-            continue
-        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)
-        if leaf in getattr(t_parent, "_buffers", {}):
-            del t_parent._buffers[leaf]
-
-    for name, s_b in s_bufs.items():
-        tb = t_bufs.get(name)
-        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)
-        s_parent, _ = _get_parent_and_leaf_by_path(src_sub, name)
-
-        # nn.Module decides buffer persistence using `_non_persistent_buffers_set`:
-        # the buffer is persistent unless its name is in this set.
-        persistent = True
-        if hasattr(s_parent, "_non_persistent_buffers_set"):
-            persistent = leaf not in s_parent._non_persistent_buffers_set
-
-        if tb is None or getattr(tb, "is_meta", False) or tb.device.type == "meta":
-            new_b = torch.empty_like(s_b, device=device)
-            new_b.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))
-            t_parent.register_buffer(leaf, new_b, persistent=persistent)
-        else:
-            if tb.device != device:
-                new_tb = torch.empty_like(s_b, device=device)
-                new_tb.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))
-                t_parent.register_buffer(leaf, new_tb, persistent=persistent)
-            else:
-                tb.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))
-
-    if hasattr(target_model, "tie_weights"):
-        target_model.tie_weights()
-
-    #print("Post alias: target_submodule device summary:")
-    # for n, p in target_submodule.named_parameters(recurse=True):
-        # print(f"  {n}: {p.device}")
-
-    # return the *target* submodule, which is the injected result
-    return target_submodule
+    return turtle_model.materialize_submodule(
+        target_model=target_model,
+        target_submodule=target_submodule,
+        device=device,
+        non_blocking=non_blocking,
+    )
 
 def _is_meta_tensor(t: torch.Tensor) -> bool:
     return bool(getattr(t, "is_meta", False)) or (hasattr(t, "device") and t.device.type == "meta")
 
-def _module_all_meta(mod: nn.Module) -> bool:
-    """True if the module has at least one tensor and *all* its params/buffers are meta."""
-    saw_any = False
-    for _, p in mod.named_parameters(recurse=False):
-        saw_any = True
-        if not _is_meta_tensor(p):
-            return False
-    for _, b in mod.named_buffers(recurse=False):
-        saw_any = True
-        if not _is_meta_tensor(b):
-            return False
-    return saw_any  # modules with no tensors aren't considered 'meta' targets
-
-def _is_leaf(mod: nn.Module) -> bool:
-    return next(mod.named_children(), None) is None
-
-def _sync_direct_meta_tensors_from_turtle(
-    shell_sub: nn.Module,
-    turtle_sub: nn.Module,
-    *,
-    param_cache: Dict[tuple[int, torch.dtype, bool], nn.Parameter],
-    buffer_cache: Dict[tuple[int, torch.dtype], torch.Tensor],
-) -> int:
-    """Materialize direct meta params/buffers from turtle without replacing children."""
-    synced = 0
-
-    shell_params = dict(shell_sub.named_parameters(recurse=False))
-    turtle_params = dict(turtle_sub.named_parameters(recurse=False))
-
-    with torch.inference_mode():
-        for name, shell_param in shell_params.items():
-            if not _is_meta_tensor(shell_param):
-                continue
-
-            turtle_param = turtle_params.get(name)
-            if turtle_param is None or shell_param.shape != turtle_param.shape:
-                continue
-
-            # Avoid silently converting custom Parameter subclasses into plain nn.Parameter.
-            if turtle_param.__class__ is not nn.Parameter:
-                continue
-
-            cache_key = (id(turtle_param), shell_param.dtype, shell_param.requires_grad)
-            new_param = param_cache.get(cache_key)
-            if new_param is None:
-                source_param = turtle_param.detach()
-                if source_param.dtype != shell_param.dtype:
-                    source_param = source_param.to(dtype=shell_param.dtype)
-
-                # Keep the shell module structure intact and only replace the missing leaf tensor.
-                new_param = nn.Parameter(
-                    source_param.clone(),
-                    requires_grad=shell_param.requires_grad,
-                )
-                # Reuse clones when multiple module paths share the same turtle tensor.
-                param_cache[cache_key] = new_param
-
-            shell_sub.register_parameter(name, new_param)
-            synced += 1
-
-        shell_buffers = dict(shell_sub.named_buffers(recurse=False))
-        turtle_buffers = dict(turtle_sub.named_buffers(recurse=False))
-
-        for name, shell_buffer in list(shell_buffers.items()):
-            if not _is_meta_tensor(shell_buffer):
-                continue
-
-            turtle_buffer = turtle_buffers.get(name)
-            if turtle_buffer is None or shell_buffer.shape != turtle_buffer.shape:
-                continue
-
-            persistent = True
-            if hasattr(turtle_sub, "_non_persistent_buffers_set"):
-                persistent = name not in turtle_sub._non_persistent_buffers_set
-
-            cache_key = (id(turtle_buffer), shell_buffer.dtype)
-            new_buffer = buffer_cache.get(cache_key)
-            if new_buffer is None:
-                source_buffer = turtle_buffer.detach()
-                if source_buffer.dtype != shell_buffer.dtype:
-                    source_buffer = source_buffer.to(dtype=shell_buffer.dtype)
-                # Reuse clones when shared buffers appear under multiple module paths.
-                new_buffer = source_buffer.clone()
-                buffer_cache[cache_key] = new_buffer
-
-            # Mirror turtle buffer persistence so save_pretrained sees the same state.
-            shell_sub.register_buffer(name, new_buffer, persistent=persistent)
-            synced += 1
-
-    return synced
-
 def alias_all_from_turtle_if_meta(
     shell_model: nn.Module,
-    turtle_model: nn.Module,
+    turtle_model: Optional["LazyTurtle"],
     *,
     require_class_match: bool = True,
     verify_shapes: bool = True,
     tie_after: bool = True,
 ) -> int:
     """
-    Replace fully-meta leaf submodules in `shell_model` with the corresponding
-    submodules from `turtle_model`. Also materialize any remaining direct
-    params/buffers that are still on meta without replacing their children.
-
-    Logs each swap via log.info().
+    Materialize any remaining direct meta tensors in `shell_model` from the lazy turtle source.
     """
     if turtle_model is None:
         return 0
 
-    turtle_map = dict(turtle_model.named_modules())
-    swapped = 0
-    param_cache: Dict[tuple[int, torch.dtype, bool], nn.Parameter] = {}
-    buffer_cache: Dict[tuple[int, torch.dtype], torch.Tensor] = {}
-
-    for qname, shell_sub in list(shell_model.named_modules()):
-        if not qname:  # skip root
-            continue
-        if not _is_leaf(shell_sub):
-            continue
-        if not _module_all_meta(shell_sub):
-            continue
-
-        turtle_sub = turtle_map.get(qname, None)
-        if turtle_sub is None:
-            # log.info(f"Module: Skipped {qname}: not found in turtle model")
-            continue
-
-        if require_class_match and (shell_sub.__class__ is not turtle_sub.__class__):
-            # log.info(
-            #     f"Module: Skipped {qname}: class mismatch "
-            #     f"(shell={shell_sub.__class__.__name__}, turtle={turtle_sub.__class__.__name__})"
-            # )
-            continue
-
-        if verify_shapes:
-            shell_ps = dict(shell_sub.named_parameters(recurse=False))
-            turtle_ps = dict(turtle_sub.named_parameters(recurse=False))
-            for n in set(shell_ps.keys()) & set(turtle_ps.keys()):
-                if shell_ps[n].shape != turtle_ps[n].shape:
-                    # log.info(
-                    #     f"Module: Skipped {qname}: parameter shape mismatch at '{n}' "
-                    #     f"(shell={tuple(shell_ps[n].shape)}, turtle={tuple(turtle_ps[n].shape)})"
-                    # )
-                    break
-            else:
-                shell_bs = dict(shell_sub.named_buffers(recurse=False))
-                turtle_bs = dict(turtle_sub.named_buffers(recurse=False))
-                for n in set(shell_bs.keys()) & set(turtle_bs.keys()):
-                    if shell_bs[n].shape != turtle_bs[n].shape:
-                        # log.info(
-                        #     f"Module: Skipped {qname}: buffer shape mismatch at '{n}' "
-                        #     f"(shell={tuple(shell_bs[n].shape)}, turtle={tuple(turtle_bs[n].shape)})"
-                        # )
-                        break
-                else:
-                    parent, leaf = _get_parent_and_leaf_by_path(shell_model, qname)
-                    setattr(parent, leaf, turtle_sub)
-                    swapped += 1
-                    log.info(f"Module: Sync {qname} <- from turtle ({turtle_sub.__class__.__name__})")
-                    continue
-            continue
-
-        parent, leaf = _get_parent_and_leaf_by_path(shell_model, qname)
-        setattr(parent, leaf, turtle_sub)
-        swapped += 1
-        log.info(f"Module:: Sync {qname} <- from turtle ({turtle_sub.__class__.__name__})")
-
-    direct_synced = 0
-    for qname, shell_sub in list(shell_model.named_modules()):
-        turtle_sub = turtle_map.get(qname, None)
-        if turtle_sub is None:
-            continue
-
-        if require_class_match and (shell_sub.__class__ is not turtle_sub.__class__):
-            continue
-
-        synced_here = _sync_direct_meta_tensors_from_turtle(
-            shell_sub,
-            turtle_sub,
-            param_cache=param_cache,
-            buffer_cache=buffer_cache,
+    if not hasattr(turtle_model, "sync_all_meta"):
+        raise TypeError(
+            f"Expected LazyTurtle-compatible source, got `{type(turtle_model).__name__}`."
         )
-        if synced_here:
-            direct_synced += synced_here
-            label = qname or "<root>"
-            log.info(f"Module: Materialized {synced_here} direct tensor(s) for {label} from turtle")
-
-    if tie_after and hasattr(shell_model, "tie_weights") and getattr(shell_model.config, "tie_word_embeddings", False):
-        try:
-            shell_model.tie_weights()
-            log.info("Module: Re-tied embedding weights on shell model after full sync")
-        except Exception as e:
-            log.info(f"Module: tie_weights failed: {e}")
-
-    log.info(f"Module: Total synced modules: {swapped}; direct tensors materialized: {direct_synced}")
-    return swapped
+    return turtle_model.sync_all_meta(
+        shell_model=shell_model,
+        require_class_match=require_class_match,
+        verify_shapes=verify_shapes,
+        tie_after=tie_after,
+    )

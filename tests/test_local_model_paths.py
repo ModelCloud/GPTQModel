@@ -1,7 +1,9 @@
+import json
 from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors.torch import save_file
 from transformers import GenerationConfig
 
 from gptqmodel.models import GPTQModel, auto, loader
@@ -9,6 +11,7 @@ from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.utils import BACKEND, PROFILE
 from gptqmodel.utils import model as model_utils
 from gptqmodel.utils.hf import INTERNAL_HF_GGUF_FILE_KWARG
+from gptqmodel.utils.structure import LazyTurtle
 
 
 def test_load_treats_missing_absolute_path_as_local(monkeypatch):
@@ -349,7 +352,7 @@ def test_gptqmodel_from_quantized_forwards_dtype_kwarg(monkeypatch):
     assert "torch_dtype" not in captured["kwargs"]
 
 
-def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
+def test_model_loader_requires_lazy_turtle_for_offload_to_disk(monkeypatch):
     class FakeConfig:
         def __init__(self):
             self._experts_implementation = None
@@ -370,7 +373,6 @@ def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
 
     base_config = FakeConfig()
     shell_configs = []
-    turtle_configs = []
 
     def fake_build_shell_model(_loader, config, **_kwargs):
         shell_configs.append(config)
@@ -384,9 +386,7 @@ def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
     class FakeInnerLoader:
         @staticmethod
         def from_pretrained(_path, config=None, **_kwargs):
-            turtle_configs.append(config)
-            assert getattr(config, "_experts_implementation", None) is None
-            return FakeModel(config)
+            raise AssertionError("legacy eager turtle load should not run")
 
     @loader.ModelLoader
     class DummyQModel:
@@ -418,23 +418,112 @@ def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
     monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("gptqmodel.utils.hf.build_shell_model", fake_build_shell_model)
     monkeypatch.setattr(loader.defuser, "convert_model", fake_convert_model)
+    monkeypatch.setattr(loader.LazyTurtle, "maybe_create", classmethod(lambda cls, **_kwargs: None))
+
+    with pytest.raises(RuntimeError, match="can't open model path"):
+        DummyQModel.from_pretrained(
+            "/tmp/fake-model",
+            quantize_config=QuantizeConfig(offload_to_disk=True),
+            trust_remote_code=False,
+        )
+
+    assert shell_configs
+    assert shell_configs[0] is not base_config
+    assert shell_configs[0]._experts_implementation == "linear_loop"
+
+
+def test_model_loader_uses_lazy_turtle_for_local_safetensors(monkeypatch, tmp_path):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+
+    shard_name = "model.safetensors"
+    tensors = {
+        "model.layers.0.linear.weight": torch.arange(16, dtype=torch.float16).view(4, 4),
+    }
+    save_file(tensors, str(model_dir / shard_name))
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys(tensors, shard_name)})
+    )
+
+    class FakeConfig:
+        def __init__(self):
+            self._experts_implementation = None
+            self.model_type = "llama"
+            self.sub_configs = {}
+            self.dtype = None
+
+        def to_dict(self):
+            return {"max_position_embeddings": 128}
+
+    class FakeModel:
+        def __init__(self, config):
+            self.config = config
+            self.seqlen = None
+
+        def eval(self):
+            return self
+
+    base_config = FakeConfig()
+    shell_configs = []
+    load_calls = []
+
+    def fake_build_shell_model(_loader, config, **_kwargs):
+        shell_configs.append(config)
+        return FakeModel(config)
+
+    def fake_convert_model(model, cleanup_original=False):
+        assert cleanup_original is False
+        model.config._experts_implementation = "linear_loop"
+        return model
+
+    class FakeInnerLoader:
+        @staticmethod
+        def from_pretrained(_path, config=None, **_kwargs):
+            load_calls.append(config)
+            return FakeModel(config)
+
+    @loader.ModelLoader
+    class DummyQModel:
+        loader = FakeInnerLoader
+        require_dtype = None
+        loader_requires_dtype = False
+        require_fast_init = False
+        require_trust_remote_code = False
+        require_pkgs = []
+        supports_desc_act = [True, False]
+        support_offload_to_disk = True
+        config_class = None
+
+        @staticmethod
+        def before_model_load(*_args, **_kwargs):
+            return None
+
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.turtle_model = kwargs.get("turtle_model")
+            self.config = model.config
+
+    monkeypatch.setattr(loader, "check_versions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader, "get_model_local_path", lambda *_args, **_kwargs: str(model_dir))
+    monkeypatch.setattr(loader, "auto_select_device", lambda *_args, **_kwargs: torch.device("cpu"))
+    monkeypatch.setattr(loader, "auto_dtype", lambda *_args, **_kwargs: torch.float16)
+    monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: base_config)
+    monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("gptqmodel.utils.hf.build_shell_model", fake_build_shell_model)
+    monkeypatch.setattr(loader.defuser, "convert_model", fake_convert_model)
 
     instance = DummyQModel.from_pretrained(
-        "/tmp/fake-model",
+        str(model_dir),
         quantize_config=QuantizeConfig(offload_to_disk=True),
         trust_remote_code=False,
     )
 
     assert shell_configs
-    assert turtle_configs
-    assert shell_configs[0] is not base_config
-    assert turtle_configs[0] is base_config
-    assert shell_configs[0]._experts_implementation == "linear_loop"
-    assert turtle_configs[0]._experts_implementation is None
-    assert instance.model.config._experts_implementation == "linear_loop"
+    assert load_calls == []
+    assert isinstance(instance.turtle_model, LazyTurtle)
     assert instance.turtle_model.config._experts_implementation == "linear_loop"
-    assert instance.turtle_model.config is not base_config
-    assert instance.turtle_model is not None
+    assert instance.turtle_model.config is not instance.model.config
 
 
 def test_model_loader_from_pretrained_forwards_dtype_kwarg(monkeypatch):

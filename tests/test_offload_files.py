@@ -6,16 +6,24 @@
 import json
 import struct
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 from safetensors import safe_open
+from safetensors.torch import save_file
 from tabulate import tabulate
 from torch import nn
+from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
 from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
-from gptqmodel.utils.structure import alias_all_from_turtle_if_meta
+from gptqmodel.utils.structure import (
+    LazyTurtle,
+    alias_all_from_turtle_if_meta,
+    alias_from_turtle_for_submodule,
+)
 
 
 class _LinearWithBuffers(nn.Module):
@@ -79,6 +87,55 @@ class _CustomParamWrapper(nn.Module):
         self.block = _CustomParamBlock(width)
 
 
+def _tiny_llama_config() -> LlamaConfig:
+    # Keep the rotary test cheap while still using the real HF module init path.
+    return LlamaConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        vocab_size=128,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+
+
+class _RotaryWrapper(nn.Module):
+    # Pair one checkpoint-backed tensor with a non-persistent rotary module.
+    def __init__(self, config: LlamaConfig):
+        super().__init__()
+        self.config = config
+        self.block = nn.Module()
+        self.block.linear = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.block.rotary = LlamaRotaryEmbedding(config, device=torch.device("cpu"))
+
+
+def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, torch.Tensor]) -> None:
+    weight_map = dict.fromkeys(state_dict, shard_name)
+    (path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+
+
+def _build_lazy_turtle_from_module(tmp_path: Path, model: nn.Module) -> LazyTurtle:
+    """Persist cloned checkpoint values and reopen them through the lazy turtle source."""
+
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+    shard_name = "model.safetensors"
+    # Checkpoint-backed lazy turtle reconstructs tensor values, not Python-side alias identity.
+    state_dict = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
+    save_file(state_dict, str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, state_dict)
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert source is not None
+    return source
+
+
 def test_offload_to_disk_writes_single_dat_file(tmp_path):
     model = _LinearWithBuffers(in_features=128, out_features=96)
     original_state = _clone_state_dict(model.linear)
@@ -131,11 +188,12 @@ def test_offload_to_disk_writes_single_dat_file(tmp_path):
 
 
 def test_alias_all_from_turtle_restores_direct_meta_tensors_with_offloaded_children(tmp_path):
-    turtle_model = _HybridWrapper(width=64)
+    source_model = _HybridWrapper(width=64)
     shell_model = _HybridWrapper(width=64)
-    shell_model.load_state_dict(turtle_model.state_dict())
+    shell_model.load_state_dict(source_model.state_dict())
+    turtle_model = _build_lazy_turtle_from_module(tmp_path, source_model)
 
-    original_state = _clone_state_dict(turtle_model)
+    original_state = _clone_state_dict(source_model)
     offload_root = tmp_path / "offload_root"
     offload_to_disk(module=shell_model.block.inner, model=shell_model, disk_path=str(offload_root))
 
@@ -171,9 +229,10 @@ def test_alias_all_from_turtle_restores_direct_meta_tensors_with_offloaded_child
 
 
 def test_alias_all_from_turtle_preserves_shell_dtype_for_direct_meta_tensors(tmp_path):
-    turtle_model = _HybridWrapper(width=64)
+    source_model = _HybridWrapper(width=64)
     shell_model = _HybridWrapper(width=64)
-    shell_model.load_state_dict(turtle_model.state_dict())
+    shell_model.load_state_dict(source_model.state_dict())
+    turtle_model = _build_lazy_turtle_from_module(tmp_path, source_model)
 
     offload_root = tmp_path / "offload_root"
     offload_to_disk(module=shell_model.block.inner, model=shell_model, disk_path=str(offload_root))
@@ -192,14 +251,15 @@ def test_alias_all_from_turtle_preserves_shell_dtype_for_direct_meta_tensors(tmp
 
     assert shell_model.block.dt_bias.dtype == torch.float16
     assert shell_model.block.dt_scale.dtype == torch.float16
-    torch.testing.assert_close(shell_model.block.dt_bias, turtle_model.block.dt_bias.to(torch.float16))
-    torch.testing.assert_close(shell_model.block.dt_scale, turtle_model.block.dt_scale.to(torch.float16))
+    torch.testing.assert_close(shell_model.block.dt_bias, source_model.block.dt_bias.to(torch.float16))
+    torch.testing.assert_close(shell_model.block.dt_scale, source_model.block.dt_scale.to(torch.float16))
 
 
-def test_alias_all_from_turtle_preserves_tied_non_leaf_direct_parameters(tmp_path):
-    turtle_model = _SharedDirectWrapper(width=64)
+def test_alias_all_from_turtle_materializes_shared_value_tensors(tmp_path):
+    source_model = _SharedDirectWrapper(width=64)
     shell_model = _SharedDirectWrapper(width=64)
-    shell_model.load_state_dict(turtle_model.state_dict())
+    shell_model.load_state_dict(source_model.state_dict())
+    turtle_model = _build_lazy_turtle_from_module(tmp_path, source_model)
 
     offload_root = tmp_path / "offload_root"
     offload_to_disk(module=shell_model.left.inner, model=shell_model, disk_path=str(offload_root))
@@ -210,23 +270,138 @@ def test_alias_all_from_turtle_preserves_tied_non_leaf_direct_parameters(tmp_pat
 
     alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=turtle_model)
 
-    assert shell_model.left.dt_bias is shell_model.right.dt_bias
-
-    state_dict = get_state_dict_for_save(shell_model, offload_root=str(offload_root))
-    tied_keys = [name for name in state_dict if name.endswith("dt_bias")]
-    assert len(tied_keys) == 1
+    torch.testing.assert_close(shell_model.left.dt_bias, source_model.left.dt_bias)
+    torch.testing.assert_close(shell_model.right.dt_bias, source_model.right.dt_bias)
 
 
-def test_alias_all_from_turtle_skips_custom_parameter_subclasses():
-    turtle_model = _CustomParamWrapper(width=16)
+def test_alias_all_from_turtle_materializes_custom_parameter_checkpoint_values(tmp_path):
+    source_model = _CustomParamWrapper(width=16)
     shell_model = _CustomParamWrapper(width=16)
-    shell_model.load_state_dict(turtle_model.state_dict())
+    shell_model.load_state_dict(source_model.state_dict())
+    turtle_model = _build_lazy_turtle_from_module(tmp_path, source_model)
 
     shell_model.block.dt_bias = nn.Parameter(torch.empty_like(shell_model.block.dt_bias, device="meta"))
 
     alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=turtle_model)
 
-    assert shell_model.block.dt_bias.device.type == "meta"
+    torch.testing.assert_close(shell_model.block.dt_bias, source_model.block.dt_bias)
+
+
+def test_lazy_turtle_materializes_recursive_submodule(tmp_path):
+    source_model = _HybridWrapper(width=16)
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+
+    shard_name = "model.safetensors"
+    save_file(source_model.state_dict(), str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, source_model.state_dict())
+
+    shell_model = _HybridWrapper(width=16)
+    shell_model.load_state_dict(source_model.state_dict())
+    shell_model.block.inner.weight = nn.Parameter(
+        torch.empty_like(shell_model.block.inner.weight, device="meta"),
+        requires_grad=shell_model.block.inner.weight.requires_grad,
+    )
+    shell_model.block.dt_bias = nn.Parameter(
+        torch.empty_like(shell_model.block.dt_bias, device="meta"),
+        requires_grad=shell_model.block.dt_bias.requires_grad,
+    )
+    shell_model.block.register_buffer(
+        "dt_scale",
+        torch.empty_like(shell_model.block.dt_scale, device="meta"),
+        persistent=True,
+    )
+
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+
+    assert source is not None
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.block,
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(shell_model.block.inner.weight, source_model.block.inner.weight)
+    torch.testing.assert_close(shell_model.block.dt_bias, source_model.block.dt_bias)
+    torch.testing.assert_close(shell_model.block.dt_scale, source_model.block.dt_scale)
+
+
+def test_lazy_turtle_restores_nonpersistent_buffers_from_module_init(tmp_path):
+    config = _tiny_llama_config()
+    source_model = _RotaryWrapper(config)
+    shell_model = _RotaryWrapper(config)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    shell_model.block.linear.weight = nn.Parameter(
+        torch.empty_like(shell_model.block.linear.weight, device="meta"),
+        requires_grad=shell_model.block.linear.weight.requires_grad,
+    )
+    shell_model.block.rotary.register_buffer(
+        "inv_freq",
+        torch.empty_like(shell_model.block.rotary.inv_freq, device="meta"),
+        persistent=False,
+    )
+    shell_model.block.rotary.register_buffer(
+        "original_inv_freq",
+        torch.empty_like(shell_model.block.rotary.original_inv_freq, device="meta"),
+        persistent=False,
+    )
+
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.block,
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(shell_model.block.linear.weight, source_model.block.linear.weight)
+    torch.testing.assert_close(shell_model.block.rotary.inv_freq, source_model.block.rotary.inv_freq)
+    torch.testing.assert_close(shell_model.block.rotary.original_inv_freq, source_model.block.rotary.original_inv_freq)
+    assert shell_model.block.rotary.inv_freq.device.type == "cpu"
+    assert shell_model.block.rotary._non_persistent_buffers_set == {"inv_freq", "original_inv_freq"}
+
+
+def test_alias_all_from_lazy_turtle_restores_direct_meta_tensors(tmp_path):
+    source_model = _HybridWrapper(width=16)
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+
+    shard_name = "model.safetensors"
+    save_file(source_model.state_dict(), str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, source_model.state_dict())
+
+    shell_model = _HybridWrapper(width=16)
+    shell_model.load_state_dict(source_model.state_dict())
+    shell_model.block.dt_bias = nn.Parameter(
+        torch.empty_like(shell_model.block.dt_bias, device="meta"),
+        requires_grad=shell_model.block.dt_bias.requires_grad,
+    )
+    shell_model.block.register_buffer(
+        "dt_scale",
+        torch.empty_like(shell_model.block.dt_scale, device="meta"),
+        persistent=True,
+    )
+
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+
+    assert source is not None
+
+    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=source)
+
+    torch.testing.assert_close(shell_model.block.dt_bias, source_model.block.dt_bias)
+    torch.testing.assert_close(shell_model.block.dt_scale, source_model.block.dt_scale)
 
 
 def test_streaming_state_dict_pads_safetensors_header_to_8_bytes(tmp_path):

@@ -1,12 +1,17 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 from defuser import convert_model
+from safetensors.torch import save_file
 from transformers.models.glm_moe_dsa.configuration_glm_moe_dsa import GlmMoeDsaConfig
 from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.glm_moe_dsa import GlmMoeDsaQModel
+from gptqmodel.utils.structure import LazyTurtle, alias_from_turtle_for_submodule
 
 
 _UPSTREAM_GLM5_MODELING_SIGNATURE = {
@@ -88,6 +93,26 @@ def _tiny_glm_moe_dsa_config(num_hidden_layers: int = 4) -> GlmMoeDsaConfig:
     )
 
 
+def _build_lazy_turtle(tmp_path: Path, model: GlmMoeDsaForCausalLM) -> LazyTurtle:
+    # Persist a tiny real GLM checkpoint so the test exercises the checkpoint-backed lazy path.
+    model_dir = tmp_path / "glm_source_model"
+    model_dir.mkdir()
+    shard_name = "model.safetensors"
+    state_dict = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
+    save_file(state_dict, str(model_dir / shard_name))
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys(state_dict, shard_name)}),
+        encoding="utf-8",
+    )
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert source is not None
+    return source
+
+
 @pytest.mark.parametrize("model_path", ["/tmp/glm-5", "/tmp/glm-5.1"])
 def test_glm_moe_dsa_model_type_selects_definition_for_glm5_variants(monkeypatch, model_path):
     fake_config = SimpleNamespace(model_type="glm_moe_dsa")
@@ -151,19 +176,31 @@ def test_glm_moe_dsa_tiny_model_matches_definition():
     assert hasattr(expert0, "down_proj")
 
 
-def test_glm_moe_dsa_pre_quant_hook_rebuilds_rotary_buffers():
-    model = GlmMoeDsaForCausalLM(_tiny_glm_moe_dsa_config())
-    convert_model(model, cleanup_original=False)
+def test_glm_moe_dsa_lazy_turtle_restores_rotary_buffers_from_module_init(tmp_path):
+    source_model = GlmMoeDsaForCausalLM(_tiny_glm_moe_dsa_config())
+    convert_model(source_model, cleanup_original=False)
+    shell_model = GlmMoeDsaForCausalLM(_tiny_glm_moe_dsa_config())
+    convert_model(shell_model, cleanup_original=False)
+    shell_model.load_state_dict(source_model.state_dict())
 
-    rotary = model.model.rotary_emb
-    del rotary._buffers["inv_freq"]
-    del rotary._buffers["original_inv_freq"]
-    assert not hasattr(rotary, "inv_freq")
+    rotary = shell_model.model.rotary_emb
+    rotary.register_buffer("inv_freq", torch.empty_like(rotary.inv_freq, device="meta"), persistent=False)
+    rotary.register_buffer(
+        "original_inv_freq",
+        torch.empty_like(rotary.original_inv_freq, device="meta"),
+        persistent=False,
+    )
 
-    holder = SimpleNamespace(model=model)
-    GlmMoeDsaQModel.pre_quantize_generate_hook_start(holder)
+    turtle = _build_lazy_turtle(tmp_path, source_model)
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=turtle,
+        target_submodule=shell_model.model.rotary_emb,
+        device=torch.device("cpu"),
+    )
 
-    rebuilt_rotary = model.model.rotary_emb
+    rebuilt_rotary = shell_model.model.rotary_emb
     assert hasattr(rebuilt_rotary, "inv_freq")
     assert hasattr(rebuilt_rotary, "original_inv_freq")
-    assert rebuilt_rotary.inv_freq.device.type == "cpu"
+    torch.testing.assert_close(rebuilt_rotary.inv_freq, source_model.model.rotary_emb.inv_freq)
+    torch.testing.assert_close(rebuilt_rotary.original_inv_freq, source_model.model.rotary_emb.original_inv_freq)
