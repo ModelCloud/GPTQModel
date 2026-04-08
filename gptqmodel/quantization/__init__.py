@@ -12,6 +12,7 @@ from .config import (
                      QUANT_CONFIG_FILENAME,
                      QUANT_METHOD_FIELD,
                      AWQQuantizeConfig,
+                     AutoModuleDecoderConfig,
                      BaseComplexBits,
                      BasePreFilterConfig,
                      BaseQuantizeConfig,

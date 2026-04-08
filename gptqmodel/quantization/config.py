@@ -25,6 +25,14 @@ from ..utils.random_str import get_random_string
 
 log = setup_logger()
 
+_DECODER_TARGET_DTYPE_MAP = {
+    "float16": torch.float16,
+    "half": torch.float16,
+    "fp16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "bf16": torch.bfloat16,
+}
+
 BITS_FIELD_CODE = "bits"
 GROUP_SIZE_FIELD_CODE = "group_size"
 FORMAT_FIELD_CODE = "format"
@@ -145,6 +153,7 @@ class PreFilterCode(str, Enum):
     """Identifiers for pre-filter passes that run before quantization."""
 
     SMOOTHER = "smoother"
+    AUTO_MODULE_DECODER = "auto_module_decoder"
 
 
 _GGUF_BITS_ALIAS_INFO = {
@@ -1096,6 +1105,62 @@ class SmootherConfig(BasePreFilterConfig):
 
 
 @dataclass
+class AutoModuleDecoderConfig(BasePreFilterConfig):
+    """Configure module-local decode behavior for source dtypes such as FP8."""
+
+    source_dtype: str = "fp8"
+    target_dtype: Union[str, torch.dtype] = torch.bfloat16
+    forward_policy: str = "native_or_decode"
+    quant_policy: str = "decode"
+    code: str = field(default=PreFilterCode.AUTO_MODULE_DECODER.value, init=False)
+
+    def __post_init__(self):
+        """Normalize the decoder payload into canonical string and dtype values."""
+
+        source_dtype = str(self.source_dtype).strip().lower()
+        if source_dtype not in {"fp8", "float8_e4m3fn", "float8_e5m2"}:
+            raise ValueError(
+                f"AutoModuleDecoderConfig: unsupported `source_dtype` `{self.source_dtype}`."
+            )
+        self.source_dtype = source_dtype
+
+        target_dtype = self.target_dtype
+        if isinstance(target_dtype, torch.dtype):
+            normalized_dtype = target_dtype
+        else:
+            normalized_dtype = _DECODER_TARGET_DTYPE_MAP.get(str(target_dtype).strip().lower())
+        if normalized_dtype not in {torch.float16, torch.bfloat16}:
+            raise ValueError(
+                "AutoModuleDecoderConfig: `target_dtype` must be `torch.float16` or `torch.bfloat16`."
+            )
+        self.target_dtype = normalized_dtype
+
+        forward_policy = str(self.forward_policy).strip().lower()
+        if forward_policy not in {"native_or_decode", "decode"}:
+            raise ValueError(
+                f"AutoModuleDecoderConfig: unsupported `forward_policy` `{self.forward_policy}`."
+            )
+        self.forward_policy = forward_policy
+
+        quant_policy = str(self.quant_policy).strip().lower()
+        if quant_policy not in {"decode"}:
+            raise ValueError(
+                f"AutoModuleDecoderConfig: unsupported `quant_policy` `{self.quant_policy}`."
+            )
+        self.quant_policy = quant_policy
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the decoder config with a stable dtype string payload."""
+
+        payload = super().to_dict()
+        payload["source_dtype"] = self.source_dtype
+        payload["target_dtype"] = str(self.target_dtype).split(".")[-1]
+        payload["forward_policy"] = self.forward_policy
+        payload["quant_policy"] = self.quant_policy
+        return payload
+
+
+@dataclass
 class HessianConfig:
     """Controls for chunked Hessian accumulation during GPTQ calibration."""
 
@@ -1557,9 +1622,18 @@ def _normalize_pre_filter_config(payload: Any) -> BasePreFilterConfig:
         normalized = payload.strip().lower()
         if normalized == PreFilterCode.SMOOTHER.value:
             return SmootherConfig(smooth=None)
+        if normalized == PreFilterCode.AUTO_MODULE_DECODER.value:
+            return AutoModuleDecoderConfig()
         return SmootherConfig(smooth=payload)
     if isinstance(payload, dict):
         code = str(payload.get("code", "")).strip().lower()
+        if code == PreFilterCode.AUTO_MODULE_DECODER.value:
+            return AutoModuleDecoderConfig(
+                source_dtype=payload.get("source_dtype", "fp8"),
+                target_dtype=payload.get("target_dtype", torch.bfloat16),
+                forward_policy=payload.get("forward_policy", "native_or_decode"),
+                quant_policy=payload.get("quant_policy", "decode"),
+            )
         if code and code != PreFilterCode.SMOOTHER.value:
             raise ValueError(f"QuantizeConfig: unsupported pre-filter code `{code}`.")
         if "smooth" in payload:

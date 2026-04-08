@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+import torch
 
 from gptqmodel.quantization.config import (
     METHOD,
+    AutoModuleDecoderConfig,
     BaseQuantizeConfig,
     BitsAndBytesConfig,
     GGUFBits,
@@ -201,6 +203,39 @@ def test_gguf_quantize_config_registers_smoother_prefilter():
     assert cfg.smooth.k == pytest.approx(1.9)
     assert len(cfg.pre_filters) == 1
     assert cfg.pre_filters[0].code == "smoother"
+
+
+def test_gguf_quantize_config_registers_auto_module_decoder_prefilter():
+    cfg = GGUFConfig(
+        bits=4,
+        format="q_k_m",
+        pre_filters=[
+            {
+                "code": "auto_module_decoder",
+                "source_dtype": "fp8",
+                "target_dtype": "float16",
+                "forward_policy": "native_or_decode",
+                "quant_policy": "decode",
+            }
+        ],
+    )
+
+    assert len(cfg.pre_filters) == 1
+    decoder = cfg.pre_filters[0]
+    assert isinstance(decoder, AutoModuleDecoderConfig)
+    assert decoder.code == "auto_module_decoder"
+    assert decoder.source_dtype == "fp8"
+    assert decoder.target_dtype == torch.float16
+    assert decoder.forward_policy == "native_or_decode"
+    assert decoder.quant_policy == "decode"
+
+    payload = cfg.to_dict()
+    assert payload["meta"]["pre_filters"][0]["code"] == "auto_module_decoder"
+    assert payload["meta"]["pre_filters"][0]["target_dtype"] == "float16"
+
+    reloaded = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(reloaded.pre_filters[0], AutoModuleDecoderConfig)
+    assert reloaded.pre_filters[0].target_dtype == torch.float16
 
 
 @pytest.mark.parametrize(
