@@ -320,6 +320,17 @@ inline __m256 load_fp8x8_to_ps(const uint8_t* src, const float* table) {
 }
 
 __attribute__((target("avx2")))
+inline void load_fp8x16_to_ps(
+    const uint8_t* src,
+    const float* table,
+    __m256* values_lo,
+    __m256* values_hi) {
+  // Two gathers amortize loop overhead on the common 16-aligned benchmark shapes.
+  *values_lo = load_fp8x8_to_ps(src, table);
+  *values_hi = load_fp8x8_to_ps(src + 8, table);
+}
+
+__attribute__((target("avx2")))
 inline void load_fp4x16_to_ps(
     const uint8_t* src,
     const float* table,
@@ -475,8 +486,14 @@ void dequantize_fp8_row_avx2_bf16(
     const ScaleSpec2D& spec,
     ScaleMode scale_mode,
     int64_t row) {
-  alignas(32) float scales[8];
   int64_t col = 0;
+  for (; col + 16 <= cols; col += 16) {
+    __m256 values_lo;
+    __m256 values_hi;
+    load_fp8x16_to_ps(src_row + col, table.data(), &values_lo, &values_hi);
+    apply_scale_and_store_bf16x8(dst_row + col, values_lo, scale_mode, spec, row, col);
+    apply_scale_and_store_bf16x8(dst_row + col + 8, values_hi, scale_mode, spec, row, col + 8);
+  }
   for (; col + 8 <= cols; col += 8) {
     __m256 values = load_fp8x8_to_ps(src_row + col, table.data());
     apply_scale_and_store_bf16x8(dst_row + col, values, scale_mode, spec, row, col);
@@ -500,8 +517,14 @@ void dequantize_fp8_row_avx2_fp16(
     const ScaleSpec2D& spec,
     ScaleMode scale_mode,
     int64_t row) {
-  alignas(32) float scales[8];
   int64_t col = 0;
+  for (; col + 16 <= cols; col += 16) {
+    __m256 values_lo;
+    __m256 values_hi;
+    load_fp8x16_to_ps(src_row + col, table.data(), &values_lo, &values_hi);
+    apply_scale_and_store_fp16x8(dst_row + col, values_lo, scale_mode, spec, row, col);
+    apply_scale_and_store_fp16x8(dst_row + col + 8, values_hi, scale_mode, spec, row, col + 8);
+  }
   for (; col + 8 <= cols; col += 8) {
     __m256 values = load_fp8x8_to_ps(src_row + col, table.data());
     apply_scale_and_store_fp16x8(dst_row + col, values, scale_mode, spec, row, col);
