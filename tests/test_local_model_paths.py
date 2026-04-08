@@ -442,7 +442,7 @@ def test_model_loader_uses_lazy_turtle_for_local_safetensors(monkeypatch, tmp_pa
     }
     save_file(tensors, str(model_dir / shard_name))
     (model_dir / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {name: shard_name for name in tensors}})
+        json.dumps({"weight_map": dict.fromkeys(tensors, shard_name)})
     )
 
     class FakeConfig:

@@ -23,6 +23,7 @@ from .env import env_flag
 from .jit_compile_baselines import get_jit_compile_baseline_seconds
 from .logger import setup_logger
 
+
 log = logging.getLogger(__name__)
 
 # Shared per-extension locks serialize cache deletion and JIT compilation so

@@ -19,7 +19,11 @@ from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
 from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
-from gptqmodel.utils.structure import LazySafetensorsTurtle, alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
+from gptqmodel.utils.structure import (
+    LazySafetensorsTurtle,
+    alias_all_from_turtle_if_meta,
+    alias_from_turtle_for_submodule,
+)
 
 
 class _LinearWithBuffers(nn.Module):
@@ -109,7 +113,7 @@ class _RotaryWrapper(nn.Module):
 
 
 def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, torch.Tensor]) -> None:
-    weight_map = {name: shard_name for name in state_dict}
+    weight_map = dict.fromkeys(state_dict, shard_name)
     (path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
 
 

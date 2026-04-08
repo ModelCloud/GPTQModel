@@ -1,6 +1,6 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
-import json
 
 import pytest
 import torch
@@ -101,7 +101,7 @@ def _build_lazy_turtle(tmp_path: Path, model: GlmMoeDsaForCausalLM) -> LazySafet
     state_dict = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
     save_file(state_dict, str(model_dir / shard_name))
     (model_dir / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {name: shard_name for name in state_dict}}),
+        json.dumps({"weight_map": dict.fromkeys(state_dict, shard_name)}),
         encoding="utf-8",
     )
     source = LazySafetensorsTurtle.maybe_create(

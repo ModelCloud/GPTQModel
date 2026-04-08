@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import threading
 import time
 from collections import defaultdict
@@ -13,7 +14,6 @@ from contextlib import nullcontext
 from itertools import count
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
 
-import pcre as re
 import torch
 import torch._dynamo
 import torch.nn as nn
@@ -35,6 +35,7 @@ except Exception:  # pragma: no cover - datasets may not be installed
     HFDataset = None
     HFIterableDataset = None
 
+from .. import DEVICE_THREAD_POOL
 from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.qlinear import BaseQuantLinear
