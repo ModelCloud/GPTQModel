@@ -2890,7 +2890,7 @@ class QuantizeConfig(BaseQuantizeConfig, metaclass=QuantizeConfigMeta):
 
 
 @dataclass
-class GPTQQuantizeConfig(QuantizeConfig):
+class GPTQQuantizeConfig(PreFilterQuantizeConfig):
     damp_percent: Optional[float] = field(default=None)
     damp_auto_increment: Optional[float] = field(default=None)
     act_group_aware: Optional[bool] = field(default=None)
@@ -2994,7 +2994,7 @@ class GPTQQuantizeConfig(QuantizeConfig):
 
 
 @dataclass
-class AWQQuantizeConfig(QuantizeConfig):
+class AWQQuantizeConfig(PreFilterQuantizeConfig):
     method: METHOD = field(default=METHOD.AWQ)
     format: FORMAT = field(default=FORMAT.GEMM)
 

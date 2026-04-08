@@ -859,6 +859,7 @@ class BaseQModel(nn.Module):
     ):
         from ..adapter.adapter import Lora
         from ..looper.eora_processor import EoraProcessor
+        from ..looper.module_prefilter_processor import ModulePreFilterProcessor
         from ..looper.module_looper import ModuleLooper
         from ..looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
 
@@ -875,6 +876,10 @@ class BaseQModel(nn.Module):
             "batch_size": batch_size,
             "calculate_w_wq_diff": needs_lora,
         }
+
+        prefilter_processors = []
+        if getattr(self.quantize_config, "pre_filters", None):
+            prefilter_processors.append(ModulePreFilterProcessor(**args))
 
         if self.quantize_config.method == METHOD.EXL3:
             from ..looper.exllamav3_processor import EXL3Processor
@@ -899,13 +904,13 @@ class BaseQModel(nn.Module):
                 "batch_size": batch_size,
                 "lm_head_name": self.lm_head,
             }
-            quantize_processor = [
+            quantize_processor = prefilter_processors + [
                 EXL3Processor(**exl3_args),
             ]
         elif self.quantize_config.method == METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
 
-            quantize_processor = [
+            quantize_processor = prefilter_processors + [
                 TensorParallelWeightProcessor(**args),
                 QQQProcessor(**args),
             ]
@@ -919,7 +924,7 @@ class BaseQModel(nn.Module):
             awq_args["model"] = self.model
             awq_args["batch_size"] = batch_size
 
-            quantize_processor = [
+            quantize_processor = prefilter_processors + [
                 TensorParallelWeightProcessor(**args),
                 AWQProcessor(**awq_args),
             ]
@@ -933,14 +938,14 @@ class BaseQModel(nn.Module):
             paro_args["model"] = self.model
             paro_args["batch_size"] = batch_size
 
-            quantize_processor = [
+            quantize_processor = prefilter_processors + [
                 TensorParallelWeightProcessor(**args),
                 ParoQuantProcessor(**paro_args),
             ]
         else:
             from ..looper.gptq_processor import GPTQProcessor
 
-            quantize_processor = [
+            quantize_processor = prefilter_processors + [
                 TensorParallelWeightProcessor(**args),
                 GPTQProcessor(**args),
             ]
