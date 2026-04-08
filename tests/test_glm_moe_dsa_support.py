@@ -149,3 +149,21 @@ def test_glm_moe_dsa_tiny_model_matches_definition():
     assert hasattr(expert0, "gate_proj")
     assert hasattr(expert0, "up_proj")
     assert hasattr(expert0, "down_proj")
+
+
+def test_glm_moe_dsa_pre_quant_hook_rebuilds_rotary_buffers():
+    model = GlmMoeDsaForCausalLM(_tiny_glm_moe_dsa_config())
+    convert_model(model, cleanup_original=False)
+
+    rotary = model.model.rotary_emb
+    del rotary._buffers["inv_freq"]
+    del rotary._buffers["original_inv_freq"]
+    assert not hasattr(rotary, "inv_freq")
+
+    holder = SimpleNamespace(model=model)
+    GlmMoeDsaQModel.pre_quantize_generate_hook_start(holder)
+
+    rebuilt_rotary = model.model.rotary_emb
+    assert hasattr(rebuilt_rotary, "inv_freq")
+    assert hasattr(rebuilt_rotary, "original_inv_freq")
+    assert rebuilt_rotary.inv_freq.device.type == "cpu"

@@ -5,6 +5,7 @@
 
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from .._const import CPU
 
 
 class GlmMoeDsaQModel(BaseQModel):
@@ -17,6 +18,7 @@ class GlmMoeDsaQModel(BaseQModel):
     dynamic_expert_index = "n_routed_experts"
 
     pre_lm_head_norm_module = "model.norm"
+    rotary_embedding = "model.rotary_emb"
 
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
@@ -50,6 +52,16 @@ class GlmMoeDsaQModel(BaseQModel):
             },
         },
     ]
+
+    def pre_quantize_generate_hook_start(self):
+        rotary = getattr(getattr(self.model, "model", None), "rotary_emb", None)
+        if rotary is None:
+            return
+
+        # GLM keeps RoPE frequencies in non-persistent buffers (`inv_freq`,
+        # `original_inv_freq`), so they are absent from checkpoint shards and
+        # must be rebuilt from config before the first cached forward.
+        self.model.model.rotary_emb = type(rotary)(self.model.config, device=CPU)
 
 
 __all__ = ["GlmMoeDsaQModel"]
