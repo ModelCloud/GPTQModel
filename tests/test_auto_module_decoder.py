@@ -81,10 +81,8 @@ def test_shell_materialize_forward_builds_fp8_wrapper_and_quant_source(tmp_path,
     named = NamedModule(shell_model.linear, name="linear", full_name="linear", layer_index=0)
     named.state["auto_module_decoder"] = {
         "code": "auto_module_decoder",
-        "source_dtype": "fp8",
+        "source_dtype": "auto",
         "target_dtype": torch.bfloat16,
-        "forward_policy": "native_or_decode",
-        "quant_policy": "decode",
     }
 
     monkeypatch.setattr(base_module, "device_supports_dtype", lambda *args, **kwargs: True)
@@ -150,10 +148,8 @@ def test_shell_materialize_quant_source_swaps_back_to_dense_module(tmp_path, mon
     named = NamedModule(shell_model.linear, name="linear", full_name="linear", layer_index=0)
     named.state["auto_module_decoder"] = {
         "code": "auto_module_decoder",
-        "source_dtype": "fp8",
+        "source_dtype": "auto",
         "target_dtype": torch.bfloat16,
-        "forward_policy": "native_or_decode",
-        "quant_policy": "decode",
     }
 
     monkeypatch.setattr(base_module, "device_supports_dtype", lambda *args, **kwargs: True)

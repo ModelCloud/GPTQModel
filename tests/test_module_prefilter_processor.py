@@ -18,10 +18,7 @@ def test_module_prefilter_processor_records_auto_module_decoder_plan():
         pre_filters=[
             {
                 "code": "auto_module_decoder",
-                "source_dtype": "fp8",
                 "target_dtype": "float16",
-                "forward_policy": "native_or_decode",
-                "quant_policy": "decode",
             }
         ],
     )
@@ -41,10 +38,8 @@ def test_module_prefilter_processor_records_auto_module_decoder_plan():
     assert len(named.state["pre_filter_pipeline"]) == 1
     plan = named.state["auto_module_decoder"]
     assert plan["code"] == "auto_module_decoder"
-    assert plan["source_dtype"] == "fp8"
+    assert plan["source_dtype"] == "auto"
     assert plan["target_dtype"] == torch.float16
-    assert plan["forward_policy"] == "native_or_decode"
-    assert plan["quant_policy"] == "decode"
 
 
 def test_module_prefilter_processor_clears_decoder_state_when_prefilters_absent():

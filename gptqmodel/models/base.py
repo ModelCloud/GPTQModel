@@ -1646,8 +1646,7 @@ class BaseQModel(nn.Module):
         forward_mode = "decode"
         replacement = target_submodule
         if (
-            decoder_plan.get("forward_policy") == "native_or_decode"
-            and device_supports_dtype(device, weight.dtype, require_validation=False)
+            device_supports_dtype(device, weight.dtype, require_validation=False)
         ):
             fp8_module = self._build_fp8_forward_module(
                 target_submodule=target_submodule,

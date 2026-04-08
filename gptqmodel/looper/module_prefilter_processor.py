@@ -51,8 +51,6 @@ class ModulePreFilterProcessor(LoopProcessor):
                         "code": pre_filter.code,
                         "source_dtype": pre_filter.source_dtype,
                         "target_dtype": pre_filter.target_dtype,
-                        "forward_policy": pre_filter.forward_policy,
-                        "quant_policy": pre_filter.quant_policy,
                     }
                 )
 

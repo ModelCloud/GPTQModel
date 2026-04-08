@@ -212,10 +212,7 @@ def test_gguf_quantize_config_registers_auto_module_decoder_prefilter():
         pre_filters=[
             {
                 "code": "auto_module_decoder",
-                "source_dtype": "fp8",
                 "target_dtype": "float16",
-                "forward_policy": "native_or_decode",
-                "quant_policy": "decode",
             }
         ],
     )
@@ -224,10 +221,8 @@ def test_gguf_quantize_config_registers_auto_module_decoder_prefilter():
     decoder = cfg.pre_filters[0]
     assert isinstance(decoder, AutoModuleDecoderConfig)
     assert decoder.code == "auto_module_decoder"
-    assert decoder.source_dtype == "fp8"
+    assert decoder.source_dtype == "auto"
     assert decoder.target_dtype == torch.float16
-    assert decoder.forward_policy == "native_or_decode"
-    assert decoder.quant_policy == "decode"
 
     payload = cfg.to_dict()
     assert payload["meta"]["pre_filters"][0]["code"] == "auto_module_decoder"

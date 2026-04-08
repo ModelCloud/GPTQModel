@@ -48,10 +48,7 @@ class TestGlm5_1Fp8AutoDecoder(ModelTest):
         cfg = super()._build_quantize_config()
         cfg.pre_filters = [
             AutoModuleDecoderConfig(
-                source_dtype="fp8",
                 target_dtype=torch.bfloat16,
-                forward_policy="native_or_decode",
-                quant_policy="decode",
             )
         ]
         cfg.wait_for_submodule_finalizers = True
