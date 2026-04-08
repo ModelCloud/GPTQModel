@@ -26,6 +26,7 @@ Notes:
 """
 
 import copy
+import inspect
 import json
 import os
 import threading
@@ -593,6 +594,7 @@ class LazySafetensorsTurtle:
         path = _get_qualified_name(target_model, target_submodule)
         with self._lock:
             self._copy_checkpoint_tensors_into_submodule(
+                target_model=target_model,
                 target_submodule=target_submodule,
                 module_path=path,
                 device=device,
@@ -671,6 +673,7 @@ class LazySafetensorsTurtle:
     def _copy_checkpoint_tensors_into_submodule(
         self,
         *,
+        target_model: nn.Module,
         target_submodule: nn.Module,
         module_path: str,
         device: torch.device,
@@ -679,6 +682,7 @@ class LazySafetensorsTurtle:
     ) -> None:
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
+        missing_nonpersistent_buffers: list[tuple[str, str]] = []
 
         grouped_names: Dict[str, list[tuple[str, str, str]]] = {}
         for rel_name in t_params:
@@ -692,8 +696,17 @@ class LazySafetensorsTurtle:
             full_name = self._join_tensor_name(module_path, rel_name)
             shard = self._weight_map.get(full_name)
             if shard is None:
+                t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+                non_persistent = leaf in getattr(t_parent, "_non_persistent_buffers_set", set())
+                if non_persistent:
+                    if (
+                        getattr(target_buffer, "is_meta", False)
+                        or target_buffer.device.type == "meta"
+                        or target_buffer.device != device
+                    ):
+                        missing_nonpersistent_buffers.append((rel_name, leaf))
+                    continue
                 if getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
-                    t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
                     if leaf in getattr(t_parent, "_buffers", {}):
                         del t_parent._buffers[leaf]
                 continue
@@ -747,6 +760,108 @@ class LazySafetensorsTurtle:
                             if source.dtype != target_buffer.dtype:
                                 source = source.to(dtype=target_buffer.dtype)
                             target_buffer.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+
+        self._restore_missing_nonpersistent_buffers(
+            target_model=target_model,
+            target_submodule=target_submodule,
+            t_bufs=t_bufs,
+            missing_nonpersistent_buffers=missing_nonpersistent_buffers,
+            device=device,
+        )
+
+    def _build_nonpersistent_buffer_template(
+        self,
+        *,
+        owner_module: nn.Module,
+        target_model: nn.Module,
+    ) -> Optional[nn.Module]:
+        """Construct a CPU module template when missing buffers must come from init logic."""
+
+        config_source = getattr(owner_module, "config", None)
+        if config_source is None:
+            config_source = getattr(target_model, "config", None)
+        if config_source is None:
+            config_source = self.config
+        if config_source is None:
+            return None
+
+        module_type = type(owner_module)
+        try:
+            signature = inspect.signature(module_type)
+        except (TypeError, ValueError):
+            return None
+
+        params = list(signature.parameters.values())
+        if not params or params[0].name != "config":
+            return None
+
+        args = []
+        kwargs = {}
+        if params[0].kind is inspect.Parameter.POSITIONAL_ONLY:
+            args.append(copy.deepcopy(config_source))
+        else:
+            kwargs["config"] = copy.deepcopy(config_source)
+
+        device_param = signature.parameters.get("device")
+        if device_param is not None:
+            if device_param.kind is inspect.Parameter.POSITIONAL_ONLY:
+                args.append(torch.device("cpu"))
+            else:
+                kwargs["device"] = torch.device("cpu")
+
+        try:
+            return module_type(*args, **kwargs)
+        except Exception as exc:
+            log.debug(
+                "LazySafetensorsTurtle: failed to build template for `%s`: %s",
+                module_type.__name__,
+                exc,
+            )
+            return None
+
+    def _restore_missing_nonpersistent_buffers(
+        self,
+        *,
+        target_model: nn.Module,
+        target_submodule: nn.Module,
+        t_bufs: Dict[str, torch.Tensor],
+        missing_nonpersistent_buffers: list[tuple[str, str]],
+        device: torch.device,
+    ) -> None:
+        """Restore constructor-owned buffers that are intentionally absent from checkpoints."""
+
+        owner_templates: Dict[str, Optional[nn.Module]] = {}
+        for rel_name, leaf in missing_nonpersistent_buffers:
+            parent_rel_path, _, _ = rel_name.rpartition(".")
+            owner_module = target_submodule if not parent_rel_path else dict(target_submodule.named_modules()).get(parent_rel_path)
+            if owner_module is None:
+                continue
+
+            current_buffer = t_bufs.get(rel_name)
+            if (
+                current_buffer is not None
+                and not getattr(current_buffer, "is_meta", False)
+                and current_buffer.device.type != "meta"
+            ):
+                source_buffer = current_buffer.detach()
+            else:
+                if parent_rel_path not in owner_templates:
+                    owner_templates[parent_rel_path] = self._build_nonpersistent_buffer_template(
+                        owner_module=owner_module,
+                        target_model=target_model,
+                    )
+                template = owner_templates[parent_rel_path]
+                if template is None:
+                    continue
+                source_buffer = dict(template.named_buffers(recurse=False)).get(leaf)
+                if source_buffer is None:
+                    continue
+                source_buffer = source_buffer.detach()
+
+            target_dtype = source_buffer.dtype if current_buffer is None else current_buffer.dtype
+            materialized = source_buffer.to(device=device, dtype=target_dtype)
+            owner_module.register_buffer(leaf, materialized, persistent=False)
+            t_bufs[rel_name] = materialized
 
     def _materialize_direct_meta_tensors(
         self,

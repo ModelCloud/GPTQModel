@@ -14,6 +14,8 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from tabulate import tabulate
 from torch import nn
+from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
 from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
@@ -79,6 +81,31 @@ class _CustomParamWrapper(nn.Module):
     def __init__(self, width: int):
         super().__init__()
         self.block = _CustomParamBlock(width)
+
+
+def _tiny_llama_config() -> LlamaConfig:
+    # Keep the rotary test cheap while still using the real HF module init path.
+    return LlamaConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        vocab_size=128,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+
+
+class _RotaryWrapper(nn.Module):
+    # Pair one checkpoint-backed tensor with a non-persistent rotary module.
+    def __init__(self, config: LlamaConfig):
+        super().__init__()
+        self.config = config
+        self.block = nn.Module()
+        self.block.linear = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.block.rotary = LlamaRotaryEmbedding(config, device=torch.device("cpu"))
 
 
 def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, torch.Tensor]) -> None:
@@ -299,6 +326,43 @@ def test_lazy_safetensors_turtle_materializes_recursive_submodule(tmp_path):
     torch.testing.assert_close(shell_model.block.inner.weight, source_model.block.inner.weight)
     torch.testing.assert_close(shell_model.block.dt_bias, source_model.block.dt_bias)
     torch.testing.assert_close(shell_model.block.dt_scale, source_model.block.dt_scale)
+
+
+def test_lazy_safetensors_turtle_restores_nonpersistent_buffers_from_module_init(tmp_path):
+    config = _tiny_llama_config()
+    source_model = _RotaryWrapper(config)
+    shell_model = _RotaryWrapper(config)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    shell_model.block.linear.weight = nn.Parameter(
+        torch.empty_like(shell_model.block.linear.weight, device="meta"),
+        requires_grad=shell_model.block.linear.weight.requires_grad,
+    )
+    shell_model.block.rotary.register_buffer(
+        "inv_freq",
+        torch.empty_like(shell_model.block.rotary.inv_freq, device="meta"),
+        persistent=False,
+    )
+    shell_model.block.rotary.register_buffer(
+        "original_inv_freq",
+        torch.empty_like(shell_model.block.rotary.original_inv_freq, device="meta"),
+        persistent=False,
+    )
+
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.block,
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(shell_model.block.linear.weight, source_model.block.linear.weight)
+    torch.testing.assert_close(shell_model.block.rotary.inv_freq, source_model.block.rotary.inv_freq)
+    torch.testing.assert_close(shell_model.block.rotary.original_inv_freq, source_model.block.rotary.original_inv_freq)
+    assert shell_model.block.rotary.inv_freq.device.type == "cpu"
+    assert shell_model.block.rotary._non_persistent_buffers_set == {"inv_freq", "original_inv_freq"}
 
 
 def test_alias_all_from_lazy_turtle_restores_direct_meta_tensors(tmp_path):
