@@ -89,42 +89,85 @@ inline int64_t clamped_threads(int64_t requested) {
   return std::max<int64_t>(1, std::min<int64_t>(at::get_num_threads(), limit));
 }
 
-template <typename T>
+template <typename SrcT, typename DstT>
 std::array<float, 256> build_fp8_table() {
   std::array<float, 256> table{};
   for (int value = 0; value < 256; ++value) {
-    table[value] = static_cast<float>(T(static_cast<uint8_t>(value), T::from_bits()));
+    const float decoded =
+        static_cast<float>(SrcT(static_cast<uint8_t>(value), SrcT::from_bits()));
+    table[value] = static_cast<float>(DstT(decoded));
   }
   return table;
 }
 
-const std::array<float, 256>& fp8_table(Fp8Format format) {
-  static const auto e4m3fn = build_fp8_table<c10::Float8_e4m3fn>();
-  static const auto e5m2 = build_fp8_table<c10::Float8_e5m2>();
-  static const auto e4m3fnuz = build_fp8_table<c10::Float8_e4m3fnuz>();
-  static const auto e5m2fnuz = build_fp8_table<c10::Float8_e5m2fnuz>();
-  static const auto e8m0fnu = build_fp8_table<c10::Float8_e8m0fnu>();
-  switch (format) {
-    case Fp8Format::kE4M3Fn:
-      return e4m3fn;
-    case Fp8Format::kE5M2:
-      return e5m2;
-    case Fp8Format::kE4M3FnUz:
-      return e4m3fnuz;
-    case Fp8Format::kE5M2FnUz:
-      return e5m2fnuz;
-    case Fp8Format::kE8M0Fnu:
-      return e8m0fnu;
+const std::array<float, 256>& fp8_table(Fp8Format format, TargetKind target_kind) {
+  // Target-rounded tables keep the hot loops from re-quantizing decoded values.
+  static const auto e4m3fn_bf16 = build_fp8_table<c10::Float8_e4m3fn, c10::BFloat16>();
+  static const auto e5m2_bf16 = build_fp8_table<c10::Float8_e5m2, c10::BFloat16>();
+  static const auto e4m3fnuz_bf16 = build_fp8_table<c10::Float8_e4m3fnuz, c10::BFloat16>();
+  static const auto e5m2fnuz_bf16 = build_fp8_table<c10::Float8_e5m2fnuz, c10::BFloat16>();
+  static const auto e8m0fnu_bf16 = build_fp8_table<c10::Float8_e8m0fnu, c10::BFloat16>();
+  static const auto e4m3fn_fp16 = build_fp8_table<c10::Float8_e4m3fn, c10::Half>();
+  static const auto e5m2_fp16 = build_fp8_table<c10::Float8_e5m2, c10::Half>();
+  static const auto e4m3fnuz_fp16 = build_fp8_table<c10::Float8_e4m3fnuz, c10::Half>();
+  static const auto e5m2fnuz_fp16 = build_fp8_table<c10::Float8_e5m2fnuz, c10::Half>();
+  static const auto e8m0fnu_fp16 = build_fp8_table<c10::Float8_e8m0fnu, c10::Half>();
+  switch (target_kind) {
+    case TargetKind::kBFloat16:
+      switch (format) {
+        case Fp8Format::kE4M3Fn:
+          return e4m3fn_bf16;
+        case Fp8Format::kE5M2:
+          return e5m2_bf16;
+        case Fp8Format::kE4M3FnUz:
+          return e4m3fnuz_bf16;
+        case Fp8Format::kE5M2FnUz:
+          return e5m2fnuz_bf16;
+        case Fp8Format::kE8M0Fnu:
+          return e8m0fnu_bf16;
+      }
+      break;
+    case TargetKind::kFloat16:
+      switch (format) {
+        case Fp8Format::kE4M3Fn:
+          return e4m3fn_fp16;
+        case Fp8Format::kE5M2:
+          return e5m2_fp16;
+        case Fp8Format::kE4M3FnUz:
+          return e4m3fnuz_fp16;
+        case Fp8Format::kE5M2FnUz:
+          return e5m2fnuz_fp16;
+        case Fp8Format::kE8M0Fnu:
+          return e8m0fnu_fp16;
+      }
+      break;
   }
   TORCH_CHECK(false, "Unsupported FP8 format code");
 }
 
-const std::array<float, 16>& fp4_table() {
-  static const std::array<float, 16> table = {
+template <typename DstT>
+std::array<float, 16> build_fp4_table() {
+  static constexpr std::array<float, 16> kDecodedValues = {
       0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
       -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
   };
+  std::array<float, 16> table{};
+  for (size_t idx = 0; idx < table.size(); ++idx) {
+    table[idx] = static_cast<float>(DstT(kDecodedValues[idx]));
+  }
   return table;
+}
+
+const std::array<float, 16>& fp4_table(TargetKind target_kind) {
+  static const auto bf16 = build_fp4_table<c10::BFloat16>();
+  static const auto fp16 = build_fp4_table<c10::Half>();
+  switch (target_kind) {
+    case TargetKind::kBFloat16:
+      return bf16;
+    case TargetKind::kFloat16:
+      return fp16;
+  }
+  TORCH_CHECK(false, "Unsupported target dtype for FP4 table");
 }
 
 ScaleSpec1D make_scale_spec_1d(
@@ -457,8 +500,7 @@ inline void apply_scale_and_store_bf16x8(
     const ScaleSpec2D& spec,
     int64_t row,
     int64_t col_base) {
-  // Keep the exact reference semantics: round operands first, scale second, store last.
-  values = round_ps_to_bf16_ps(values);
+  // Values arrive pre-rounded from the lookup tables; only scale operands need rounding here.
   if (scale_mode != ScaleMode::kNone) {
     __m256 scales = round_ps_to_bf16_ps(load_scale8_ps(spec, row, col_base));
     values = scale_mode == ScaleMode::kMultiply ? _mm256_mul_ps(values, scales) : _mm256_div_ps(values, scales);
@@ -493,8 +535,7 @@ inline void apply_scale_and_store_fp16x8(
     const ScaleSpec2D& spec,
     int64_t row,
     int64_t col_base) {
-  // Keep the exact reference semantics: round operands first, scale second, store last.
-  values = round_ps_to_fp16_ps(values);
+  // Values arrive pre-rounded from the lookup tables; only scale operands need rounding here.
   if (scale_mode != ScaleMode::kNone) {
     __m256 scales = round_ps_to_fp16_ps(load_scale8_ps(spec, row, col_base));
     values = scale_mode == ScaleMode::kMultiply ? _mm256_mul_ps(values, scales) : _mm256_div_ps(values, scales);
@@ -837,7 +878,7 @@ at::Tensor dequantize_fp8_cpu(
 
   at::Tensor src = source.contiguous();
   at::Tensor output = empty_target_like(src, target_kind);
-  const auto& table = fp8_table(format);
+  const auto& table = fp8_table(format, target_kind);
 
   if (src.ndimension() == 1) {
     const int64_t length = src.size(0);
@@ -895,7 +936,7 @@ at::Tensor dequantize_fp4_cpu(
 
   at::Tensor src = source.contiguous();
   at::Tensor output = empty_target_for_fp4(src, target_kind);
-  const auto& table = fp4_table();
+  const auto& table = fp4_table(target_kind);
 
   if (src.ndimension() == 1) {
     const int64_t packed = src.size(0);
