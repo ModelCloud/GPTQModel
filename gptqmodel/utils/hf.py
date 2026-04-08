@@ -68,9 +68,23 @@ _FALSEY_ENV_VALUES = {"", "0", "false", "off", "no"}
 
 def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
     dtype = getattr(config, "dtype", None)
-    if dtype is not None:
+    if dtype is None:
+        dtype = getattr(config, "torch_dtype", None)
+
+    if dtype is None:
+        return None
+
+    if isinstance(dtype, torch.dtype):
         return dtype
-    return getattr(config, "torch_dtype", None)
+
+    # If provided as a string (e.g., "float16"), resolve it via torch namespace
+    if isinstance(dtype, str):
+        try:
+            return getattr(torch, dtype)
+        except AttributeError:
+            raise ValueError(f"Invalid dtype string: {dtype}")
+
+    raise ValueError(f"dtype must be torch.dtype or str, but got {dtype} (type={type(dtype)})")
 
 
 def set_hf_config_dtype(config: Any, dtype: torch.dtype) -> None:
