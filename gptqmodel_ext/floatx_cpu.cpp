@@ -320,6 +320,21 @@ inline __m256 load_fp8x8_to_ps(const uint8_t* src, const float* table) {
 }
 
 __attribute__((target("avx2")))
+inline void load_fp4x16_to_ps(
+    const uint8_t* src,
+    const float* table,
+    __m256* values_lo,
+    __m256* values_hi) {
+  // Decode 8 packed bytes into 16 logical FP4 values in column order.
+  const __m128i raw = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src));
+  const __m128i lo_nibbles = _mm_and_si128(raw, _mm_set1_epi8(0x0F));
+  const __m128i hi_nibbles = _mm_and_si128(_mm_srli_epi16(raw, 4), _mm_set1_epi8(0x0F));
+  const __m128i interleaved = _mm_unpacklo_epi8(lo_nibbles, hi_nibbles);
+  *values_lo = _mm256_i32gather_ps(table, _mm256_cvtepu8_epi32(interleaved), 4);
+  *values_hi = _mm256_i32gather_ps(table, _mm256_cvtepu8_epi32(_mm_srli_si128(interleaved, 8)), 4);
+}
+
+__attribute__((target("avx2")))
 inline void fill_scale8(
     float* dst,
     const ScaleSpec2D& spec,
@@ -644,6 +659,13 @@ void dequantize_fp4_vectorized(
       __attribute__((target("avx2"))) {
         alignas(32) float values[8];
         int64_t col = 0;
+        for (; col + 16 <= cols; col += 16) {
+          __m256 vec_lo;
+          __m256 vec_hi;
+          load_fp4x16_to_ps(src_row + (col / 2), table.data(), &vec_lo, &vec_hi);
+          apply_scale_and_store_bf16x8(dst_row + col, vec_lo, scale_mode, spec, row, col);
+          apply_scale_and_store_bf16x8(dst_row + col + 8, vec_hi, scale_mode, spec, row, col + 8);
+        }
         for (; col + 8 <= cols; col += 8) {
           // FP4 unpack stays scalar per nibble, then hands the scaled arithmetic to SIMD.
           for (int64_t lane = 0; lane < 8; ++lane) {
@@ -678,6 +700,13 @@ void dequantize_fp4_vectorized(
       __attribute__((target("avx2,f16c"))) {
         alignas(32) float values[8];
         int64_t col = 0;
+        for (; col + 16 <= cols; col += 16) {
+          __m256 vec_lo;
+          __m256 vec_hi;
+          load_fp4x16_to_ps(src_row + (col / 2), table.data(), &vec_lo, &vec_hi);
+          apply_scale_and_store_fp16x8(dst_row + col, vec_lo, scale_mode, spec, row, col);
+          apply_scale_and_store_fp16x8(dst_row + col + 8, vec_hi, scale_mode, spec, row, col + 8);
+        }
         for (; col + 8 <= cols; col += 8) {
           // FP4 unpack stays scalar per nibble, then hands the scaled arithmetic to SIMD.
           for (int64_t lane = 0; lane < 8; ++lane) {
