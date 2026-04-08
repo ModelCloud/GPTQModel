@@ -251,7 +251,9 @@ def _dequantize_f4_reference(
     if scale is not None and scale_inv is not None:
         raise ValueError("Provide either scale or scale_inv, not both")
 
-    if tensor.dtype is not torch.uint8:
+    if is_fp4_packed_dtype(tensor.dtype):
+        tensor = tensor.view(torch.uint8)
+    elif tensor.dtype is not torch.uint8:
         raise ValueError("FP4 packed tensors must use torch.uint8 storage")
 
     orig_shape = list(tensor.shape)

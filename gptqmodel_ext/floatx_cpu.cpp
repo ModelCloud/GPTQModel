@@ -406,6 +406,15 @@ inline __m512 load_fp8x16_to_ps_avx512(const uint8_t* src, const float* table) {
 }
 
 __attribute__((target("avx512f,avx512bw,avx512vl")))
+inline __m512 load_fp4x16_to_ps_avx512(const uint8_t* src, const float* table) {
+  const __m128i raw = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src));
+  const __m128i lo_nibbles = _mm_and_si128(raw, _mm_set1_epi8(0x0F));
+  const __m128i hi_nibbles = _mm_and_si128(_mm_srli_epi16(raw, 4), _mm_set1_epi8(0x0F));
+  const __m128i interleaved = _mm_unpacklo_epi8(lo_nibbles, hi_nibbles);
+  return _mm512_i32gather_ps(_mm512_cvtepu8_epi32(interleaved), table, 4);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl")))
 inline void fill_scale16(
     float* dst,
     const ScaleSpec2D& spec,
@@ -1004,6 +1013,142 @@ void dequantize_fp8_row_avx2_fp16_block_scale(
     }
   }
 }
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16")))
+void dequantize_fp4_row_avx512_bf16(
+    const uint8_t* src_row,
+    c10::BFloat16* dst_row,
+    int64_t cols,
+    const std::array<float, 16>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  int64_t col = 0;
+  for (; col + 16 <= cols; col += 16) {
+    const __m512 values = load_fp4x16_to_ps_avx512(src_row + (col / 2), table.data());
+    apply_scale_and_store_bf16x16(dst_row + col, values, scale_mode, spec, row, col);
+  }
+  if (col < cols) {
+    for (int64_t logical_col = col; logical_col < cols; ++logical_col) {
+      const uint8_t byte = src_row[logical_col / 2];
+      const uint8_t nibble = (logical_col & 1)
+          ? static_cast<uint8_t>((byte >> 4) & 0x0F)
+          : static_cast<uint8_t>(byte & 0x0F);
+      float value = table[nibble];
+      if (scale_mode != ScaleMode::kNone) {
+        const float scale = scale_value_2d(spec, row, logical_col);
+        value = scale_mode == ScaleMode::kMultiply ? value * scale : value / scale;
+      }
+      store_scalar(dst_row + logical_col, value);
+    }
+  }
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16")))
+void dequantize_fp4_row_avx512_bf16_block_scale(
+    const uint8_t* src_row,
+    c10::BFloat16* dst_row,
+    int64_t cols,
+    const std::array<float, 16>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  const int64_t block_row = row / spec.row_repeat;
+  int64_t col = 0;
+  while (col < cols) {
+    const int64_t block_col = col / spec.col_repeat;
+    const int64_t block_end = std::min<int64_t>(cols, (block_col + 1) * spec.col_repeat);
+    const float rounded_scale = static_cast<float>(c10::BFloat16(spec.ptr[block_row * spec.scale_cols + block_col]));
+    const __m512 scale_vec = _mm512_set1_ps(rounded_scale);
+
+    for (; col + 16 <= block_end; col += 16) {
+      const __m512 values = load_fp4x16_to_ps_avx512(src_row + (col / 2), table.data());
+      apply_scale_and_store_bf16x16_const(dst_row + col, values, scale_mode, scale_vec);
+    }
+    if (col < block_end) {
+      for (int64_t logical_col = col; logical_col < block_end; ++logical_col) {
+        const uint8_t byte = src_row[logical_col / 2];
+        const uint8_t nibble = (logical_col & 1)
+            ? static_cast<uint8_t>((byte >> 4) & 0x0F)
+            : static_cast<uint8_t>(byte & 0x0F);
+        float value = table[nibble];
+        if (scale_mode != ScaleMode::kNone) {
+          value = scale_mode == ScaleMode::kMultiply ? value * rounded_scale : value / rounded_scale;
+        }
+        store_scalar(dst_row + logical_col, value);
+      }
+      col = block_end;
+    }
+  }
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512fp16")))
+void dequantize_fp4_row_avx512_fp16(
+    const uint8_t* src_row,
+    c10::Half* dst_row,
+    int64_t cols,
+    const std::array<float, 16>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  int64_t col = 0;
+  for (; col + 16 <= cols; col += 16) {
+    const __m512 values = load_fp4x16_to_ps_avx512(src_row + (col / 2), table.data());
+    apply_scale_and_store_fp16x16(dst_row + col, values, scale_mode, spec, row, col);
+  }
+  if (col < cols) {
+    for (int64_t logical_col = col; logical_col < cols; ++logical_col) {
+      const uint8_t byte = src_row[logical_col / 2];
+      const uint8_t nibble = (logical_col & 1)
+          ? static_cast<uint8_t>((byte >> 4) & 0x0F)
+          : static_cast<uint8_t>(byte & 0x0F);
+      float value = table[nibble];
+      if (scale_mode != ScaleMode::kNone) {
+        const float scale = scale_value_2d(spec, row, logical_col);
+        value = scale_mode == ScaleMode::kMultiply ? value * scale : value / scale;
+      }
+      store_scalar(dst_row + logical_col, value);
+    }
+  }
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512fp16")))
+void dequantize_fp4_row_avx512_fp16_block_scale(
+    const uint8_t* src_row,
+    c10::Half* dst_row,
+    int64_t cols,
+    const std::array<float, 16>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  const int64_t block_row = row / spec.row_repeat;
+  int64_t col = 0;
+  while (col < cols) {
+    const int64_t block_col = col / spec.col_repeat;
+    const int64_t block_end = std::min<int64_t>(cols, (block_col + 1) * spec.col_repeat);
+    const float rounded_scale = static_cast<float>(c10::Half(spec.ptr[block_row * spec.scale_cols + block_col]));
+    const __m512 scale_vec = _mm512_set1_ps(rounded_scale);
+
+    for (; col + 16 <= block_end; col += 16) {
+      const __m512 values = load_fp4x16_to_ps_avx512(src_row + (col / 2), table.data());
+      apply_scale_and_store_fp16x16_const(dst_row + col, values, scale_mode, scale_vec);
+    }
+    if (col < block_end) {
+      for (int64_t logical_col = col; logical_col < block_end; ++logical_col) {
+        const uint8_t byte = src_row[logical_col / 2];
+        const uint8_t nibble = (logical_col & 1)
+            ? static_cast<uint8_t>((byte >> 4) & 0x0F)
+            : static_cast<uint8_t>(byte & 0x0F);
+        float value = table[nibble];
+        if (scale_mode != ScaleMode::kNone) {
+          value = scale_mode == ScaleMode::kMultiply ? value * rounded_scale : value / rounded_scale;
+        }
+        store_scalar(dst_row + logical_col, value);
+      }
+      col = block_end;
+    }
+  }
+}
 #else
 inline bool cpu_supports_avx2() {
   return false;
@@ -1218,6 +1363,66 @@ void dequantize_fp4_vectorized(
     ScaleMode scale_mode,
     int64_t threads) {
 #if GPTQMODEL_FLOATX_X86 && (defined(__GNUC__) || defined(__clang__))
+  if (cpu_supports_avx512bf16()) {
+    const int64_t cols = packed_cols * 2;
+    const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
+    if constexpr (std::is_same_v<T, c10::BFloat16>) {
+      at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
+        for (int64_t row = begin; row < end; ++row) {
+          if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 16) {
+            dequantize_fp4_row_avx512_bf16_block_scale(
+                src + row * packed_cols,
+                dst + row * cols,
+                cols,
+                table,
+                spec,
+                scale_mode,
+                row);
+          } else {
+            dequantize_fp4_row_avx512_bf16(
+                src + row * packed_cols,
+                dst + row * cols,
+                cols,
+                table,
+                spec,
+                scale_mode,
+                row);
+          }
+        }
+      });
+      return;
+    }
+  }
+  if (cpu_supports_avx512fp16()) {
+    const int64_t cols = packed_cols * 2;
+    const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
+    if constexpr (std::is_same_v<T, c10::Half>) {
+      at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
+        for (int64_t row = begin; row < end; ++row) {
+          if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 16) {
+            dequantize_fp4_row_avx512_fp16_block_scale(
+                src + row * packed_cols,
+                dst + row * cols,
+                cols,
+                table,
+                spec,
+                scale_mode,
+                row);
+          } else {
+            dequantize_fp4_row_avx512_fp16(
+                src + row * packed_cols,
+                dst + row * cols,
+                cols,
+                table,
+                spec,
+                scale_mode,
+                row);
+          }
+        }
+      });
+      return;
+    }
+  }
   auto dequantize_fp4_row_avx2_bf16 =
       [&table, &spec, scale_mode](const uint8_t* src_row, c10::BFloat16* dst_row, int64_t cols, int64_t row)
       __attribute__((target("avx2"))) {

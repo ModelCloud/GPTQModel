@@ -27,12 +27,12 @@ FLOATX_BENCH_MODEL_ROOT = Path(os.environ.get("GPTQMODEL_FLOATX_BENCH_MODEL", "/
 
 
 def _print_accuracy(title: str, rows, headers) -> None:
-    table = tabulate(rows, headers=headers, floatfmt=".6f")
+    table = tabulate(rows, headers=headers, floatfmt=".6f", tablefmt="grid")
     print(f"\n{title}\n{table}\n")
 
 
 def _print_benchmark(title: str, rows, headers, note: str | None = None) -> None:
-    table = tabulate(rows, headers=headers, floatfmt=".4f", tablefmt="github")
+    table = tabulate(rows, headers=headers, floatfmt=".4f", tablefmt="grid")
     note_block = f"{note}\n" if note else ""
     print(f"\n{title}\n{note_block}{table}\n")
 
@@ -428,25 +428,18 @@ def test_dequantize_fp8_cpu_ab_benchmark_table(target_dtype: torch.dtype):
         input_mib = _tensor_mib(packed) + _tensor_mib(scale_inv)
         ref_throughput = (input_mib + ref_stats["output_mib"]) / max(ref_stats["median_ms"] / 1e3, 1e-9)
         fast_throughput = (input_mib + fast_stats["output_mib"]) / max(fast_stats["median_ms"] / 1e3, 1e-9)
+        speedup = ref_stats["median_ms"] / max(fast_stats["median_ms"], 1e-9)
+        throughput_gain_pct = ((fast_throughput - ref_throughput) / max(ref_throughput, 1e-9)) * 100.0
 
         bench_rows.append([
             fmt_name,
             str(target_dtype).split(".")[-1],
-            "reference",
             ref_stats["median_ms"],
-            ref_throughput,
-            ref_stats["output_mib"],
-            ref_stats["rss_delta_mib"],
-            0.0,
-        ])
-        bench_rows.append([
-            fmt_name,
-            str(target_dtype).split(".")[-1],
-            "native",
             fast_stats["median_ms"],
+            speedup,
+            ref_throughput,
             fast_throughput,
-            fast_stats["output_mib"],
-            fast_stats["rss_delta_mib"],
+            throughput_gain_pct,
             diff,
         ])
 
@@ -458,11 +451,12 @@ def test_dequantize_fp8_cpu_ab_benchmark_table(target_dtype: torch.dtype):
         [
             "format",
             "target",
-            "impl",
-            "median ms",
-            "throughput MiB/s",
-            "output MiB",
-            "rss delta MiB",
+            "ref ms",
+            "native ms",
+            "speedup x",
+            "ref MiB/s",
+            "native MiB/s",
+            "throughput delta %",
             "max|diff|",
         ],
         note=source_note,
@@ -494,22 +488,20 @@ def test_dequantize_fp4_cpu_ab_benchmark_table(target_dtype: torch.dtype):
     fast_uint8, fast_uint8_stats = _benchmark_cpu_impl(fast_uint8_fn, warmup=warmup, iters=iters)
     bench_rows = []
     input_mib = _tensor_mib(packed) + _tensor_mib(scales)
-
-    for impl_name, tensor_result, stats in (
-        ("reference:uint8", ref, ref_stats),
-        ("native:uint8", fast_uint8, fast_uint8_stats),
-    ):
-        throughput = (input_mib + stats["output_mib"]) / max(stats["median_ms"] / 1e3, 1e-9)
-        diff = 0.0 if impl_name.startswith("reference") else float(torch.max(torch.abs(ref.to(torch.float32) - tensor_result.to(torch.float32))).item())
-        bench_rows.append([
-            str(target_dtype).split(".")[-1],
-            impl_name,
-            stats["median_ms"],
-            throughput,
-            stats["output_mib"],
-            stats["rss_delta_mib"],
-            diff,
-        ])
+    ref_throughput = (input_mib + ref_stats["output_mib"]) / max(ref_stats["median_ms"] / 1e3, 1e-9)
+    fast_uint8_throughput = (input_mib + fast_uint8_stats["output_mib"]) / max(fast_uint8_stats["median_ms"] / 1e3, 1e-9)
+    fast_uint8_diff = float(torch.max(torch.abs(ref.to(torch.float32) - fast_uint8.to(torch.float32))).item())
+    bench_rows.append([
+        str(target_dtype).split(".")[-1],
+        "native:uint8",
+        ref_stats["median_ms"],
+        fast_uint8_stats["median_ms"],
+        ref_stats["median_ms"] / max(fast_uint8_stats["median_ms"], 1e-9),
+        ref_throughput,
+        fast_uint8_throughput,
+        ((fast_uint8_throughput - ref_throughput) / max(ref_throughput, 1e-9)) * 100.0,
+        fast_uint8_diff,
+    ])
 
     assert torch.allclose(fast_uint8, ref, atol=1e-3, rtol=1e-3)
 
@@ -526,10 +518,12 @@ def test_dequantize_fp4_cpu_ab_benchmark_table(target_dtype: torch.dtype):
         bench_rows.append([
             str(target_dtype).split(".")[-1],
             "native:float4_x2",
+            ref_stats["median_ms"],
             fast_float4_stats["median_ms"],
+            ref_stats["median_ms"] / max(fast_float4_stats["median_ms"], 1e-9),
+            ref_throughput,
             throughput,
-            fast_float4_stats["output_mib"],
-            fast_float4_stats["rss_delta_mib"],
+            ((throughput - ref_throughput) / max(ref_throughput, 1e-9)) * 100.0,
             diff,
         ])
         assert torch.allclose(fast_float4, ref, atol=1e-3, rtol=1e-3)
@@ -539,11 +533,13 @@ def test_dequantize_fp4_cpu_ab_benchmark_table(target_dtype: torch.dtype):
         bench_rows,
         [
             "target",
-            "impl",
-            "median ms",
-            "throughput MiB/s",
-            "output MiB",
-            "rss delta MiB",
+            "candidate",
+            "ref ms",
+            "native ms",
+            "speedup x",
+            "ref MiB/s",
+            "native MiB/s",
+            "throughput delta %",
             "max|diff|",
         ],
         note=f"{source_note} fp4_block_size=16",
