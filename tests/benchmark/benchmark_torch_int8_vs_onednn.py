@@ -30,6 +30,7 @@ DEFAULT_BATCHES = (1, 2, 4, 8, 16, 32, 64, 128)
 DEFAULT_CHUNK_ROWS = 2048
 DEFAULT_WARMUP = 3
 DEFAULT_ITERS = 10
+DEFAULT_OUTPUT_DTYPE = torch.bfloat16
 
 
 def _positive_divisor(value: int, name: str) -> int:
@@ -260,6 +261,7 @@ def main() -> int:
         ["threads", torch.get_num_threads()],
         ["interop_threads", torch.get_num_interop_threads()],
         ["weight_build_ms", f"{weight_build_ms:.2f}"],
+        ["output_dtype", str(DEFAULT_OUTPUT_DTYPE)],
         ["note", "forward-only timings; oneDNN prepack measured separately"],
         ["quant", "TorchInt8=w8/a16 bf16, oneDNN=w8/a8 bf16"],
     ]
@@ -302,15 +304,27 @@ def main() -> int:
                 None,
                 1.0,
                 0,
-                torch.bfloat16,
+                DEFAULT_OUTPUT_DTYPE,
                 "none",
                 [],
                 "",
             )
 
         with torch.inference_mode():
-            out_torch_int8 = run_torch_int8().float()
-            out_onednn = run_onednn().float()
+            out_torch_int8_raw = run_torch_int8()
+            out_onednn_raw = run_onednn()
+
+        if out_torch_int8_raw.dtype != DEFAULT_OUTPUT_DTYPE:
+            raise RuntimeError(
+                f"expected TorchInt8 output dtype {DEFAULT_OUTPUT_DTYPE}, got {out_torch_int8_raw.dtype}"
+            )
+        if out_onednn_raw.dtype != DEFAULT_OUTPUT_DTYPE:
+            raise RuntimeError(
+                f"expected oneDNN output dtype {DEFAULT_OUTPUT_DTYPE}, got {out_onednn_raw.dtype}"
+            )
+
+        out_torch_int8 = out_torch_int8_raw.float()
+        out_onednn = out_onednn_raw.float()
 
         torch_int8_mean_ms, torch_int8_median_ms, _ = bench_ms(
             run_torch_int8, warmup=warmup, iters=iters
