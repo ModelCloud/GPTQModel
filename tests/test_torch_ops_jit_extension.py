@@ -129,6 +129,18 @@ def test_detected_cuda_wheel_include_paths_discovers_merged_and_split_layouts(mo
     ]
 
 
+def test_detected_local_cuda_include_paths_prefers_cuda_home(monkeypatch, tmp_path):
+    """Guard local CUDA header discovery so JIT builds can skip wheel headers when toolkit headers exist."""
+
+    cuda_home = tmp_path / "cuda-toolkit"
+    (cuda_home / "include").mkdir(parents=True)
+
+    monkeypatch.setattr(cpp_module, "CUDA_HOME", str(cuda_home))
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+
+    assert cpp_module.detected_local_cuda_include_paths() == [str(cuda_home / "include")]
+
+
 def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
     """Guard cache reuse so startup skips expensive JIT rebuilds when ops are already built."""
 
@@ -249,6 +261,7 @@ def test_torch_ops_jit_extension_appends_detected_cuda_include_paths(monkeypatch
 
     monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
     monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cpp_module, "detected_local_cuda_include_paths", lambda: [])
     monkeypatch.setattr(
         cpp_module,
         "detected_cuda_wheel_include_paths",
@@ -268,6 +281,39 @@ def test_torch_ops_jit_extension_appends_detected_cuda_include_paths(monkeypatch
         "/tmp/nvidia/cu13/include",
         "/tmp/nvidia/cusparse/include",
     ]
+
+
+def test_torch_ops_jit_extension_skips_cuda_wheel_include_paths_when_local_headers_exist(monkeypatch, tmp_path):
+    """Guard local-toolkit builds so wheel headers do not get mixed into one CUDA compile invocation."""
+
+    loader = _make_loader(
+        tmp_path,
+        requires_cuda=True,
+        extra_include_paths=["/tmp/include"],
+    )
+
+    state = {"ready": False}
+    compile_calls = []
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cpp_module, "detected_local_cuda_include_paths", lambda: ["/usr/local/cuda/include"])
+    monkeypatch.setattr(
+        cpp_module,
+        "detected_cuda_wheel_include_paths",
+        lambda: ["/tmp/nvidia/cu13/include", "/tmp/nvidia/cusparse/include"],
+    )
+
+    def fake_compile(**kwargs):
+        compile_calls.append(kwargs)
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert compile_calls[0]["extra_include_paths"] == ["/tmp/include"]
 
 
 def test_torch_ops_jit_extension_reuses_cached_namespace_after_first_load(monkeypatch, tmp_path):
@@ -338,6 +384,7 @@ def test_torch_ops_jit_extension_cuda_fingerprint_tracks_detected_include_paths(
     loader = _make_loader(tmp_path, requires_cuda=True)
 
     monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.0")
+    monkeypatch.setattr(cpp_module, "detected_local_cuda_include_paths", lambda: [])
     monkeypatch.setattr(cpp_module, "detected_cuda_wheel_include_paths", lambda: ["/tmp/nvidia/cu13/include"])
     first_build_root = loader.build_root()
 

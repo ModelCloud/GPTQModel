@@ -17,12 +17,11 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 import torch
-from torch.utils.cpp_extension import _get_build_directory, load
+from torch.utils.cpp_extension import CUDA_HOME, _get_build_directory, load
 
 from .env import env_flag
 from .jit_compile_baselines import get_jit_compile_baseline_seconds
 from .logger import setup_logger
-
 
 log = logging.getLogger(__name__)
 
@@ -247,6 +246,25 @@ def detected_cuda_wheel_include_paths() -> list[str]:
     return _dedupe_path_strings(include_paths)
 
 
+def detected_local_cuda_include_paths() -> list[str]:
+    """Discover CUDA developer headers from the active local CUDA toolkit."""
+
+    include_paths: list[str] = []
+
+    if CUDA_HOME:
+        candidate = Path(CUDA_HOME).expanduser() / "include"
+        if candidate.is_dir():
+            include_paths.append(str(candidate))
+
+    cuda_path = os.getenv("CUDA_PATH")
+    if cuda_path:
+        candidate = Path(cuda_path).expanduser() / "include"
+        if candidate.is_dir():
+            include_paths.append(str(candidate))
+
+    return _dedupe_path_strings(include_paths)
+
+
 def torch_cxx11_abi_flag() -> int:
     """Return the ABI mode local JIT extensions must match for this torch build."""
 
@@ -418,7 +436,9 @@ class TorchOpsJitExtension:
         """Resolve explicit include paths and append CUDA wheel headers when needed."""
 
         include_paths = self._resolve_sequence(self.extra_include_paths)
-        if self.requires_cuda:
+        # Prefer one CUDA header source per build. Mixing local toolkit headers
+        # with NVIDIA wheel headers can trip NVCC/toolkit compatibility guards.
+        if self.requires_cuda and not detected_local_cuda_include_paths():
             include_paths.extend(detected_cuda_wheel_include_paths())
         return _dedupe_path_strings(include_paths)
 
