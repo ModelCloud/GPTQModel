@@ -432,7 +432,11 @@ def forward_batch_worker(
     if reuse_kv and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:
         kv_next = module_output[-1]
 
-    result_output = module_output if need_output else None
+    result_output = None
+    if need_output and module_output is not None:
+        # Replay only consumes the hidden-state tensor that feeds the next
+        # layer.
+        result_output = module_output[0] if isinstance(module_output, tuple) else module_output
 
     # Promptly release VRAM to reduce peak memory usage.
     del inputs
