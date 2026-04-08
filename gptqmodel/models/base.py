@@ -1538,24 +1538,29 @@ class BaseQModel(nn.Module):
             return None
 
         format_name = str(weight.dtype).split(".")[-1]
-        weight_scale_method, weight_block_size = self._infer_fp8_forward_layout(
-            weight=weight,
-            scale_inv=scale_inv,
-        )
-        forward_module = TorchFP8Linear(
-            bits=8,
-            group_size=-1,
-            desc_act=False,
-            sym=True,
-            in_features=target_submodule.in_features,
-            out_features=target_submodule.out_features,
-            bias=target_submodule.bias is not None,
-            pack_dtype=torch.int32,
-            format=format_name,
-            weight_scale_method=weight_scale_method,
-            weight_block_size=weight_block_size,
-            register_buffers=False,
-        ).to(device=device)
+        try:
+            weight_scale_method, weight_block_size = self._infer_fp8_forward_layout(
+                weight=weight,
+                scale_inv=scale_inv,
+            )
+            forward_module = TorchFP8Linear(
+                bits=8,
+                group_size=-1,
+                desc_act=False,
+                sym=True,
+                in_features=target_submodule.in_features,
+                out_features=target_submodule.out_features,
+                bias=target_submodule.bias is not None,
+                pack_dtype=torch.int32,
+                format=format_name,
+                weight_scale_method=weight_scale_method,
+                weight_block_size=weight_block_size,
+                register_buffers=False,
+            ).to(device=device)
+        except Exception:
+            # Some checkpoints use padded or otherwise non-TorchFP8Linear layouts and must
+            # fall back to the decoded dense path even on native-FP8-capable GPUs.
+            return None
         forward_module.register_buffer("weight", weight.to(device=device))
         forward_module.register_buffer(
             "weight_scale_inv",
