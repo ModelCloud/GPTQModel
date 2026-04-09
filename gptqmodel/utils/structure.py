@@ -710,6 +710,38 @@ class LazyTurtle:
             return module_path
         return f"{module_path}.{rel_name}"
 
+    @staticmethod
+    def _candidate_module_paths(module_path: str, *, allow_empty: bool = False) -> list[str]:
+        """Return progressively stripped module path aliases for checkpoint lookup."""
+
+        if not module_path:
+            return [""]
+
+        parts = module_path.split(".")
+        candidates: list[str] = []
+        for drop_count in range(len(parts) + 1):
+            candidate = ".".join(parts[drop_count:])
+            if not candidate and not allow_empty:
+                continue
+            if candidate in candidates:
+                continue
+            candidates.append(candidate)
+        return candidates
+
+    def _resolve_checkpoint_module_path(self, module_path: str) -> str:
+        for candidate in self._candidate_module_paths(module_path):
+            prefix = f"{candidate}."
+            if any(full_name.startswith(prefix) for full_name in self._weight_map):
+                return candidate
+        return module_path
+
+    def _resolve_checkpoint_tensor_name(self, module_path: str, rel_name: str) -> str:
+        for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
+            candidate_name = self._join_tensor_name(candidate_path, rel_name)
+            if candidate_name in self._weight_map:
+                return candidate_name
+        return self._join_tensor_name(module_path, rel_name)
+
     def _load_checkpoint_tensors_for_module_path(
         self,
         *,
@@ -718,7 +750,8 @@ class LazyTurtle:
     ) -> Dict[str, torch.Tensor]:
         """Return raw checkpoint tensors keyed by submodule-relative names."""
 
-        prefix = f"{module_path}."
+        resolved_module_path = self._resolve_checkpoint_module_path(module_path)
+        prefix = f"{resolved_module_path}."
         grouped_names: Dict[str, list[tuple[str, str]]] = {}
         for full_name, shard in self._weight_map.items():
             if not full_name.startswith(prefix):
@@ -756,14 +789,14 @@ class LazyTurtle:
 
         grouped_names: Dict[str, list[tuple[str, str, str]]] = {}
         for rel_name in t_params:
-            full_name = self._join_tensor_name(module_path, rel_name)
+            full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
             shard = self._weight_map.get(full_name)
             if shard is None:
                 continue
             grouped_names.setdefault(shard, []).append(("param", rel_name, full_name))
 
         for rel_name, target_buffer in list(t_bufs.items()):
-            full_name = self._join_tensor_name(module_path, rel_name)
+            full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
             shard = self._weight_map.get(full_name)
             if shard is None:
                 t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
@@ -948,7 +981,7 @@ class LazyTurtle:
                 if not _is_meta_tensor(shell_param):
                     continue
 
-                full_name = self._join_tensor_name(module_path, name)
+                full_name = self._resolve_checkpoint_tensor_name(module_path, name)
                 shard = self._weight_map.get(full_name)
                 if shard is None:
                     continue
@@ -978,7 +1011,7 @@ class LazyTurtle:
                 if not _is_meta_tensor(shell_buffer):
                     continue
 
-                full_name = self._join_tensor_name(module_path, name)
+                full_name = self._resolve_checkpoint_tensor_name(module_path, name)
                 shard = self._weight_map.get(full_name)
                 if shard is None:
                     continue

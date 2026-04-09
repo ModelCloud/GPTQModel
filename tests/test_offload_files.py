@@ -55,6 +55,12 @@ class _HybridWrapper(nn.Module):
         self.block = _HybridBlock(width)
 
 
+class _TransformerPrefixedHybridWrapper(nn.Module):
+    def __init__(self, width: int):
+        super().__init__()
+        self.transformer = _HybridWrapper(width)
+
+
 class _SharedDirectBlock(nn.Module):
     def __init__(self, width: int, shared_bias: nn.Parameter):
         super().__init__()
@@ -330,6 +336,73 @@ def test_lazy_turtle_materializes_recursive_submodule(tmp_path):
     torch.testing.assert_close(shell_model.block.inner.weight, source_model.block.inner.weight)
     torch.testing.assert_close(shell_model.block.dt_bias, source_model.block.dt_bias)
     torch.testing.assert_close(shell_model.block.dt_scale, source_model.block.dt_scale)
+
+
+def test_lazy_turtle_materializes_submodule_when_shell_has_extra_root_prefix(tmp_path):
+    source_model = _HybridWrapper(width=16)
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+
+    shard_name = "model.safetensors"
+    save_file(source_model.state_dict(), str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, source_model.state_dict())
+
+    shell_model = _TransformerPrefixedHybridWrapper(width=16)
+    shell_model.transformer.load_state_dict(source_model.state_dict())
+    shell_model.transformer.block.inner.weight = nn.Parameter(
+        torch.empty_like(shell_model.transformer.block.inner.weight, device="meta"),
+        requires_grad=shell_model.transformer.block.inner.weight.requires_grad,
+    )
+    shell_model.transformer.block.dt_bias = nn.Parameter(
+        torch.empty_like(shell_model.transformer.block.dt_bias, device="meta"),
+        requires_grad=shell_model.transformer.block.dt_bias.requires_grad,
+    )
+    shell_model.transformer.block.register_buffer(
+        "dt_scale",
+        torch.empty_like(shell_model.transformer.block.dt_scale, device="meta"),
+        persistent=True,
+    )
+
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+
+    assert source is not None
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.transformer.block,
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(shell_model.transformer.block.inner.weight, source_model.block.inner.weight)
+    torch.testing.assert_close(shell_model.transformer.block.dt_bias, source_model.block.dt_bias)
+    torch.testing.assert_close(shell_model.transformer.block.dt_scale, source_model.block.dt_scale)
+
+
+def test_alias_all_from_lazy_turtle_handles_shell_root_prefix_mismatch(tmp_path):
+    source_model = _HybridWrapper(width=16)
+    turtle_model = _build_lazy_turtle_from_module(tmp_path, source_model)
+
+    shell_model = _TransformerPrefixedHybridWrapper(width=16)
+    shell_model.transformer.load_state_dict(source_model.state_dict())
+    shell_model.transformer.block.dt_bias = nn.Parameter(
+        torch.empty_like(shell_model.transformer.block.dt_bias, device="meta"),
+        requires_grad=shell_model.transformer.block.dt_bias.requires_grad,
+    )
+    shell_model.transformer.block.register_buffer(
+        "dt_scale",
+        torch.empty_like(shell_model.transformer.block.dt_scale, device="meta"),
+        persistent=True,
+    )
+
+    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=turtle_model)
+
+    torch.testing.assert_close(shell_model.transformer.block.dt_bias, source_model.block.dt_bias)
+    torch.testing.assert_close(shell_model.transformer.block.dt_scale, source_model.block.dt_scale)
 
 
 def test_lazy_turtle_restores_nonpersistent_buffers_from_module_init(tmp_path):
