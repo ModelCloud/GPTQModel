@@ -13,8 +13,10 @@ import torch
 from safetensors import safe_open
 from tabulate import tabulate
 
-import gptqmodel.quantization.dtype as dtype_module
 from gptqmodel.quantization.dtype import (
+    _cpu_floatx_threads,
+    _dequantize_f4_reference,
+    _dequantize_f8_reference,
     available_float8_dtype_names,
     dequantize_f4_e2m1,
     dequantize_f8_e4m3,
@@ -170,7 +172,7 @@ def _realistic_fp8_benchmark_source() -> tuple[torch.Tensor, torch.Tensor, str, 
         scale_inv = tensors.get_tensor(scale_key)
 
     # Reuse the checkpoint's real FP8 distribution as the float source for both FP8 and FP4 decode tables.
-    src = dtype_module._dequantize_f8_reference(
+    src = _dequantize_f8_reference(
         packed,
         scale_inv=scale_inv,
         axis=None,
@@ -283,7 +285,7 @@ def test_dequantize_f8_cpu_prefers_reference_for_standard_fp8(monkeypatch: pytes
     src = torch.linspace(-1, 1, steps=16, dtype=torch.float32).reshape(4, 4)
     fp8 = src.to(torch.float8_e4m3fn)
     scale_inv = torch.ones_like(src, dtype=torch.float32)
-    expected = dtype_module._dequantize_f8_reference(
+    expected = _dequantize_f8_reference(
         fp8,
         scale_inv=scale_inv,
         axis=None,
@@ -294,7 +296,7 @@ def test_dequantize_f8_cpu_prefers_reference_for_standard_fp8(monkeypatch: pytes
         raise AssertionError("native FP8 kernel should be bypassed for standard torch FP8 dtypes")
 
     monkeypatch.delenv("GPTQMODEL_FLOATX_CPU_FORCE_NATIVE_FP8", raising=False)
-    monkeypatch.setattr(dtype_module, "_load_floatx_cpu_ops", fail_load)
+    monkeypatch.setattr("gptqmodel.quantization.dtype._load_floatx_cpu_ops", fail_load)
 
     got = dequantize_f8_e4m3(
         fp8,
@@ -322,7 +324,7 @@ def test_dequantize_f8_e4m3_disable_avx2_override_matches_reference(monkeypatch,
 
     monkeypatch.setenv("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2", "1")
     got = dequantize_f8_e4m3(fp8, scale_inv=scale_inv, axis=None, target_dtype=target_dtype)
-    expected = dtype_module._dequantize_f8_reference(
+    expected = _dequantize_f8_reference(
         fp8,
         scale_inv=scale_inv,
         axis=None,
@@ -373,7 +375,7 @@ def test_dequantize_f4_e2m1_disable_avx2_override_matches_reference(monkeypatch,
 
     monkeypatch.setenv("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2", "1")
     got = dequantize_f4_e2m1(packed_float4, scale=scales, axis=None, target_dtype=target_dtype)
-    expected = dtype_module._dequantize_f4_reference(
+    expected = _dequantize_f4_reference(
         packed,
         scale=scales,
         axis=None,
@@ -468,7 +470,7 @@ def test_dequantize_fp8_cpu_ab_benchmark_table(target_dtype: torch.dtype):
         fmt_src = src.abs() if "e8m0" in fmt_name else src
         packed = fmt_src.to(fmt)
 
-        ref_fn = lambda: dtype_module._dequantize_f8_reference(  # noqa: E731
+        ref_fn = lambda: _dequantize_f8_reference(  # noqa: E731
             packed,
             scale_inv=scale_inv,
             axis=None,
@@ -533,7 +535,7 @@ def test_dequantize_fp8_cpu_real_format_ab_benchmark_table(target_dtype: torch.d
         packed.dtype is torch.float8_e4m3fn
     )
 
-    ref_fn = lambda: dtype_module._dequantize_f8_reference(  # noqa: E731
+    ref_fn = lambda: _dequantize_f8_reference(  # noqa: E731
         packed,
         scale_inv=scale_inv,
         axis=None,
@@ -584,7 +586,7 @@ def test_dequantize_fp8_cpu_real_format_ab_benchmark_table(target_dtype: torch.d
         ],
         note=(
             f"{source_note} "
-            f"threads={dtype_module._cpu_floatx_threads(rows * cols, enable_large_threads=enable_large_threads)}"
+            f"threads={_cpu_floatx_threads(rows * cols, enable_large_threads=enable_large_threads)}"
         ),
     )
 
@@ -597,7 +599,7 @@ def test_dequantize_fp4_cpu_ab_benchmark_table(target_dtype: torch.dtype):
     scales, packed = nvfp4_quantize(data, block_size=16)
     packed_float4 = packed.view(torch.float4_e2m1fn_x2) if hasattr(torch, "float4_e2m1fn_x2") else None
 
-    ref_fn = lambda: dtype_module._dequantize_f4_reference(  # noqa: E731
+    ref_fn = lambda: _dequantize_f4_reference(  # noqa: E731
         packed,
         scale=scales,
         axis=None,

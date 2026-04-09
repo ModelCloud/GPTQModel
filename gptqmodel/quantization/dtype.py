@@ -47,7 +47,6 @@ _FLOAT8_DTYPES = tuple(getattr(torch, name) for name in _FLOAT8_DTYPE_NAMES)
 _FLOAT4_PACKED_CANDIDATE_NAMES = ("float4_e2m1fn_x2",)
 _FLOAT4_PACKED_DTYPE_NAMES = tuple(name for name in _FLOAT4_PACKED_CANDIDATE_NAMES if hasattr(torch, name))
 _FLOAT4_PACKED_DTYPES = tuple(getattr(torch, name) for name in _FLOAT4_PACKED_DTYPE_NAMES)
-_FLOAT4_PACKED_DTYPE = _FLOAT4_PACKED_DTYPES[0] if _FLOAT4_PACKED_DTYPES else None
 
 _TARGET_DTYPE_CODES = {
     torch.bfloat16: 0,

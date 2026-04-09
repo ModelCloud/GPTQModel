@@ -35,8 +35,6 @@ _PACK_BLOCK_EXTENSION: Optional[bool] = None
 _PACK_BLOCK_EXTENSION_INITIALISED = False
 
 _PACK_BLOCK_TORCH_OPS_EXTENSION = None
-_FLOATX_CPU_EXTENSION: Optional[bool] = None
-_FLOATX_CPU_EXTENSION_INITIALISED = False
 _FLOATX_CPU_TORCH_OPS_EXTENSION = None
 
 _cpp_ext_lock = threading.Lock()
@@ -872,22 +870,13 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
 def load_floatx_cpu_extension(*, verbose: bool = False) -> Optional[object]:
     """Ensure the floatx CPU extension is built and loaded."""
 
-    global _FLOATX_CPU_EXTENSION, _FLOATX_CPU_EXTENSION_INITIALISED
-
     namespace = getattr(torch.ops, "gptqmodel_floatx", None)
     if namespace is not None and hasattr(namespace, "dequantize_fp8_cpu") and hasattr(namespace, "dequantize_fp4_cpu"):
-        _FLOATX_CPU_EXTENSION_INITIALISED = True
-        _FLOATX_CPU_EXTENSION = True
-        return _FLOATX_CPU_EXTENSION
-
-    if _FLOATX_CPU_EXTENSION_INITIALISED and _FLOATX_CPU_EXTENSION:
-        return _FLOATX_CPU_EXTENSION
+        return namespace
 
     source_path = _floatx_cpu_source_path()
     if not source_path.exists():
         log.debug("floatx_cpu extension source not found at %s", source_path)
-        _FLOATX_CPU_EXTENSION = None
-        _FLOATX_CPU_EXTENSION_INITIALISED = True
         return None
 
     try:
@@ -897,7 +886,7 @@ def load_floatx_cpu_extension(*, verbose: bool = False) -> Optional[object]:
         if verbose:
             os.environ["GPTQMODEL_EXT_VERBOSE"] = "1"
         try:
-            _FLOATX_CPU_EXTENSION = extension_api.load(name="floatx_cpu")["floatx_cpu"]
+            extension = extension_api.load(name="floatx_cpu")["floatx_cpu"]
         finally:
             if verbose:
                 if previous_verbose is None:
@@ -905,8 +894,7 @@ def load_floatx_cpu_extension(*, verbose: bool = False) -> Optional[object]:
                 else:
                     os.environ["GPTQMODEL_EXT_VERBOSE"] = previous_verbose
         log.debug("floatx_cpu extension loaded from %s", source_path)
+        return extension
     except Exception as exc:  # pragma: no cover - environment-specific
         log.debug("floatx_cpu extension build failed: %s", exc)
-        _FLOATX_CPU_EXTENSION = None
-    _FLOATX_CPU_EXTENSION_INITIALISED = True
-    return _FLOATX_CPU_EXTENSION
+    return None
