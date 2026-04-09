@@ -8,14 +8,10 @@ import os
 
 # isort: off
 from ._banner import get_startup_banner  # noqa: E402
+from .utils import _MONKEY_PATCH_LOCK  # noqa: E402
 from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noqa: E402
 
 # isort: on
-
-import threading
-
-
-_patch_lock = threading.Lock()
 
 
 patch_safetensors_save_file()
@@ -37,25 +33,26 @@ def _patch_transformers_gptq_device_map_compat():
     except Exception:
         return
 
-    original_process = GptqHfQuantizer._process_model_before_weight_loading
-    if getattr(original_process, "_gptqmodel_device_map_compat", False):
-        return
+    with _MONKEY_PATCH_LOCK:
+        original_process = GptqHfQuantizer._process_model_before_weight_loading
+        if getattr(original_process, "_gptqmodel_device_map_compat", False):
+            return
 
-    @wraps(original_process)
-    def _process_model_before_weight_loading_with_device_map(self, model, **kwargs):
-        """Backfill `hf_device_map` when GPTQ uses a single concrete device."""
-        device_map = kwargs.get("device_map")
-        if (
-            isinstance(device_map, dict)
-            and device_map
-            and len(set(device_map.values())) == 1
-            and not hasattr(model, "hf_device_map")
-        ):
-            model.hf_device_map = dict(device_map)
-        return original_process(self, model, **kwargs)
+        @wraps(original_process)
+        def _process_model_before_weight_loading_with_device_map(self, model, **kwargs):
+            """Backfill `hf_device_map` when GPTQ uses a single concrete device."""
+            device_map = kwargs.get("device_map")
+            if (
+                isinstance(device_map, dict)
+                and device_map
+                and len(set(device_map.values())) == 1
+                and not hasattr(model, "hf_device_map")
+            ):
+                model.hf_device_map = dict(device_map)
+            return original_process(self, model, **kwargs)
 
-    _process_model_before_weight_loading_with_device_map._gptqmodel_device_map_compat = True
-    GptqHfQuantizer._process_model_before_weight_loading = _process_model_before_weight_loading_with_device_map
+        _process_model_before_weight_loading_with_device_map._gptqmodel_device_map_compat = True
+        GptqHfQuantizer._process_model_before_weight_loading = _process_model_before_weight_loading_with_device_map
 
 
 def _patch_transformers_paroquant_quantizer_compat():
@@ -73,12 +70,13 @@ def _patch_transformers_paroquant_quantizer_compat():
     except Exception:
         return
 
-    if getattr(hf_quant_auto, "_gptqmodel_paroquant_quantizer_compat", False):
-        return
+    with _MONKEY_PATCH_LOCK:
+        if getattr(hf_quant_auto, "_gptqmodel_paroquant_quantizer_compat", False):
+            return
 
-    hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault("paroquant", GPTQConfig)
-    hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault("paroquant", GptqHfQuantizer)
-    hf_quant_auto._gptqmodel_paroquant_quantizer_compat = True
+        hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault("paroquant", GPTQConfig)
+        hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault("paroquant", GptqHfQuantizer)
+        hf_quant_auto._gptqmodel_paroquant_quantizer_compat = True
 
 
 def _patch_openvino_gptqmodel_compat():
@@ -88,7 +86,7 @@ def _patch_openvino_gptqmodel_compat():
     except Exception:
         return
 
-    with _patch_lock:
+    with _MONKEY_PATCH_LOCK:
         if getattr(ov_gptq, "_gptqmodel_torch_quant_compat", False):
             return
 

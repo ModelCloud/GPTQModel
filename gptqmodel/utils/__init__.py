@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
+import threading
 
 from .backend import BACKEND, PROFILE
 from .logger import setup_logger
@@ -13,6 +14,8 @@ from .vram import get_vram
 
 
 log = setup_logger()
+# Shared across runtime monkeypatch entrypoints; some patch helpers nest.
+_MONKEY_PATCH_LOCK = threading.RLock()
 
 ASYNC_BG_QUEUE = AsyncManager(threads=4)
 SERIAL_BG_QUEUE = SerialWorker()
