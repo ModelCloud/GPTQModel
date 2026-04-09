@@ -14,9 +14,9 @@ from gptqmodel.quantization.config import (
     BitsAndBytesConfig,
     GGUFBits,
     GGUFConfig,
-    GPTQQuantizeConfig,
+    GPTQConfig,
     QuantizeConfig,
-    RTNQuantizeConfig,
+    RTNConfig,
     SmootherConfig,
     SmoothMAD,
 )
@@ -24,7 +24,7 @@ from gptqmodel.quantization.config import (
 
 def test_quantize_config_weight_only_round_trip():
     smooth = SmoothMAD(k=1.75)
-    cfg = RTNQuantizeConfig(
+    cfg = RTNConfig(
         bits=4,
         group_size=128,
         smooth=smooth,
@@ -41,7 +41,7 @@ def test_quantize_config_weight_only_round_trip():
     assert payload["meta"]["weight_only"]["smooth"]["k"] == pytest.approx(1.75)
 
     reloaded = QuantizeConfig.from_quant_config(payload)
-    assert isinstance(reloaded, RTNQuantizeConfig)
+    assert isinstance(reloaded, RTNConfig)
     assert isinstance(reloaded.smooth, SmoothMAD)
     assert reloaded.smooth.k == pytest.approx(1.75)
     assert reloaded.uses_weight_only_lifecycle() is True
@@ -49,10 +49,10 @@ def test_quantize_config_weight_only_round_trip():
 
 
 def test_rtn_quantize_config_defaults_to_no_smoother():
-    cfg = RTNQuantizeConfig(bits=4, group_size=128)
+    cfg = RTNConfig(bits=4, group_size=128)
 
     assert isinstance(cfg, BaseQuantizeConfig)
-    assert not isinstance(cfg, GPTQQuantizeConfig)
+    assert not isinstance(cfg, GPTQConfig)
     assert cfg.uses_weight_only_lifecycle() is True
     assert cfg.smooth is None
     assert cfg.export_quant_method() is not None
@@ -61,13 +61,13 @@ def test_rtn_quantize_config_defaults_to_no_smoother():
     assert payload["meta"]["weight_only"]["smooth"] is None
 
     reloaded = QuantizeConfig.from_quant_config(payload)
-    assert isinstance(reloaded, RTNQuantizeConfig)
+    assert isinstance(reloaded, RTNConfig)
     assert reloaded.smooth is None
 
 
 def test_rtn_quantize_config_supports_awq_export_round_trip():
     smooth = SmoothMAD(k=1.5)
-    cfg = RTNQuantizeConfig(
+    cfg = RTNConfig(
         bits=4,
         group_size=128,
         format="gemm",
@@ -80,7 +80,7 @@ def test_rtn_quantize_config_supports_awq_export_round_trip():
     payload = cfg.to_dict()
     reloaded = QuantizeConfig.from_quant_config(payload)
 
-    assert isinstance(reloaded, RTNQuantizeConfig)
+    assert isinstance(reloaded, RTNConfig)
     assert reloaded.format == cfg.format
     assert reloaded.export_quant_method() == cfg.export_quant_method()
     assert isinstance(reloaded.smooth, SmoothMAD)
@@ -122,8 +122,8 @@ def test_gguf_quantize_config_round_trip():
     assert "desc_act" not in payload
     assert "pack_dtype" not in payload
     assert "weight_only" not in payload["meta"]
-    assert payload["meta"]["pre_filters"][0]["code"] == "smoother"
-    assert payload["meta"]["pre_filters"][0]["smooth"]["type"] == "mad"
+    assert payload["meta"]["preprocessors"][0]["code"] == "smoother"
+    assert payload["meta"]["preprocessors"][0]["smooth"]["type"] == "mad"
     reloaded = QuantizeConfig.from_quant_config(payload)
 
     assert isinstance(reloaded, GGUFConfig)
@@ -194,25 +194,25 @@ def test_bitsandbytes_quantize_config_round_trip_8bit():
     assert reloaded.quant_method == METHOD.BITSANDBYTES
 
 
-def test_gguf_quantize_config_registers_smoother_prefilter():
+def test_gguf_config_registers_smoother_preprocessor():
     cfg = GGUFConfig(
         bits=4,
         format="q_k_m",
-        pre_filters=[SmootherConfig(smooth=SmoothMAD(k=1.9))],
+        preprocessors=[SmootherConfig(smooth=SmoothMAD(k=1.9))],
     )
 
     assert isinstance(cfg.smoother, SmootherConfig)
     assert isinstance(cfg.smooth, SmoothMAD)
     assert cfg.smooth.k == pytest.approx(1.9)
-    assert len(cfg.pre_filters) == 1
-    assert cfg.pre_filters[0].code == "smoother"
+    assert len(cfg.preprocessors) == 1
+    assert cfg.preprocessors[0].code == "smoother"
 
 
-def test_gguf_quantize_config_registers_auto_module_decoder_prefilter():
+def test_gguf_config_registers_auto_module_decoder_preprocessor():
     cfg = GGUFConfig(
         bits=4,
         format="q_k_m",
-        pre_filters=[
+        preprocessors=[
             {
                 "code": "auto_module_decoder",
                 "target_dtype": "float16",
@@ -220,20 +220,20 @@ def test_gguf_quantize_config_registers_auto_module_decoder_prefilter():
         ],
     )
 
-    assert len(cfg.pre_filters) == 1
-    decoder = cfg.pre_filters[0]
+    assert len(cfg.preprocessors) == 1
+    decoder = cfg.preprocessors[0]
     assert isinstance(decoder, AutoModuleDecoderConfig)
     assert decoder.code == "auto_module_decoder"
     assert decoder.source_dtype == "auto"
     assert decoder.target_dtype == torch.float16
 
     payload = cfg.to_dict()
-    assert payload["meta"]["pre_filters"][0]["code"] == "auto_module_decoder"
-    assert payload["meta"]["pre_filters"][0]["target_dtype"] == "float16"
+    assert payload["meta"]["preprocessors"][0]["code"] == "auto_module_decoder"
+    assert payload["meta"]["preprocessors"][0]["target_dtype"] == "float16"
 
     reloaded = QuantizeConfig.from_quant_config(payload)
-    assert isinstance(reloaded.pre_filters[0], AutoModuleDecoderConfig)
-    assert reloaded.pre_filters[0].target_dtype == torch.float16
+    assert isinstance(reloaded.preprocessors[0], AutoModuleDecoderConfig)
+    assert reloaded.preprocessors[0].target_dtype == torch.float16
 
 
 def test_auto_module_decoder_config_does_not_expose_code_as_init_field():
@@ -335,7 +335,7 @@ def test_weight_only_payload_dispatches_to_rtn():
         },
     )
 
-    assert isinstance(cfg, RTNQuantizeConfig)
+    assert isinstance(cfg, RTNConfig)
     assert isinstance(cfg.smooth, SmoothMAD)
     assert cfg.smooth.k == pytest.approx(2.0)
 

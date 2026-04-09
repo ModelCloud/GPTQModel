@@ -29,9 +29,9 @@ from ..quantization.config import (
     BaseQuantizeConfig,
     BitsAndBytesConfig,
     FP8Config,
-    GGUFQuantizeConfig,
+    GGUFConfig,
     METHOD,
-    RTNQuantizeConfig,
+    RTNConfig,
     clone_weight_only_config_for_module,
     resolve_quant_format,
 )
@@ -52,7 +52,7 @@ class WeightOnlyProcessor(LoopProcessor):
     def __init__(
         self,
         tokenizer,
-        qcfg: RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig,
+        qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig,
     ):
         """Initializes a weight-only processor for RTN, GGUF, FP8, or BitsAndBytes."""
 
@@ -73,7 +73,7 @@ class WeightOnlyProcessor(LoopProcessor):
         self.lock = threading.Lock()
 
     @staticmethod
-    def _uses_direct_pack(qcfg: RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig) -> bool:
+    def _uses_direct_pack(qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig) -> bool:
         """Returns whether the method packs directly from the original dense weights."""
 
         return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES}
@@ -109,7 +109,7 @@ class WeightOnlyProcessor(LoopProcessor):
     def quantize_module(
         self,
         module: NamedModule,
-    ) -> Optional[RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig]:
+    ) -> Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig]:
         """Clones per-module config, quantizes weights, and logs the result."""
 
         qcfg_clone = clone_weight_only_config_for_module(self.qcfg, module.full_name)
@@ -165,7 +165,7 @@ class WeightOnlyProcessor(LoopProcessor):
         module: NamedModule,
         model: BaseQModel,
         *,
-        qcfg: Optional[RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig] = None,
+        qcfg: Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig] = None,
         **kwargs,
     ):
         """Creates and packs the final quantized module into the model graph."""

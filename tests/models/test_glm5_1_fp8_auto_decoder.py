@@ -46,7 +46,7 @@ class TestGlm5_1Fp8AutoDecoder(ModelTest):
 
     def _build_quantize_config(self):
         cfg = super()._build_quantize_config()
-        cfg.pre_filters = [
+        cfg.preprocessors = [
             AutoModuleDecoderConfig(
                 target_dtype=torch.bfloat16,
             )

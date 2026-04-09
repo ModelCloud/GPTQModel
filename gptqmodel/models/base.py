@@ -880,7 +880,7 @@ class BaseQModel(nn.Module):
         from ..adapter.adapter import Lora
         from ..looper.eora_processor import EoraProcessor
         from ..looper.module_looper import ModuleLooper
-        from ..looper.module_prefilter_processor import ModulePreFilterProcessor
+        from ..looper.module_preprocessor import ModulePreProcessor
         from ..looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
 
         needs_lora = isinstance(self.quantize_config.adapter, Lora)
@@ -897,9 +897,9 @@ class BaseQModel(nn.Module):
             "calculate_w_wq_diff": needs_lora,
         }
 
-        prefilter_processors = []
-        if getattr(self.quantize_config, "pre_filters", None):
-            prefilter_processors.append(ModulePreFilterProcessor(**args))
+        preprocessors = []
+        if getattr(self.quantize_config, "preprocessors", None):
+            preprocessors.append(ModulePreProcessor(**args))
 
         if self.quantize_config.method == METHOD.EXL3:
             from ..looper.exllamav3_processor import EXL3Processor
@@ -924,13 +924,13 @@ class BaseQModel(nn.Module):
                 "batch_size": batch_size,
                 "lm_head_name": self.lm_head,
             }
-            quantize_processor = prefilter_processors + [
+            quantize_processor = preprocessors + [
                 EXL3Processor(**exl3_args),
             ]
         elif self.quantize_config.method == METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
 
-            quantize_processor = prefilter_processors + [
+            quantize_processor = preprocessors + [
                 TensorParallelWeightProcessor(**args),
                 QQQProcessor(**args),
             ]
@@ -944,7 +944,7 @@ class BaseQModel(nn.Module):
             awq_args["model"] = self.model
             awq_args["batch_size"] = batch_size
 
-            quantize_processor = prefilter_processors + [
+            quantize_processor = preprocessors + [
                 TensorParallelWeightProcessor(**args),
                 AWQProcessor(**awq_args),
             ]
@@ -958,14 +958,14 @@ class BaseQModel(nn.Module):
             paro_args["model"] = self.model
             paro_args["batch_size"] = batch_size
 
-            quantize_processor = prefilter_processors + [
+            quantize_processor = preprocessors + [
                 TensorParallelWeightProcessor(**args),
                 ParoQuantProcessor(**paro_args),
             ]
         else:
             from ..looper.gptq_processor import GPTQProcessor
 
-            quantize_processor = prefilter_processors + [
+            quantize_processor = preprocessors + [
                 TensorParallelWeightProcessor(**args),
                 GPTQProcessor(**args),
             ]

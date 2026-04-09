@@ -8,7 +8,7 @@ from model_test import ModelTest, _env_choice, _env_flag, _env_int, _env_optiona
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
-from gptqmodel.quantization import FORMAT, METHOD, ParoQuantizeConfig
+from gptqmodel.quantization import FORMAT, METHOD, ParoConfig
 
 
 def _resolve_save_path(scope_env: str, default: str) -> str:
@@ -187,7 +187,7 @@ class BaseLlama3_2ParoQuantOptimizeTest(ModelTest):
         )
 
     def _build_quantize_config(self):
-        return ParoQuantizeConfig(
+        return ParoConfig(
             bits=self.BITS,
             method=METHOD.PARO,
             format=FORMAT.PAROQUANT,

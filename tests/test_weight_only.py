@@ -25,7 +25,7 @@ from gptqmodel.quantization.config import (
     GGUFBits,
     GGUFConfig,
     QuantizeConfig,
-    RTNQuantizeConfig,
+    RTNConfig,
     SmoothMAD,
     quant_bits_width,
 )
@@ -84,7 +84,7 @@ def _reference_rtn_quantized_weight(weight: torch.Tensor, device: torch.device, 
     linear.weight.data.copy_(weight)
     linear.to(device)
 
-    qcfg = RTNQuantizeConfig(
+    qcfg = RTNConfig(
         bits=4,
         group_size=32,
         desc_act=False,
@@ -156,7 +156,7 @@ def _build_rtn_microbench_case(
         requested_bits = GGUFBits.from_string(bits)
         rtn_bits = quant_bits_width(bits)
 
-    qcfg = RTNQuantizeConfig(
+    qcfg = RTNConfig(
         bits=rtn_bits,
         group_size=group_size,
         desc_act=False,
@@ -285,7 +285,7 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
     original_state = copy.deepcopy(native.state_dict())
 
     smooth = SmoothMAD(k=2.25)
-    qcfg = RTNQuantizeConfig(
+    qcfg = RTNConfig(
         bits=4,
         group_size=32,
         desc_act=False,
@@ -346,7 +346,7 @@ def test_baseqmodel_quantize_allows_rtn_awq_export():
     native = _TinyModel().to(device=device, dtype=torch.float16).eval()
     smooth = SmoothMAD(k=2.25)
 
-    qcfg = RTNQuantizeConfig(
+    qcfg = RTNConfig(
         bits=4,
         group_size=32,
         desc_act=False,

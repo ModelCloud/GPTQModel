@@ -7,7 +7,7 @@ from model_test import ModelTest
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
-from gptqmodel.quantization import FORMAT, METHOD, GPTQQuantizeConfig
+from gptqmodel.quantization import FORMAT, METHOD, GPTQConfig
 from gptqmodel.quantization.protocol import (
     Rule,
     Stage,
@@ -123,7 +123,7 @@ class _BaseLlama3_2GPTQProtocol(ModelTest):
         return compile_plan_to_quantize_config(self._compiled_protocol_plan())
 
     def _assert_layer0_only_dynamic(self, cfg):
-        assert isinstance(cfg, GPTQQuantizeConfig)
+        assert isinstance(cfg, GPTQConfig)
         assert cfg.quant_method == METHOD.GPTQ
         assert cfg.format == FORMAT.GPTQ
         assert cfg.dynamic == {f"-:{LAYER0_ONLY_NEGATIVE_MATCH}": {}}

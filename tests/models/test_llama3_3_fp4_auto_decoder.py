@@ -35,10 +35,10 @@ class TestLlama3_3FP4AutoDecoder(ModelTest):
     }
 
     def _build_quantize_config(self):
-        """Attach the auto-decoder pre-filter to the standard GPTQ config."""
+        """Attach the auto-decoder preprocessor to the standard GPTQ config."""
 
         cfg = super()._build_quantize_config()
-        cfg.pre_filters = [
+        cfg.preprocessors = [
             AutoModuleDecoderConfig(
                 target_dtype=torch.bfloat16,
             )

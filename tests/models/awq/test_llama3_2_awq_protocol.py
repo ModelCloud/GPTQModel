@@ -17,7 +17,7 @@ from model_test import ModelTest
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
-from gptqmodel.quantization import FORMAT, METHOD, AWQQuantizeConfig
+from gptqmodel.quantization import FORMAT, METHOD, AWQConfig
 from gptqmodel.quantization.protocol import (
     Rule,
     Stage,
@@ -140,7 +140,7 @@ class _BaseLlama3_2AWQProtocol(ModelTest):
         return compile_plan_to_quantize_config(self._compiled_protocol_plan())
 
     def _assert_layer0_only_dynamic(self, cfg):
-        assert isinstance(cfg, AWQQuantizeConfig)
+        assert isinstance(cfg, AWQConfig)
         assert cfg.quant_method == METHOD.AWQ
         assert cfg.format == FORMAT.GEMM
         assert cfg.dynamic == {f"-:{LAYER0_ONLY_NEGATIVE_MATCH}": {}}

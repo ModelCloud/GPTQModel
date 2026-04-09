@@ -13,7 +13,7 @@ import transformers
 from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
-from .config import Fallback, FallbackStrategy, RTNQuantizeConfig, SmoothMSE
+from .config import Fallback, FallbackStrategy, RTNConfig, SmoothMSE
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -36,7 +36,7 @@ class RTN:
     AWQ, or future export layouts by the existing packing stage.
     """
 
-    def __init__(self, module: nn.Module, qcfg: RTNQuantizeConfig):
+    def __init__(self, module: nn.Module, qcfg: RTNConfig):
         self.rows, self.columns = get_number_of_rows_and_cols(module)
         if isinstance(module, NamedModule):
             self.module = module.module

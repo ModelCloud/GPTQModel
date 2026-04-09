@@ -12,11 +12,11 @@ from ..looper.named_module import NamedModule
 from ..quantization.config import AutoModuleDecoderConfig
 
 
-class ModulePreFilterProcessor(LoopProcessor):
-    """Annotate modules with an ordered pre-filter plan before quantization."""
+class ModulePreProcessor(LoopProcessor):
+    """Annotate modules with an ordered preprocessor plan before quantization."""
 
     def __init__(self, *args, **kwargs):
-        """Initialize a no-forward planning processor for module pre-filters."""
+        """Initialize a no-forward planning processor for module preprocessors."""
 
         kwargs = dict(kwargs)
         kwargs.pop("calculate_w_wq_diff", None)
@@ -39,30 +39,30 @@ class ModulePreFilterProcessor(LoopProcessor):
         self.qcfg = qcfg
 
     def preprocess(self, module: NamedModule, **kwargs):
-        """Normalize configured pre-filters into a stable per-module plan."""
+        """Normalize configured preprocessors into a stable per-module plan."""
 
         del kwargs
 
         pipeline = []
-        for pre_filter in getattr(self.qcfg, "pre_filters", []) or []:
-            if isinstance(pre_filter, AutoModuleDecoderConfig):
+        for preprocessor in getattr(self.qcfg, "preprocessors", []) or []:
+            if isinstance(preprocessor, AutoModuleDecoderConfig):
                 pipeline.append(
                     {
-                        "code": pre_filter.code,
-                        "source_dtype": pre_filter.source_dtype,
-                        "target_dtype": pre_filter.target_dtype,
+                        "code": preprocessor.code,
+                        "source_dtype": preprocessor.source_dtype,
+                        "target_dtype": preprocessor.target_dtype,
                     }
                 )
 
         if pipeline:
-            module.state["pre_filter_pipeline"] = pipeline
+            module.state["preprocessor_pipeline"] = pipeline
             module.state["auto_module_decoder"] = pipeline[-1]
         else:
-            module.state.pop("pre_filter_pipeline", None)
+            module.state.pop("preprocessor_pipeline", None)
             module.state.pop("auto_module_decoder", None)
 
     def is_skipped(self, module: NamedModule) -> bool:
-        """Report that every candidate module passes through pre-filter planning."""
+        """Report that every candidate module passes through preprocessor planning."""
 
         del module
         return False
@@ -100,7 +100,6 @@ class ModulePreFilterProcessor(LoopProcessor):
     def name(self) -> str:
         """Return the processor label used in logs and lifecycle reporting."""
 
-        return "module-pre-filter"
+        return "module-preprocessor"
 
-
-__all__ = ["ModulePreFilterProcessor"]
+__all__ = ["ModulePreProcessor"]

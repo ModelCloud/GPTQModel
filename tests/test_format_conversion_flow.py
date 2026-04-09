@@ -9,7 +9,7 @@ from unittest import mock
 import torch
 
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.quantization import FORMAT, METHOD, GGUFQuantizeConfig, QuantizeConfig, RTNQuantizeConfig
+from gptqmodel.quantization import FORMAT, METHOD, GGUFConfig, QuantizeConfig, RTNConfig
 from gptqmodel.utils.model import pack_module
 
 
@@ -106,19 +106,19 @@ def test_pack_module_skips_for_non_gptq_method():
 
 
 def test_pack_module_skips_for_non_gptq_export_method():
-    cfg = RTNQuantizeConfig(bits=4, format=FORMAT.GEMM, offload_to_disk=False)
+    cfg = RTNConfig(bits=4, format=FORMAT.GEMM, offload_to_disk=False)
     calls = _run_pack(cfg, requires_v2=True)
     assert calls == 0
 
 
 def test_pack_module_converts_for_rtn_gptq_export_requires_v2():
-    cfg = RTNQuantizeConfig(bits=4, format=FORMAT.GPTQ, offload_to_disk=False)
+    cfg = RTNConfig(bits=4, format=FORMAT.GPTQ, offload_to_disk=False)
     calls = _run_pack(cfg, requires_v2=True)
     assert calls == 1
 
 
 def test_pack_module_skips_for_rtn_gguf_export():
-    cfg = GGUFQuantizeConfig(bits=4, offload_to_disk=False)
+    cfg = GGUFConfig(bits=4, offload_to_disk=False)
     calls = _run_pack(cfg, requires_v2=True)
     assert calls == 0
 

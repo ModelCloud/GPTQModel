@@ -149,8 +149,8 @@ class WeightOnlyMethod(str, Enum):
     NVFP4 = "nvfp4"
 
 
-class PreFilterCode(str, Enum):
-    """Identifiers for pre-filter passes that run before quantization."""
+class PreProcessorCode(str, Enum):
+    """Identifiers for preprocessing passes that run before quantization."""
 
     SMOOTHER = "smoother"
     AUTO_MODULE_DECODER = "auto_module_decoder"
@@ -689,12 +689,12 @@ def _normalize_exl3_bits(bits: Union[int, float, str]) -> float:
     elif isinstance(bits, int):
         bits = float(bits)
     elif not isinstance(bits, float):
-        raise ValueError(f"EXL3QuantizeConfig: unsupported bits specification `{bits}`.")
+        raise ValueError(f"EXL3Config: unsupported bits specification `{bits}`.")
 
     if not math.isfinite(bits):
-        raise ValueError("EXL3QuantizeConfig: `bits` must be finite.")
+        raise ValueError("EXL3Config: `bits` must be finite.")
     if bits < 1.0 or bits > 8.0:
-        raise ValueError("EXL3QuantizeConfig: `bits` must be between 1.0 and 8.0.")
+        raise ValueError("EXL3Config: `bits` must be between 1.0 and 8.0.")
     return float(bits)
 
 
@@ -1083,22 +1083,22 @@ class WeightOnlyConfig:
 
 
 @dataclass
-class BasePreFilterConfig:
-    """Base payload for pre-filter stages emitted into config JSON."""
+class BasePreProcessorConfig:
+    """Base payload for preprocessing stages emitted into config JSON."""
 
     code: ClassVar[str] = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize the pre-filter config into a minimal dictionary."""
+        """Serialize the preprocessor config into a minimal dictionary."""
 
         return {"code": self.code}
 
 
 @dataclass
-class SmootherConfig(BasePreFilterConfig):
-    """Serialized wrapper for a configured smoothing pre-filter."""
+class SmootherConfig(BasePreProcessorConfig):
+    """Serialized wrapper for a configured smoothing preprocessor."""
 
-    code: ClassVar[str] = PreFilterCode.SMOOTHER.value
+    code: ClassVar[str] = PreProcessorCode.SMOOTHER.value
     smooth: Optional[SmoothMethod] = None
 
     def __post_init__(self):
@@ -1115,10 +1115,10 @@ class SmootherConfig(BasePreFilterConfig):
 
 
 @dataclass
-class AutoModuleDecoderConfig(BasePreFilterConfig):
+class AutoModuleDecoderConfig(BasePreProcessorConfig):
     """Configure automatic module-local decode behavior for checkpoint dtypes such as FP8."""
 
-    code: ClassVar[str] = PreFilterCode.AUTO_MODULE_DECODER.value
+    code: ClassVar[str] = PreProcessorCode.AUTO_MODULE_DECODER.value
     source_dtype: str = "auto"
     target_dtype: Union[str, torch.dtype] = torch.bfloat16
 
@@ -1605,41 +1605,41 @@ def _normalize_smoother_config(
     return SmootherConfig(smooth=payload)
 
 
-def _normalize_pre_filter_config(payload: Any) -> BasePreFilterConfig:
-    if isinstance(payload, BasePreFilterConfig):
+def _normalize_preprocessor_config(payload: Any) -> BasePreProcessorConfig:
+    if isinstance(payload, BasePreProcessorConfig):
         return payload
     if isinstance(payload, SmoothMethod):
         return SmootherConfig(smooth=payload)
     if isinstance(payload, str):
         normalized = payload.strip().lower()
-        if normalized == PreFilterCode.SMOOTHER.value:
+        if normalized == PreProcessorCode.SMOOTHER.value:
             return SmootherConfig(smooth=None)
-        if normalized == PreFilterCode.AUTO_MODULE_DECODER.value:
+        if normalized == PreProcessorCode.AUTO_MODULE_DECODER.value:
             return AutoModuleDecoderConfig()
         return SmootherConfig(smooth=payload)
     if isinstance(payload, dict):
         code = str(payload.get("code", "")).strip().lower()
-        if code == PreFilterCode.AUTO_MODULE_DECODER.value:
+        if code == PreProcessorCode.AUTO_MODULE_DECODER.value:
             return AutoModuleDecoderConfig(
                 source_dtype=payload.get("source_dtype", "auto"),
                 target_dtype=payload.get("target_dtype", torch.bfloat16),
             )
-        if code and code != PreFilterCode.SMOOTHER.value:
-            raise ValueError(f"QuantizeConfig: unsupported pre-filter code `{code}`.")
+        if code and code != PreProcessorCode.SMOOTHER.value:
+            raise ValueError(f"QuantizeConfig: unsupported preprocessor code `{code}`.")
         if "smooth" in payload:
             return SmootherConfig(smooth=payload.get("smooth"))
         if "type" in payload:
             return SmootherConfig(smooth=payload)
         return SmootherConfig(smooth=None)
-    raise ValueError("QuantizeConfig: `pre_filters` entries must be pre-filter configs, smooth configs, dicts, or strings.")
+    raise ValueError("QuantizeConfig: `preprocessors` entries must be preprocessor configs, smooth configs, dicts, or strings.")
 
 
-def _normalize_pre_filters(payload: Optional[List[Any]]) -> List[BasePreFilterConfig]:
+def _normalize_preprocessors(payload: Optional[List[Any]]) -> List[BasePreProcessorConfig]:
     if payload is None:
         return []
     if not isinstance(payload, list):
-        raise ValueError("QuantizeConfig: `pre_filters` must be a list or None.")
-    return [_normalize_pre_filter_config(item) for item in payload]
+        raise ValueError("QuantizeConfig: `preprocessors` must be a list or None.")
+    return [_normalize_preprocessor_config(item) for item in payload]
 
 
 def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
@@ -1748,7 +1748,7 @@ def _normalize_paroquant_best_state_dtype(best_state_dtype: Optional[Union[str, 
         if best_state_dtype == torch.float32:
             return "fp32"
     raise ValueError(
-        "ParoQuantizeConfig: `opt_best_state_dtype` must be one of {'fp16', 'bf16', 'fp32'} "
+        "ParoConfig: `opt_best_state_dtype` must be one of {'fp16', 'bf16', 'fp32'} "
         "or torch.float16/torch.bfloat16/torch.float32."
     )
 
@@ -2073,13 +2073,13 @@ def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional
 def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(payload)
 
-    if target_cls is AWQQuantizeConfig:
+    if target_cls is AWQConfig:
         expected_method = METHOD.AWQ
     elif target_cls is FP8Config:
         expected_method = METHOD.FP8
     elif target_cls is BitsAndBytesConfig:
         expected_method = METHOD.BITSANDBYTES
-    elif target_cls is EXL3QuantizeConfig:
+    elif target_cls is EXL3Config:
         expected_method = METHOD.EXL3
         format_value = normalized.get(FORMAT_FIELD_CODE)
         normalized_format = None
@@ -2092,7 +2092,7 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.EXL3:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.EXL3}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.EXL3
-    elif target_cls is ParoQuantizeConfig:
+    elif target_cls is ParoConfig:
         expected_method = METHOD.PARO
         format_value = normalized.get(FORMAT_FIELD_CODE)
         normalized_format = None
@@ -2107,7 +2107,7 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
             normalized[FORMAT_FIELD_CODE] = FORMAT.PAROQUANT
     elif target_cls is GGUFConfig:
         expected_method = METHOD.GGUF
-    elif target_cls is QQQQuantizeConfig:
+    elif target_cls is QQQConfig:
         expected_method = METHOD.QQQ
         format_value = normalized.get(FORMAT_FIELD_CODE)
         normalized_format = None
@@ -2152,7 +2152,7 @@ def _filter_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str
 
 def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, payload)
-    if target_cls is RTNQuantizeConfig:
+    if target_cls is RTNConfig:
         normalized = _normalize_rtn_kwargs(normalized)
     elif target_cls is GGUFConfig:
         normalized = _normalize_gguf_kwargs(normalized)
@@ -2164,6 +2164,19 @@ def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) 
 
 
 class QuantizeConfigMeta(type):
+    def __instancecheck__(cls, instance):
+        if cls is QuantizeConfig:
+            return isinstance(instance, BaseQuantizeConfig)
+        return super().__instancecheck__(instance)
+
+    def __subclasscheck__(cls, subclass):
+        if cls is QuantizeConfig:
+            try:
+                return issubclass(subclass, BaseQuantizeConfig)
+            except TypeError:
+                return False
+        return super().__subclasscheck__(subclass)
+
     def __call__(cls, *args, **kwargs):
         kwargs = _normalize_quantize_config_constructor_kwargs(kwargs)
         if cls is QuantizeConfig:
@@ -2633,7 +2646,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "gptaq": "gptaq",
             "foem": "foem",
             "weight_only": "weight_only",
-            "pre_filters": "pre_filters",
+            "preprocessors": "preprocessors",
             "gc_mode": "gc_mode",
             "wait_for_submodule_finalizers": "wait_for_submodule_finalizers",
             "auto_forward_data_parallel": "auto_forward_data_parallel",
@@ -2685,7 +2698,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         target_cls = cls if cls not in {BaseQuantizeConfig, QuantizeConfig} else _resolve_quantize_config_class(normalized)
         normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, normalized)
-        if target_cls is RTNQuantizeConfig:
+        if target_cls is RTNConfig:
             normalized = _normalize_rtn_kwargs(normalized)
         elif target_cls is GGUFConfig:
             normalized = _normalize_gguf_kwargs(normalized)
@@ -2706,7 +2719,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         if resolved_format_family in {FORMAT.BITBLAS, FORMAT.BITSANDBYTES}:
             normalized["desc_act"] = False
 
-        if "sym" not in normalized and target_cls not in {GGUFConfig, FP8Config, BitsAndBytesConfig, EXL3QuantizeConfig}:
+        if "sym" not in normalized and target_cls not in {GGUFConfig, FP8Config, BitsAndBytesConfig, EXL3Config}:
             log.warn(
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
@@ -2833,32 +2846,34 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
 
 @dataclass
-class PreFilterQuantizeConfig(BaseQuantizeConfig):
-    pre_filters: Optional[List[Union[BasePreFilterConfig, Dict[str, Any], str]]] = field(default=None)
+class PreProcessorConfig(BaseQuantizeConfig):
+    preprocessors: Optional[List[Union[BasePreProcessorConfig, Dict[str, Any], str]]] = field(default=None)
     smoother: Optional[Union[SmootherConfig, SmoothMethod, Dict[str, Any], str]] = field(default=None)
     # Backward-compatible alias. New code should use `smoother`.
     smooth: Optional[Union[SmoothMethod, Dict[str, Any], str]] = field(default=None, repr=False)
 
-    def _normalize_prefilter_state(self) -> None:
-        self.pre_filters = _normalize_pre_filters(self.pre_filters)
+    def _normalize_preprocessor_state(self) -> None:
+        self.preprocessors = _normalize_preprocessors(self.preprocessors)
 
         smoother_payload = self.smoother if self.smoother is not None else self.smooth
         self.smoother = _normalize_smoother_config(smoother_payload)
 
         if self.smoother is None:
-            for pre_filter in self.pre_filters:
-                if isinstance(pre_filter, SmootherConfig):
-                    self.smoother = pre_filter
+            for preprocessor in self.preprocessors:
+                if isinstance(preprocessor, SmootherConfig):
+                    self.smoother = preprocessor
                     break
 
-        non_smoother_filters = [pre_filter for pre_filter in self.pre_filters if not isinstance(pre_filter, SmootherConfig)]
+        non_smoother_preprocessors = [
+            preprocessor for preprocessor in self.preprocessors if not isinstance(preprocessor, SmootherConfig)
+        ]
         if self.smoother is not None:
-            non_smoother_filters.append(self.smoother)
-        self.pre_filters = non_smoother_filters
+            non_smoother_preprocessors.append(self.smoother)
+        self.preprocessors = non_smoother_preprocessors
         self.smooth = self.resolve_smooth_method()
 
     def __post_init__(self):
-        self._normalize_prefilter_state()
+        self._normalize_preprocessor_state()
         super().__post_init__()
 
     def resolve_smooth_method(self) -> Optional[SmoothMethod]:
@@ -2867,8 +2882,8 @@ class PreFilterQuantizeConfig(BaseQuantizeConfig):
         return self.smoother.smooth
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
-        if self.pre_filters:
-            meta_payload["pre_filters"] = [pre_filter.to_dict() for pre_filter in self.pre_filters]
+        if self.preprocessors:
+            meta_payload["preprocessors"] = [preprocessor.to_dict() for preprocessor in self.preprocessors]
 
 
 @dataclass
@@ -2880,7 +2895,7 @@ class QuantizeConfig(BaseQuantizeConfig, metaclass=QuantizeConfigMeta):
 
 
 @dataclass
-class GPTQQuantizeConfig(PreFilterQuantizeConfig):
+class GPTQConfig(PreProcessorConfig):
     damp_percent: Optional[float] = field(default=None)
     damp_auto_increment: Optional[float] = field(default=None)
     act_group_aware: Optional[bool] = field(default=None)
@@ -2984,7 +2999,7 @@ class GPTQQuantizeConfig(PreFilterQuantizeConfig):
 
 
 @dataclass
-class AWQQuantizeConfig(PreFilterQuantizeConfig):
+class AWQConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.AWQ)
     format: FORMAT = field(default=FORMAT.GEMM)
 
@@ -3009,7 +3024,7 @@ class AWQQuantizeConfig(PreFilterQuantizeConfig):
 
 
 @dataclass
-class ParoQuantizeConfig(QuantizeConfig):
+class ParoConfig(QuantizeConfig):
     method: METHOD = field(default=METHOD.PARO)
     format: FORMAT = field(default=FORMAT.PAROQUANT)
     krot: int = field(default=8)
@@ -3063,7 +3078,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         super().__post_init__()
         self.krot = int(self.krot)
         if self.krot <= 0:
-            raise ValueError("ParoQuantizeConfig: `krot` must be a positive integer.")
+            raise ValueError("ParoConfig: `krot` must be a positive integer.")
         self.opt_rotation_epochs = int(self.opt_rotation_epochs)
         self.opt_finetune_epochs = int(self.opt_finetune_epochs)
         self.opt_train_samples = int(self.opt_train_samples)
@@ -3077,7 +3092,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_optimizer = str(self.opt_optimizer).strip().lower()
         self.opt_weight_decay = float(self.opt_weight_decay)
         if not isinstance(self.opt_betas, (list, tuple)) or len(self.opt_betas) != 2:
-            raise ValueError("ParoQuantizeConfig: `opt_betas` must be a 2-tuple/list of floats.")
+            raise ValueError("ParoConfig: `opt_betas` must be a 2-tuple/list of floats.")
         self.opt_betas = (float(self.opt_betas[0]), float(self.opt_betas[1]))
         self.opt_eps = float(self.opt_eps)
         self.opt_amsgrad = bool(self.opt_amsgrad)
@@ -3095,7 +3110,7 @@ class ParoQuantizeConfig(QuantizeConfig):
                 checkpointing = False
             else:
                 raise ValueError(
-                    "ParoQuantizeConfig: `opt_gradient_checkpointing` string values must be one of "
+                    "ParoConfig: `opt_gradient_checkpointing` string values must be one of "
                     "{'1','0','true','false','yes','no','on','off','y','n','t','f'}."
                 )
         if checkpointing is None:
@@ -3110,44 +3125,44 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_channel_scale_clamp_min = float(self.opt_channel_scale_clamp_min)
         self.opt_channel_scale_clamp_max = float(self.opt_channel_scale_clamp_max)
         if self.opt_rotation_epochs < 0 or self.opt_finetune_epochs < 0:
-            raise ValueError("ParoQuantizeConfig: optimization epochs must be non-negative.")
+            raise ValueError("ParoConfig: optimization epochs must be non-negative.")
         if self.opt_train_samples <= 0 or self.opt_validation_samples <= 0:
-            raise ValueError("ParoQuantizeConfig: optimization sample counts must be positive.")
+            raise ValueError("ParoConfig: optimization sample counts must be positive.")
         if self.opt_batch_size <= 0:
-            raise ValueError("ParoQuantizeConfig: `opt_batch_size` must be positive.")
+            raise ValueError("ParoConfig: `opt_batch_size` must be positive.")
         if self.opt_rotation_lr <= 0 or self.opt_weight_lr <= 0 or self.opt_quantizer_lr <= 0:
-            raise ValueError("ParoQuantizeConfig: optimization learning rates must be positive.")
+            raise ValueError("ParoConfig: optimization learning rates must be positive.")
         if not (0.0 < self.opt_pair_ratio <= 0.5):
-            raise ValueError("ParoQuantizeConfig: `opt_pair_ratio` must be in the interval (0, 0.5].")
+            raise ValueError("ParoConfig: `opt_pair_ratio` must be in the interval (0, 0.5].")
         if self.opt_optimizer not in {"adamw", "adam", "sgd"}:
-            raise ValueError("ParoQuantizeConfig: `opt_optimizer` must be one of {'adamw', 'adam', 'sgd'}.")
+            raise ValueError("ParoConfig: `opt_optimizer` must be one of {'adamw', 'adam', 'sgd'}.")
         if self.opt_weight_decay < 0:
-            raise ValueError("ParoQuantizeConfig: `opt_weight_decay` must be non-negative.")
+            raise ValueError("ParoConfig: `opt_weight_decay` must be non-negative.")
         if self.opt_eps <= 0:
-            raise ValueError("ParoQuantizeConfig: `opt_eps` must be positive.")
+            raise ValueError("ParoConfig: `opt_eps` must be positive.")
         if not all(0.0 <= beta < 1.0 for beta in self.opt_betas):
-            raise ValueError("ParoQuantizeConfig: `opt_betas` values must be in the interval [0, 1).")
+            raise ValueError("ParoConfig: `opt_betas` values must be in the interval [0, 1).")
         if self.opt_sgd_momentum < 0:
-            raise ValueError("ParoQuantizeConfig: `opt_sgd_momentum` must be non-negative.")
+            raise ValueError("ParoConfig: `opt_sgd_momentum` must be non-negative.")
         if self.opt_sgd_dampening < 0:
-            raise ValueError("ParoQuantizeConfig: `opt_sgd_dampening` must be non-negative.")
+            raise ValueError("ParoConfig: `opt_sgd_dampening` must be non-negative.")
         if self.opt_sgd_nesterov and self.opt_sgd_momentum <= 0:
-            raise ValueError("ParoQuantizeConfig: `opt_sgd_nesterov=True` requires `opt_sgd_momentum > 0`.")
+            raise ValueError("ParoConfig: `opt_sgd_nesterov=True` requires `opt_sgd_momentum > 0`.")
         if self.opt_sgd_nesterov and self.opt_sgd_dampening != 0:
-            raise ValueError("ParoQuantizeConfig: `opt_sgd_nesterov=True` requires `opt_sgd_dampening == 0`.")
+            raise ValueError("ParoConfig: `opt_sgd_nesterov=True` requires `opt_sgd_dampening == 0`.")
         if self.opt_scope not in {"module", "compute_block", "layer"}:
-            raise ValueError("ParoQuantizeConfig: `opt_scope` must be one of {'module', 'compute_block', 'layer'}.")
+            raise ValueError("ParoConfig: `opt_scope` must be one of {'module', 'compute_block', 'layer'}.")
         if self.opt_stage_impl not in {"fast", "reference"}:
-            raise ValueError("ParoQuantizeConfig: `opt_stage_impl` must be one of {'fast', 'reference'}.")
+            raise ValueError("ParoConfig: `opt_stage_impl` must be one of {'fast', 'reference'}.")
         if self.opt_pair_impl not in {"fast", "reference"}:
-            raise ValueError("ParoQuantizeConfig: `opt_pair_impl` must be one of {'fast', 'reference'}.")
+            raise ValueError("ParoConfig: `opt_pair_impl` must be one of {'fast', 'reference'}.")
         if self.opt_quantizer_impl not in {"fast", "reference"}:
-            raise ValueError("ParoQuantizeConfig: `opt_quantizer_impl` must be one of {'fast', 'reference'}.")
+            raise ValueError("ParoConfig: `opt_quantizer_impl` must be one of {'fast', 'reference'}.")
         if self.opt_channel_scale_clamp_min <= 0 or self.opt_channel_scale_clamp_max <= 0:
-            raise ValueError("ParoQuantizeConfig: scale clamp bounds must be positive.")
+            raise ValueError("ParoConfig: scale clamp bounds must be positive.")
         if self.opt_channel_scale_clamp_min >= self.opt_channel_scale_clamp_max:
             raise ValueError(
-                "ParoQuantizeConfig: `opt_channel_scale_clamp_min` must be smaller than "
+                "ParoConfig: `opt_channel_scale_clamp_min` must be smaller than "
                 "`opt_channel_scale_clamp_max`."
             )
 
@@ -3194,7 +3209,7 @@ class ParoQuantizeConfig(QuantizeConfig):
 
 
 @dataclass
-class QQQQuantizeConfig(GPTQQuantizeConfig):
+class QQQConfig(GPTQConfig):
     method: METHOD = field(default=METHOD.QQQ)
     format: FORMAT = field(default=FORMAT.QQQ)
 
@@ -3209,7 +3224,7 @@ class QQQQuantizeConfig(GPTQQuantizeConfig):
 
 
 @dataclass
-class FP8Config(PreFilterQuantizeConfig):
+class FP8Config(PreProcessorConfig):
     bits: int = field(default=8, metadata={"choices": [8]})
     method: METHOD = field(default=METHOD.FP8)
     format: Optional[str] = field(default="float8_e4m3fn")
@@ -3234,8 +3249,8 @@ class FP8Config(PreFilterQuantizeConfig):
         return False
 
     def __post_init__(self):
-        self._normalize_prefilter_state()
-        super(PreFilterQuantizeConfig, self).__post_init__()
+        self._normalize_preprocessor_state()
+        super(PreProcessorConfig, self).__post_init__()
 
         if self.bits != 8:
             raise ValueError("FP8Config: `bits` must be `8`.")
@@ -3317,12 +3332,8 @@ class FP8Config(PreFilterQuantizeConfig):
     def uses_weight_only_lifecycle(self) -> bool:
         return True
 
-
-FP8QuantizeConfig = FP8Config
-
-
 @dataclass
-class BitsAndBytesConfig(PreFilterQuantizeConfig):
+class BitsAndBytesConfig(PreProcessorConfig):
     bits: int = field(default=4, metadata={"choices": [4, 8]})
     method: METHOD = field(default=METHOD.BITSANDBYTES)
     format: Optional[str] = field(default=None)
@@ -3346,8 +3357,8 @@ class BitsAndBytesConfig(PreFilterQuantizeConfig):
         return False
 
     def __post_init__(self):
-        self._normalize_prefilter_state()
-        super(PreFilterQuantizeConfig, self).__post_init__()
+        self._normalize_preprocessor_state()
+        super(PreProcessorConfig, self).__post_init__()
 
         if self.bits not in {4, 8}:
             raise ValueError("BitsAndBytesConfig: `bits` must be `4` or `8`.")
@@ -3446,12 +3457,8 @@ class BitsAndBytesConfig(PreFilterQuantizeConfig):
     def bnb_compress_statistics(self, value: bool) -> None:
         self.compress_statistics = bool(value)
 
-
-BitsAndBytesQuantizeConfig = BitsAndBytesConfig
-
-
 @dataclass
-class EXL3QuantizeConfig(BaseQuantizeConfig):
+class EXL3Config(BaseQuantizeConfig):
     bits: float = field(default=3.0)
     method: METHOD = field(default=METHOD.EXL3)
     format: FORMAT = field(default=FORMAT.EXL3)
@@ -3495,7 +3502,7 @@ class EXL3QuantizeConfig(BaseQuantizeConfig):
             elif key == "head_bits":
                 layer_dict[key] = None if value is None else _normalize_exl3_bits(value)
             elif key == "group_size" and value not in (-1, None):
-                raise ValueError("EXL3QuantizeConfig: `group_size` is not used; keep it at `-1`.")
+                raise ValueError("EXL3Config: `group_size` is not used; keep it at `-1`.")
 
     def __post_init__(self):
         self.method = _normalize_quant_method(self.method)
@@ -3505,9 +3512,9 @@ class EXL3QuantizeConfig(BaseQuantizeConfig):
         self.head_bits = None if self.head_bits is None else _normalize_exl3_bits(self.head_bits)
 
         if self.method != METHOD.EXL3:
-            raise ValueError("EXL3QuantizeConfig: `method` must be `exl3`.")
+            raise ValueError("EXL3Config: `method` must be `exl3`.")
         if self.format != FORMAT.EXL3:
-            raise ValueError("EXL3QuantizeConfig: `format` must be `exl3`.")
+            raise ValueError("EXL3Config: `format` must be `exl3`.")
 
         self.group_size = -1
         self.desc_act = False
@@ -3539,18 +3546,18 @@ class EXL3QuantizeConfig(BaseQuantizeConfig):
                 "none": "auto",
             }
             if normalized_out_scales not in out_scale_aliases:
-                raise ValueError("EXL3QuantizeConfig: `out_scales` must be one of `always`, `never`, or `auto`.")
+                raise ValueError("EXL3Config: `out_scales` must be one of `always`, `never`, or `auto`.")
             self.out_scales = out_scale_aliases[normalized_out_scales]
 
         self.codebook = str(self.codebook).strip().lower()
         if self.codebook not in {"mcg", "mul1", "3inst"}:
-            raise ValueError("EXL3QuantizeConfig: `codebook` must be one of `mcg`, `mul1`, or `3inst`.")
+            raise ValueError("EXL3Config: `codebook` must be one of `mcg`, `mul1`, or `3inst`.")
 
         if self.tensor_storage is not None and not isinstance(self.tensor_storage, dict):
-            raise ValueError("EXL3QuantizeConfig: `tensor_storage` must be a dictionary when provided.")
+            raise ValueError("EXL3Config: `tensor_storage` must be a dictionary when provided.")
         if self.calibration is not None:
             if not isinstance(self.calibration, dict):
-                raise ValueError("EXL3QuantizeConfig: `calibration` must be a dictionary when provided.")
+                raise ValueError("EXL3Config: `calibration` must be a dictionary when provided.")
             self.calibration = {
                 str(key): int(value)
                 for key, value in self.calibration.items()
@@ -3594,7 +3601,7 @@ class EXL3QuantizeConfig(BaseQuantizeConfig):
         )
 
 @dataclass
-class RTNQuantizeConfig(PreFilterQuantizeConfig):
+class RTNConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.GPTQ)
     format: FORMAT = field(default=FORMAT.GPTQ)
 
@@ -3625,7 +3632,7 @@ class RTNQuantizeConfig(PreFilterQuantizeConfig):
 
 
 @dataclass
-class GGUFConfig(PreFilterQuantizeConfig):
+class GGUFConfig(PreProcessorConfig):
     bits: Union[int, str, GGUFBits] = field(default=4, metadata={"choices": [1, 2, 3, 4, 5, 6, 8]})
     format: Optional[str] = field(default=None)
     method: METHOD = field(default=METHOD.GGUF, init=False)
@@ -3689,8 +3696,8 @@ class GGUFConfig(PreFilterQuantizeConfig):
             raise ValueError(_resolve_dynamic_group_size_error())
 
     def __post_init__(self):
-        self._normalize_prefilter_state()
-        # GGUFConfig already normalized pre-filters above; skip the parent hook to
+        self._normalize_preprocessor_state()
+        # GGUFConfig already normalized preprocessors above; skip the parent hook to
         # avoid running that normalization twice.
         BaseQuantizeConfig.__post_init__(self)
         self._gguf_bits = _gguf_bits_from_components(self.bits, self.format)
@@ -3736,14 +3743,10 @@ class GGUFConfig(PreFilterQuantizeConfig):
     def uses_weight_only_lifecycle(self) -> bool:
         return True
 
-
-GGUFQuantizeConfig = GGUFConfig
-
-
 def clone_weight_only_config_for_module(
-    qcfg: Union[RTNQuantizeConfig, GGUFConfig, FP8Config, BitsAndBytesConfig],
+    qcfg: Union[RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig],
     module_full_name: str,
-) -> Optional[Union[RTNQuantizeConfig, GGUFConfig, FP8Config, BitsAndBytesConfig]]:
+) -> Optional[Union[RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig]]:
     if qcfg.dynamic_get(layer_name=module_full_name) is False:
         return None
 
@@ -3836,7 +3839,7 @@ def clone_weight_only_config_for_module(
                 format_value=resolve_quant_format(qcfg_clone.format, qcfg_clone.method),
             )
 
-        if isinstance(qcfg_clone, RTNQuantizeConfig):
+        if isinstance(qcfg_clone, RTNConfig):
             qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
             qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
 
@@ -3906,42 +3909,42 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
     if weight_only_method == WeightOnlyMethod.BITSANDBYTES:
         return BitsAndBytesConfig
     if weight_only_method == WeightOnlyMethod.RTN:
-        return RTNQuantizeConfig
+        return RTNConfig
     if weight_only is not None:
-        return RTNQuantizeConfig
+        return RTNConfig
     if method == METHOD.FP8 or format_value == FORMAT.FP8 or _looks_like_fp8_fmt(fp8_storage_fmt):
         return FP8Config
     if method == METHOD.BITSANDBYTES or format_value == FORMAT.BITSANDBYTES or _looks_like_bitsandbytes_format(raw_format_value):
         return BitsAndBytesConfig
     if method == METHOD.EXL3 or format_value == FORMAT.EXL3:
-        return EXL3QuantizeConfig
+        return EXL3Config
     if method == METHOD.PARO or format_value == FORMAT.PAROQUANT:
-        return ParoQuantizeConfig
+        return ParoConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
-        return QQQQuantizeConfig
+        return QQQConfig
     if method == METHOD.AWQ:
-        return AWQQuantizeConfig
+        return AWQConfig
     if format_value in {FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ}:
-        return AWQQuantizeConfig
+        return AWQConfig
     if format_value == FORMAT.MARLIN:
-        return AWQQuantizeConfig if method == METHOD.AWQ else GPTQQuantizeConfig
-    return GPTQQuantizeConfig
+        return AWQConfig if method == METHOD.AWQ else GPTQConfig
+    return GPTQConfig
 
 
 def _known_quantize_config_field_names() -> set[str]:
     field_names: set[str] = set()
     for cls in (
         BaseQuantizeConfig,
-        PreFilterQuantizeConfig,
+        PreProcessorConfig,
         QuantizeConfig,
-        GPTQQuantizeConfig,
-        AWQQuantizeConfig,
-        ParoQuantizeConfig,
-        QQQQuantizeConfig,
+        GPTQConfig,
+        AWQConfig,
+        ParoConfig,
+        QQQConfig,
         FP8Config,
         BitsAndBytesConfig,
-        EXL3QuantizeConfig,
-        RTNQuantizeConfig,
+        EXL3Config,
+        RTNConfig,
         GGUFConfig,
     ):
         field_names.update(field.name for field in fields(cls))
