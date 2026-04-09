@@ -96,6 +96,8 @@ if TYPE_CHECKING:
     except Exception:  # pragma: no cover - optional dependency
         HFDatasetType = HFIterableDatasetType = object
 
+    from ..looper.named_module import NamedModule
+
 
 class _ClassPropertyDescriptor:
     def __init__(self, fget, fset=None):
@@ -877,8 +879,8 @@ class BaseQModel(nn.Module):
     ):
         from ..adapter.adapter import Lora
         from ..looper.eora_processor import EoraProcessor
-        from ..looper.module_prefilter_processor import ModulePreFilterProcessor
         from ..looper.module_looper import ModuleLooper
+        from ..looper.module_prefilter_processor import ModulePreFilterProcessor
         from ..looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
 
         needs_lora = isinstance(self.quantize_config.adapter, Lora)

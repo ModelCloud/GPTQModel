@@ -15,7 +15,7 @@ if TESTS_MODELS_ROOT not in sys.path:
 
 from model_test import ModelTest
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND
 from gptqmodel.looper.module_looper import StopMainLoop
 from gptqmodel.models import auto
 from gptqmodel.quantization import AutoModuleDecoderConfig

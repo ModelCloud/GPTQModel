@@ -14,12 +14,12 @@ from torch import nn
 import gptqmodel.models.base as base_module
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.quantization.dtype import dequantize_f4_e2m1, dequantize_fp8
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.structure import LazyTurtle
+
 
 try:
     from torchao.prototype.mx_formats.nvfp4_tensor import nvfp4_quantize
@@ -78,7 +78,7 @@ def test_shell_materialize_forward_builds_fp8_wrapper_and_quant_source(tmp_path,
         requires_grad=False,
     )
 
-    harness = BaseQModel.__new__(BaseQModel)
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
     nn.Module.__init__(harness)
     harness.model = shell_model
     harness.turtle_model = turtle
@@ -94,7 +94,7 @@ def test_shell_materialize_forward_builds_fp8_wrapper_and_quant_source(tmp_path,
 
     monkeypatch.setattr(base_module, "device_supports_dtype", lambda *args, **kwargs: True)
 
-    prepared = BaseQModel.shell_module_materialize(
+    prepared = base_module.BaseQModel.shell_module_materialize(
         harness,
         target_submodule=shell_model.linear,
         device=torch.device("cpu"),
@@ -152,7 +152,7 @@ def test_shell_materialize_quant_source_swaps_back_to_dense_module(tmp_path, mon
         requires_grad=False,
     )
 
-    harness = BaseQModel.__new__(BaseQModel)
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
     nn.Module.__init__(harness)
     harness.model = shell_model
     harness.turtle_model = turtle
@@ -168,7 +168,7 @@ def test_shell_materialize_quant_source_swaps_back_to_dense_module(tmp_path, mon
 
     monkeypatch.setattr(base_module, "device_supports_dtype", lambda *args, **kwargs: True)
 
-    forward_module = BaseQModel.shell_module_materialize(
+    forward_module = base_module.BaseQModel.shell_module_materialize(
         harness,
         target_submodule=shell_model.linear,
         device=torch.device("cpu"),
@@ -177,7 +177,7 @@ def test_shell_materialize_quant_source_swaps_back_to_dense_module(tmp_path, mon
     )
     named.module = forward_module
 
-    quant_source = BaseQModel.shell_module_materialize(
+    quant_source = base_module.BaseQModel.shell_module_materialize(
         harness,
         target_submodule=forward_module,
         device=torch.device("cpu"),
@@ -231,7 +231,7 @@ def test_shell_materialize_forward_decodes_fp4_source_to_dense_module(tmp_path):
         requires_grad=False,
     )
 
-    harness = BaseQModel.__new__(BaseQModel)
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
     nn.Module.__init__(harness)
     harness.model = shell_model
     harness.turtle_model = turtle
@@ -245,7 +245,7 @@ def test_shell_materialize_forward_decodes_fp4_source_to_dense_module(tmp_path):
         "target_dtype": torch.bfloat16,
     }
 
-    prepared = BaseQModel.shell_module_materialize(
+    prepared = base_module.BaseQModel.shell_module_materialize(
         harness,
         target_submodule=shell_model.linear,
         device=torch.device("cpu"),
@@ -308,7 +308,7 @@ def test_shell_materialize_forward_builds_fp4_wrapper_when_native_supported(tmp_
         requires_grad=False,
     )
 
-    harness = BaseQModel.__new__(BaseQModel)
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
     nn.Module.__init__(harness)
     harness.model = shell_model
     harness.turtle_model = turtle
@@ -324,7 +324,7 @@ def test_shell_materialize_forward_builds_fp4_wrapper_when_native_supported(tmp_
 
     monkeypatch.setattr(base_module, "device_supports_native_fp4", lambda *args, **kwargs: True)
 
-    prepared = BaseQModel.shell_module_materialize(
+    prepared = base_module.BaseQModel.shell_module_materialize(
         harness,
         target_submodule=shell_model.linear,
         device=torch.device("cpu"),
