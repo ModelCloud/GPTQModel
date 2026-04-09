@@ -17,6 +17,7 @@ class TestDeci(ModelTest):
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     TRUST_REMOTE_CODE = True
     USE_VLLM = False
+    USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 6
 
     def test_deci(self):

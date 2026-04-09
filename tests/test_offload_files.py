@@ -118,6 +118,24 @@ class _RotaryWrapper(nn.Module):
         self.block.rotary = LlamaRotaryEmbedding(config, device=torch.device("cpu"))
 
 
+class _AttrBufferTemplate(nn.Module):
+    def __init__(self, width: int, scale: float = 1.0, device=None):
+        super().__init__()
+        self.width = width
+        self.scale = scale
+        base = torch.arange(width, dtype=torch.float32, device=device)
+        self.register_buffer("cache", base * scale, persistent=False)
+        self.register_buffer("cache_plus_one", base + 1, persistent=False)
+
+
+class _AttrBufferWrapper(nn.Module):
+    def __init__(self, width: int, scale: float = 1.0):
+        super().__init__()
+        self.block = nn.Module()
+        self.block.linear = nn.Linear(width, width, bias=False)
+        self.block.rotary = _AttrBufferTemplate(width=width, scale=scale, device=torch.device("cpu"))
+
+
 def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, torch.Tensor]) -> None:
     weight_map = dict.fromkeys(state_dict, shard_name)
     (path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
@@ -440,6 +458,42 @@ def test_lazy_turtle_restores_nonpersistent_buffers_from_module_init(tmp_path):
     torch.testing.assert_close(shell_model.block.rotary.original_inv_freq, source_model.block.rotary.original_inv_freq)
     assert shell_model.block.rotary.inv_freq.device.type == "cpu"
     assert shell_model.block.rotary._non_persistent_buffers_set == {"inv_freq", "original_inv_freq"}
+
+
+def test_lazy_turtle_restores_nonpersistent_buffers_from_attribute_ctor(tmp_path):
+    source_model = _AttrBufferWrapper(width=16, scale=0.5)
+    shell_model = _AttrBufferWrapper(width=16, scale=0.5)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    shell_model.block.linear.weight = nn.Parameter(
+        torch.empty_like(shell_model.block.linear.weight, device="meta"),
+        requires_grad=shell_model.block.linear.weight.requires_grad,
+    )
+    shell_model.block.rotary.register_buffer(
+        "cache",
+        torch.empty_like(shell_model.block.rotary.cache, device="meta"),
+        persistent=False,
+    )
+    shell_model.block.rotary.register_buffer(
+        "cache_plus_one",
+        torch.empty_like(shell_model.block.rotary.cache_plus_one, device="meta"),
+        persistent=False,
+    )
+
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.block,
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(shell_model.block.linear.weight, source_model.block.linear.weight)
+    torch.testing.assert_close(shell_model.block.rotary.cache, source_model.block.rotary.cache)
+    torch.testing.assert_close(shell_model.block.rotary.cache_plus_one, source_model.block.rotary.cache_plus_one)
+    assert shell_model.block.rotary.cache.device.type == "cpu"
+    assert shell_model.block.rotary._non_persistent_buffers_set == {"cache", "cache_plus_one"}
 
 
 def test_alias_all_from_lazy_turtle_restores_direct_meta_tensors(tmp_path):

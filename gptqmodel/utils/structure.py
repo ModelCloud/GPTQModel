@@ -885,8 +885,6 @@ class LazyTurtle:
             config_source = getattr(target_model, "config", None)
         if config_source is None:
             config_source = self.config
-        if config_source is None:
-            return None
 
         module_type = type(owner_module)
         try:
@@ -895,22 +893,33 @@ class LazyTurtle:
             return None
 
         params = list(signature.parameters.values())
-        if not params or params[0].name != "config":
+        if not params:
             return None
 
         args = []
         kwargs = {}
-        if params[0].kind is inspect.Parameter.POSITIONAL_ONLY:
-            args.append(copy.deepcopy(config_source))
-        else:
-            kwargs["config"] = copy.deepcopy(config_source)
 
-        device_param = signature.parameters.get("device")
-        if device_param is not None:
-            if device_param.kind is inspect.Parameter.POSITIONAL_ONLY:
-                args.append(torch.device("cpu"))
+        for param in params:
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+
+            if param.name == "config":
+                if config_source is None:
+                    return None
+                value = copy.deepcopy(config_source)
+            elif param.name == "device":
+                value = torch.device("cpu")
+            elif hasattr(owner_module, param.name):
+                value = copy.deepcopy(getattr(owner_module, param.name))
+            elif param.default is not inspect.Parameter.empty:
+                continue
             else:
-                kwargs["device"] = torch.device("cpu")
+                return None
+
+            if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+                args.append(value)
+            else:
+                kwargs[param.name] = value
 
         try:
             return module_type(*args, **kwargs)
