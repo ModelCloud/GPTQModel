@@ -990,6 +990,36 @@ void dequantize_fp8_row_avx2_bf16(
 }
 
 __attribute__((target("avx2")))
+void dequantize_fp8_row_avx2_bf16_block16_scale(
+    const uint8_t* src_row,
+    c10::BFloat16* dst_row,
+    const float* block_scales,
+    int64_t cols,
+    const std::array<float, 256>& table,
+    ScaleMode scale_mode) {
+  // Block-16 scaling is common in real checkpoints. Walk blocks linearly so the
+  // hot loop avoids the generic block bookkeeping and repeated divide/index work.
+  int64_t col = 0;
+  int64_t block_idx = 0;
+  for (; col + 16 <= cols; col += 16, ++block_idx) {
+    const __m256 scale_vec = _mm256_set1_ps(static_cast<float>(c10::BFloat16(block_scales[block_idx])));
+    __m256 values_lo;
+    __m256 values_hi;
+    load_fp8x16_to_ps(src_row + col, table.data(), &values_lo, &values_hi);
+    apply_scale_and_store_bf16x8_const(dst_row + col, values_lo, scale_mode, scale_vec);
+    apply_scale_and_store_bf16x8_const(dst_row + col + 8, values_hi, scale_mode, scale_vec);
+  }
+  if (col < cols) {
+    const float rounded_scale = static_cast<float>(c10::BFloat16(block_scales[block_idx]));
+    for (int64_t i = col; i < cols; ++i) {
+      float value = table[src_row[i]];
+      value = scale_mode == ScaleMode::kMultiply ? value * rounded_scale : value / rounded_scale;
+      store_scalar(dst_row + i, value);
+    }
+  }
+}
+
+__attribute__((target("avx2")))
 void dequantize_fp8_row_avx2_bf16_const_scale(
     const uint8_t* src_row,
     c10::BFloat16* dst_row,
@@ -1101,6 +1131,36 @@ void dequantize_fp8_row_avx2_fp16(
       tail[i] = table[src_row[col + i]];
     }
     apply_scale_and_store_scalar(dst_row + col, tail, tail_count, scale_mode, spec, row, col);
+  }
+}
+
+__attribute__((target("avx2,f16c")))
+void dequantize_fp8_row_avx2_fp16_block16_scale(
+    const uint8_t* src_row,
+    c10::Half* dst_row,
+    const float* block_scales,
+    int64_t cols,
+    const std::array<float, 256>& table,
+    ScaleMode scale_mode) {
+  // Block-16 scaling is common in real checkpoints. Walk blocks linearly so the
+  // hot loop avoids the generic block bookkeeping and repeated divide/index work.
+  int64_t col = 0;
+  int64_t block_idx = 0;
+  for (; col + 16 <= cols; col += 16, ++block_idx) {
+    const __m256 scale_vec = _mm256_set1_ps(static_cast<float>(c10::Half(block_scales[block_idx])));
+    __m256 values_lo;
+    __m256 values_hi;
+    load_fp8x16_to_ps(src_row + col, table.data(), &values_lo, &values_hi);
+    apply_scale_and_store_fp16x8_const(dst_row + col, values_lo, scale_mode, scale_vec);
+    apply_scale_and_store_fp16x8_const(dst_row + col + 8, values_hi, scale_mode, scale_vec);
+  }
+  if (col < cols) {
+    const float rounded_scale = static_cast<float>(c10::Half(block_scales[block_idx]));
+    for (int64_t i = col; i < cols; ++i) {
+      float value = table[src_row[i]];
+      value = scale_mode == ScaleMode::kMultiply ? value * rounded_scale : value / rounded_scale;
+      store_scalar(dst_row + i, value);
+    }
   }
 }
 
@@ -1588,7 +1648,16 @@ void dequantize_fp8_2d(
       const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
       at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
-          if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 16) {
+          if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock &&
+              spec.row_repeat == 1 && spec.col_repeat == 16) {
+            dequantize_fp8_row_avx2_bf16_block16_scale(
+                src + row * cols,
+                dst + row * cols,
+                spec.ptr + row * spec.scale_cols,
+                cols,
+                table,
+                scale_mode);
+          } else if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 16) {
             dequantize_fp8_row_avx2_bf16_block_scale(
                 src + row * cols,
                 dst + row * cols,
@@ -1673,7 +1742,16 @@ void dequantize_fp8_2d(
     const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
     at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
       for (int64_t row = begin; row < end; ++row) {
-        if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 16) {
+        if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock &&
+            spec.row_repeat == 1 && spec.col_repeat == 16) {
+          dequantize_fp8_row_avx2_fp16_block16_scale(
+              src + row * cols,
+              dst + row * cols,
+              spec.ptr + row * spec.scale_cols,
+              cols,
+              table,
+              scale_mode);
+        } else if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 16) {
           dequantize_fp8_row_avx2_fp16_block_scale(
               src + row * cols,
               dst + row * cols,
