@@ -62,6 +62,7 @@ class _FakeExtension:
 def _install_fake_extensions(monkeypatch):
     fakes = {
         "pack_block_cpu": _FakeExtension("pack_block_cpu"),
+        "floatx_cpu": _FakeExtension("floatx_cpu"),
         "awq": _FakeExtension("AWQ"),
         "qqq": _FakeExtension("QQQ"),
         "exllamav2": _FakeExtension("ExLlamaV2 GPTQ"),
@@ -74,6 +75,7 @@ def _install_fake_extensions(monkeypatch):
     }
 
     monkeypatch.setattr(cpp_utils, "_pack_block_extension", lambda: fakes["pack_block_cpu"])
+    monkeypatch.setattr(cpp_utils, "_floatx_cpu_extension", lambda: fakes["floatx_cpu"])
     monkeypatch.setattr(awq_utils, "_AWQ_TORCH_OPS_EXTENSION", fakes["awq"])
     monkeypatch.setattr(qqq_utils, "_QQQ_TORCH_OPS_EXTENSION", fakes["qqq"])
     monkeypatch.setattr(exllamav2_utils, "_EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION", fakes["exllamav2"])
@@ -99,6 +101,7 @@ def test_load_defaults_to_all_extensions(monkeypatch):
 
     assert result == {
         "pack_block_cpu": True,
+        "floatx_cpu": True,
         "awq": True,
         "qqq": True,
         "exllamav2": True,

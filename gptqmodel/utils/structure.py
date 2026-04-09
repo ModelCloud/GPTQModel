@@ -66,10 +66,21 @@ _DTYPE_BYTES: Dict[object, float] = {
     torch.int32: 4, torch.int: 4,
     torch.bool: 1,
 }
-if hasattr(torch, "float8_e4m3fn"):
-    _DTYPE_BYTES[torch.float8_e4m3fn] = 1
-if hasattr(torch, "float8_e5m2"):
-    _DTYPE_BYTES[torch.float8_e5m2] = 1
+for _dtype_name in (
+    *[
+        name
+        for name in (
+            "float8_e4m3fn",
+            "float8_e5m2",
+            "float8_e4m3fnuz",
+            "float8_e5m2fnuz",
+            "float8_e8m0fnu",
+        )
+        if hasattr(torch, name)
+    ],
+    *[name for name in ("float4_e2m1fn_x2",) if hasattr(torch, name)],
+):
+    _DTYPE_BYTES[getattr(torch, _dtype_name)] = 1
 
 class _FakeDType:
     """Sentinel dtype for experimental 4-bit formats."""
@@ -253,8 +264,6 @@ def print_module_tree(
         "bfloat16":"\033[35m",        # magenta
         "float16": "\033[33m",        # yellow
         "half":    "\033[33m",        # yellow (alias)
-        "float8_e4m3fn": "\033[34m",  # blue
-        "float8_e5m2":   "\033[34m",  # blue
         "MXFP4":   "\033[36m",        # cyan (sentinel 4-bit)
         "NVFP4":   "\033[36m",        # cyan (sentinel 4-bit)
         "int8":    "\033[31m",        # red
@@ -266,6 +275,21 @@ def print_module_tree(
         "bool":    "\033[37m",        # white/gray
         "-":       "\033[37m",        # white/gray (unknown)
     }
+    for _dtype_name in (
+        *[
+            name
+            for name in (
+                "float8_e4m3fn",
+                "float8_e5m2",
+                "float8_e4m3fnuz",
+                "float8_e5m2fnuz",
+                "float8_e8m0fnu",
+            )
+            if hasattr(torch, name)
+        ],
+        *[name for name in ("float4_e2m1fn_x2",) if hasattr(torch, name)],
+    ):
+        DTYPE_COLOR[_dtype_name] = "\033[34m" if _dtype_name.startswith("float8_") else "\033[36m"
     DEVICE_COLOR = {
         "cpu":          "\033[37m",  # white/gray
         "cuda":         "\033[32m",  # green

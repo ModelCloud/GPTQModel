@@ -18,17 +18,23 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from ..quantization.dtype import dequantize_f4_e2m1, dequantize_fp8
+from ..quantization.dtype import (
+    available_float4_packed_dtypes,
+    available_float8_dtype_names,
+    available_float8_dtypes,
+    dequantize_f4_e2m1,
+    dequantize_fp8,
+)
 from ..utils.logger import setup_logger
 
 
 LOG = logging.getLogger(__name__)
 
-_FLOAT8_DTYPES = tuple(
-    getattr(torch, name)
-    for name in ("float8_e4m3fn", "float8_e5m2")
-    if hasattr(torch, name)
-)
+# Reuse the shared dtype registries so checkpoint detection stays aligned with
+# the CPU dequant kernels and config normalization paths.
+_FLOAT8_DTYPES = available_float8_dtypes()
+_FLOAT8_FORMAT_NAMES = frozenset(available_float8_dtype_names())
+_NVFP4_STORAGE_DTYPES = (torch.uint8, *available_float4_packed_dtypes())
 
 if TYPE_CHECKING:
     from compressed_tensors.compressors.base import BaseCompressor
@@ -351,7 +357,7 @@ def detect_format(model_path: Path, config: dict) -> str:
                 if tensor.dtype in _FLOAT8_DTYPES:
                     LOG.debug("Detected FP8 weights via dtype on tensor '%s'", key)
                     return "fp8"
-                if tensor.dtype == torch.uint8 and (key + "_scale") in keys:
+                if tensor.dtype in _NVFP4_STORAGE_DTYPES and (key + "_scale") in keys:
                     LOG.debug("Detected NVFP4 weights via dtype on tensor '%s'", key)
                     return "nvfp4"
         if any(k.endswith(".weight_packed") for k in keys):
@@ -384,7 +390,7 @@ def detect_format(model_path: Path, config: dict) -> str:
             )
             return "gptq" if has_g else "awq"
 
-    if format_name in {"float8_e4m3fn", "float8_e5m2"}:
+    if format_name in _FLOAT8_FORMAT_NAMES:
         LOG.debug("Detected FP8 format via config format=%s", format_name)
         return "fp8"
     if format_name in {"fp4", "nf4", "int8"}:
@@ -508,7 +514,7 @@ def convert_nvfp4_shard(reader, target_dtype: torch.dtype) -> Dict[str, torch.Te
     tensors: Dict[str, torch.Tensor] = {}
     for key in reader.keys():
         tensor = reader.get_tensor(key)
-        if key.endswith(".weight") and tensor.dtype == torch.uint8:
+        if key.endswith(".weight") and tensor.dtype in _NVFP4_STORAGE_DTYPES:
             scale_key = key + "_scale"
             if scale_key not in reader.keys():
                 raise KeyError(f"Missing scale tensor for {key}")
@@ -521,7 +527,7 @@ def convert_nvfp4_shard(reader, target_dtype: torch.dtype) -> Dict[str, torch.Te
                 target_dtype=target_dtype,
             )
             tensors[key] = finalize_for_save(deq, target_dtype)
-        elif key.endswith("_weight_scale"):
+        elif key.endswith(".weight_scale"):
             LOG.debug("Dropping auxiliary NVFP4 tensor '%s' after dequantization", key)
             continue
         else:

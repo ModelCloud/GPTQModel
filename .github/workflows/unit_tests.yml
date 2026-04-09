@@ -187,7 +187,7 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
-    if: always() && !cancelled() && (needs.build.result == 'success') && needs.list-test-files.outputs.torch-files != '[]' #  || github.event.inputs.artifact_id != ''
+    if: always() && !cancelled() && needs.list-test-files.outputs.torch-files != '[]' #  || github.event.inputs.artifact_id != ''
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
@@ -409,7 +409,7 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.model-files) }}
-    if: always() && !cancelled() && (needs.build.result == 'success') && needs.list-test-files.outputs.model-files != '[]'
+    if: always() && !cancelled() && needs.list-test-files.outputs.model-files != '[]'
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6

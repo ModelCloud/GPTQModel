@@ -698,12 +698,22 @@ def _normalize_exl3_bits(bits: Union[int, float, str]) -> float:
     return float(bits)
 
 
+# Canonical FP8 aliases are normalized here before validating torch runtime
+# support so config payloads can use either shorthand or exact dtype names.
 _FP8_FMT_ALIASES = {
     "e4m3": "float8_e4m3fn",
     "float8_e4m3": "float8_e4m3fn",
     "float8_e4m3fn": "float8_e4m3fn",
     "e5m2": "float8_e5m2",
     "float8_e5m2": "float8_e5m2",
+    "e4m3fnuz": "float8_e4m3fnuz",
+    "float8_e4m3fnuz": "float8_e4m3fnuz",
+    "e5m2fnuz": "float8_e5m2fnuz",
+    "float8_e5m2fnuz": "float8_e5m2fnuz",
+    "e8m0": "float8_e8m0fnu",
+    "e8m0fnu": "float8_e8m0fnu",
+    "float8_e8m0": "float8_e8m0fnu",
+    "float8_e8m0fnu": "float8_e8m0fnu",
 }
 _FP8_WEIGHT_SCALE_METHODS = {"tensor", "row", "block"}
 _FP8_SCALE_SEMANTICS = {"inverse"}

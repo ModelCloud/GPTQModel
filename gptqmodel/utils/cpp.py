@@ -35,6 +35,7 @@ _PACK_BLOCK_EXTENSION: Optional[bool] = None
 _PACK_BLOCK_EXTENSION_INITIALISED = False
 
 _PACK_BLOCK_TORCH_OPS_EXTENSION = None
+_FLOATX_CPU_TORCH_OPS_EXTENSION = None
 
 _cpp_ext_lock = threading.Lock()
 
@@ -772,6 +773,16 @@ def _pack_block_source_path() -> Path:
     return project_root / "gptqmodel_ext" / "pack_block_cpu.cpp"
 
 
+def _floatx_cpu_source_path() -> Path:
+    """Resolve the floatx CPU custom-op source file from source or editable installs."""
+
+    project_root = Path(__file__).resolve().parents[2]
+    source_path = project_root / "floatx_cpu.cpp"
+    if source_path.exists():
+        return source_path
+    return project_root / "gptqmodel_ext" / "floatx_cpu.cpp"
+
+
 def _pack_block_extension() -> TorchOpsJitExtension:
     """Build the shared pack_block torch.ops loader on first use."""
 
@@ -791,6 +802,27 @@ def _pack_block_extension() -> TorchOpsJitExtension:
             requires_cuda=False,
         )
     return _PACK_BLOCK_TORCH_OPS_EXTENSION
+
+
+def _floatx_cpu_extension() -> TorchOpsJitExtension:
+    """Build the shared floatx CPU torch.ops loader on first use."""
+
+    global _FLOATX_CPU_TORCH_OPS_EXTENSION
+    if _FLOATX_CPU_TORCH_OPS_EXTENSION is None:
+        _FLOATX_CPU_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+            name="gptqmodel_floatx_cpu",
+            namespace="gptqmodel_floatx",
+            required_ops=("dequantize_fp8_cpu", "dequantize_fp4_cpu"),
+            sources=lambda: [str(_floatx_cpu_source_path())],
+            build_root_env="GPTQMODEL_EXT_BUILD",
+            default_build_root=lambda: default_torch_ops_build_root("floatx_cpu"),
+            display_name="floatx_cpu",
+            extra_cflags=["-O3", "-std=c++17"],
+            extra_ldflags=[],
+            verbose_env="GPTQMODEL_EXT_VERBOSE",
+            requires_cuda=False,
+        )
+    return _FLOATX_CPU_TORCH_OPS_EXTENSION
 
 
 def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
@@ -833,3 +865,36 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
         _PACK_BLOCK_EXTENSION = None
     _PACK_BLOCK_EXTENSION_INITIALISED = True
     return _PACK_BLOCK_EXTENSION
+
+
+def load_floatx_cpu_extension(*, verbose: bool = False) -> Optional[object]:
+    """Ensure the floatx CPU extension is built and loaded."""
+
+    namespace = getattr(torch.ops, "gptqmodel_floatx", None)
+    if namespace is not None and hasattr(namespace, "dequantize_fp8_cpu") and hasattr(namespace, "dequantize_fp4_cpu"):
+        return namespace
+
+    source_path = _floatx_cpu_source_path()
+    if not source_path.exists():
+        log.debug("floatx_cpu extension source not found at %s", source_path)
+        return None
+
+    try:
+        from gptqmodel import extension as extension_api
+
+        previous_verbose = os.environ.get("GPTQMODEL_EXT_VERBOSE")
+        if verbose:
+            os.environ["GPTQMODEL_EXT_VERBOSE"] = "1"
+        try:
+            extension = extension_api.load(name="floatx_cpu")["floatx_cpu"]
+        finally:
+            if verbose:
+                if previous_verbose is None:
+                    os.environ.pop("GPTQMODEL_EXT_VERBOSE", None)
+                else:
+                    os.environ["GPTQMODEL_EXT_VERBOSE"] = previous_verbose
+        log.debug("floatx_cpu extension loaded from %s", source_path)
+        return extension
+    except Exception as exc:  # pragma: no cover - environment-specific
+        log.debug("floatx_cpu extension build failed: %s", exc)
+    return None

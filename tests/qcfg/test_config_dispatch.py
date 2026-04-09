@@ -18,6 +18,20 @@ from gptqmodel.quantization.config import (
     SmoothMAD,
     WeightOnlyConfig,
 )
+from gptqmodel.quantization.dtype import available_float8_dtype_names
+
+
+def _fp8_alias_cases():
+    cases = [
+        ("e4m3", "float8_e4m3fn"),
+        ("e5m2", "float8_e5m2"),
+        ("e4m3fnuz", "float8_e4m3fnuz"),
+        ("e5m2fnuz", "float8_e5m2fnuz"),
+        ("e8m0", "float8_e8m0fnu"),
+        ("float8_e8m0", "float8_e8m0fnu"),
+    ]
+    available = set(available_float8_dtype_names())
+    return [(alias, expected) for alias, expected in cases if expected in available]
 
 
 def test_quantize_config_dispatches_gptq_by_default():
@@ -190,6 +204,17 @@ def test_quantize_config_dispatches_fp8_from_weight_only_method():
     assert cfg.weight_scale_method == "block"
     assert cfg.weight_block_size == [128, 128]
     assert cfg.smooth is not None
+
+
+@pytest.mark.parametrize(("format_value", "expected"), _fp8_alias_cases())
+def test_quantize_config_normalizes_all_supported_fp8_aliases(format_value: str, expected: str):
+    cfg = QuantizeConfig(
+        quant_method=METHOD.FP8,
+        format=format_value,
+    )
+
+    assert isinstance(cfg, FP8Config)
+    assert cfg.format == expected
 
 
 def test_quantize_config_dispatches_bitsandbytes_constructor():

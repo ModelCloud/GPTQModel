@@ -8,14 +8,15 @@ import torch
 from safetensors.torch import save_file
 
 from gptqmodel.quantization.config import METHOD, FP8Config, QuantizeConfig
+from gptqmodel.quantization.dtype import available_float8_dtype_names
 from gptqmodel.utils.model_dequant import detect_format
 
 
-@pytest.mark.skipif(not hasattr(torch, "float8_e5m2"), reason="float8_e5m2 unavailable")
-def test_fp8_quantize_config_round_trip():
+@pytest.mark.parametrize("format_name", available_float8_dtype_names())
+def test_fp8_quantize_config_round_trip(format_name: str):
     cfg = QuantizeConfig(
         quant_method=METHOD.FP8,
-        format="float8_e5m2",
+        format=format_name,
         weight_scale_method="block",
         weight_block_size=[128, 128],
     )
@@ -26,29 +27,32 @@ def test_fp8_quantize_config_round_trip():
     payload = cfg.to_dict()
     assert payload["method"] == METHOD.FP8
     assert payload["quant_method"] == METHOD.FP8
-    assert payload["format"] == "float8_e5m2"
-    assert payload["checkpoint_format"] == "float8_e5m2"
+    assert payload["format"] == format_name
+    assert payload["checkpoint_format"] == format_name
     assert payload["weight_scale_method"] == "block"
     assert payload["weight_block_size"] == [128, 128]
     assert payload["weight_scale_semantics"] == "inverse"
 
     reloaded = QuantizeConfig.from_quant_config(payload)
     assert isinstance(reloaded, FP8Config)
-    assert reloaded.format == "float8_e5m2"
+    assert reloaded.format == format_name
     assert reloaded.weight_scale_method == "block"
     assert reloaded.weight_block_size == [128, 128]
 
 
-@pytest.mark.skipif(not hasattr(torch, "float8_e5m2"), reason="float8_e5m2 unavailable")
-def test_detect_format_identifies_fp8_from_e5m2_checkpoint(tmp_path):
+@pytest.mark.parametrize("format_name", available_float8_dtype_names())
+def test_detect_format_identifies_fp8_from_checkpoint_or_config(tmp_path, format_name: str):
     shard_path = tmp_path / "model.safetensors"
-    save_file(
-        {
-            "model.layers.0.self_attn.q_proj.weight": torch.zeros((16, 16), dtype=torch.float8_e5m2),
-            "model.layers.0.self_attn.q_proj.weight_scale_inv": torch.ones((16,), dtype=torch.float32),
-        },
-        str(shard_path),
-    )
+    if format_name.endswith("fnuz"):
+        save_file({}, str(shard_path))
+    else:
+        save_file(
+            {
+                "model.layers.0.self_attn.q_proj.weight": torch.zeros((16, 16), dtype=getattr(torch, format_name)),
+                "model.layers.0.self_attn.q_proj.weight_scale_inv": torch.ones((16,), dtype=torch.float32),
+            },
+            str(shard_path),
+        )
 
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -56,7 +60,7 @@ def test_detect_format_identifies_fp8_from_e5m2_checkpoint(tmp_path):
             {
                 "quantization_config": {
                     "method": "fp8",
-                    "format": "float8_e5m2",
+                    "format": format_name,
                     "weight_scale_method": "row",
                     "weight_scale_semantics": "inverse",
                 }
