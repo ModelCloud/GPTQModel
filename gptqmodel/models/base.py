@@ -1708,6 +1708,8 @@ class BaseQModel(nn.Module):
             result_shape=tuple(weight.shape),
         )
         if not isinstance(scale_inv, torch.Tensor):
+            # ModelOpt-style FP8 checkpoints store direct scales instead of inverse scales;
+            # normalize them here so TorchFP8Linear can use one consistent metadata form.
             scale = self._decoder_scale_tensor(
                 scale_tensor=checkpoint_tensors.get("weight_scale"),
                 result_shape=tuple(weight.shape),
@@ -1724,6 +1726,8 @@ class BaseQModel(nn.Module):
 
         format_name = str(weight.dtype).split(".")[-1]
         try:
+            # Infer the wrapper layout from the normalized inverse-scale tensor so native
+            # FP8 execution works for either checkpoint convention.
             weight_scale_method, weight_block_size = self._infer_fp8_forward_layout(
                 weight=weight,
                 scale_inv=scale_inv,
