@@ -25,14 +25,15 @@
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
 * 03/09/2026 [main]: ✨Qwen 3.5 MoE model support added. New HF Kernel support added for AWQ. 
 HF Kernel for both gptq/awq are now used by default for cpu devices for best performance. New INT8 kernel ported from Intel for gptq. 
+
+<details>
+
+<summary>Archived News</summary>
 * 02/28/2026 [main]: ✨Qwen 3.5 model support added. 
 * 02/09/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): ✨New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
 `AWQ` `qcfg.zero_point` property has been merged with a unified `sym` symmetry property; `zero_point=True` is now `sym=False`.
 Fixed `AWQ` `sym=True` packing/inference and quantization compatibility with some Qwen3 models. Exaone 4.0 support.
 
-<details>
-
-<summary>Archived News</summary>
 * 12/31/2025 5.7.0-dev: ✨New `FailSafe` config and `FailSafeStrategy`, auto-enabled by default, to address uneven routing of MoE experts resulting in quantization issues for some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce the impact of outliers in `FailSafe` quantization using `RTN` by default. Different `FailSafeStrategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
 New Voxtral and Glm-4v model support, plus audio dataset calibration for Qwen2-Omni. `AWQ` compatibility fix for `GLM 4.5-Air`.
 
@@ -384,14 +385,12 @@ model.save(quant_path)
 
 `GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
 
-##### AutoDecoder Mini Doc
+##### AutoDecoder
 
 `AutoModuleDecoderConfig` is a preprocessor for calibration-based quantization flows when the source checkpoint stores weights in formats such as FP8 or FP4.
 
 - Use it with configs such as `GPTQConfig`, `AWQConfig`, or `ParoConfig` when you want to quantize from an FP8/FP4 source checkpoint into another target format.
-- During the forward stage, GPT-QModel will use native module-local acceleration when the device supports the source dtype; otherwise it will decode the module to dense `torch.float16` or `torch.bfloat16`.
-- The decoded dense module is then reused as the quantization source and for optional forward replay, so GPTQ/AWQ can still complete their full forward -> quantize -> replay lifecycle.
-- In Python code, pass real torch dtypes such as `torch.bfloat16` or `torch.float16`. String dtype names are mainly for serialized JSON/YAML-style payloads.
+- Set `target_dtype` to the dense dtype you want the auto-decoder path to use during quantization, typically `torch.bfloat16` or `torch.float16`.
 
 ```py
 import torch
