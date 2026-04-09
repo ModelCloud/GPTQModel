@@ -16,8 +16,14 @@ from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+from gptqmodel.quantization.dtype import dequantize_f4_e2m1, dequantize_fp8
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.structure import LazyTurtle
+
+try:
+    from torchao.prototype.mx_formats.nvfp4_tensor import nvfp4_quantize
+except Exception:
+    nvfp4_quantize = None
 
 
 class _LinearWrapper(nn.Module):
@@ -41,7 +47,7 @@ def test_shell_materialize_forward_builds_fp8_wrapper_and_quant_source(tmp_path,
     model_dir.mkdir()
 
     weight_fp8 = source_model.linear.weight.detach().to(torch.float8_e4m3fn).cpu()
-    scale_inv = torch.ones(source_model.linear.out_features, dtype=torch.float32)
+    scale_inv = torch.linspace(2.0, 3.75, steps=source_model.linear.out_features, dtype=torch.float32)
     bias = source_model.linear.bias.detach().cpu()
     shard_name = "model.safetensors"
     save_file(
@@ -101,6 +107,13 @@ def test_shell_materialize_forward_builds_fp8_wrapper_and_quant_source(tmp_path,
     assert isinstance(named.state["quant_source_module"], nn.Linear)
     assert named.state["quant_source_module"].weight.device.type == "cpu"
     assert named.state["quant_source_module"].weight.dtype == torch.bfloat16
+    expected = dequantize_fp8(
+        weight_fp8,
+        scale_inv=scale_inv,
+        axis=None,
+        target_dtype=torch.bfloat16,
+    )
+    torch.testing.assert_close(named.state["quant_source_module"].weight, expected)
     assert harness.auto_module_decoder_events[0]["forward_mode"] == "native"
 
 
@@ -177,6 +190,79 @@ def test_shell_materialize_quant_source_swaps_back_to_dense_module(tmp_path, mon
         quant_source.weight,
         named.state["quant_source_module"].weight,
     )
+
+
+@pytest.mark.skipif(nvfp4_quantize is None, reason="torchao NVFP4 support required")
+@pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="float4 packed dtype not available")
+def test_shell_materialize_forward_decodes_fp4_source_to_dense_module(tmp_path):
+    source_model = _LinearWrapper(16, 4).eval()
+    model_dir = tmp_path / "fp4_source"
+    model_dir.mkdir()
+
+    scales, packed = nvfp4_quantize(source_model.linear.weight.detach().to(torch.float32), block_size=16)
+    packed_float4 = packed.view(torch.float4_e2m1fn_x2)
+    bias = source_model.linear.bias.detach().cpu()
+    shard_name = "model.safetensors"
+    save_file(
+        {
+            "linear.weight": packed_float4.cpu(),
+            "linear.weight_scale": scales.cpu(),
+            "linear.bias": bias,
+        },
+        str(model_dir / shard_name),
+    )
+    _write_index(model_dir, shard_name, ["linear.weight", "linear.weight_scale", "linear.bias"])
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    shell_model = _LinearWrapper(16, 4).eval()
+    shell_model.linear.weight = nn.Parameter(
+        torch.empty_like(shell_model.linear.weight, device="meta"),
+        requires_grad=False,
+    )
+    shell_model.linear.bias = nn.Parameter(
+        torch.empty_like(shell_model.linear.bias, device="meta"),
+        requires_grad=False,
+    )
+
+    harness = BaseQModel.__new__(BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = shell_model
+    harness.turtle_model = turtle
+    harness._turtle_lock = threading.RLock()
+    harness.auto_module_decoder_events = []
+
+    named = NamedModule(shell_model.linear, name="linear", full_name="linear", layer_index=0)
+    named.state["auto_module_decoder"] = {
+        "code": "auto_module_decoder",
+        "source_dtype": "auto",
+        "target_dtype": torch.bfloat16,
+    }
+
+    prepared = BaseQModel.shell_module_materialize(
+        harness,
+        target_submodule=shell_model.linear,
+        device=torch.device("cpu"),
+        role="forward",
+        named_module=named,
+    )
+
+    expected = dequantize_f4_e2m1(
+        packed_float4.cpu(),
+        scale=scales.cpu(),
+        axis=None,
+        target_dtype=torch.bfloat16,
+    )
+    assert isinstance(prepared, nn.Linear)
+    assert not isinstance(prepared, TorchFP8Linear)
+    assert named.state["auto_module_decoder_forward_mode"] == "decode"
+    torch.testing.assert_close(prepared.weight, expected, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(named.state["quant_source_module"].weight, expected, atol=1e-3, rtol=1e-3)
 
 
 def test_gptq_prefers_quant_source_module_when_present():

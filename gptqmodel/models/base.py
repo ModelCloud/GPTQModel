@@ -52,7 +52,13 @@ from ..quantization.config import (
     dynamic_get,
     resolve_quant_format,
 )
-from ..quantization.dtype import device_supports_dtype
+from ..quantization.dtype import (
+    available_float8_dtypes,
+    dequantize_f4_e2m1,
+    dequantize_fp8,
+    device_supports_dtype,
+    is_fp4_packed_dtype,
+)
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND, normalize_backend
@@ -1495,15 +1501,150 @@ class BaseQModel(nn.Module):
         self,
         target_submodule: nn.Module,
         *,
+        checkpoint_tensors: Optional[Dict[str, torch.Tensor]] = None,
         target_dtype: torch.dtype,
     ) -> nn.Module:
-        """Clone the decoded shell module into a dense CPU source for quantization."""
+        """Build a dense CPU source module from checkpoint tensors for quantization."""
 
-        quant_source = copy.deepcopy(target_submodule).to(device=CPU)
+        quant_source = copy.deepcopy(target_submodule)
+        if _module_has_meta_tensors(quant_source):
+            quant_source = quant_source.to_empty(device=CPU)
+        else:
+            quant_source = quant_source.to(device=CPU)
+        weight = None if checkpoint_tensors is None else checkpoint_tensors.get("weight")
+        if isinstance(weight, torch.Tensor) and hasattr(quant_source, "weight"):
+            decoder_kind = self._decoder_weight_format(
+                weight=weight,
+                checkpoint_tensors=checkpoint_tensors,
+            )
+            result_shape = tuple(getattr(quant_source.weight, "shape", weight.shape))
+            scale = self._decoder_scale_tensor(
+                scale_tensor=checkpoint_tensors.get("weight_scale"),
+                result_shape=result_shape,
+            )
+            scale_inv = None
+            if not isinstance(scale, torch.Tensor):
+                scale_inv = self._decoder_scale_tensor(
+                    scale_tensor=checkpoint_tensors.get("weight_scale_inv"),
+                    result_shape=result_shape,
+                )
+            if decoder_kind == "fp8":
+                decoded_weight = dequantize_fp8(
+                    weight,
+                    scale=scale if isinstance(scale, torch.Tensor) else None,
+                    scale_inv=scale_inv if isinstance(scale_inv, torch.Tensor) else None,
+                    axis=None,
+                    target_dtype=target_dtype,
+                )
+            elif decoder_kind == "fp4":
+                decoded_weight = dequantize_f4_e2m1(
+                    weight,
+                    scale=scale if isinstance(scale, torch.Tensor) else None,
+                    scale_inv=scale_inv if isinstance(scale_inv, torch.Tensor) else None,
+                    axis=None,
+                    target_dtype=target_dtype,
+                )
+            else:
+                decoded_weight = weight.to(dtype=target_dtype)
+
+            existing_weight = getattr(quant_source, "weight")
+            quant_source.weight = nn.Parameter(
+                decoded_weight.to(device=CPU, dtype=target_dtype),
+                requires_grad=getattr(existing_weight, "requires_grad", False),
+            )
+
+        bias = None if checkpoint_tensors is None else checkpoint_tensors.get("bias")
+        if isinstance(bias, torch.Tensor) and getattr(quant_source, "bias", None) is not None:
+            existing_bias = quant_source.bias
+            quant_source.bias = nn.Parameter(
+                bias.to(device=CPU, dtype=target_dtype),
+                requires_grad=getattr(existing_bias, "requires_grad", False),
+            )
+
         quant_source = quant_source.to(dtype=target_dtype)
         quant_source.eval()
         setattr(quant_source, "target_device", torch.device(CPU))
         return quant_source
+
+    def _decoder_block_size(self) -> Optional[tuple[int, int]]:
+        """Read the checkpoint's floatx block size metadata when present."""
+
+        quant_config = getattr(getattr(self.model, "config", None), "quantization_config", None)
+        if isinstance(quant_config, dict):
+            block_size = quant_config.get("weight_block_size")
+        else:
+            block_size = getattr(quant_config, "weight_block_size", None)
+        if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
+            return int(block_size[0]), int(block_size[1])
+        return None
+
+    def _decoder_scale_tensor(
+        self,
+        *,
+        scale_tensor: Optional[torch.Tensor],
+        result_shape: tuple[int, ...],
+    ) -> Optional[torch.Tensor]:
+        """Expand padded floatx block grids to the dense weight shape when needed."""
+
+        if not isinstance(scale_tensor, torch.Tensor):
+            return None
+        if scale_tensor.ndim != 2 or len(result_shape) != 2:
+            return scale_tensor
+
+        rows, cols = result_shape
+        blocks_r, blocks_c = scale_tensor.shape
+        if rows % blocks_r == 0 and cols % blocks_c == 0:
+            return scale_tensor
+
+        block_size = self._decoder_block_size()
+        if block_size is None:
+            return scale_tensor
+
+        block_rows, block_cols = block_size
+        if blocks_r * block_rows < rows or blocks_c * block_cols < cols:
+            return scale_tensor
+
+        expanded = scale_tensor.repeat_interleave(block_rows, dim=0)
+        expanded = expanded.repeat_interleave(block_cols, dim=1)
+        return expanded[:rows, :cols].contiguous()
+
+    def _decoder_weight_format(
+        self,
+        *,
+        weight: torch.Tensor,
+        checkpoint_tensors: Dict[str, torch.Tensor],
+    ) -> Optional[str]:
+        """Infer which floatx decoder matches one checkpoint weight tensor."""
+
+        if weight.dtype in available_float8_dtypes():
+            return "fp8"
+        if is_fp4_packed_dtype(weight.dtype):
+            return "fp4"
+        if weight.dtype is not torch.uint8 or not isinstance(checkpoint_tensors.get("weight_scale"), torch.Tensor):
+            return None
+
+        quant_config = getattr(getattr(self.model, "config", None), "quantization_config", None)
+        if isinstance(quant_config, dict):
+            format_name = quant_config.get("format") or quant_config.get("quant_method")
+        else:
+            format_name = getattr(quant_config, "format", None) or getattr(quant_config, "quant_method", None)
+        if str(format_name or "").strip().lower() in {"nvfp4", "fp4"}:
+            return "fp4"
+        return None
+
+    def _build_decoder_forward_module(
+        self,
+        *,
+        quant_source: nn.Module,
+        device: torch.device,
+    ) -> nn.Module:
+        """Clone the decoded quant source into a live forward module on ``device``."""
+
+        forward_module = copy.deepcopy(quant_source)
+        forward_module = forward_module.to(device=device)
+        forward_module.eval()
+        setattr(forward_module, "target_device", torch.device(device))
+        return forward_module
 
     def _infer_fp8_forward_layout(
         self,
@@ -1628,26 +1769,24 @@ class BaseQModel(nn.Module):
         if not isinstance(weight, torch.Tensor):
             return target_submodule
 
-        float8_dtypes = tuple(
-            getattr(torch, attr)
-            for attr in ("float8_e4m3fn", "float8_e5m2")
-            if hasattr(torch, attr)
+        decoder_kind = self._decoder_weight_format(
+            weight=weight,
+            checkpoint_tensors=checkpoint_tensors,
         )
-        if weight.dtype not in float8_dtypes:
+        if decoder_kind is None:
             return target_submodule
 
         target_dtype = decoder_plan.get("target_dtype", target_submodule.weight.dtype)
         if not isinstance(named_module.state.get("quant_source_module"), nn.Module):
             named_module.state["quant_source_module"] = self._build_decoder_quant_source_module(
                 target_submodule,
+                checkpoint_tensors=checkpoint_tensors,
                 target_dtype=target_dtype,
             )
 
         forward_mode = "decode"
         replacement = target_submodule
-        if (
-            device_supports_dtype(device, weight.dtype, require_validation=False)
-        ):
+        if decoder_kind == "fp8" and device_supports_dtype(device, weight.dtype, require_validation=False):
             fp8_module = self._build_fp8_forward_module(
                 target_submodule=target_submodule,
                 checkpoint_tensors=checkpoint_tensors,
@@ -1657,6 +1796,12 @@ class BaseQModel(nn.Module):
             if fp8_module is not None:
                 replacement = self._replace_live_submodule(target_submodule, fp8_module)
                 forward_mode = "native"
+        if forward_mode == "decode":
+            decoded_forward = self._build_decoder_forward_module(
+                quant_source=named_module.state["quant_source_module"],
+                device=device,
+            )
+            replacement = self._replace_live_submodule(target_submodule, decoded_forward)
 
         named_module.state["auto_module_decoder_forward_mode"] = forward_mode
         self._record_auto_module_decoder_event(
@@ -1888,8 +2033,16 @@ class BaseQModel(nn.Module):
                         "target_dtype",
                         getattr(getattr(target_submodule, "weight", None), "dtype", torch.float16),
                     )
+                    checkpoint_tensors = None
+                    if isinstance(self.turtle_model, LazyTurtle):
+                        checkpoint_tensors = self.turtle_model.checkpoint_tensors_for_submodule(
+                            target_model=self.model,
+                            target_submodule=target_submodule,
+                            recurse=False,
+                        )
                     quant_source = self._build_decoder_quant_source_module(
                         target_submodule,
+                        checkpoint_tensors=checkpoint_tensors,
                         target_dtype=target_dtype,
                     )
                     named_module.state["quant_source_module"] = quant_source
