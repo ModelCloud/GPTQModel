@@ -109,13 +109,7 @@ _FLOAT4_PACKED_DTYPE_NAMES = tuple(
 
 # Byte-size fallbacks keep ancillary metadata math working for torch floatx
 # dtypes even when the current safetensors header schema cannot serialize them.
-_DTYPE_NUM_BYTES = {
-    dtype: 1
-    for dtype in (
-        *[getattr(torch, name) for name in _FLOAT8_DTYPE_NAMES],
-        *[getattr(torch, name) for name in _FLOAT4_PACKED_DTYPE_NAMES],
-    )
-}
+_DTYPE_NUM_BYTES = dict.fromkeys((*[getattr(torch, name) for name in _FLOAT8_DTYPE_NAMES], *[getattr(torch, name) for name in _FLOAT4_PACKED_DTYPE_NAMES]), 1)
 
 
 _DTYPE_STR_MAP = {

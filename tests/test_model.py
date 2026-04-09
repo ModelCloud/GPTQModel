@@ -52,6 +52,7 @@ from gptqmodel.quantization.dtype import (
 )
 from gptqmodel.utils.model_dequant import dequantize_model
 
+
 try:
     from torchao.prototype.mx_formats.nvfp4_tensor import nvfp4_quantize
 except Exception:

@@ -13,10 +13,9 @@ import sys
 import time
 from pathlib import Path
 
+import torch
 from safetensors import safe_open
 from tabulate import tabulate
-
-import torch
 
 
 # Keep this CPU benchmark isolated from optional GPU backend import side effects.
@@ -293,12 +292,14 @@ def main() -> int:
         def run_torch_int8() -> torch.Tensor:
             return torch_int8_module(x_bf16)
 
-        def run_onednn() -> torch.Tensor:
+        def run_onednn(
+            onednn_weight_packed: torch.Tensor = onednn_weight,
+        ) -> torch.Tensor:
             return torch.ops.onednn.qlinear_pointwise(
                 qx_int8,
                 float(x_scale),
                 0,
-                onednn_weight,
+                onednn_weight_packed,
                 int8_weight_scales_fp32,
                 int8_weight_zero_points,
                 None,

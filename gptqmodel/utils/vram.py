@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from accelerate.utils import convert_bytes
 
+
 _ONE_BYTE_FLOATX_DTYPES = frozenset(
     getattr(torch, name)
     for name in (

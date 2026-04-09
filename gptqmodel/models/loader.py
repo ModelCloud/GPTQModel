@@ -76,7 +76,7 @@ from ..utils.model import (
     simple_dispatch_model,
 )
 from ._const import DEVICE, normalize_device
-from packaging.version import Version
+
 
 log = setup_logger()
 

@@ -13,10 +13,9 @@ import sys
 import time
 from pathlib import Path
 
+import torch
 from safetensors import safe_open
 from tabulate import tabulate
-
-import torch
 
 
 DEFAULT_MODEL_DIR = Path("/root/GLM-4.6")
