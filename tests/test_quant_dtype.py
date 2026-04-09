@@ -499,6 +499,11 @@ def test_dequantize_fp8_cpu_ab_benchmark_table(target_dtype: torch.dtype):
 def test_dequantize_fp8_cpu_real_format_ab_benchmark_table(target_dtype: torch.dtype):
     packed, scale_inv, source_note, rows, cols = _realistic_fp8_native_benchmark_source()
     warmup, iters = _benchmark_profile(rows * cols)
+    enable_large_threads = (
+        target_dtype is torch.bfloat16 and
+        hasattr(torch, "float8_e4m3fn") and
+        packed.dtype is torch.float8_e4m3fn
+    )
 
     ref_fn = lambda: dtype_module._dequantize_f8_reference(  # noqa: E731
         packed,
@@ -549,7 +554,10 @@ def test_dequantize_fp8_cpu_real_format_ab_benchmark_table(target_dtype: torch.d
             "throughput delta %",
             "max|diff|",
         ],
-        note=f"{source_note} threads={dtype_module._cpu_floatx_threads(rows * cols)}",
+        note=(
+            f"{source_note} "
+            f"threads={dtype_module._cpu_floatx_threads(rows * cols, enable_large_threads=enable_large_threads)}"
+        ),
     )
 
 

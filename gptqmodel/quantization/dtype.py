@@ -82,9 +82,9 @@ def is_fp4_packed_dtype(dtype: torch.dtype) -> bool:
     return dtype in _FLOAT4_PACKED_DTYPES
 
 
-def _cpu_floatx_threads(numel: Optional[int] = None) -> int:
+def _cpu_floatx_threads(numel: Optional[int] = None, *, enable_large_threads: bool = False) -> int:
     raw = os.environ.get("GPTQMODEL_FLOATX_CPU_THREADS", "").strip()
-    default_value = 32 if numel is not None and numel >= 64 * 1024 * 1024 else 8
+    default_value = 32 if enable_large_threads and numel is not None and numel >= 64 * 1024 * 1024 else 8
     try:
         value = int(raw) if raw else default_value
     except ValueError:
@@ -363,6 +363,11 @@ def dequantize_f8_e4m3(
             fast_scale, scale_mode = _fast_scale_arg(scale=scale, scale_inv=scale_inv)
             format_code = _FP8_FORMAT_CODES.get(tensor.dtype)
             if format_code is not None:
+                enable_large_threads = (
+                    target_dtype is torch.bfloat16 and
+                    hasattr(torch, "float8_e4m3fn") and
+                    tensor.dtype is torch.float8_e4m3fn
+                )
                 source = tensor.contiguous().view(torch.uint8)
                 return ops.dequantize_fp8_cpu(
                     source,
@@ -372,7 +377,7 @@ def dequantize_f8_e4m3(
                     axis is None,
                     _TARGET_DTYPE_CODES[target_dtype],
                     int(format_code),
-                    _cpu_floatx_threads(tensor.numel()),
+                    _cpu_floatx_threads(tensor.numel(), enable_large_threads=enable_large_threads),
                 )
 
     return _dequantize_f8_reference(
