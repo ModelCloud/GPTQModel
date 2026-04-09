@@ -143,6 +143,49 @@ def test_detected_local_cuda_include_paths_prefers_cuda_home(monkeypatch, tmp_pa
     assert cpp_module.detected_local_cuda_include_paths() == [str(cuda_home / "include")]
 
 
+def test_cuda_include_paths_with_fallback_use_wheel_headers_when_local_cuda_is_incomplete(monkeypatch, tmp_path):
+    """Guard shared CUDA header fallback so incomplete local toolkits still build JIT extensions."""
+
+    local_cuda_include = tmp_path / "local_cuda_include"
+    wheel_cuda_include = tmp_path / "wheel_cuda_include"
+    local_cuda_include.mkdir()
+    wheel_cuda_include.mkdir()
+    (wheel_cuda_include / "cusparse.h").write_text("// stub", encoding="utf-8")
+
+    monkeypatch.setattr(cpp_module, "detected_local_cuda_include_paths", lambda: [str(local_cuda_include)])
+    monkeypatch.setattr(cpp_module, "detected_cuda_wheel_include_paths", lambda: [str(wheel_cuda_include)])
+
+    include_paths = cpp_module.cuda_include_paths_with_fallback(
+        ["/tmp/extension"],
+        required_header_names=("cusparse.h",),
+    )
+
+    assert include_paths == ["/tmp/extension", str(wheel_cuda_include)]
+
+
+def test_cuda_include_paths_with_fallback_skip_wheel_headers_when_local_cuda_has_required_headers(
+    monkeypatch,
+    tmp_path,
+):
+    """Guard shared CUDA header fallback so complete local toolkits do not mix in wheel headers."""
+
+    local_cuda_include = tmp_path / "local_cuda_include"
+    wheel_cuda_include = tmp_path / "wheel_cuda_include"
+    local_cuda_include.mkdir()
+    wheel_cuda_include.mkdir()
+    (local_cuda_include / "cusparse.h").write_text("// stub", encoding="utf-8")
+
+    monkeypatch.setattr(cpp_module, "detected_local_cuda_include_paths", lambda: [str(local_cuda_include)])
+    monkeypatch.setattr(cpp_module, "detected_cuda_wheel_include_paths", lambda: [str(wheel_cuda_include)])
+
+    include_paths = cpp_module.cuda_include_paths_with_fallback(
+        ["/tmp/extension"],
+        required_header_names=("cusparse.h",),
+    )
+
+    assert include_paths == ["/tmp/extension"]
+
+
 def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
     """Guard cache reuse so startup skips expensive JIT rebuilds when ops are already built."""
 

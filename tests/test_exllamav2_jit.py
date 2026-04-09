@@ -4,6 +4,8 @@
 import torch
 
 import gptqmodel.nn_modules.qlinear.exllamav2 as exllamav2_module
+import gptqmodel.utils.exllamav2 as exllamav2_utils
+from gptqmodel.utils import cpp as cpp_module
 
 
 def _build_module() -> exllamav2_module.ExllamaV2Linear:
@@ -93,3 +95,40 @@ def test_exllamav2_validate_once_surfaces_jit_error(monkeypatch):
     assert ok is False
     assert isinstance(err, ImportError)
     assert "missing exllamav2 jit ops" in str(err)
+
+
+def test_exllamav2_include_paths_use_wheel_headers_when_local_cuda_is_incomplete(monkeypatch, tmp_path):
+    root = tmp_path / "exllamav2"
+    local_cuda_include = tmp_path / "local_cuda_include"
+    wheel_cuda_include = tmp_path / "wheel_cuda_include"
+    root.mkdir()
+    local_cuda_include.mkdir()
+    wheel_cuda_include.mkdir()
+    (wheel_cuda_include / "cusparse.h").write_text("// stub", encoding="utf-8")
+
+    monkeypatch.setattr(exllamav2_utils, "_exllamav2_root", lambda: root)
+    monkeypatch.setattr(cpp_module, "detected_local_cuda_include_paths", lambda: [str(local_cuda_include)])
+    monkeypatch.setattr(cpp_module, "detected_cuda_wheel_include_paths", lambda: [str(wheel_cuda_include)])
+
+    include_paths = exllamav2_utils._exllamav2_include_paths()
+
+    assert include_paths[0] == str(root)
+    assert str(wheel_cuda_include) in include_paths
+
+
+def test_exllamav2_include_paths_skip_wheel_headers_when_local_cuda_has_required_headers(monkeypatch, tmp_path):
+    root = tmp_path / "exllamav2"
+    local_cuda_include = tmp_path / "local_cuda_include"
+    wheel_cuda_include = tmp_path / "wheel_cuda_include"
+    root.mkdir()
+    local_cuda_include.mkdir()
+    wheel_cuda_include.mkdir()
+    (local_cuda_include / "cusparse.h").write_text("// stub", encoding="utf-8")
+
+    monkeypatch.setattr(exllamav2_utils, "_exllamav2_root", lambda: root)
+    monkeypatch.setattr(cpp_module, "detected_local_cuda_include_paths", lambda: [str(local_cuda_include)])
+    monkeypatch.setattr(cpp_module, "detected_cuda_wheel_include_paths", lambda: [str(wheel_cuda_include)])
+
+    include_paths = exllamav2_utils._exllamav2_include_paths()
+
+    assert include_paths == [str(root)]
