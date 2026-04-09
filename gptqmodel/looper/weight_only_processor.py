@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 import threading
 import time
 from typing import Optional
@@ -26,7 +25,6 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization.config import (
-    BaseQuantizeConfig,
     BitsAndBytesConfig,
     FP8Config,
     GGUFConfig,
@@ -35,7 +33,7 @@ from ..quantization.config import (
     clone_weight_only_config_for_module,
     resolve_quant_format,
 )
-from ..quantization.rtn import RTN, get_number_of_rows_and_cols
+from ..quantization.rtn import RTN
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, pack_module
 from ..utils.module_locks import parent_module_lock
@@ -46,8 +44,6 @@ log = setup_logger()
 
 class WeightOnlyProcessor(LoopProcessor):
     """Process weight-only modules without entering activation-based quantization flows."""
-
-    _TP_TARGETS = (2, 4, 8)
 
     def __init__(
         self,
@@ -87,25 +83,6 @@ class WeightOnlyProcessor(LoopProcessor):
                     entry[QUANT_LOG_LOSS] = avg_loss
                     return
 
-    def _annotate_tp_padding(self, module: NamedModule, qcfg: BaseQuantizeConfig) -> None:
-        """Records tensor-parallel padding metadata needed by downstream packing."""
-
-        target_multiple = math.lcm(*self._TP_TARGETS)
-        if qcfg.group_size > 0:
-            target_multiple = math.lcm(target_multiple, qcfg.group_size)
-
-        _, columns = get_number_of_rows_and_cols(module)
-        pad_cols = (target_multiple - (columns % target_multiple)) % target_multiple
-        if pad_cols == 0:
-            module.state.pop("tp_pad_info", None)
-            return
-
-        module.state["tp_pad_info"] = {
-            "pad_cols": pad_cols,
-            "target_multiple": target_multiple,
-            "original_columns": columns,
-        }
-
     def quantize_module(
         self,
         module: NamedModule,
@@ -123,8 +100,6 @@ class WeightOnlyProcessor(LoopProcessor):
             damp_percent = 0.0
             nsamples = 0
         else:
-            self._annotate_tp_padding(module, qcfg_clone)
-
             task = RTN(module=module, qcfg=qcfg_clone)
             wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = task.quantize()
 
@@ -240,6 +215,8 @@ class WeightOnlyProcessor(LoopProcessor):
             dequant_weight = qmodule.dequantize_weight().T.detach().cpu().to(torch.float32)
             mean_abs_err = (dequant_weight - reference_weight).abs().mean().item()
             self._update_logged_loss(module, f"{active_qcfg.method.value}: {mean_abs_err:.7f}")
+            module.state.pop("tp_pad_info", None)
+            module.state.pop("quant_source_module", None)
             module.unregister_parameter("weight")
             return
 
@@ -265,6 +242,8 @@ class WeightOnlyProcessor(LoopProcessor):
             )
 
         del q_scales, q_zeros, q_g_idx
+        module.state.pop("tp_pad_info", None)
+        module.state.pop("quant_source_module", None)
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):

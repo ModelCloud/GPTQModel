@@ -885,7 +885,6 @@ class BaseQModel(nn.Module):
         from ..looper.eora_processor import EoraProcessor
         from ..looper.module_looper import ModuleLooper
         from ..looper.module_preprocessor import ModulePreProcessor
-        from ..looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
 
         needs_lora = isinstance(self.quantize_config.adapter, Lora)
 
@@ -935,7 +934,6 @@ class BaseQModel(nn.Module):
             from ..looper.qqq_processor import QQQProcessor
 
             quantize_processor = preprocessors + [
-                TensorParallelWeightProcessor(**args),
                 QQQProcessor(**args),
             ]
         elif self.quantize_config.method == METHOD.AWQ:
@@ -949,7 +947,6 @@ class BaseQModel(nn.Module):
             awq_args["batch_size"] = batch_size
 
             quantize_processor = preprocessors + [
-                TensorParallelWeightProcessor(**args),
                 AWQProcessor(**awq_args),
             ]
         elif self.quantize_config.method == METHOD.PARO:
@@ -963,14 +960,12 @@ class BaseQModel(nn.Module):
             paro_args["batch_size"] = batch_size
 
             quantize_processor = preprocessors + [
-                TensorParallelWeightProcessor(**args),
                 ParoQuantProcessor(**paro_args),
             ]
         else:
             from ..looper.gptq_processor import GPTQProcessor
 
             quantize_processor = preprocessors + [
-                TensorParallelWeightProcessor(**args),
                 GPTQProcessor(**args),
             ]
 
@@ -1105,38 +1100,44 @@ class BaseQModel(nn.Module):
         from ..looper.dequantize_processor import DequantizeProcessor
         from ..looper.eora_processor import EoraProcessor
         from ..looper.module_looper import ModuleLooper
-        from ..looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
+        from ..looper.module_preprocessor import ModulePreProcessor
 
         self.quantize_config.adapter = adapter
 
         assert isinstance(self.quantize_config.adapter, Lora)
 
         # init processor with EoRA processor
-        processors = [
-            TensorParallelWeightProcessor(
-                tokenizer=self.tokenizer,
-                qcfg=self.quantize_config,
-                calibration=calibration_dataset,
-                prepare_dataset_func=self.prepare_dataset,
-                calibration_concat_size=calibration_dataset_concat_size,
-                calibration_sort=calibration_dataset_sort,
-                calibration_concat_separator=calibration_concat_separator,
-                batch_size=batch_size,
-            ),
-            DequantizeProcessor(
-                quantized_modules=quantized_modules,
-            ),
-            EoraProcessor(
-                tokenizer=self.tokenizer,
-                qcfg=self.quantize_config,
-                calibration=calibration_dataset,
-                prepare_dataset_func=self.prepare_dataset,
-                calibration_concat_size=calibration_dataset_concat_size,
-                calibration_sort=calibration_dataset_sort,
-                calibration_concat_separator=calibration_concat_separator,
-                batch_size=batch_size,
-            ),
-        ]
+        processors = []
+        if getattr(self.quantize_config, "preprocessors", None):
+            processors.append(
+                ModulePreProcessor(
+                    tokenizer=self.tokenizer,
+                    qcfg=self.quantize_config,
+                    calibration=calibration_dataset,
+                    prepare_dataset_func=self.prepare_dataset,
+                    calibration_concat_size=calibration_dataset_concat_size,
+                    calibration_sort=calibration_dataset_sort,
+                    calibration_concat_separator=calibration_concat_separator,
+                    batch_size=batch_size,
+                ),
+            )
+        processors.extend(
+            [
+                DequantizeProcessor(
+                    quantized_modules=quantized_modules,
+                ),
+                EoraProcessor(
+                    tokenizer=self.tokenizer,
+                    qcfg=self.quantize_config,
+                    calibration=calibration_dataset,
+                    prepare_dataset_func=self.prepare_dataset,
+                    calibration_concat_size=calibration_dataset_concat_size,
+                    calibration_sort=calibration_dataset_sort,
+                    calibration_concat_separator=calibration_concat_separator,
+                    batch_size=batch_size,
+                ),
+            ]
+        )
 
         # prepare processor worker (looper)
         module_looper = ModuleLooper(model=self, processors=processors)

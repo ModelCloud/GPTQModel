@@ -154,6 +154,7 @@ class PreProcessorCode(str, Enum):
 
     SMOOTHER = "smoother"
     AUTO_MODULE_DECODER = "auto_module_decoder"
+    TENSOR_PARALLEL_PADDER = "tensor_parallel_padder"
 
 
 _GGUF_BITS_ALIAS_INFO = {
@@ -1153,6 +1154,13 @@ class AutoModuleDecoderConfig(BasePreProcessorConfig):
 
 
 @dataclass
+class TensorParallelPadderConfig(BasePreProcessorConfig):
+    """Configure tensor-parallel-safe column padding derived from module weight shapes."""
+
+    code: ClassVar[str] = PreProcessorCode.TENSOR_PARALLEL_PADDER.value
+
+
+@dataclass
 class HessianConfig:
     """Controls for chunked Hessian accumulation during GPTQ calibration."""
 
@@ -1616,6 +1624,8 @@ def _normalize_preprocessor_config(payload: Any) -> BasePreProcessorConfig:
             return SmootherConfig(smooth=None)
         if normalized == PreProcessorCode.AUTO_MODULE_DECODER.value:
             return AutoModuleDecoderConfig()
+        if normalized == PreProcessorCode.TENSOR_PARALLEL_PADDER.value:
+            return TensorParallelPadderConfig()
         return SmootherConfig(smooth=payload)
     if isinstance(payload, dict):
         code = str(payload.get("code", "")).strip().lower()
@@ -1624,6 +1634,8 @@ def _normalize_preprocessor_config(payload: Any) -> BasePreProcessorConfig:
                 source_dtype=payload.get("source_dtype", "auto"),
                 target_dtype=payload.get("target_dtype", torch.bfloat16),
             )
+        if code == PreProcessorCode.TENSOR_PARALLEL_PADDER.value:
+            return TensorParallelPadderConfig()
         if code and code != PreProcessorCode.SMOOTHER.value:
             raise ValueError(f"QuantizeConfig: unsupported preprocessor code `{code}`.")
         if "smooth" in payload:
@@ -1640,6 +1652,14 @@ def _normalize_preprocessors(payload: Optional[List[Any]]) -> List[BasePreProces
     if not isinstance(payload, list):
         raise ValueError("QuantizeConfig: `preprocessors` must be a list or None.")
     return [_normalize_preprocessor_config(item) for item in payload]
+
+
+def _validate_unique_preprocessors(preprocessors: List[BasePreProcessorConfig]) -> None:
+    codes_seen = set()
+    for preprocessor in preprocessors:
+        if preprocessor.code in codes_seen:
+            raise ValueError(f"QuantizeConfig: duplicate preprocessor `{preprocessor.code}` is not allowed.")
+        codes_seen.add(preprocessor.code)
 
 
 def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
@@ -2847,7 +2867,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
 @dataclass
 class PreProcessorConfig(BaseQuantizeConfig):
-    preprocessors: Optional[List[Union[BasePreProcessorConfig, Dict[str, Any], str]]] = field(default=None)
+    preprocessors: Optional[List[Union[BasePreProcessorConfig, Dict[str, Any], str]]] = field(default_factory=list)
     smoother: Optional[Union[SmootherConfig, SmoothMethod, Dict[str, Any], str]] = field(default=None)
     # Backward-compatible alias. New code should use `smoother`.
     smooth: Optional[Union[SmoothMethod, Dict[str, Any], str]] = field(default=None, repr=False)
@@ -2870,6 +2890,7 @@ class PreProcessorConfig(BaseQuantizeConfig):
         if self.smoother is not None:
             non_smoother_preprocessors.append(self.smoother)
         self.preprocessors = non_smoother_preprocessors
+        _validate_unique_preprocessors(self.preprocessors)
         self.smooth = self.resolve_smooth_method()
 
     def __post_init__(self):
@@ -3024,7 +3045,7 @@ class AWQConfig(PreProcessorConfig):
 
 
 @dataclass
-class ParoConfig(QuantizeConfig):
+class ParoConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.PARO)
     format: FORMAT = field(default=FORMAT.PAROQUANT)
     krot: int = field(default=8)
