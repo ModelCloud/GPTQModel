@@ -3250,7 +3250,7 @@ class FP8Config(PreProcessorConfig):
 
     def __post_init__(self):
         self._normalize_preprocessor_state()
-        super(PreProcessorConfig, self).__post_init__()
+        super().__post_init__()
 
         if self.bits != 8:
             raise ValueError("FP8Config: `bits` must be `8`.")
@@ -3358,7 +3358,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
 
     def __post_init__(self):
         self._normalize_preprocessor_state()
-        super(PreProcessorConfig, self).__post_init__()
+        super().__post_init__()
 
         if self.bits not in {4, 8}:
             raise ValueError("BitsAndBytesConfig: `bits` must be `4` or `8`.")
