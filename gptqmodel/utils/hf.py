@@ -62,7 +62,6 @@ _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
 _MISSING = object()
 INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
-_PRISM_GGUF_PATCH_WARNED = False
 _INTERNAL_GGUF_TORCH_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER"
 _FALSEY_ENV_VALUES = {"", "0", "false", "off", "no"}
 
@@ -359,8 +358,6 @@ def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
 
 
 def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
-    global _PRISM_GGUF_PATCH_WARNED
-
     try:
         import transformers.modeling_gguf_pytorch_utils as gguf_utils
         from transformers.utils import import_utils as hf_import_utils
@@ -389,13 +386,11 @@ def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
         gguf_utils._is_prism_q1_0_g128 = _is_prism_q1_0_g128
         gguf_utils._dequantize_prism_q1_0_g128 = _dequantize_prism_q1_0_g128
 
-        if not _PRISM_GGUF_PATCH_WARNED:
-            log.warning(
-                "HF: installed transformers lacks native Prism GGUF support; GPT-QModel registered its internal "
-                "GGUF runtime and local Q1_0_g128 compatibility patch for `%s`.",
-                api_name,
-            )
-            _PRISM_GGUF_PATCH_WARNED = True
+        log.warning(
+            "HF: installed transformers lacks native Prism GGUF support; GPT-QModel registered its internal "
+            "GGUF runtime and local Q1_0_g128 compatibility patch for `%s`.",
+            api_name,
+        )
 
 
 def normalize_model_id_or_path_for_hf_gguf(

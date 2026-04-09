@@ -95,7 +95,6 @@ def test_patch_transformers_prism_gguf_compat_registers_internal_runtime(monkeyp
     monkeypatch.setattr(gguf_utils, "is_gguf_available", lambda *args, **kwargs: False)
     monkeypatch.setattr(hf_import_utils, "is_gguf_available", lambda *args, **kwargs: False)
     monkeypatch.setattr(hf_utils, "_transformers_has_native_prism_gguf_support", lambda: False)
-    monkeypatch.setattr(hf_utils, "_PRISM_GGUF_PATCH_WARNED", False)
 
     hf_utils._patch_transformers_prism_gguf_compat(api_name="test")
 
@@ -127,7 +126,6 @@ def test_patch_transformers_prism_gguf_compat_wraps_load_checkpoint_for_torch_lo
     monkeypatch.setattr(gguf_utils, "is_gguf_available", lambda *args, **kwargs: False)
     monkeypatch.setattr(hf_import_utils, "is_gguf_available", lambda *args, **kwargs: False)
     monkeypatch.setattr(hf_utils, "_transformers_has_native_prism_gguf_support", lambda: False)
-    monkeypatch.setattr(hf_utils, "_PRISM_GGUF_PATCH_WARNED", False)
     monkeypatch.setattr(hf_utils, "_load_gguf_checkpoint_torch_direct", _direct_loader)
 
     hf_utils._patch_transformers_prism_gguf_compat(api_name="test")
