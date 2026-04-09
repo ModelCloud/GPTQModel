@@ -705,6 +705,15 @@ inline void load_fp4x16_to_ps(
 }
 
 __attribute__((target("avx2")))
+inline __m256 load_fp4x8_to_ps(const uint8_t* src, const float* table) {
+  const __m128i raw = _mm_cvtsi32_si128(*reinterpret_cast<const int32_t*>(src));
+  const __m128i lo_nibbles = _mm_and_si128(raw, _mm_set1_epi8(0x0F));
+  const __m128i hi_nibbles = _mm_and_si128(_mm_srli_epi16(raw, 4), _mm_set1_epi8(0x0F));
+  const __m128i interleaved = _mm_unpacklo_epi8(lo_nibbles, hi_nibbles);
+  return _mm256_i32gather_ps(table, _mm256_cvtepu8_epi32(interleaved), 4);
+}
+
+__attribute__((target("avx2")))
 inline void fill_scale8(
     float* dst,
     const ScaleSpec2D& spec,
@@ -1008,6 +1017,170 @@ void dequantize_fp8_row_avx2_fp16_block_scale(
       }
       for (int64_t i = 0; i < tail_count; ++i) {
         store_scalar(dst_row + col + i, tail[i]);
+      }
+      col = block_end;
+    }
+  }
+}
+
+__attribute__((target("avx2")))
+void dequantize_fp4_row_avx2_bf16(
+    const uint8_t* src_row,
+    c10::BFloat16* dst_row,
+    int64_t cols,
+    const std::array<float, 16>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  int64_t col = 0;
+  for (; col + 16 <= cols; col += 16) {
+    __m256 values_lo;
+    __m256 values_hi;
+    load_fp4x16_to_ps(src_row + (col / 2), table.data(), &values_lo, &values_hi);
+    apply_scale_and_store_bf16x8(dst_row + col, values_lo, scale_mode, spec, row, col);
+    apply_scale_and_store_bf16x8(dst_row + col + 8, values_hi, scale_mode, spec, row, col + 8);
+  }
+  for (; col + 8 <= cols; col += 8) {
+    const __m256 values = load_fp4x8_to_ps(src_row + (col / 2), table.data());
+    apply_scale_and_store_bf16x8(dst_row + col, values, scale_mode, spec, row, col);
+  }
+  if (col < cols) {
+    for (int64_t logical_col = col; logical_col < cols; ++logical_col) {
+      const uint8_t byte = src_row[logical_col / 2];
+      const uint8_t nibble = (logical_col & 1)
+          ? static_cast<uint8_t>((byte >> 4) & 0x0F)
+          : static_cast<uint8_t>(byte & 0x0F);
+      float value = table[nibble];
+      if (scale_mode != ScaleMode::kNone) {
+        const float scale = scale_value_2d(spec, row, logical_col);
+        value = scale_mode == ScaleMode::kMultiply ? value * scale : value / scale;
+      }
+      store_scalar(dst_row + logical_col, value);
+    }
+  }
+}
+
+__attribute__((target("avx2")))
+void dequantize_fp4_row_avx2_bf16_block_scale(
+    const uint8_t* src_row,
+    c10::BFloat16* dst_row,
+    int64_t cols,
+    const std::array<float, 16>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  const int64_t block_row = row / spec.row_repeat;
+  int64_t col = 0;
+  while (col < cols) {
+    const int64_t block_col = col / spec.col_repeat;
+    const int64_t block_end = std::min<int64_t>(cols, (block_col + 1) * spec.col_repeat);
+    const float rounded_scale = static_cast<float>(c10::BFloat16(spec.ptr[block_row * spec.scale_cols + block_col]));
+    const __m256 scale_vec = _mm256_set1_ps(rounded_scale);
+
+    for (; col + 16 <= block_end; col += 16) {
+      __m256 values_lo;
+      __m256 values_hi;
+      load_fp4x16_to_ps(src_row + (col / 2), table.data(), &values_lo, &values_hi);
+      apply_scale_and_store_bf16x8_const(dst_row + col, values_lo, scale_mode, scale_vec);
+      apply_scale_and_store_bf16x8_const(dst_row + col + 8, values_hi, scale_mode, scale_vec);
+    }
+    for (; col + 8 <= block_end; col += 8) {
+      const __m256 values = load_fp4x8_to_ps(src_row + (col / 2), table.data());
+      apply_scale_and_store_bf16x8_const(dst_row + col, values, scale_mode, scale_vec);
+    }
+    if (col < block_end) {
+      for (int64_t logical_col = col; logical_col < block_end; ++logical_col) {
+        const uint8_t byte = src_row[logical_col / 2];
+        const uint8_t nibble = (logical_col & 1)
+            ? static_cast<uint8_t>((byte >> 4) & 0x0F)
+            : static_cast<uint8_t>(byte & 0x0F);
+        float value = table[nibble];
+        if (scale_mode != ScaleMode::kNone) {
+          value = scale_mode == ScaleMode::kMultiply ? value * rounded_scale : value / rounded_scale;
+        }
+        store_scalar(dst_row + logical_col, value);
+      }
+      col = block_end;
+    }
+  }
+}
+
+__attribute__((target("avx2,f16c")))
+void dequantize_fp4_row_avx2_fp16(
+    const uint8_t* src_row,
+    c10::Half* dst_row,
+    int64_t cols,
+    const std::array<float, 16>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  int64_t col = 0;
+  for (; col + 16 <= cols; col += 16) {
+    __m256 values_lo;
+    __m256 values_hi;
+    load_fp4x16_to_ps(src_row + (col / 2), table.data(), &values_lo, &values_hi);
+    apply_scale_and_store_fp16x8(dst_row + col, values_lo, scale_mode, spec, row, col);
+    apply_scale_and_store_fp16x8(dst_row + col + 8, values_hi, scale_mode, spec, row, col + 8);
+  }
+  for (; col + 8 <= cols; col += 8) {
+    const __m256 values = load_fp4x8_to_ps(src_row + (col / 2), table.data());
+    apply_scale_and_store_fp16x8(dst_row + col, values, scale_mode, spec, row, col);
+  }
+  if (col < cols) {
+    for (int64_t logical_col = col; logical_col < cols; ++logical_col) {
+      const uint8_t byte = src_row[logical_col / 2];
+      const uint8_t nibble = (logical_col & 1)
+          ? static_cast<uint8_t>((byte >> 4) & 0x0F)
+          : static_cast<uint8_t>(byte & 0x0F);
+      float value = table[nibble];
+      if (scale_mode != ScaleMode::kNone) {
+        const float scale = scale_value_2d(spec, row, logical_col);
+        value = scale_mode == ScaleMode::kMultiply ? value * scale : value / scale;
+      }
+      store_scalar(dst_row + logical_col, value);
+    }
+  }
+}
+
+__attribute__((target("avx2,f16c")))
+void dequantize_fp4_row_avx2_fp16_block_scale(
+    const uint8_t* src_row,
+    c10::Half* dst_row,
+    int64_t cols,
+    const std::array<float, 16>& table,
+    const ScaleSpec2D& spec,
+    ScaleMode scale_mode,
+    int64_t row) {
+  const int64_t block_row = row / spec.row_repeat;
+  int64_t col = 0;
+  while (col < cols) {
+    const int64_t block_col = col / spec.col_repeat;
+    const int64_t block_end = std::min<int64_t>(cols, (block_col + 1) * spec.col_repeat);
+    const float rounded_scale = static_cast<float>(c10::Half(spec.ptr[block_row * spec.scale_cols + block_col]));
+    const __m256 scale_vec = _mm256_set1_ps(rounded_scale);
+
+    for (; col + 16 <= block_end; col += 16) {
+      __m256 values_lo;
+      __m256 values_hi;
+      load_fp4x16_to_ps(src_row + (col / 2), table.data(), &values_lo, &values_hi);
+      apply_scale_and_store_fp16x8_const(dst_row + col, values_lo, scale_mode, scale_vec);
+      apply_scale_and_store_fp16x8_const(dst_row + col + 8, values_hi, scale_mode, scale_vec);
+    }
+    for (; col + 8 <= block_end; col += 8) {
+      const __m256 values = load_fp4x8_to_ps(src_row + (col / 2), table.data());
+      apply_scale_and_store_fp16x8_const(dst_row + col, values, scale_mode, scale_vec);
+    }
+    if (col < block_end) {
+      for (int64_t logical_col = col; logical_col < block_end; ++logical_col) {
+        const uint8_t byte = src_row[logical_col / 2];
+        const uint8_t nibble = (logical_col & 1)
+            ? static_cast<uint8_t>((byte >> 4) & 0x0F)
+            : static_cast<uint8_t>(byte & 0x0F);
+        float value = table[nibble];
+        if (scale_mode != ScaleMode::kNone) {
+          value = scale_mode == ScaleMode::kMultiply ? value * rounded_scale : value / rounded_scale;
+        }
+        store_scalar(dst_row + logical_col, value);
       }
       col = block_end;
     }
@@ -1423,95 +1596,31 @@ void dequantize_fp4_vectorized(
       return;
     }
   }
-  auto dequantize_fp4_row_avx2_bf16 =
-      [&table, &spec, scale_mode](const uint8_t* src_row, c10::BFloat16* dst_row, int64_t cols, int64_t row)
-      __attribute__((target("avx2"))) {
-        alignas(32) float values[8];
-        int64_t col = 0;
-        for (; col + 16 <= cols; col += 16) {
-          __m256 vec_lo;
-          __m256 vec_hi;
-          load_fp4x16_to_ps(src_row + (col / 2), table.data(), &vec_lo, &vec_hi);
-          apply_scale_and_store_bf16x8(dst_row + col, vec_lo, scale_mode, spec, row, col);
-          apply_scale_and_store_bf16x8(dst_row + col + 8, vec_hi, scale_mode, spec, row, col + 8);
-        }
-        for (; col + 8 <= cols; col += 8) {
-          // FP4 unpack stays scalar per nibble, then hands the scaled arithmetic to SIMD.
-          for (int64_t lane = 0; lane < 8; ++lane) {
-            const int64_t logical_col = col + lane;
-            const uint8_t byte = src_row[logical_col / 2];
-            const uint8_t nibble = (logical_col & 1)
-                ? static_cast<uint8_t>((byte >> 4) & 0x0F)
-                : static_cast<uint8_t>(byte & 0x0F);
-            values[lane] = table[nibble];
-          }
-          __m256 vec = _mm256_load_ps(values);
-          apply_scale_and_store_bf16x8(dst_row + col, vec, scale_mode, spec, row, col);
-        }
-        if (col < cols) {
-          for (int64_t logical_col = col; logical_col < cols; ++logical_col) {
-            const uint8_t byte = src_row[logical_col / 2];
-            const uint8_t nibble = (logical_col & 1)
-                ? static_cast<uint8_t>((byte >> 4) & 0x0F)
-                : static_cast<uint8_t>(byte & 0x0F);
-            float value = table[nibble];
-            if (scale_mode != ScaleMode::kNone) {
-              const float scale = scale_value_2d(spec, row, logical_col);
-              value = scale_mode == ScaleMode::kMultiply ? value * scale : value / scale;
-            }
-            store_scalar(dst_row + logical_col, value);
-          }
-        }
-      };
-
-  auto dequantize_fp4_row_avx2_fp16 =
-      [&table, &spec, scale_mode](const uint8_t* src_row, c10::Half* dst_row, int64_t cols, int64_t row)
-      __attribute__((target("avx2,f16c"))) {
-        alignas(32) float values[8];
-        int64_t col = 0;
-        for (; col + 16 <= cols; col += 16) {
-          __m256 vec_lo;
-          __m256 vec_hi;
-          load_fp4x16_to_ps(src_row + (col / 2), table.data(), &vec_lo, &vec_hi);
-          apply_scale_and_store_fp16x8(dst_row + col, vec_lo, scale_mode, spec, row, col);
-          apply_scale_and_store_fp16x8(dst_row + col + 8, vec_hi, scale_mode, spec, row, col + 8);
-        }
-        for (; col + 8 <= cols; col += 8) {
-          // FP4 unpack stays scalar per nibble, then hands the scaled arithmetic to SIMD.
-          for (int64_t lane = 0; lane < 8; ++lane) {
-            const int64_t logical_col = col + lane;
-            const uint8_t byte = src_row[logical_col / 2];
-            const uint8_t nibble = (logical_col & 1)
-                ? static_cast<uint8_t>((byte >> 4) & 0x0F)
-                : static_cast<uint8_t>(byte & 0x0F);
-            values[lane] = table[nibble];
-          }
-          __m256 vec = _mm256_load_ps(values);
-          apply_scale_and_store_fp16x8(dst_row + col, vec, scale_mode, spec, row, col);
-        }
-        if (col < cols) {
-          for (int64_t logical_col = col; logical_col < cols; ++logical_col) {
-            const uint8_t byte = src_row[logical_col / 2];
-            const uint8_t nibble = (logical_col & 1)
-                ? static_cast<uint8_t>((byte >> 4) & 0x0F)
-                : static_cast<uint8_t>(byte & 0x0F);
-            float value = table[nibble];
-            if (scale_mode != ScaleMode::kNone) {
-              const float scale = scale_value_2d(spec, row, logical_col);
-              value = scale_mode == ScaleMode::kMultiply ? value * scale : value / scale;
-            }
-            store_scalar(dst_row + logical_col, value);
-          }
-        }
-      };
-
   if (cpu_supports_avx2()) {
     const int64_t cols = packed_cols * 2;
     const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
     if constexpr (std::is_same_v<T, c10::BFloat16>) {
       at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
-          dequantize_fp4_row_avx2_bf16(src + row * packed_cols, dst + row * cols, cols, row);
+          if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 8) {
+            dequantize_fp4_row_avx2_bf16_block_scale(
+                src + row * packed_cols,
+                dst + row * cols,
+                cols,
+                table,
+                spec,
+                scale_mode,
+                row);
+          } else {
+            dequantize_fp4_row_avx2_bf16(
+                src + row * packed_cols,
+                dst + row * cols,
+                cols,
+                table,
+                spec,
+                scale_mode,
+                row);
+          }
         }
       });
       return;
@@ -1520,7 +1629,25 @@ void dequantize_fp4_vectorized(
       if (cpu_supports_f16c()) {
         at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
           for (int64_t row = begin; row < end; ++row) {
-            dequantize_fp4_row_avx2_fp16(src + row * packed_cols, dst + row * cols, cols, row);
+            if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 8) {
+              dequantize_fp4_row_avx2_fp16_block_scale(
+                  src + row * packed_cols,
+                  dst + row * cols,
+                  cols,
+                  table,
+                  spec,
+                  scale_mode,
+                  row);
+            } else {
+              dequantize_fp4_row_avx2_fp16(
+                  src + row * packed_cols,
+                  dst + row * cols,
+                  cols,
+                  table,
+                  spec,
+                  scale_mode,
+                  row);
+            }
           }
         });
         return;
