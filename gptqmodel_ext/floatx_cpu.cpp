@@ -21,6 +21,9 @@
 
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #include <immintrin.h>
+#if defined(__GNUC__) || defined(__clang__)
+#include <cpuid.h>
+#endif
 #define GPTQMODEL_FLOATX_X86 1
 #else
 #define GPTQMODEL_FLOATX_X86 0
@@ -396,6 +399,34 @@ inline bool cpu_supports_avx512bf16() {
 
 inline bool cpu_supports_avx512fp16() {
   return cpu_supports_avx512_core() && __builtin_cpu_supports("avx512fp16");
+}
+
+inline bool cpu_prefers_avx2_fp8_bf16() {
+  // Zen 5 class EPYC parts expose AVX-512 BF16, but the 16-lane FP8 gather path
+  // still loses to AVX2 on this host because the wider gather path costs more than
+  // the extra SIMD width saves. Keep the narrower path as a targeted runtime quirk
+  // instead of changing the generic dispatch for every AVX-512 CPU.
+  unsigned int eax = 0;
+  unsigned int ebx = 0;
+  unsigned int ecx = 0;
+  unsigned int edx = 0;
+  if (__get_cpuid_max(0, nullptr) == 0 || !__get_cpuid(0, &eax, &ebx, &ecx, &edx)) {
+    return false;
+  }
+  if (ebx != 0x68747541u || edx != 0x69746e65u || ecx != 0x444d4163u) {
+    return false;
+  }
+
+  if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+    return false;
+  }
+  const unsigned int base_family = (eax >> 8) & 0x0F;
+  const unsigned int base_model = (eax >> 4) & 0x0F;
+  const unsigned int ext_family = (eax >> 20) & 0xFF;
+  const unsigned int ext_model = (eax >> 16) & 0x0F;
+  const unsigned int family = base_family == 0x0F ? base_family + ext_family : base_family;
+  const unsigned int model = base_model | (ext_model << 4);
+  return family == 26 && model == 2;
 }
 
 __attribute__((target("avx512f,avx512bw,avx512vl")))
@@ -1511,7 +1542,8 @@ void dequantize_fp8_2d(
   if (output.scalar_type() == at::kBFloat16) {
     c10::BFloat16* dst = output.data_ptr<c10::BFloat16>();
 #if GPTQMODEL_FLOATX_X86 && (defined(__GNUC__) || defined(__clang__))
-    if (cpu_supports_avx512bf16()) {
+    const bool prefer_avx2_bf16_fp8 = cpu_prefers_avx2_fp8_bf16();
+    if (cpu_supports_avx512bf16() && !prefer_avx2_bf16_fp8) {
       const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
       at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
@@ -1551,6 +1583,8 @@ void dequantize_fp8_2d(
       return;
     }
     if (cpu_supports_avx2()) {
+      // Some AMD AVX-512 parts still retire the FP8 BF16 gather-heavy loop faster
+      // with AVX2, so let the runtime quirk above steer this path on those hosts.
       const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
       at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
