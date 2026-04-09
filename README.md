@@ -384,6 +384,36 @@ model.save(quant_path)
 
 `GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
 
+##### AutoDecoder Mini Doc
+
+`AutoModuleDecoderConfig` is a preprocessor for calibration-based quantization flows when the source checkpoint stores weights in formats such as FP8 or FP4.
+
+- Use it with configs such as `GPTQConfig`, `AWQConfig`, or `ParoConfig` when you want to quantize from an FP8/FP4 source checkpoint into another target format.
+- During the forward stage, GPT-QModel will use native module-local acceleration when the device supports the source dtype; otherwise it will decode the module to dense `torch.float16` or `torch.bfloat16`.
+- The decoded dense module is then reused as the quantization source and for optional forward replay, so GPTQ/AWQ can still complete their full forward -> quantize -> replay lifecycle.
+- In Python code, pass real torch dtypes such as `torch.bfloat16` or `torch.float16`. String dtype names are mainly for serialized JSON/YAML-style payloads.
+
+```py
+import torch
+from datasets import load_dataset
+from gptqmodel import GPTQConfig, GPTQModel
+from gptqmodel.quantization import AutoModuleDecoderConfig
+
+model_id = "/path/to/fp8-or-fp4-checkpoint"
+calibration_dataset = load_dataset("allenai/c4", split="train").select(range(128))["text"]
+
+qcfg = GPTQConfig(
+    bits=4,
+    group_size=128,
+    preprocessors=[
+        AutoModuleDecoderConfig(target_dtype=torch.bfloat16),
+    ],
+)
+
+model = GPTQModel.load(model_id, qcfg)
+model.quantize(calibration_dataset, batch_size=1)
+```
+
 ##### GGUF Example: Llama 3.2 1B Instruct
 
 ```py
