@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from pathlib import Path
 
 from gptqmodel.utils import cpp as cpp_module
@@ -337,6 +339,74 @@ def test_torch_ops_jit_extension_reuses_cached_namespace_after_first_load(monkey
     assert loader.load() is True
     assert loader.namespace_object() is runtime
     assert loader.op("kernel") is runtime.kernel
+
+
+def test_torch_ops_jit_extension_serializes_different_extensions_with_one_shared_lock(monkeypatch, tmp_path):
+    """Guard that different JIT extensions do not compile in parallel."""
+
+    loader_a = _make_loader(
+        tmp_path,
+        name="unit_test_ops_a",
+        namespace="unit_test_ns_a",
+    )
+    loader_b = _make_loader(
+        tmp_path,
+        name="unit_test_ops_b",
+        namespace="unit_test_ns_b",
+    )
+
+    states = {
+        "unit_test_ops_a": False,
+        "unit_test_ops_b": False,
+    }
+    runtime_a = type("RuntimeNamespaceA", (), {"kernel": object()})()
+    runtime_b = type("RuntimeNamespaceB", (), {"kernel": object()})()
+    logger = _FakeLogger()
+    compile_tracker = {
+        "active": 0,
+        "max_active": 0,
+    }
+    compile_tracker_lock = threading.Lock()
+    start_barrier = threading.Barrier(3)
+    errors: list[Exception] = []
+
+    monkeypatch.setattr(loader_a, "_ops_available", lambda: states["unit_test_ops_a"])
+    monkeypatch.setattr(loader_b, "_ops_available", lambda: states["unit_test_ops_b"])
+    monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns_a", runtime_a, raising=False)
+    monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns_b", runtime_b, raising=False)
+    monkeypatch.setattr(cpp_module, "setup_logger", lambda: logger)
+
+    def fake_compile(**kwargs):
+        extension_name = kwargs["name"]
+        with compile_tracker_lock:
+            compile_tracker["active"] += 1
+            compile_tracker["max_active"] = max(compile_tracker["max_active"], compile_tracker["active"])
+        time.sleep(0.02)
+        states[extension_name] = True
+        with compile_tracker_lock:
+            compile_tracker["active"] -= 1
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    def runner(loader):
+        try:
+            start_barrier.wait(timeout=1.0)
+            assert loader.load() is True
+        except Exception as exc:  # pragma: no cover - assertion path below
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=runner, args=(loader_a,)),
+        threading.Thread(target=runner, args=(loader_b,)),
+    ]
+    for thread in threads:
+        thread.start()
+    start_barrier.wait(timeout=1.0)
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert compile_tracker["max_active"] == 1
 
 
 def test_torch_ops_jit_extension_cuda_fingerprint_tracks_visible_capabilities(monkeypatch, tmp_path):
