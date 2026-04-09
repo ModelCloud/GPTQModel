@@ -134,6 +134,7 @@ def _prefer_reference_fp8_cpu(
     scale_tensor: Optional[torch.Tensor],
     *,
     target_dtype: torch.dtype,
+    axis: Optional[int] = 0,
 ) -> bool:
     if scale_tensor is None:
         return False
@@ -150,7 +151,33 @@ def _prefer_reference_fp8_cpu(
             getattr(torch, "float8_e5m2", None),
         ) if dtype is not None
     )
-    return tensor.dtype in standard_fp8_dtypes
+    if tensor.dtype not in standard_fp8_dtypes:
+        return False
+
+    # Standard torch FP8 dtypes already have a strong ATen path on CPU, but the
+    # native extension now wins on a few layout/target pairs on this host. Keep
+    # the default on the reference path unless the scale layout matches one of
+    # the native wins we have benchmarked and validated.
+    if tensor.ndim != 2:
+        return True
+    rows, cols = tensor.shape
+    if scale_tensor.ndim == 0:
+        return False
+    if scale_tensor.ndim == 1:
+        resolved_axis = 0 if axis is None else axis
+        if resolved_axis == 1 and cols % scale_tensor.numel() == 0:
+            return target_dtype is torch.float16
+        return True
+    if scale_tensor.ndim != 2:
+        return True
+    if scale_tensor.shape == tensor.shape:
+        return True
+    scale_rows, scale_cols = scale_tensor.shape
+    if scale_rows == rows and cols % scale_cols == 0:
+        block_width = cols // scale_cols
+        if block_width in (16, 64):
+            return False
+    return True
 
 
 def _load_floatx_cpu_ops():
@@ -592,6 +619,7 @@ def dequantize_f8_e4m3(
             tensor,
             scale if scale is not None else scale_inv,
             target_dtype=target_dtype,
+            axis=axis,
         ):
             return _dequantize_f8_reference(
                 tensor,
