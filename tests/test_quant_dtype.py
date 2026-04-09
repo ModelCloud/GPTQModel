@@ -279,6 +279,34 @@ def test_dequantize_f8_e4m3_with_fractional_scale_inv():
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
+def test_dequantize_f8_cpu_prefers_reference_for_standard_fp8(monkeypatch: pytest.MonkeyPatch):
+    src = torch.linspace(-1, 1, steps=16, dtype=torch.float32).reshape(4, 4)
+    fp8 = src.to(torch.float8_e4m3fn)
+    scale_inv = torch.ones_like(src, dtype=torch.float32)
+    expected = dtype_module._dequantize_f8_reference(
+        fp8,
+        scale_inv=scale_inv,
+        axis=None,
+        target_dtype=torch.bfloat16,
+    )
+
+    def fail_load():
+        raise AssertionError("native FP8 kernel should be bypassed for standard torch FP8 dtypes")
+
+    monkeypatch.delenv("GPTQMODEL_FLOATX_CPU_FORCE_NATIVE_FP8", raising=False)
+    monkeypatch.setattr(dtype_module, "_load_floatx_cpu_ops", fail_load)
+
+    got = dequantize_f8_e4m3(
+        fp8,
+        scale_inv=scale_inv,
+        axis=None,
+        target_dtype=torch.bfloat16,
+    )
+
+    assert torch.equal(got, expected)
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
 def test_dequantize_f8_e4m3_raises_on_both_scale_and_inverse():
     tensor = torch.zeros(2, dtype=torch.float8_e4m3fn)
     with pytest.raises(ValueError):

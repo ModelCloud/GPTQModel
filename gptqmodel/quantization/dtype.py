@@ -118,6 +118,30 @@ def _can_use_fast_path(
     return True
 
 
+def _prefer_reference_fp8_cpu(
+    tensor: torch.Tensor,
+    scale_tensor: Optional[torch.Tensor],
+    *,
+    target_dtype: torch.dtype,
+) -> bool:
+    if scale_tensor is None:
+        return False
+    if tensor.device.type != "cpu":
+        return False
+    if target_dtype not in _TARGET_DTYPE_CODES:
+        return False
+    if os.environ.get("GPTQMODEL_FLOATX_CPU_FORCE_NATIVE_FP8", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+
+    standard_fp8_dtypes = tuple(
+        dtype for dtype in (
+            getattr(torch, "float8_e4m3fn", None),
+            getattr(torch, "float8_e5m2", None),
+        ) if dtype is not None
+    )
+    return tensor.dtype in standard_fp8_dtypes
+
+
 def _load_floatx_cpu_ops():
     try:
         from ..utils.cpp import load_floatx_cpu_extension
@@ -357,6 +381,18 @@ def dequantize_f8_e4m3(
     ):
         if scale is None and scale_inv is None:
             return tensor.to(target_dtype)
+        if _prefer_reference_fp8_cpu(
+            tensor,
+            scale if scale is not None else scale_inv,
+            target_dtype=target_dtype,
+        ):
+            return _dequantize_f8_reference(
+                tensor,
+                scale=scale,
+                scale_inv=scale_inv,
+                axis=axis,
+                target_dtype=target_dtype,
+            )
 
         ops = _load_floatx_cpu_ops()
         if ops is not None:
