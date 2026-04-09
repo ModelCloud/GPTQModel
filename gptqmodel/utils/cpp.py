@@ -26,10 +26,10 @@ from .logger import setup_logger
 
 log = logging.getLogger(__name__)
 
-# Shared per-extension locks serialize cache deletion and JIT compilation so
-# concurrent startup paths do not race on the same build root.
-_TORCH_OPS_EXTENSION_LOCKS: dict[str, threading.Lock] = {}
-_TORCH_OPS_EXTENSION_LOCKS_GUARD = threading.Lock()
+# One process-local lock serializes every torch.ops JIT cache mutation and
+# compile so concurrent startup paths never overlap toolchain work across
+# different extensions.
+_TORCH_OPS_JIT_LOCK = threading.Lock()
 
 _PACK_BLOCK_EXTENSION: Optional[bool] = None
 _PACK_BLOCK_EXTENSION_INITIALISED = False
@@ -37,7 +37,7 @@ _PACK_BLOCK_EXTENSION_INITIALISED = False
 _PACK_BLOCK_TORCH_OPS_EXTENSION = None
 _FLOATX_CPU_TORCH_OPS_EXTENSION = None
 
-_cpp_ext_lock = threading.Lock()
+_cpp_ext_lock = _TORCH_OPS_JIT_LOCK
 
 # Used to track whether cleanup has been done already
 _cpp_ext_initialized = False
@@ -408,18 +408,12 @@ class TorchOpsJitExtension:
         self._last_error = ""
         self._namespace_cache: Optional[object] = None
         self._op_cache: dict[str, object] = {}
-        self._lock = self._get_shared_lock(name)
+        self._lock = self._get_shared_lock()
 
     @classmethod
-    def _get_shared_lock(cls, extension_name: str) -> threading.Lock:
-        """Reuse one process-local lock per extension build directory."""
-
-        with _TORCH_OPS_EXTENSION_LOCKS_GUARD:
-            lock = _TORCH_OPS_EXTENSION_LOCKS.get(extension_name)
-            if lock is None:
-                lock = threading.Lock()
-                _TORCH_OPS_EXTENSION_LOCKS[extension_name] = lock
-            return lock
+    def _get_shared_lock(cls) -> threading.Lock:
+        """Reuse the single process-local lock for every JIT extension."""
+        return _TORCH_OPS_JIT_LOCK
 
     def _resolve_path(self, value: Path | str | Callable[[], Path | str]) -> Path:
         resolved = value() if callable(value) else value
