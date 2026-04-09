@@ -314,6 +314,8 @@ class BaseQModel(nn.Module):
         # auto-fix model config erors
         if isinstance(self.model, PreTrainedModel):
             autofix_hf_model_config(self.model, path=model_local_path)
+        # Reject activation-quantized checkpoints at load time so the rest of
+        # the floatx decoder stack can continue assuming dense activations.
         self._configure_modelopt_runtime()
 
         self._turtle_lock = threading.RLock()

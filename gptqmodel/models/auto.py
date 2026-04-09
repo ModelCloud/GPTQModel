@@ -284,6 +284,14 @@ SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
 
 def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
+    """Return the first activation-quantization field that makes this config unsupported.
+
+    GPT-QModel can load weight-only quantized checkpoints through the Transformers
+    surface, but it does not currently implement activation-quantized runtime
+    semantics. This helper keeps the rejection logic in one place for both
+    ModelOpt-style grouped configs and flatter HF quantization payloads.
+    """
+
     config_groups = quantization_config.get("config_groups")
     if isinstance(config_groups, dict):
         for group_cfg in config_groups.values():
@@ -309,6 +317,8 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     if not isinstance(quantization_config, dict):
         return False
 
+    # Fail fast before model selection so activation-quantized checkpoints do
+    # not accidentally proceed down a weight-only loader path.
     unsupported_mode = _activation_quantization_mode(quantization_config)
     if unsupported_mode is not None:
         log.error("GPT-QModel currently does not support loading of activation quantized models")
