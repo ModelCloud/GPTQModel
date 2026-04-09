@@ -44,6 +44,7 @@ from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..quantization.config import (
+    AutoModuleDecoderConfig,
     FORMAT,
     METHOD,
     QUANTIZE_BLACK_LIST,
@@ -313,6 +314,9 @@ class BaseQModel(nn.Module):
         # auto-fix model config erors
         if isinstance(self.model, PreTrainedModel):
             autofix_hf_model_config(self.model, path=model_local_path)
+        # Reject activation-quantized checkpoints at load time so the rest of
+        # the floatx decoder stack can continue assuming dense activations.
+        self._configure_modelopt_runtime()
 
         self._turtle_lock = threading.RLock()
 
@@ -1328,6 +1332,171 @@ class BaseQModel(nn.Module):
                 )
                 timer.flush()
 
+    def _active_auto_module_decoder_config(self) -> Optional[AutoModuleDecoderConfig]:
+        """Return the active auto-decoder preprocessor config, if any."""
+
+        preprocessors = getattr(self.quantize_config, "preprocessors", None) or []
+        for preprocessor in reversed(preprocessors):
+            if isinstance(preprocessor, AutoModuleDecoderConfig):
+                return preprocessor
+        return None
+
+    def materialize_passthrough_modules_for_save(self) -> int:
+        """Decode passthrough floatx modules in-place before saving when configured."""
+
+        decoder_cfg = self._active_auto_module_decoder_config()
+        if decoder_cfg is None or decoder_cfg.passthrough_save_policy != "decode":
+            return 0
+
+        decoded_count = 0
+        for _, module in list(self.model.named_modules()):
+            if isinstance(module, BaseQuantLinear) or not hasattr(module, "weight"):
+                continue
+
+            checkpoint_tensors = None
+            if isinstance(self.turtle_model, LazyTurtle):
+                checkpoint_tensors = self.turtle_model.checkpoint_tensors_for_submodule(
+                    target_model=self.model,
+                    target_submodule=module,
+                    recurse=False,
+                )
+            if not checkpoint_tensors:
+                checkpoint_tensors = dict(module.state_dict(keep_vars=True))
+            weight = checkpoint_tensors.get("weight")
+            if not isinstance(weight, torch.Tensor):
+                continue
+
+            decoder_kind = self._decoder_weight_format(
+                weight=weight,
+                checkpoint_tensors=checkpoint_tensors,
+            )
+            if decoder_kind is None:
+                continue
+
+            decoded_module = self._build_decoder_quant_source_module(
+                module,
+                checkpoint_tensors=checkpoint_tensors,
+                target_dtype=decoder_cfg.target_dtype,
+            )
+            self._replace_live_submodule(module, decoded_module)
+            decoded_count += 1
+
+        return decoded_count
+
+    def materialize_passthrough_modules_for_eval(
+        self,
+        device: torch.device,
+        *,
+        respect_forward_policy: bool = False,
+    ) -> int:
+        """Materialize passthrough floatx modules into live evaluation modules."""
+
+        decoder_cfg = self._active_auto_module_decoder_config()
+        if decoder_cfg is None:
+            return 0
+
+        target_device = torch.device(device)
+        decoded_count = 0
+        for _, module in list(self.model.named_modules()):
+            if isinstance(module, BaseQuantLinear) or not hasattr(module, "weight"):
+                continue
+
+            checkpoint_tensors = None
+            if isinstance(self.turtle_model, LazyTurtle):
+                checkpoint_tensors = self.turtle_model.checkpoint_tensors_for_submodule(
+                    target_model=self.model,
+                    target_submodule=module,
+                    recurse=False,
+                )
+            if not checkpoint_tensors:
+                checkpoint_tensors = dict(module.state_dict(keep_vars=True))
+            weight = checkpoint_tensors.get("weight")
+            if not isinstance(weight, torch.Tensor):
+                continue
+
+            decoder_kind = self._decoder_weight_format(
+                weight=weight,
+                checkpoint_tensors=checkpoint_tensors,
+            )
+            if decoder_kind is None:
+                continue
+
+            forward_module = None
+            if respect_forward_policy and decoder_cfg.passthrough_forward_policy != "decode":
+                if decoder_kind == "fp8" and device_supports_dtype(target_device, weight.dtype, require_validation=False):
+                    forward_module = self._build_fp8_forward_module(
+                        target_submodule=module,
+                        checkpoint_tensors=checkpoint_tensors,
+                        device=target_device,
+                        target_dtype=decoder_cfg.target_dtype,
+                    )
+                elif decoder_kind == "fp4" and device_supports_native_fp4(target_device, require_validation=False):
+                    forward_module = self._build_fp4_forward_module(
+                        target_submodule=module,
+                        checkpoint_tensors=checkpoint_tensors,
+                        device=target_device,
+                        target_dtype=decoder_cfg.target_dtype,
+                    )
+
+            if forward_module is None:
+                decoded_module = self._build_decoder_quant_source_module(
+                    module,
+                    checkpoint_tensors=checkpoint_tensors,
+                    target_dtype=decoder_cfg.target_dtype,
+                )
+                forward_module = self._build_decoder_forward_module(
+                    quant_source=decoded_module,
+                    device=target_device,
+                )
+            self._replace_live_submodule(module, forward_module)
+            decoded_count += 1
+
+        return decoded_count
+
+    def decoded_passthrough_state_dict_entries_for_save(self) -> tuple[Dict[str, torch.Tensor], List[str]]:
+        """Return dense state-dict entries that should replace native passthrough tensors on save."""
+
+        decoder_cfg = self._active_auto_module_decoder_config()
+        if decoder_cfg is None or decoder_cfg.passthrough_save_policy != "decode":
+            return {}, []
+
+        decoded_entries: Dict[str, torch.Tensor] = {}
+        decoded_prefixes: List[str] = []
+        for module_name, module in list(self.model.named_modules()):
+            if not module_name or isinstance(module, BaseQuantLinear) or not hasattr(module, "weight"):
+                continue
+
+            checkpoint_tensors = None
+            if isinstance(self.turtle_model, LazyTurtle):
+                checkpoint_tensors = self.turtle_model.checkpoint_tensors_for_submodule(
+                    target_model=self.model,
+                    target_submodule=module,
+                    recurse=False,
+                )
+            if not checkpoint_tensors:
+                checkpoint_tensors = dict(module.state_dict(keep_vars=True))
+            weight = checkpoint_tensors.get("weight")
+            if not isinstance(weight, torch.Tensor):
+                continue
+
+            decoder_kind = self._decoder_weight_format(
+                weight=weight,
+                checkpoint_tensors=checkpoint_tensors,
+            )
+            if decoder_kind is None:
+                continue
+
+            decoded_module = self._build_decoder_quant_source_module(
+                module,
+                checkpoint_tensors=checkpoint_tensors,
+                target_dtype=decoder_cfg.target_dtype,
+            )
+            decoded_prefixes.append(module_name)
+            for key, tensor in decoded_module.state_dict().items():
+                decoded_entries[f"{module_name}.{key}"] = tensor.detach().cpu()
+
+        return decoded_entries, decoded_prefixes
+
 
     # returns all the loaded qlinear types, returns empty [] if non-found
     def kernels(self) -> List[Type[BaseQuantLinear]]:
@@ -1522,9 +1691,16 @@ class BaseQModel(nn.Module):
                 checkpoint_tensors=checkpoint_tensors,
             )
             result_shape = tuple(getattr(quant_source.weight, "shape", weight.shape))
-            scale = self._decoder_scale_tensor(
-                scale_tensor=checkpoint_tensors.get("weight_scale"),
-                result_shape=result_shape,
+            scale = (
+                self._decoder_fp4_effective_scale(
+                    checkpoint_tensors=checkpoint_tensors,
+                    result_shape=result_shape,
+                )
+                if decoder_kind == "fp4"
+                else self._decoder_scale_tensor(
+                    scale_tensor=checkpoint_tensors.get("weight_scale"),
+                    result_shape=result_shape,
+                )
             )
             scale_inv = None
             if not isinstance(scale, torch.Tensor):
@@ -1582,6 +1758,69 @@ class BaseQModel(nn.Module):
             return int(block_size[0]), int(block_size[1])
         return None
 
+    def _decoder_quant_method_name(self) -> str:
+        """Return the checkpoint quantizer family declared in model config."""
+
+        quant_config = getattr(getattr(self.model, "config", None), "quantization_config", None)
+        if isinstance(quant_config, dict):
+            value = quant_config.get("quant_method")
+        else:
+            value = getattr(quant_config, "quant_method", None)
+        return str(value or "").strip().lower()
+
+    def _uses_modelopt_runtime(self) -> bool:
+        """Return ``True`` when the checkpoint declares ModelOpt runtime semantics."""
+
+        return self._decoder_quant_method_name() == "modelopt"
+
+    def _modelopt_activation_quantization_mode(self) -> Optional[str]:
+        """Describe unsupported ModelOpt activation quantization metadata when present."""
+
+        quant_config = getattr(getattr(self.model, "config", None), "quantization_config", None)
+        if not isinstance(quant_config, dict):
+            return None
+
+        config_groups = quant_config.get("config_groups")
+        if isinstance(config_groups, dict):
+            for group_cfg in config_groups.values():
+                if not isinstance(group_cfg, dict):
+                    continue
+                input_activations = group_cfg.get("input_activations")
+                if isinstance(input_activations, dict):
+                    num_bits = input_activations.get("num_bits")
+                    if isinstance(num_bits, (int, float)) and int(num_bits) < 16:
+                        return "input_activations"
+
+        kv_cache_scheme = quant_config.get("kv_cache_scheme")
+        if isinstance(kv_cache_scheme, dict):
+            num_bits = kv_cache_scheme.get("num_bits")
+            if isinstance(num_bits, (int, float)) and int(num_bits) < 16:
+                return "kv_cache_scheme"
+
+        if isinstance(self.turtle_model, LazyTurtle):
+            keys = self.turtle_model._weight_map.keys()
+        else:
+            keys = self.model.state_dict().keys()
+        if any(str(name).endswith((".input_scale", ".k_scale", ".v_scale")) for name in keys):
+            return "checkpoint_scales"
+        return None
+
+    def _configure_modelopt_runtime(self) -> None:
+        """Reject unsupported ModelOpt activation quantization at load time."""
+
+        if not self._uses_modelopt_runtime():
+            return
+
+        unsupported_mode = self._modelopt_activation_quantization_mode()
+        if unsupported_mode is not None:
+            log.error("GPT-QModel currently does not support loading of activation quantized models")
+            raise ValueError(
+                "GPT-QModel currently does not support loading of activation quantized models. "
+                "GPTQModel does not support loading ModelOpt checkpoints with activation quantization. "
+                "Only dense-activation weight-only variants such as W8A16/FP8 and W4A16/FP4 are supported. "
+                f"Detected unsupported metadata: {unsupported_mode}."
+            )
+
     def _decoder_scale_tensor(
         self,
         *,
@@ -1611,6 +1850,25 @@ class BaseQModel(nn.Module):
         expanded = scale_tensor.repeat_interleave(block_rows, dim=0)
         expanded = expanded.repeat_interleave(block_cols, dim=1)
         return expanded[:rows, :cols].contiguous()
+
+    def _decoder_fp4_effective_scale(
+        self,
+        *,
+        checkpoint_tensors: Dict[str, torch.Tensor],
+        result_shape: tuple[int, ...],
+    ) -> Optional[torch.Tensor]:
+        """Resolve NVFP4 weight scales, including ModelOpt's secondary global scale."""
+
+        scale = self._decoder_scale_tensor(
+            scale_tensor=checkpoint_tensors.get("weight_scale"),
+            result_shape=result_shape,
+        )
+        if not isinstance(scale, torch.Tensor):
+            return None
+        scale_2 = checkpoint_tensors.get("weight_scale_2")
+        if isinstance(scale_2, torch.Tensor):
+            scale = scale.to(torch.float32) * scale_2.to(torch.float32)
+        return scale
 
     def _decoder_weight_format(
         self,
@@ -1700,12 +1958,34 @@ class BaseQModel(nn.Module):
             return None
 
         weight = checkpoint_tensors.get("weight")
-        scale_inv = checkpoint_tensors.get("weight_scale_inv")
-        if not isinstance(weight, torch.Tensor) or not isinstance(scale_inv, torch.Tensor):
+        if not isinstance(weight, torch.Tensor):
             return None
+
+        scale_inv = self._decoder_scale_tensor(
+            scale_tensor=checkpoint_tensors.get("weight_scale_inv"),
+            result_shape=tuple(weight.shape),
+        )
+        if not isinstance(scale_inv, torch.Tensor):
+            # ModelOpt-style FP8 checkpoints store direct scales instead of inverse scales;
+            # normalize them here so TorchFP8Linear can use one consistent metadata form.
+            scale = self._decoder_scale_tensor(
+                scale_tensor=checkpoint_tensors.get("weight_scale"),
+                result_shape=tuple(weight.shape),
+            )
+            if not isinstance(scale, torch.Tensor):
+                return None
+            scale = scale.to(torch.float32)
+            tiny = torch.finfo(torch.float32).tiny
+            scale_inv = torch.where(
+                scale != 0,
+                torch.reciprocal(scale),
+                torch.full_like(scale, 1.0 / tiny),
+            )
 
         format_name = str(weight.dtype).split(".")[-1]
         try:
+            # Infer the wrapper layout from the normalized inverse-scale tensor so native
+            # FP8 execution works for either checkpoint convention.
             weight_scale_method, weight_block_size = self._infer_fp8_forward_layout(
                 weight=weight,
                 scale_inv=scale_inv,
@@ -1761,7 +2041,10 @@ class BaseQModel(nn.Module):
             return None
 
         weight = checkpoint_tensors.get("weight")
-        scale = checkpoint_tensors.get("weight_scale")
+        scale = self._decoder_fp4_effective_scale(
+            checkpoint_tensors=checkpoint_tensors,
+            result_shape=(target_submodule.out_features, target_submodule.in_features),
+        )
         if not isinstance(weight, torch.Tensor) or not isinstance(scale, torch.Tensor):
             return None
 
@@ -1844,6 +2127,7 @@ class BaseQModel(nn.Module):
             return target_submodule
 
         target_dtype = decoder_plan.get("target_dtype", target_submodule.weight.dtype)
+        forward_policy = str(decoder_plan.get("passthrough_forward_policy", "native")).strip().lower()
         if not isinstance(named_module.state.get("quant_source_module"), nn.Module):
             named_module.state["quant_source_module"] = self._build_decoder_quant_source_module(
                 target_submodule,
@@ -1853,7 +2137,7 @@ class BaseQModel(nn.Module):
 
         forward_mode = "decode"
         replacement = target_submodule
-        if decoder_kind == "fp8" and device_supports_dtype(device, weight.dtype, require_validation=False):
+        if forward_policy != "decode" and decoder_kind == "fp8" and device_supports_dtype(device, weight.dtype, require_validation=False):
             fp8_module = self._build_fp8_forward_module(
                 target_submodule=target_submodule,
                 checkpoint_tensors=checkpoint_tensors,
@@ -1863,7 +2147,7 @@ class BaseQModel(nn.Module):
             if fp8_module is not None:
                 replacement = self._replace_live_submodule(target_submodule, fp8_module)
                 forward_mode = "native"
-        elif decoder_kind == "fp4" and device_supports_native_fp4(device, require_validation=False):
+        elif forward_policy != "decode" and decoder_kind == "fp4" and device_supports_native_fp4(device, require_validation=False):
             fp4_module = self._build_fp4_forward_module(
                 target_submodule=target_submodule,
                 checkpoint_tensors=checkpoint_tensors,

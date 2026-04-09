@@ -31,7 +31,7 @@ from torch import nn
 from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.looper.module_looper import ModuleLooper, StopMainLoop
 from gptqmodel.models import loader
-from gptqmodel.models.auto import _hide_unsupported_quantization_config_for_lm_eval
+from gptqmodel.models.auto import _hide_unsupported_quantization_config_for_lm_eval, _is_supported_quantization_config
 
 
 ############ test_model_dequant.py ############
@@ -692,3 +692,32 @@ def test_hide_unsupported_quantization_config_for_lm_eval_leaves_supported_gptq_
         assert model.config.quantization_config == quantization_config
 
     assert model.config.quantization_config == quantization_config
+
+
+def test_is_supported_quantization_config_rejects_input_activation_quantization():
+    config = types.SimpleNamespace(
+        quantization_config={
+            "quant_method": "modelopt",
+            "config_groups": {
+                "group_0": {
+                    "input_activations": {"num_bits": 4, "type": "float", "dynamic": False},
+                    "weights": {"num_bits": 4, "type": "float", "dynamic": False},
+                }
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="activation quantized models"):
+        _is_supported_quantization_config(config)
+
+
+def test_is_supported_quantization_config_rejects_kv_cache_quantization():
+    config = types.SimpleNamespace(
+        quantization_config={
+            "quant_method": "modelopt",
+            "kv_cache_scheme": {"num_bits": 8, "type": "float", "dynamic": False},
+        }
+    )
+
+    with pytest.raises(ValueError, match="activation quantized models"):
+        _is_supported_quantization_config(config)

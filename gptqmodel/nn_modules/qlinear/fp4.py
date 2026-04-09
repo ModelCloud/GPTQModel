@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 try:
     from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor
 except Exception:
