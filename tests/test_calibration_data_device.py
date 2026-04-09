@@ -205,8 +205,11 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
 
     # Create fake GPT-QModel with calibration_data_device="cpu"
     class FakeGPTQModel:
+        capture_first_layer_positional_inputs = BaseQModel.capture_first_layer_positional_inputs
+        capture_first_layer_input_kwargs = BaseQModel.capture_first_layer_input_kwargs
         finalize_input_capture_example = BaseQModel.finalize_input_capture_example
         move_input_capture_example = BaseQModel.move_input_capture_example
+        prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
         run_input_capture = BaseQModel.run_input_capture
 
         def __init__(self):
@@ -221,7 +224,8 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
             self.INPUT_EMBEDDING_EXTRA_ARGS = None
             self.quant_region_timer = None
 
-        def shell_module_materialize(self, target_submodule, device):
+        def shell_module_materialize(self, target_submodule, device, **kwargs):
+            del kwargs
             return target_submodule
 
         def get_base_modules(self, model):
@@ -346,8 +350,11 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
     model = MinimalModel(hooked_layer)
 
     class FakeGPTQModel:
+        capture_first_layer_positional_inputs = BaseQModel.capture_first_layer_positional_inputs
+        capture_first_layer_input_kwargs = BaseQModel.capture_first_layer_input_kwargs
         finalize_input_capture_example = BaseQModel.finalize_input_capture_example
         move_input_capture_example = BaseQModel.move_input_capture_example
+        prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
         run_input_capture = BaseQModel.run_input_capture
 
         def __init__(self):
@@ -362,7 +369,8 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
             self.INPUT_EMBEDDING_EXTRA_ARGS = None
             self.quant_region_timer = None
 
-        def shell_module_materialize(self, target_submodule, device):
+        def shell_module_materialize(self, target_submodule, device, **kwargs):
+            del kwargs
             return target_submodule
 
         def get_base_modules(self, model):
@@ -496,8 +504,11 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
     model = MinimalModel(hooked_layer)
 
     class FakeGPTQModel:
+        capture_first_layer_positional_inputs = BaseQModel.capture_first_layer_positional_inputs
+        capture_first_layer_input_kwargs = BaseQModel.capture_first_layer_input_kwargs
         finalize_input_capture_example = BaseQModel.finalize_input_capture_example
         move_input_capture_example = BaseQModel.move_input_capture_example
+        prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
         run_input_capture = BaseQModel.run_input_capture
 
         def __init__(self):
@@ -512,7 +523,8 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
             self.INPUT_EMBEDDING_EXTRA_ARGS = None
             self.quant_region_timer = None
 
-        def shell_module_materialize(self, target_submodule, device):
+        def shell_module_materialize(self, target_submodule, device, **kwargs):
+            del kwargs
             return target_submodule
 
         def get_base_modules(self, model):
@@ -602,6 +614,10 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
 
 class _DummyGPTQModelForLooper:
     """Minimal fake GPT-QModel for testing ModuleLooper."""
+
+    capture_first_layer_positional_inputs = BaseQModel.capture_first_layer_positional_inputs
+    capture_first_layer_input_kwargs = BaseQModel.capture_first_layer_input_kwargs
+    prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
 
     def __init__(
         self,

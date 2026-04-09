@@ -221,15 +221,14 @@ from . import extension
 from .models import GPTQModel, get_best_device
 from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import (
-    AWQQuantizeConfig,
+    AWQConfig,
     BaseQuantizeConfig,
     FOEMConfig,
     GGUFConfig,
-    GGUFQuantizeConfig,
     GPTAQConfig,
-    GPTQQuantizeConfig,
+    GPTQConfig,
     QuantizeConfig,
-    RTNQuantizeConfig,
+    RTNConfig,
     WeightOnlyConfig,
 )
 from .utils import BACKEND, PROFILE

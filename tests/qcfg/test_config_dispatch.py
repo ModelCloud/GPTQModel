@@ -6,15 +6,15 @@ import pytest
 from gptqmodel.quantization.config import (
     FORMAT,
     METHOD,
-    AWQQuantizeConfig,
+    AWQConfig,
     BaseQuantizeConfig,
     BitsAndBytesConfig,
     FP8Config,
     GGUFBits,
     GGUFConfig,
-    GPTQQuantizeConfig,
+    GPTQConfig,
     QuantizeConfig,
-    RTNQuantizeConfig,
+    RTNConfig,
     SmoothMAD,
     WeightOnlyConfig,
 )
@@ -37,7 +37,7 @@ def _fp8_alias_cases():
 def test_quantize_config_dispatches_gptq_by_default():
     cfg = QuantizeConfig()
 
-    assert isinstance(cfg, GPTQQuantizeConfig)
+    assert isinstance(cfg, GPTQConfig)
     assert cfg.quant_method == METHOD.GPTQ
     assert cfg.format == FORMAT.GPTQ
 
@@ -45,7 +45,7 @@ def test_quantize_config_dispatches_gptq_by_default():
 def test_quantize_config_dispatches_awq_constructor():
     cfg = QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, sym=False)
 
-    assert isinstance(cfg, AWQQuantizeConfig)
+    assert isinstance(cfg, AWQConfig)
     assert isinstance(cfg, QuantizeConfig)
     assert cfg.quant_method == METHOD.AWQ
     assert cfg.format == FORMAT.GEMM
@@ -55,7 +55,7 @@ def test_quantize_config_dispatches_awq_constructor():
 def test_quantize_config_dispatches_awq_with_canonical_method_field():
     cfg = QuantizeConfig(method=METHOD.AWQ, format=FORMAT.GEMM, sym=False)
 
-    assert isinstance(cfg, AWQQuantizeConfig)
+    assert isinstance(cfg, AWQConfig)
     assert cfg.method == METHOD.AWQ
     assert cfg.quant_method == METHOD.AWQ
     assert cfg.format == FORMAT.GEMM
@@ -65,7 +65,7 @@ def test_quantize_config_dispatches_awq_with_canonical_method_field():
 def test_quantize_config_dispatches_awq_from_format_without_explicit_method():
     cfg = QuantizeConfig(format=FORMAT.GEMM, sym=False)
 
-    assert isinstance(cfg, AWQQuantizeConfig)
+    assert isinstance(cfg, AWQConfig)
     assert cfg.quant_method == METHOD.AWQ
     assert cfg.format == FORMAT.GEMM
     assert cfg.sym is False
@@ -82,7 +82,7 @@ def test_quantize_config_dispatches_awq_ignoring_legacy_gptq_only_kwargs():
         mse=0.0,
     )
 
-    assert isinstance(cfg, AWQQuantizeConfig)
+    assert isinstance(cfg, AWQConfig)
     assert cfg.quant_method == METHOD.AWQ
     assert cfg.format == FORMAT.GEMM
     assert cfg.sym is False
@@ -107,8 +107,8 @@ def test_quantize_config_dispatches_rtn_constructor():
     cfg = QuantizeConfig(weight_only=WeightOnlyConfig(smooth=SmoothMAD(k=2.0)))
 
     assert isinstance(cfg, BaseQuantizeConfig)
-    assert isinstance(cfg, RTNQuantizeConfig)
-    assert not isinstance(cfg, GPTQQuantizeConfig)
+    assert isinstance(cfg, RTNConfig)
+    assert not isinstance(cfg, GPTQConfig)
     assert cfg.uses_weight_only_lifecycle() is True
     assert cfg.smooth is not None
     assert cfg.export_quant_method() == METHOD.GPTQ
@@ -120,7 +120,7 @@ def test_quantize_config_dispatches_rtn_awq_export_constructor():
         weight_only=WeightOnlyConfig(smooth=SmoothMAD(k=2.0)),
     )
 
-    assert isinstance(cfg, RTNQuantizeConfig)
+    assert isinstance(cfg, RTNConfig)
     assert cfg.format == FORMAT.GEMM
     assert cfg.export_quant_method() == METHOD.AWQ
 
@@ -251,7 +251,7 @@ def test_quantize_config_dispatches_bitsandbytes_from_weight_only_method():
 def test_quantize_config_dispatches_gptq_marlin_constructor():
     cfg = QuantizeConfig(quant_method=METHOD.GPTQ, format=FORMAT.MARLIN)
 
-    assert isinstance(cfg, GPTQQuantizeConfig)
+    assert isinstance(cfg, GPTQConfig)
     assert cfg.export_quant_method() == METHOD.GPTQ
 
 
@@ -266,5 +266,5 @@ def test_from_quant_config_dispatches_awq_and_loads_zero_point():
         }
     )
 
-    assert isinstance(cfg, AWQQuantizeConfig)
+    assert isinstance(cfg, AWQConfig)
     assert cfg.sym is False

@@ -34,6 +34,7 @@ from ..looper.named_module import NamedModule
 from ..looper.paroquant_processor import ParoQuantProcessor
 from ..looper.qqq_processor import QQQProcessor
 from ..utils.device import get_device, get_device_new
+from ..utils.looper_helpers import normalize_device_like
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
 from ..utils.model import find_modules, get_module
 from ..utils.offload import offload_to_disk
@@ -448,6 +449,9 @@ def run_layer_stage(
         materialize_model(module)
 
         cur_layer_device = get_device(module)
+        if getattr(cur_layer_device, "type", None) == "meta":
+            # Lazy shell layers can stay meta until a later subset stage materializes them.
+            cur_layer_device = normalize_device_like(looper.gptq_model.quantize_config.device) or CPU
         full = find_modules(module, name=looper.gptq_model.lm_head if is_lm_head_module else "")
 
         for p_index, processor in enumerate(looper.processors):

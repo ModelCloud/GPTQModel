@@ -31,6 +31,7 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
+from ..models._const import META
 from ..quantization.config import VramStrategy, GcMode, ExpertsRoutingBypass
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
@@ -481,6 +482,14 @@ def _run_single_subset_pass(
     handle = []
     subset_size = len(subset)
 
+    if execute_forward:
+        for named_module in subset.values():
+            if isinstance(named_module, NamedModule):
+                looper._prepare_named_module_for_forward(
+                    named_module=named_module,
+                    fallback_device=cur_layer_device,
+                )
+
     # Determine MoE block name for hook selection
     moe_block_name = None
     if looper.gptq_model and hasattr(looper.gptq_model, 'moe_lifecycle_hooks'):
@@ -722,6 +731,8 @@ def _run_single_subset_pass(
             )
         else:
             target_device = get_device(named_module.module)
+            if target_device == META:
+                target_device = cur_layer_device
             setattr(named_module, "target_device", target_device)
             setattr(named_module.module, "target_device", target_device)
 
@@ -755,7 +766,7 @@ def _run_single_subset_pass(
         if module_weight is not None and expected_device is not None:
             target_device = expected_device if isinstance(expected_device, torch.device) else torch.device(expected_device)
             actual_device = get_device(module_weight)
-            assert actual_device == target_device, (
+            assert actual_device == META or actual_device == target_device, (
                 f"Device mismatch for '{module_label}' process task: "
                 f"module weight on {actual_device}, thread target {target_device}."
             )

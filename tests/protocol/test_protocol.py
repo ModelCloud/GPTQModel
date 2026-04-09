@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-from gptqmodel.quantization import FORMAT, METHOD, AWQQuantizeConfig, GGUFConfig, GPTQQuantizeConfig
+from gptqmodel.quantization import FORMAT, METHOD, AWQConfig, GGUFConfig, GPTQConfig
 from gptqmodel.quantization.protocol import (
     MatchSpec,
     Rule,
@@ -279,8 +279,8 @@ def test_negative_match_gptq_protocol_compiles_to_dynamic_skip_config():
     python_cfg = compile_protocol_to_quantize_config(_python_gptq_protocol_with_negative_match())
     yaml_cfg = compile_protocol_yaml_to_quantize_config(_yaml_gptq_protocol_with_negative_match())
 
-    assert isinstance(python_cfg, GPTQQuantizeConfig)
-    assert isinstance(yaml_cfg, GPTQQuantizeConfig)
+    assert isinstance(python_cfg, GPTQConfig)
+    assert isinstance(yaml_cfg, GPTQConfig)
     assert type(python_cfg) is type(yaml_cfg)
     assert python_cfg.quant_method == METHOD.GPTQ
     assert yaml_cfg.quant_method == METHOD.GPTQ
@@ -302,8 +302,8 @@ def test_negative_match_awq_protocol_compiles_to_dynamic_skip_config():
     python_cfg = compile_protocol_to_quantize_config(_python_awq_protocol_with_negative_match())
     yaml_cfg = compile_protocol_yaml_to_quantize_config(_yaml_awq_protocol_with_negative_match())
 
-    assert isinstance(python_cfg, AWQQuantizeConfig)
-    assert isinstance(yaml_cfg, AWQQuantizeConfig)
+    assert isinstance(python_cfg, AWQConfig)
+    assert isinstance(yaml_cfg, AWQConfig)
     assert type(python_cfg) is type(yaml_cfg)
     assert python_cfg.quant_method == METHOD.AWQ
     assert yaml_cfg.quant_method == METHOD.AWQ

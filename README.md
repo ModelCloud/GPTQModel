@@ -25,14 +25,15 @@
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
 * 03/09/2026 [main]: ✨Qwen 3.5 MoE model support added. New HF Kernel support added for AWQ. 
 HF Kernel for both gptq/awq are now used by default for cpu devices for best performance. New INT8 kernel ported from Intel for gptq. 
+
+<details>
+
+<summary>Archived News</summary>
 * 02/28/2026 [main]: ✨Qwen 3.5 model support added. 
 * 02/09/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): ✨New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
 `AWQ` `qcfg.zero_point` property has been merged with a unified `sym` symmetry property; `zero_point=True` is now `sym=False`.
 Fixed `AWQ` `sym=True` packing/inference and quantization compatibility with some Qwen3 models. Exaone 4.0 support.
 
-<details>
-
-<summary>Archived News</summary>
 * 12/31/2025 5.7.0-dev: ✨New `FailSafe` config and `FailSafeStrategy`, auto-enabled by default, to address uneven routing of MoE experts resulting in quantization issues for some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce the impact of outliers in `FailSafe` quantization using `RTN` by default. Different `FailSafeStrategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
 New Voxtral and Glm-4v model support, plus audio dataset calibration for Qwen2-Omni. `AWQ` compatibility fix for `GLM 4.5-Air`.
 
@@ -210,7 +211,7 @@ Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accum
 
 ### ParoQuant Activation Checkpointing
 
-`ParoQuantizeConfig.opt_gradient_checkpointing` controls activation checkpointing during ParoQuant's train-style optimization stages.
+`ParoConfig.opt_gradient_checkpointing` controls activation checkpointing during ParoQuant's train-style optimization stages.
 
 - `opt_scope="layer"` defaults to `opt_gradient_checkpointing=True`
 - `opt_scope="module"` defaults to `opt_gradient_checkpointing=False`
@@ -357,7 +358,7 @@ Basic example of using `GPT-QModel` to quantize an LLM model:
 
 ```py
 from datasets import load_dataset
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import GPTQConfig, GPTQModel
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
@@ -368,7 +369,7 @@ calibration_dataset = load_dataset(
     split="train"
   ).select(range(1024))["text"]
 
-quant_config = QuantizeConfig(bits=4, group_size=128)
+quant_config = GPTQConfig(bits=4, group_size=128)
 
 model = GPTQModel.load(model_id, quant_config)
 
@@ -380,7 +381,37 @@ model.save(quant_path)
 
 #### Other Quantization Formats
 
+`QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
+
 `GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
+
+##### AutoDecoder
+
+`AutoModuleDecoderConfig` is a preprocessor for calibration-based quantization flows when the source checkpoint stores weights in formats such as FP8 or FP4.
+
+- Use it with configs such as `GPTQConfig`, `AWQConfig`, or `ParoConfig` when you want to quantize from an FP8/FP4 source checkpoint into another target format.
+- Set `target_dtype` to the dense dtype you want the auto-decoder path to use during quantization, typically `torch.bfloat16` or `torch.float16`.
+
+```py
+import torch
+from datasets import load_dataset
+from gptqmodel import GPTQConfig, GPTQModel
+from gptqmodel.quantization import AutoModuleDecoderConfig
+
+model_id = "/path/to/fp8-or-fp4-checkpoint"
+calibration_dataset = load_dataset("allenai/c4", split="train").select(range(128))["text"]
+
+qcfg = GPTQConfig(
+    bits=4,
+    group_size=128,
+    preprocessors=[
+        AutoModuleDecoderConfig(target_dtype=torch.bfloat16),
+    ],
+)
+
+model = GPTQModel.load(model_id, qcfg)
+model.quantize(calibration_dataset, batch_size=1)
+```
 
 ##### GGUF Example: Llama 3.2 1B Instruct
 
@@ -403,13 +434,12 @@ model.save(quant_path)
 ##### FP8 Example: Llama 3.2 1B Instruct
 
 ```py
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, FP8Config, GPTQModel
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-FP8-E4M3"
 
-qcfg = QuantizeConfig(
-    method="fp8",
+qcfg = FP8Config(
     format="float8_e4m3fn",  # or "float8_e5m2"
     bits=8,
     weight_scale_method="row",
@@ -424,7 +454,7 @@ model.save(quant_path)
 
 ```py
 from datasets import load_dataset
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, EXL3Config, GPTQModel
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-EXL3"
@@ -435,9 +465,7 @@ calibration_dataset = load_dataset(
     split="train",
 ).select(range(1024))["text"]
 
-qcfg = QuantizeConfig(
-    method="exl3",
-    format="exl3",
+qcfg = EXL3Config(
     bits=4.0,        # target average bits-per-weight
     head_bits=6.0,   # optional higher bitrate for attention heads / sensitive tensors
     codebook="mcg",  # one of: mcg, mul1, 3inst

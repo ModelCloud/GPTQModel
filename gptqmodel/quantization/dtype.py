@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 
 try:
@@ -19,12 +21,22 @@ except Exception:
     unpack_uint4 = None
     f4_unpacked_to_f32 = None
 
+try:
+    from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor, nvfp4_quantize
+except Exception:
+    NVFP4Tensor = None
+    nvfp4_quantize = None
+
 __all__ = [
+    "DeviceDTypeSupport",
+    "get_device_dtype_support",
+    "device_supports_dtype",
     "available_float4_packed_dtype_names",
     "available_float4_packed_dtypes",
     "available_float8_dtype_names",
     "available_float8_dtypes",
     "device_supports_native_fp8",
+    "device_supports_native_fp4",
     "dequantize_fp8",
     "dequantize_f8_e4m3",
     "dequantize_f4_e2m1",
@@ -300,26 +312,222 @@ def _dequantize_f4_reference(
             result = result / scale_tensor
     return result
 
+_DTYPE_SUPPORT_CACHE: dict[tuple[str, Optional[int], bool], "DeviceDTypeSupport"] = {}
 
-def device_supports_native_fp8(device: Optional[torch.device] = None) -> bool:
-    """Return ``True`` when the target CUDA device supports native FP8 (E4M3).
 
-    Hopper-class GPUs (SM >= 9.0) expose hardware accelerated FP8 kernels while
-    earlier generations such as the A100 (SM 8.x) do not.  When CUDA is
-    unavailable this helper always returns ``False``.
+@dataclass(frozen=True)
+class DeviceDTypeSupport:
+    """Describe which execution dtypes a device advertises and validates.
+
+    ``advertised_linear_dtypes`` is architecture-based. It answers what the
+    device family is expected to support in native matmul / linear kernels.
+    ``validated_linear_dtypes`` is runtime-probed and therefore stricter.
     """
 
-    if not torch.cuda.is_available():
-        return False
+    device: torch.device
+    capability: Optional[tuple[int, int]]
+    advertised_linear_dtypes: frozenset[torch.dtype]
+    validated_linear_dtypes: frozenset[torch.dtype]
+
+    def supports(self, dtype: torch.dtype, *, require_validation: bool = False) -> bool:
+        """Return whether ``dtype`` is supported for linear-style execution."""
+
+        supported = (
+            self.validated_linear_dtypes
+            if require_validation
+            else self.advertised_linear_dtypes
+        )
+        return dtype in supported
+
+
+def _normalize_device(device: Optional[torch.device]) -> torch.device:
+    """Resolve ``device`` into a concrete torch device."""
 
     if device is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+        if torch.cuda.is_available():
+            return torch.device("cuda", torch.cuda.current_device())
+        return torch.device("cpu")
+    return torch.device(device)
 
-    if device.type != "cuda":
+
+def _cuda_capability(device: torch.device) -> Optional[tuple[int, int]]:
+    """Return CUDA compute capability for a concrete device."""
+
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return None
+    return tuple(int(v) for v in torch.cuda.get_device_capability(device))
+
+
+def _advertised_cuda_linear_dtypes(capability: tuple[int, int]) -> frozenset[torch.dtype]:
+    """Map CUDA architecture families to expected fast linear dtypes."""
+
+    major, minor = capability
+    supported = {
+        torch.float16,
+        torch.float32,
+    }
+
+    if major >= 8:
+        supported.add(torch.bfloat16)
+
+    if _FLOAT8_DTYPES and (major >= 9 or (major, minor) == (8, 9)):
+        supported.update(_FLOAT8_DTYPES)
+    if _FLOAT4_PACKED_DTYPES and major >= 10:
+        supported.update(_FLOAT4_PACKED_DTYPES)
+
+    return frozenset(supported)
+
+
+def _advertised_linear_dtypes_for_device(device: torch.device) -> tuple[Optional[tuple[int, int]], frozenset[torch.dtype]]:
+    """Return the architecture-level linear dtype support set for ``device``."""
+
+    if device.type == "cuda" and torch.cuda.is_available():
+        capability = _cuda_capability(device)
+        assert capability is not None
+        return capability, _advertised_cuda_linear_dtypes(capability)
+
+    # CPU / other devices fall back to portable dtypes only. This helper is
+    # used for accelerator routing decisions, so keep the default conservative.
+    return None, frozenset({torch.float16, torch.float32, torch.bfloat16})
+
+
+def _validate_linear_dtype_support(device: torch.device, dtype: torch.dtype) -> bool:
+    """Runtime-probe whether one small linear/matmul path works for ``dtype``."""
+
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return dtype in {torch.float16, torch.float32, torch.bfloat16}
+
+    try:
+        if dtype in _FLOAT4_PACKED_DTYPES:
+            if NVFP4Tensor is None or nvfp4_quantize is None:
+                return False
+            weight = torch.randn(16, 16, dtype=torch.float32)
+            scales, packed = nvfp4_quantize(weight, block_size=16)
+            packed_weight = packed.view(dtype) if packed.dtype is not dtype else packed
+            packed_weight = packed_weight.to(device)
+            scales = scales.to(device)
+            x = torch.randn(4, 16, device=device, dtype=torch.bfloat16)
+            result = F.linear(
+                x,
+                NVFP4Tensor(
+                    packed_weight,
+                    scales,
+                    block_size=16,
+                    orig_dtype=torch.bfloat16,
+                ),
+                None,
+            )
+            return isinstance(result, torch.Tensor)
+
+        if dtype in _FLOAT8_DTYPES:
+            if not hasattr(torch, "_scaled_mm"):
+                return False
+            compute_dtype = torch.bfloat16 if device_supports_dtype(device, torch.bfloat16) else torch.float16
+            a = torch.randn(16, 16, device=device, dtype=compute_dtype).to(dtype)
+            b = torch.randn(16, 16, device=device, dtype=compute_dtype).to(dtype)
+            result = torch._scaled_mm(
+                a,
+                b,
+                scale_a=torch.tensor(1.0, device=device),
+                scale_b=torch.tensor(1.0, device=device),
+                out_dtype=compute_dtype,
+            )
+            if isinstance(result, tuple):
+                result = result[0]
+            return isinstance(result, torch.Tensor)
+
+        a = torch.randn(16, 16, device=device, dtype=dtype)
+        b = torch.randn(16, 16, device=device, dtype=dtype)
+        result = torch.matmul(a, b)
+        return isinstance(result, torch.Tensor)
+    except Exception:
         return False
 
-    major, _ = torch.cuda.get_device_capability(device)
-    return major >= 9
+
+def get_device_dtype_support(
+    device: Optional[torch.device] = None,
+    *,
+    validate: bool = False,
+) -> DeviceDTypeSupport:
+    """Return linear-dtype support metadata for ``device``.
+
+    ``validate=False`` is architecture-based and cheap.
+    ``validate=True`` probes one small kernel per advertised dtype and caches
+    the results for subsequent callers.
+    """
+
+    resolved_device = _normalize_device(device)
+    cache_key = (resolved_device.type, resolved_device.index, bool(validate))
+    cached = _DTYPE_SUPPORT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    capability, advertised = _advertised_linear_dtypes_for_device(resolved_device)
+    validated = advertised
+    if validate:
+        validated = frozenset(
+            dtype
+            for dtype in advertised
+            if _validate_linear_dtype_support(resolved_device, dtype)
+        )
+
+    support = DeviceDTypeSupport(
+        device=resolved_device,
+        capability=capability,
+        advertised_linear_dtypes=advertised,
+        validated_linear_dtypes=validated,
+    )
+    _DTYPE_SUPPORT_CACHE[cache_key] = support
+    return support
+
+
+def device_supports_dtype(
+    device: Optional[torch.device],
+    dtype: torch.dtype,
+    *,
+    require_validation: bool = False,
+) -> bool:
+    """Return whether ``device`` supports ``dtype`` for linear-style kernels."""
+
+    support = get_device_dtype_support(device, validate=require_validation)
+    return support.supports(dtype, require_validation=require_validation)
+
+
+def device_supports_native_fp8(
+    device: Optional[torch.device] = None,
+    *,
+    require_validation: bool = False,
+) -> bool:
+    """Return ``True`` when the target CUDA device supports native FP8 (E4M3).
+
+    This compatibility wrapper now forwards to the generic device/dtype support
+    map. By default it returns architecture-advertised support; callers that
+    need a stricter answer may pass ``require_validation=True``.
+    """
+
+    if not _FLOAT8_DTYPES:
+        return False
+    return device_supports_dtype(
+        device,
+        torch.float8_e4m3fn,
+        require_validation=require_validation,
+    )
+
+
+def device_supports_native_fp4(
+    device: Optional[torch.device] = None,
+    *,
+    require_validation: bool = False,
+) -> bool:
+    """Return ``True`` when the target device advertises native NVFP4 linear execution."""
+
+    if not _FLOAT4_PACKED_DTYPES:
+        return False
+    return device_supports_dtype(
+        device,
+        _FLOAT4_PACKED_DTYPES[0],
+        require_validation=require_validation,
+    )
 
 
 def _reshape_for_axis(tensor: torch.Tensor, axis: Optional[int], target_ndim: int) -> torch.Tensor:

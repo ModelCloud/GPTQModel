@@ -9,7 +9,7 @@ from safetensors.torch import save_file
 
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
-from gptqmodel.quantization.config import FORMAT, METHOD, EXL3QuantizeConfig, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, EXL3Config, QuantizeConfig
 from gptqmodel.utils.exllamav3 import build_exllamav3_tensor_storage, replace_exllamav3_placeholders
 from gptqmodel.utils.model_dequant import detect_format
 
@@ -24,7 +24,7 @@ def test_exllamav3_quantize_config_round_trip():
         codebook="mul1",
     )
 
-    assert isinstance(cfg, EXL3QuantizeConfig)
+    assert isinstance(cfg, EXL3Config)
     assert cfg.quant_method == METHOD.EXL3
     assert cfg.format == FORMAT.EXL3
     assert cfg.runtime_bits == 2
@@ -38,7 +38,7 @@ def test_exllamav3_quantize_config_round_trip():
     assert payload["codebook"] == "mul1"
 
     reloaded = QuantizeConfig.from_quant_config(payload)
-    assert isinstance(reloaded, EXL3QuantizeConfig)
+    assert isinstance(reloaded, EXL3Config)
     assert reloaded.bits == 2.25
     assert reloaded.head_bits == 4.0
     assert reloaded.out_scales == "always"

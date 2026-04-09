@@ -32,7 +32,7 @@ from ..models.writer import (
 )
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..quantization import QuantizeConfig
-from ..quantization.config import EXL3QuantizeConfig, FORMAT, GPTQQuantizeConfig, METHOD
+from ..quantization.config import EXL3Config, FORMAT, GPTQConfig, METHOD
 from ..quantization.gptq import GPTQ
 from ..utils.device import get_device
 from ..utils.exllamav3 import create_exllamav3_module
@@ -52,9 +52,9 @@ _OUT_SCALES_TO_ARG = {
 
 
 def clone_exllamav3_config_for_module(
-    qcfg: EXL3QuantizeConfig,
+    qcfg: EXL3Config,
     module_full_name: str,
-) -> Optional[EXL3QuantizeConfig]:
+) -> Optional[EXL3Config]:
     """Clones and applies per-module EXL3 dynamic overrides, or skips the module."""
 
     if qcfg.dynamic_get(layer_name=module_full_name) == False:
@@ -134,7 +134,7 @@ class EXL3Processor(LoopProcessor):
         if module_qcfg is None:
             return
 
-        capture_qcfg = GPTQQuantizeConfig(
+        capture_qcfg = GPTQConfig(
             bits=max(1, module_qcfg.runtime_bits),
             group_size=-1,
             desc_act=False,
@@ -177,7 +177,7 @@ class EXL3Processor(LoopProcessor):
             return True
         return module.full_name.endswith(f".{self.lm_head_name}")
 
-    def _target_bits(self, module: NamedModule, module_qcfg: EXL3QuantizeConfig) -> int:
+    def _target_bits(self, module: NamedModule, module_qcfg: EXL3Config) -> int:
         """Chooses lm_head-specific bitwidth overrides when configured."""
 
         if self._is_lm_head(module) and module_qcfg.head_bits is not None:
@@ -187,7 +187,7 @@ class EXL3Processor(LoopProcessor):
     def _build_quant_args(
         self,
         module: NamedModule,
-        module_qcfg: EXL3QuantizeConfig,
+        module_qcfg: EXL3Config,
         device: torch.device,
     ) -> Dict[str, object]:
         """Builds the argument bundle passed into the EXL3 quantizer."""
@@ -244,7 +244,7 @@ class EXL3Processor(LoopProcessor):
 
         task_entry = self.tasks[module.name]
         capture: GPTQ = task_entry["capture"]
-        module_qcfg: EXL3QuantizeConfig = task_entry["qcfg"]
+        module_qcfg: EXL3Config = task_entry["qcfg"]
 
         target_device = device or get_device(module.module)
         target_device = torch.device(target_device)

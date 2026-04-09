@@ -127,6 +127,15 @@ def _compute_awq_weight_mean(
 class AWQProcessor(LoopProcessor):
     """Captures activations and quantizes layers with the AWQ scaling workflow."""
 
+    @staticmethod
+    def resolve_quant_source_module(named_module: NamedModule) -> nn.Module:
+        """Return the dense module view AWQ should use for weight quantization."""
+
+        quant_source = named_module.state.get("quant_source_module")
+        if isinstance(quant_source, nn.Module):
+            return quant_source
+        return named_module.module
+
     def __init__(
         self,
         tokenizer,
@@ -1331,7 +1340,7 @@ class AWQProcessor(LoopProcessor):
             base_title = f"Quantizing {named_module.name} in layer"
             self._pause_controller.register_and_draw_progress_bar(self.pb, title=base_title, subtitle="")
 
-            linear_layer = named_module.module
+            linear_layer = self.resolve_quant_source_module(named_module)
             linear_layer = linear_layer.to(get_best_device())
 
             tp_info = named_module.state.get("tp_pad_info")

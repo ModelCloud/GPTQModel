@@ -31,7 +31,7 @@ from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.looper.stage_layer import _capture_pristine_group_context
 from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
-from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantizeConfig, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, ParoConfig, QuantizeConfig
 from gptqmodel.quantization.paroquant import optimization as paroquant_optimization
 from gptqmodel.quantization.paroquant.optimization import (
     GroupLinearQuantizer,
@@ -93,7 +93,7 @@ def test_paroquant_quantize_config_dispatches_constructor():
 def test_paroquant_quantize_config_enables_gradient_checkpointing_by_default_for_layer_scope():
     """Layer scope should opt into activation checkpointing by default because it is the only measured memory win."""
 
-    cfg = ParoQuantizeConfig(
+    cfg = ParoConfig(
         bits=4,
         group_size=128,
         opt_scope="layer",
@@ -144,7 +144,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
         }
     )
 
-    assert isinstance(cfg, ParoQuantizeConfig)
+    assert isinstance(cfg, ParoConfig)
     assert cfg.quant_method == METHOD.PARO
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
@@ -201,7 +201,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
 def test_paroquant_quantize_config_rejects_invalid_scale_clamp_range():
     """Guard that ParoQuant scale-clamp overrides remain numerically valid."""
     with pytest.raises(ValueError, match="scale clamp bounds must be positive"):
-        ParoQuantizeConfig(
+        ParoConfig(
             bits=4,
             group_size=128,
             opt_channel_scale_clamp_min=0.0,
@@ -209,7 +209,7 @@ def test_paroquant_quantize_config_rejects_invalid_scale_clamp_range():
         )
 
     with pytest.raises(ValueError, match="opt_channel_scale_clamp_min"):
-        ParoQuantizeConfig(
+        ParoConfig(
             bits=4,
             group_size=128,
             opt_channel_scale_clamp_min=10.0,
@@ -220,7 +220,7 @@ def test_paroquant_quantize_config_rejects_invalid_scale_clamp_range():
 def test_paroquant_quantize_config_rejects_invalid_opt_scope():
     """Guard that ParoQuant optimize-scope selection stays within supported modes."""
     with pytest.raises(ValueError, match="opt_scope"):
-        ParoQuantizeConfig(
+        ParoConfig(
             bits=4,
             group_size=128,
             opt_scope="block",
@@ -230,7 +230,7 @@ def test_paroquant_quantize_config_rejects_invalid_opt_scope():
 def test_paroquant_quantize_config_rejects_invalid_opt_optimizer():
     """Guard that ParoQuant optimizer selection stays within supported modes."""
     with pytest.raises(ValueError, match="opt_optimizer"):
-        ParoQuantizeConfig(
+        ParoConfig(
             bits=4,
             group_size=128,
             opt_optimizer="lion",
@@ -240,7 +240,7 @@ def test_paroquant_quantize_config_rejects_invalid_opt_optimizer():
 def test_paroquant_quantize_config_rejects_invalid_best_state_dtype():
     """Guard best-state snapshot compression against unsupported dtype strings."""
     with pytest.raises(ValueError, match="opt_best_state_dtype"):
-        ParoQuantizeConfig(
+        ParoConfig(
             bits=4,
             group_size=128,
             opt_best_state_dtype="int8",
@@ -250,28 +250,28 @@ def test_paroquant_quantize_config_rejects_invalid_best_state_dtype():
 def test_paroquant_quantize_config_rejects_invalid_optimizer_hyperparameters():
     """Guard optimizer hyperparameter validation against invalid stage settings."""
     with pytest.raises(ValueError, match="opt_betas"):
-        ParoQuantizeConfig(
+        ParoConfig(
             bits=4,
             group_size=128,
             opt_betas=(0.9,),
         )
 
     with pytest.raises(ValueError, match="opt_eps"):
-        ParoQuantizeConfig(
+        ParoConfig(
             bits=4,
             group_size=128,
             opt_eps=0.0,
         )
 
     with pytest.raises(ValueError, match="opt_sgd_nesterov"):
-        ParoQuantizeConfig(
+        ParoConfig(
             bits=4,
             group_size=128,
             opt_sgd_nesterov=True,
         )
 
     with pytest.raises(ValueError, match="opt_sgd_dampening"):
-        ParoQuantizeConfig(
+        ParoConfig(
             bits=4,
             group_size=128,
             opt_sgd_momentum=0.9,
@@ -292,13 +292,13 @@ def test_paroquant_benchmark_config_preserves_opt_scope():
 def test_paroquant_quantize_config_preserves_explicit_gradient_checkpointing_override():
     """Explicit checkpointing overrides must win over the scope-derived default."""
 
-    layer_cfg = ParoQuantizeConfig(
+    layer_cfg = ParoConfig(
         bits=4,
         group_size=128,
         opt_scope="layer",
         opt_gradient_checkpointing=False,
     )
-    compute_block_cfg = ParoQuantizeConfig(
+    compute_block_cfg = ParoConfig(
         bits=4,
         group_size=128,
         opt_scope="compute_block",
@@ -1649,7 +1649,7 @@ def test_paroquant_processor_enables_layer_context_capture_only_for_grouped_scop
     """Guard module scope against retaining pristine layer IO it never consumes."""
     processor = ParoQuantProcessor(
         tokenizer=None,
-        qcfg=ParoQuantizeConfig(bits=4, group_size=128, opt_scope=opt_scope),
+        qcfg=ParoConfig(bits=4, group_size=128, opt_scope=opt_scope),
         calibration=None,
         prepare_dataset_func=None,
         calibration_concat_size=None,
@@ -3194,7 +3194,7 @@ def test_paroquant_processor_group_best_state_can_cast_float_snapshots_without_t
 
 def test_paroquant_quantize_config_accepts_torch_float16_best_state_dtype():
     """Guard direct config construction so torch.float16 snapshots serialize as fp16."""
-    cfg = ParoQuantizeConfig(
+    cfg = ParoConfig(
         bits=4,
         group_size=128,
         opt_best_state_dtype=torch.float16,

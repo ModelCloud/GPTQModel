@@ -142,9 +142,9 @@ from gptqmodel.quantization.config import (  # noqa: E402
     GPTAQConfig,
     HessianConfig,
     MoEConfig,
-    ParoQuantizeConfig,
+    ParoConfig,
     QuantizeConfig,
-    RTNQuantizeConfig,
+    RTNConfig,
     VramStrategy,
     WeightOnlyConfig,
     resolve_quant_format,
@@ -1405,7 +1405,7 @@ class ModelTest(unittest.TestCase):
                     offload_to_disk=self.OFFLOAD_TO_DISK,
                 )
             elif self.METHOD == METHOD.PARO:
-                return ParoQuantizeConfig(
+                return ParoConfig(
                     bits=self.BITS,
                     method=METHOD.PARO,
                     format=FORMAT.PAROQUANT,
@@ -1446,7 +1446,7 @@ class ModelTest(unittest.TestCase):
                     smoother=self.WEIGHT_ONLY.smooth,
                 )
 
-            return RTNQuantizeConfig(
+            return RTNConfig(
                 bits=self.BITS,
                 group_size=self.GROUP_SIZE,
                 desc_act=self.DESC_ACT,

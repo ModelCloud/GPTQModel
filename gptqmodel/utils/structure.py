@@ -629,6 +629,22 @@ class LazyTurtle:
             target_model.tie_weights()
         return target_submodule
 
+    def checkpoint_tensors_for_submodule(
+        self,
+        *,
+        target_model: nn.Module,
+        target_submodule: nn.Module,
+        recurse: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """Load checkpoint tensors for one shell submodule without mutating it."""
+
+        path = _get_qualified_name(target_model, target_submodule)
+        with self._lock:
+            return self._load_checkpoint_tensors_for_module_path(
+                module_path=path,
+                recurse=recurse,
+            )
+
     def sync_all_meta(
         self,
         *,
@@ -693,6 +709,36 @@ class LazyTurtle:
         if not rel_name:
             return module_path
         return f"{module_path}.{rel_name}"
+
+    def _load_checkpoint_tensors_for_module_path(
+        self,
+        *,
+        module_path: str,
+        recurse: bool,
+    ) -> Dict[str, torch.Tensor]:
+        """Return raw checkpoint tensors keyed by submodule-relative names."""
+
+        prefix = f"{module_path}."
+        grouped_names: Dict[str, list[tuple[str, str]]] = {}
+        for full_name, shard in self._weight_map.items():
+            if not full_name.startswith(prefix):
+                continue
+
+            rel_name = full_name[len(prefix):]
+            if not rel_name:
+                continue
+            if not recurse and "." in rel_name:
+                continue
+
+            grouped_names.setdefault(shard, []).append((rel_name, full_name))
+
+        tensors: Dict[str, torch.Tensor] = {}
+        for shard, names in grouped_names.items():
+            shard_path = os.path.join(self.model_local_path, shard)
+            with safe_open(shard_path, framework="pt", device="cpu") as handler:
+                for rel_name, full_name in names:
+                    tensors[rel_name] = handler.get_tensor(full_name)
+        return tensors
 
     def _copy_checkpoint_tensors_into_submodule(
         self,

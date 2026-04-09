@@ -835,6 +835,10 @@ class ModuleLooper():
         if task is None:
             return
 
+        quant_source = named_module.state.get("quant_source_module")
+        if isinstance(quant_source, torch.nn.Module) and hasattr(task, "module"):
+            task.module = quant_source
+
         to_device_fn = getattr(task, "to_device", None)
         if callable(to_device_fn):
             to_device_fn(target_device)
@@ -868,6 +872,30 @@ class ModuleLooper():
         if hasattr(task, "dev"):
             task.dev = target_device
 
+    def _prepare_named_module_for_forward(
+        self,
+        named_module: NamedModule,
+        fallback_device: torch.device,
+    ) -> torch.nn.Module:
+        """Prepare one named module for the forward role before replay starts."""
+
+        target_device = get_device(named_module.module)
+        if target_device == META:
+            target_device = fallback_device
+
+        prepared = self.gptq_model.shell_module_materialize(
+            target_submodule=named_module.module,
+            device=target_device,
+            role="forward",
+            named_module=named_module,
+        )
+        if prepared is not named_module.module:
+            named_module.module = prepared
+
+        setattr(named_module, "target_device", target_device)
+        setattr(named_module.module, "target_device", target_device)
+        return prepared
+
     def _prepare_named_module_for_quantization(
         self,
         processor: LoopProcessor,
@@ -881,7 +909,17 @@ class ModuleLooper():
             fallback_device=fallback_device,
         )
 
-        move_to(named_module.module, device=target_device)
+        if isinstance(named_module.state.get("quant_source_module"), torch.nn.Module):
+            prepared = self.gptq_model.shell_module_materialize(
+                target_submodule=named_module.module,
+                device=target_device,
+                role="quant_source",
+                named_module=named_module,
+            )
+            if prepared is not named_module.module:
+                named_module.module = prepared
+        else:
+            move_to(named_module.module, device=target_device)
         rehome_module_to_device(named_module.module, target_device, move_parameters=True, move_buffers=True)
 
         setattr(named_module, "target_device", target_device)
