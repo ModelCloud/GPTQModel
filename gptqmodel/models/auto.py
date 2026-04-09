@@ -283,10 +283,39 @@ if Qwen3_5_MoeQModel is not None:
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
 
+def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
+    config_groups = quantization_config.get("config_groups")
+    if isinstance(config_groups, dict):
+        for group_cfg in config_groups.values():
+            if not isinstance(group_cfg, dict):
+                continue
+            input_activations = group_cfg.get("input_activations")
+            if isinstance(input_activations, dict) and input_activations:
+                return "input_activations"
+
+    kv_cache_scheme = quantization_config.get("kv_cache_scheme")
+    if isinstance(kv_cache_scheme, dict) and kv_cache_scheme:
+        return "kv_cache_scheme"
+
+    for key in ("input_activations", "activation_quantization", "activations"):
+        value = quantization_config.get(key)
+        if isinstance(value, dict) and value:
+            return key
+    return None
+
+
 def _is_supported_quantization_config(config: AutoConfig) -> bool:
     quantization_config = getattr(config, "quantization_config", None)
     if not isinstance(quantization_config, dict):
         return False
+
+    unsupported_mode = _activation_quantization_mode(quantization_config)
+    if unsupported_mode is not None:
+        log.error("GPT-QModel currently does not support loading of activation quantized models")
+        raise ValueError(
+            "GPT-QModel currently does not support loading of activation quantized models. "
+            f"Detected unsupported metadata: {unsupported_mode}."
+        )
 
     quant_format = quantization_config.get("quant_format")
     if isinstance(quant_format, str) and quant_format.lower() in (

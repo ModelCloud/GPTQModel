@@ -71,8 +71,6 @@ _FP8_FORMAT_CODES = {
     getattr(torch, "float8_e5m2fnuz", None): 3,
     getattr(torch, "float8_e8m0fnu", None): 4,
 }
-
-
 def available_float8_dtype_names() -> tuple[str, ...]:
     return _FLOAT8_DTYPE_NAMES
 
