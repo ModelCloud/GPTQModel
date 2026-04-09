@@ -14,7 +14,11 @@ from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import select_quant_linear
 
 
-def _build_quant_modules(bits: str) -> tuple[GGUFTorchLinear, GGUFCppKernel, GGUFCudaKernel]:
+def _build_quant_modules(
+    bits: str,
+    *,
+    include_cuda: bool = False,
+) -> tuple[GGUFTorchLinear, GGUFCppKernel, GGUFCudaKernel | None]:
     torch.manual_seed(7)
     linear = torch.nn.Linear(64, 48, bias=True, dtype=torch.float16).cpu().eval()
 
@@ -42,23 +46,28 @@ def _build_quant_modules(bits: str) -> tuple[GGUFTorchLinear, GGUFCppKernel, GGU
     )
     cpp_kernel.load_state_dict(torch_kernel.state_dict(), strict=True)
 
-    cuda_kernel = GGUFCudaKernel(
-        bits=bits,
-        group_size=-1,
-        sym=True,
-        desc_act=False,
-        in_features=64,
-        out_features=48,
-        bias=True,
-        register_buffers=True,
-    )
-    cuda_kernel.load_state_dict(torch_kernel.state_dict(), strict=True)
-    return torch_kernel.eval(), cpp_kernel.eval(), cuda_kernel.eval()
+    cuda_kernel = None
+    if include_cuda:
+        cuda_kernel = GGUFCudaKernel(
+            bits=bits,
+            group_size=-1,
+            sym=True,
+            desc_act=False,
+            in_features=64,
+            out_features=48,
+            bias=True,
+            register_buffers=True,
+        )
+        cuda_kernel.load_state_dict(torch_kernel.state_dict(), strict=True)
+        cuda_kernel = cuda_kernel.eval()
+    return torch_kernel.eval(), cpp_kernel.eval(), cuda_kernel
 
 
 def test_gguf_cpp_kernel_validate_once_uses_llama_cpp():
     GGUFCppKernel.cached_validate_once.cache_clear()
     ok, err = GGUFCppKernel.cached_validate_once()
+    if not ok:
+        pytest.skip(f"llama-cpp-python unavailable: {err}")
     assert ok, err
     assert _get_ggml_bridge() is not None
 
@@ -89,8 +98,9 @@ def test_gguf_cuda_kernel_forward_matches_torch_kernel(bits: str):
     if not ok:
         pytest.skip(f"llama-cpp-python CUDA unavailable: {err}")
 
-    torch_kernel, _, cuda_kernel = _build_quant_modules(bits)
+    torch_kernel, _, cuda_kernel = _build_quant_modules(bits, include_cuda=True)
     torch_kernel = torch_kernel.to(device="cuda")
+    assert cuda_kernel is not None
     cuda_kernel = cuda_kernel.to(device="cuda")
     x = torch.randn(9, 64, dtype=torch.float16, device="cuda")
 
@@ -110,7 +120,8 @@ def test_gguf_cuda_kernel_reuses_cached_plan():
     if not ok:
         pytest.skip(f"llama-cpp-python CUDA unavailable: {err}")
 
-    _, _, cuda_kernel = _build_quant_modules("q4_k_m")
+    _, _, cuda_kernel = _build_quant_modules("q4_k_m", include_cuda=True)
+    assert cuda_kernel is not None
     cuda_kernel = cuda_kernel.to(device="cuda")
     x = torch.randn(9, 64, dtype=torch.float16, device="cuda")
 
@@ -132,8 +143,9 @@ def test_gguf_cuda_kernel_fp32_preserves_output_dtype():
     if not ok:
         pytest.skip(f"llama-cpp-python CUDA unavailable: {err}")
 
-    torch_kernel, _, cuda_kernel = _build_quant_modules("q4_k_m")
+    torch_kernel, _, cuda_kernel = _build_quant_modules("q4_k_m", include_cuda=True)
     torch_kernel = torch_kernel.to(device="cuda")
+    assert cuda_kernel is not None
     cuda_kernel = cuda_kernel.to(device="cuda")
     x = torch.randn(9, 64, dtype=torch.float32, device="cuda")
 

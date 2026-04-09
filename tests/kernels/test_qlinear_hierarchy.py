@@ -7,7 +7,6 @@ import pytest
 import torch
 
 import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
-import gptqmodel.nn_modules.qlinear.bitblas_awq as awq_bitblas_module
 from gptqmodel.nn_modules.qlinear import (
     AWQuantLinear,
     BaseQuantLinear,
@@ -127,8 +126,6 @@ def _install_dummy_bitblas(monkeypatch):
 
     monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
     monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
-    monkeypatch.setattr(awq_bitblas_module, "BITBLAS_AVAILABLE", True)
-    monkeypatch.setattr(awq_bitblas_module, "import_bitblas", lambda: None)
     monkeypatch.setattr(BitblasLinear, "_get_or_create_bitblas_operator", _fake_get_or_create)
     monkeypatch.setattr(AWQBitBlasKernel, "_get_or_create_bitblas_operator", _fake_get_or_create)
     monkeypatch.setattr(BitblasLinear, "_configure_bitblas_matmul", _fake_configure)
