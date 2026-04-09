@@ -7,6 +7,8 @@ from model_test import ModelTest
 
 
 class TestDeci(ModelTest):
+    """Compat coverage for Deci remote code through quantize, save, reload, and eval."""
+
     NATIVE_MODEL_ID = "/monster/data/model/DeciLM-7B-instruct" # "Deci/DeciLM-7B-instruct"
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
@@ -17,7 +19,7 @@ class TestDeci(ModelTest):
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     TRUST_REMOTE_CODE = True
     USE_VLLM = False
-    USE_FLASH_ATTN = False
+    USE_FLASH_ATTN = False  # Deci remote code rejects flash_attention_2 during model init.
     EVAL_BATCH_SIZE = 6
 
     def test_deci(self):

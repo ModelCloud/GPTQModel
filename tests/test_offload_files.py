@@ -56,6 +56,8 @@ class _HybridWrapper(nn.Module):
 
 
 class _TransformerPrefixedHybridWrapper(nn.Module):
+    """Wrap the real module tree under an extra root to mimic shell-only prefixes."""
+
     def __init__(self, width: int):
         super().__init__()
         self.transformer = _HybridWrapper(width)
@@ -119,6 +121,8 @@ class _RotaryWrapper(nn.Module):
 
 
 class _AttrBufferTemplate(nn.Module):
+    """Template module whose non-persistent buffers depend on constructor attributes."""
+
     def __init__(self, width: int, scale: float = 1.0, device=None):
         super().__init__()
         self.width = width
@@ -129,6 +133,8 @@ class _AttrBufferTemplate(nn.Module):
 
 
 class _AttrBufferWrapper(nn.Module):
+    """Hybrid wrapper that pairs checkpoint tensors with attribute-driven init-only buffers."""
+
     def __init__(self, width: int, scale: float = 1.0):
         super().__init__()
         self.block = nn.Module()
@@ -357,6 +363,8 @@ def test_lazy_turtle_materializes_recursive_submodule(tmp_path):
 
 
 def test_lazy_turtle_materializes_submodule_when_shell_has_extra_root_prefix(tmp_path):
+    """Checkpoint-backed materialization should ignore wrapper prefixes absent from shard names."""
+
     source_model = _HybridWrapper(width=16)
     model_dir = tmp_path / "source_model"
     model_dir.mkdir()
@@ -402,6 +410,8 @@ def test_lazy_turtle_materializes_submodule_when_shell_has_extra_root_prefix(tmp
 
 
 def test_alias_all_from_lazy_turtle_handles_shell_root_prefix_mismatch(tmp_path):
+    """Direct meta tensors should resolve through the same prefix-stripping checkpoint aliases."""
+
     source_model = _HybridWrapper(width=16)
     turtle_model = _build_lazy_turtle_from_module(tmp_path, source_model)
 
@@ -461,6 +471,8 @@ def test_lazy_turtle_restores_nonpersistent_buffers_from_module_init(tmp_path):
 
 
 def test_lazy_turtle_restores_nonpersistent_buffers_from_attribute_ctor(tmp_path):
+    """Init-only buffers should rebuild from constructor attributes when no config argument exists."""
+
     source_model = _AttrBufferWrapper(width=16, scale=0.5)
     shell_model = _AttrBufferWrapper(width=16, scale=0.5)
     shell_model.load_state_dict(source_model.state_dict())

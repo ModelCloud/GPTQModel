@@ -729,6 +729,8 @@ class LazyTurtle:
         return candidates
 
     def _resolve_checkpoint_module_path(self, module_path: str) -> str:
+        """Resolve a shell module path to the checkpoint path when wrappers add extra roots."""
+
         for candidate in self._candidate_module_paths(module_path):
             prefix = f"{candidate}."
             if any(full_name.startswith(prefix) for full_name in self._weight_map):
@@ -736,6 +738,8 @@ class LazyTurtle:
         return module_path
 
     def _resolve_checkpoint_tensor_name(self, module_path: str, rel_name: str) -> str:
+        """Resolve a tensor name against checkpoint aliases derived from the shell module path."""
+
         for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
             candidate_name = self._join_tensor_name(candidate_path, rel_name)
             if candidate_name in self._weight_map:
@@ -783,6 +787,8 @@ class LazyTurtle:
         recurse: bool,
         non_blocking: bool,
     ) -> None:
+        """Materialize checkpoint tensors into a shell submodule and rebuild missing init-only buffers."""
+
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
         missing_nonpersistent_buffers: list[tuple[str, str]] = []
@@ -878,7 +884,7 @@ class LazyTurtle:
         owner_module: nn.Module,
         target_model: nn.Module,
     ) -> Optional[nn.Module]:
-        """Construct a CPU module template when missing buffers must come from init logic."""
+        """Construct a CPU template module for init-only buffers missing from checkpoint shards."""
 
         config_source = getattr(owner_module, "config", None)
         if config_source is None:
@@ -910,6 +916,7 @@ class LazyTurtle:
             elif param.name == "device":
                 value = torch.device("cpu")
             elif hasattr(owner_module, param.name):
+                # Some remote-code modules rebuild buffers from constructor attributes instead of config.
                 value = copy.deepcopy(getattr(owner_module, param.name))
             elif param.default is not inspect.Parameter.empty:
                 continue

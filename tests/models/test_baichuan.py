@@ -9,6 +9,8 @@ from model_test import ModelTest
 
 
 class TestBaiChuan(ModelTest):
+    """Compat coverage for Baichuan remote tokenizer loading and monolithic checkpoint handling."""
+
     NATIVE_MODEL_ID = "/monster/data/model/Baichuan2-7B-Chat" # "baichuan-inc/Baichuan2-7B-Chat"
     NATIVE_ARC_CHALLENGE_ACC = 0.4104
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4317
@@ -23,6 +25,7 @@ class TestBaiChuan(ModelTest):
     OFFLOAD_TO_DISK = False  # Local checkpoint is a monolithic .bin, so LazyTurtle offload is unavailable.
 
     def test_baichuan(self):
+        # Baichuan's remote tokenizer imports sentencepiece eagerly, so skip before model load when absent.
         if importlib.util.find_spec("sentencepiece") is None:
             self.skipTest("Baichuan tokenizer remote code requires sentencepiece")
 
