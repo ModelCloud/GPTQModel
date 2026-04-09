@@ -48,6 +48,11 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_factory("gptqmodel.utils.cpp", "_pack_block_extension"),
     ),
     _ExtensionSpec(
+        name="floatx_cpu",
+        aliases=("floatx", "quant_dtype_cpu"),
+        resolve=lambda: _resolve_extension_factory("gptqmodel.utils.cpp", "_floatx_cpu_extension"),
+    ),
+    _ExtensionSpec(
         name="awq",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.awq", "_AWQ_TORCH_OPS_EXTENSION"),
