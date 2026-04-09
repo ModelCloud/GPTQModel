@@ -267,6 +267,31 @@ def detected_local_cuda_include_paths() -> list[str]:
     return _dedupe_path_strings(include_paths)
 
 
+def _detected_local_cuda_has_required_headers(required_header_names: Sequence[str]) -> bool:
+    """Return whether the detected local CUDA toolkit exposes every required header."""
+
+    local_cuda_include_paths = detected_local_cuda_include_paths()
+    if not local_cuda_include_paths:
+        return False
+    return all(
+        any((Path(include_path) / header_name).is_file() for include_path in local_cuda_include_paths)
+        for header_name in required_header_names
+    )
+
+
+def cuda_include_paths_with_fallback(
+    include_paths: Sequence[str],
+    *,
+    required_header_names: Sequence[str] = (),
+) -> list[str]:
+    """Append NVIDIA wheel headers when the local CUDA toolkit is absent or incomplete."""
+
+    resolved_include_paths = _dedupe_path_strings(include_paths)
+    if not _detected_local_cuda_has_required_headers(required_header_names):
+        resolved_include_paths.extend(detected_cuda_wheel_include_paths())
+    return _dedupe_path_strings(resolved_include_paths)
+
+
 def torch_cxx11_abi_flag() -> int:
     """Return the ABI mode local JIT extensions must match for this torch build."""
 
@@ -432,11 +457,9 @@ class TorchOpsJitExtension:
         """Resolve explicit include paths and append CUDA wheel headers when needed."""
 
         include_paths = self._resolve_sequence(self.extra_include_paths)
-        # Prefer one CUDA header source per build. Mixing local toolkit headers
-        # with NVIDIA wheel headers can trip NVCC/toolkit compatibility guards.
-        if self.requires_cuda and not detected_local_cuda_include_paths():
-            include_paths.extend(detected_cuda_wheel_include_paths())
-        return _dedupe_path_strings(include_paths)
+        if not self.requires_cuda:
+            return _dedupe_path_strings(include_paths)
+        return cuda_include_paths_with_fallback(include_paths)
 
     def base_build_root(self) -> Path:
         """Return the user-visible cache root before applying the loader fingerprint."""

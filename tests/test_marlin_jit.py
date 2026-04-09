@@ -8,6 +8,7 @@ import torch
 
 import gptqmodel.nn_modules.qlinear.marlin as marlin_qlinear_module
 import gptqmodel.utils.marlin as marlin_utils
+from gptqmodel.utils import cpp as cpp_module
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 
 
@@ -258,3 +259,42 @@ def test_marlin_runtime_error_skips_install_hint_when_cuda_wheel_headers_are_det
     assert fake_extension_api.is_available_calls == ["marlin_bf16"]
     assert fake_extension_api.error_calls == ["marlin_bf16"]
     assert error_text == fake_extension_api.error_text
+
+
+def test_marlin_include_paths_use_wheel_headers_when_local_cuda_is_incomplete(monkeypatch, tmp_path):
+    root = tmp_path / "marlin"
+    local_cuda_include = tmp_path / "local_cuda_include"
+    wheel_cuda_include = tmp_path / "wheel_cuda_include"
+    root.mkdir()
+    local_cuda_include.mkdir()
+    wheel_cuda_include.mkdir()
+    for header_name in marlin_utils._MARLIN_REQUIRED_CUDA_HEADERS:
+        (wheel_cuda_include / header_name).write_text("// stub", encoding="utf-8")
+
+    monkeypatch.setattr(marlin_utils, "_marlin_root", lambda: root)
+    monkeypatch.setattr(cpp_module, "detected_local_cuda_include_paths", lambda: [str(local_cuda_include)])
+    monkeypatch.setattr(cpp_module, "detected_cuda_wheel_include_paths", lambda: [str(wheel_cuda_include)])
+
+    include_paths = marlin_utils._marlin_include_paths()
+
+    assert include_paths[0] == str(root)
+    assert str(wheel_cuda_include) in include_paths
+
+
+def test_marlin_include_paths_skip_wheel_headers_when_local_cuda_has_required_headers(monkeypatch, tmp_path):
+    root = tmp_path / "marlin"
+    local_cuda_include = tmp_path / "local_cuda_include"
+    wheel_cuda_include = tmp_path / "wheel_cuda_include"
+    root.mkdir()
+    local_cuda_include.mkdir()
+    wheel_cuda_include.mkdir()
+    for header_name in marlin_utils._MARLIN_REQUIRED_CUDA_HEADERS:
+        (local_cuda_include / header_name).write_text("// stub", encoding="utf-8")
+
+    monkeypatch.setattr(marlin_utils, "_marlin_root", lambda: root)
+    monkeypatch.setattr(cpp_module, "detected_local_cuda_include_paths", lambda: [str(local_cuda_include)])
+    monkeypatch.setattr(cpp_module, "detected_cuda_wheel_include_paths", lambda: [str(wheel_cuda_include)])
+
+    include_paths = marlin_utils._marlin_include_paths()
+
+    assert include_paths == [str(root)]

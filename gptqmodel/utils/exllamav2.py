@@ -11,6 +11,7 @@ import torch
 
 from .cpp import (
     TorchOpsJitExtension,
+    cuda_include_paths_with_fallback,
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
@@ -50,8 +51,15 @@ def _exllamav2_gptq_sources() -> list[str]:
     ]
 
 
+def _exllamav2_required_cuda_headers() -> tuple[str, ...]:
+    return ("cusparse.h",)
+
+
 def _exllamav2_include_paths() -> list[str]:
-    return [str(_exllamav2_root())]
+    return cuda_include_paths_with_fallback(
+        [str(_exllamav2_root())],
+        required_header_names=_exllamav2_required_cuda_headers(),
+    )
 
 
 def _exllamav2_gptq_extra_cflags() -> list[str]:

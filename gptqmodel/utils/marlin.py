@@ -16,6 +16,7 @@ import torch
 from ..utils.logger import setup_logger
 from .cpp import (
     TorchOpsJitExtension,
+    cuda_include_paths_with_fallback,
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
@@ -163,7 +164,10 @@ def _marlin_sources(dtype_tag: str) -> list[str]:
 
 
 def _marlin_include_paths() -> list[str]:
-    return [str(_marlin_root())]
+    return cuda_include_paths_with_fallback(
+        [str(_marlin_root())],
+        required_header_names=_MARLIN_REQUIRED_CUDA_HEADERS,
+    )
 
 
 def _marlin_extra_cflags() -> list[str]:

@@ -17,6 +17,7 @@ import torch
 
 from ..utils.cpp import (
     TorchOpsJitExtension,
+    cuda_include_paths_with_fallback,
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
@@ -100,6 +101,17 @@ def _source_files() -> list[str]:
     return [str((sources_dir / path).resolve()) for path in source_files]
 
 
+def _exllamav3_required_cuda_headers() -> tuple[str, ...]:
+    return ("cusparse.h",)
+
+
+def _exllamav3_include_paths() -> list[str]:
+    return cuda_include_paths_with_fallback(
+        [str(_source_root())],
+        required_header_names=_exllamav3_required_cuda_headers(),
+    )
+
+
 def _legacy_build_root() -> Optional[Path]:
     build_root = os.environ.get("GPTQMODEL_EXT_BUILD")
     if not build_root:
@@ -176,7 +188,7 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     display_name="ExLlamaV3",
     extra_cflags=_extra_cflags,
     extra_cuda_cflags=_extra_cuda_cflags,
-    extra_include_paths=lambda: [str(_source_root())],
+    extra_include_paths=_exllamav3_include_paths,
     extra_ldflags=_extra_ldflags,
     force_rebuild_env="GPTQMODEL_EXLLAMAV3_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
