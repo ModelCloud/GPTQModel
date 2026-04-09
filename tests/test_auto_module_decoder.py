@@ -193,6 +193,80 @@ def test_shell_materialize_quant_source_swaps_back_to_dense_module(tmp_path, mon
     )
 
 
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
+def test_shell_materialize_forward_builds_fp8_wrapper_from_weight_scale_metadata(tmp_path, monkeypatch):
+    source_model = _LinearWrapper(16, 8).eval()
+    model_dir = tmp_path / "fp8_source_scale"
+    model_dir.mkdir()
+
+    weight_fp8 = source_model.linear.weight.detach().to(torch.float8_e4m3fn).cpu()
+    scale = torch.full((), 0.5, dtype=torch.float32)
+    bias = source_model.linear.bias.detach().cpu()
+    shard_name = "model.safetensors"
+    save_file(
+        {
+            "linear.weight": weight_fp8,
+            "linear.weight_scale": scale,
+            "linear.bias": bias,
+        },
+        str(model_dir / shard_name),
+    )
+    _write_index(model_dir, shard_name, ["linear.weight", "linear.weight_scale", "linear.bias"])
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    shell_model = _LinearWrapper(16, 8).eval()
+    shell_model.linear.weight = nn.Parameter(
+        torch.empty_like(shell_model.linear.weight, device="meta"),
+        requires_grad=False,
+    )
+    shell_model.linear.bias = nn.Parameter(
+        torch.empty_like(shell_model.linear.bias, device="meta"),
+        requires_grad=False,
+    )
+
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = shell_model
+    harness.turtle_model = turtle
+    harness._turtle_lock = threading.RLock()
+    harness.auto_module_decoder_events = []
+
+    named = NamedModule(shell_model.linear, name="linear", full_name="linear", layer_index=0)
+    named.state["auto_module_decoder"] = {
+        "code": "auto_module_decoder",
+        "source_dtype": "auto",
+        "target_dtype": torch.bfloat16,
+    }
+
+    monkeypatch.setattr(base_module, "device_supports_dtype", lambda *args, **kwargs: True)
+
+    prepared = base_module.BaseQModel.shell_module_materialize(
+        harness,
+        target_submodule=shell_model.linear,
+        device=torch.device("cpu"),
+        role="forward",
+        named_module=named,
+    )
+
+    assert isinstance(prepared, TorchFP8Linear)
+    assert named.state["auto_module_decoder_forward_mode"] == "native"
+    expected = dequantize_fp8(
+        weight_fp8,
+        scale=scale,
+        axis=None,
+        target_dtype=torch.bfloat16,
+    )
+    torch.testing.assert_close(named.state["quant_source_module"].weight, expected)
+    torch.testing.assert_close(prepared.weight_scale_inv, torch.reciprocal(scale).to(torch.float32))
+    assert harness.auto_module_decoder_events[0]["forward_mode"] == "native"
+
+
 @pytest.mark.skipif(nvfp4_quantize is None, reason="torchao NVFP4 support required")
 @pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="float4 packed dtype not available")
 def test_shell_materialize_forward_decodes_fp4_source_to_dense_module(tmp_path):

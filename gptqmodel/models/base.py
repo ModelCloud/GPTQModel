@@ -1700,9 +1700,27 @@ class BaseQModel(nn.Module):
             return None
 
         weight = checkpoint_tensors.get("weight")
-        scale_inv = checkpoint_tensors.get("weight_scale_inv")
-        if not isinstance(weight, torch.Tensor) or not isinstance(scale_inv, torch.Tensor):
+        if not isinstance(weight, torch.Tensor):
             return None
+
+        scale_inv = self._decoder_scale_tensor(
+            scale_tensor=checkpoint_tensors.get("weight_scale_inv"),
+            result_shape=tuple(weight.shape),
+        )
+        if not isinstance(scale_inv, torch.Tensor):
+            scale = self._decoder_scale_tensor(
+                scale_tensor=checkpoint_tensors.get("weight_scale"),
+                result_shape=tuple(weight.shape),
+            )
+            if not isinstance(scale, torch.Tensor):
+                return None
+            scale = scale.to(torch.float32)
+            tiny = torch.finfo(torch.float32).tiny
+            scale_inv = torch.where(
+                scale != 0,
+                torch.reciprocal(scale),
+                torch.full_like(scale, 1.0 / tiny),
+            )
 
         format_name = str(weight.dtype).split(".")[-1]
         try:
