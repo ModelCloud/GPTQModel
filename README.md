@@ -385,32 +385,42 @@ model.save(quant_path)
 
 `GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
 
-##### AutoDecoder
+##### Preprocessors
 
-`AutoModuleDecoderConfig` is a preprocessor for calibration-based quantization flows when the source checkpoint stores weights in formats such as FP8 or FP4.
+`preprocessors=[...]` adds optional module-weight preparation steps before quantization or repacking. They are available on `GPTQConfig`, `AWQConfig`, `ParoConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, and `BitsAndBytesConfig`.
 
-- Use it with configs such as `GPTQConfig`, `AWQConfig`, or `ParoConfig` when you want to quantize from an FP8/FP4 source checkpoint into another target format.
-- Set `target_dtype` to the dense dtype you want the auto-decoder path to use during quantization, typically `torch.bfloat16` or `torch.float16`.
+- `SmootherConfig`: apply weight smoothing before quantization.
+- `AutoModuleDecoderConfig`: decode FP8/FP4 source modules to a dense `target_dtype` before downstream quantization or repacking.
+- `TensorParallelPadderConfig`: opt-in tensor-parallel padding metadata for TP-aligned packing.
 
 ```py
 import torch
-from datasets import load_dataset
-from gptqmodel import GPTQConfig, GPTQModel
-from gptqmodel.quantization import AutoModuleDecoderConfig
+from gptqmodel import GGUFConfig, GPTQConfig
+from gptqmodel.quantization import (
+    AutoModuleDecoderConfig,
+    SmoothMAD,
+    SmootherConfig,
+    TensorParallelPadderConfig,
+)
 
-model_id = "/path/to/fp8-or-fp4-checkpoint"
-calibration_dataset = load_dataset("allenai/c4", split="train").select(range(128))["text"]
-
-qcfg = GPTQConfig(
+gptq_cfg = GPTQConfig(
     bits=4,
     group_size=128,
     preprocessors=[
+        SmootherConfig(smooth=SmoothMAD(k=2.0)),
         AutoModuleDecoderConfig(target_dtype=torch.bfloat16),
+        TensorParallelPadderConfig(),
     ],
 )
 
-model = GPTQModel.load(model_id, qcfg)
-model.quantize(calibration_dataset, batch_size=1)
+gguf_cfg = GGUFConfig(
+    bits=4,
+    format="q_k_m",
+    preprocessors=[
+        AutoModuleDecoderConfig(target_dtype=torch.bfloat16),
+        TensorParallelPadderConfig(),
+    ],
+)
 ```
 
 ##### GGUF Example: Llama 3.2 1B Instruct
