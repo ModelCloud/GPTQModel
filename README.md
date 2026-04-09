@@ -210,7 +210,7 @@ Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accum
 
 ### ParoQuant Activation Checkpointing
 
-`ParoQuantizeConfig.opt_gradient_checkpointing` controls activation checkpointing during ParoQuant's train-style optimization stages.
+`ParoConfig.opt_gradient_checkpointing` controls activation checkpointing during ParoQuant's train-style optimization stages.
 
 - `opt_scope="layer"` defaults to `opt_gradient_checkpointing=True`
 - `opt_scope="module"` defaults to `opt_gradient_checkpointing=False`
@@ -357,7 +357,7 @@ Basic example of using `GPT-QModel` to quantize an LLM model:
 
 ```py
 from datasets import load_dataset
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import GPTQConfig, GPTQModel
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
@@ -368,7 +368,7 @@ calibration_dataset = load_dataset(
     split="train"
   ).select(range(1024))["text"]
 
-quant_config = QuantizeConfig(bits=4, group_size=128)
+quant_config = GPTQConfig(bits=4, group_size=128)
 
 model = GPTQModel.load(model_id, quant_config)
 
@@ -379,6 +379,8 @@ model.save(quant_path)
 ```
 
 #### Other Quantization Formats
+
+`QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
 
 `GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
 
@@ -403,13 +405,12 @@ model.save(quant_path)
 ##### FP8 Example: Llama 3.2 1B Instruct
 
 ```py
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, FP8Config, GPTQModel
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-FP8-E4M3"
 
-qcfg = QuantizeConfig(
-    method="fp8",
+qcfg = FP8Config(
     format="float8_e4m3fn",  # or "float8_e5m2"
     bits=8,
     weight_scale_method="row",
@@ -424,7 +425,7 @@ model.save(quant_path)
 
 ```py
 from datasets import load_dataset
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, EXL3Config, GPTQModel
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-EXL3"
@@ -435,9 +436,7 @@ calibration_dataset = load_dataset(
     split="train",
 ).select(range(1024))["text"]
 
-qcfg = QuantizeConfig(
-    method="exl3",
-    format="exl3",
+qcfg = EXL3Config(
     bits=4.0,        # target average bits-per-weight
     head_bits=6.0,   # optional higher bitrate for attention heads / sensitive tensors
     codebook="mcg",  # one of: mcg, mul1, 3inst

@@ -1757,7 +1757,7 @@ stages:
 
 Related repo test:
 
-- `tests/test_format_conversion_flow.py` also verifies that RTN can export to GPTQ format with `RTNQuantizeConfig(bits=4, format=FORMAT.GPTQ, offload_to_disk=False)`
+- `tests/test_format_conversion_flow.py` also verifies that RTN can export to GPTQ format with `RTNConfig(bits=4, format=FORMAT.GPTQ, offload_to_disk=False)`
 
 That is a concrete existing example of the protocol's `quantize != export` split.
 
@@ -1772,7 +1772,7 @@ A straightforward migration path is:
 - `dynamic` positive override -> narrower rule
 - partial `dynamic` override fields -> quantizer patch fields such as `weight.quantize.bits`
 - `-:` negative skip -> target-scoped `skip()`
-- smoothers / prefilters -> `weight.prepare`
+- smoothers / preprocessors -> `weight.prepare`
 - method vs output representation split -> `quantize` vs `export`
 
 This keeps current intent while making the protocol ready for activation and cache quantization.
