@@ -19,6 +19,7 @@ from gptqmodel.quantization.config import (
     RTNConfig,
     SmootherConfig,
     SmoothMAD,
+    TensorParallelPadderConfig,
 )
 
 
@@ -208,6 +209,12 @@ def test_gguf_config_registers_smoother_preprocessor():
     assert cfg.preprocessors[0].code == "smoother"
 
 
+def test_gguf_config_does_not_auto_register_tensor_parallel_padder():
+    cfg = GGUFConfig(bits=4, format="q_k_m")
+
+    assert cfg.preprocessors == []
+
+
 def test_gguf_config_registers_auto_module_decoder_preprocessor():
     cfg = GGUFConfig(
         bits=4,
@@ -233,12 +240,39 @@ def test_gguf_config_registers_auto_module_decoder_preprocessor():
     assert reloaded.preprocessors[0].target_dtype == torch.float16
 
 
+def test_gguf_config_registers_tensor_parallel_padder_preprocessor():
+    cfg = GGUFConfig(
+        bits=4,
+        format="q_k_m",
+        preprocessors=[TensorParallelPadderConfig()],
+    )
+
+    assert len(cfg.preprocessors) == 1
+    padder = cfg.preprocessors[0]
+    assert isinstance(padder, TensorParallelPadderConfig)
+    assert padder.code == "tensor_parallel_padder"
+
+    payload = cfg.to_dict()
+    assert payload["meta"]["preprocessors"][0]["code"] == "tensor_parallel_padder"
+
+    reloaded = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(reloaded.preprocessors[0], TensorParallelPadderConfig)
+
+
 def test_auto_module_decoder_config_does_not_expose_code_as_init_field():
     decoder_fields = {field.name for field in fields(AutoModuleDecoderConfig)}
 
     assert "code" not in signature(AutoModuleDecoderConfig).parameters
     assert "code" not in decoder_fields
     assert AutoModuleDecoderConfig().to_dict()["code"] == "auto_module_decoder"
+
+
+def test_tensor_parallel_padder_config_does_not_expose_code_as_init_field():
+    padder_fields = {field.name for field in fields(TensorParallelPadderConfig)}
+
+    assert "code" not in signature(TensorParallelPadderConfig).parameters
+    assert "code" not in padder_fields
+    assert TensorParallelPadderConfig().to_dict()["code"] == "tensor_parallel_padder"
 
 
 @pytest.mark.parametrize(

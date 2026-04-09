@@ -3,17 +3,31 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+import math
+from typing import Any, Dict, List, Optional
 
 import torch
+import transformers
 
 from ..looper.loop_processor import ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
-from ..quantization.config import AutoModuleDecoderConfig
+from ..quantization.config import AutoModuleDecoderConfig, SmootherConfig, TensorParallelPadderConfig
+
+
+def _get_number_of_rows_and_cols(layer: torch.nn.Module) -> tuple[int, int]:
+    if isinstance(layer, NamedModule):
+        layer = layer.module
+
+    if isinstance(layer, transformers.Conv1D):
+        return layer.weight.shape[1], layer.weight.shape[0]
+
+    return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 
 
 class ModulePreProcessor(LoopProcessor):
     """Annotate modules with an ordered preprocessor plan before quantization."""
+
+    _TP_TARGETS = (2, 4, 8)
 
     def __init__(self, *args, **kwargs):
         """Initialize a no-forward planning processor for module preprocessors."""
@@ -43,23 +57,47 @@ class ModulePreProcessor(LoopProcessor):
 
         del kwargs
 
-        pipeline = []
+        pipeline: List[Dict[str, Any]] = []
+        auto_module_decoder_plan = None
+        tp_pad_info = None
         for preprocessor in getattr(self.qcfg, "preprocessors", []) or []:
             if isinstance(preprocessor, AutoModuleDecoderConfig):
+                auto_module_decoder_plan = {
+                    "code": preprocessor.code,
+                    "source_dtype": preprocessor.source_dtype,
+                    "target_dtype": preprocessor.target_dtype,
+                }
+                pipeline.append(auto_module_decoder_plan)
+                continue
+            if isinstance(preprocessor, TensorParallelPadderConfig):
+                tp_pad_info = self._compute_tp_pad_info(module)
                 pipeline.append(
                     {
                         "code": preprocessor.code,
-                        "source_dtype": preprocessor.source_dtype,
-                        "target_dtype": preprocessor.target_dtype,
+                        **tp_pad_info,
                     }
                 )
+                continue
+            if isinstance(preprocessor, SmootherConfig):
+                pipeline.append(preprocessor.to_dict())
 
         if pipeline:
             module.state["preprocessor_pipeline"] = pipeline
-            module.state["auto_module_decoder"] = pipeline[-1]
         else:
             module.state.pop("preprocessor_pipeline", None)
+
+        if auto_module_decoder_plan is not None:
+            module.state["auto_module_decoder"] = auto_module_decoder_plan
+        else:
             module.state.pop("auto_module_decoder", None)
+            module.state.pop("quant_source_module", None)
+            module.state.pop("auto_module_decoder_forward_mode", None)
+            module.state.pop("_auto_module_decoder_event_recorded", None)
+
+        if tp_pad_info is not None and tp_pad_info["pad_cols"] > 0:
+            module.state["tp_pad_info"] = tp_pad_info
+        else:
+            module.state.pop("tp_pad_info", None)
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Report that every candidate module passes through preprocessor planning."""
@@ -101,5 +139,21 @@ class ModulePreProcessor(LoopProcessor):
         """Return the processor label used in logs and lifecycle reporting."""
 
         return "module-preprocessor"
+
+    def _compute_tp_pad_info(self, module: NamedModule) -> Dict[str, int]:
+        """Calculate tensor-parallel padding metadata for one module."""
+
+        target_multiple = math.lcm(*self._TP_TARGETS)
+        group_size = getattr(self.qcfg, "group_size", -1)
+        if group_size > 0:
+            target_multiple = math.lcm(target_multiple, group_size)
+
+        _, columns = _get_number_of_rows_and_cols(module)
+        pad_cols = (target_multiple - (columns % target_multiple)) % target_multiple
+        return {
+            "pad_cols": pad_cols,
+            "target_multiple": target_multiple,
+            "original_columns": columns,
+        }
 
 __all__ = ["ModulePreProcessor"]

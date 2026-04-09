@@ -43,6 +43,7 @@ from .config import (
                      SmoothPercentileAsymmetric,
                      SmoothRowCol,
                      SmoothSoftNorm,
+                     TensorParallelPadderConfig,
                      WeightOnlyConfig,
                      WeightOnlyMethod,
 )

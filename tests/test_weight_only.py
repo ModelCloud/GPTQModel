@@ -20,6 +20,7 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.quantization.config import (
+    AutoModuleDecoderConfig,
     FORMAT,
     METHOD,
     GGUFBits,
@@ -481,6 +482,42 @@ def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):
     assert model.quantized is True
     qmodules = find_modules(model.model, [model.qlinear_kernel])
     assert len(qmodules) == 4
+
+
+def test_baseqmodel_quantize_gguf_weight_only_applies_auto_module_decoder(monkeypatch):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device_type = device.type
+
+    native = _TinyModel().to(device=device, dtype=torch.float16).eval()
+
+    qcfg = GGUFConfig(
+        bits=4,
+        format="q_k_m",
+        preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
+        offload_to_disk=False,
+        device=device_type,
+    )
+
+    model = _TinyQModel(
+        model=native,
+        quantized=False,
+        quantize_config=qcfg,
+        tokenizer=None,
+    )
+
+    materialize_calls = []
+    original_shell_module_materialize = BaseQModel.shell_module_materialize
+
+    def _spy_shell_module_materialize(self, *args, **kwargs):
+        materialize_calls.append(kwargs.get("role"))
+        return original_shell_module_materialize(self, *args, **kwargs)
+
+    monkeypatch.setattr(BaseQModel, "shell_module_materialize", _spy_shell_module_materialize)
+
+    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+
+    assert "weight_only_gguf" in result
+    assert materialize_calls.count("quant_source") == 4
 
 
 @pytest.mark.parametrize("bits", ["q4_k_m", "q5_k_m", "q6_k"])

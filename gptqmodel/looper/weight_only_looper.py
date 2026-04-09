@@ -19,6 +19,7 @@ from typing import Dict, Optional
 import torch
 from defuser.modeling.replace_modules import materialize_model
 
+from ..looper.module_preprocessor import ModulePreProcessor
 from ..looper.weight_only_processor import WeightOnlyProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -155,6 +156,18 @@ class WeightOnlyLooper:
 
         layer_count = len(layers)
         total_layers = layer_count + (1 if quant_config.lm_head else 0)
+        preprocessor = None
+        if getattr(quant_config, "preprocessors", None):
+            preprocessor = ModulePreProcessor(
+                tokenizer=self.gptq_model.tokenizer,
+                qcfg=quant_config,
+                calibration=None,
+                prepare_dataset_func=None,
+                calibration_concat_size=None,
+                calibration_sort=None,
+                calibration_concat_separator=None,
+                batch_size=1,
+            )
 
         try:
             for layer_index in range(total_layers):
@@ -197,6 +210,18 @@ class WeightOnlyLooper:
                         )
                         if named is None:
                             continue
+
+                        if preprocessor is not None:
+                            preprocessor.preprocess(named)
+                            if isinstance(named.state.get("auto_module_decoder"), dict):
+                                prepared = self.gptq_model.shell_module_materialize(
+                                    target_submodule=named.module,
+                                    device=CPU,
+                                    role="quant_source",
+                                    named_module=named,
+                                )
+                                if prepared is not named.module:
+                                    named.module = prepared
 
                         # Weight-only quantization happens entirely within the
                         # processor; no captured activations are needed.
