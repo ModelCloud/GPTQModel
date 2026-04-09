@@ -1626,6 +1626,8 @@ class BaseQModel(nn.Module):
             return "fp4"
         if weight.dtype is not torch.uint8 or not isinstance(checkpoint_tensors.get("weight_scale"), torch.Tensor):
             return None
+        if isinstance(checkpoint_tensors.get("weight_scale_2"), torch.Tensor):
+            return "fp4"
 
         quant_config = getattr(getattr(self.model, "config", None), "quantization_config", None)
         if isinstance(quant_config, dict):
