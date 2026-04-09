@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from functools import total_ordering
 from os.path import join
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 import pcre as re
 import torch
@@ -1086,7 +1086,7 @@ class WeightOnlyConfig:
 class BasePreFilterConfig:
     """Base payload for pre-filter stages emitted into config JSON."""
 
-    code: str
+    code: ClassVar[str] = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the pre-filter config into a minimal dictionary."""
@@ -1098,8 +1098,8 @@ class BasePreFilterConfig:
 class SmootherConfig(BasePreFilterConfig):
     """Serialized wrapper for a configured smoothing pre-filter."""
 
+    code: ClassVar[str] = PreFilterCode.SMOOTHER.value
     smooth: Optional[SmoothMethod] = None
-    code: str = field(default=PreFilterCode.SMOOTHER.value, init=False)
 
     def __post_init__(self):
         """Normalize the smoother payload into a typed smoother instance."""
@@ -1118,9 +1118,9 @@ class SmootherConfig(BasePreFilterConfig):
 class AutoModuleDecoderConfig(BasePreFilterConfig):
     """Configure automatic module-local decode behavior for checkpoint dtypes such as FP8."""
 
+    code: ClassVar[str] = PreFilterCode.AUTO_MODULE_DECODER.value
     source_dtype: str = "auto"
     target_dtype: Union[str, torch.dtype] = torch.bfloat16
-    code: str = field(default=PreFilterCode.AUTO_MODULE_DECODER.value, init=False)
 
     def __post_init__(self):
         """Normalize the decoder payload into canonical string and dtype values."""

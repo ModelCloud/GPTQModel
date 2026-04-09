@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import fields
+from inspect import signature
+
 import pytest
 import torch
 
@@ -231,6 +234,14 @@ def test_gguf_quantize_config_registers_auto_module_decoder_prefilter():
     reloaded = QuantizeConfig.from_quant_config(payload)
     assert isinstance(reloaded.pre_filters[0], AutoModuleDecoderConfig)
     assert reloaded.pre_filters[0].target_dtype == torch.float16
+
+
+def test_auto_module_decoder_config_does_not_expose_code_as_init_field():
+    decoder_fields = {field.name for field in fields(AutoModuleDecoderConfig)}
+
+    assert "code" not in signature(AutoModuleDecoderConfig).parameters
+    assert "code" not in decoder_fields
+    assert AutoModuleDecoderConfig().to_dict()["code"] == "auto_module_decoder"
 
 
 @pytest.mark.parametrize(
