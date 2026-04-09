@@ -213,10 +213,7 @@ def test_gguf_config_registers_auto_module_decoder_preprocessor():
         bits=4,
         format="q_k_m",
         preprocessors=[
-            {
-                "code": "auto_module_decoder",
-                "target_dtype": "float16",
-            }
+            AutoModuleDecoderConfig(target_dtype=torch.float16)
         ],
     )
 

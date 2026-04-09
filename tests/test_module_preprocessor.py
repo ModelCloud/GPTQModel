@@ -5,7 +5,7 @@ import torch
 
 from gptqmodel.looper.module_preprocessor import ModulePreProcessor
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.config import AutoModuleDecoderConfig, QuantizeConfig
 
 
 def test_module_preprocessor_records_auto_module_decoder_plan():
@@ -16,10 +16,7 @@ def test_module_preprocessor_records_auto_module_decoder_plan():
         bits=4,
         group_size=128,
         preprocessors=[
-            {
-                "code": "auto_module_decoder",
-                "target_dtype": "float16",
-            }
+            AutoModuleDecoderConfig(target_dtype=torch.float16)
         ],
     )
 
