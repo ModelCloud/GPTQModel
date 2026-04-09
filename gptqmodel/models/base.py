@@ -39,6 +39,7 @@ from .. import DEVICE_THREAD_POOL
 from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchLinear
@@ -57,6 +58,7 @@ from ..quantization.dtype import (
     dequantize_f4_e2m1,
     dequantize_fp8,
     device_supports_dtype,
+    device_supports_native_fp4,
     is_fp4_packed_dtype,
 )
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
@@ -1660,6 +1662,26 @@ class BaseQModel(nn.Module):
             return "row", None
         return "block", infer_block_shape(tuple(weight.shape), scale_inv)
 
+    def _infer_fp4_forward_block_size(
+        self,
+        *,
+        target_submodule: nn.Module,
+        scale: torch.Tensor,
+    ) -> int:
+        """Infer the NVFP4 block size used along the input-feature axis."""
+
+        block_size = self._decoder_block_size()
+        if block_size is not None and target_submodule.in_features % block_size[1] == 0:
+            return int(block_size[1])
+
+        if scale.ndim >= 1 and scale.shape[-1] > 0 and target_submodule.in_features % scale.shape[-1] == 0:
+            return int(target_submodule.in_features // scale.shape[-1])
+
+        raise ValueError(
+            f"Cannot infer FP4 block size for in_features={target_submodule.in_features} "
+            f"and scale shape={tuple(scale.shape)}."
+        )
+
     def _build_fp8_forward_module(
         self,
         *,
@@ -1716,6 +1738,47 @@ class BaseQModel(nn.Module):
             )
         else:
             forward_module.bias = None
+
+        forward_module.eval()
+        setattr(forward_module, "target_device", torch.device(device))
+        return forward_module
+
+    def _build_fp4_forward_module(
+        self,
+        *,
+        target_submodule: nn.Module,
+        checkpoint_tensors: Dict[str, torch.Tensor],
+        device: torch.device,
+        target_dtype: torch.dtype,
+    ) -> Optional[nn.Module]:
+        """Rebuild one linear submodule as a native NVFP4 forward wrapper."""
+
+        if not isinstance(target_submodule, nn.Linear):
+            return None
+
+        weight = checkpoint_tensors.get("weight")
+        scale = checkpoint_tensors.get("weight_scale")
+        if not isinstance(weight, torch.Tensor) or not isinstance(scale, torch.Tensor):
+            return None
+
+        try:
+            block_size = self._infer_fp4_forward_block_size(
+                target_submodule=target_submodule,
+                scale=scale,
+            )
+            forward_module = TorchFP4Linear(
+                in_features=target_submodule.in_features,
+                out_features=target_submodule.out_features,
+                weight=weight.to(device=device),
+                weight_scale=scale.to(device=device),
+                weight_block_size=block_size,
+                orig_dtype=target_dtype,
+                bias=checkpoint_tensors.get("bias").to(device=device, dtype=target_dtype)
+                if isinstance(checkpoint_tensors.get("bias"), torch.Tensor)
+                else None,
+            )
+        except Exception:
+            return None
 
         forward_module.eval()
         setattr(forward_module, "target_device", torch.device(device))
@@ -1795,6 +1858,16 @@ class BaseQModel(nn.Module):
             )
             if fp8_module is not None:
                 replacement = self._replace_live_submodule(target_submodule, fp8_module)
+                forward_mode = "native"
+        elif decoder_kind == "fp4" and device_supports_native_fp4(device, require_validation=False):
+            fp4_module = self._build_fp4_forward_module(
+                target_submodule=target_submodule,
+                checkpoint_tensors=checkpoint_tensors,
+                device=device,
+                target_dtype=target_dtype,
+            )
+            if fp4_module is not None:
+                replacement = self._replace_live_submodule(target_submodule, fp4_module)
                 forward_mode = "native"
         if forward_mode == "decode":
             decoded_forward = self._build_decoder_forward_module(

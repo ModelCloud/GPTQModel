@@ -23,6 +23,7 @@ from gptqmodel.quantization.dtype import (
     dequantize_f4_e2m1,
     dequantize_f8_e4m3,
     device_supports_dtype,
+    device_supports_native_fp4,
     device_supports_native_fp8,
 )
 
@@ -363,6 +364,24 @@ def test_device_supports_native_fp8_reports_capability(monkeypatch):
     monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (8, 0))
     assert device_supports_native_fp8(torch.device("cuda", 0)) is False
     assert device_supports_dtype(torch.device("cuda", 0), torch.float8_e4m3fn) is False
+
+
+@pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="float4 packed dtype not available")
+def test_device_supports_native_fp4_reports_capability(monkeypatch):
+    dtype_helpers._DTYPE_SUPPORT_CACHE.clear()
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (10, 0))
+    support = get_device_dtype_support(torch.device("cuda", 0))
+    assert torch.float4_e2m1fn_x2 in support.advertised_linear_dtypes
+    assert device_supports_native_fp4(torch.device("cuda", 0)) is True
+    assert device_supports_dtype(torch.device("cuda", 0), torch.float4_e2m1fn_x2) is True
+
+    dtype_helpers._DTYPE_SUPPORT_CACHE.clear()
+    monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (8, 9))
+    support = get_device_dtype_support(torch.device("cuda", 0))
+    assert torch.float4_e2m1fn_x2 not in support.advertised_linear_dtypes
+    assert device_supports_native_fp4(torch.device("cuda", 0)) is False
+    assert device_supports_dtype(torch.device("cuda", 0), torch.float4_e2m1fn_x2) is False
 
 
 @pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")

@@ -15,6 +15,7 @@ import gptqmodel.models.base as base_module
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.quantization.dtype import dequantize_f4_e2m1, dequantize_fp8
 from gptqmodel.quantization.gptq import GPTQ
@@ -262,6 +263,84 @@ def test_shell_materialize_forward_decodes_fp4_source_to_dense_module(tmp_path):
     assert not isinstance(prepared, TorchFP8Linear)
     assert named.state["auto_module_decoder_forward_mode"] == "decode"
     torch.testing.assert_close(prepared.weight, expected, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(named.state["quant_source_module"].weight, expected, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.skipif(nvfp4_quantize is None, reason="torchao NVFP4 support required")
+@pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="float4 packed dtype not available")
+def test_shell_materialize_forward_builds_fp4_wrapper_when_native_supported(tmp_path, monkeypatch):
+    source_model = _LinearWrapper(16, 4).eval()
+    model_dir = tmp_path / "fp4_native_source"
+    model_dir.mkdir()
+
+    scales, packed = nvfp4_quantize(source_model.linear.weight.detach().to(torch.float32), block_size=16)
+    packed_float4 = packed.view(torch.float4_e2m1fn_x2)
+    bias = source_model.linear.bias.detach().cpu()
+    shard_name = "model.safetensors"
+    save_file(
+        {
+            "linear.weight": packed_float4.cpu(),
+            "linear.weight_scale": scales.cpu(),
+            "linear.bias": bias,
+        },
+        str(model_dir / shard_name),
+    )
+    _write_index(model_dir, shard_name, ["linear.weight", "linear.weight_scale", "linear.bias"])
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(
+            _experts_implementation=None,
+            quantization_config={"format": "nvfp4"},
+        ),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    shell_model = _LinearWrapper(16, 4).eval()
+    shell_model.config = SimpleNamespace(quantization_config={"format": "nvfp4"})
+    shell_model.linear.weight = nn.Parameter(
+        torch.empty_like(shell_model.linear.weight, device="meta"),
+        requires_grad=False,
+    )
+    shell_model.linear.bias = nn.Parameter(
+        torch.empty_like(shell_model.linear.bias, device="meta"),
+        requires_grad=False,
+    )
+
+    harness = BaseQModel.__new__(BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = shell_model
+    harness.turtle_model = turtle
+    harness._turtle_lock = threading.RLock()
+    harness.auto_module_decoder_events = []
+
+    named = NamedModule(shell_model.linear, name="linear", full_name="linear", layer_index=0)
+    named.state["auto_module_decoder"] = {
+        "code": "auto_module_decoder",
+        "source_dtype": "auto",
+        "target_dtype": torch.bfloat16,
+    }
+
+    monkeypatch.setattr(base_module, "device_supports_native_fp4", lambda *args, **kwargs: True)
+
+    prepared = BaseQModel.shell_module_materialize(
+        harness,
+        target_submodule=shell_model.linear,
+        device=torch.device("cpu"),
+        role="forward",
+        named_module=named,
+    )
+
+    expected = dequantize_f4_e2m1(
+        packed_float4.cpu(),
+        scale=scales.cpu(),
+        axis=None,
+        target_dtype=torch.bfloat16,
+    )
+    assert isinstance(prepared, TorchFP4Linear)
+    assert named.state["auto_module_decoder_forward_mode"] == "native"
+    assert isinstance(named.state["quant_source_module"], nn.Linear)
     torch.testing.assert_close(named.state["quant_source_module"].weight, expected, atol=1e-3, rtol=1e-3)
 
 

@@ -12,6 +12,7 @@ import os
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 
 try:
@@ -19,6 +20,12 @@ try:
 except Exception:
     unpack_uint4 = None
     f4_unpacked_to_f32 = None
+
+try:
+    from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor, nvfp4_quantize
+except Exception:
+    NVFP4Tensor = None
+    nvfp4_quantize = None
 
 __all__ = [
     "DeviceDTypeSupport",
@@ -29,6 +36,7 @@ __all__ = [
     "available_float8_dtype_names",
     "available_float8_dtypes",
     "device_supports_native_fp8",
+    "device_supports_native_fp4",
     "dequantize_fp8",
     "dequantize_f8_e4m3",
     "dequantize_f4_e2m1",
@@ -364,6 +372,8 @@ def _advertised_cuda_linear_dtypes(capability: tuple[int, int]) -> frozenset[tor
 
     if _FLOAT8_DTYPES and (major >= 9 or (major, minor) == (8, 9)):
         supported.update(_FLOAT8_DTYPES)
+    if _FLOAT4_PACKED_DTYPES and major >= 10:
+        supported.update(_FLOAT4_PACKED_DTYPES)
 
     return frozenset(supported)
 
@@ -388,6 +398,27 @@ def _validate_linear_dtype_support(device: torch.device, dtype: torch.dtype) -> 
         return dtype in {torch.float16, torch.float32, torch.bfloat16}
 
     try:
+        if dtype in _FLOAT4_PACKED_DTYPES:
+            if NVFP4Tensor is None or nvfp4_quantize is None:
+                return False
+            weight = torch.randn(16, 16, dtype=torch.float32)
+            scales, packed = nvfp4_quantize(weight, block_size=16)
+            packed_weight = packed.view(dtype) if packed.dtype is not dtype else packed
+            packed_weight = packed_weight.to(device)
+            scales = scales.to(device)
+            x = torch.randn(4, 16, device=device, dtype=torch.bfloat16)
+            result = F.linear(
+                x,
+                NVFP4Tensor(
+                    packed_weight,
+                    scales,
+                    block_size=16,
+                    orig_dtype=torch.bfloat16,
+                ),
+                None,
+            )
+            return isinstance(result, torch.Tensor)
+
         if dtype in _FLOAT8_DTYPES:
             if not hasattr(torch, "_scaled_mm"):
                 return False
@@ -479,6 +510,22 @@ def device_supports_native_fp8(
     return device_supports_dtype(
         device,
         torch.float8_e4m3fn,
+        require_validation=require_validation,
+    )
+
+
+def device_supports_native_fp4(
+    device: Optional[torch.device] = None,
+    *,
+    require_validation: bool = False,
+) -> bool:
+    """Return ``True`` when the target device advertises native NVFP4 linear execution."""
+
+    if not _FLOAT4_PACKED_DTYPES:
+        return False
+    return device_supports_dtype(
+        device,
+        _FLOAT4_PACKED_DTYPES[0],
         require_validation=require_validation,
     )
 
