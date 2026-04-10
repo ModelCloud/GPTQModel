@@ -230,7 +230,7 @@ jobs:
           
           echo "using py=$py gpu=$gpu for test ${{ matrix.test_script }}"
 
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${py}_test_${{ matrix.test_script }}"
+          env_name="gptqmodel_test_cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${py}_${{ matrix.test_script }}"
           /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Setup uv env
@@ -438,7 +438,7 @@ jobs:
 
       - name: Activate uv env
         run: |
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_model_${{ matrix.test_script }}"
+          env_name="gptqmodel_test_cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_${{ matrix.test_script }}"
           /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Setup uv env
