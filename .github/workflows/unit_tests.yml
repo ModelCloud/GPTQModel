@@ -178,7 +178,7 @@ jobs:
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/uv:/opt/uv
+        #        - /monster/ci/uv:/opt/uv
         - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
     strategy:
@@ -206,6 +206,10 @@ jobs:
       - name: Print env
         run: |
           printenv
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
 
       - name: fio test
         run: |
@@ -417,7 +421,7 @@ jobs:
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/uv:/opt/uv
+        #        - /monster/ci/uv:/opt/uv
         - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
     strategy:
@@ -446,6 +450,10 @@ jobs:
       - name: Print env
         run: |
           printenv
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
 
       - name: fio test
         run: |
