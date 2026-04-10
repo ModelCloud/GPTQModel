@@ -178,7 +178,12 @@ jobs:
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/uv:/opt/uv
+        # - /monster/ci/uv:/opt/uv
+        - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
+        - /monster/ci/uv/uv:/opt/uv/uv
+        - /monster/ci/uv/uvx:/opt/uv/uvx
+        - /monster/ci/uv/env:/opt/uv/env
+        - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
         - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
     strategy:
@@ -203,18 +208,9 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Print env
-        run: |
-          echo PATH=$PATH
-          echo UV_INSTALL_DIR=$UV_INSTALL_DIR
-          echo UV_PYTHON_BIN_DIR=$UV_PYTHON_BIN_DIR
-          echo UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR
-          echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
-          echo UV_CACHE_DIR=$UV_CACHE_DIR
-          echo VENV_ROOT=$VENV_ROOT
-
       - name: Activate uv env
         run: |
+          echo "-- loading unit test's config --"
           source /opt/uv/setup_uv_venv.sh unit_test_env
 
           config_json="$(python3 .github/scripts/parse_test_config.py \
@@ -228,9 +224,12 @@ jobs:
           echo "GPU_COUNT=$gpu" >> "$GITHUB_ENV"
           
           echo "using py=$py gpu=$gpu for test ${{ matrix.test_script }}"
+          echo "-- loaded --"
 
+          echo "-- setting up env --"
           env_name="gptqmodel_test_cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${py}_${{ matrix.test_script }}"
           /opt/uv/setup_uv_venv.sh $env_name
+          echo "-- set --"
 
       - name: Setup uv env
         run: |
@@ -301,7 +300,6 @@ jobs:
         run: |
           echo "::group::uv python list"
           uv python list
-          ls -ahl /opt/uv/venvs
           echo "::endgroup::"
 
           which python
@@ -400,7 +398,12 @@ jobs:
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/uv:/opt/uv
+        # - /monster/ci/uv:/opt/uv
+        - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
+        - /monster/ci/uv/uv:/opt/uv/uv
+        - /monster/ci/uv/uvx:/opt/uv/uvx
+        - /monster/ci/uv/env:/opt/uv/env
+        - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
         - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
     strategy:
@@ -425,15 +428,9 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Print env
+      - name: Clean uv
         run: |
-          echo PATH=$PATH
-          echo UV_INSTALL_DIR=$UV_INSTALL_DIR
-          echo UV_PYTHON_BIN_DIR=$UV_PYTHON_BIN_DIR
-          echo UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR
-          echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
-          echo UV_CACHE_DIR=$UV_CACHE_DIR
-          echo VENV_ROOT=$VENV_ROOT
+          uv cache clean
 
       - name: Activate uv env
         run: |
@@ -463,7 +460,6 @@ jobs:
         run: |
           echo "::group::uv python list"
           uv python list
-          ls -ahl /opt/uv/venvs
           echo "::endgroup::"
 
           which python
