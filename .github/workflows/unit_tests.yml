@@ -178,8 +178,11 @@ jobs:
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        #        - /monster/ci/uv:/opt/uv
+        # - /monster/ci/uv:/opt/uv
         - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
+        - /monster/ci/uv/uv:/opt/uv/uv
+        - /monster/ci/uv/uvx:/opt/uv/uvx
+        - /monster/ci/uv/env:/opt/uv/env
         - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
         - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
@@ -422,8 +425,11 @@ jobs:
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        #        - /monster/ci/uv:/opt/uv
+        # - /monster/ci/uv:/opt/uv
         - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
+        - /monster/ci/uv/uv:/opt/uv/uv
+        - /monster/ci/uv/uvx:/opt/uv/uvx
+        - /monster/ci/uv/env:/opt/uv/env
         - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
         - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
