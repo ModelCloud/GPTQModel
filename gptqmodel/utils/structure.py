@@ -746,6 +746,123 @@ class LazyTurtle:
                 return candidate_name
         return self._join_tensor_name(module_path, rel_name)
 
+    def _resolve_split_gate_up_tensor_name(
+        self,
+        module_path: str,
+        rel_name: str,
+    ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
+        """Resolve split gate/up projection tensors against fused `gate_up_proj` checkpoint entries."""
+
+        parts = rel_name.split(".")
+        if len(parts) < 2:
+            return None, None, None, None
+
+        proj_name = parts[-2]
+        tensor_name = parts[-1]
+        if proj_name not in {"gate_proj", "up_proj"} or tensor_name not in {"weight", "bias"}:
+            return None, None, None, None
+
+        fused_parts = list(parts)
+        fused_parts[-2] = "gate_up_proj"
+        fused_rel_name = ".".join(fused_parts)
+        split_index = 0 if proj_name == "gate_proj" else 1
+
+        for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
+            candidate_name = self._join_tensor_name(candidate_path, fused_rel_name)
+            if candidate_name in self._weight_map:
+                return candidate_name, None, split_index, 0
+
+        return None, None, None, None
+
+    def _resolve_fused_expert_tensor_name(
+        self,
+        module_path: str,
+        rel_name: str,
+    ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
+        """Resolve defused expert leaf tensors against fused per-expert checkpoint tensors."""
+
+        parts = rel_name.split(".")
+        for expert_pos, part in enumerate(parts):
+            if part != "experts" or expert_pos + 3 >= len(parts):
+                continue
+            if not parts[expert_pos + 1].isdigit():
+                continue
+
+            expert_index = int(parts[expert_pos + 1])
+            proj_name = parts[expert_pos + 2]
+            tensor_name = parts[expert_pos + 3]
+
+            fused_leaf = None
+            split_index = None
+            split_dim = None
+
+            if proj_name in {"gate_proj", "up_proj"}:
+                split_index = 0 if proj_name == "gate_proj" else 1
+                if tensor_name == "weight":
+                    fused_leaf = "gate_up_proj"
+                    split_dim = 1
+                elif tensor_name == "bias":
+                    fused_leaf = "gate_up_proj_bias"
+                    split_dim = 0
+            elif proj_name == "down_proj":
+                if tensor_name == "weight":
+                    fused_leaf = "down_proj"
+                elif tensor_name == "bias":
+                    fused_leaf = "down_proj_bias"
+
+            if fused_leaf is None:
+                return None, None, None, None
+
+            fused_parts = parts[: expert_pos + 1] + [fused_leaf]
+            fused_rel_name = ".".join(fused_parts)
+            for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
+                candidate_name = self._join_tensor_name(candidate_path, fused_rel_name)
+                if candidate_name in self._weight_map:
+                    return candidate_name, expert_index, split_index, split_dim
+
+            return None, None, None, None
+
+        return None, None, None, None
+
+    @staticmethod
+    def _transform_checkpoint_tensor(
+        tensor: torch.Tensor,
+        *,
+        expert_index: Optional[int],
+        split_index: Optional[int],
+        split_dim: Optional[int],
+    ) -> Optional[torch.Tensor]:
+        """Slice fused checkpoint tensors into the tensor layout expected by the shell module."""
+
+        if expert_index is not None:
+            if tensor.shape[0] <= expert_index:
+                return None
+            tensor = tensor[expert_index].contiguous()
+
+        if split_index is not None:
+            if split_dim is None or tensor.shape[split_dim] % 2 != 0:
+                return None
+            tensor = tensor.chunk(2, dim=split_dim)[split_index].contiguous()
+
+        return tensor
+
+    def _resolve_checkpoint_tensor_source(
+        self,
+        module_path: str,
+        rel_name: str,
+    ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
+        """Resolve a target tensor name to its checkpoint source and optional fused split index."""
+
+        full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
+        if full_name in self._weight_map:
+            return full_name, None, None, None
+
+        resolved = self._resolve_split_gate_up_tensor_name(module_path, rel_name)
+        if resolved[0] is not None:
+            return resolved
+
+        return self._resolve_fused_expert_tensor_name(module_path, rel_name)
+
     def _load_checkpoint_tensors_for_module_path(
         self,
         *,
@@ -793,16 +910,23 @@ class LazyTurtle:
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
         missing_nonpersistent_buffers: list[tuple[str, str]] = []
 
-        grouped_names: Dict[str, list[tuple[str, str, str]]] = {}
+        grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
         for rel_name in t_params:
-            full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
+            full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
+            if full_name is None:
+                continue
             shard = self._weight_map.get(full_name)
             if shard is None:
                 continue
-            grouped_names.setdefault(shard, []).append(("param", rel_name, full_name))
+            grouped_names.setdefault(shard, []).append(("param", rel_name, full_name, expert_index, split_index, split_dim))
 
         for rel_name, target_buffer in list(t_bufs.items()):
-            full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
+            full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
+            if full_name is None:
+                full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
+                expert_index = None
+                split_index = None
+                split_dim = None
             shard = self._weight_map.get(full_name)
             if shard is None:
                 t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
@@ -819,14 +943,22 @@ class LazyTurtle:
                     if leaf in getattr(t_parent, "_buffers", {}):
                         del t_parent._buffers[leaf]
                 continue
-            grouped_names.setdefault(shard, []).append(("buffer", rel_name, full_name))
+            grouped_names.setdefault(shard, []).append(("buffer", rel_name, full_name, expert_index, split_index, split_dim))
 
         with torch.inference_mode():
             for shard, entries in grouped_names.items():
                 shard_path = os.path.join(self.model_local_path, shard)
                 with safe_open(shard_path, framework="pt", device="cpu") as handler:
-                    for kind, rel_name, full_name in entries:
+                    for kind, rel_name, full_name, expert_index, split_index, split_dim in entries:
                         tensor = handler.get_tensor(full_name)
+                        tensor = self._transform_checkpoint_tensor(
+                            tensor,
+                            expert_index=expert_index,
+                            split_index=split_index,
+                            split_dim=split_dim,
+                        )
+                        if tensor is None:
+                            continue
                         if kind == "param":
                             target_param = t_params.get(rel_name)
                             if target_param is None or target_param.shape != tensor.shape:
@@ -917,7 +1049,16 @@ class LazyTurtle:
                 value = torch.device("cpu")
             elif hasattr(owner_module, param.name):
                 # Some remote-code modules rebuild buffers from constructor attributes instead of config.
-                value = copy.deepcopy(getattr(owner_module, param.name))
+                raw_value = getattr(owner_module, param.name)
+                if isinstance(raw_value, torch.Tensor) and raw_value.device.type == "meta":
+                    scalar_attr_name = f"scalar_{param.name}"
+                    if hasattr(owner_module, scalar_attr_name):
+                        raw_value = getattr(owner_module, scalar_attr_name)
+                    elif param.default is not inspect.Parameter.empty:
+                        continue
+                    else:
+                        return None
+                value = copy.deepcopy(raw_value)
             elif param.default is not inspect.Parameter.empty:
                 continue
             else:
@@ -987,8 +1128,8 @@ class LazyTurtle:
         *,
         shell_sub: nn.Module,
         module_path: str,
-        param_cache: Dict[tuple[str, torch.dtype, bool], nn.Parameter],
-        buffer_cache: Dict[tuple[str, torch.dtype], torch.Tensor],
+        param_cache: Dict[tuple[str, Optional[int], Optional[int], Optional[int], torch.dtype, bool], nn.Parameter],
+        buffer_cache: Dict[tuple[str, Optional[int], Optional[int], Optional[int], torch.dtype], torch.Tensor],
     ) -> int:
         synced = 0
 
@@ -997,7 +1138,9 @@ class LazyTurtle:
                 if not _is_meta_tensor(shell_param):
                     continue
 
-                full_name = self._resolve_checkpoint_tensor_name(module_path, name)
+                full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, name)
+                if full_name is None:
+                    continue
                 shard = self._weight_map.get(full_name)
                 if shard is None:
                     continue
@@ -1005,11 +1148,19 @@ class LazyTurtle:
                 source_path = os.path.join(self.model_local_path, shard)
                 with safe_open(source_path, framework="pt", device="cpu") as handler:
                     source_param = handler.get_tensor(full_name)
+                source_param = self._transform_checkpoint_tensor(
+                    source_param,
+                    expert_index=expert_index,
+                    split_index=split_index,
+                    split_dim=split_dim,
+                )
+                if source_param is None:
+                    continue
 
                 if shell_param.shape != source_param.shape:
                     continue
 
-                cache_key = (full_name, shell_param.dtype, shell_param.requires_grad)
+                cache_key = (full_name, expert_index, split_index, split_dim, shell_param.dtype, shell_param.requires_grad)
                 new_param = param_cache.get(cache_key)
                 if new_param is None:
                     if source_param.dtype != shell_param.dtype:
@@ -1027,7 +1178,9 @@ class LazyTurtle:
                 if not _is_meta_tensor(shell_buffer):
                     continue
 
-                full_name = self._resolve_checkpoint_tensor_name(module_path, name)
+                full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, name)
+                if full_name is None:
+                    continue
                 shard = self._weight_map.get(full_name)
                 if shard is None:
                     continue
@@ -1035,12 +1188,20 @@ class LazyTurtle:
                 source_path = os.path.join(self.model_local_path, shard)
                 with safe_open(source_path, framework="pt", device="cpu") as handler:
                     source_buffer = handler.get_tensor(full_name)
+                source_buffer = self._transform_checkpoint_tensor(
+                    source_buffer,
+                    expert_index=expert_index,
+                    split_index=split_index,
+                    split_dim=split_dim,
+                )
+                if source_buffer is None:
+                    continue
 
                 if shell_buffer.shape != source_buffer.shape:
                     continue
 
                 persistent = name not in getattr(shell_sub, "_non_persistent_buffers_set", set())
-                cache_key = (full_name, shell_buffer.dtype)
+                cache_key = (full_name, expert_index, split_index, split_dim, shell_buffer.dtype)
                 new_buffer = buffer_cache.get(cache_key)
                 if new_buffer is None:
                     if source_buffer.dtype != shell_buffer.dtype:
