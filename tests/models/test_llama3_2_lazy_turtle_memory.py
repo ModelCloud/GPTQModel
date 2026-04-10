@@ -38,7 +38,6 @@ class TestLlama3_2LazyTurtleMemory(ModelTest):
     """Verify lazy turtle keeps host memory bounded on a monolithic Llama safetensors file."""
 
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
-    PIN_CUDA_DEVICE = 0
     TORCH_DTYPE = "bfloat16"
     USE_FLASH_ATTN = False
     QUANT_BATCH_SIZE = 1
@@ -148,7 +147,7 @@ class TestLlama3_2LazyTurtleMemory(ModelTest):
         dataset = None
         try:
             quantize_config = self._build_quantize_config()
-            quantize_config.device = torch.device(f"cuda:{self.PIN_CUDA_DEVICE}")
+            quantize_config.device = torch.device("cuda")
             quantize_config.wait_for_submodule_finalizers = True
 
             model = GPTQModel.load(

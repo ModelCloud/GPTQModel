@@ -33,8 +33,6 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
-    # Keep this regression on a single deterministic CUDA device in PCI bus order.
-    PIN_CUDA_DEVICE = 0
     LOAD_BACKEND = BACKEND.MARLIN
     KERNEL_INFERENCE = {MarlinLinear}
     DYNAMIC = {
@@ -68,7 +66,7 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
             "evalution_model_args": {
                 "dtype": "bfloat16",
                 "attn_implementation": "paged|flash_attention_2",
-                "device": "cuda:0",
+                "device": "cuda",
             },
             "evalution_suite_kwargs": {
                 "batch_size": 24,

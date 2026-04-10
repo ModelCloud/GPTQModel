@@ -33,7 +33,6 @@ class TestGlm5_1Fp8AutoDecoder(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/GLM-5.1-FP8"
     LOAD_BACKEND = BACKEND.TORCH
     QUANT_BACKEND = BACKEND.TORCH
-    PIN_CUDA_DEVICE = 0
     TORCH_DTYPE = "bfloat16"
     USE_FLASH_ATTN = False
     QUANT_BATCH_SIZE = 1
@@ -55,7 +54,7 @@ class TestGlm5_1Fp8AutoDecoder(ModelTest):
         return cfg
 
     def _expected_forward_mode(self) -> str:
-        support = get_device_dtype_support(torch.device("cuda:0"), validate=False)
+        support = get_device_dtype_support(torch.device("cuda"), validate=False)
         return "native" if torch.float8_e4m3fn in support.advertised_linear_dtypes else "decode"
 
     def test_glm5_1_fp8_auto_decoder_selects_forward_role_by_gpu_capability(self) -> None:
@@ -66,7 +65,7 @@ class TestGlm5_1Fp8AutoDecoder(ModelTest):
         dataset = None
         try:
             quantize_config = self._build_quantize_config()
-            quantize_config.device = torch.device("cuda:0")
+            quantize_config.device = torch.device("cuda")
 
             model_definition = auto.check_and_get_model_definition(
                 self.NATIVE_MODEL_ID,

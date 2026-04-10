@@ -67,7 +67,6 @@ class TestLlama3_2_ExllamaV3(ModelTest):
     TORCH_DTYPE = torch.float16
     QUANT_BACKEND = BACKEND.EXLLAMA_V3
     LOAD_BACKEND = BACKEND.EXLLAMA_V3
-    PIN_CUDA_DEVICE = 0
 
     def test_llama3_2_exllamav3(self):
         self.quant_lm_eval()

@@ -172,7 +172,6 @@ class ModelTest(unittest.TestCase):
     QUANT_BATCH_SIZE = 1
     LOAD_BACKEND = BACKEND.MARLIN
     QUANT_BACKEND = BACKEND.AUTO
-    PIN_CUDA_DEVICE: Optional[int] = None
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
@@ -1048,7 +1047,7 @@ class ModelTest(unittest.TestCase):
                     model_path,
                     trust_remote_code=trust_remote_code,
                     backend=backend,
-                    device_map=self._preferred_cuda_device_map(backend=backend) or {"": "cuda:0"},
+                    device_map={"": "cuda:0"},
                 )
             else:
                 model = self.loadQuantModel(
@@ -1482,24 +1481,6 @@ class ModelTest(unittest.TestCase):
             offload_to_disk=self.OFFLOAD_TO_DISK,
         )
 
-    def _preferred_cuda_device_map(self, *, backend=None):
-        if self.PIN_CUDA_DEVICE is None or not torch.cuda.is_available():
-            return None
-
-        active_backend = backend if backend is not None else self._current_load_backend()
-        if active_backend == self._torch_fused_backend():
-            return None
-
-        try:
-            if self.PIN_CUDA_DEVICE >= torch.cuda.device_count():
-                self.skipTest(
-                    f"CUDA device {self.PIN_CUDA_DEVICE} requested but only {torch.cuda.device_count()} visible device(s) are available."
-                )
-        except Exception:
-            pass
-
-        return {"": f"cuda:{self.PIN_CUDA_DEVICE}"}
-
     def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):
         """Return `(model, tokenizer, processor)`; `processor` is `None` for text-only models."""
         quantize_config = self._build_quantize_config()
@@ -1528,7 +1509,7 @@ class ModelTest(unittest.TestCase):
             device_map=(
                 {"": "cpu"}
                 if self.LOAD_BACKEND == torch_fused_backend
-                else (self._preferred_cuda_device_map(backend=self.LOAD_BACKEND) or "auto")
+                else "auto"
             ),
             **args,
         )
@@ -1627,7 +1608,7 @@ class ModelTest(unittest.TestCase):
                                 path,
                                 trust_remote_code=trust_remote_code,
                                 backend=target_backend,
-                                device_map=self._preferred_cuda_device_map(backend=target_backend) or {"": "cuda:0"},
+                                device_map={"": "cuda:0"},
                             )
                         else:
                             q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code, backend=target_backend)
@@ -1677,7 +1658,7 @@ class ModelTest(unittest.TestCase):
         explicit_device = "device" in load_kwargs
         inserted_device_map = False
         if "device_map" not in load_kwargs and not explicit_device:
-            load_kwargs["device_map"] = self._preferred_cuda_device_map(backend=active_backend) or default_device_map
+            load_kwargs["device_map"] = default_device_map
             inserted_device_map = True
 
         # Post-quant CI runs may expose multiple GPUs; pin loading to the first one to avoid spread-out auto maps.
@@ -1696,7 +1677,7 @@ class ModelTest(unittest.TestCase):
 
             if multi_device:
                 if self.EVAL_SINGLE_GPU:
-                    load_kwargs["device_map"] = self._preferred_cuda_device_map(backend=active_backend) or {"": "cuda:0"}
+                    load_kwargs["device_map"] = {"": "cuda:0"}
 
         model = GPTQModel.load(
             model_id_or_path,

@@ -75,8 +75,8 @@ stages:
 
 class _BaseLlama3_2GPTQProtocol(ModelTest):
     pytestmark = pytest.mark.skipif(
-        (not __import__("torch").cuda.is_available()) or __import__("torch").cuda.device_count() <= 3,
-        reason="CUDA devices 2 and 3 are required for protocol GPTQ integration tests",
+        not __import__("torch").cuda.is_available(),
+        reason="CUDA is required for protocol GPTQ integration tests",
     )
 
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
@@ -174,8 +174,6 @@ class _BaseLlama3_2GPTQProtocol(ModelTest):
 
 
 class TestLlama3_2_GPTQProtocolPython(_BaseLlama3_2GPTQProtocol):
-    PIN_CUDA_DEVICE = 2
-
     def _compiled_protocol_plan(self):
         return compile_protocol(_python_protocol())
 
@@ -184,8 +182,6 @@ class TestLlama3_2_GPTQProtocolPython(_BaseLlama3_2GPTQProtocol):
 
 
 class TestLlama3_2_GPTQProtocolYAML(_BaseLlama3_2GPTQProtocol):
-    PIN_CUDA_DEVICE = 3
-
     def _compiled_protocol_plan(self):
         return compile_protocol_yaml_text(_yaml_protocol())
 

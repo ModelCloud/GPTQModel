@@ -55,6 +55,14 @@ class _HybridWrapper(nn.Module):
         self.block = _HybridBlock(width)
 
 
+class _TransformerPrefixedHybridWrapper(nn.Module):
+    """Wrap the real module tree under an extra root to mimic shell-only prefixes."""
+
+    def __init__(self, width: int):
+        super().__init__()
+        self.transformer = _HybridWrapper(width)
+
+
 class _SharedDirectBlock(nn.Module):
     def __init__(self, width: int, shared_bias: nn.Parameter):
         super().__init__()
@@ -110,6 +118,86 @@ class _RotaryWrapper(nn.Module):
         self.block = nn.Module()
         self.block.linear = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.block.rotary = LlamaRotaryEmbedding(config, device=torch.device("cpu"))
+
+
+class _AttrBufferTemplate(nn.Module):
+    """Template module whose non-persistent buffers depend on constructor attributes."""
+
+    def __init__(self, width: int, scale: float = 1.0, device=None):
+        super().__init__()
+        self.width = width
+        self.scale = scale
+        base = torch.arange(width, dtype=torch.float32, device=device)
+        self.register_buffer("cache", base * scale, persistent=False)
+        self.register_buffer("cache_plus_one", base + 1, persistent=False)
+
+
+class _AttrBufferWrapper(nn.Module):
+    """Hybrid wrapper that pairs checkpoint tensors with attribute-driven init-only buffers."""
+
+    def __init__(self, width: int, scale: float = 1.0):
+        super().__init__()
+        self.block = nn.Module()
+        self.block.linear = nn.Linear(width, width, bias=False)
+        self.block.rotary = _AttrBufferTemplate(width=width, scale=scale, device=torch.device("cpu"))
+
+
+class _ScalarMetaBufferTemplate(nn.Module):
+    """Template module that keeps the constructor scalar separately from the registered buffer."""
+
+    def __init__(self, scale: float, device=None):
+        super().__init__()
+        self.scalar_scale = scale
+        self.register_buffer("scale", torch.tensor(scale, dtype=torch.float32, device=device), persistent=False)
+
+
+class _ScalarMetaBufferWrapper(nn.Module):
+    """Wrapper used to cover constructors that take a scalar but expose a same-named buffer."""
+
+    def __init__(self, scale: float):
+        super().__init__()
+        self.block = nn.Module()
+        self.block.linear = nn.Linear(8, 8, bias=False)
+        self.block.scale_holder = _ScalarMetaBufferTemplate(scale=scale, device=torch.device("cpu"))
+
+
+class _SplitGateUpBlock(nn.Module):
+    """Tiny stand-in for Defuser runtime MLPs that expose split projections from a fused checkpoint tensor."""
+
+    def __init__(self, width: int, intermediate: int):
+        super().__init__()
+        self.gate_proj = nn.Linear(width, intermediate, bias=False)
+        self.up_proj = nn.Linear(width, intermediate, bias=False)
+        self.down_proj = nn.Linear(intermediate, width, bias=False)
+
+
+class _SplitGateUpWrapper(nn.Module):
+    """Wrapper used to exercise lazy-turtle rematerialization from `gate_up_proj` checkpoints."""
+
+    def __init__(self, width: int, intermediate: int):
+        super().__init__()
+        self.block = _SplitGateUpBlock(width, intermediate)
+
+
+class _TinyExpert(nn.Module):
+    """Small expert used to mirror Defuser's split expert runtime layout."""
+
+    def __init__(self, width: int):
+        super().__init__()
+        self.gate_proj = nn.Linear(width, width, bias=True)
+        self.up_proj = nn.Linear(width, width, bias=True)
+        self.down_proj = nn.Linear(width, width, bias=True)
+
+
+class _FusedExpertsWrapper(nn.Module):
+    """Wrapper used to exercise fused expert checkpoint slicing during lazy-turtle rematerialization."""
+
+    def __init__(self, width: int, expert_count: int):
+        super().__init__()
+        self.block = nn.Module()
+        self.block.experts = nn.Module()
+        for expert_idx in range(expert_count):
+            self.block.experts.add_module(str(expert_idx), _TinyExpert(width))
 
 
 def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, torch.Tensor]) -> None:
@@ -332,6 +420,77 @@ def test_lazy_turtle_materializes_recursive_submodule(tmp_path):
     torch.testing.assert_close(shell_model.block.dt_scale, source_model.block.dt_scale)
 
 
+def test_lazy_turtle_materializes_submodule_when_shell_has_extra_root_prefix(tmp_path):
+    """Checkpoint-backed materialization should ignore wrapper prefixes absent from shard names."""
+
+    source_model = _HybridWrapper(width=16)
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+
+    shard_name = "model.safetensors"
+    save_file(source_model.state_dict(), str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, source_model.state_dict())
+
+    shell_model = _TransformerPrefixedHybridWrapper(width=16)
+    shell_model.transformer.load_state_dict(source_model.state_dict())
+    shell_model.transformer.block.inner.weight = nn.Parameter(
+        torch.empty_like(shell_model.transformer.block.inner.weight, device="meta"),
+        requires_grad=shell_model.transformer.block.inner.weight.requires_grad,
+    )
+    shell_model.transformer.block.dt_bias = nn.Parameter(
+        torch.empty_like(shell_model.transformer.block.dt_bias, device="meta"),
+        requires_grad=shell_model.transformer.block.dt_bias.requires_grad,
+    )
+    shell_model.transformer.block.register_buffer(
+        "dt_scale",
+        torch.empty_like(shell_model.transformer.block.dt_scale, device="meta"),
+        persistent=True,
+    )
+
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+
+    assert source is not None
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.transformer.block,
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(shell_model.transformer.block.inner.weight, source_model.block.inner.weight)
+    torch.testing.assert_close(shell_model.transformer.block.dt_bias, source_model.block.dt_bias)
+    torch.testing.assert_close(shell_model.transformer.block.dt_scale, source_model.block.dt_scale)
+
+
+def test_alias_all_from_lazy_turtle_handles_shell_root_prefix_mismatch(tmp_path):
+    """Direct meta tensors should resolve through the same prefix-stripping checkpoint aliases."""
+
+    source_model = _HybridWrapper(width=16)
+    turtle_model = _build_lazy_turtle_from_module(tmp_path, source_model)
+
+    shell_model = _TransformerPrefixedHybridWrapper(width=16)
+    shell_model.transformer.load_state_dict(source_model.state_dict())
+    shell_model.transformer.block.dt_bias = nn.Parameter(
+        torch.empty_like(shell_model.transformer.block.dt_bias, device="meta"),
+        requires_grad=shell_model.transformer.block.dt_bias.requires_grad,
+    )
+    shell_model.transformer.block.register_buffer(
+        "dt_scale",
+        torch.empty_like(shell_model.transformer.block.dt_scale, device="meta"),
+        persistent=True,
+    )
+
+    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=turtle_model)
+
+    torch.testing.assert_close(shell_model.transformer.block.dt_bias, source_model.block.dt_bias)
+    torch.testing.assert_close(shell_model.transformer.block.dt_scale, source_model.block.dt_scale)
+
+
 def test_lazy_turtle_restores_nonpersistent_buffers_from_module_init(tmp_path):
     config = _tiny_llama_config()
     source_model = _RotaryWrapper(config)
@@ -367,6 +526,238 @@ def test_lazy_turtle_restores_nonpersistent_buffers_from_module_init(tmp_path):
     torch.testing.assert_close(shell_model.block.rotary.original_inv_freq, source_model.block.rotary.original_inv_freq)
     assert shell_model.block.rotary.inv_freq.device.type == "cpu"
     assert shell_model.block.rotary._non_persistent_buffers_set == {"inv_freq", "original_inv_freq"}
+
+
+def test_lazy_turtle_restores_nonpersistent_buffers_from_attribute_ctor(tmp_path):
+    """Init-only buffers should rebuild from constructor attributes when no config argument exists."""
+
+    source_model = _AttrBufferWrapper(width=16, scale=0.5)
+    shell_model = _AttrBufferWrapper(width=16, scale=0.5)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    shell_model.block.linear.weight = nn.Parameter(
+        torch.empty_like(shell_model.block.linear.weight, device="meta"),
+        requires_grad=shell_model.block.linear.weight.requires_grad,
+    )
+    shell_model.block.rotary.register_buffer(
+        "cache",
+        torch.empty_like(shell_model.block.rotary.cache, device="meta"),
+        persistent=False,
+    )
+    shell_model.block.rotary.register_buffer(
+        "cache_plus_one",
+        torch.empty_like(shell_model.block.rotary.cache_plus_one, device="meta"),
+        persistent=False,
+    )
+
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.block,
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(shell_model.block.linear.weight, source_model.block.linear.weight)
+    torch.testing.assert_close(shell_model.block.rotary.cache, source_model.block.rotary.cache)
+    torch.testing.assert_close(shell_model.block.rotary.cache_plus_one, source_model.block.rotary.cache_plus_one)
+    assert shell_model.block.rotary.cache.device.type == "cpu"
+    assert shell_model.block.rotary._non_persistent_buffers_set == {"cache", "cache_plus_one"}
+
+
+def test_lazy_turtle_restores_nonpersistent_buffers_from_scalar_shadow_attr(tmp_path):
+    """Scalar constructor args should not be reconstructed from same-named meta buffers."""
+
+    source_model = _ScalarMetaBufferWrapper(scale=3.5)
+    shell_model = _ScalarMetaBufferWrapper(scale=3.5)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    shell_model.block.linear.weight = nn.Parameter(
+        torch.empty_like(shell_model.block.linear.weight, device="meta"),
+        requires_grad=shell_model.block.linear.weight.requires_grad,
+    )
+    shell_model.block.scale_holder.register_buffer(
+        "scale",
+        torch.empty_like(shell_model.block.scale_holder.scale, device="meta"),
+        persistent=False,
+    )
+
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.block,
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(shell_model.block.linear.weight, source_model.block.linear.weight)
+    torch.testing.assert_close(shell_model.block.scale_holder.scale, source_model.block.scale_holder.scale)
+    assert shell_model.block.scale_holder.scale.device.type == "cpu"
+    assert shell_model.block.scale_holder._non_persistent_buffers_set == {"scale"}
+
+
+def test_lazy_turtle_materializes_split_gate_up_from_fused_checkpoint_tensor(tmp_path):
+    """Defused runtime `gate_proj`/`up_proj` leaves should restore from fused checkpoint `gate_up_proj` weights."""
+
+    source_model = _SplitGateUpWrapper(width=8, intermediate=6)
+    shell_model = _SplitGateUpWrapper(width=8, intermediate=6)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+    shard_name = "model.safetensors"
+    checkpoint_tensors = {
+        "block.gate_up_proj.weight": torch.cat(
+            [
+                source_model.block.gate_proj.weight.detach().clone(),
+                source_model.block.up_proj.weight.detach().clone(),
+            ],
+            dim=0,
+        ),
+        "block.down_proj.weight": source_model.block.down_proj.weight.detach().clone(),
+    }
+    save_file(checkpoint_tensors, str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
+
+    shell_model.block.gate_proj.weight = nn.Parameter(
+        torch.empty_like(shell_model.block.gate_proj.weight, device="meta"),
+        requires_grad=shell_model.block.gate_proj.weight.requires_grad,
+    )
+    shell_model.block.up_proj.weight = nn.Parameter(
+        torch.empty_like(shell_model.block.up_proj.weight, device="meta"),
+        requires_grad=shell_model.block.up_proj.weight.requires_grad,
+    )
+    shell_model.block.down_proj.weight = nn.Parameter(
+        torch.empty_like(shell_model.block.down_proj.weight, device="meta"),
+        requires_grad=shell_model.block.down_proj.weight.requires_grad,
+    )
+
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert source is not None
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.block,
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(shell_model.block.gate_proj.weight, source_model.block.gate_proj.weight)
+    torch.testing.assert_close(shell_model.block.up_proj.weight, source_model.block.up_proj.weight)
+    torch.testing.assert_close(shell_model.block.down_proj.weight, source_model.block.down_proj.weight)
+
+
+def test_lazy_turtle_materializes_split_experts_from_fused_checkpoint_tensors(tmp_path):
+    """Fused expert checkpoint tensors should rematerialize defused `experts.<idx>.*` leaves."""
+
+    source_model = _FusedExpertsWrapper(width=4, expert_count=2)
+    shell_model = _FusedExpertsWrapper(width=4, expert_count=2)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+    shard_name = "model.safetensors"
+    checkpoint_tensors = {
+        "block.experts.gate_up_proj": torch.stack(
+            [
+                torch.cat(
+                    [
+                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.weight.detach().clone(),
+                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.weight.detach().clone(),
+                    ],
+                    dim=1,
+                )
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+        "block.experts.gate_up_proj_bias": torch.stack(
+            [
+                torch.cat(
+                    [
+                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.bias.detach().clone(),
+                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.bias.detach().clone(),
+                    ],
+                    dim=0,
+                )
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+        "block.experts.down_proj": torch.stack(
+            [
+                source_model.block.experts.get_submodule(str(expert_idx)).down_proj.weight.detach().clone()
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+        "block.experts.down_proj_bias": torch.stack(
+            [
+                source_model.block.experts.get_submodule(str(expert_idx)).down_proj.bias.detach().clone()
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+    }
+    save_file(checkpoint_tensors, str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
+
+    for expert_idx in range(2):
+        expert = shell_model.block.experts.get_submodule(str(expert_idx))
+        expert.gate_proj.weight = nn.Parameter(
+            torch.empty_like(expert.gate_proj.weight, device="meta"),
+            requires_grad=expert.gate_proj.weight.requires_grad,
+        )
+        expert.gate_proj.bias = nn.Parameter(
+            torch.empty_like(expert.gate_proj.bias, device="meta"),
+            requires_grad=expert.gate_proj.bias.requires_grad,
+        )
+        expert.up_proj.weight = nn.Parameter(
+            torch.empty_like(expert.up_proj.weight, device="meta"),
+            requires_grad=expert.up_proj.weight.requires_grad,
+        )
+        expert.up_proj.bias = nn.Parameter(
+            torch.empty_like(expert.up_proj.bias, device="meta"),
+            requires_grad=expert.up_proj.bias.requires_grad,
+        )
+        expert.down_proj.weight = nn.Parameter(
+            torch.empty_like(expert.down_proj.weight, device="meta"),
+            requires_grad=expert.down_proj.weight.requires_grad,
+        )
+        expert.down_proj.bias = nn.Parameter(
+            torch.empty_like(expert.down_proj.bias, device="meta"),
+            requires_grad=expert.down_proj.bias.requires_grad,
+        )
+
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert source is not None
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.block,
+        device=torch.device("cpu"),
+    )
+
+    for expert_idx in range(2):
+        expected = source_model.block.experts.get_submodule(str(expert_idx))
+        actual = shell_model.block.experts.get_submodule(str(expert_idx))
+        torch.testing.assert_close(actual.gate_proj.weight, expected.gate_proj.weight)
+        torch.testing.assert_close(actual.gate_proj.bias, expected.gate_proj.bias)
+        torch.testing.assert_close(actual.up_proj.weight, expected.up_proj.weight)
+        torch.testing.assert_close(actual.up_proj.bias, expected.up_proj.bias)
+        torch.testing.assert_close(actual.down_proj.weight, expected.down_proj.weight)
+        torch.testing.assert_close(actual.down_proj.bias, expected.down_proj.bias)
 
 
 def test_alias_all_from_lazy_turtle_restores_direct_meta_tensors(tmp_path):

@@ -18,6 +18,7 @@ class TestExaone(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
     TRUST_REMOTE_CODE = True
+    USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 6
 
     @classmethod
@@ -30,4 +31,3 @@ class TestExaone(ModelTest):
 
     def test_exaone(self):
         self.quant_lm_eval()
-

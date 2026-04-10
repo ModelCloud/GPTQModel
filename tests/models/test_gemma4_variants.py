@@ -9,13 +9,6 @@ import unittest
 from huggingface_hub import snapshot_download
 
 from gptqmodel.quantization.config import GcMode, VramStrategy
-from gptqmodel.utils.backend import BACKEND
-
-
-# Keep Gemma 4 model tests inside the requested PCI bus ordered GPU pool.
-os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1,2,4")
-
 from model_test import ModelTest
 
 
@@ -42,8 +35,6 @@ class _Gemma4VariantModelTest(ModelTest):
     DISABLE_NATIVE_BASELINE_FALLBACK = False
     TRUST_REMOTE_CODE = False
     TORCH_DTYPE = "bfloat16"
-    # The local env does not ship Marlin runtime kernels, so validation reloads must stay on Torch.
-    LOAD_BACKEND = BACKEND.TORCH
     # Gemma 4 full-attention layers expand to 512-dim heads, which FlashAttention cannot execute.
     USE_FLASH_ATTN = False
     # Gemma 4 variants differ most at the tail: KV sharing, full-attention-only layers, and per-layer adapters.
@@ -76,7 +67,6 @@ class _Gemma4VariantModelTest(ModelTest):
 class TestGemma4E2B(_Gemma4VariantModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gemma-4-E2B"
     HF_MODEL_ID = "google/gemma-4-e2b-it"
-    PIN_CUDA_DEVICE = 0
     EVAL_BATCH_SIZE = 8
 
     def test_gemma4_e2b(self):
@@ -86,7 +76,6 @@ class TestGemma4E2B(_Gemma4VariantModelTest):
 class TestGemma4E4BIt(_Gemma4VariantModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gemma-4-E4B-it"
     HF_MODEL_ID = "google/gemma-4-e4b-it"
-    PIN_CUDA_DEVICE = 1
     EVAL_BATCH_SIZE = 4
 
     def test_gemma4_e4b_it(self):
@@ -96,8 +85,6 @@ class TestGemma4E4BIt(_Gemma4VariantModelTest):
 class TestGemma431BIt(_Gemma4VariantModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gemma-4-31B-it"
     HF_MODEL_ID = "google/gemma-4-31b-it"
-    # Visible index 3 maps to physical GPU 4 under CUDA_VISIBLE_DEVICES=0,1,2,4.
-    PIN_CUDA_DEVICE = 3
     EVAL_BATCH_SIZE = 1
     VRAM_STRATEGY = VramStrategy.BALANCED
 
