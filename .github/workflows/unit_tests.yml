@@ -454,6 +454,7 @@ jobs:
       - name: Install uv
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
+          touch /opt/uv/uv.toml
 
       - name: fio test
         run: |
