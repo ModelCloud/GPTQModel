@@ -207,6 +207,21 @@ jobs:
         run: |
           printenv
 
+      - name: fio test
+        run: |
+          fio --name=seq_test \
+            --directory=/opt/uv \
+            --size=512M \
+            --bs=4k \
+            --rw=readwrite \
+            --rwmixread=70 \
+            --ioengine=libaio \
+            --iodepth=4 \
+            --numjobs=1 \
+            --runtime=60 \
+            --time_based \
+            --group_reporting
+
       - name: Clean uv
         run: |
           uv cache clean
