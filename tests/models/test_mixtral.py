@@ -23,7 +23,6 @@ class TestMixtral(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    OFFLOAD_TO_DISK = False  # FIXME Currently, after defuser converted the model, OFFLOAD_TO_DISK must be False for quantization.
 
     def test_mixtral(self):
         self.quant_lm_eval()

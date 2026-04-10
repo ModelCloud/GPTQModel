@@ -831,20 +831,97 @@ class LazyTurtle:
         expert_index: Optional[int],
         split_index: Optional[int],
         split_dim: Optional[int],
+        expected_shape: Optional[tuple[int, ...]] = None,
+        prefer_transposed: Optional[bool] = None,
     ) -> Optional[torch.Tensor]:
         """Slice fused checkpoint tensors into the tensor layout expected by the shell module."""
 
         if expert_index is not None:
             if tensor.shape[0] <= expert_index:
                 return None
+            # Fused expert checkpoints store the expert axis first; peel it off before
+            # reasoning about split dimensions or transpose decisions.
             tensor = tensor[expert_index].contiguous()
 
-        if split_index is not None:
-            if split_dim is None or tensor.shape[split_dim] % 2 != 0:
-                return None
-            tensor = tensor.chunk(2, dim=split_dim)[split_index].contiguous()
+        if expected_shape is None:
+            if split_index is not None:
+                if split_dim is None or tensor.shape[split_dim] % 2 != 0:
+                    return None
+                tensor = tensor.chunk(2, dim=split_dim)[split_index].contiguous()
+            return tensor
 
-        return tensor
+        expected_shape = tuple(expected_shape)
+
+        # Some checkpoints store expert projections as (out, in) while others store
+        # them as (in, out). Keep both candidates and let the defused leaf shape be
+        # the final arbiter instead of hard-coding one model family's layout.
+        candidates: list[tuple[torch.Tensor, bool]] = [(tensor, False)]
+        if tensor.ndim == 2:
+            transposed = tensor.transpose(0, 1).contiguous()
+            if prefer_transposed is True:
+                candidates = [(transposed, True), (tensor, False)]
+            elif prefer_transposed is None and transposed.shape != tensor.shape:
+                candidates.append((transposed, True))
+            elif prefer_transposed is False and transposed.shape != tensor.shape:
+                candidates.append((transposed, True))
+
+        for candidate, used_transpose in candidates:
+            if split_index is None:
+                if tuple(candidate.shape) == expected_shape:
+                    return candidate.contiguous()
+                continue
+
+            preferred_dims: list[int] = []
+            mapped_split_dim = split_dim
+            if (
+                used_transpose
+                and candidate.ndim == 2
+                and split_dim is not None
+                and 0 <= split_dim < 2
+            ):
+                # The resolver hint is expressed in the checkpoint's native layout.
+                # Once we transpose a 2D candidate, the split dimension flips too.
+                mapped_split_dim = 1 - split_dim
+            if mapped_split_dim is not None and 0 <= mapped_split_dim < candidate.ndim:
+                preferred_dims.append(mapped_split_dim)
+            preferred_dims.extend(dim for dim in range(candidate.ndim) if dim not in preferred_dims)
+
+            for dim in preferred_dims:
+                if candidate.shape[dim] % 2 != 0:
+                    continue
+                split_tensor = candidate.chunk(2, dim=dim)[split_index].contiguous()
+                if tuple(split_tensor.shape) == expected_shape:
+                    return split_tensor
+
+        return None
+
+    @staticmethod
+    def _resolve_prefer_transposed_hint(
+        *,
+        target_model: nn.Module,
+        module_path: str,
+        rel_name: str,
+        modules_by_name: Dict[str, nn.Module],
+    ) -> Optional[bool]:
+        rel_parent, _, _leaf = rel_name.rpartition(".")
+        current_path = module_path
+        if rel_parent:
+            current_path = LazyTurtle._join_tensor_name(module_path, rel_parent)
+
+        # Expert containers usually expose `is_transposed`; leaf Linear modules do not.
+        # Walk upward until we find the nearest owner that carries the layout hint.
+        while True:
+            owner = target_model if not current_path else modules_by_name.get(current_path)
+            if owner is not None and hasattr(owner, "is_transposed"):
+                value = getattr(owner, "is_transposed")
+                if isinstance(value, bool):
+                    return value
+
+            if not current_path:
+                break
+            current_path = current_path.rpartition(".")[0]
+
+        return None
 
     def _resolve_checkpoint_tensor_source(
         self,
@@ -861,7 +938,61 @@ class LazyTurtle:
         if resolved[0] is not None:
             return resolved
 
-        return self._resolve_fused_expert_tensor_name(module_path, rel_name)
+        resolved = self._resolve_fused_expert_tensor_name(module_path, rel_name)
+        if resolved[0] is not None:
+            return resolved
+
+        # Direct-meta rematerialization often visits a leaf Linear whose relative name is
+        # just `weight` / `bias`. Retry resolution with the full module path so leaf-only
+        # materialization can still map back to fused expert checkpoint tensors.
+        combined_name = self._join_tensor_name(module_path, rel_name)
+        resolved = self._resolve_split_gate_up_tensor_name("", combined_name)
+        if resolved[0] is not None:
+            return resolved
+
+        return self._resolve_fused_expert_tensor_name("", combined_name)
+
+    @staticmethod
+    def _warn_materialization_skip(
+        *,
+        phase: str,
+        kind: str,
+        module_path: str,
+        rel_name: str,
+        reason: str,
+        full_name: Optional[str] = None,
+        source_shape: Optional[tuple[int, ...]] = None,
+        target_shape: Optional[tuple[int, ...]] = None,
+        expert_index: Optional[int] = None,
+        split_index: Optional[int] = None,
+        split_dim: Optional[int] = None,
+    ) -> None:
+        """Emit a consistent warning when a checkpoint-backed tensor cannot be materialized."""
+
+        details = []
+        if full_name is not None:
+            details.append(f"checkpoint={full_name}")
+        if source_shape is not None:
+            details.append(f"source_shape={source_shape}")
+        if target_shape is not None:
+            details.append(f"target_shape={target_shape}")
+        if expert_index is not None:
+            details.append(f"expert_index={expert_index}")
+        if split_index is not None:
+            details.append(f"split_index={split_index}")
+        if split_dim is not None:
+            details.append(f"split_dim={split_dim}")
+
+        suffix = f" ({', '.join(details)})" if details else ""
+        log.warning(
+            "LazyTurtle: skip %s %s `%s` under `%s`: %s%s",
+            phase,
+            kind,
+            rel_name,
+            module_path or "<root>",
+            reason,
+            suffix,
+        )
 
     def _load_checkpoint_tensors_for_module_path(
         self,
@@ -908,15 +1039,36 @@ class LazyTurtle:
 
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
+        modules_by_name = dict(target_model.named_modules())
         missing_nonpersistent_buffers: list[tuple[str, str]] = []
 
         grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
         for rel_name in t_params:
             full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
             if full_name is None:
+                self._warn_materialization_skip(
+                    phase="submodule materialization",
+                    kind="param",
+                    module_path=module_path,
+                    rel_name=rel_name,
+                    reason="no checkpoint tensor mapping was found",
+                    target_shape=tuple(t_params[rel_name].shape),
+                )
                 continue
             shard = self._weight_map.get(full_name)
             if shard is None:
+                self._warn_materialization_skip(
+                    phase="submodule materialization",
+                    kind="param",
+                    module_path=module_path,
+                    rel_name=rel_name,
+                    reason="checkpoint tensor mapping resolved to a missing shard",
+                    full_name=full_name,
+                    target_shape=tuple(t_params[rel_name].shape),
+                    expert_index=expert_index,
+                    split_index=split_index,
+                    split_dim=split_dim,
+                )
                 continue
             grouped_names.setdefault(shard, []).append(("param", rel_name, full_name, expert_index, split_index, split_dim))
 
@@ -950,18 +1102,68 @@ class LazyTurtle:
                 shard_path = os.path.join(self.model_local_path, shard)
                 with safe_open(shard_path, framework="pt", device="cpu") as handler:
                     for kind, rel_name, full_name, expert_index, split_index, split_dim in entries:
-                        tensor = handler.get_tensor(full_name)
+                        target_tensor = t_params.get(rel_name) if kind == "param" else t_bufs.get(rel_name)
+                        expected_shape = tuple(target_tensor.shape) if target_tensor is not None else None
+                        prefer_transposed = self._resolve_prefer_transposed_hint(
+                            target_model=target_model,
+                            module_path=module_path,
+                            rel_name=rel_name,
+                            modules_by_name=modules_by_name,
+                        )
+                        checkpoint_tensor = handler.get_tensor(full_name)
                         tensor = self._transform_checkpoint_tensor(
-                            tensor,
+                            checkpoint_tensor,
                             expert_index=expert_index,
                             split_index=split_index,
                             split_dim=split_dim,
+                            expected_shape=expected_shape,
+                            prefer_transposed=prefer_transposed,
                         )
                         if tensor is None:
+                            self._warn_materialization_skip(
+                                phase="submodule materialization",
+                                kind=kind,
+                                module_path=module_path,
+                                rel_name=rel_name,
+                                reason="checkpoint tensor could not be reshaped into the target layout",
+                                full_name=full_name,
+                                source_shape=tuple(checkpoint_tensor.shape),
+                                target_shape=expected_shape,
+                                expert_index=expert_index,
+                                split_index=split_index,
+                                split_dim=split_dim,
+                            )
                             continue
                         if kind == "param":
                             target_param = t_params.get(rel_name)
-                            if target_param is None or target_param.shape != tensor.shape:
+                            if target_param is None:
+                                self._warn_materialization_skip(
+                                    phase="submodule materialization",
+                                    kind=kind,
+                                    module_path=module_path,
+                                    rel_name=rel_name,
+                                    reason="target tensor disappeared before materialization",
+                                    full_name=full_name,
+                                    source_shape=tuple(tensor.shape),
+                                    expert_index=expert_index,
+                                    split_index=split_index,
+                                    split_dim=split_dim,
+                                )
+                                continue
+                            if target_param.shape != tensor.shape:
+                                self._warn_materialization_skip(
+                                    phase="submodule materialization",
+                                    kind=kind,
+                                    module_path=module_path,
+                                    rel_name=rel_name,
+                                    reason="target tensor shape does not match the transformed checkpoint tensor",
+                                    full_name=full_name,
+                                    source_shape=tuple(tensor.shape),
+                                    target_shape=tuple(target_param.shape),
+                                    expert_index=expert_index,
+                                    split_index=split_index,
+                                    split_dim=split_dim,
+                                )
                                 continue
                             target_param_new = _ensure_target_storage_on_device_(target_param, device)
                             if target_param_new is not target_param:
@@ -983,6 +1185,22 @@ class LazyTurtle:
                             new_buffer = source.to(device=device)
                             t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
                             t_bufs[rel_name] = new_buffer
+                            continue
+
+                        if tuple(target_buffer.shape) != tuple(source.shape):
+                            self._warn_materialization_skip(
+                                phase="submodule materialization",
+                                kind=kind,
+                                module_path=module_path,
+                                rel_name=rel_name,
+                                reason="target tensor shape does not match the transformed checkpoint tensor",
+                                full_name=full_name,
+                                source_shape=tuple(source.shape),
+                                target_shape=tuple(target_buffer.shape),
+                                expert_index=expert_index,
+                                split_index=split_index,
+                                split_dim=split_dim,
+                            )
                             continue
 
                         if getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
@@ -1140,24 +1358,72 @@ class LazyTurtle:
 
                 full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, name)
                 if full_name is None:
+                    self._warn_materialization_skip(
+                        phase="direct-meta sync",
+                        kind="param",
+                        module_path=module_path,
+                        rel_name=name,
+                        reason="no checkpoint tensor mapping was found",
+                        target_shape=tuple(shell_param.shape),
+                    )
                     continue
                 shard = self._weight_map.get(full_name)
                 if shard is None:
+                    self._warn_materialization_skip(
+                        phase="direct-meta sync",
+                        kind="param",
+                        module_path=module_path,
+                        rel_name=name,
+                        reason="checkpoint tensor mapping resolved to a missing shard",
+                        full_name=full_name,
+                        target_shape=tuple(shell_param.shape),
+                        expert_index=expert_index,
+                        split_index=split_index,
+                        split_dim=split_dim,
+                    )
                     continue
 
                 source_path = os.path.join(self.model_local_path, shard)
                 with safe_open(source_path, framework="pt", device="cpu") as handler:
-                    source_param = handler.get_tensor(full_name)
+                    checkpoint_param = handler.get_tensor(full_name)
                 source_param = self._transform_checkpoint_tensor(
-                    source_param,
+                    checkpoint_param,
                     expert_index=expert_index,
                     split_index=split_index,
                     split_dim=split_dim,
+                    expected_shape=tuple(shell_param.shape),
+                    prefer_transposed=getattr(shell_sub, "is_transposed", None),
                 )
                 if source_param is None:
+                    self._warn_materialization_skip(
+                        phase="direct-meta sync",
+                        kind="param",
+                        module_path=module_path,
+                        rel_name=name,
+                        reason="checkpoint tensor could not be reshaped into the target layout",
+                        full_name=full_name,
+                        source_shape=tuple(checkpoint_param.shape),
+                        target_shape=tuple(shell_param.shape),
+                        expert_index=expert_index,
+                        split_index=split_index,
+                        split_dim=split_dim,
+                    )
                     continue
 
                 if shell_param.shape != source_param.shape:
+                    self._warn_materialization_skip(
+                        phase="direct-meta sync",
+                        kind="param",
+                        module_path=module_path,
+                        rel_name=name,
+                        reason="target tensor shape does not match the transformed checkpoint tensor",
+                        full_name=full_name,
+                        source_shape=tuple(source_param.shape),
+                        target_shape=tuple(shell_param.shape),
+                        expert_index=expert_index,
+                        split_index=split_index,
+                        split_dim=split_dim,
+                    )
                     continue
 
                 cache_key = (full_name, expert_index, split_index, split_dim, shell_param.dtype, shell_param.requires_grad)
@@ -1180,24 +1446,72 @@ class LazyTurtle:
 
                 full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, name)
                 if full_name is None:
+                    self._warn_materialization_skip(
+                        phase="direct-meta sync",
+                        kind="buffer",
+                        module_path=module_path,
+                        rel_name=name,
+                        reason="no checkpoint tensor mapping was found",
+                        target_shape=tuple(shell_buffer.shape),
+                    )
                     continue
                 shard = self._weight_map.get(full_name)
                 if shard is None:
+                    self._warn_materialization_skip(
+                        phase="direct-meta sync",
+                        kind="buffer",
+                        module_path=module_path,
+                        rel_name=name,
+                        reason="checkpoint tensor mapping resolved to a missing shard",
+                        full_name=full_name,
+                        target_shape=tuple(shell_buffer.shape),
+                        expert_index=expert_index,
+                        split_index=split_index,
+                        split_dim=split_dim,
+                    )
                     continue
 
                 source_path = os.path.join(self.model_local_path, shard)
                 with safe_open(source_path, framework="pt", device="cpu") as handler:
-                    source_buffer = handler.get_tensor(full_name)
+                    checkpoint_buffer = handler.get_tensor(full_name)
                 source_buffer = self._transform_checkpoint_tensor(
-                    source_buffer,
+                    checkpoint_buffer,
                     expert_index=expert_index,
                     split_index=split_index,
                     split_dim=split_dim,
+                    expected_shape=tuple(shell_buffer.shape),
+                    prefer_transposed=getattr(shell_sub, "is_transposed", None),
                 )
                 if source_buffer is None:
+                    self._warn_materialization_skip(
+                        phase="direct-meta sync",
+                        kind="buffer",
+                        module_path=module_path,
+                        rel_name=name,
+                        reason="checkpoint tensor could not be reshaped into the target layout",
+                        full_name=full_name,
+                        source_shape=tuple(checkpoint_buffer.shape),
+                        target_shape=tuple(shell_buffer.shape),
+                        expert_index=expert_index,
+                        split_index=split_index,
+                        split_dim=split_dim,
+                    )
                     continue
 
                 if shell_buffer.shape != source_buffer.shape:
+                    self._warn_materialization_skip(
+                        phase="direct-meta sync",
+                        kind="buffer",
+                        module_path=module_path,
+                        rel_name=name,
+                        reason="target tensor shape does not match the transformed checkpoint tensor",
+                        full_name=full_name,
+                        source_shape=tuple(source_buffer.shape),
+                        target_shape=tuple(shell_buffer.shape),
+                        expert_index=expert_index,
+                        split_index=split_index,
+                        split_dim=split_dim,
+                    )
                     continue
 
                 persistent = name not in getattr(shell_sub, "_non_persistent_buffers_set", set())
