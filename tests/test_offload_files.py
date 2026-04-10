@@ -17,7 +17,6 @@ from torch import nn
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
-import gptqmodel.utils.structure as structure_utils
 from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
 from gptqmodel.utils.structure import (
@@ -25,6 +24,7 @@ from gptqmodel.utils.structure import (
     alias_all_from_turtle_if_meta,
     alias_from_turtle_for_submodule,
 )
+from gptqmodel.utils.structure import log as structure_log
 
 
 class _LinearWithBuffers(nn.Module):
@@ -316,7 +316,7 @@ def _capture_structure_warnings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     def _record_warning(message: str, *args):
         warnings.append(message % args if args else message)
 
-    monkeypatch.setattr(structure_utils.log, "warning", _record_warning, raising=False)
+    monkeypatch.setattr(structure_log, "warning", _record_warning, raising=False)
     return warnings
 
 
