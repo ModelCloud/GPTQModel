@@ -324,7 +324,6 @@ jobs:
         run: |
           echo "::group::uv python list"
           uv python list
-          ls -ahl /opt/uv/venvs
           echo "::endgroup::"
 
           which python
@@ -506,7 +505,6 @@ jobs:
         run: |
           echo "::group::uv python list"
           uv python list
-          ls -ahl /opt/uv/venvs
           echo "::endgroup::"
 
           which python
