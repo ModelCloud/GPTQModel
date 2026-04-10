@@ -208,33 +208,6 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Print env
-        run: |
-          printenv
-
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-
-      - name: fio test
-        run: |
-          fio --name=seq_test \
-            --directory=/opt/uv \
-            --size=512M \
-            --bs=4k \
-            --rw=readwrite \
-            --rwmixread=70 \
-            --ioengine=libaio \
-            --iodepth=4 \
-            --numjobs=1 \
-            --runtime=60 \
-            --time_based \
-            --group_reporting
-
-      - name: Clean uv
-        run: |
-          uv cache clean
-
       - name: Activate uv env
         run: |
           echo "-- loading unit test's config --"
@@ -454,30 +427,6 @@ jobs:
           git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
-
-
-      - name: Print env
-        run: |
-          printenv
-
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-
-      - name: fio test
-        run: |
-          fio --name=seq_test \
-            --directory=/opt/uv \
-            --size=512M \
-            --bs=4k \
-            --rw=readwrite \
-            --rwmixread=70 \
-            --ioengine=libaio \
-            --iodepth=4 \
-            --numjobs=1 \
-            --runtime=60 \
-            --time_based \
-            --group_reporting
 
       - name: Clean uv
         run: |
