@@ -63,7 +63,6 @@ env:
   PYTORCH_ALLOC_CONF: 'expandable_segments:True'
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.249
-  UV_INDEX_URL: http://10.0.14.249/simple
   LOGBAR_ANIMATION: '0'
   CUDA_VERSION: 130
   UV_TORCH_BACKEND: cu130
