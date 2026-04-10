@@ -205,13 +205,7 @@ jobs:
 
       - name: Print env
         run: |
-          echo PATH=$PATH
-          echo UV_INSTALL_DIR=$UV_INSTALL_DIR
-          echo UV_PYTHON_BIN_DIR=$UV_PYTHON_BIN_DIR
-          echo UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR
-          echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
-          echo UV_CACHE_DIR=$UV_CACHE_DIR
-          echo VENV_ROOT=$VENV_ROOT
+          printenv
 
       - name: Activate uv env
         run: |
