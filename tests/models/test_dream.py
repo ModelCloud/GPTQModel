@@ -17,6 +17,7 @@ class TestDream(ModelTest):
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     TRUST_REMOTE_CODE = True
+    USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 1
     BITS = 8
 
