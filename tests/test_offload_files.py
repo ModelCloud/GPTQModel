@@ -24,6 +24,7 @@ from gptqmodel.utils.structure import (
     alias_all_from_turtle_if_meta,
     alias_from_turtle_for_submodule,
 )
+from gptqmodel.utils.structure import log as structure_log
 
 
 class _LinearWithBuffers(nn.Module):
@@ -189,6 +190,16 @@ class _TinyExpert(nn.Module):
         self.down_proj = nn.Linear(width, width, bias=True)
 
 
+class _RectExpert(nn.Module):
+    """Expert with distinct hidden/intermediate sizes to catch wrong split/transpose rules."""
+
+    def __init__(self, width: int, intermediate: int, *, bias: bool = True):
+        super().__init__()
+        self.gate_proj = nn.Linear(width, intermediate, bias=bias)
+        self.up_proj = nn.Linear(width, intermediate, bias=bias)
+        self.down_proj = nn.Linear(intermediate, width, bias=bias)
+
+
 class _FusedExpertsWrapper(nn.Module):
     """Wrapper used to exercise fused expert checkpoint slicing during lazy-turtle rematerialization."""
 
@@ -200,6 +211,18 @@ class _FusedExpertsWrapper(nn.Module):
             self.block.experts.add_module(str(expert_idx), _TinyExpert(width))
 
 
+class _RectFusedExpertsWrapper(nn.Module):
+    """Wrapper used to validate real rectangular expert layouts, including transposed storage."""
+
+    def __init__(self, width: int, intermediate: int, expert_count: int, *, is_transposed: bool):
+        super().__init__()
+        self.block = nn.Module()
+        self.block.experts = nn.Module()
+        self.block.experts.is_transposed = is_transposed
+        for expert_idx in range(expert_count):
+            self.block.experts.add_module(str(expert_idx), _RectExpert(width, intermediate))
+
+
 def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, torch.Tensor]) -> None:
     weight_map = dict.fromkeys(state_dict, shard_name)
     (path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
@@ -208,13 +231,18 @@ def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, t
 def _build_lazy_turtle_from_module(tmp_path: Path, model: nn.Module) -> LazyTurtle:
     """Persist cloned checkpoint values and reopen them through the lazy turtle source."""
 
+    state_dict = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
+    return _build_lazy_turtle_from_checkpoint_tensors(tmp_path, state_dict)
+
+
+def _build_lazy_turtle_from_checkpoint_tensors(tmp_path: Path, checkpoint_tensors: dict[str, torch.Tensor]) -> LazyTurtle:
+    """Persist an arbitrary safetensors checkpoint and reopen it through LazyTurtle."""
+
     model_dir = tmp_path / "source_model"
     model_dir.mkdir()
     shard_name = "model.safetensors"
-    # Checkpoint-backed lazy turtle reconstructs tensor values, not Python-side alias identity.
-    state_dict = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
-    save_file(state_dict, str(model_dir / shard_name))
-    _write_checkpoint_index(model_dir, shard_name, state_dict)
+    save_file(checkpoint_tensors, str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
     source = LazyTurtle.maybe_create(
         model_local_path=str(model_dir),
         config=SimpleNamespace(_experts_implementation=None),
@@ -222,6 +250,74 @@ def _build_lazy_turtle_from_module(tmp_path: Path, model: nn.Module) -> LazyTurt
     )
     assert source is not None
     return source
+
+
+def _build_rect_fused_expert_checkpoint_tensors(
+    source_model: _RectFusedExpertsWrapper,
+    *,
+    include_down_proj: bool = True,
+) -> dict[str, torch.Tensor]:
+    """Build fused expert checkpoint tensors that mimic the HF/Defuser expert storage layouts."""
+
+    experts = [expert for _, expert in source_model.block.experts.named_children()]
+    is_transposed = bool(getattr(source_model.block.experts, "is_transposed", False))
+    gate_split_dim = 1 if is_transposed else 0
+
+    checkpoint_tensors = {
+        "block.experts.gate_up_proj": torch.stack(
+            [
+                torch.cat(
+                    [
+                        expert.gate_proj.weight.detach().clone().transpose(0, 1) if is_transposed else expert.gate_proj.weight.detach().clone(),
+                        expert.up_proj.weight.detach().clone().transpose(0, 1) if is_transposed else expert.up_proj.weight.detach().clone(),
+                    ],
+                    dim=gate_split_dim,
+                )
+                for expert in experts
+            ],
+            dim=0,
+        ),
+        "block.experts.gate_up_proj_bias": torch.stack(
+            [
+                torch.cat(
+                    [
+                        expert.gate_proj.bias.detach().clone(),
+                        expert.up_proj.bias.detach().clone(),
+                    ],
+                    dim=0,
+                )
+                for expert in experts
+            ],
+            dim=0,
+        ),
+    }
+
+    if include_down_proj:
+        checkpoint_tensors["block.experts.down_proj"] = torch.stack(
+            [
+                expert.down_proj.weight.detach().clone().transpose(0, 1) if is_transposed else expert.down_proj.weight.detach().clone()
+                for expert in experts
+            ],
+            dim=0,
+        )
+        checkpoint_tensors["block.experts.down_proj_bias"] = torch.stack(
+            [expert.down_proj.bias.detach().clone() for expert in experts],
+            dim=0,
+        )
+
+    return checkpoint_tensors
+
+
+def _capture_structure_warnings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Capture LazyTurtle warnings without depending on the logging backend implementation."""
+
+    warnings: list[str] = []
+
+    def _record_warning(message: str, *args):
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(structure_log, "warning", _record_warning, raising=False)
+    return warnings
 
 
 def test_offload_to_disk_writes_single_dat_file(tmp_path):
@@ -758,6 +854,458 @@ def test_lazy_turtle_materializes_split_experts_from_fused_checkpoint_tensors(tm
         torch.testing.assert_close(actual.up_proj.bias, expected.up_proj.bias)
         torch.testing.assert_close(actual.down_proj.weight, expected.down_proj.weight)
         torch.testing.assert_close(actual.down_proj.bias, expected.down_proj.bias)
+
+
+def test_lazy_turtle_materializes_rectangular_qwen_style_experts_from_fused_checkpoint_tensors(tmp_path):
+    """Non-transposed expert checkpoints should split gate/up along the output dimension."""
+
+    source_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=False)
+    shell_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=False)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+    shard_name = "model.safetensors"
+    checkpoint_tensors = {
+        "block.experts.gate_up_proj": torch.stack(
+            [
+                torch.cat(
+                    [
+                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.weight.detach().clone(),
+                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.weight.detach().clone(),
+                    ],
+                    dim=0,
+                )
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+        "block.experts.gate_up_proj_bias": torch.stack(
+            [
+                torch.cat(
+                    [
+                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.bias.detach().clone(),
+                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.bias.detach().clone(),
+                    ],
+                    dim=0,
+                )
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+        "block.experts.down_proj": torch.stack(
+            [
+                source_model.block.experts.get_submodule(str(expert_idx)).down_proj.weight.detach().clone()
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+        "block.experts.down_proj_bias": torch.stack(
+            [
+                source_model.block.experts.get_submodule(str(expert_idx)).down_proj.bias.detach().clone()
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+    }
+    save_file(checkpoint_tensors, str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
+
+    for expert_idx in range(2):
+        expert = shell_model.block.experts.get_submodule(str(expert_idx))
+        expert.gate_proj.weight = nn.Parameter(
+            torch.empty_like(expert.gate_proj.weight, device="meta"),
+            requires_grad=expert.gate_proj.weight.requires_grad,
+        )
+        expert.gate_proj.bias = nn.Parameter(
+            torch.empty_like(expert.gate_proj.bias, device="meta"),
+            requires_grad=expert.gate_proj.bias.requires_grad,
+        )
+        expert.up_proj.weight = nn.Parameter(
+            torch.empty_like(expert.up_proj.weight, device="meta"),
+            requires_grad=expert.up_proj.weight.requires_grad,
+        )
+        expert.up_proj.bias = nn.Parameter(
+            torch.empty_like(expert.up_proj.bias, device="meta"),
+            requires_grad=expert.up_proj.bias.requires_grad,
+        )
+        expert.down_proj.weight = nn.Parameter(
+            torch.empty_like(expert.down_proj.weight, device="meta"),
+            requires_grad=expert.down_proj.weight.requires_grad,
+        )
+        expert.down_proj.bias = nn.Parameter(
+            torch.empty_like(expert.down_proj.bias, device="meta"),
+            requires_grad=expert.down_proj.bias.requires_grad,
+        )
+
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert source is not None
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.block,
+        device=torch.device("cpu"),
+    )
+
+    for expert_idx in range(2):
+        expected = source_model.block.experts.get_submodule(str(expert_idx))
+        actual = shell_model.block.experts.get_submodule(str(expert_idx))
+        torch.testing.assert_close(actual.gate_proj.weight, expected.gate_proj.weight)
+        torch.testing.assert_close(actual.gate_proj.bias, expected.gate_proj.bias)
+        torch.testing.assert_close(actual.up_proj.weight, expected.up_proj.weight)
+        torch.testing.assert_close(actual.up_proj.bias, expected.up_proj.bias)
+        torch.testing.assert_close(actual.down_proj.weight, expected.down_proj.weight)
+        torch.testing.assert_close(actual.down_proj.bias, expected.down_proj.bias)
+
+
+def test_lazy_turtle_materializes_leaf_qwen_style_expert_gate_proj_from_fused_checkpoint_tensor(tmp_path):
+    """Leaf expert gate_proj modules should resolve fused expert sources from module_path alone."""
+
+    source_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=False)
+    shell_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=False)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+    shard_name = "model.safetensors"
+    checkpoint_tensors = {
+        "block.experts.gate_up_proj": torch.stack(
+            [
+                torch.cat(
+                    [
+                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.weight.detach().clone(),
+                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.weight.detach().clone(),
+                    ],
+                    dim=0,
+                )
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+        "block.experts.gate_up_proj_bias": torch.stack(
+            [
+                torch.cat(
+                    [
+                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.bias.detach().clone(),
+                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.bias.detach().clone(),
+                    ],
+                    dim=0,
+                )
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+    }
+    save_file(checkpoint_tensors, str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
+
+    expert = shell_model.block.experts.get_submodule("1").gate_proj
+    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
+
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert source is not None
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=expert,
+        device=torch.device("cpu"),
+    )
+
+    expected = source_model.block.experts.get_submodule("1").gate_proj
+    torch.testing.assert_close(expert.weight, expected.weight)
+    torch.testing.assert_close(expert.bias, expected.bias)
+
+
+def test_lazy_turtle_materializes_rectangular_transposed_experts_from_fused_checkpoint_tensors(tmp_path):
+    """Transposed expert checkpoints should transpose weights before matching defused leaves."""
+
+    source_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=True)
+    shell_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=True)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+    shard_name = "model.safetensors"
+    checkpoint_tensors = {
+        "block.experts.gate_up_proj": torch.stack(
+            [
+                torch.cat(
+                    [
+                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.weight.detach().clone().transpose(0, 1),
+                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.weight.detach().clone().transpose(0, 1),
+                    ],
+                    dim=1,
+                )
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+        "block.experts.gate_up_proj_bias": torch.stack(
+            [
+                torch.cat(
+                    [
+                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.bias.detach().clone(),
+                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.bias.detach().clone(),
+                    ],
+                    dim=0,
+                )
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+        "block.experts.down_proj": torch.stack(
+            [
+                source_model.block.experts.get_submodule(str(expert_idx)).down_proj.weight.detach().clone().transpose(0, 1)
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+        "block.experts.down_proj_bias": torch.stack(
+            [
+                source_model.block.experts.get_submodule(str(expert_idx)).down_proj.bias.detach().clone()
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+    }
+    save_file(checkpoint_tensors, str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
+
+    for expert_idx in range(2):
+        expert = shell_model.block.experts.get_submodule(str(expert_idx))
+        expert.gate_proj.weight = nn.Parameter(
+            torch.empty_like(expert.gate_proj.weight, device="meta"),
+            requires_grad=expert.gate_proj.weight.requires_grad,
+        )
+        expert.gate_proj.bias = nn.Parameter(
+            torch.empty_like(expert.gate_proj.bias, device="meta"),
+            requires_grad=expert.gate_proj.bias.requires_grad,
+        )
+        expert.up_proj.weight = nn.Parameter(
+            torch.empty_like(expert.up_proj.weight, device="meta"),
+            requires_grad=expert.up_proj.weight.requires_grad,
+        )
+        expert.up_proj.bias = nn.Parameter(
+            torch.empty_like(expert.up_proj.bias, device="meta"),
+            requires_grad=expert.up_proj.bias.requires_grad,
+        )
+        expert.down_proj.weight = nn.Parameter(
+            torch.empty_like(expert.down_proj.weight, device="meta"),
+            requires_grad=expert.down_proj.weight.requires_grad,
+        )
+        expert.down_proj.bias = nn.Parameter(
+            torch.empty_like(expert.down_proj.bias, device="meta"),
+            requires_grad=expert.down_proj.bias.requires_grad,
+        )
+
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert source is not None
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.block,
+        device=torch.device("cpu"),
+    )
+
+    for expert_idx in range(2):
+        expected = source_model.block.experts.get_submodule(str(expert_idx))
+        actual = shell_model.block.experts.get_submodule(str(expert_idx))
+        torch.testing.assert_close(actual.gate_proj.weight, expected.gate_proj.weight)
+        torch.testing.assert_close(actual.gate_proj.bias, expected.gate_proj.bias)
+        torch.testing.assert_close(actual.up_proj.weight, expected.up_proj.weight)
+        torch.testing.assert_close(actual.up_proj.bias, expected.up_proj.bias)
+        torch.testing.assert_close(actual.down_proj.weight, expected.down_proj.weight)
+        torch.testing.assert_close(actual.down_proj.bias, expected.down_proj.bias)
+
+
+def test_lazy_turtle_materializes_leaf_transposed_expert_gate_proj_from_fused_checkpoint_tensor(tmp_path):
+    """Leaf expert gate_proj modules should also honor transposed fused expert layouts."""
+
+    source_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=True)
+    shell_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=True)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+    shard_name = "model.safetensors"
+    checkpoint_tensors = {
+        "block.experts.gate_up_proj": torch.stack(
+            [
+                torch.cat(
+                    [
+                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.weight.detach().clone().transpose(0, 1),
+                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.weight.detach().clone().transpose(0, 1),
+                    ],
+                    dim=1,
+                )
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+        "block.experts.gate_up_proj_bias": torch.stack(
+            [
+                torch.cat(
+                    [
+                        source_model.block.experts.get_submodule(str(expert_idx)).gate_proj.bias.detach().clone(),
+                        source_model.block.experts.get_submodule(str(expert_idx)).up_proj.bias.detach().clone(),
+                    ],
+                    dim=0,
+                )
+                for expert_idx in range(2)
+            ],
+            dim=0,
+        ),
+    }
+    save_file(checkpoint_tensors, str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
+
+    expert = shell_model.block.experts.get_submodule("1").gate_proj
+    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
+
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert source is not None
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=expert,
+        device=torch.device("cpu"),
+    )
+
+    expected = source_model.block.experts.get_submodule("1").gate_proj
+    torch.testing.assert_close(expert.weight, expected.weight)
+    torch.testing.assert_close(expert.bias, expected.bias)
+
+
+def test_alias_all_from_turtle_materializes_leaf_qwen_style_expert_gate_proj_from_fused_checkpoint_tensor(tmp_path):
+    """Direct-meta sync should resolve fused non-transposed expert tensors for leaf Linear modules."""
+
+    source_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=False)
+    shell_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=False)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    expert = shell_model.block.experts.get_submodule("1").gate_proj
+    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
+
+    source = _build_lazy_turtle_from_checkpoint_tensors(
+        tmp_path,
+        _build_rect_fused_expert_checkpoint_tensors(source_model, include_down_proj=False),
+    )
+
+    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=source)
+
+    expected = source_model.block.experts.get_submodule("1").gate_proj
+    torch.testing.assert_close(expert.weight, expected.weight)
+    torch.testing.assert_close(expert.bias, expected.bias)
+
+
+def test_alias_all_from_turtle_materializes_leaf_transposed_expert_gate_proj_from_fused_checkpoint_tensor(tmp_path):
+    """Direct-meta sync should resolve fused transposed expert tensors for leaf Linear modules."""
+
+    source_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=True)
+    shell_model = _RectFusedExpertsWrapper(width=8, intermediate=6, expert_count=2, is_transposed=True)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    expert = shell_model.block.experts.get_submodule("1").gate_proj
+    expert.weight = nn.Parameter(torch.empty_like(expert.weight, device="meta"), requires_grad=expert.weight.requires_grad)
+    expert.bias = nn.Parameter(torch.empty_like(expert.bias, device="meta"), requires_grad=expert.bias.requires_grad)
+
+    source = _build_lazy_turtle_from_checkpoint_tensors(
+        tmp_path,
+        _build_rect_fused_expert_checkpoint_tensors(source_model, include_down_proj=False),
+    )
+
+    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=source)
+
+    expected = source_model.block.experts.get_submodule("1").gate_proj
+    torch.testing.assert_close(expert.weight, expected.weight)
+    torch.testing.assert_close(expert.bias, expected.bias)
+
+
+def test_lazy_turtle_warns_when_submodule_materialization_cannot_match_target_shape(monkeypatch, tmp_path):
+    """Shape-derived transform failures should produce warnings instead of silently skipping the tensor."""
+
+    source_model = _HybridWrapper(width=16)
+    shell_model = _HybridWrapper(width=16)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    shell_model.block.dt_bias = nn.Parameter(torch.empty(8, device="meta"), requires_grad=source_model.block.dt_bias.requires_grad)
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+    warnings = _capture_structure_warnings(monkeypatch)
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.block,
+        device=torch.device("cpu"),
+    )
+
+    assert any(
+        "skip submodule materialization param `dt_bias`" in warning
+        and "could not be reshaped into the target layout" in warning
+        and "target_shape=(8,)" in warning
+        for warning in warnings
+    )
+
+
+def test_alias_all_from_turtle_warns_when_direct_meta_shape_mismatch_slips_past_transform(monkeypatch, tmp_path):
+    """Keep an explicit warning path for post-transform shape mismatches in direct-meta sync."""
+
+    source_model = _HybridWrapper(width=16)
+    shell_model = _HybridWrapper(width=16)
+    shell_model.load_state_dict(source_model.state_dict())
+
+    shell_model.block.dt_bias = nn.Parameter(
+        torch.empty_like(shell_model.block.dt_bias, device="meta"),
+        requires_grad=source_model.block.dt_bias.requires_grad,
+    )
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+    warnings = _capture_structure_warnings(monkeypatch)
+
+    original_transform = LazyTurtle._transform_checkpoint_tensor
+
+    def _return_wrong_shape(tensor: torch.Tensor, **kwargs) -> torch.Tensor | None:
+        transformed = original_transform(tensor, **kwargs)
+        if transformed is None:
+            return None
+        return transformed[:-1].contiguous()
+
+    # `_transform_checkpoint_tensor()` now guards most shape mismatches up front.
+    # Monkeypatch it here so the regression test still exercises the downstream
+    # warning branch that protects against malformed custom transforms.
+    monkeypatch.setattr(LazyTurtle, "_transform_checkpoint_tensor", staticmethod(_return_wrong_shape))
+
+    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=source)
+
+    assert any(
+        "skip direct-meta sync param `dt_bias`" in warning
+        and "shape does not match the transformed checkpoint tensor" in warning
+        and "source_shape=(15,)" in warning
+        and "target_shape=(16,)" in warning
+        for warning in warnings
+    )
 
 
 def test_alias_all_from_lazy_turtle_restores_direct_meta_tensors(tmp_path):
