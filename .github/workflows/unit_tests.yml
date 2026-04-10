@@ -207,6 +207,10 @@ jobs:
         run: |
           printenv
 
+      - name: Clean uv
+        run: |
+          uv cache clean
+
       - name: Activate uv env
         run: |
           source /opt/uv/setup_uv_venv.sh unit_test_env
