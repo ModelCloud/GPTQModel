@@ -23,7 +23,6 @@ class TestLlama3_3FP4AutoDecoder(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.3-70B-Instruct-FP4"
     LOAD_BACKEND = BACKEND.TORCH
     QUANT_BACKEND = BACKEND.TORCH
-    PIN_CUDA_DEVICE = 0
     TORCH_DTYPE = "bfloat16"
     USE_FLASH_ATTN = False
     QUANT_BATCH_SIZE = 1
@@ -49,7 +48,7 @@ class TestLlama3_3FP4AutoDecoder(ModelTest):
     def _expected_forward_mode(self) -> str:
         """Mirror runtime device capability checks so the assertion stays future-proof."""
 
-        support = get_device_dtype_support(torch.device("cuda:0"), validate=False)
+        support = get_device_dtype_support(torch.device("cuda"), validate=False)
         if hasattr(torch, "float4_e2m1fn_x2") and torch.float4_e2m1fn_x2 in support.advertised_linear_dtypes:
             return "native"
         return "decode"
@@ -81,7 +80,7 @@ class TestLlama3_3FP4AutoDecoder(ModelTest):
         dataset = None
         try:
             quantize_config = self._build_quantize_config()
-            quantize_config.device = torch.device("cuda:0")
+            quantize_config.device = torch.device("cuda")
 
             model_definition = auto.check_and_get_model_definition(
                 self.NATIVE_MODEL_ID,

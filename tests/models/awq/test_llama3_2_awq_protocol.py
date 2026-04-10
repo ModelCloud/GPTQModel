@@ -88,10 +88,9 @@ class _BaseLlama3_2AWQProtocol(ModelTest):
     pytestmark = pytest.mark.skipif(
         (
             (not __import__("torch").cuda.is_available())
-            or __import__("torch").cuda.device_count() <= 3
             or not _validate_machete_device_support()
         ),
-        reason="CUDA devices 2 and 3 plus NVIDIA Hopper-or-newer GPUs are required for AWQ protocol dynamic-match integration tests",
+        reason="CUDA plus NVIDIA Hopper-or-newer GPUs are required for AWQ protocol dynamic-match integration tests",
     )
 
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
@@ -192,8 +191,6 @@ class _BaseLlama3_2AWQProtocol(ModelTest):
 
 
 class TestLlama3_2_AWQProtocolPython(_BaseLlama3_2AWQProtocol):
-    PIN_CUDA_DEVICE = 2
-
     def _compiled_protocol_plan(self):
         return compile_protocol(_python_protocol())
 
@@ -202,8 +199,6 @@ class TestLlama3_2_AWQProtocolPython(_BaseLlama3_2AWQProtocol):
 
 
 class TestLlama3_2_AWQProtocolYAML(_BaseLlama3_2AWQProtocol):
-    PIN_CUDA_DEVICE = 3
-
     def _compiled_protocol_plan(self):
         return compile_protocol_yaml_text(_yaml_protocol())
 

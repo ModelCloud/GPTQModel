@@ -69,7 +69,6 @@ class TestLlama3_2_FP8(ModelTest):
     LOAD_BACKEND = BACKEND.TORCH
     KERNEL_QUANT = {TorchFP8Linear}
     KERNEL_INFERENCE = {TorchFP8Linear}
-    PIN_CUDA_DEVICE = 0
 
     def test_llama3_2_fp8(self):
         self.quant_lm_eval()
