@@ -244,7 +244,7 @@ class TestQwen3_5MoeModuleTree(ModelTest):
         self.assertIn("in_proj_b:!:1", Qwen3_5_MoeQModel.module_tree[-1]["linear_attn"])
         self.assertIn("in_proj_a:!:1", Qwen3_5_MoeQModel.module_tree[-1]["linear_attn"])
         self.assertIn("shared_expert_gate", Qwen3_5_MoeQModel.module_tree[-1]["mlp:moe:?"])
-        self.assertIn("shared_expert", Qwen3_5_MoeQModel.module_tree[-1]["mlp:moe:?"])
+        self.assertIn("shared_expert:0", Qwen3_5_MoeQModel.module_tree[-1]["mlp:moe:?"])
 
 
 class TestQwen3OmniModuleTree(ModelTest):
