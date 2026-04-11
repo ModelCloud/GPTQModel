@@ -509,3 +509,25 @@ def test_torch_ops_jit_extension_cuda_fingerprint_tracks_detected_include_paths(
     second_build_root = loader.build_root()
 
     assert first_build_root != second_build_root
+
+
+def test_torch_ops_jit_extension_fingerprint_tracks_transitive_local_includes(tmp_path):
+    """Guard cache keys so changes under quoted transitive includes rebuild stale entrypoint binaries."""
+
+    source_root = tmp_path / "src"
+    source_root.mkdir()
+    entry = source_root / "entry.cpp"
+    middle = source_root / "middle.h"
+    leaf = source_root / "leaf.inc"
+
+    entry.write_text('#include "middle.h"\nint kernel() { return answer(); }\n', encoding="utf-8")
+    middle.write_text('#include "leaf.inc"\ninline int answer() { return ANSWER_VALUE; }\n', encoding="utf-8")
+    leaf.write_text("#define ANSWER_VALUE 1\n", encoding="utf-8")
+
+    loader = _make_loader(tmp_path, sources=[str(entry)])
+    first_build_root = loader.build_root()
+
+    leaf.write_text("#define ANSWER_VALUE 12345\n", encoding="utf-8")
+    second_build_root = loader.build_root()
+
+    assert first_build_root != second_build_root
