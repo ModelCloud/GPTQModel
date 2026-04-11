@@ -53,7 +53,25 @@ tests:
     - https://github.com/huggingface/transformers
     - https://github.com/huggingface/optimum
 
-  test_awq.py:
+  test_awq_gemm.py:
+    - peft
+
+  test_awq_marlin.py:
+    - peft
+
+  test_awq_gemv.py:
+    - peft
+
+  test_awq_gemv_fast.py:
+    - peft
+
+  test_awq_llm_awq.py:
+    - peft
+
+  test_awq_inference_mistral.py:
+    - peft
+
+  test_awq_inference_llm_awq.py:
     - peft
 
   test_asym_gptq_v1.py:
@@ -117,3 +135,7 @@ tests/models:
 
   test_phi_3_moe.py:
     - transformers<=4.44.2
+
+tests/models/awq:
+  test_qwen3_8b_base_awq.py:
+    - peft
