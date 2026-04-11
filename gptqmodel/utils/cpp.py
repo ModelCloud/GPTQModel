@@ -9,6 +9,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import shutil
 import sys
 import threading
@@ -45,6 +46,7 @@ _cpp_ext_initialized = False
 _SHARED_LIBRARY_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
 _COMPILE_PROGRESS_TOTAL_STEPS = 100
 _COMPILE_PROGRESS_INTERVAL_SECONDS = 1.0
+_LOCAL_INCLUDE_PATTERN = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.MULTILINE)
 # Default NVCC internal threading for JIT builds. This is based on clean-build
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
 # the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
@@ -246,6 +248,27 @@ def detected_cuda_wheel_include_paths() -> list[str]:
             if candidate.is_dir():
                 include_paths.append(str(candidate))
     return _dedupe_path_strings(include_paths)
+
+
+def _resolve_local_include_path(
+    include_name: str,
+    *,
+    including_path: Path,
+    include_search_roots: Sequence[Path],
+) -> Optional[Path]:
+    """Resolve one quoted local include against the current file and explicit include roots."""
+
+    include_path = Path(include_name).expanduser()
+    if include_path.is_absolute():
+        resolved = include_path.resolve(strict=False)
+        return resolved if resolved.exists() else None
+
+    search_roots = [including_path.parent, *include_search_roots]
+    for root in search_roots:
+        candidate = (root / include_path).resolve(strict=False)
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def detected_local_cuda_include_paths() -> list[str]:
@@ -469,6 +492,47 @@ class TorchOpsJitExtension:
             return Path(override).expanduser()
         return self._resolve_path(self.default_build_root)
 
+    def _source_cache_fingerprint_payload(self, source: str, include_paths: Sequence[str]) -> list[str]:
+        """Hash one source file plus recursively discovered quoted local includes."""
+
+        payload: list[str] = []
+        visited: set[Path] = set()
+        include_search_roots = [Path(path).expanduser().resolve(strict=False) for path in include_paths]
+
+        def visit(path: Path) -> None:
+            normalized = path.expanduser().resolve(strict=False)
+            if normalized in visited:
+                return
+            visited.add(normalized)
+            payload.append(str(normalized))
+
+            if not normalized.exists():
+                payload.append("missing")
+                return
+
+            try:
+                source_bytes = normalized.read_bytes()
+            except OSError as exc:
+                payload.append(f"read_error={type(exc).__name__}")
+                return
+
+            payload.append(hashlib.sha256(source_bytes).hexdigest())
+
+            source_text = source_bytes.decode("utf-8", errors="ignore")
+            for include_name in _LOCAL_INCLUDE_PATTERN.findall(source_text):
+                included_path = _resolve_local_include_path(
+                    include_name,
+                    including_path=normalized,
+                    include_search_roots=include_search_roots,
+                )
+                if included_path is None:
+                    payload.append(f"missing_include={normalized}:{include_name}")
+                    continue
+                visit(included_path)
+
+        visit(Path(source))
+        return payload
+
     def _cache_fingerprint(self) -> str:
         """Hash the effective op surface and source metadata to avoid stale cache reuse."""
 
@@ -477,19 +541,13 @@ class TorchOpsJitExtension:
         payload.append(f"torch={torch.__version__}")
         payload.append(f"torch_cuda={torch.version.cuda or 'none'}")
         payload.extend(self._cuda_cache_fingerprint_payload())
+        include_paths = self._resolved_extra_include_paths()
         for source in self._resolve_sequence(self.sources):
-            payload.append(source)
-            source_path = Path(source)
-            if source_path.exists():
-                stat = source_path.stat()
-                payload.append(str(stat.st_size))
-                payload.append(str(stat.st_mtime_ns))
-            else:
-                payload.append("missing")
+            payload.extend(self._source_cache_fingerprint_payload(source, include_paths))
 
         payload.extend(self._resolve_sequence(self.extra_cflags))
         payload.extend(self._resolve_sequence(self.extra_cuda_cflags))
-        payload.extend(self._resolved_extra_include_paths())
+        payload.extend(include_paths)
         payload.extend(self._resolve_sequence(self.extra_ldflags))
         digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
         return digest[:16]
