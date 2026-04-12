@@ -172,6 +172,29 @@ def test_machete_hopper_arch_cuda_cflags_skip_duplicate_sm90a(monkeypatch):
     assert machete_utils._machete_hopper_arch_cuda_cflags() == []
 
 
+def test_machete_extra_cuda_cflags_keep_only_required_torch_undefines(monkeypatch):
+    monkeypatch.setattr(machete_utils, "_machete_cuda_version_at_least", lambda *_args: False)
+    monkeypatch.setattr(machete_utils, "_machete_hopper_arch_cuda_cflags", lambda: [])
+
+    flags = machete_utils._machete_extra_cuda_cflags()
+
+    assert flags[:3] == list(machete_utils._MACHETE_REQUIRED_TORCH_NVCC_UNDEFINES)
+    assert "-U__CUDA_NO_BFLOAT16_OPERATORS__" not in flags
+    assert "-U__CUDA_NO_BFLOAT162_OPERATORS__" not in flags
+    assert "-U__CUDA_NO_BFLOAT162_CONVERSIONS__" not in flags
+    assert "-U__CUDA_NO_HALF2_OPERATORS__" not in flags
+
+
+def test_machete_extra_cuda_cflags_enable_static_global_template_stub_for_cuda_12_8_plus(monkeypatch):
+    monkeypatch.setattr(machete_utils, "_machete_cuda_version_at_least", lambda major, minor: (major, minor) == (12, 8))
+    monkeypatch.setattr(machete_utils, "_machete_hopper_arch_cuda_cflags", lambda: [])
+
+    flags = machete_utils._machete_extra_cuda_cflags()
+
+    assert flags[0] == "-static-global-template-stub=false"
+    assert flags[1:4] == list(machete_utils._MACHETE_REQUIRED_TORCH_NVCC_UNDEFINES)
+
+
 def test_ensure_cutlass_source_bootstraps_repo_local_checkout(monkeypatch, tmp_path):
     archive_path = tmp_path / f"cutlass-v{machete_utils._CUTLASS_VERSION}.tar.gz"
     _write_fake_cutlass_archive(archive_path)
@@ -185,6 +208,7 @@ def test_ensure_cutlass_source_bootstraps_repo_local_checkout(monkeypatch, tmp_p
     )
 
     cutlass_root = machete_utils._ensure_cutlass_source()
+    monkeypatch.setenv("GPTQMODEL_CUTLASS_DIR", os.environ["GPTQMODEL_CUTLASS_DIR"])
 
     assert cutlass_root == (tmp_path / "cutlass").resolve()
     assert (cutlass_root / "include" / "cutlass" / "cutlass.h").is_file()
@@ -215,10 +239,10 @@ def test_scaled_mm_epilogues_c3x_matches_cutlass_442_broadcast_signatures():
         / "scaled_mm_epilogues_c3x.hpp"
     ).read_text(encoding="utf-8")
 
-    assert "TileShape, T, T, Stride<Int<1>, Int<0>, Int<0>>" not in header
-    assert "TileShape, T, T, Stride<Int<0>, Int<1>, Int<0>>" not in header
-    assert "Sm90ColBroadcast<\n      0 /*Stages*/, TileShape, T, Stride<Int<1>, Int<0>, Int<0>>" in header
-    assert "Sm90RowBroadcast<\n      0 /*Stages*/, TileShape, T, Stride<Int<0>, Int<1>, Int<0>>" in header
+    assert "Sm90ColBroadcast<\n      0 /*Stages*/, TileShape, T, Stride<Int<1>, Int<0>, Int<0>>" not in header
+    assert "Sm90RowBroadcast<\n      0 /*Stages*/, TileShape, T, Stride<Int<0>, Int<1>, Int<0>>" not in header
+    assert "Sm90ColBroadcast<\n      0 /*Stages*/, TileShape, T, T, Stride<Int<1>, Int<0>, Int<0>>" in header
+    assert "Sm90RowBroadcast<\n      0 /*Stages*/, TileShape, T, T, Stride<Int<0>, Int<1>, Int<0>>" in header
 
 
 def test_machete_mm_kernel_plain_store_uses_trivial_epilogue():
@@ -315,6 +339,32 @@ def test_machete_ldflags_link_cuda_driver():
     assert "-lcuda" in machete_utils._machete_extra_ldflags()
 
 
+def test_vllm_cutlass_library_extension_imports_cleanly_in_subprocess():
+    root = Path(__file__).resolve().parents[1]
+    cutlass_python_dir = root / "cutlass" / "python"
+    cutlass_ext_dir = root / "gptqmodel_ext" / "cutlass_extensions"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                f"sys.path.insert(0, {str(cutlass_ext_dir)!r}); "
+                f"sys.path.insert(1, {str(cutlass_python_dir)!r}); "
+                "import vllm_cutlass_library_extension as ext; "
+                "print(ext.VLLMDataType.u4b8.name)"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "u4b8"
+
+
 def _jit_scratch_root(tmp_path: Path, suffix: str) -> Path:
     base = Path("/dev/shm") if Path("/dev/shm").is_dir() else tmp_path
     root = base / "gptqmodel-jit-tests" / suffix
@@ -330,6 +380,7 @@ def test_machete_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
 
     scratch_root = _jit_scratch_root(tmp_path, "machete")
     monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    monkeypatch.delenv("GPTQMODEL_CUTLASS_DIR", raising=False)
     monkeypatch.setenv("GPTQMODEL_MACHETE_BUILD_ROOT", str(scratch_root / "machete"))
     monkeypatch.setenv("GPTQMODEL_MACHETE_FORCE_REBUILD", "1")
 

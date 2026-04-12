@@ -5,6 +5,9 @@ import enum
 
 from cutlass_library import *
 
+if "enum_auto" not in globals():
+    from enum import auto as enum_auto
+
 #
 #   Extend cutlass library with custom types, and missing values
 #

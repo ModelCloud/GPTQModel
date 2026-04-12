@@ -43,6 +43,11 @@ _MACHETE_SM90A_ARCH_FLAGS = (
     "-gencode=arch=compute_90a,code=sm_90a",
     "-gencode=arch=compute_90a,code=compute_90a",
 )
+_MACHETE_REQUIRED_TORCH_NVCC_UNDEFINES = (
+    "-U__CUDA_NO_HALF_OPERATORS__",
+    "-U__CUDA_NO_HALF_CONVERSIONS__",
+    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+)
 
 MACHETE_PREPACKED_BLOCK_SHAPE = (64, 128)
 
@@ -53,6 +58,18 @@ def _machete_project_root() -> Path:
 
 def _machete_source_root() -> Path:
     return _machete_project_root() / "gptqmodel_ext" / "machete"
+
+
+def _machete_cuda_version_at_least(major: int, minor: int) -> bool:
+    raw = getattr(torch.version, "cuda", None)
+    if not raw:
+        return False
+    try:
+        parts = raw.split(".")
+        current = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    except (TypeError, ValueError):  # pragma: no cover - depends on torch build metadata
+        return False
+    return current >= (major, minor)
 
 
 def _repo_local_cutlass_root() -> Path:
@@ -301,13 +318,8 @@ def _machete_hopper_arch_cuda_cflags() -> list[str]:
 
 
 def _machete_extra_cuda_cflags() -> list[str]:
-    return [
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+    flags = [
+        *_MACHETE_REQUIRED_TORCH_NVCC_UNDEFINES,
         *default_jit_cuda_cflags(
             enable_bf16=True,
             include_lineinfo=True,
@@ -319,6 +331,9 @@ def _machete_extra_cuda_cflags() -> list[str]:
         ),
         *_machete_hopper_arch_cuda_cflags(),
     ]
+    if _machete_cuda_version_at_least(12, 8):
+        flags.insert(0, "-static-global-template-stub=false")
+    return flags
 
 
 def _machete_extra_ldflags() -> list[str]:
