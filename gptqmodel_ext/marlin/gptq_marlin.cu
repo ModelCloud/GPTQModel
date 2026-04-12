@@ -278,6 +278,13 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     return false;
   }
 
+  // Our stage-2 dense 4-bit kernels need enough B-stage capacity to cover the
+  // output tile. Larger M tiles with thread_k == 64 are not emitted.
+  if (stages == 2 && num_bits == 4 &&
+      thread_m_blocks * 2 > th_config.thread_k / 16) {
+    return false;
+  }
+
   // Check that pipeline fits into cache
   int cache_size = get_kernel_cache_size(
       th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
@@ -295,16 +302,26 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
              stages == STAGES && group_blocks == GROUP_BLOCKS &&               \
              num_threads == NUM_THREADS &&                                     \
              is_zp_float == IS_ZP_FLOAT) {                                     \
-      constexpr auto S_TYPE =                                                  \
-          W_TYPE == vllm::kFE2M1f                                              \
-              ? (GROUP_BLOCKS == 1 ? vllm::kFE4M3fn : vllm::kFE8M0fnu)         \
-              : (W_TYPE == vllm::kFE4M3fn && GROUP_BLOCKS == 2                 \
-                     ? vllm::kFE8M0fnu                                         \
-              : (std::is_same<scalar_t, half>::value ? vllm::kFloat16          \
-                                                     : vllm::kBFloat16));      \
-      kernel = Marlin<scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS,         \
-                      THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,       \
-                      M_BLOCK_SIZE_8, STAGES, GROUP_BLOCKS, IS_ZP_FLOAT>;      \
+      constexpr bool kIsStage2FourBitTile =                                    \
+          STAGES == 2 &&                                                       \
+          (W_TYPE == vllm::kU4 || W_TYPE == vllm::kU4B8 ||                     \
+           W_TYPE == vllm::kFE2M1f);                                           \
+      constexpr bool kIsSupportedStage2Tile =                                  \
+          !kIsStage2FourBitTile ||                                             \
+          THREAD_M_BLOCKS * 2 <= THREAD_K_BLOCKS;                              \
+      if constexpr (kIsSupportedStage2Tile) {                                  \
+        constexpr auto S_TYPE =                                                \
+            W_TYPE == vllm::kFE2M1f                                            \
+                ? (GROUP_BLOCKS == 1 ? vllm::kFE4M3fn : vllm::kFE8M0fnu)       \
+                : ((W_TYPE == vllm::kFE4M3fn && GROUP_BLOCKS == 2)             \
+                       ? vllm::kFE8M0fnu                                       \
+                       : (std::is_same<scalar_t, half>::value                  \
+                              ? vllm::kFloat16                                 \
+                              : vllm::kBFloat16));                             \
+        kernel = Marlin<scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS,       \
+                        THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,     \
+                        M_BLOCK_SIZE_8, STAGES, GROUP_BLOCKS, IS_ZP_FLOAT>;    \
+      }                                                                        \
     }
 
   // COMMON: cases for (group_blocks in [-1, 2, 4, 8] and is_zp_float == false)
@@ -526,44 +543,57 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
                                 bool is_zp_float, int stages) {
   int num_bits = q_type.size_bits();
   auto kernel = MarlinDefault;
-  if (false) {
+  if constexpr (std::is_same<scalar_t, half>::value) {
+    if (stages == 2) {
+      if (false) {
+      }
+      COMMON_GET_IF(vllm::kU4, 2)
+      COMMON_GET_IF(vllm::kU4B8, 2)
+      COMMON_GET_IF(vllm::kU8B128, 2)
+
+      NVFP4_GET_IF(vllm::kFE2M1f, 2)
+
+      BIGGROUP_GET_IF(vllm::kFE4M3fn, 2)
+
+      ACT_GET_IF(vllm::kU4B8, 2)
+      ACT_GET_IF(vllm::kU8B128, 2)
+    }
+  }
+
+  if (stages == pipe_stages) {
+    if (false) {
+    }
+    COMMON_GET_IF(vllm::kU4, pipe_stages)
+    COMMON_GET_IF(vllm::kU4B8, pipe_stages)
+    COMMON_GET_IF(vllm::kU8B128, pipe_stages)
+
+    NVFP4_GET_IF(vllm::kFE2M1f, pipe_stages)
+
+    BIGGROUP_GET_IF(vllm::kFE4M3fn, pipe_stages)
+
+    ACT_GET_IF(vllm::kU4B8, pipe_stages)
+    ACT_GET_IF(vllm::kU8B128, pipe_stages)
   }
 
   if constexpr (std::is_same<scalar_t, half>::value) {
-    COMMON_GET_IF(vllm::kU4, 2)
-    COMMON_GET_IF(vllm::kU4B8, 2)
-    COMMON_GET_IF(vllm::kU8B128, 2)
-
-    NVFP4_GET_IF(vllm::kFE2M1f, 2)
-
-    BIGGROUP_GET_IF(vllm::kFE4M3fn, 2)
-
-    ACT_GET_IF(vllm::kU4B8, 2)
-    ACT_GET_IF(vllm::kU8B128, 2)
-  }
-
-  COMMON_GET_IF(vllm::kU4, pipe_stages)
-  COMMON_GET_IF(vllm::kU4B8, pipe_stages)
-  COMMON_GET_IF(vllm::kU8B128, pipe_stages)
-
-  NVFP4_GET_IF(vllm::kFE2M1f, pipe_stages)
-
-  BIGGROUP_GET_IF(vllm::kFE4M3fn, pipe_stages)
-
-  ACT_GET_IF(vllm::kU4B8, pipe_stages)
-  ACT_GET_IF(vllm::kU8B128, pipe_stages)
-
-  if (std::is_same<scalar_t, half>::value) {
-    if (false) {
+    if (stages == 2) {
+      if (false) {
+      }
+      FZP_GET_IF(vllm::kU4, 2)
     }
-    FZP_GET_IF(vllm::kU4, 2)
-    FZP_GET_IF(vllm::kU4, pipe_stages)
-  }
-  if (std::is_same<scalar_t, nv_bfloat16>::value) {
-    if (false) {
+    if (stages == pipe_stages) {
+      if (false) {
+      }
+      FZP_GET_IF(vllm::kU4, pipe_stages)
     }
-    MXFP8_GET_IF(vllm::kFE4M3fn, pipe_stages)
-    MXFP4_GET_IF(vllm::kFE2M1f, pipe_stages)
+  }
+  if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
+    if (stages == pipe_stages) {
+      if (false) {
+      }
+      MXFP8_GET_IF(vllm::kFE4M3fn, pipe_stages)
+      MXFP4_GET_IF(vllm::kFE2M1f, pipe_stages)
+    }
   }
 
   return kernel;
@@ -717,8 +747,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   int stages = pipe_stages;
   if (major_capability == 7 && minor_capability == 5) {
     stages = 2;
-    TORCH_CHECK(std::is_same<scalar_t, half>::value,
-                "Turing only supports float16 dense Marlin kernels.");
+    if constexpr (!std::is_same<scalar_t, half>::value) {
+      TORCH_CHECK(false, "Turing only supports float16 dense Marlin kernels.");
+    }
   }
 
   int max_par = 16;

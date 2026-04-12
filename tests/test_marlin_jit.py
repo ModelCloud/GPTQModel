@@ -248,6 +248,32 @@ def test_sm75_turing_contract_is_present_in_marlin_sources():
     assert "dtype=torch.float16 only." in loader_py
 
 
+def test_stage2_dense_four_bit_tiles_stay_in_sync_between_selector_and_codegen():
+    marlin_root = marlin_utils._marlin_root()
+    gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
+    generator_py = (marlin_root / "generate_kernels.py").read_text(encoding="utf-8")
+    kernel_u4 = (marlin_root / "kernel_fp16_ku4.cu").read_text(encoding="utf-8")
+    kernel_u4b8 = (marlin_root / "kernel_fp16_ku4b8.cu").read_text(encoding="utf-8")
+    kernel_nvfp4 = (marlin_root / "kernel_fp16_kfe2m1f.cu").read_text(encoding="utf-8")
+
+    assert "kIsStage2FourBitTile" in gemm_cu
+    assert "THREAD_M_BLOCKS * 2 <= THREAD_K_BLOCKS" in gemm_cu
+    assert "stages == 2 && num_bits == 4" in gemm_cu
+    assert "thread_m_blocks * 2 > th_config.thread_k / 16" in gemm_cu
+    assert "_is_4bit_weight" in generator_py
+    assert "stage_value == 2" in generator_py
+
+    invalid_stage2_tile = ", 256, 4, 16, 4, false, 2,"
+    valid_stage2_tile = ", 256, 2, 16, 4, false, 2,"
+
+    assert invalid_stage2_tile not in kernel_u4
+    assert invalid_stage2_tile not in kernel_u4b8
+    assert invalid_stage2_tile not in kernel_nvfp4
+    assert valid_stage2_tile in kernel_u4
+    assert valid_stage2_tile in kernel_u4b8
+    assert valid_stage2_tile in kernel_nvfp4
+
+
 def test_mxfp8_contract_is_present_in_marlin_sources():
     marlin_root = marlin_utils._marlin_root()
     gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")

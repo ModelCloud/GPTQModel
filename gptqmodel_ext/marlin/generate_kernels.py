@@ -49,6 +49,14 @@ GROUP_BLOCKS = [0, 1, -1, 2, 4, 8]
 DTYPES = ["fp16", "bf16"]
 
 
+def _is_4bit_weight(scalar_type: str) -> bool:
+    return scalar_type in {
+        "vllm::kU4",
+        "vllm::kU4B8",
+        "vllm::kFE2M1f",
+    }
+
+
 def remove_old_kernels() -> None:
     root = Path(__file__).parent
     for path in root.glob("kernel_*.cu"):
@@ -134,6 +142,15 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
 
         for is_zp_float in is_zp_float_list:
             for stage_value in stage_values:
+                if (
+                    stage_value == 2
+                    and _is_4bit_weight(scalar_type)
+                    and max(m_blocks, 1) * 2 > k_blocks
+                ):
+                    # Our dense Turing kernels need enough B-stage capacity to
+                    # cover the output tile. For 4-bit weights this rules out
+                    # the larger M tiles when thread_k_blocks == 4.
+                    continue
                 template_str = jinja2.Template(TEMPLATE).render(
                     scalar_t=c_dtype,
                     w_type_id=scalar_type + ".id()",

@@ -239,8 +239,8 @@ __global__ void Marlin(
     const int4* __restrict__ b_bias_ptr,
     const int4* __restrict__ scales_ptr,  // fp16 quantization scales of shape
                                           // (k/groupsize)xn
-    const uint16_t* __restrict__ scale2_ptr,  // fp16 global scale (for nvfp4
-                                              // only)
+    const float* __restrict__ global_scale_ptr,  // fp32 global scale (for
+                                                 // nvfp4 only)
     const int4* __restrict__ zp_ptr,  // 4bit packed zero-points of shape
                                       // (k/groupsize)x(n/pack_factor)
     const int* __restrict__ g_idx,    // int32 group indices of shape k
