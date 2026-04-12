@@ -284,14 +284,6 @@ def _machete_include_paths() -> list[str]:
     return include_paths
 
 
-def _machete_stage_roots() -> list[str]:
-    project_root = _machete_project_root()
-    return [
-        str((project_root / "gptqmodel_ext").resolve()),
-        str(_ensure_cutlass_source().resolve()),
-    ]
-
-
 def _machete_extra_cflags() -> list[str]:
     return default_jit_cflags(enable_bf16=True)
 
@@ -348,7 +340,6 @@ _MACHETE_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     extra_cuda_cflags=_machete_extra_cuda_cflags,
     extra_include_paths=_machete_include_paths,
     extra_ldflags=_machete_extra_ldflags,
-    stage_roots=_machete_stage_roots,
     force_rebuild_env="GPTQMODEL_MACHETE_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,

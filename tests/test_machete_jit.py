@@ -330,8 +330,7 @@ def test_machete_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
 
     scratch_root = _jit_scratch_root(tmp_path, "machete")
     monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-    monkeypatch.setenv("GPTQMODEL_EXT_BUILD_BASE", str(scratch_root / "build"))
-    monkeypatch.setenv("GPTQMODEL_EXT_TMPDIR", str(scratch_root / "tmp"))
+    monkeypatch.setenv("GPTQMODEL_MACHETE_BUILD_ROOT", str(scratch_root / "machete"))
     monkeypatch.setenv("GPTQMODEL_MACHETE_FORCE_REBUILD", "1")
 
     assert extension_api.load(name="machete", use_cache=False) == {"machete": True}

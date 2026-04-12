@@ -11,7 +11,6 @@ import math
 import os
 import shutil
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -55,8 +54,6 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
 # the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
 _DEFAULT_NVCC_THREADS = "8"
-_GLOBAL_TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_EXT_BUILD_BASE"
-_GLOBAL_TORCH_OPS_TMP_ROOT_ENV = "GPTQMODEL_EXT_TMPDIR"
 
 
 def _format_compile_duration_seconds(seconds: float) -> str:
@@ -220,9 +217,6 @@ class _CompileProgressDisplay:
 def default_torch_ops_build_root(subdir: str) -> Path:
     """Return the default on-disk cache root for torch.ops JIT extensions."""
 
-    override = os.getenv(_GLOBAL_TORCH_OPS_BUILD_ROOT_ENV)
-    if override:
-        return Path(override).expanduser() / subdir
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
 
 
@@ -448,7 +442,6 @@ class TorchOpsJitExtension:
         extra_cuda_cflags: Optional[Sequence[str] | Callable[[], Sequence[str]]] = None,
         extra_include_paths: Optional[Sequence[str] | Callable[[], Sequence[str]]] = None,
         extra_ldflags: Optional[Sequence[str] | Callable[[], Sequence[str]]] = None,
-        stage_roots: Optional[Sequence[str] | Callable[[], Sequence[str]]] = None,
         force_rebuild_env: Optional[str] = None,
         verbose_env: Optional[str] = None,
         requires_cuda: bool = False,
@@ -465,7 +458,6 @@ class TorchOpsJitExtension:
         self.extra_cuda_cflags = extra_cuda_cflags
         self.extra_include_paths = extra_include_paths
         self.extra_ldflags = extra_ldflags
-        self.stage_roots = stage_roots
         self.force_rebuild_env = force_rebuild_env
         self.verbose_env = verbose_env
         self.requires_cuda = bool(requires_cuda)
@@ -503,74 +495,6 @@ class TorchOpsJitExtension:
         if not self.requires_cuda:
             return _dedupe_path_strings(include_paths)
         return cuda_include_paths_with_fallback(include_paths)
-
-    def _resolved_stage_roots(self) -> list[Path]:
-        """Resolve optional project-local trees that should be copied into the build cache."""
-
-        roots = [Path(path).expanduser().resolve(strict=False) for path in self._resolve_sequence(self.stage_roots)]
-        if not roots:
-            return []
-
-        deduped: list[Path] = []
-        for candidate in sorted(roots, key=lambda path: (len(path.parts), str(path))):
-            if any(candidate == existing or candidate.is_relative_to(existing) for existing in deduped):
-                continue
-            deduped.append(candidate)
-        return deduped
-
-    def _stage_compile_inputs(
-        self,
-        *,
-        build_root: Path,
-        sources: Sequence[str],
-        include_paths: Sequence[str],
-    ) -> tuple[list[str], list[str]]:
-        """Copy configured local source trees into the build cache and rewrite compile paths."""
-
-        stage_roots = self._resolved_stage_roots()
-        if not stage_roots:
-            return list(sources), _dedupe_path_strings(include_paths)
-
-        staged_parent = build_root / "_local_sources"
-        staged_parent.mkdir(parents=True, exist_ok=True)
-
-        staged_roots: list[tuple[Path, Path]] = []
-        for stage_root in stage_roots:
-            if not stage_root.exists():
-                continue
-
-            stage_key = hashlib.sha256(str(stage_root).encode("utf-8")).hexdigest()[:12]
-            staged_root = staged_parent / f"{stage_root.name}-{stage_key}"
-            if not staged_root.exists():
-                if stage_root.is_dir():
-                    shutil.copytree(
-                        stage_root,
-                        staged_root,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
-                    )
-                else:
-                    staged_root.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(stage_root, staged_root)
-            staged_roots.append((stage_root, staged_root))
-
-        if not staged_roots:
-            return list(sources), _dedupe_path_strings(include_paths)
-
-        staged_roots.sort(key=lambda item: len(item[0].parts), reverse=True)
-
-        def remap(raw_path: str) -> str:
-            normalized = Path(raw_path).expanduser().resolve(strict=False)
-            for source_root, staged_root in staged_roots:
-                try:
-                    relative = normalized.relative_to(source_root)
-                except ValueError:
-                    continue
-                return str(staged_root / relative)
-            return raw_path
-
-        staged_sources = [remap(source) for source in sources]
-        staged_include_paths = _dedupe_path_strings([remap(path) for path in include_paths])
-        return staged_sources, staged_include_paths
 
     def base_build_root(self) -> Path:
         """Return the user-visible cache root before applying the loader fingerprint."""
@@ -678,14 +602,6 @@ class TorchOpsJitExtension:
         """Return the fingerprinted filesystem directory that caches this JIT extension."""
 
         return self.base_build_root() / self._cache_fingerprint()
-
-    def _compile_temp_root(self, build_root: Path) -> Path:
-        """Resolve one stable scratch directory for compiler temp files."""
-
-        override = os.getenv(_GLOBAL_TORCH_OPS_TMP_ROOT_ENV)
-        if override:
-            return Path(override).expanduser() / self.name / build_root.name
-        return build_root / "_tmp"
 
     def force_rebuild_enabled(self) -> bool:
         """Check whether this extension should ignore and replace cached binaries."""
@@ -827,13 +743,6 @@ class TorchOpsJitExtension:
             try:
                 resolved_sources = self._resolve_sequence(self.sources)
                 extra_include_paths = self._resolved_extra_include_paths()
-                resolved_sources, extra_include_paths = self._stage_compile_inputs(
-                    build_root=build_root,
-                    sources=resolved_sources,
-                    include_paths=extra_include_paths,
-                )
-                compile_temp_root = self._compile_temp_root(build_root)
-                compile_temp_root.mkdir(parents=True, exist_ok=True)
                 kwargs = {
                     "name": self.name,
                     "sources": resolved_sources,
@@ -852,24 +761,7 @@ class TorchOpsJitExtension:
                 extra_ldflags = self._resolve_sequence(self.extra_ldflags)
                 if extra_ldflags:
                     kwargs["extra_ldflags"] = extra_ldflags
-                previous_tempdir = tempfile.tempdir
-                previous_temp_env = {
-                    name: os.environ.get(name) for name in ("TMPDIR", "TEMP", "TMP")
-                }
-                try:
-                    compile_temp_root_text = str(compile_temp_root)
-                    os.environ["TMPDIR"] = compile_temp_root_text
-                    os.environ["TEMP"] = compile_temp_root_text
-                    os.environ["TMP"] = compile_temp_root_text
-                    tempfile.tempdir = compile_temp_root_text
-                    load(**kwargs)
-                finally:
-                    tempfile.tempdir = previous_tempdir
-                    for name, previous_value in previous_temp_env.items():
-                        if previous_value is None:
-                            os.environ.pop(name, None)
-                        else:
-                            os.environ[name] = previous_value
+                load(**kwargs)
                 build_invocation_succeeded = True
             except Exception as exc:  # pragma: no cover - build depends on host toolchain
                 elapsed = time.perf_counter() - started

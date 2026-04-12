@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import os
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -219,13 +217,12 @@ def test_cuda_cache_fingerprint_payload_includes_resolved_arch_flags(monkeypatch
     ]
 
 
-def test_default_torch_ops_build_root_honors_global_override(monkeypatch, tmp_path):
-    """Guard the shared cache-root override so large JIT builds can move off constrained filesystems."""
+def test_default_torch_ops_build_root_ignores_removed_global_override(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_EXT_BUILD_BASE", "/tmp/obsolete-jit-root")
 
-    override_root = tmp_path / "jit_cache"
-    monkeypatch.setenv("GPTQMODEL_EXT_BUILD_BASE", str(override_root))
-
-    assert cpp_module.default_torch_ops_build_root("marlin") == override_root / "marlin"
+    assert cpp_module.default_torch_ops_build_root("marlin") == (
+        Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / "marlin"
+    )
 
 
 def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
@@ -333,50 +330,6 @@ def test_torch_ops_jit_extension_emits_spinner_logs_around_compile(monkeypatch, 
     assert any("torch.ops JIT extension ready" in message for message in logger.info_messages)
 
 
-def test_torch_ops_jit_extension_routes_compile_tempfiles_into_build_local_tmp(monkeypatch, tmp_path):
-    """Guard NVCC scratch placement so JIT builds stop depending on the host `/tmp` mount."""
-
-    loader = _make_loader(tmp_path)
-
-    state = {"ready": False}
-    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
-    compile_temp_roots: list[tuple[str, str, str, str | None]] = []
-
-    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
-    monkeypatch.delenv("TMPDIR", raising=False)
-    monkeypatch.delenv("TEMP", raising=False)
-    monkeypatch.delenv("TMP", raising=False)
-
-    def fake_compile(**_kwargs):
-        compile_temp_roots.append(
-            (
-                os.environ["TMPDIR"],
-                os.environ["TEMP"],
-                os.environ["TMP"],
-                tempfile.tempdir,
-            )
-        )
-        state["ready"] = True
-        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
-
-    monkeypatch.setattr(cpp_module, "load", fake_compile)
-
-    assert loader.load() is True
-    expected_temp_root = loader._compile_temp_root(loader.build_root())
-    assert compile_temp_roots == [
-        (
-            str(expected_temp_root),
-            str(expected_temp_root),
-            str(expected_temp_root),
-            str(expected_temp_root),
-        )
-    ]
-    assert expected_temp_root.is_dir()
-    assert "TMPDIR" not in os.environ
-    assert "TEMP" not in os.environ
-    assert "TMP" not in os.environ
-
-
 def test_torch_ops_jit_extension_appends_detected_cuda_include_paths(monkeypatch, tmp_path):
     """Guard CUDA JIT kwargs so detected NVIDIA wheel headers reach the compiler."""
 
@@ -414,9 +367,7 @@ def test_torch_ops_jit_extension_appends_detected_cuda_include_paths(monkeypatch
     ]
 
 
-def test_torch_ops_jit_extension_stages_configured_local_roots(monkeypatch, tmp_path):
-    """Guard NFS-sensitive builds so configured project trees are copied into the local build cache."""
-
+def test_torch_ops_jit_extension_uses_original_compile_paths(monkeypatch, tmp_path):
     local_root = tmp_path / "repo"
     (local_root / "src").mkdir(parents=True)
     (local_root / "include").mkdir(parents=True)
@@ -429,7 +380,6 @@ def test_torch_ops_jit_extension_stages_configured_local_roots(monkeypatch, tmp_
         tmp_path,
         sources=[str(source_path)],
         extra_include_paths=[str(include_path), "/usr/local/cuda/include"],
-        stage_roots=[str(local_root)],
     )
 
     state = {"ready": False}
@@ -446,19 +396,8 @@ def test_torch_ops_jit_extension_stages_configured_local_roots(monkeypatch, tmp_
     monkeypatch.setattr(cpp_module, "load", fake_compile)
 
     assert loader.load() is True
-    assert len(compile_calls) == 1
-
-    staged_source = Path(compile_calls[0]["sources"][0])
-    staged_include = Path(compile_calls[0]["extra_include_paths"][0])
-    build_root = loader.build_root()
-
-    assert staged_source != source_path
-    assert staged_source.is_file()
-    assert staged_source.is_relative_to(build_root / "_local_sources")
-    assert staged_source.read_text(encoding="utf-8") == source_path.read_text(encoding="utf-8")
-    assert staged_include.is_dir()
-    assert staged_include.is_relative_to(build_root / "_local_sources")
-    assert compile_calls[0]["extra_include_paths"][1] == "/usr/local/cuda/include"
+    assert compile_calls[0]["sources"] == [str(source_path)]
+    assert compile_calls[0]["extra_include_paths"] == [str(include_path), "/usr/local/cuda/include"]
 
 
 def test_torch_ops_jit_extension_skips_cuda_wheel_include_paths_when_local_headers_exist(monkeypatch, tmp_path):

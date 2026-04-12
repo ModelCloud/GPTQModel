@@ -278,8 +278,8 @@ def test_marlin_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
 
     scratch_root = _jit_scratch_root(tmp_path, "marlin")
     monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-    monkeypatch.setenv("GPTQMODEL_EXT_BUILD_BASE", str(scratch_root / "build"))
-    monkeypatch.setenv("GPTQMODEL_EXT_TMPDIR", str(scratch_root / "tmp"))
+    monkeypatch.setenv("GPTQMODEL_MARLIN_FP16_BUILD_ROOT", str(scratch_root / "marlin_fp16"))
+    monkeypatch.setenv("GPTQMODEL_MARLIN_BF16_BUILD_ROOT", str(scratch_root / "marlin_bf16"))
     monkeypatch.setenv("GPTQMODEL_MARLIN_FORCE_REBUILD", "1")
 
     assert extension_api.load(name="marlin", use_cache=False) == {

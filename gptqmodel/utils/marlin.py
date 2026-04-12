@@ -170,10 +170,6 @@ def _marlin_include_paths() -> list[str]:
     )
 
 
-def _marlin_stage_roots() -> list[str]:
-    return [str(_marlin_root().resolve())]
-
-
 def _marlin_extra_cflags() -> list[str]:
     return default_jit_cflags(enable_bf16=True)
 
@@ -204,7 +200,6 @@ _MARLIN_FP16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     extra_cflags=_marlin_extra_cflags,
     extra_cuda_cflags=_marlin_extra_cuda_cflags,
     extra_include_paths=_marlin_include_paths,
-    stage_roots=_marlin_stage_roots,
     force_rebuild_env="GPTQMODEL_MARLIN_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
@@ -222,7 +217,6 @@ _MARLIN_BF16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     extra_cflags=_marlin_extra_cflags,
     extra_cuda_cflags=_marlin_extra_cuda_cflags,
     extra_include_paths=_marlin_include_paths,
-    stage_roots=_marlin_stage_roots,
     force_rebuild_env="GPTQMODEL_MARLIN_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
