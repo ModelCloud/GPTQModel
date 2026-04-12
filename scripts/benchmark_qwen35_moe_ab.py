@@ -20,6 +20,11 @@ DEFAULT_MODEL_PATH = "/monster/data/model/Qwen3.5-35B-A3B"
 DEFAULT_BASELINE_ROOT = "/root/gptqmodel-main"
 FAST_LAYER_COUNT_ENV = "GPTQMODEL_FAST_LAYER_COUNT"
 FAST_LAYER_POSITION_ENV = "GPTQMODEL_FAST_LAYER_POSITION"
+VRAM_STRATEGY_CHOICES = (
+    "exclusive",
+    "balanced",
+    "dense_home_moe_balanced",
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -43,6 +48,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--stop-after-layer", type=int, default=1, help="Stop once this zero-based layer index has fully finalized.")
     parser.add_argument("--dtype", default="auto", help="Model dtype passed to GPTQModel.load().")
     parser.add_argument("--attn-implementation", default="eager", choices=("eager", "flash_attention_2"), help="Attention implementation.")
+    parser.add_argument("--vram-strategy", default="balanced", choices=VRAM_STRATEGY_CHOICES, help="VRAM strategy to benchmark.")
+    parser.add_argument(
+        "--current-vram-strategy",
+        default=None,
+        choices=VRAM_STRATEGY_CHOICES,
+        help="Optional VRAM strategy override for the current repo in A/B mode.",
+    )
+    parser.add_argument(
+        "--baseline-vram-strategy",
+        default=None,
+        choices=("exclusive", "balanced"),
+        help="Optional VRAM strategy override for the baseline repo in A/B mode.",
+    )
     return parser.parse_args()
 
 
@@ -68,6 +86,14 @@ def _extract_region_total(snapshot: Dict[str, Dict[str, Any]], region: str) -> f
         return 0.0
 
 
+def _spread(values: List[float]) -> float:
+    """Measure device imbalance across all visible accelerators for one sample."""
+
+    if len(values) < 2:
+        return 0.0
+    return max(values) - min(values)
+
+
 def _summarize_case(case: Dict[str, Any]) -> Dict[str, Any]:
     layer_records = case.get("layer_records") or []
     final_layer = layer_records[-1] if layer_records else None
@@ -75,14 +101,15 @@ def _summarize_case(case: Dict[str, Any]) -> Dict[str, Any]:
     reserved_gib = [float(item.get("reserved_gib", 0.0)) for item in final_devices]
     peak_reserved_gib = [float(item.get("max_reserved_gib", 0.0)) for item in final_devices]
 
-    spread_reserved_gib = abs(reserved_gib[0] - reserved_gib[1]) if len(reserved_gib) >= 2 else 0.0
-    peak_spread_reserved_gib = abs(peak_reserved_gib[0] - peak_reserved_gib[1]) if len(peak_reserved_gib) >= 2 else 0.0
+    spread_reserved_gib = _spread(reserved_gib)
+    peak_spread_reserved_gib = _spread(peak_reserved_gib)
 
     quant_region_snapshot = case.get("quant_region_snapshot") or {}
     return {
         "label": case.get("label"),
         "repo_root": case.get("repo_root"),
         "git_head": case.get("git_head"),
+        "vram_strategy": case.get("vram_strategy"),
         "quant_wall_s": float(case.get("quant_wall_s", 0.0)),
         "pre_quant_forward_s": _extract_region_total(quant_region_snapshot, "pre_quant_forward"),
         "process_quant_s": _extract_region_total(quant_region_snapshot, "process_quant"),
@@ -128,7 +155,7 @@ def _compare_cases(current: Dict[str, Any], baseline: Dict[str, Any]) -> Dict[st
 
 def _print_case_summary(case: Dict[str, Any]) -> None:
     summary = _summarize_case(case)
-    print(f"[{summary['label']}] head={summary['git_head']}")
+    print(f"[{summary['label']}] head={summary['git_head']} vram_strategy={summary.get('vram_strategy')}")
     print(
         "  quant_wall_s={quant_wall_s:.3f} pre={pre_quant_forward_s:.3f} "
         "quant={process_quant_s:.3f} post={post_quant_forward_s:.3f}".format(**summary)
@@ -169,6 +196,7 @@ def _run_subprocess_case(
     stop_after_layer: int,
     dtype: str,
     attn_implementation: str,
+    vram_strategy: str,
 ) -> Dict[str, Any]:
     json_out = output_dir / f"{label}.json"
     log_out = output_dir / f"{label}.log"
@@ -202,6 +230,8 @@ def _run_subprocess_case(
         dtype,
         "--attn-implementation",
         attn_implementation,
+        "--vram-strategy",
+        vram_strategy,
     ]
 
     with log_out.open("w", encoding="utf-8") as log_handle:
@@ -232,15 +262,19 @@ def _single_case_main(args: argparse.Namespace) -> int:
 
     os.environ[FAST_LAYER_COUNT_ENV] = str(args.quant_layers)
     os.environ[FAST_LAYER_POSITION_ENV] = "first"
+    os.environ["DEBUG"] = "1"
 
     import torch
     from transformers.utils import is_flash_attn_2_available
 
     from gptqmodel import DEBUG_ON, GPTQModel
     from gptqmodel.looper.module_looper import StopMainLoop
+    from gptqmodel.quantization.config import VramStrategy
     from gptqmodel.utils.torch import torch_empty_cache
     from model_test import BACKEND
     from test_qwen3_5_moe import TestQwen3_5Moe
+
+    resolved_vram_strategy = VramStrategy(args.vram_strategy)
 
     def _safe_sync() -> None:
         if not torch.cuda.is_available():
@@ -289,6 +323,7 @@ def _single_case_main(args: argparse.Namespace) -> int:
         EVAL_TASKS_FAST = {}
         EVAL_TASKS_SLOW = {}
         USE_FLASH_ATTN = args.attn_implementation == "flash_attention_2"
+        VRAM_STRATEGY = resolved_vram_strategy
 
         def __init__(self, methodName: str = "test_qwen3_5_moe"):
             super().__init__(methodName=methodName)
@@ -397,6 +432,7 @@ def _single_case_main(args: argparse.Namespace) -> int:
                     "stop_after_layer": self.STOP_AFTER_LAYER,
                     "dtype": str(args.dtype),
                     "attn_implementation": load_kwargs["attn_implementation"],
+                    "vram_strategy": self.VRAM_STRATEGY.value,
                     "python": sys.version,
                     "python_gil_disabled": bool(getattr(sys, "_is_gil_enabled", lambda: True)() is False),
                     "python_gil_env": os.environ.get("PYTHON_GIL"),
@@ -440,6 +476,8 @@ def _ab_main(args: argparse.Namespace) -> int:
     script_path = Path(__file__).resolve()
     output_dir = args.output_dir or Path(tempfile.mkdtemp(prefix="qwen35_moe_ab_"))
     output_dir.mkdir(parents=True, exist_ok=True)
+    current_vram_strategy = args.current_vram_strategy or args.vram_strategy
+    baseline_vram_strategy = args.baseline_vram_strategy or args.vram_strategy
 
     current = _run_subprocess_case(
         script_path=script_path,
@@ -453,6 +491,7 @@ def _ab_main(args: argparse.Namespace) -> int:
         stop_after_layer=args.stop_after_layer,
         dtype=args.dtype,
         attn_implementation=args.attn_implementation,
+        vram_strategy=current_vram_strategy,
     )
     baseline = _run_subprocess_case(
         script_path=script_path,
@@ -466,6 +505,7 @@ def _ab_main(args: argparse.Namespace) -> int:
         stop_after_layer=args.stop_after_layer,
         dtype=args.dtype,
         attn_implementation=args.attn_implementation,
+        vram_strategy=baseline_vram_strategy,
     )
 
     compare = _compare_cases(current=current, baseline=baseline)

@@ -118,6 +118,7 @@ class VramStrategy(str, Enum):
 
     EXCLUSIVE = "exclusive"
     BALANCED = "balanced"
+    DENSE_HOME_MOE_BALANCED = "dense_home_moe_balanced"
 
 
 class FallbackStrategy(str, Enum):

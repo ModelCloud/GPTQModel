@@ -214,7 +214,11 @@ class BaseQModel(nn.Module):
     require_monkeypatch = False
 
     # VRAM strategy support list
-    supported_vram_strategies: List[VramStrategy] = [VramStrategy.EXCLUSIVE, VramStrategy.BALANCED]
+    supported_vram_strategies: List[VramStrategy] = [
+        VramStrategy.EXCLUSIVE,
+        VramStrategy.BALANCED,
+        VramStrategy.DENSE_HOME_MOE_BALANCED,
+    ]
 
     # some models have broken attention mask codes so we need to only use batch 1 with no masks
     support_batch_quantize = True

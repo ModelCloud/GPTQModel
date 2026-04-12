@@ -268,6 +268,36 @@ def _resolve_forward_baseline_devices(
     return resolved
 
 
+def _collect_layer_candidate_names(
+    subset: Dict[str, NamedModule],
+    full,
+) -> List[str]:
+    """Return the stable layer module order used for device planning."""
+
+    names: List[str] = list(subset.keys())
+    if full is None:
+        return names
+
+    for candidate in full.keys():
+        if candidate not in subset:
+            names.append(candidate)
+    return names
+
+
+def _collect_assignable_moe_group_keys(
+    moe_groups: Dict[str, List[str]],
+) -> List[str]:
+    """Return expert families that should stay co-located on one device."""
+
+    assignable_group_keys: List[str] = []
+    for group_key, module_names in moe_groups.items():
+        suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
+        # Some MoE families route pairs like gate/up or w1/w3 together.
+        if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
+            assignable_group_keys.append(group_key)
+    return assignable_group_keys
+
+
 def build_subset_plan(
     looper: "ModuleLooper",
     *,
@@ -300,91 +330,109 @@ def build_subset_plan(
     attention_subset = bool(subset) and all(
         looper._is_attention_module_name(name) for name in subset
     )
-    moe_group_key_by_name: Dict[str, Optional[str]] = {
+    layer_candidate_names = _collect_layer_candidate_names(subset=subset, full=full)
+    subset_moe_group_key_by_name: Dict[str, Optional[str]] = {
         name: looper._extract_moe_group_key(name)
         for name in subset
     }
-    moe_module_names = [
-        name for name, group_key in moe_group_key_by_name.items()
+    layer_moe_group_key_by_name: Dict[str, Optional[str]] = {
+        name: looper._extract_moe_group_key(name)
+        for name in layer_candidate_names
+    }
+    subset_moe_module_names = [
+        name for name, group_key in subset_moe_group_key_by_name.items()
         if group_key is not None
     ]
-    is_moe_subset = len(moe_module_names) >= looper._moe_subset_threshold
-    moe_modules_set = set(moe_module_names)
+    layer_moe_module_names = [
+        name for name, group_key in layer_moe_group_key_by_name.items()
+        if group_key is not None
+    ]
+    is_moe_subset = len(subset_moe_module_names) >= looper._moe_subset_threshold
+    layer_has_moe = len(layer_moe_module_names) >= looper._moe_subset_threshold
+    moe_modules_set = set(subset_moe_module_names)
 
-    if is_moe_subset:
-        combined_names: List[str] = list(subset.keys())
-        if full is not None:
-            for candidate in full.keys():
-                if candidate not in subset:
-                    combined_names.append(candidate)
-
-        for module_name in combined_names:
+    if layer_has_moe:
+        for module_name in layer_candidate_names:
             # Group experts across the full MoE family so device placement is
             # consistent even when the current subset only contains one slice.
-            group_key = looper._extract_moe_group_key(module_name)
+            group_key = layer_moe_group_key_by_name[module_name]
             if group_key is None:
                 continue
             moe_groups.setdefault(group_key, []).append(module_name)
 
-        for name, named_module in subset.items():
-            setattr(named_module, "moe_enabled", name in moe_modules_set)
+    for name, named_module in subset.items():
+        setattr(named_module, "moe_enabled", name in moe_modules_set)
 
-        if looper._vram_strategy == VramStrategy.BALANCED:
-            devices = [
-                dev for dev in looper._quant_devices
-                if dev is not None and getattr(dev, "type", None) != "cpu"
-            ]
-            if len(devices) > 1 and moe_groups:
-                assignable_group_keys: List[str] = []
-                for group_key, module_names in moe_groups.items():
-                    suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
-                    # Some MoE families route pairs like gate/up or w1/w3 together.
-                    if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
-                        assignable_group_keys.append(group_key)
+    if layer_has_moe or is_moe_subset:
+        devices = [
+            dev for dev in looper._quant_devices
+            if dev is not None and getattr(dev, "type", None) != "cpu"
+        ]
 
-                if assignable_group_keys:
-                    groups_per_device = max(
-                        math.ceil(len(assignable_group_keys) / len(devices)), 1
-                    )
-                    for group_index, group_key in enumerate(assignable_group_keys):
-                        device_idx = min(group_index // groups_per_device, len(devices) - 1)
-                        target_device = devices[device_idx]
-                        for module_name in moe_groups[group_key]:
-                            forward_device_map[module_name] = target_device
+        if looper._vram_strategy == VramStrategy.BALANCED and len(devices) > 1 and moe_groups and is_moe_subset:
+            assignable_group_keys = _collect_assignable_moe_group_keys(moe_groups)
+            if assignable_group_keys:
+                groups_per_device = max(
+                    math.ceil(len(assignable_group_keys) / len(devices)), 1
+                )
+                for group_index, group_key in enumerate(assignable_group_keys):
+                    device_idx = min(group_index // groups_per_device, len(devices) - 1)
+                    target_device = devices[device_idx]
+                    for module_name in moe_groups[group_key]:
+                        forward_device_map[module_name] = target_device
 
-                    # Once balanced MoE routing pins any expert family to explicit
-                    # devices, the rest of the layer must also be anchored to the
-                    # baseline layer placement. Otherwise untouched modules can
-                    # inherit stale round-robin quant devices from earlier subsets.
-                    baseline_devices = _resolve_forward_baseline_devices(
-                        subset=subset,
-                        full=full,
-                    )
-                    for module_name, baseline_device in baseline_devices.items():
-                        forward_device_map.setdefault(module_name, baseline_device)
+                # Once balanced MoE routing pins any expert family to explicit
+                # devices, the rest of the layer must also be anchored to the
+                # baseline layer placement. Otherwise untouched modules can
+                # inherit stale round-robin quant devices from earlier subsets.
+                baseline_devices = _resolve_forward_baseline_devices(
+                    subset=subset,
+                    full=full,
+                )
+                for module_name, baseline_device in baseline_devices.items():
+                    forward_device_map.setdefault(module_name, baseline_device)
 
-                    for module_name, named_module in subset.items():
-                        preferred_device = forward_device_map.get(module_name)
-                        if preferred_device is not None:
-                            named_module.state["preferred_quant_device"] = preferred_device
+                for module_name, named_module in subset.items():
+                    preferred_device = forward_device_map.get(module_name)
+                    if preferred_device is not None:
+                        named_module.state["preferred_quant_device"] = preferred_device
 
-                    # Keep the balanced forward placement stable through quant for
-                    # this layer stage. Restoring immediately would reintroduce
-                    # the cross-device ping-pong we just eliminated.
-                    restore_forward_device_overrides = False
+                # Keep the balanced forward placement stable through quant for
+                # this layer stage. Restoring immediately would reintroduce
+                # the cross-device ping-pong we just eliminated.
+                restore_forward_device_overrides = False
+
+        if looper._vram_strategy == VramStrategy.DENSE_HOME_MOE_BALANCED and len(devices) > 1:
+            dense_home_device = devices[0]
+            expert_devices = devices[1:] or [dense_home_device]
+            assignable_group_keys = _collect_assignable_moe_group_keys(moe_groups)
+            for group_index, group_key in enumerate(assignable_group_keys):
+                target_device = expert_devices[group_index % len(expert_devices)]
+                for module_name in moe_groups[group_key]:
+                    forward_device_map[module_name] = target_device
+
+            for module_name in layer_candidate_names:
+                forward_device_map.setdefault(module_name, dense_home_device)
+
+            for module_name, named_module in subset.items():
+                preferred_device = forward_device_map.get(module_name)
+                if preferred_device is not None:
+                    named_module.state["preferred_quant_device"] = preferred_device
+
+            if forward_device_map:
+                restore_forward_device_overrides = False
+                subset_forward_serial = True
 
         # Balanced MoE subsets stay serial so replica fan-out does not fight the
         # explicit per-expert device assignment planned above.
-        subset_forward_serial = looper._vram_strategy == VramStrategy.BALANCED
-        if subset_forward_serial:
-            active_group_count = len(moe_groups)
-            if active_group_count == 0:
-                subset_forward_serial = False
-            elif attention_subset and active_group_count <= looper._moe_subset_threshold:
-                subset_forward_serial = False
-    else:
-        for named_module in subset.values():
-            setattr(named_module, "moe_enabled", False)
+        if looper._vram_strategy == VramStrategy.BALANCED:
+            subset_forward_serial = is_moe_subset
+            if subset_forward_serial:
+                active_group_count = len(moe_groups)
+                if active_group_count == 0:
+                    subset_forward_serial = False
+                elif attention_subset and active_group_count <= looper._moe_subset_threshold:
+                    subset_forward_serial = False
 
     auto_forward_data_parallel = getattr(
         looper.gptq_model.quantize_config,
