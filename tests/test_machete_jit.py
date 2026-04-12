@@ -168,6 +168,21 @@ def test_cutlass_checkout_complete_accepts_tools_util_layout(tmp_path):
     assert machete_utils._cutlass_checkout_complete(cutlass_root)
 
 
+def test_scaled_mm_epilogues_c3x_matches_cutlass_442_broadcast_signatures():
+    header = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext"
+        / "cutlass_extensions"
+        / "epilogue"
+        / "scaled_mm_epilogues_c3x.hpp"
+    ).read_text(encoding="utf-8")
+
+    assert "TileShape, T, T, Stride<Int<1>, Int<0>, Int<0>>" not in header
+    assert "TileShape, T, T, Stride<Int<0>, Int<1>, Int<0>>" not in header
+    assert "Sm90ColBroadcast<\n      0 /*Stages*/, TileShape, T, Stride<Int<1>, Int<0>, Int<0>>" in header
+    assert "Sm90RowBroadcast<\n      0 /*Stages*/, TileShape, T, Stride<Int<0>, Int<1>, Int<0>>" in header
+
+
 def test_machete_sources_generate_once_when_missing(monkeypatch, tmp_path):
     machete_root = tmp_path / "gptqmodel_ext" / "machete"
     cutlass_ext_root = tmp_path / "gptqmodel_ext" / "cutlass_extensions"
