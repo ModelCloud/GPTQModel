@@ -134,6 +134,44 @@ def test_machete_static_runtime_error_checks_optin_shared_memory(monkeypatch):
     assert "98304" in error
 
 
+def test_machete_hopper_arch_cuda_cflags_add_sm90a_when_torch_only_targets_sm90(monkeypatch):
+    class _Props:
+        name = "NVIDIA H200"
+        shared_memory_per_block = 49152
+        shared_memory_per_block_optin = 232448
+
+    monkeypatch.setattr(machete_utils, "IS_ROCM", False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (9, 0))
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda *_args, **_kwargs: _Props())
+    monkeypatch.setattr(machete_utils, "resolved_cuda_arch_flags", lambda: ["-gencode=arch=compute_90,code=sm_90"])
+
+    flags = machete_utils._machete_hopper_arch_cuda_cflags()
+
+    assert flags == list(machete_utils._MACHETE_SM90A_ARCH_FLAGS)
+
+
+def test_machete_hopper_arch_cuda_cflags_skip_duplicate_sm90a(monkeypatch):
+    class _Props:
+        name = "NVIDIA H200"
+        shared_memory_per_block = 49152
+        shared_memory_per_block_optin = 232448
+
+    monkeypatch.setattr(machete_utils, "IS_ROCM", False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (9, 0))
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda *_args, **_kwargs: _Props())
+    monkeypatch.setattr(
+        machete_utils,
+        "resolved_cuda_arch_flags",
+        lambda: ["-gencode=arch=compute_90a,code=sm_90a"],
+    )
+
+    assert machete_utils._machete_hopper_arch_cuda_cflags() == []
+
+
 def test_ensure_cutlass_source_bootstraps_repo_local_checkout(monkeypatch, tmp_path):
     archive_path = tmp_path / f"cutlass-v{machete_utils._CUTLASS_VERSION}.tar.gz"
     _write_fake_cutlass_archive(archive_path)
@@ -181,6 +219,18 @@ def test_scaled_mm_epilogues_c3x_matches_cutlass_442_broadcast_signatures():
     assert "TileShape, T, T, Stride<Int<0>, Int<1>, Int<0>>" not in header
     assert "Sm90ColBroadcast<\n      0 /*Stages*/, TileShape, T, Stride<Int<1>, Int<0>, Int<0>>" in header
     assert "Sm90RowBroadcast<\n      0 /*Stages*/, TileShape, T, Stride<Int<0>, Int<1>, Int<0>>" in header
+
+
+def test_machete_mm_kernel_plain_store_uses_trivial_epilogue():
+    kernel_header = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext"
+        / "machete"
+        / "machete_mm_kernel.cuh"
+    ).read_text(encoding="utf-8")
+
+    assert "TrivialEpilogue<ElementAccumulator, ElementD," in kernel_header
+    assert "Sm90EVT<\n      cutlass::epilogue::fusion::Sm90AccFetch>" not in kernel_header
 
 
 def test_machete_sources_generate_once_when_missing(monkeypatch, tmp_path):

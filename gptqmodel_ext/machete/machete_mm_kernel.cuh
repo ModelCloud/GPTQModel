@@ -136,8 +136,9 @@ struct MacheteKernelTemplate {
                 "Currently token and channel scales (if present) must be float "
                 "(and if one is present the other must be too)");
 
-  using StoreEpilogueCompute = typename cutlass::epilogue::fusion::Sm90EVT<
-      cutlass::epilogue::fusion::Sm90AccFetch>;
+  using StoreEpilogueCompute =
+      typename vllm::c3x::TrivialEpilogue<ElementAccumulator, ElementD,
+                                          TileShape>::EVTCompute;
 
   using EVTCompute =
       std::conditional_t<with_channel_scales || with_token_scales,

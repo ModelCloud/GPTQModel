@@ -22,6 +22,7 @@ from .cpp import (
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
+    resolved_cuda_arch_flags,
 )
 from .logger import setup_logger
 from .marlin_scalar_type import ScalarType, scalar_types
@@ -38,6 +39,10 @@ _CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{_
 _CUTLASS_VERSION_MARKER = ".gptqmodel_cutlass_version"
 _MACHETE_REQUIRED_COMPUTE_CAPABILITY = (9, 0)
 _MACHETE_MIN_SHARED_MEMORY_PER_BLOCK_OPTIN = 204800
+_MACHETE_SM90A_ARCH_FLAGS = (
+    "-gencode=arch=compute_90a,code=sm_90a",
+    "-gencode=arch=compute_90a,code=compute_90a",
+)
 
 MACHETE_PREPACKED_BLOCK_SHAPE = (64, 128)
 
@@ -291,6 +296,18 @@ def _machete_extra_cflags() -> list[str]:
     return default_jit_cflags(enable_bf16=True)
 
 
+def _machete_hopper_arch_cuda_cflags() -> list[str]:
+    if _machete_static_runtime_error():
+        return []
+
+    # vLLM builds Machete only for Hopper-compatible sm90a targets. Torch's
+    # default JIT arch detection resolves H100/H200 to sm_90, which compiles
+    # but triggers CUTLASS runtime abort spam for sm90a-only instructions.
+    if any("90a" in flag for flag in resolved_cuda_arch_flags()):
+        return []
+    return list(_MACHETE_SM90A_ARCH_FLAGS)
+
+
 def _machete_extra_cuda_cflags() -> list[str]:
     return [
         "-U__CUDA_NO_HALF_OPERATORS__",
@@ -308,6 +325,7 @@ def _machete_extra_cuda_cflags() -> list[str]:
             include_fatbin_compression=True,
             include_diag_suppress=True,
         ),
+        *_machete_hopper_arch_cuda_cflags(),
     ]
 
 
