@@ -66,4 +66,4 @@ class Test_Granite_4_0_H_350M(ModelTest):
     }
 
     def test_granite(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

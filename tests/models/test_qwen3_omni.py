@@ -27,4 +27,4 @@ class TestQwen3Omni(ModelTest):
     QUANT_BATCH_SIZE = 1
 
     def test_omni(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

@@ -74,7 +74,7 @@ class TestLlama3_2_BitsAndBytes(ModelTest):
     def test_llama3_2_bitsandbytes(self):
         if not BITSANDBYTES_AVAILABLE:
             self.skipTest("bitsandbytes backend unavailable")
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 
         module = self.model.model.model.layers[0].self_attn.q_proj
         assert isinstance(module, BitsAndBytesLinear)

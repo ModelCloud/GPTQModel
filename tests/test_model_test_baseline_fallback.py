@@ -18,6 +18,7 @@ from model_test import ModelTest  # noqa: E402
 class _BaselineFallbackHarness(ModelTest):
     NATIVE_MODEL_ID = "/tmp/native-model"
     LOAD_BACKEND = BACKEND.TORCH
+    DISABLE_NATIVE_BASELINE_FALLBACK = False
     EVAL_TASKS = {
         "arc_challenge": {
             "acc": {
@@ -31,13 +32,13 @@ class _BaselineFallbackHarness(ModelTest):
     def __init__(self, native_results):
         super().__init__(methodName="runTest")
         self._stub_native_results = native_results
-        self.lm_eval_calls = 0
+        self.evaluate_model_calls = 0
 
     def _model_test_mode(self) -> str:
         return self.MODEL_TEST_MODE_SLOW
 
-    def lm_eval(self, *args, **kwargs):  # pragma: no cover - exercised via check_results
-        self.lm_eval_calls += 1
+    def evaluate_model(self, *args, **kwargs):  # pragma: no cover - exercised via check_results
+        self.evaluate_model_calls += 1
         return self._stub_native_results
 
 
@@ -48,7 +49,7 @@ def test_check_results_accepts_current_native_baseline_when_static_value_is_stal
 
     harness.check_results({"arc_challenge": {"acc,none": 0.255}})
 
-    assert harness.lm_eval_calls == 1
+    assert harness.evaluate_model_calls == 1
 
 
 def test_check_results_still_fails_when_quantized_result_misses_current_native_baseline():
@@ -59,4 +60,4 @@ def test_check_results_still_fails_when_quantized_result_misses_current_native_b
     with pytest.raises(AssertionError):
         harness.check_results({"arc_challenge": {"acc,none": 0.255}})
 
-    assert harness.lm_eval_calls == 1
+    assert harness.evaluate_model_calls == 1

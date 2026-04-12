@@ -28,4 +28,4 @@ class TestQwen3_5(ModelTest):
 
 
     def test_qwen3_5(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

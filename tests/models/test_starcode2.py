@@ -17,5 +17,5 @@ class TestStarCode2(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = 0.30802047781569963
     TORCH_DTYPE = torch.float16
     def test_starcode2(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 

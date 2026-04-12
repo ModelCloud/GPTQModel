@@ -256,6 +256,7 @@ jobs:
 
           echo "--- uninstalling required deps..."
           python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
+          uv pip uninstall lm-eval || true
 
       # - name: Install Evalution
       #   run: |
@@ -314,6 +315,7 @@ jobs:
 
           # deps may reinstalled torch
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+          uv pip uninstall lm-eval || true
 
       - name: Print uv env
         run: |
@@ -467,6 +469,7 @@ jobs:
           bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
           python .github/scripts/install_deps.py ${{ matrix.test_script }}
           python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
+          uv pip uninstall lm-eval || true
 
       - name: Install package from source
         run: |
@@ -487,6 +490,7 @@ jobs:
             uv pip install "$url"
           done
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+          uv pip uninstall lm-eval || true
 
       - name: Print uv env
         run: |
@@ -618,7 +622,7 @@ jobs:
 #          pip install setuptools build -U -i http://$RUNNER/simple --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 #
 #          echo "=== installing test tools"
-#          uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm -U -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+#          uv pip install pytest parameterized vllm device-smi mlx-lm -U -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 #
 #          echo "=== installing gptqmodel"
 #          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple

@@ -35,7 +35,7 @@ class TestLmHeadLoad(ModelTest):
         assert isinstance(model.model.lm_head, BaseQuantLinear)
 
     def test_eval(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 
 
 class TestLmHeadQuant(ModelTest):
@@ -81,7 +81,7 @@ class TestLmHeadQuant(ModelTest):
                 device_map="auto",
             )
 
-            task_results = self.lm_eval(model=model,
+            task_results = self.evaluate_model(model=model,
                                         trust_remote_code=self.TRUST_REMOTE_CODE,
                                         delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
             self.check_results(task_results)

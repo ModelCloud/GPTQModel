@@ -70,7 +70,7 @@ class TestGemma4E2B(_Gemma4VariantModelTest):
     EVAL_BATCH_SIZE = 8
 
     def test_gemma4_e2b(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 
 
 class TestGemma4E4BIt(_Gemma4VariantModelTest):
@@ -79,7 +79,7 @@ class TestGemma4E4BIt(_Gemma4VariantModelTest):
     EVAL_BATCH_SIZE = 4
 
     def test_gemma4_e4b_it(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 
 
 class TestGemma431BIt(_Gemma4VariantModelTest):
@@ -96,4 +96,4 @@ class TestGemma431BIt(_Gemma4VariantModelTest):
         return quantize_config
 
     def test_gemma4_31b_it(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

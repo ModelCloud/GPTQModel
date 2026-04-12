@@ -29,4 +29,4 @@ class TestBaiChuan(ModelTest):
         if importlib.util.find_spec("sentencepiece") is None:
             self.skipTest("Baichuan tokenizer remote code requires sentencepiece")
 
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

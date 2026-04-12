@@ -18,4 +18,4 @@ class TestCohere(ModelTest):
     EVAL_BATCH_SIZE = 4
 
     def test_cohere(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

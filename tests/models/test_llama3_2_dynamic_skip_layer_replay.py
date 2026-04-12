@@ -285,7 +285,7 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
         if eval_records and len(eval_records) == 1 and target_backend in eval_records:
             task_results = eval_records[target_backend]
         else:
-            task_results = self.lm_eval(
+            task_results = self.evaluate_model(
                 model=self.SAVE_PATH if self.SAVE_PATH else self.model,
                 trust_remote_code=self.TRUST_REMOTE_CODE,
                 delete_quantized_model=self.DELETE_QUANTIZED_MODEL,

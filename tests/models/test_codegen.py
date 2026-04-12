@@ -32,4 +32,4 @@ class TestCodeGen(ModelTest):
             )
 
     def test_codegen(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

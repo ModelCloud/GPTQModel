@@ -42,4 +42,4 @@ class TestQwen3Next(ModelTest):
     # USE_FLASH_ATTN = True
 
     def test_mimo(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

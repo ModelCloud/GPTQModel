@@ -28,4 +28,4 @@ class TestHymba(ModelTest):
 
 
     def test_hymba(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

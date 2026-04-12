@@ -21,4 +21,4 @@ class TestGlmMoeLite(ModelTest):
     SAVE_PATH = "temp/TestGlmMoeLite"
 
     def test_glm4moe(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

@@ -57,4 +57,4 @@ class TestBrumby(ModelTest):
             )
 
     def test_brumby(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

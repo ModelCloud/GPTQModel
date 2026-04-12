@@ -26,4 +26,4 @@ class Test(ModelTest):
     SYM = False
 
     def test(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

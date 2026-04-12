@@ -19,4 +19,4 @@ class TestBloom(ModelTest):
     USE_FLASH_ATTN = False
 
     def test_bloom(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

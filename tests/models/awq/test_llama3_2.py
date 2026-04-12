@@ -94,4 +94,4 @@ class TestLlama3_2_awq(ModelTest):
     TORCH_DTYPE = torch.float16
 
     def test_llama3_2_awq(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

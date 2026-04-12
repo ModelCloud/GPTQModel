@@ -33,4 +33,4 @@ class TestYi(ModelTest):
     }
 
     def test_yi(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

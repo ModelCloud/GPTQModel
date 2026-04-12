@@ -22,4 +22,4 @@ class TestDream(ModelTest):
     BITS = 8
 
     def test_dream(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

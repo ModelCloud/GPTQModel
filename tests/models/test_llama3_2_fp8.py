@@ -71,4 +71,4 @@ class TestLlama3_2_FP8(ModelTest):
     KERNEL_INFERENCE = {TorchFP8Linear}
 
     def test_llama3_2_fp8(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

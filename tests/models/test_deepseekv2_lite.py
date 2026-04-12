@@ -27,5 +27,5 @@ class TestDeepseekV2Lite(ModelTest):
     LOAD_BACKEND = BACKEND.AUTO
 
     def test_deepseekv2lite(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 

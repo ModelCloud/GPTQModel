@@ -26,4 +26,4 @@ class TestMixtral(ModelTest):
     OFFLOAD_TO_DISK = False  # FIXME Currently, after defuser converted the model, OFFLOAD_TO_DISK must be False for quantization.
 
     def test_mixtral(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

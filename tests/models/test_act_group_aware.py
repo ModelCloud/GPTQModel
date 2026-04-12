@@ -20,4 +20,4 @@ class TestHybridActOrder(ModelTest):
     ACT_GROUP_AWARE = True
 
     def test_llama3_2(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

@@ -69,7 +69,7 @@ class TestLlama3_2_ExllamaV3(ModelTest):
     LOAD_BACKEND = BACKEND.EXLLAMA_V3
 
     def test_llama3_2_exllamav3(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 
         module = self.model.model.model.layers[0].self_attn.q_proj
         assert isinstance(module, ExllamaV3Linear)

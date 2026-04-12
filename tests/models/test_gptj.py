@@ -20,4 +20,4 @@ class TestGptJ(ModelTest):
     USE_FLASH_ATTN = False
 
     def test_gptj(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

@@ -28,8 +28,8 @@ def _is_model_compat_test(rel_path: str, file_path: Path) -> bool:
         return False
 
     compat_markers = (
-        "quant_lm_eval(",
-        "self.lm_eval(",
+        "quantize_and_evaluate(",
+        "self.evaluate_model(",
         "check_results(",
     )
     return any(marker in contents for marker in compat_markers)
@@ -45,7 +45,7 @@ def getFiles(
     Returns:
       (torch_test_files, model_compat_test_files, m4_test_files)
       - torch_test_files: tests/**/test_*.py excluding mlx / ipex / xpu and model compat files
-      - model_compat_test_files: tests/models/**/test_*.py files that run model quantize + lm-eval compat flows
+      - model_compat_test_files: tests/models/**/test_*.py files that run model quantize + evaluation compat flows
       - m4_test_files: tests/**/test_*.py that contains mlx or apple
     """
     tests_root = Path(tests_root)
