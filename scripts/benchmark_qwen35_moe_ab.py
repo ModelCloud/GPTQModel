@@ -345,8 +345,9 @@ def _single_case_main(args: argparse.Namespace) -> int:
         for idx in range(torch.cuda.device_count()):
             try:
                 torch.cuda.synchronize(idx)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Snapshot collection is best-effort; keep the benchmark running.
+                print(f"Warning: failed to synchronize cuda:{idx} during benchmark snapshot: {exc}", file=sys.stderr)
 
     def _snapshot_cuda(label: str) -> Dict[str, Any]:
         gc.collect()
@@ -444,7 +445,6 @@ def _single_case_main(args: argparse.Namespace) -> int:
 
             model = None
             dataset = None
-            quant_wall_s = 0.0
             stop_exception = False
             try:
                 self._record_snapshot("before_load")

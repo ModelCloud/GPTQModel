@@ -1,10 +1,10 @@
 import threading
+import sys
 import types
 from typing import Dict
 
 import torch
 
-import gptqmodel.looper.module_looper as module_looper_module
 import gptqmodel.looper.stage_subset as stage_subset_module
 from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
@@ -100,6 +100,7 @@ def test_module_looper_runtime_telemetry_reports_gil_and_split_pools(monkeypatch
     emitted = []
     info_logs = []
     warn_logs = []
+    module_looper_module = sys.modules[ModuleLooper.__module__]
 
     monkeypatch.setattr(
         module_looper_module,

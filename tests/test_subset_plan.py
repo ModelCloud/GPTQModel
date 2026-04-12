@@ -1,9 +1,9 @@
+import sys
 import types
 from unittest.mock import MagicMock
 
 import torch
 
-import gptqmodel.looper.stage_subset as stage_subset_module
 from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_layer_subset_plans, build_subset_plan
@@ -438,6 +438,7 @@ def test_build_layer_subset_plans_merges_groups_for_single_pass_processors():
 
 def test_emit_moe_parallel_quant_subset_telemetry_reports_gil_and_worker_fanout(monkeypatch):
     emitted = []
+    stage_subset_module = sys.modules[build_subset_plan.__module__]
 
     monkeypatch.setattr(
         stage_subset_module,
