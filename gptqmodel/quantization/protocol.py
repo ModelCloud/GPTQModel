@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-import pcre as re
+import pcre
 
 from .config import FORMAT, METHOD, GGUFBits, GGUFConfig, QuantizeConfig, SmoothMAD
 
@@ -524,4 +524,4 @@ def _resolve_export_format(method: METHOD, export: Optional[ExportSpec]) -> FORM
 def _pattern_matches(pattern: str, module_name: str) -> bool:
     if pattern == "*":
         return True
-    return re.search(pattern, module_name) is not None
+    return pcre.compile(pattern).search(module_name) is not None

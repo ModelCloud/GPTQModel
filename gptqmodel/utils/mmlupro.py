@@ -9,7 +9,7 @@ import os
 import random
 import time
 
-import pcre as re
+import pcre
 import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
@@ -24,6 +24,12 @@ max_new_tokens = 2048
 stop_string = "Question:"
 
 log = setup_logger()
+_ANSWER_IS_RE = pcre.compile(r"answer is \(?([A-J])\)?")
+_ANSWER_LINE_RE = pcre.compile(r".*[aA]nswer:\s*([A-J])")
+_FINAL_ANSWER_RE = pcre.compile(
+    r"\b[A-J]\b(?!.*\b[A-J]\b)",
+    flags=pcre.Flag.DOTALL,
+)
 
 def load_mmlu_pro():
     dataset = load_dataset("TIGER-Lab/MMLU-Pro")
@@ -92,8 +98,7 @@ def generate_cot_prompt(val_df, curr, k):
 
 
 def extract_answer(text):
-    pattern = r"answer is \(?([A-J])\)?"
-    match = re.search(pattern, text)
+    match = _ANSWER_IS_RE.search(text)
     if match:
         return match.group(1)
     else:
@@ -102,7 +107,7 @@ def extract_answer(text):
 
 
 def extract_again(text):
-    match = re.search(r'.*[aA]nswer:\s*([A-J])', text)
+    match = _ANSWER_LINE_RE.search(text)
     if match:
         return match.group(1)
     else:
@@ -110,8 +115,7 @@ def extract_again(text):
 
 
 def extract_final(text):
-    pattern = r"\b[A-J]\b(?!.*\b[A-J]\b)"
-    match = re.search(pattern, text, re.DOTALL)
+    match = _FINAL_ANSWER_RE.search(text)
     if match:
         return match.group(0)
     else:

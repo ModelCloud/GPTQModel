@@ -13,7 +13,7 @@ import shutil
 from os.path import isfile, join
 from typing import Any, Dict, List, Optional, Union
 
-import pcre as re
+import pcre
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -82,6 +82,10 @@ EORA_DEFAULT_FILE = "eora.safetensors"
 # disable gptqmodel split_by layer feature (until sglang pr is merged since our dir struct is not compatible)
 # SUPPORTED_SPLIT_BY = {None, "layer"}
 SUPPORTED_SPLIT_BY = {None}
+_MAX_SHARD_SIZE_RE = pcre.compile(
+    r"\s*(\d+)([KMGTP]?B?)\s*",
+    flags=pcre.Flag.CASELESS,
+)
 
 
 def _parse_split_by(value: Optional[str]) -> Optional[str]:
@@ -105,7 +109,9 @@ def _cleanup_saved_weight_files(
     model_save_name: str,
 ) -> None:
     expected = set(expected_files)
-    shard_pattern = re.compile(rf"{re.escape(model_base_name)}-\d{{5}}-of-\d{{5}}\.safetensors")
+    shard_pattern = pcre.compile(
+        rf"{pcre.escape(model_base_name)}-\d{{5}}-of-\d{{5}}\.safetensors"
+    )
 
     for filename in os.listdir(save_dir):
         full_filename = join(save_dir, filename)
@@ -670,7 +676,7 @@ def ModelWriter(cls):
                 return None
             if isinstance(value, int):
                 return value
-            match = re.fullmatch(r"\s*(\d+)([KMGTP]?B?)\s*", value, re.IGNORECASE)
+            match = _MAX_SHARD_SIZE_RE.fullmatch(value)
             if not match:
                 raise ValueError(f"Invalid max_shard_size value: {value}")
             base = int(match.group(1))

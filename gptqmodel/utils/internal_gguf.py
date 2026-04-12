@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 from collections import OrderedDict
 from enum import IntEnum
@@ -12,6 +11,7 @@ from typing import Any, Literal, NamedTuple, TypeVar, Union
 
 import numpy as np
 import numpy.typing as npt
+import pcre
 import torch
 
 from ..nn_modules.qlinear.gguf import (
@@ -156,20 +156,20 @@ _QWEN3_DIRECT_NAME_MAP = {
     "model.embed_tokens": "token_embd",
     "model.norm": "output_norm",
 }
-_QWEN3_BLOCK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.q_proj$"), "blk.{bid}.attn_q"),
-    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.k_proj$"), "blk.{bid}.attn_k"),
-    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.v_proj$"), "blk.{bid}.attn_v"),
-    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.o_proj$"), "blk.{bid}.attn_output"),
-    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.q_norm$"), "blk.{bid}.attn_q_norm"),
-    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.k_norm$"), "blk.{bid}.attn_k_norm"),
-    (re.compile(r"^model\.layers\.(\d+)\.mlp\.gate_proj$"), "blk.{bid}.ffn_gate"),
-    (re.compile(r"^model\.layers\.(\d+)\.mlp\.up_proj$"), "blk.{bid}.ffn_up"),
-    (re.compile(r"^model\.layers\.(\d+)\.mlp\.down_proj$"), "blk.{bid}.ffn_down"),
-    (re.compile(r"^model\.layers\.(\d+)\.input_layernorm$"), "blk.{bid}.attn_norm"),
-    (re.compile(r"^model\.layers\.(\d+)\.post_attention_layernorm$"), "blk.{bid}.ffn_norm"),
+_QWEN3_BLOCK_PATTERNS: tuple[tuple[pcre.Pattern, str], ...] = (
+    (pcre.compile(r"^model\.layers\.(\d+)\.self_attn\.q_proj$"), "blk.{bid}.attn_q"),
+    (pcre.compile(r"^model\.layers\.(\d+)\.self_attn\.k_proj$"), "blk.{bid}.attn_k"),
+    (pcre.compile(r"^model\.layers\.(\d+)\.self_attn\.v_proj$"), "blk.{bid}.attn_v"),
+    (pcre.compile(r"^model\.layers\.(\d+)\.self_attn\.o_proj$"), "blk.{bid}.attn_output"),
+    (pcre.compile(r"^model\.layers\.(\d+)\.self_attn\.q_norm$"), "blk.{bid}.attn_q_norm"),
+    (pcre.compile(r"^model\.layers\.(\d+)\.self_attn\.k_norm$"), "blk.{bid}.attn_k_norm"),
+    (pcre.compile(r"^model\.layers\.(\d+)\.mlp\.gate_proj$"), "blk.{bid}.ffn_gate"),
+    (pcre.compile(r"^model\.layers\.(\d+)\.mlp\.up_proj$"), "blk.{bid}.ffn_up"),
+    (pcre.compile(r"^model\.layers\.(\d+)\.mlp\.down_proj$"), "blk.{bid}.ffn_down"),
+    (pcre.compile(r"^model\.layers\.(\d+)\.input_layernorm$"), "blk.{bid}.attn_norm"),
+    (pcre.compile(r"^model\.layers\.(\d+)\.post_attention_layernorm$"), "blk.{bid}.ffn_norm"),
 )
-_QWEN3_LINEAR_TENSOR_RE = re.compile(
+_QWEN3_LINEAR_TENSOR_RE = pcre.compile(
     r"^blk\.\d+\.(attn_q|attn_k|attn_v|attn_output|ffn_gate|ffn_up|ffn_down)\.weight$"
 )
 _GGUF_BITS_ALIAS_BY_QTYPE: dict[GGMLQuantizationType, str] = {

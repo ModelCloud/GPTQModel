@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
-import pcre as re
+import pcre
 import torch
 from packaging import version
 
@@ -138,6 +138,8 @@ def _is_bitblas_available() -> bool:
 
 
 BITBLAS_AVAILABLE = _is_bitblas_available()
+_BITBLAS_TARGET_ARCH_RE = pcre.compile(r"\bsm_(\d+)[a-z]*\b")
+_BITBLAS_TARGET_SM_RE = pcre.compile(r"sm_(\d+)")
 
 
 BITBLAS_INSTALL_HINT = (
@@ -185,7 +187,7 @@ def _bitblas_target_arch(target) -> Optional[str]:
 
         return str(tvm.target.Target(target_text).arch)
     except Exception:
-        match = re.search(r"\bsm_(\d+)[a-z]*\b", target_text)
+        match = _BITBLAS_TARGET_ARCH_RE.search(target_text)
         if match:
             return f"sm_{match.group(1)}"
         return None
@@ -196,7 +198,7 @@ def _bitblas_target_sm(target) -> Optional[int]:
     if arch is None:
         return None
 
-    match = re.search(r"sm_(\d+)", arch)
+    match = _BITBLAS_TARGET_SM_RE.search(arch)
     if match:
         return int(match.group(1))
     return None

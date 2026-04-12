@@ -79,12 +79,13 @@ config_output=$({ printf '\n'; } | ${SUDO} update-alternatives --config cuda 2>&
 
 selection=$(CONFIG_OUTPUT="${config_output}" "${python_cmd}" - "${target_version}" <<'PY'
 import os
-import pcre as re
+import pcre
 import sys
 
 target = sys.argv[1]
 data = os.environ.get("CONFIG_OUTPUT", "")
 lines = data.splitlines()
+cuda_version_pattern = pcre.compile(r"cuda-([0-9.]+)")
 
 candidates = []
 for line in lines:
@@ -100,7 +101,7 @@ for line in lines:
     if not sel.isdigit():
         continue
     path = parts[1]
-    match = re.search(r"cuda-([0-9.]+)", path)
+    match = cuda_version_pattern.search(path)
     if not match:
         continue
     version = match.group(1)

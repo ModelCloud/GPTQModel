@@ -3,14 +3,19 @@ from __future__ import annotations
 
 import argparse
 import bisect
-import pcre as re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlopen
 
+import pcre
 
-BLOCK_RE = re.compile(r"struct TSample samples_(\d+)\[\]\s*=\s*\{(.*?)\n\};", re.S)
-ROW_RE = re.compile(r"\{\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*\}")
+BLOCK_RE = pcre.compile(
+    r"struct TSample samples_(\d+)\[\]\s*=\s*\{(.*?)\n\};",
+    flags=pcre.Flag.DOTALL,
+)
+ROW_RE = pcre.compile(
+    r"\{\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*\}"
+)
 EXLLAMAV3_ORIGINAL_COMMIT = "ba1ad9ac66670785c0ca95b0f1ab3ad044fda7c6"
 EXLLAMAV3_ORIGINAL_LEGACY_HEADER_URL = (
     "https://raw.githubusercontent.com/turboderp-org/exllamav3/"

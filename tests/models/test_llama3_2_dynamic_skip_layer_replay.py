@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 from pathlib import Path
 
+import pcre
 import pytest
 import torch
 import torch.nn as nn
@@ -20,6 +20,10 @@ LAYER0_AND_LAYER2_ONLY_NEGATIVE_MATCH = r"^model\.layers\.(?!(?:0|2)\.)\d+\."
 GPTQ_TENSOR_SUFFIXES = ("qweight", "qzeros", "scales", "g_idx")
 # Dynamically skipped layers must remain in native half precision on disk.
 HALF_PRECISION_DTYPES = {"F16", "BF16"}
+_LAYER_INDEX_RE = pcre.compile(r"\.layers\.(\d+)\.")
+_QUANTIZED_TENSOR_RE = pcre.compile(
+    r"^(model\.layers\.(\d+)\..*)\.(qweight|qzeros|scales|g_idx)$"
+)
 
 
 class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
@@ -110,7 +114,7 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
             if not isinstance(module, BaseQuantLinear):
                 continue
 
-            layer_match = re.search(r"\.layers\.(\d+)\.", name)
+            layer_match = _LAYER_INDEX_RE.search(name)
             if layer_match is None:
                 continue
 
@@ -134,7 +138,7 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
     @staticmethod
     def _layer_index_from_module_name(module_name: str) -> int | None:
         """Return the transformer layer index encoded in a module/tensor name."""
-        layer_match = re.search(r"\.layers\.(\d+)\.", module_name)
+        layer_match = _LAYER_INDEX_RE.search(module_name)
         if layer_match is None:
             return None
         return int(layer_match.group(1))
@@ -200,9 +204,8 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
         assert native_linear_module_names, "Expected skipped layers to retain native linear weights in the saved model."
 
         unexpected_quantized_keys = []
-        quantized_tensor_pattern = re.compile(r"^(model\.layers\.(\d+)\..*)\.(qweight|qzeros|scales|g_idx)$")
         for tensor_name in tensor_dtypes:
-            match = quantized_tensor_pattern.match(tensor_name)
+            match = _QUANTIZED_TENSOR_RE.match(tensor_name)
             if match is None:
                 continue
             layer_idx = int(match.group(2))

@@ -32,7 +32,7 @@ import os
 import threading
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
-import pcre as re
+import pcre
 import torch
 from safetensors import safe_open
 from torch import nn
@@ -390,9 +390,9 @@ def print_module_tree(
     # ------------------------------------------------------------------
     # Setup + utilities
     # ------------------------------------------------------------------
-    _ = re.compile(filter_regex) if filter_regex else None  # reserved for future
-    experts_path_re = re.compile(experts_regex)
-    layers_name_re = re.compile(layers_regex) if layers_show is not None else None
+    _ = pcre.compile(filter_regex) if filter_regex else None  # reserved for future
+    experts_path_re = pcre.compile(experts_regex)
+    layers_name_re = pcre.compile(layers_regex) if layers_show is not None else None
     seen: Set[int] = set()
 
     total_p = sum(p.numel() for p in model.parameters())
