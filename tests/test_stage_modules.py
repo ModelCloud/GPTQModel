@@ -4,6 +4,7 @@ from typing import Dict
 
 import torch
 
+import gptqmodel.looper.module_looper as module_looper_module
 import gptqmodel.looper.stage_subset as stage_subset_module
 from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
@@ -93,6 +94,46 @@ def test_assign_quant_device_prefers_balanced_hint():
     assert target == torch.device("cuda:1")
     assert looper._module_device_map[named.full_name] == torch.device("cuda:1")
     assert looper._quant_device_rr == 0
+
+
+def test_module_looper_runtime_telemetry_reports_gil_and_split_pools(monkeypatch):
+    emitted = []
+    info_logs = []
+    warn_logs = []
+
+    monkeypatch.setattr(
+        module_looper_module,
+        "emit_device_telemetry",
+        lambda event, **fields: emitted.append((event, fields)),
+    )
+    monkeypatch.setattr(module_looper_module, "has_gil_control", lambda: True)
+    monkeypatch.setattr(module_looper_module, "has_gil_disabled", lambda: True)
+    monkeypatch.setattr(module_looper_module.os, "environ", {"PYTHON_GIL": "0"})
+    monkeypatch.setattr(module_looper_module.log, "info", lambda *args, **kwargs: info_logs.append(args))
+    monkeypatch.setattr(module_looper_module.log, "warn", lambda *args, **kwargs: warn_logs.append(args))
+
+    looper = ModuleLooper.__new__(ModuleLooper)
+    looper.gptq_model = types.SimpleNamespace(dynamic_expert_index=object())
+    looper._dense_quant_devices = [torch.device("cuda:0")]
+    looper._moe_quant_devices = [torch.device("cuda:1"), torch.device("cuda:2")]
+    looper._dense_vram_strategy = "exclusive"
+    looper._moe_vram_strategy = "balanced"
+    looper.moe_routing_override = 256
+    looper.moe_routing_bypass = False
+
+    looper._emit_moe_parallel_quant_runtime()
+
+    assert info_logs
+    assert not warn_logs
+    assert len(emitted) == 1
+    event, fields = emitted[0]
+    assert event == "moe_parallel_quant_runtime"
+    assert fields["dense_devices"] == ["cuda:0"]
+    assert fields["moe_devices"] == ["cuda:1", "cuda:2"]
+    assert fields["routing_override"] == 256
+    assert fields["python_gil_env"] == "0"
+    assert fields["python_gil_disabled"] is True
+    assert fields["free_threaded_parallel_quant_eligible"] is True
 
 
 class _TinyLayer(torch.nn.Module):

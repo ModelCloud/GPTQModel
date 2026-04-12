@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 import torch
 
+import gptqmodel.looper.stage_subset as stage_subset_module
 from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_layer_subset_plans, build_subset_plan
@@ -433,3 +434,66 @@ def test_build_layer_subset_plans_merges_groups_for_single_pass_processors():
     assert plans[0].subset_index == 0
     assert plans[0].subset_total == 1
     assert list(plans[0].modules.keys()) == ["self_attn.q_proj", "mlp.down_proj"]
+
+
+def test_emit_moe_parallel_quant_subset_telemetry_reports_gil_and_worker_fanout(monkeypatch):
+    emitted = []
+
+    monkeypatch.setattr(
+        stage_subset_module,
+        "emit_device_telemetry",
+        lambda event, **fields: emitted.append((event, fields)),
+    )
+    monkeypatch.setattr(stage_subset_module, "has_gil_control", lambda: True)
+    monkeypatch.setattr(stage_subset_module, "has_gil_disabled", lambda: True)
+    monkeypatch.setattr(
+        stage_subset_module.DEVICE_THREAD_POOL,
+        "_collect_state_snapshot",
+        lambda: {
+            "workers": {"cuda:1": 4, "cuda:2": 4},
+            "total_workers": 8,
+            "total_inflight": 2,
+        },
+    )
+
+    named = _make_named_module("mlp.experts.0.gate_proj")
+    plan = stage_subset_module.SubsetPlan(
+        modules={named.name: named},
+        subset_index=0,
+        subset_total=1,
+        execute_forward=True,
+        replay_after_process=True,
+        forward_mode="serial",
+        batch_count=1,
+        forward_row_counts=[1],
+        forward_total_rows=1,
+        moe_groups={"mlp.experts.0": [named.name]},
+        forward_device_map={},
+        calibration_coverage_policy=stage_subset_module.CalibrationCoveragePolicy(
+            validate_input_coverage=False,
+            fallback_enabled=True,
+            prune_uncovered_modules=False,
+            record_dynamic_exclusions=False,
+        ),
+        module_chunks=[{named.name: named}],
+    )
+
+    stage_subset_module._emit_moe_parallel_quant_subset_telemetry(
+        plan=plan,
+        quant_target_devices={
+            named.name: torch.device("cuda:1"),
+            "mlp.experts.0.up_proj": torch.device("cuda:2"),
+        },
+        futures_count=2,
+        layer_index=3,
+    )
+
+    assert len(emitted) == 1
+    event, fields = emitted[0]
+    assert event == "moe_parallel_quant_subset"
+    assert fields["layer_index"] == 3
+    assert fields["submitted_tasks"] == 2
+    assert fields["quant_devices"] == ["cuda:1", "cuda:2"]
+    assert fields["thread_pool_workers"] == {"cuda:1": 4, "cuda:2": 4}
+    assert fields["python_gil_disabled"] is True
+    assert fields["free_threaded_parallel_quant_active"] is True

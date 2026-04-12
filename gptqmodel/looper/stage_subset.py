@@ -16,6 +16,7 @@ MoE chunking, coverage handling, and device routing are easier to reason about.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
@@ -32,9 +33,11 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
 from ..quantization.config import GcMode, ExpertsRoutingBypass, VramStrategy
+from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
+from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import torch_empty_cache, torch_sync
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -589,6 +592,63 @@ def build_layer_subset_plans(
     ]
 
 
+def _emit_moe_parallel_quant_subset_telemetry(
+    *,
+    plan: SubsetPlan,
+    quant_target_devices: Dict[str, torch.device],
+    futures_count: int,
+    layer_index: int,
+) -> None:
+    """Capture the worker fan-out used for one MoE quant subset when telemetry is enabled."""
+
+    if not plan.moe_groups or futures_count <= 0:
+        return
+
+    unique_devices = sorted({str(device) for device in quant_target_devices.values() if device is not None})
+    thread_pool_workers: Dict[str, int] = {}
+    thread_pool_total_workers: Optional[int] = None
+    thread_pool_total_inflight: Optional[int] = None
+
+    collect_snapshot = getattr(DEVICE_THREAD_POOL, "_collect_state_snapshot", None)
+    if callable(collect_snapshot):
+        try:
+            snapshot = collect_snapshot()
+        except Exception:
+            snapshot = None
+        if isinstance(snapshot, dict):
+            workers = snapshot.get("workers") or {}
+            thread_pool_workers = {
+                device_name: int(workers.get(device_name, 0))
+                for device_name in unique_devices
+            }
+            total_workers = snapshot.get("total_workers")
+            total_inflight = snapshot.get("total_inflight")
+            if total_workers is not None:
+                thread_pool_total_workers = int(total_workers)
+            if total_inflight is not None:
+                thread_pool_total_inflight = int(total_inflight)
+
+    total_parallel_workers = sum(thread_pool_workers.values())
+    emit_device_telemetry(
+        "moe_parallel_quant_subset",
+        layer_index=layer_index,
+        subset_index=plan.subset_index + 1,
+        subset_total=plan.subset_total,
+        module_count=len(plan.modules),
+        moe_group_count=len(plan.moe_groups),
+        submitted_tasks=futures_count,
+        quant_devices=unique_devices,
+        thread_pool_workers=thread_pool_workers,
+        thread_pool_total_workers=thread_pool_total_workers,
+        thread_pool_total_inflight=thread_pool_total_inflight,
+        python_gil_env=os.environ.get("PYTHON_GIL"),
+        python_gil_controllable=has_gil_control(),
+        python_gil_disabled=has_gil_disabled(),
+        free_threaded_parallel_quant_eligible=bool(has_gil_disabled() and futures_count > 1),
+        free_threaded_parallel_quant_active=bool(total_parallel_workers > 1 and futures_count > 1),
+    )
+
+
 def _run_single_subset_pass(
     looper: 'ModuleLooper',
     processor: LoopProcessor,
@@ -986,6 +1046,13 @@ def _run_single_subset_pass(
                 subset_total,
             )
         )
+
+    _emit_moe_parallel_quant_subset_telemetry(
+        plan=plan,
+        quant_target_devices=quant_target_devices,
+        futures_count=len(futures),
+        layer_index=layer_index,
+    )
 
     for fut in futures:
         # Collect results in submission order so the final subset map preserves

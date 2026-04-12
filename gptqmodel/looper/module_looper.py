@@ -19,6 +19,7 @@ import math
 import threading
 import time
 import logging
+import os
 from concurrent.futures import as_completed
 from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING, Any
 
@@ -52,6 +53,7 @@ from ..utils.looper_helpers import (
 )
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, MoETopKState, set_moe_topk, restore_moe_topk
 from ..utils.offload import offload_to_disk
+from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
 from .. import DEVICE_THREAD_POOL
 from .awq_processor import AWQProcessor
@@ -313,9 +315,63 @@ class ModuleLooper():
         else:
             self.moe_routing_override = None
         self.moe_routing_bypass = self.gptq_model.quantize_config.moe_routing_bypass()
+        self._emit_moe_parallel_quant_runtime()
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
+
+    def _emit_moe_parallel_quant_runtime(self) -> None:
+        """Log the runtime knobs that decide whether MoE quant can fan out efficiently."""
+
+        if not getattr(self.gptq_model, "dynamic_expert_index", None):
+            return
+
+        dense_devices = [str(device) for device in self._dense_quant_devices]
+        moe_devices = [str(device) for device in self._moe_quant_devices]
+        gil_env = os.environ.get("PYTHON_GIL")
+        gil_disabled = has_gil_disabled()
+        gil_controllable = has_gil_control()
+        routing_mode = (
+            "override"
+            if self.moe_routing_override is not None
+            else "bypass"
+            if self.moe_routing_bypass
+            else "native"
+        )
+        free_threaded_parallel_quant_eligible = bool(gil_disabled and len(self._moe_quant_devices) > 0)
+
+        log.info(
+            "ModuleLooper: MoE quant runtime dense_pool=%s moe_pool=%s routing_mode=%s routing_override=%s "
+            "PYTHON_GIL=%s gil_disabled=%s free_threaded_parallel_quant_eligible=%s",
+            dense_devices,
+            moe_devices,
+            routing_mode,
+            self.moe_routing_override,
+            gil_env,
+            gil_disabled,
+            free_threaded_parallel_quant_eligible,
+        )
+        if moe_devices and gil_controllable and not gil_disabled:
+            log.warn(
+                "ModuleLooper: MoE quant is configured for device fan-out across %s but Python GIL is still enabled; "
+                "rerun with PYTHON_GIL=0 to unlock the free-threaded parallel quant path.",
+                moe_devices,
+            )
+
+        emit_device_telemetry(
+            "moe_parallel_quant_runtime",
+            dense_devices=dense_devices,
+            moe_devices=moe_devices,
+            dense_strategy=self._dense_vram_strategy,
+            moe_strategy=self._moe_vram_strategy,
+            routing_mode=routing_mode,
+            routing_override=self.moe_routing_override,
+            routing_bypass=self.moe_routing_bypass,
+            python_gil_env=gil_env,
+            python_gil_controllable=gil_controllable,
+            python_gil_disabled=gil_disabled,
+            free_threaded_parallel_quant_eligible=free_threaded_parallel_quant_eligible,
+        )
 
     class MoERoutingOverrideContext:
         """
