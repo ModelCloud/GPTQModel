@@ -21,7 +21,6 @@ from gptqmodel.looper.stage_layer import (
 from gptqmodel.looper.stage_subset import CalibrationCoveragePolicy, SubsetPlan, SubsetStageResult
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization.config import QuantizeConfig
-from gptqmodel.utils.pause_resume import PauseResumeController
 
 
 class _DummyQModel:
@@ -395,7 +394,6 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             self._moe_subset_threshold = 16
             self._vram_strategy = types.SimpleNamespace()
             self._layer_events = []
-            self.pause_controller = PauseResumeController()
 
         def _check_loop_stop(self):
             return False
@@ -604,7 +602,6 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             self._vram_strategy = types.SimpleNamespace()
             self._layer_events = []
             self.named_module_layers = []
-            self.pause_controller = PauseResumeController()
 
         def _check_loop_stop(self):
             return False
@@ -830,7 +827,6 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
             self._quant_device_lock = threading.Lock()
             self._moe_subset_threshold = 16
             self._vram_strategy = types.SimpleNamespace()
-            self.pause_controller = PauseResumeController()
             self.forward_replay_calls = []
 
         def _run_forward_batches(self, **kwargs):
@@ -1289,7 +1285,6 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             self._quant_device_lock = threading.Lock()
             self._moe_subset_threshold = 16
             self._vram_strategy = types.SimpleNamespace()
-            self.pause_controller = PauseResumeController()
             self._current_subset = None
             self.support_batch_quantize = False
             self.moe_routing_override = None

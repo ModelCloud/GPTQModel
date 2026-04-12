@@ -25,7 +25,6 @@ from gptqmodel.quantization.config import (
 from gptqmodel.quantization.fallback_smooth import smooth_block
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.fallback import should_use_fallback
-from gptqmodel.utils.pause_resume import PauseResumeController
 
 
 def test_smooth_mad_uses_sigma_normalized_window():
@@ -243,7 +242,6 @@ def test_awq_fallback_falls_back_to_rtn_when_no_activations(monkeypatch):
     processor = _StubAWQProcessor(
         qcfg=qcfg,
     )
-    processor._pause_controller = PauseResumeController()
     processor.pb = _DummyProgressBar()
 
     named = NamedModule(model.linear, name="linear", full_name="linear", layer_index=0)

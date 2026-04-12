@@ -203,6 +203,13 @@ class LoopProcessor:
         # GPTQ's Hessian updates) even when forwards run on multiple threads.
         self._batch_tls = threading.local()
 
+    def draw_progress(self, title: str, subtitle: str = "") -> None:
+        """Best-effort progress-bar redraw for processors with an attached progress handle."""
+
+        if self.pb is None:
+            return
+        self.pb.title(title).subtitle(subtitle).draw()
+
     @staticmethod
     def _compute_total_tokens(calibration_dataset) -> int:
         """Counts total calibration tokens using masks when available."""

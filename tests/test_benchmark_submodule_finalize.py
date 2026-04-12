@@ -17,7 +17,6 @@ from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import QuantizeConfig
-from gptqmodel.utils.pause_resume import PauseResumeController
 from gptqmodel.utils.threadx import DeviceThreadPool
 
 
@@ -153,7 +152,6 @@ def test_submodule_finalize_timing():
         require_fwd=False,
         calculate_w_wq_diff=False,
     )
-    processor._pause_controller = PauseResumeController()
     processor.pb = _DummyProgressBar()
 
     processor.preprocess(named_module)
@@ -367,7 +365,6 @@ def test_submodule_finalize_threadpool_serialization(cpu_workers):
         require_fwd=False,
         calculate_w_wq_diff=False,
     )
-    processor._pause_controller = PauseResumeController()
     processor.pb = _DummyProgressBar()
 
     module_count = min(cpu_workers * 2, 32)

@@ -144,7 +144,7 @@ class QQQProcessor(LoopProcessor):
         """Runs QQQ quantization for one module and stores pack-ready tensors."""
 
         base_title = f"Quantizing {module.name} in layer"
-        self._pause_controller.register_and_draw_progress_bar(self.pb, title=base_title, subtitle="")
+        self.draw_progress(base_title)
         qqq = self.tasks
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
