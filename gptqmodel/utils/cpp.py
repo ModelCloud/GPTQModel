@@ -442,6 +442,7 @@ class TorchOpsJitExtension:
         extra_cuda_cflags: Optional[Sequence[str] | Callable[[], Sequence[str]]] = None,
         extra_include_paths: Optional[Sequence[str] | Callable[[], Sequence[str]]] = None,
         extra_ldflags: Optional[Sequence[str] | Callable[[], Sequence[str]]] = None,
+        stage_roots: Optional[Sequence[str] | Callable[[], Sequence[str]]] = None,
         force_rebuild_env: Optional[str] = None,
         verbose_env: Optional[str] = None,
         requires_cuda: bool = False,
@@ -458,6 +459,7 @@ class TorchOpsJitExtension:
         self.extra_cuda_cflags = extra_cuda_cflags
         self.extra_include_paths = extra_include_paths
         self.extra_ldflags = extra_ldflags
+        self.stage_roots = stage_roots
         self.force_rebuild_env = force_rebuild_env
         self.verbose_env = verbose_env
         self.requires_cuda = bool(requires_cuda)
@@ -495,6 +497,74 @@ class TorchOpsJitExtension:
         if not self.requires_cuda:
             return _dedupe_path_strings(include_paths)
         return cuda_include_paths_with_fallback(include_paths)
+
+    def _resolved_stage_roots(self) -> list[Path]:
+        """Resolve optional project-local trees that should be copied into the build cache."""
+
+        roots = [Path(path).expanduser().resolve(strict=False) for path in self._resolve_sequence(self.stage_roots)]
+        if not roots:
+            return []
+
+        deduped: list[Path] = []
+        for candidate in sorted(roots, key=lambda path: (len(path.parts), str(path))):
+            if any(candidate == existing or candidate.is_relative_to(existing) for existing in deduped):
+                continue
+            deduped.append(candidate)
+        return deduped
+
+    def _stage_compile_inputs(
+        self,
+        *,
+        build_root: Path,
+        sources: Sequence[str],
+        include_paths: Sequence[str],
+    ) -> tuple[list[str], list[str]]:
+        """Copy configured local source trees into the build cache and rewrite compile paths."""
+
+        stage_roots = self._resolved_stage_roots()
+        if not stage_roots:
+            return list(sources), _dedupe_path_strings(include_paths)
+
+        staged_parent = build_root / "_local_sources"
+        staged_parent.mkdir(parents=True, exist_ok=True)
+
+        staged_roots: list[tuple[Path, Path]] = []
+        for stage_root in stage_roots:
+            if not stage_root.exists():
+                continue
+
+            stage_key = hashlib.sha256(str(stage_root).encode("utf-8")).hexdigest()[:12]
+            staged_root = staged_parent / f"{stage_root.name}-{stage_key}"
+            if not staged_root.exists():
+                if stage_root.is_dir():
+                    shutil.copytree(
+                        stage_root,
+                        staged_root,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+                    )
+                else:
+                    staged_root.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(stage_root, staged_root)
+            staged_roots.append((stage_root, staged_root))
+
+        if not staged_roots:
+            return list(sources), _dedupe_path_strings(include_paths)
+
+        staged_roots.sort(key=lambda item: len(item[0].parts), reverse=True)
+
+        def remap(raw_path: str) -> str:
+            normalized = Path(raw_path).expanduser().resolve(strict=False)
+            for source_root, staged_root in staged_roots:
+                try:
+                    relative = normalized.relative_to(source_root)
+                except ValueError:
+                    continue
+                return str(staged_root / relative)
+            return raw_path
+
+        staged_sources = [remap(source) for source in sources]
+        staged_include_paths = _dedupe_path_strings([remap(path) for path in include_paths])
+        return staged_sources, staged_include_paths
 
     def base_build_root(self) -> Path:
         """Return the user-visible cache root before applying the loader fingerprint."""
@@ -741,9 +811,16 @@ class TorchOpsJitExtension:
             started = time.perf_counter()
             build_invocation_succeeded = False
             try:
+                resolved_sources = self._resolve_sequence(self.sources)
+                extra_include_paths = self._resolved_extra_include_paths()
+                resolved_sources, extra_include_paths = self._stage_compile_inputs(
+                    build_root=build_root,
+                    sources=resolved_sources,
+                    include_paths=extra_include_paths,
+                )
                 kwargs = {
                     "name": self.name,
-                    "sources": self._resolve_sequence(self.sources),
+                    "sources": resolved_sources,
                     "build_directory": str(build_root),
                     "is_python_module": False,
                     "verbose": env_flag(self.verbose_env, default=False) if self.verbose_env else False,
@@ -754,7 +831,6 @@ class TorchOpsJitExtension:
                 extra_cuda_cflags = self._resolve_sequence(self.extra_cuda_cflags)
                 if extra_cuda_cflags:
                     kwargs["extra_cuda_cflags"] = extra_cuda_cflags
-                extra_include_paths = self._resolved_extra_include_paths()
                 if extra_include_paths:
                     kwargs["extra_include_paths"] = extra_include_paths
                 extra_ldflags = self._resolve_sequence(self.extra_ldflags)

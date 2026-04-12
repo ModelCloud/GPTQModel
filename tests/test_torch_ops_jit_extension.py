@@ -359,6 +359,53 @@ def test_torch_ops_jit_extension_appends_detected_cuda_include_paths(monkeypatch
     ]
 
 
+def test_torch_ops_jit_extension_stages_configured_local_roots(monkeypatch, tmp_path):
+    """Guard NFS-sensitive builds so configured project trees are copied into the local build cache."""
+
+    local_root = tmp_path / "repo"
+    (local_root / "src").mkdir(parents=True)
+    (local_root / "include").mkdir(parents=True)
+    source_path = local_root / "src" / "unit_test.cpp"
+    include_path = local_root / "include"
+    source_path.write_text('#include "unit_test.h"\nint kernel() { return 1; }\n', encoding="utf-8")
+    (include_path / "unit_test.h").write_text("inline int unit_test_header() { return 1; }\n", encoding="utf-8")
+
+    loader = _make_loader(
+        tmp_path,
+        sources=[str(source_path)],
+        extra_include_paths=[str(include_path), "/usr/local/cuda/include"],
+        stage_roots=[str(local_root)],
+    )
+
+    state = {"ready": False}
+    compile_calls = []
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+
+    def fake_compile(**kwargs):
+        compile_calls.append(kwargs)
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert len(compile_calls) == 1
+
+    staged_source = Path(compile_calls[0]["sources"][0])
+    staged_include = Path(compile_calls[0]["extra_include_paths"][0])
+    build_root = loader.build_root()
+
+    assert staged_source != source_path
+    assert staged_source.is_file()
+    assert staged_source.is_relative_to(build_root / "_local_sources")
+    assert staged_source.read_text(encoding="utf-8") == source_path.read_text(encoding="utf-8")
+    assert staged_include.is_dir()
+    assert staged_include.is_relative_to(build_root / "_local_sources")
+    assert compile_calls[0]["extra_include_paths"][1] == "/usr/local/cuda/include"
+
+
 def test_torch_ops_jit_extension_skips_cuda_wheel_include_paths_when_local_headers_exist(monkeypatch, tmp_path):
     """Guard local-toolkit builds so wheel headers do not get mixed into one CUDA compile invocation."""
 
