@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from shutil import which
 
 import pytest
 import torch
@@ -192,6 +193,61 @@ def test_nvfp4_global_scale_contract_is_float_in_marlin_sources():
     assert "c1 *= global_scale_f32;" in template_h
 
 
+def test_marlin_capability_checks_allow_sm75_but_reject_sm70(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (7, 5))
+
+    assert marlin_utils._marlin_capability_supported(7, 5) is True
+    assert marlin_utils._marlin_environment_error() == ""
+    assert marlin_utils._validate_marlin_device_support() is True
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (7, 0))
+
+    assert marlin_utils._marlin_capability_supported(7, 0) is False
+    assert "compute capability >= 7.5" in marlin_utils._marlin_environment_error()
+    assert marlin_utils._validate_marlin_device_support() is False
+
+
+def test_marlin_quant_linear_validate_device_allows_sm75(monkeypatch):
+    monkeypatch.setattr(marlin_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: (7, 5))
+
+    marlin_qlinear_module.MarlinLinear.validate_device(marlin_qlinear_module.DEVICE.CUDA)
+
+
+def test_marlin_quant_linear_validate_device_rejects_pre_turing(monkeypatch):
+    monkeypatch.setattr(marlin_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: (7, 0))
+
+    with pytest.raises(NotImplementedError, match="compute capability >= 7.5"):
+        marlin_qlinear_module.MarlinLinear.validate_device(marlin_qlinear_module.DEVICE.CUDA)
+
+
+def test_sm75_turing_contract_is_present_in_marlin_sources():
+    marlin_root = marlin_utils._marlin_root()
+    gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
+    generator_py = (marlin_root / "generate_kernels.py").read_text(encoding="utf-8")
+    template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
+    mma_h = (marlin_root / "marlin_mma.h").read_text(encoding="utf-8")
+    loader_py = (Path(marlin_utils.__file__).resolve().parents[1] / "models" / "loader.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "requires CUDA_ARCH >= 7.5" in gemm_cu
+    assert "major_capability == 7 && minor_capability == 5" in gemm_cu
+    assert "stages = 2;" in gemm_cu
+    assert "Turing only supports float16 dense Marlin kernels." in gemm_cu
+    assert 'stage_values.insert(0, 2)' in generator_py
+    assert "constexpr bool use_fp16_accum" in template_h
+    assert "__CUDA_ARCH__ == 750" in mma_h
+    assert "m16n8k8.row.col.f16.f16.f16.f16" in mma_h
+    assert "compute capability >= 7.5" in loader_py
+    assert "GPTQ Marlin on Turing (compute capability 7.5)" in loader_py
+    assert "dtype=torch.float16 only." in loader_py
+
+
 def test_gptq_marlin_repack_prefers_requested_dtype_extension(monkeypatch):
     fp16_loader = _FakeLoader()
     bf16_loader = _FakeLoader()
@@ -327,8 +383,11 @@ def test_marlin_runtime_error_skips_install_hint_when_cuda_wheel_headers_are_det
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_marlin_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
-    if torch.cuda.get_device_capability()[0] < 8:
-        pytest.skip("Marlin requires compute capability >= 8.0")
+    capability = torch.cuda.get_device_capability()
+    if capability[0] < 7 or (capability[0] == 7 and capability[1] < 5):
+        pytest.skip("Marlin requires compute capability >= 7.5")
+    if which("ninja") is None:
+        pytest.skip("Marlin JIT smoke test requires ninja.")
 
     scratch_root = _jit_scratch_root(tmp_path, "marlin")
     monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
@@ -336,13 +395,17 @@ def test_marlin_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
     monkeypatch.setenv("GPTQMODEL_MARLIN_BF16_BUILD_ROOT", str(scratch_root / "marlin_bf16"))
     monkeypatch.setenv("GPTQMODEL_MARLIN_FORCE_REBUILD", "1")
 
-    assert extension_api.load(name="marlin", use_cache=False) == {
+    assert extension_api.load(name="marlin_fp16", use_cache=False) == {
         "marlin_fp16": True,
-        "marlin_bf16": True,
     }
+    if capability[0] >= 8:
+        assert extension_api.load(name="marlin_bf16", use_cache=False) == {
+            "marlin_bf16": True,
+        }
 
     device = torch.device("cuda:0")
-    for dtype in (torch.float16, torch.bfloat16):
+    dtypes = (torch.float16, torch.bfloat16) if capability[0] >= 8 else (torch.float16,)
+    for dtype in dtypes:
         module = marlin_qlinear_module.MarlinLinear(
             bits=4,
             group_size=128,

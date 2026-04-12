@@ -41,6 +41,10 @@ _MARLIN_REQUIRED_CUDA_HEADERS = (
 )
 
 
+def _marlin_capability_supported(major: int, minor: int) -> bool:
+    return major > 7 or (major == 7 and minor >= 5)
+
+
 def _marlin_environment_error() -> str:
     if IS_ROCM:
         return "Marlin kernel is not supported on ROCm."
@@ -50,8 +54,8 @@ def _marlin_environment_error() -> str:
         major, minor = torch.cuda.get_device_capability()
     except Exception as exc:  # pragma: no cover - depends on host CUDA runtime
         return f"Marlin kernel failed to query CUDA device capability: {exc}"
-    if major < 8:
-        return f"Marlin kernel requires compute capability >= 8.0, got {major}.{minor}."
+    if not _marlin_capability_supported(major, minor):
+        return f"Marlin kernel requires compute capability >= 7.5, got {major}.{minor}."
     return ""
 
 
@@ -285,7 +289,10 @@ def _validate_marlin_device_support() -> bool:
     Returns:
         bool: indicates if CUDA device is compatible for Marlin
     """
-    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 and not IS_ROCM
+    if IS_ROCM or not torch.cuda.is_available():
+        return False
+    major, minor = torch.cuda.get_device_capability()
+    return _marlin_capability_supported(major, minor)
 
 
 def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:

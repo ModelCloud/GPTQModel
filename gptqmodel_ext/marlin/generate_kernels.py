@@ -70,6 +70,10 @@ def _write_kernel_file(scalar_type: str, dtype: str, templates: list[str]) -> Pa
 
 def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
     results: list[str] = []
+    stage_values = ["pipe_stages"]
+    if dtype == "fp16":
+        # Turing uses a shorter pipeline depth than Ampere+.
+        stage_values.insert(0, 2)
     for group_blocks, m_blocks, thread_configs in itertools.product(
             GROUP_BLOCKS, THREAD_M_BLOCKS, THREAD_CONFIGS):
 
@@ -124,21 +128,22 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
             s_type = "vllm::kBFloat16"
 
         for is_zp_float in is_zp_float_list:
-            template_str = jinja2.Template(TEMPLATE).render(
-                scalar_t=c_dtype,
-                w_type_id=scalar_type + ".id()",
-                s_type_id=s_type + ".id()",
-                threads=threads,
-                thread_m_blocks=max(m_blocks, 1),
-                thread_n_blocks=n_blocks,
-                thread_k_blocks=k_blocks,
-                m_block_size_8=m_blocks == 0.5,
-                stages="pipe_stages",
-                group_blocks=group_blocks,
-                is_zp_float=is_zp_float,
-            )
+            for stage_value in stage_values:
+                template_str = jinja2.Template(TEMPLATE).render(
+                    scalar_t=c_dtype,
+                    w_type_id=scalar_type + ".id()",
+                    s_type_id=s_type + ".id()",
+                    threads=threads,
+                    thread_m_blocks=max(m_blocks, 1),
+                    thread_n_blocks=n_blocks,
+                    thread_k_blocks=k_blocks,
+                    m_block_size_8=m_blocks == 0.5,
+                    stages=stage_value,
+                    group_blocks=group_blocks,
+                    is_zp_float=is_zp_float,
+                )
 
-            results.append(template_str)
+                results.append(template_str)
 
     return results
 

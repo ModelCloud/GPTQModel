@@ -29,6 +29,7 @@ from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
+    _marlin_capability_supported,
     _transform_param,
     apply_gptq_marlin_linear,
     gptq_marlin_repack,
@@ -233,12 +234,14 @@ class MarlinLinear(GPTQQuantLinear):
                 raise NotImplementedError("Marlin kernel is not supported on ROCm.")
 
             # Directly check capabilities of all currently visible CUDA devices
-            has_cuda_v8 = all(
-                torch.cuda.get_device_capability(i)[0] >= 8
+            has_supported_cuda = all(
+                _marlin_capability_supported(*torch.cuda.get_device_capability(i))
                 for i in range(torch.cuda.device_count())
             )
-            if not has_cuda_v8:
-                raise NotImplementedError("Marlin kernel only supports compute capability >= 8.0.")
+            if not has_supported_cuda:
+                raise NotImplementedError(
+                    "Marlin kernel only supports compute capability >= 7.5."
+                )
 
     def post_init(self):
         device = self.qweight.device
