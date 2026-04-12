@@ -186,6 +186,37 @@ def test_cuda_include_paths_with_fallback_skip_wheel_headers_when_local_cuda_has
     assert include_paths == ["/tmp/extension"]
 
 
+def test_cuda_cache_fingerprint_payload_includes_resolved_arch_flags(monkeypatch, tmp_path):
+    """Guard CUDA cache keys so stale binaries cannot cross architecture targets."""
+
+    loader = _make_loader(tmp_path, requires_cuda=True)
+
+    monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_device_capability", lambda _index: (12, 0))
+    monkeypatch.setattr(
+        cpp_module,
+        "resolved_cuda_arch_flags",
+        lambda: [
+            "-gencode=arch=compute_120,code=compute_120",
+            "-gencode=arch=compute_120,code=sm_120",
+        ],
+    )
+
+    payload = loader._cuda_cache_fingerprint_payload()
+
+    assert payload == [
+        "cuda_ext=1",
+        "visible_caps=12.0",
+        (
+            "resolved_arch_flags="
+            "-gencode=arch=compute_120,code=compute_120,"
+            "-gencode=arch=compute_120,code=sm_120"
+        ),
+    ]
+
+
 def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
     """Guard cache reuse so startup skips expensive JIT rebuilds when ops are already built."""
 

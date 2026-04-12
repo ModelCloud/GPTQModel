@@ -18,7 +18,7 @@ from typing import Callable, Optional, Sequence
 
 import pcre
 import torch
-from torch.utils.cpp_extension import CUDA_HOME, _get_build_directory, load
+from torch.utils.cpp_extension import CUDA_HOME, _get_build_directory, _get_cuda_arch_flags, load
 
 from .env import env_flag
 from .jit_compile_baselines import get_jit_compile_baseline_seconds
@@ -318,6 +318,15 @@ def cuda_include_paths_with_fallback(
     return _dedupe_path_strings(resolved_include_paths)
 
 
+def resolved_cuda_arch_flags() -> list[str]:
+    """Return the effective NVCC arch flags Torch will emit for this host."""
+
+    try:
+        return list(_get_cuda_arch_flags())
+    except Exception:
+        return []
+
+
 def torch_cxx11_abi_flag() -> int:
     """Return the ABI mode local JIT extensions must match for this torch build."""
 
@@ -561,12 +570,18 @@ class TorchOpsJitExtension:
         if not self.requires_cuda:
             return ["cuda_ext=0"]
 
+        payload = ["cuda_ext=1"]
         override = os.getenv("TORCH_CUDA_ARCH_LIST")
         if override:
-            return ["cuda_ext=1", f"arch_list={override}"]
+            payload.append(f"arch_list={override}")
+            arch_flags = resolved_cuda_arch_flags()
+            if arch_flags:
+                payload.append(f"resolved_arch_flags={','.join(arch_flags)}")
+            return payload
 
         if not torch.cuda.is_available():
-            return ["cuda_ext=1", "cuda_available=0"]
+            payload.append("cuda_available=0")
+            return payload
 
         capabilities: set[str] = set()
         for device_index in range(torch.cuda.device_count()):
@@ -574,8 +589,14 @@ class TorchOpsJitExtension:
             capabilities.add(f"{major}.{minor}")
 
         if not capabilities:
-            return ["cuda_ext=1", "visible_caps=none"]
-        return ["cuda_ext=1", f"visible_caps={','.join(sorted(capabilities))}"]
+            payload.append("visible_caps=none")
+        else:
+            payload.append(f"visible_caps={','.join(sorted(capabilities))}")
+
+        arch_flags = resolved_cuda_arch_flags()
+        if arch_flags:
+            payload.append(f"resolved_arch_flags={','.join(arch_flags)}")
+        return payload
 
     def build_root(self) -> Path:
         """Return the fingerprinted filesystem directory that caches this JIT extension."""
