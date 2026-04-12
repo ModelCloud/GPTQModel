@@ -41,7 +41,6 @@ from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
 from ..utils.disk import estimate_disk_io_speed
 from ..utils.logger import setup_logger, log_time_block
-from ..utils.pause_resume import PauseResumeController, PauseResumeState
 from ..utils.looper_helpers import (
     clone_module_for_devices,
     device_ctx,
@@ -127,12 +126,6 @@ class ModuleLooper():
         self.processors = processors
         self.gptq_model = model
 
-        # Initialize pause/resume controller first
-        self.pause_controller = PauseResumeController()
-
-        # Give processors access to pause controller for status
-        for processor in self.processors:
-            processor._pause_controller = self.pause_controller
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
         self._forward_executor = ForwardExecutor(self, logger=log)
@@ -1184,11 +1177,10 @@ class ModuleLooper():
         )
 
     def loop(self, fallback=None, **kwargs):
-        """Run the quantization loop under the pause/resume and TF32 guards."""
+        """Run the quantization loop under the TF32 guard."""
 
         with tf32_high_precision_guard():
-            with self.pause_controller.lifecycle():
-                return self._loop_impl(fallback=fallback, **kwargs)
+            return self._loop_impl(fallback=fallback, **kwargs)
 
     @torch.inference_mode()
     def _loop_impl(self, fallback=None, **kwargs):

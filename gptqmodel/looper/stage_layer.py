@@ -403,7 +403,7 @@ def run_layer_stage(
             module = layers[layer_index]
             pristine_group_module = None
 
-        looper.pause_controller.register_and_draw_progress_bar(pb, title=layer_title, subtitle="")
+        pb.title(layer_title).subtitle("").draw()
         if durable_progress_logs:
             log.info(
                 "StageLayer: start layer=%s/%s title=`%s`",
@@ -660,7 +660,7 @@ def run_layer_stage(
                 processor.clear_cache_data()
                 processor.receive_layer_inputs(layer_outputs)
                 layer_inputs = processor.inputs_cache.layer_inputs
-                looper.pause_controller.register_and_draw_progress_bar(pb, title=layer_title, subtitle="")
+                pb.title(layer_title).subtitle("").draw()
 
             if p_index == len(looper.processors) - 1:
                 torch_sync()
@@ -911,12 +911,6 @@ def run_layer_stage(
                             layer_index if not is_lm_head_module else "lm_head",
                         )
 
-        # Check for pause after completing each layer
-        layer_info = f"layer {layer_index}" if not is_lm_head_module else "lm_head"
-        looper.pause_controller.check_pause_point(f"after {layer_info}")
-
-        # Unregister progress bar when moving to next layer
-        looper.pause_controller.unregister_progress_bar(pb)
         if durable_progress_logs:
             log.info(
                 "StageLayer: handoff complete for layer=%s",

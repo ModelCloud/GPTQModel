@@ -240,7 +240,7 @@ class EXL3Processor(LoopProcessor):
         del subset, previous_subset, subset_index, subset_total
 
         base_title = f"Quantizing {module.name} in layer"
-        self._pause_controller.register_and_draw_progress_bar(self.pb, title=base_title, subtitle="")
+        self.draw_progress(base_title)
 
         task_entry = self.tasks[module.name]
         capture: GPTQ = task_entry["capture"]
