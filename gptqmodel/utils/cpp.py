@@ -11,6 +11,7 @@ import math
 import os
 import shutil
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -54,6 +55,8 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
 # the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
 _DEFAULT_NVCC_THREADS = "8"
+_GLOBAL_TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_EXT_BUILD_BASE"
+_GLOBAL_TORCH_OPS_TMP_ROOT_ENV = "GPTQMODEL_EXT_TMPDIR"
 
 
 def _format_compile_duration_seconds(seconds: float) -> str:
@@ -217,6 +220,9 @@ class _CompileProgressDisplay:
 def default_torch_ops_build_root(subdir: str) -> Path:
     """Return the default on-disk cache root for torch.ops JIT extensions."""
 
+    override = os.getenv(_GLOBAL_TORCH_OPS_BUILD_ROOT_ENV)
+    if override:
+        return Path(override).expanduser() / subdir
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
 
 
@@ -673,6 +679,14 @@ class TorchOpsJitExtension:
 
         return self.base_build_root() / self._cache_fingerprint()
 
+    def _compile_temp_root(self, build_root: Path) -> Path:
+        """Resolve one stable scratch directory for compiler temp files."""
+
+        override = os.getenv(_GLOBAL_TORCH_OPS_TMP_ROOT_ENV)
+        if override:
+            return Path(override).expanduser() / self.name / build_root.name
+        return build_root / "_tmp"
+
     def force_rebuild_enabled(self) -> bool:
         """Check whether this extension should ignore and replace cached binaries."""
 
@@ -818,6 +832,8 @@ class TorchOpsJitExtension:
                     sources=resolved_sources,
                     include_paths=extra_include_paths,
                 )
+                compile_temp_root = self._compile_temp_root(build_root)
+                compile_temp_root.mkdir(parents=True, exist_ok=True)
                 kwargs = {
                     "name": self.name,
                     "sources": resolved_sources,
@@ -836,8 +852,24 @@ class TorchOpsJitExtension:
                 extra_ldflags = self._resolve_sequence(self.extra_ldflags)
                 if extra_ldflags:
                     kwargs["extra_ldflags"] = extra_ldflags
-
-                load(**kwargs)
+                previous_tempdir = tempfile.tempdir
+                previous_temp_env = {
+                    name: os.environ.get(name) for name in ("TMPDIR", "TEMP", "TMP")
+                }
+                try:
+                    compile_temp_root_text = str(compile_temp_root)
+                    os.environ["TMPDIR"] = compile_temp_root_text
+                    os.environ["TEMP"] = compile_temp_root_text
+                    os.environ["TMP"] = compile_temp_root_text
+                    tempfile.tempdir = compile_temp_root_text
+                    load(**kwargs)
+                finally:
+                    tempfile.tempdir = previous_tempdir
+                    for name, previous_value in previous_temp_env.items():
+                        if previous_value is None:
+                            os.environ.pop(name, None)
+                        else:
+                            os.environ[name] = previous_value
                 build_invocation_succeeded = True
             except Exception as exc:  # pragma: no cover - build depends on host toolchain
                 elapsed = time.perf_counter() - started

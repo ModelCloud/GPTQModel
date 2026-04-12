@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -217,6 +219,15 @@ def test_cuda_cache_fingerprint_payload_includes_resolved_arch_flags(monkeypatch
     ]
 
 
+def test_default_torch_ops_build_root_honors_global_override(monkeypatch, tmp_path):
+    """Guard the shared cache-root override so large JIT builds can move off constrained filesystems."""
+
+    override_root = tmp_path / "jit_cache"
+    monkeypatch.setenv("GPTQMODEL_EXT_BUILD_BASE", str(override_root))
+
+    assert cpp_module.default_torch_ops_build_root("marlin") == override_root / "marlin"
+
+
 def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
     """Guard cache reuse so startup skips expensive JIT rebuilds when ops are already built."""
 
@@ -320,6 +331,50 @@ def test_torch_ops_jit_extension_emits_spinner_logs_around_compile(monkeypatch, 
     assert logger.spinners[0].closed is True
     assert any("compiling torch.ops JIT extension" in message for message in logger.info_messages)
     assert any("torch.ops JIT extension ready" in message for message in logger.info_messages)
+
+
+def test_torch_ops_jit_extension_routes_compile_tempfiles_into_build_local_tmp(monkeypatch, tmp_path):
+    """Guard NVCC scratch placement so JIT builds stop depending on the host `/tmp` mount."""
+
+    loader = _make_loader(tmp_path)
+
+    state = {"ready": False}
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+    compile_temp_roots: list[tuple[str, str, str, str | None]] = []
+
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.delenv("TMPDIR", raising=False)
+    monkeypatch.delenv("TEMP", raising=False)
+    monkeypatch.delenv("TMP", raising=False)
+
+    def fake_compile(**_kwargs):
+        compile_temp_roots.append(
+            (
+                os.environ["TMPDIR"],
+                os.environ["TEMP"],
+                os.environ["TMP"],
+                tempfile.tempdir,
+            )
+        )
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    expected_temp_root = loader._compile_temp_root(loader.build_root())
+    assert compile_temp_roots == [
+        (
+            str(expected_temp_root),
+            str(expected_temp_root),
+            str(expected_temp_root),
+            str(expected_temp_root),
+        )
+    ]
+    assert expected_temp_root.is_dir()
+    assert "TMPDIR" not in os.environ
+    assert "TEMP" not in os.environ
+    assert "TMP" not in os.environ
 
 
 def test_torch_ops_jit_extension_appends_detected_cuda_include_paths(monkeypatch, tmp_path):
