@@ -74,6 +74,11 @@ env:
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py,models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   MODEL_TEST_MODE: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
   MODEL_TEST_GPU_COUNT: '1'
+  DEFUSER_GIT_URL: git+https://github.com/modelcloud/Defuser.git
+  PYPCRE_GIT_URL: git+https://github.com/modelcloud/PyPcre.git
+  TOKENICER_GIT_URL: git+https://github.com/modelcloud/Tokenicer.git
+  LOGBAR_GIT_URL: git+https://github.com/modelcloud/LogBar.git
+  EVALUTION_GIT_URL: git+https://github.com/modelcloud/Evalution.git
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -293,6 +298,20 @@ jobs:
           echo "===== install package from checkout ====="
           uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
+          echo "===== install ModelCloud git deps ====="
+          for pkg in defuser pypcre tokenicer logbar evalution; do
+            uv pip uninstall "$pkg" || true
+          done
+          for url in \
+            "$DEFUSER_GIT_URL" \
+            "$PYPCRE_GIT_URL" \
+            "$TOKENICER_GIT_URL" \
+            "$LOGBAR_GIT_URL" \
+            "$EVALUTION_GIT_URL"
+          do
+            uv pip install "$url"
+          done
+
           # deps may reinstalled torch
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
 
@@ -454,6 +473,18 @@ jobs:
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
           uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          for pkg in defuser pypcre tokenicer logbar evalution; do
+            uv pip uninstall "$pkg" || true
+          done
+          for url in \
+            "$DEFUSER_GIT_URL" \
+            "$PYPCRE_GIT_URL" \
+            "$TOKENICER_GIT_URL" \
+            "$LOGBAR_GIT_URL" \
+            "$EVALUTION_GIT_URL"
+          do
+            uv pip install "$url"
+          done
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
 
       - name: Print uv env
