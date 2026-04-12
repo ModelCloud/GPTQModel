@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import logging
 import math
-import pcre as re
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
 
+import pcre as libpcre2
 import torch
 
 from .awq_processor import AWQProcessor
@@ -714,7 +714,9 @@ def _run_single_subset_pass(
                 if calibration_coverage_policy.record_dynamic_exclusions:
                     if processor.qcfg.dynamic is None:
                         processor.qcfg.dynamic = {}
-                    processor.qcfg.dynamic[f"-:{re.escape(skipped_module.full_name)}"] = {}
+                    processor.qcfg.dynamic[
+                        f"-:{libpcre2.escape(skipped_module.full_name)}"
+                    ] = {}
 
     quant_target_devices: Dict[str, torch.device] = {}
     for name, named_module in subset.items():

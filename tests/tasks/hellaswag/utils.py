@@ -4,14 +4,17 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import datasets
-import pcre as re
+import pcre as libpcre2
+
+
+_BRACKET_ARTIFACT_RE = libpcre2.compile(r"\[.*?\]")
 
 
 def preprocess(text):
     text = text.strip()
     # NOTE: Brackets are artifacts of the WikiHow dataset portion of HellaSwag.
     text = text.replace(" [title]", ". ")
-    text = re.sub("\\[.*?\\]", "", text)
+    text = _BRACKET_ARTIFACT_RE.sub("", text)
     text = text.replace("  ", " ")
     return text
 
