@@ -7,13 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlopen
 
-import pcre as libpcre2
+import pcre
 
-BLOCK_RE = libpcre2.compile(
+BLOCK_RE = pcre.compile(
     r"struct TSample samples_(\d+)\[\]\s*=\s*\{(.*?)\n\};",
-    flags=libpcre2.Flag.DOTALL,
+    flags=pcre.Flag.DOTALL,
 )
-ROW_RE = libpcre2.compile(
+ROW_RE = pcre.compile(
     r"\{\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*\}"
 )
 EXLLAMAV3_ORIGINAL_COMMIT = "ba1ad9ac66670785c0ca95b0f1ab3ad044fda7c6"

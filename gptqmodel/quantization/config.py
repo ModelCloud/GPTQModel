@@ -14,7 +14,7 @@ from functools import total_ordering
 from os.path import join
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
-import pcre as libpcre2
+import pcre
 import torch
 from packaging import version
 
@@ -460,7 +460,7 @@ class GGUFBits(BaseComplexBits):
 QuantBits = GGUFBits
 
 
-_GGUF_PUBLIC_FORMAT_RE = libpcre2.compile(r"^(q|iq)_(0|k)(?:_(xs|s|m|l|g128))?$")
+_GGUF_PUBLIC_FORMAT_RE = pcre.compile(r"^(q|iq)_(0|k)(?:_(xs|s|m|l|g128))?$")
 
 
 def _gguf_public_format_from_bits(bits: GGUFBits) -> str:
@@ -1670,9 +1670,9 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
 
     for pattern, overrides in dynamic.items():
         if pattern.startswith("-:"):
-            if libpcre2.compile(pattern.removeprefix("-:")).match(module_name):
+            if pcre.compile(pattern.removeprefix("-:")).match(module_name):
                 return False
-        elif libpcre2.compile(pattern.removeprefix("+:")).match(module_name):
+        elif pcre.compile(pattern.removeprefix("+:")).match(module_name):
             if key is None:
                 return overrides
             else:

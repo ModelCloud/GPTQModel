@@ -4,10 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import datasets
-import pcre as libpcre2
+import pcre
 
-
-_BRACKET_ARTIFACT_RE = libpcre2.compile(r"\[.*?\]")
+_BRACKET_ARTIFACT_RE = pcre.compile(r"\[.*?\]")
 
 
 def preprocess(text):

@@ -9,7 +9,7 @@ import os
 import random
 import time
 
-import pcre as libpcre2
+import pcre
 import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
@@ -24,11 +24,11 @@ max_new_tokens = 2048
 stop_string = "Question:"
 
 log = setup_logger()
-_ANSWER_IS_RE = libpcre2.compile(r"answer is \(?([A-J])\)?")
-_ANSWER_LINE_RE = libpcre2.compile(r".*[aA]nswer:\s*([A-J])")
-_FINAL_ANSWER_RE = libpcre2.compile(
+_ANSWER_IS_RE = pcre.compile(r"answer is \(?([A-J])\)?")
+_ANSWER_LINE_RE = pcre.compile(r".*[aA]nswer:\s*([A-J])")
+_FINAL_ANSWER_RE = pcre.compile(
     r"\b[A-J]\b(?!.*\b[A-J]\b)",
-    flags=libpcre2.Flag.DOTALL,
+    flags=pcre.Flag.DOTALL,
 )
 
 def load_mmlu_pro():

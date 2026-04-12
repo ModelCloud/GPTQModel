@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-import pcre as libpcre2
+import pcre
 import pytest
 import torch
 import torch.nn as nn
@@ -20,8 +20,8 @@ LAYER0_AND_LAYER2_ONLY_NEGATIVE_MATCH = r"^model\.layers\.(?!(?:0|2)\.)\d+\."
 GPTQ_TENSOR_SUFFIXES = ("qweight", "qzeros", "scales", "g_idx")
 # Dynamically skipped layers must remain in native half precision on disk.
 HALF_PRECISION_DTYPES = {"F16", "BF16"}
-_LAYER_INDEX_RE = libpcre2.compile(r"\.layers\.(\d+)\.")
-_QUANTIZED_TENSOR_RE = libpcre2.compile(
+_LAYER_INDEX_RE = pcre.compile(r"\.layers\.(\d+)\.")
+_QUANTIZED_TENSOR_RE = pcre.compile(
     r"^(model\.layers\.(\d+)\..*)\.(qweight|qzeros|scales|g_idx)$"
 )
 

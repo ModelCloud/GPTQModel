@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
 
-import pcre as libpcre2
+import pcre
 import torch
 
 from .awq_processor import AWQProcessor
@@ -715,7 +715,7 @@ def _run_single_subset_pass(
                     if processor.qcfg.dynamic is None:
                         processor.qcfg.dynamic = {}
                     processor.qcfg.dynamic[
-                        f"-:{libpcre2.escape(skipped_module.full_name)}"
+                        f"-:{pcre.escape(skipped_module.full_name)}"
                     ] = {}
 
     quant_target_devices: Dict[str, torch.device] = {}

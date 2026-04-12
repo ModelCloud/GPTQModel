@@ -21,7 +21,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
-import pcre as libpcre2
+import pcre
 import torch
 import torch.nn as nn
 import transformers
@@ -72,7 +72,7 @@ from .torch import HAS_CUDA, torch_empty_cache
 
 
 log = setup_logger()
-_REQUIRES_VERSION_RE = libpcre2.compile(r"(<=|>=|==|<|>)\s*([\d\.]+)")
+_REQUIRES_VERSION_RE = pcre.compile(r"(<=|>=|==|<|>)\s*([\d\.]+)")
 
 
 _DTYPE_SAFE_MAP = {
@@ -1626,7 +1626,7 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
         if model._tied_weights_keys is not None:
             found = 0
             for name in sorted(names):
-                matches_pattern = any(libpcre2.compile(pat).search(name) for pat in model._tied_weights_keys)
+                matches_pattern = any(pcre.compile(pat).search(name) for pat in model._tied_weights_keys)
                 if matches_pattern and name in state_dict:
                     found += 1
                     if found < len(names):

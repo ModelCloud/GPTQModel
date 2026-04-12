@@ -79,13 +79,13 @@ config_output=$({ printf '\n'; } | ${SUDO} update-alternatives --config cuda 2>&
 
 selection=$(CONFIG_OUTPUT="${config_output}" "${python_cmd}" - "${target_version}" <<'PY'
 import os
-import pcre as libpcre2
+import pcre
 import sys
 
 target = sys.argv[1]
 data = os.environ.get("CONFIG_OUTPUT", "")
 lines = data.splitlines()
-cuda_version_pattern = libpcre2.compile(r"cuda-([0-9.]+)")
+cuda_version_pattern = pcre.compile(r"cuda-([0-9.]+)")
 
 candidates = []
 for line in lines:

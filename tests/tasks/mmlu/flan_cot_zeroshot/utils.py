@@ -6,7 +6,7 @@
 import sys
 import unicodedata
 
-import pcre as libpcre2
+import pcre
 from lm_eval.filters.extraction import RegexFilter
 
 
@@ -32,7 +32,7 @@ class MultiChoiceRegexFilter(RegexFilter):
         regexes_to_ignore: Remove these regexes during step 1 matching
         """
         super().__init__(regex_pattern, group_select, fallback)
-        self.regex = libpcre2.compile(regex_pattern)
+        self.regex = pcre.compile(regex_pattern)
         self.ignore_case = ignore_case
         self.ignore_punctuation = ignore_punctuation
         self.regexes_to_ignore = regexes_to_ignore
@@ -60,7 +60,7 @@ class MultiChoiceRegexFilter(RegexFilter):
             if unicodedata.category(chr(i)).startswith("P")
         )
         ignore_patterns = [
-            libpcre2.compile(pattern)
+            pcre.compile(pattern)
             for pattern in (self.regexes_to_ignore or [])
         ]
 
@@ -89,16 +89,16 @@ class MultiChoiceRegexFilter(RegexFilter):
             choices = doc["choices"]
             for c in choices:
                 m = filter_ignores(c.strip())
-                fallback_regexes.append(libpcre2.escape(m))
+                fallback_regexes.append(pcre.escape(m))
                 choice_to_alpha[m] = f"({next_alpha})"
 
                 without_paren_fallback_regexes.append(next_alpha)
                 without_paren_to_target[next_alpha] = f"({next_alpha})"
 
                 next_alpha = chr(ord(next_alpha) + 1)
-            fallback_regex = libpcre2.compile("|".join(fallback_regexes))
+            fallback_regex = pcre.compile("|".join(fallback_regexes))
             without_paren_choice_pattern = "|".join(without_paren_fallback_regexes)
-            without_paren_fallback_regex = libpcre2.compile(
+            without_paren_fallback_regex = pcre.compile(
                 rf":\s*({without_paren_choice_pattern})"
             )
 

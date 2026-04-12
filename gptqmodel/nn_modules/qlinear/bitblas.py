@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
-import pcre as libpcre2
+import pcre
 import torch
 from packaging import version
 
@@ -138,8 +138,8 @@ def _is_bitblas_available() -> bool:
 
 
 BITBLAS_AVAILABLE = _is_bitblas_available()
-_BITBLAS_TARGET_ARCH_RE = libpcre2.compile(r"\bsm_(\d+)[a-z]*\b")
-_BITBLAS_TARGET_SM_RE = libpcre2.compile(r"sm_(\d+)")
+_BITBLAS_TARGET_ARCH_RE = pcre.compile(r"\bsm_(\d+)[a-z]*\b")
+_BITBLAS_TARGET_SM_RE = pcre.compile(r"sm_(\d+)")
 
 
 BITBLAS_INSTALL_HINT = (

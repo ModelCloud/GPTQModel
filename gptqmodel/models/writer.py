@@ -13,7 +13,7 @@ import shutil
 from os.path import isfile, join
 from typing import Any, Dict, List, Optional, Union
 
-import pcre as libpcre2
+import pcre
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -82,9 +82,9 @@ EORA_DEFAULT_FILE = "eora.safetensors"
 # disable gptqmodel split_by layer feature (until sglang pr is merged since our dir struct is not compatible)
 # SUPPORTED_SPLIT_BY = {None, "layer"}
 SUPPORTED_SPLIT_BY = {None}
-_MAX_SHARD_SIZE_RE = libpcre2.compile(
+_MAX_SHARD_SIZE_RE = pcre.compile(
     r"\s*(\d+)([KMGTP]?B?)\s*",
-    flags=libpcre2.Flag.CASELESS,
+    flags=pcre.Flag.CASELESS,
 )
 
 
@@ -109,8 +109,8 @@ def _cleanup_saved_weight_files(
     model_save_name: str,
 ) -> None:
     expected = set(expected_files)
-    shard_pattern = libpcre2.compile(
-        rf"{libpcre2.escape(model_base_name)}-\d{{5}}-of-\d{{5}}\.safetensors"
+    shard_pattern = pcre.compile(
+        rf"{pcre.escape(model_base_name)}-\d{{5}}-of-\d{{5}}\.safetensors"
     )
 
     for filename in os.listdir(save_dir):
