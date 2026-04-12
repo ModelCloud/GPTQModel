@@ -190,7 +190,7 @@ class MacheteLinear(GPTQQuantLinear):
             if IS_ROCM:
                 raise NotImplementedError("Machete kernel is not supported on ROCm.")
             if not _validate_machete_device_support():
-                raise NotImplementedError("Machete kernel requires compute capability >= 9.0.")
+                raise NotImplementedError(machete_runtime_error())
 
     def post_init(self):
         device = self.qweight.device

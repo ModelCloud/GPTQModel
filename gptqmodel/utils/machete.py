@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -32,8 +33,11 @@ log = setup_logger()
 _MACHETE_OPS_NAME = "gptqmodel_machete_ops"
 _MACHETE_OPS_NAMESPACE = "gptqmodel_machete"
 
-_CUTLASS_VERSION = "3.5.0"
+_CUTLASS_VERSION = "4.4.2"
 _CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{_CUTLASS_VERSION}.tar.gz"
+_CUTLASS_VERSION_MARKER = ".gptqmodel_cutlass_version"
+_MACHETE_REQUIRED_COMPUTE_CAPABILITY = (9, 0)
+_MACHETE_MIN_SHARED_MEMORY_PER_BLOCK_OPTIN = 204800
 
 MACHETE_PREPACKED_BLOCK_SHAPE = (64, 128)
 
@@ -63,12 +67,27 @@ def _cutlass_python_bindings_present(cutlass_root: Path) -> bool:
 
 
 def _cutlass_checkout_complete(cutlass_root: Path) -> bool:
+    common_include_dir = cutlass_root / "examples" / "common" / "include"
+    util_include_dir = cutlass_root / "tools" / "util" / "include"
     return (
         (cutlass_root / "include" / "cutlass" / "cutlass.h").is_file()
-        and (cutlass_root / "examples" / "common" / "include").is_dir()
         and (cutlass_root / "tools" / "library" / "include").is_dir()
+        and (common_include_dir.is_dir() or util_include_dir.is_dir())
         and _cutlass_python_bindings_present(cutlass_root)
     )
+
+
+def _repo_local_cutlass_version_marker(cutlass_root: Path) -> Path:
+    return cutlass_root / _CUTLASS_VERSION_MARKER
+
+
+def _repo_local_cutlass_version_matches(cutlass_root: Path) -> bool:
+    marker = _repo_local_cutlass_version_marker(cutlass_root)
+    return marker.is_file() and marker.read_text(encoding="utf-8").strip() == _CUTLASS_VERSION
+
+
+def _mark_repo_local_cutlass_version(cutlass_root: Path) -> None:
+    _repo_local_cutlass_version_marker(cutlass_root).write_text(f"{_CUTLASS_VERSION}\n", encoding="utf-8")
 
 
 def _download_cutlass_archive(url: str, destination: Path) -> None:
@@ -92,20 +111,28 @@ def _extract_cutlass_archive(archive_path: Path, destination_parent: Path) -> No
 
 
 def _ensure_cutlass_source() -> Path:
+    repo_local_root = _repo_local_cutlass_root().resolve()
     configured_root = os.getenv("GPTQMODEL_CUTLASS_DIR")
     if configured_root:
         configured_path = Path(configured_root).expanduser().resolve()
-        if _cutlass_checkout_complete(configured_path):
+        if _cutlass_checkout_complete(configured_path) and (
+            configured_path != repo_local_root or _repo_local_cutlass_version_matches(configured_path)
+        ):
             return configured_path
         log.info(
             "Machete: GPTQMODEL_CUTLASS_DIR=`%s` is incomplete; falling back to repo-local CUTLASS checkout.",
             configured_path,
         )
 
-    repo_local_root = _repo_local_cutlass_root().resolve()
-    if _cutlass_checkout_complete(repo_local_root):
+    if _cutlass_checkout_complete(repo_local_root) and _repo_local_cutlass_version_matches(repo_local_root):
         os.environ["GPTQMODEL_CUTLASS_DIR"] = str(repo_local_root)
         return repo_local_root
+    if repo_local_root.exists():
+        log.info(
+            "Machete: refreshing repo-local CUTLASS checkout at `%s` to v%s.",
+            repo_local_root,
+            _CUTLASS_VERSION,
+        )
 
     archive_path = _cutlass_download_cache_dir() / f"cutlass-v{_CUTLASS_VERSION}.tar.gz"
     archive_path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,6 +151,7 @@ def _ensure_cutlass_source() -> Path:
         if not extracted_root.exists():
             raise RuntimeError(f"Machete: failed to extract CUTLASS archive `{archive_path}`.")
         extracted_root.replace(repo_local_root)
+        _mark_repo_local_cutlass_version(repo_local_root)
 
     os.environ["GPTQMODEL_CUTLASS_DIR"] = str(repo_local_root)
     return repo_local_root
@@ -137,11 +165,31 @@ def _machete_generation_marker() -> Path:
     return _machete_generated_dir() / ".gptqmodel_complete"
 
 
-def _machete_generator_inputs() -> list[Path]:
+def _cutlass_python_binding_inputs(cutlass_root: Path) -> list[Path]:
+    python_dir = cutlass_root / "python"
+    candidates = [
+        python_dir / "cutlass_library.py",
+        python_dir / "cutlass_library" / "__init__.py",
+    ]
+    return [candidate for candidate in candidates if candidate.exists()]
+
+
+def _machete_generation_signature(cutlass_root: Path) -> str:
+    return json.dumps(
+        {
+            "cutlass_root": str(cutlass_root.resolve()),
+            "cutlass_version": _CUTLASS_VERSION,
+        },
+        sort_keys=True,
+    )
+
+
+def _machete_generator_inputs(cutlass_root: Path) -> list[Path]:
     project_root = _machete_project_root()
     return [
         _machete_source_root() / "generate.py",
         project_root / "gptqmodel_ext" / "cutlass_extensions" / "vllm_cutlass_library_extension.py",
+        *_cutlass_python_binding_inputs(cutlass_root),
     ]
 
 
@@ -149,13 +197,15 @@ def _generated_machete_sources() -> list[Path]:
     return sorted(_machete_generated_dir().glob("*.cu"))
 
 
-def _generated_machete_sources_current() -> bool:
+def _generated_machete_sources_current(cutlass_root: Path) -> bool:
     marker = _machete_generation_marker()
     generated_sources = _generated_machete_sources()
     if not marker.exists() or not generated_sources:
         return False
+    if marker.read_text(encoding="utf-8").strip() != _machete_generation_signature(cutlass_root):
+        return False
     marker_mtime_ns = marker.stat().st_mtime_ns
-    return not any(path.stat().st_mtime_ns > marker_mtime_ns for path in _machete_generator_inputs())
+    return not any(path.stat().st_mtime_ns > marker_mtime_ns for path in _machete_generator_inputs(cutlass_root))
 
 
 def _run_machete_generator(cutlass_root: Path) -> None:
@@ -183,7 +233,7 @@ def _run_machete_generator(cutlass_root: Path) -> None:
 
 def _ensure_generated_machete_sources() -> list[Path]:
     cutlass_root = _ensure_cutlass_source()
-    if _generated_machete_sources_current():
+    if _generated_machete_sources_current(cutlass_root):
         return _generated_machete_sources()
 
     generated_dir = _machete_generated_dir()
@@ -198,7 +248,10 @@ def _ensure_generated_machete_sources() -> list[Path]:
             "Machete: generator completed without producing any CUDA sources."
         )
 
-    _machete_generation_marker().touch()
+    _machete_generation_marker().write_text(
+        _machete_generation_signature(cutlass_root),
+        encoding="utf-8",
+    )
     return generated_sources
 
 
@@ -211,13 +264,19 @@ def _machete_sources() -> list[str]:
 def _machete_include_paths() -> list[str]:
     project_root = _machete_project_root()
     cutlass_root = _ensure_cutlass_source()
-    return [
+    include_paths = [
         str((project_root / "gptqmodel_ext").resolve()),
         str((project_root / "gptqmodel_ext" / "cutlass_extensions").resolve()),
         str((cutlass_root / "include").resolve()),
-        str((cutlass_root / "examples" / "common" / "include").resolve()),
         str((cutlass_root / "tools" / "library" / "include").resolve()),
     ]
+    common_include_dir = cutlass_root / "examples" / "common" / "include"
+    util_include_dir = cutlass_root / "tools" / "util" / "include"
+    if common_include_dir.is_dir():
+        include_paths.append(str(common_include_dir.resolve()))
+    if util_include_dir.is_dir():
+        include_paths.append(str(util_include_dir.resolve()))
+    return include_paths
 
 
 def _machete_stage_roots() -> list[str]:
@@ -289,8 +348,25 @@ def _machete_static_runtime_error() -> str:
         return "Machete kernel is not supported on ROCm."
     if not torch.cuda.is_available():
         return "Machete kernel requires CUDA."
-    if torch.cuda.get_device_capability()[0] < 9:
-        return "Machete kernel requires compute capability >= 9.0."
+    capability = torch.cuda.get_device_capability()
+    if capability != _MACHETE_REQUIRED_COMPUTE_CAPABILITY:
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        return (
+            "Machete kernel currently supports Hopper-class SM90 GPUs only; "
+            f"found `{props.name}` with compute capability {capability[0]}.{capability[1]}."
+        )
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    shared_memory_per_block_optin = getattr(
+        props,
+        "shared_memory_per_block_optin",
+        props.shared_memory_per_block,
+    )
+    if shared_memory_per_block_optin < _MACHETE_MIN_SHARED_MEMORY_PER_BLOCK_OPTIN:
+        return (
+            "Machete kernel requires at least "
+            f"{_MACHETE_MIN_SHARED_MEMORY_PER_BLOCK_OPTIN} bytes of opt-in shared memory per block; "
+            f"`{props.name}` exposes {shared_memory_per_block_optin}."
+        )
     return ""
 
 

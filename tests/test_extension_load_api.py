@@ -125,6 +125,17 @@ def test_load_all_skips_extensions_unsupported_on_this_host(monkeypatch):
     assert fakes["machete"].load_calls == 0
 
 
+def test_load_specific_unsupported_extension_raises_without_building(monkeypatch):
+    fakes = _install_fake_extensions(monkeypatch)
+    monkeypatch.setattr(machete_utils, "_validate_machete_device_support", lambda: False)
+    monkeypatch.setattr(machete_utils, "machete_runtime_error", lambda: "Machete unsupported on this device.")
+
+    with pytest.raises(RuntimeError, match="Machete unsupported on this device."):
+        extension_api.load(name="machete")
+
+    assert fakes["machete"].load_calls == 0
+
+
 def test_load_marlin_alias_builds_both_variants(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
 

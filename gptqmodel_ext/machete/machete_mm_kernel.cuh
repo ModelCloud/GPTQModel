@@ -296,13 +296,25 @@ struct MacheteKernelTemplate {
 
   static void run(Arguments const& args, void* workspace, cudaStream_t stream) {
     Gemm gemm_op;
+    int smem_size = GemmKernel::SharedStorageSize;
+    if (smem_size >= (48 << 10)) {
+      cudaError_t cuda_status = cudaFuncSetAttribute(
+          cutlass::device_kernel<GemmKernel>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+      TORCH_CHECK(
+          cuda_status == cudaSuccess,
+          "Machete kernel failed to set max dynamic shared memory size to ",
+          smem_size, ": ", cudaGetErrorString(cuda_status));
+    }
 
     cutlass::Status status = gemm_op.initialize(args, workspace, stream);
     TORCH_CHECK(status == cutlass::Status::kSuccess,
-                "Machete kernel failed to initialize workspace");
+                "Machete kernel failed to initialize workspace: ",
+                cutlassGetStatusString(status));
 
     status = gemm_op.run(stream);
-    TORCH_CHECK(status == cutlass::Status::kSuccess, "Machete kernel failed");
+    TORCH_CHECK(status == cutlass::Status::kSuccess, "Machete kernel failed: ",
+                cutlassGetStatusString(status));
   }
 };
 
