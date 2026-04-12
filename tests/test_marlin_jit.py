@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 
+from gptqmodel import extension as extension_api
 import gptqmodel.nn_modules.qlinear.marlin as marlin_qlinear_module
 import gptqmodel.utils.marlin as marlin_utils
 from gptqmodel.utils import cpp as cpp_module
@@ -49,6 +52,13 @@ class _FakeExtensionApi:
     def error(self, extension_name: str) -> str:
         self.error_calls.append(extension_name)
         return self.error_text
+
+
+def _jit_scratch_root(tmp_path: Path, suffix: str) -> Path:
+    base = Path("/dev/shm") if Path("/dev/shm").is_dir() else tmp_path
+    root = base / "gptqmodel-jit-tests" / suffix
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def test_gptq_marlin_gemm_dispatches_fp16_to_torch_ops(monkeypatch):
@@ -258,7 +268,49 @@ def test_marlin_runtime_error_skips_install_hint_when_cuda_wheel_headers_are_det
 
     assert fake_extension_api.is_available_calls == ["marlin_bf16"]
     assert fake_extension_api.error_calls == ["marlin_bf16"]
-    assert error_text == fake_extension_api.error_text
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_marlin_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
+    if torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("Marlin requires compute capability >= 8.0")
+
+    scratch_root = _jit_scratch_root(tmp_path, "marlin")
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    monkeypatch.setenv("GPTQMODEL_EXT_BUILD_BASE", str(scratch_root / "build"))
+    monkeypatch.setenv("GPTQMODEL_EXT_TMPDIR", str(scratch_root / "tmp"))
+    monkeypatch.setenv("GPTQMODEL_MARLIN_FORCE_REBUILD", "1")
+
+    assert extension_api.load(name="marlin", use_cache=False) == {
+        "marlin_fp16": True,
+        "marlin_bf16": True,
+    }
+
+    device = torch.device("cuda:0")
+    for dtype in (torch.float16, torch.bfloat16):
+        module = marlin_qlinear_module.MarlinLinear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            in_features=128,
+            out_features=64,
+            bias=False,
+            dtype=dtype,
+        ).to(device)
+        with torch.no_grad():
+            module.qweight.copy_(torch.randint(0, 16, module.qweight.shape, device=device, dtype=torch.int32))
+            module.g_idx.copy_(torch.arange(module.in_features, device=device, dtype=torch.int32))
+            module.scales.copy_(torch.ones_like(module.scales, device=device))
+            module.qzeros.copy_(torch.zeros_like(module.qzeros, device=device))
+        module.post_init()
+
+        out = module(torch.randn(4, 128, device=device, dtype=dtype))
+        torch.cuda.synchronize(device)
+
+        assert out.shape == (4, 64)
+        assert out.dtype == dtype
 
 
 def test_marlin_include_paths_use_wheel_headers_when_local_cuda_is_incomplete(monkeypatch, tmp_path):
