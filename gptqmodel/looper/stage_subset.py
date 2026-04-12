@@ -91,6 +91,7 @@ class SubsetPlan:
     forward_device_map: Dict[str, torch.device]
     calibration_coverage_policy: CalibrationCoveragePolicy
     module_chunks: List[Dict[str, NamedModule]]
+    restore_forward_device_overrides: bool = True
 
     @property
     def subset_forward_serial(self) -> bool:
@@ -294,6 +295,7 @@ def build_subset_plan(
     moe_groups: Dict[str, List[str]] = {}
     forward_device_map: Dict[str, torch.device] = {}
     subset_forward_serial = False
+    restore_forward_device_overrides = True
 
     attention_subset = bool(subset) and all(
         looper._is_attention_module_name(name) for name in subset
@@ -361,6 +363,16 @@ def build_subset_plan(
                     for module_name, baseline_device in baseline_devices.items():
                         forward_device_map.setdefault(module_name, baseline_device)
 
+                    for module_name, named_module in subset.items():
+                        preferred_device = forward_device_map.get(module_name)
+                        if preferred_device is not None:
+                            named_module.state["preferred_quant_device"] = preferred_device
+
+                    # Keep the balanced forward placement stable through quant for
+                    # this layer stage. Restoring immediately would reintroduce
+                    # the cross-device ping-pong we just eliminated.
+                    restore_forward_device_overrides = False
+
         # Balanced MoE subsets stay serial so replica fan-out does not fight the
         # explicit per-expert device assignment planned above.
         subset_forward_serial = looper._vram_strategy == VramStrategy.BALANCED
@@ -420,6 +432,7 @@ def build_subset_plan(
         forward_device_map=forward_device_map,
         calibration_coverage_policy=calibration_coverage_policy,
         module_chunks=module_chunks,
+        restore_forward_device_overrides=restore_forward_device_overrides,
     )
 
 
@@ -678,7 +691,7 @@ def _run_single_subset_pass(
                 preserve_module_devices=preserve_devices,
             )
         finally:
-            if forward_device_map:
+            if forward_device_map and plan.restore_forward_device_overrides:
                 looper._restore_forward_device_overrides(
                     subset,
                     previous_forward_devices,

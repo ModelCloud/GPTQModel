@@ -253,7 +253,11 @@ def _replay_layer_outputs(
             preserve_module_devices=replay_preserve_module_devices,
         )
     finally:
-        if replay_modules is not None and replay_forward_device_map:
+        if (
+            replay_modules is not None
+            and replay_forward_device_map
+            and (replay_plan is None or replay_plan.restore_forward_device_overrides)
+        ):
             looper._restore_forward_device_overrides(
                 replay_modules,
                 replay_prev_devices,

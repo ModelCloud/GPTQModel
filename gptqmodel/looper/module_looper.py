@@ -736,7 +736,15 @@ class ModuleLooper():
                 )
                 return cached
             device: Optional[torch.device]
-            if len(self._quant_devices) <= 1:
+            preferred_device = normalize_device_like(named_module.state.get("preferred_quant_device"))
+            if preferred_device is not None and any(dev == preferred_device for dev in self._quant_devices if dev is not None):
+                device = preferred_device
+                emit_device_telemetry(
+                    "quant_device_preferred_hint",
+                    module=key,
+                    target_device=device,
+                )
+            elif len(self._quant_devices) <= 1:
                 device = self._quant_devices[0]
             else:
                 device = self._quant_devices[self._quant_device_rr % len(self._quant_devices)]

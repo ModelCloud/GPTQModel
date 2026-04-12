@@ -164,6 +164,9 @@ def test_build_subset_plan_balanced_moe_pins_untouched_modules_to_baseline_devic
     assert plan.forward_device_map["mlp.experts.0.gate_proj"] == torch.device("cuda:0")
     assert plan.forward_device_map["mlp.experts.1.gate_proj"] == torch.device("cuda:1")
     assert plan.forward_device_map["self_attn.o_proj"] == torch.device("cpu")
+    assert plan.restore_forward_device_overrides is False
+    assert subset["mlp.experts.0.gate_proj"].state["preferred_quant_device"] == torch.device("cuda:0")
+    assert subset["mlp.experts.1.gate_proj"].state["preferred_quant_device"] == torch.device("cuda:1")
 
 
 def test_build_layer_subset_plans_merges_groups_for_single_pass_processors():

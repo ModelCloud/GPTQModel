@@ -64,6 +64,30 @@ def test_cache_inputs_delegates_to_stage_capture(monkeypatch):
     assert captured["kwargs"]["calibration_data"] is data
 
 
+def test_assign_quant_device_prefers_balanced_hint():
+    looper = _make_looper()
+    looper._quant_devices = [torch.device("cuda:0"), torch.device("cuda:1")]
+    looper._module_device_map = {}
+    looper._quant_device_rr = 0
+
+    named = NamedModule(
+        torch.nn.Linear(4, 4, bias=False),
+        name="mlp.experts.1.gate_proj",
+        full_name="model.layers.0.mlp.experts.1.gate_proj",
+        layer_index=0,
+    )
+    named.state["preferred_quant_device"] = torch.device("cuda:1")
+
+    target = looper._assign_quant_device_for_module(
+        named,
+        fallback_device=torch.device("cuda:0"),
+    )
+
+    assert target == torch.device("cuda:1")
+    assert looper._module_device_map[named.full_name] == torch.device("cuda:1")
+    assert looper._quant_device_rr == 0
+
+
 class _TinyLayer(torch.nn.Module):
     def forward(self, hidden_states, attention_mask=None, position_ids=None, **kwargs):
         return hidden_states
@@ -1087,6 +1111,105 @@ def test_replay_layer_outputs_with_plan_uses_plan_metadata_and_device_overrides(
     assert looper.restored_override_modules is replay_modules
     assert looper.restored_previous_devices == {"self_attn.q_proj": torch.device("cpu")}
     assert timer_records[0][1]["source"] == "model.layers.0:subset1/1"
+
+
+def test_replay_layer_outputs_with_plan_can_skip_override_restore():
+    tensor = torch.zeros(1, 1, 1)
+    replay_modules = {
+        "self_attn.q_proj": NamedModule(
+            torch.nn.Linear(1, 1, bias=False),
+            name="self_attn.q_proj",
+            full_name="model.layers.0.self_attn.q_proj",
+            layer_index=0,
+        )
+    }
+    replay_plan = SubsetPlan(
+        modules=replay_modules,
+        subset_index=0,
+        subset_total=1,
+        execute_forward=True,
+        replay_after_process=True,
+        forward_mode="serial",
+        batch_count=1,
+        forward_row_counts=[1],
+        forward_total_rows=1,
+        moe_groups={},
+        forward_device_map={"self_attn.q_proj": torch.device("cuda:0")},
+        calibration_coverage_policy=CalibrationCoveragePolicy(
+            validate_input_coverage=False,
+            fallback_enabled=True,
+            prune_uncovered_modules=False,
+            record_dynamic_exclusions=False,
+        ),
+        module_chunks=[replay_modules],
+        restore_forward_device_overrides=False,
+    )
+
+    class DummyPB:
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            return self
+
+        def title(self, *_):
+            return self
+
+        def subtitle(self, *_):
+            return self
+
+        def draw(self):
+            return self
+
+        def close(self):
+            return self
+
+    class DummyLogger:
+        def pb(self, iterable):
+            return DummyPB()
+
+    class DummyLooper:
+        def __init__(self):
+            self._current_subset = replay_modules
+            self.forward_calls = []
+
+        def _run_forward_batches(self, **kwargs):
+            self.forward_calls.append(kwargs)
+            return [[tensor]]
+
+        def _apply_forward_device_overrides(self, modules, forward_device_map, fallback_modules=None):
+            self.forward_override_modules = modules
+            self.forward_override_map = forward_device_map
+            return {"self_attn.q_proj": torch.device("cpu")}
+
+        def _restore_forward_device_overrides(self, modules, previous_devices, fallback_modules=None):
+            raise AssertionError("restore should be skipped when replay_plan disables it")
+
+    looper = DummyLooper()
+    processor = types.SimpleNamespace(num_batches=None)
+
+    outputs = _replay_layer_outputs(
+        looper,
+        module=torch.nn.Linear(1, 1, bias=False),
+        processor=processor,
+        layer_inputs=[[tensor]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.layers.0",
+        full={},
+        log=DummyLogger(),
+        region_timer=None,
+        replay_plan=replay_plan,
+    )
+
+    assert outputs == [[tensor]]
+    assert looper.forward_override_modules is replay_modules
+    assert looper.forward_override_map == {"self_attn.q_proj": torch.device("cuda:0")}
 
 
 class _ToySelfAttention(torch.nn.Module):

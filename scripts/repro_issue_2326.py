@@ -305,11 +305,12 @@ def main() -> int:
         preserve_module_devices=plan.preserve_module_devices,
     )
 
-    looper._restore_forward_device_overrides(
-        subset,
-        previous_devices,
-        fallback_modules=full,
-    )
+    if plan.restore_forward_device_overrides:
+        looper._restore_forward_device_overrides(
+            subset,
+            previous_devices,
+            fallback_modules=full,
+        )
 
     telemetry = get_device_telemetry_records()
     o_proj_forward = [
@@ -333,6 +334,7 @@ def main() -> int:
         "nvidia_smi": _nvidia_smi_snapshot(),
         "plan_forward_device_map": {name: str(device) for name, device in plan.forward_device_map.items()},
         "o_proj_in_forward_device_map": "self_attn.o_proj" in plan.forward_device_map,
+        "restore_forward_device_overrides": plan.restore_forward_device_overrides,
         "o_proj_device_after_quant_prepare": o_proj_device_after_quant_prepare,
         "o_proj_device_after_forward_restore": str(layer.self_attn.o_proj.weight.device),
         "o_proj_forward_records": o_proj_forward,
