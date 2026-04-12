@@ -449,7 +449,8 @@ jobs:
 
       - name: Clean uv
         run: |
-          uv cache clean
+          ls
+          # uv cache clean
 
       - name: Activate uv env
         run: |

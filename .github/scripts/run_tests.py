@@ -51,8 +51,9 @@ def start_keepalive_monitor(
         print(f"start to keep alive... {keep_alive_url}")
         while not stop_event.wait(interval_sec):
             resp = fetch_text(keep_alive_url, timeout=10, suppress_error=True)
-            if resp.strip() == "-1":
-                print("Server returned -1, terminating job...")
+            # if resp.strip() == "-1":
+            if int(resp.strip()) < 0:
+                print(f"Server returned {resp.strip()}, terminating job...")
                 state["forced_exit_code"] = 3
                 kill_process_group(proc)
                 stop_event.set()
