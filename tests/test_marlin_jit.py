@@ -248,6 +248,25 @@ def test_sm75_turing_contract_is_present_in_marlin_sources():
     assert "dtype=torch.float16 only." in loader_py
 
 
+def test_mxfp8_contract_is_present_in_marlin_sources():
+    marlin_root = marlin_utils._marlin_root()
+    gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
+    generator_py = (marlin_root / "generate_kernels.py").read_text(encoding="utf-8")
+    template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
+
+    assert 'scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 2, 8]' in generator_py
+    assert 'scalar_type == "vllm::kFE4M3fn" and group_blocks == 2' in generator_py
+    assert 'MXFP8 is only supported with bf16 compute.' in generator_py
+    assert "MXFP8_GET_IF(vllm::kFE4M3fn, pipe_stages)" in gemm_cu
+    assert "W_TYPE == vllm::kFE4M3fn && GROUP_BLOCKS == 2" in gemm_cu
+    assert "Float8_e8m0fnu" in gemm_cu
+    assert "float8_e4m3fn with float8_e8m0fnu scales requires " in gemm_cu
+    assert "float8_e4m3fn only supports group_size == 32 (MXFP8)" in gemm_cu
+    assert "// MXFP8: FP8 weights with e8m0 microscaling block scales." in template_h
+    assert "w_type == vllm::kFE4M3fn && !(s_type == vllm::kFE8M0fnu)" in template_h
+    assert "if constexpr (s_type == vllm::kFE4M3fn || s_type == vllm::kFE8M0fnu)" in template_h
+
+
 def test_gptq_marlin_repack_prefers_requested_dtype_extension(monkeypatch):
     fp16_loader = _FakeLoader()
     bf16_loader = _FakeLoader()

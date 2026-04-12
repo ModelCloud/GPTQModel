@@ -90,9 +90,9 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
             if m_blocks > 1 and thread_configs[0] != 64:
                 continue
 
-        # we only support channelwise quantization and group_size == 128
-        # for fp8
-        if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 8]:
+        # FP8 weights support channelwise/group128 in both fp16 and bf16, and
+        # group32 microscaling (MXFP8) in bf16.
+        if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 2, 8]:
             continue
         # nvfp4 only supports group_size == 16
         # mxfp4 only supports group_size == 32
@@ -121,6 +121,11 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
             s_type = "vllm::kFE8M0fnu"
             if dtype == "fp16":
                 # we cannot safely dequantize e8m0 to fp16, so skip this
+                continue
+        elif scalar_type == "vllm::kFE4M3fn" and group_blocks == 2:
+            s_type = "vllm::kFE8M0fnu"
+            if dtype == "fp16":
+                # MXFP8 is only supported with bf16 compute.
                 continue
         elif dtype == "fp16":
             s_type = "vllm::kFloat16"

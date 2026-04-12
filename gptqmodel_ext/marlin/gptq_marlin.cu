@@ -298,8 +298,10 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
       constexpr auto S_TYPE =                                                  \
           W_TYPE == vllm::kFE2M1f                                              \
               ? (GROUP_BLOCKS == 1 ? vllm::kFE4M3fn : vllm::kFE8M0fnu)         \
+              : (W_TYPE == vllm::kFE4M3fn && GROUP_BLOCKS == 2                 \
+                     ? vllm::kFE8M0fnu                                         \
               : (std::is_same<scalar_t, half>::value ? vllm::kFloat16          \
-                                                     : vllm::kBFloat16);       \
+                                                     : vllm::kBFloat16));      \
       kernel = Marlin<scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS,         \
                       THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,       \
                       M_BLOCK_SIZE_8, STAGES, GROUP_BLOCKS, IS_ZP_FLOAT>;      \
@@ -446,6 +448,29 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     MXFP4_GET_IF_M234(W_TYPE, 8, 4, 128, STAGES)   \
     MXFP4_GET_IF_M234(W_TYPE, 4, 8, 128, STAGES)
 
+  #define MXFP8_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS, STAGES) \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, STAGES, 2, NUM_THREADS,    \
+            false)                                                           \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, STAGES, 2, NUM_THREADS,   \
+            false)
+
+  #define MXFP8_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS,        \
+                            STAGES)                                          \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, STAGES, 2, NUM_THREADS,   \
+            false)                                                           \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, STAGES, 2, NUM_THREADS,   \
+            false)                                                           \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, STAGES, 2, NUM_THREADS,   \
+            false)
+
+  #define MXFP8_GET_IF(W_TYPE, STAGES)             \
+    MXFP8_GET_IF_M1(W_TYPE, 8, 8, 256, STAGES)     \
+    MXFP8_GET_IF_M1(W_TYPE, 8, 4, 128, STAGES)     \
+    MXFP8_GET_IF_M1(W_TYPE, 4, 8, 128, STAGES)     \
+    MXFP8_GET_IF_M234(W_TYPE, 16, 4, 256, STAGES)  \
+    MXFP8_GET_IF_M234(W_TYPE, 8, 4, 128, STAGES)   \
+    MXFP8_GET_IF_M234(W_TYPE, 4, 8, 128, STAGES)
+
   // We currently have 4-bit models only with group_blocks == 4
   #define FZP_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS, STAGES)   \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, STAGES, 4, NUM_THREADS,   \
@@ -537,6 +562,7 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
   if (std::is_same<scalar_t, nv_bfloat16>::value) {
     if (false) {
     }
+    MXFP8_GET_IF(vllm::kFE4M3fn, pipe_stages)
     MXFP4_GET_IF(vllm::kFE2M1f, pipe_stages)
   }
 
@@ -1050,6 +1076,12 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
         TORCH_CHECK(false,
                     "float4_e2m1f only supports group_size == 16 (NVFP4) ",
                     "and group_size == 32 (MXFP4)");
+#if HAS_FLOAT8_E8M0FNU
+    } else if (b_q_type == vllm::kFE4M3fn &&
+               b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu) {
+      TORCH_CHECK(false, "float8_e4m3fn with float8_e8m0fnu scales requires "
+                         "bfloat16 compute (MXFP8).");
+#endif
     } else {
       scales_ptr = b_scales.data_ptr<at::Half>();
     }
@@ -1084,6 +1116,14 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
         TORCH_CHECK(false,
                     "float4_e2m1f only supports group_size == 16 (NVFP4) ",
                     "and group_size == 32 (MXFP4)");
+#if HAS_FLOAT8_E8M0FNU
+    } else if (b_q_type == vllm::kFE4M3fn &&
+               b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu) {
+      TORCH_CHECK(group_size == 32,
+                  "float8_e4m3fn only supports group_size == 32 (MXFP8) when "
+                  "using float8_e8m0fnu scales.");
+      scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
+#endif
     } else {
       scales_ptr = b_scales.data_ptr<at::BFloat16>();
     }
