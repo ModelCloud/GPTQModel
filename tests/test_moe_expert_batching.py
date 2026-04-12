@@ -39,7 +39,10 @@ class TestMoEExpertBatching(unittest.TestCase):
         self.looper._moe_subset_threshold = 2
         # Mock device preparation to return proper torch.device
         self.looper._prepare_named_module_for_quantization.return_value = torch.device("cpu")
-        self.looper._vram_strategy = None
+        self.looper._dense_quant_devices = [torch.device("cpu")]
+        self.looper._moe_quant_devices = [torch.device("cpu")]
+        self.looper._dense_vram_strategy_explicit = False
+        self.looper._moe_vram_strategy_explicit = False
 
         self.processor.name.return_value = "GPTQProcessor"
         self.processor.execution_config = ExecutionConfig(

@@ -86,7 +86,7 @@ class TestGemma431BIt(_Gemma4VariantModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gemma-4-31B-it"
     HF_MODEL_ID = "google/gemma-4-31b-it"
     EVAL_BATCH_SIZE = 1
-    VRAM_STRATEGY = VramStrategy.BALANCED
+    DENSE_VRAM_STRATEGY = VramStrategy.BALANCED
 
     def _build_quantize_config(self):
         quantize_config = super()._build_quantize_config()

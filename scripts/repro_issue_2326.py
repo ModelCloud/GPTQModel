@@ -90,8 +90,13 @@ class _ToyLayer(torch.nn.Module):
 
 class _PlanLooper:
     def __init__(self, devices: list[torch.device]) -> None:
-        self._vram_strategy = VramStrategy.BALANCED
         self._quant_devices = devices
+        self._dense_quant_devices = [devices[0]]
+        self._moe_quant_devices = devices
+        self._dense_vram_strategy = VramStrategy.EXCLUSIVE
+        self._moe_vram_strategy = VramStrategy.BALANCED
+        self._dense_vram_strategy_explicit = False
+        self._moe_vram_strategy_explicit = True
         self._moe_subset_threshold = 2
         self.gptq_model = types.SimpleNamespace(
             lm_head=None,

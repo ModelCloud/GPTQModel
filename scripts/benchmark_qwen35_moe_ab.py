@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 DEFAULT_MODEL_PATH = "/monster/data/model/Qwen3.5-35B-A3B"
@@ -25,6 +25,17 @@ VRAM_STRATEGY_CHOICES = (
     "balanced",
     "dense_home_moe_balanced",
 )
+DENSE_VRAM_STRATEGY_CHOICES = ("exclusive", "balanced")
+MOE_VRAM_STRATEGY_CHOICES = ("exclusive", "balanced")
+
+
+def _csv_arg(value: Optional[str]) -> Optional[List[str]]:
+    """Parse a comma-separated CLI device list into a normalized list."""
+
+    if value is None:
+        return None
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    return items or None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -49,6 +60,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", default="auto", help="Model dtype passed to GPTQModel.load().")
     parser.add_argument("--attn-implementation", default="eager", choices=("eager", "flash_attention_2"), help="Attention implementation.")
     parser.add_argument("--vram-strategy", default="balanced", choices=VRAM_STRATEGY_CHOICES, help="VRAM strategy to benchmark.")
+    parser.add_argument("--cuda-visible-devices", default=None, help="Comma-separated visible device set for one case.")
+    parser.add_argument("--dense-vram-strategy", default="balanced", choices=DENSE_VRAM_STRATEGY_CHOICES, help="Dense-pool strategy for repos that support split VRAM config.")
+    parser.add_argument("--dense-vram-strategy-devices", default=None, help="Comma-separated dense-pool devices relative to CUDA_VISIBLE_DEVICES, e.g. cuda:0.")
+    parser.add_argument("--moe-vram-strategy", default="balanced", choices=MOE_VRAM_STRATEGY_CHOICES, help="MoE-pool strategy for repos that support split VRAM config.")
+    parser.add_argument("--moe-vram-strategy-devices", default=None, help="Comma-separated MoE-pool devices relative to CUDA_VISIBLE_DEVICES, e.g. cuda:1,cuda:2.")
     parser.add_argument(
         "--current-vram-strategy",
         default=None,
@@ -61,6 +77,16 @@ def _parse_args() -> argparse.Namespace:
         choices=("exclusive", "balanced"),
         help="Optional VRAM strategy override for the baseline repo in A/B mode.",
     )
+    parser.add_argument("--current-cuda-visible-devices", default=None, help="Comma-separated CUDA_VISIBLE_DEVICES for the current repo in A/B mode.")
+    parser.add_argument("--baseline-cuda-visible-devices", default=None, help="Comma-separated CUDA_VISIBLE_DEVICES for the baseline repo in A/B mode.")
+    parser.add_argument("--current-dense-vram-strategy", default=None, choices=DENSE_VRAM_STRATEGY_CHOICES, help="Optional dense-pool strategy override for the current repo in A/B mode.")
+    parser.add_argument("--baseline-dense-vram-strategy", default=None, choices=DENSE_VRAM_STRATEGY_CHOICES, help="Optional dense-pool strategy override for the baseline repo in A/B mode.")
+    parser.add_argument("--current-dense-vram-strategy-devices", default=None, help="Optional dense-pool device list override for the current repo in A/B mode.")
+    parser.add_argument("--baseline-dense-vram-strategy-devices", default=None, help="Optional dense-pool device list override for the baseline repo in A/B mode.")
+    parser.add_argument("--current-moe-vram-strategy", default=None, choices=MOE_VRAM_STRATEGY_CHOICES, help="Optional MoE-pool strategy override for the current repo in A/B mode.")
+    parser.add_argument("--baseline-moe-vram-strategy", default=None, choices=MOE_VRAM_STRATEGY_CHOICES, help="Optional MoE-pool strategy override for the baseline repo in A/B mode.")
+    parser.add_argument("--current-moe-vram-strategy-devices", default=None, help="Optional MoE-pool device list override for the current repo in A/B mode.")
+    parser.add_argument("--baseline-moe-vram-strategy-devices", default=None, help="Optional MoE-pool device list override for the baseline repo in A/B mode.")
     return parser.parse_args()
 
 
@@ -110,6 +136,12 @@ def _summarize_case(case: Dict[str, Any]) -> Dict[str, Any]:
         "repo_root": case.get("repo_root"),
         "git_head": case.get("git_head"),
         "vram_strategy": case.get("vram_strategy"),
+        "dense_vram_strategy": case.get("dense_vram_strategy"),
+        "dense_vram_strategy_devices": case.get("dense_vram_strategy_devices"),
+        "moe_vram_strategy": case.get("moe_vram_strategy"),
+        "moe_vram_strategy_devices": case.get("moe_vram_strategy_devices"),
+        "split_vram_pools_applied": bool(case.get("split_vram_pools_applied")),
+        "cuda_visible_devices": case.get("cuda_visible_devices"),
         "quant_wall_s": float(case.get("quant_wall_s", 0.0)),
         "pre_quant_forward_s": _extract_region_total(quant_region_snapshot, "pre_quant_forward"),
         "process_quant_s": _extract_region_total(quant_region_snapshot, "process_quant"),
@@ -155,7 +187,14 @@ def _compare_cases(current: Dict[str, Any], baseline: Dict[str, Any]) -> Dict[st
 
 def _print_case_summary(case: Dict[str, Any]) -> None:
     summary = _summarize_case(case)
-    print(f"[{summary['label']}] head={summary['git_head']} vram_strategy={summary.get('vram_strategy')}")
+    print(
+        f"[{summary['label']}] head={summary['git_head']} "
+        f"vram_strategy={summary.get('vram_strategy')} "
+        f"dense={summary.get('dense_vram_strategy')}@{summary.get('dense_vram_strategy_devices')} "
+        f"moe={summary.get('moe_vram_strategy')}@{summary.get('moe_vram_strategy_devices')} "
+        f"split_applied={summary.get('split_vram_pools_applied')} "
+        f"visible={summary.get('cuda_visible_devices')}"
+    )
     print(
         "  quant_wall_s={quant_wall_s:.3f} pre={pre_quant_forward_s:.3f} "
         "quant={process_quant_s:.3f} post={post_quant_forward_s:.3f}".format(**summary)
@@ -197,12 +236,20 @@ def _run_subprocess_case(
     dtype: str,
     attn_implementation: str,
     vram_strategy: str,
+    cuda_visible_devices: Optional[str],
+    dense_vram_strategy: str,
+    dense_vram_strategy_devices: Optional[str],
+    moe_vram_strategy: str,
+    moe_vram_strategy_devices: Optional[str],
 ) -> Dict[str, Any]:
     json_out = output_dir / f"{label}.json"
     log_out = output_dir / f"{label}.log"
     env = os.environ.copy()
     env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    env.setdefault("CUDA_VISIBLE_DEVICES", "0,1")
+    if cuda_visible_devices is not None:
+        env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+    else:
+        env.setdefault("CUDA_VISIBLE_DEVICES", "0,1")
     env["PYTHON_GIL"] = "0"
     env["DEBUG"] = "1"
 
@@ -232,7 +279,17 @@ def _run_subprocess_case(
         attn_implementation,
         "--vram-strategy",
         vram_strategy,
+        "--dense-vram-strategy",
+        dense_vram_strategy,
+        "--moe-vram-strategy",
+        moe_vram_strategy,
     ]
+    if cuda_visible_devices is not None:
+        cmd.extend(["--cuda-visible-devices", cuda_visible_devices])
+    if dense_vram_strategy_devices is not None:
+        cmd.extend(["--dense-vram-strategy-devices", dense_vram_strategy_devices])
+    if moe_vram_strategy_devices is not None:
+        cmd.extend(["--moe-vram-strategy-devices", moe_vram_strategy_devices])
 
     with log_out.open("w", encoding="utf-8") as log_handle:
         subprocess.run(
@@ -254,6 +311,8 @@ def _single_case_main(args: argparse.Namespace) -> int:
         raise SystemExit("--single requires --repo-root and --json-out")
     if os.environ.get("PYTHON_GIL") != "0":
         raise SystemExit("--single requires PYTHON_GIL=0")
+    if args.cuda_visible_devices is not None and os.environ.get("CUDA_VISIBLE_DEVICES") != args.cuda_visible_devices:
+        raise SystemExit("--single requires CUDA_VISIBLE_DEVICES to match --cuda-visible-devices")
 
     repo_root = args.repo_root.resolve()
     os.chdir(repo_root)
@@ -275,6 +334,10 @@ def _single_case_main(args: argparse.Namespace) -> int:
     from test_qwen3_5_moe import TestQwen3_5Moe
 
     resolved_vram_strategy = VramStrategy(args.vram_strategy)
+    resolved_dense_vram_strategy = VramStrategy(args.dense_vram_strategy)
+    dense_vram_strategy_devices = _csv_arg(args.dense_vram_strategy_devices)
+    moe_vram_strategy_devices = _csv_arg(args.moe_vram_strategy_devices)
+    resolved_moe_vram_strategy = VramStrategy(args.moe_vram_strategy)
 
     def _safe_sync() -> None:
         if not torch.cuda.is_available():
@@ -433,6 +496,12 @@ def _single_case_main(args: argparse.Namespace) -> int:
                     "dtype": str(args.dtype),
                     "attn_implementation": load_kwargs["attn_implementation"],
                     "vram_strategy": self.VRAM_STRATEGY.value,
+                    "dense_vram_strategy": getattr(self, "DENSE_VRAM_STRATEGY", None).value if getattr(self, "DENSE_VRAM_STRATEGY", None) is not None else None,
+                    "dense_vram_strategy_devices": getattr(self, "DENSE_VRAM_STRATEGY_DEVICES", None),
+                    "moe_vram_strategy": getattr(self, "MOE_VRAM_STRATEGY", None).value if getattr(self, "MOE_VRAM_STRATEGY", None) is not None else None,
+                    "moe_vram_strategy_devices": getattr(self, "MOE_VRAM_STRATEGY_DEVICES", None),
+                    "split_vram_pools_supported": split_vram_pools_supported,
+                    "split_vram_pools_applied": split_vram_pools_applied,
                     "python": sys.version,
                     "python_gil_disabled": bool(getattr(sys, "_is_gil_enabled", lambda: True)() is False),
                     "python_gil_env": os.environ.get("PYTHON_GIL"),
@@ -464,6 +533,22 @@ def _single_case_main(args: argparse.Namespace) -> int:
                 del model
                 torch_empty_cache()
 
+    # Only apply split pools when the imported repo exposes the newer test
+    # class knobs; older branches stay on their legacy single-strategy path.
+    split_vram_pools_supported = (
+        hasattr(BenchmarkQwen35Moe, "DENSE_VRAM_STRATEGY")
+        and hasattr(BenchmarkQwen35Moe, "DENSE_VRAM_STRATEGY_DEVICES")
+        and hasattr(BenchmarkQwen35Moe, "MOE_VRAM_STRATEGY")
+        and hasattr(BenchmarkQwen35Moe, "MOE_VRAM_STRATEGY_DEVICES")
+    )
+    split_vram_pools_applied = False
+    if split_vram_pools_supported:
+        BenchmarkQwen35Moe.DENSE_VRAM_STRATEGY = resolved_dense_vram_strategy
+        BenchmarkQwen35Moe.DENSE_VRAM_STRATEGY_DEVICES = dense_vram_strategy_devices
+        BenchmarkQwen35Moe.MOE_VRAM_STRATEGY = resolved_moe_vram_strategy
+        BenchmarkQwen35Moe.MOE_VRAM_STRATEGY_DEVICES = moe_vram_strategy_devices
+        split_vram_pools_applied = True
+
     case = BenchmarkQwen35Moe()
     result = case.run_benchmark()
     args.json_out.parent.mkdir(parents=True, exist_ok=True)
@@ -478,35 +563,127 @@ def _ab_main(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     current_vram_strategy = args.current_vram_strategy or args.vram_strategy
     baseline_vram_strategy = args.baseline_vram_strategy or args.vram_strategy
+    current_cuda_visible_devices = args.current_cuda_visible_devices or args.cuda_visible_devices
+    baseline_cuda_visible_devices = args.baseline_cuda_visible_devices or args.cuda_visible_devices
+    current_dense_vram_strategy = args.current_dense_vram_strategy or args.dense_vram_strategy
+    baseline_dense_vram_strategy = args.baseline_dense_vram_strategy or args.dense_vram_strategy
+    current_dense_vram_strategy_devices = args.current_dense_vram_strategy_devices or args.dense_vram_strategy_devices
+    baseline_dense_vram_strategy_devices = args.baseline_dense_vram_strategy_devices or args.dense_vram_strategy_devices
+    current_moe_vram_strategy = args.current_moe_vram_strategy or args.moe_vram_strategy
+    baseline_moe_vram_strategy = args.baseline_moe_vram_strategy or args.moe_vram_strategy
+    current_moe_vram_strategy_devices = args.current_moe_vram_strategy_devices or args.moe_vram_strategy_devices
+    baseline_moe_vram_strategy_devices = args.baseline_moe_vram_strategy_devices or args.moe_vram_strategy_devices
 
-    current = _run_subprocess_case(
-        script_path=script_path,
+    current = baseline = None
+
+    def _start_case(
+        *,
+        repo_root: Path,
+        label: str,
+        vram_strategy: str,
+        cuda_visible_devices: Optional[str],
+        dense_vram_strategy: str,
+        dense_vram_strategy_devices: Optional[str],
+        moe_vram_strategy: str,
+        moe_vram_strategy_devices: Optional[str],
+    ):
+        json_out = output_dir / f"{label}.json"
+        log_out = output_dir / f"{label}.log"
+        env = os.environ.copy()
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        if cuda_visible_devices is not None:
+            env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+        else:
+            env.setdefault("CUDA_VISIBLE_DEVICES", "0,1")
+        env["PYTHON_GIL"] = "0"
+        env["DEBUG"] = "1"
+
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--single",
+            "--repo-root",
+            str(repo_root),
+            "--json-out",
+            str(json_out),
+            "--label",
+            label,
+            "--model-path",
+            args.model_path,
+            "--dataset-size",
+            str(args.dataset_size),
+            "--batch-size",
+            str(args.batch_size),
+            "--quant-layers",
+            str(args.quant_layers),
+            "--stop-after-layer",
+            str(args.stop_after_layer),
+            "--dtype",
+            args.dtype,
+            "--attn-implementation",
+            args.attn_implementation,
+            "--vram-strategy",
+            vram_strategy,
+            "--dense-vram-strategy",
+            dense_vram_strategy,
+            "--moe-vram-strategy",
+            moe_vram_strategy,
+        ]
+        if cuda_visible_devices is not None:
+            cmd.extend(["--cuda-visible-devices", cuda_visible_devices])
+        if dense_vram_strategy_devices is not None:
+            cmd.extend(["--dense-vram-strategy-devices", dense_vram_strategy_devices])
+        if moe_vram_strategy_devices is not None:
+            cmd.extend(["--moe-vram-strategy-devices", moe_vram_strategy_devices])
+
+        log_handle = log_out.open("w", encoding="utf-8")
+        proc = subprocess.Popen(
+            cmd,
+            cwd=repo_root,
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        return proc, log_handle, json_out, log_out
+
+    current_proc, current_log_handle, current_json_out, _ = _start_case(
         repo_root=args.current_root.resolve(),
         label="current",
-        output_dir=output_dir,
-        model_path=args.model_path,
-        dataset_size=args.dataset_size,
-        batch_size=args.batch_size,
-        quant_layers=args.quant_layers,
-        stop_after_layer=args.stop_after_layer,
-        dtype=args.dtype,
-        attn_implementation=args.attn_implementation,
         vram_strategy=current_vram_strategy,
+        cuda_visible_devices=current_cuda_visible_devices,
+        dense_vram_strategy=current_dense_vram_strategy,
+        dense_vram_strategy_devices=current_dense_vram_strategy_devices,
+        moe_vram_strategy=current_moe_vram_strategy,
+        moe_vram_strategy_devices=current_moe_vram_strategy_devices,
     )
-    baseline = _run_subprocess_case(
-        script_path=script_path,
+    baseline_proc, baseline_log_handle, baseline_json_out, _ = _start_case(
         repo_root=args.baseline_root.resolve(),
         label="baseline",
-        output_dir=output_dir,
-        model_path=args.model_path,
-        dataset_size=args.dataset_size,
-        batch_size=args.batch_size,
-        quant_layers=args.quant_layers,
-        stop_after_layer=args.stop_after_layer,
-        dtype=args.dtype,
-        attn_implementation=args.attn_implementation,
         vram_strategy=baseline_vram_strategy,
+        cuda_visible_devices=baseline_cuda_visible_devices,
+        dense_vram_strategy=baseline_dense_vram_strategy,
+        dense_vram_strategy_devices=baseline_dense_vram_strategy_devices,
+        moe_vram_strategy=baseline_moe_vram_strategy,
+        moe_vram_strategy_devices=baseline_moe_vram_strategy_devices,
     )
+
+    try:
+        current_returncode = current_proc.wait()
+        baseline_returncode = baseline_proc.wait()
+    finally:
+        current_log_handle.close()
+        baseline_log_handle.close()
+
+    if current_returncode != 0:
+        raise subprocess.CalledProcessError(current_returncode, current_proc.args)
+    if baseline_returncode != 0:
+        raise subprocess.CalledProcessError(baseline_returncode, baseline_proc.args)
+
+    with current_json_out.open("r", encoding="utf-8") as handle:
+        current = json.load(handle)
+    with baseline_json_out.open("r", encoding="utf-8") as handle:
+        baseline = json.load(handle)
 
     compare = _compare_cases(current=current, baseline=baseline)
     compare_path = output_dir / "compare.json"

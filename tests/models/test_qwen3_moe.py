@@ -64,7 +64,8 @@ class TestQwen3Moe(ModelTest):
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
-    VRAM_STRATEGY = VramStrategy.BALANCED
+    DENSE_VRAM_STRATEGY = VramStrategy.EXCLUSIVE
+    MOE_VRAM_STRATEGY = VramStrategy.BALANCED
     MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride())
     # TRUST_REMOTE_CODE = False
     # APPLY_CHAT_TEMPLATE = True

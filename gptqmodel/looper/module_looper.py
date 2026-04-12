@@ -96,6 +96,42 @@ def _restrict_quant_devices_for_method(method: Any, quant_devices: List[torch.de
     return quant_devices[:1]
 
 
+def _resolve_strategy_device_pool(
+    configured_devices: Optional[List[str]],
+    available_devices: List[torch.device],
+    *,
+    label: str,
+) -> List[torch.device]:
+    """Resolve one strategy device pool as a validated subset of available devices."""
+
+    if not configured_devices:
+        return list(available_devices)
+
+    available_by_name = {
+        str(normalize_device_like(device)): normalize_device_like(device)
+        for device in available_devices
+        if normalize_device_like(device) is not None
+    }
+    resolved: List[torch.device] = []
+    for device_name in configured_devices:
+        normalized = normalize_device_like(device_name)
+        if normalized is None:
+            raise ValueError(f"ModuleLooper: {label} device pool contains an unsupported device value: {device_name!r}.")
+        matched = available_by_name.get(str(normalized))
+        if matched is None:
+            raise ValueError(
+                f"ModuleLooper: {label} device pool {configured_devices} must be a subset of the visible compute devices "
+                f"{list(available_by_name.keys())}."
+            )
+        if matched not in resolved:
+            resolved.append(matched)
+
+    if not resolved:
+        raise ValueError(f"ModuleLooper: {label} device pool is empty after normalization.")
+
+    return resolved
+
+
 class StopMainLoop(Exception):
     """Signal that the module loop should abort immediately."""
 
@@ -190,31 +226,79 @@ class ModuleLooper():
         self._quant_device_rr = 0
         self._module_device_map: Dict[str, torch.device] = {}
         self._quant_device_lock = threading.Lock()
-        vram_strategy = getattr(self.gptq_model.quantize_config, "vram_strategy", VramStrategy.EXCLUSIVE)
-        if isinstance(vram_strategy, str):
+
+        # Resolve the user-facing split dense/MoE placement settings once at
+        # looper construction time so subset planning can reuse stable pools.
+        dense_vram_strategy = getattr(self.gptq_model.quantize_config, "dense_vram_strategy", VramStrategy.EXCLUSIVE)
+        if isinstance(dense_vram_strategy, str):
             try:
-                vram_strategy = VramStrategy(vram_strategy.lower())
+                dense_vram_strategy = VramStrategy(dense_vram_strategy.lower())
             except ValueError:
-                vram_strategy = VramStrategy.EXCLUSIVE
-        supported_strategies = getattr(
+                dense_vram_strategy = VramStrategy.EXCLUSIVE
+        supported_dense_strategies = getattr(
             self.gptq_model,
-            "supported_vram_strategies",
+            "supported_dense_vram_strategies",
             [
                 VramStrategy.EXCLUSIVE,
                 VramStrategy.BALANCED,
-                VramStrategy.DENSE_HOME_MOE_BALANCED,
             ],
         )
-        if isinstance(supported_strategies, VramStrategy):
-            supported_strategies = [supported_strategies]
-        if vram_strategy not in supported_strategies:
+        if isinstance(supported_dense_strategies, VramStrategy):
+            supported_dense_strategies = [supported_dense_strategies]
+        if dense_vram_strategy not in supported_dense_strategies:
             log.debug(
-                "ModuleLooper: Model %s does not support VRAM strategy %s; falling back to exclusive.",
+                "ModuleLooper: Model %s does not support dense VRAM strategy %s; falling back to exclusive.",
                 getattr(self.gptq_model, "__class__", type(self.gptq_model)).__name__,
-                vram_strategy,
+                dense_vram_strategy,
             )
-            vram_strategy = VramStrategy.EXCLUSIVE
-        self._vram_strategy = vram_strategy
+            dense_vram_strategy = VramStrategy.EXCLUSIVE
+
+        moe_vram_strategy = getattr(
+            self.gptq_model.quantize_config,
+            "moe_vram_strategy",
+            VramStrategy.EXCLUSIVE,
+        )
+        if isinstance(moe_vram_strategy, str):
+            try:
+                moe_vram_strategy = VramStrategy(moe_vram_strategy.lower())
+            except ValueError:
+                moe_vram_strategy = VramStrategy.EXCLUSIVE
+        supported_moe_strategies = getattr(
+            self.gptq_model,
+            "supported_moe_vram_strategies",
+            [
+                VramStrategy.EXCLUSIVE,
+                VramStrategy.BALANCED,
+            ],
+        )
+        if isinstance(supported_moe_strategies, VramStrategy):
+            supported_moe_strategies = [supported_moe_strategies]
+        if moe_vram_strategy not in supported_moe_strategies:
+            log.debug(
+                "ModuleLooper: Model %s does not support MoE VRAM strategy %s; falling back to exclusive.",
+                getattr(self.gptq_model, "__class__", type(self.gptq_model)).__name__,
+                moe_vram_strategy,
+            )
+            moe_vram_strategy = VramStrategy.EXCLUSIVE
+
+        self._dense_vram_strategy = dense_vram_strategy
+        self._moe_vram_strategy = moe_vram_strategy
+        dense_strategy_devices = getattr(self.gptq_model.quantize_config, "dense_vram_strategy_devices", None)
+        moe_strategy_devices = getattr(self.gptq_model.quantize_config, "moe_vram_strategy_devices", None)
+        self._dense_quant_devices = _resolve_strategy_device_pool(
+            dense_strategy_devices,
+            quant_devices,
+            label="dense_vram_strategy_devices",
+        )
+        self._moe_quant_devices = _resolve_strategy_device_pool(
+            moe_strategy_devices,
+            quant_devices,
+            label="moe_vram_strategy_devices",
+        )
+        # Keep a cheap flag so the planner can skip split-pool logic entirely
+        # when the user leaves a pool on the default exclusive behavior.
+        self._dense_vram_strategy_explicit = bool(dense_strategy_devices) or self._dense_vram_strategy != VramStrategy.EXCLUSIVE
+        self._moe_vram_strategy_explicit = bool(moe_strategy_devices) or self._moe_vram_strategy != VramStrategy.EXCLUSIVE
 
         self._moe_subset_threshold = 16
         self._subset_callback = getattr(self.gptq_model, "subset_callback", None)
@@ -1320,6 +1404,11 @@ class ModuleLooper():
             is_awq_quantize=is_awq_quantize,
             include_capture_only=requires_activation_capture,
         )
+        planning_layer_modules = self.gptq_model.full_layer_modules(
+            model_config=self.gptq_model.model.config,
+            is_awq_quantize=is_awq_quantize,
+            include_capture_only=requires_activation_capture,
+        )
 
         # true-sequential will replay the quantized activations after each subset has been quantized to be used for next subset quantization
         # this should always be true for gptq unless you want lower but misleading error_loss that is misleading and will lead to lower post-quantized model
@@ -1351,6 +1440,7 @@ class ModuleLooper():
             self,
             layers=layers,
             layer_modules=layer_modules,
+            planning_layer_modules=planning_layer_modules,
             layers_prefix=layers_prefix,
             fallback=fallback,
             shared_kv_cache_dict=shared_kv_cache_dict,

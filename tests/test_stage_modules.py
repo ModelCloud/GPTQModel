@@ -26,7 +26,14 @@ from gptqmodel.quantization.config import QuantizeConfig
 class _DummyQModel:
     def __init__(self):
         self.support_batch_quantize = False
-        self.quantize_config = types.SimpleNamespace(device=None, vram_strategy="exclusive", moe_routing_bypass=lambda : False)
+        self.quantize_config = types.SimpleNamespace(
+            device=None,
+            dense_vram_strategy="exclusive",
+            dense_vram_strategy_devices=None,
+            moe_vram_strategy="exclusive",
+            moe_vram_strategy_devices=None,
+            moe_routing_bypass=lambda: False,
+        )
         self.layer_callback = None
 
 
@@ -416,7 +423,12 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             self._module_device_map = {}
             self._quant_device_lock = threading.Lock()
             self._moe_subset_threshold = 16
-            self._vram_strategy = types.SimpleNamespace()
+            self._dense_quant_devices = [torch.device("cpu")]
+            self._moe_quant_devices = [torch.device("cpu")]
+            self._dense_vram_strategy = types.SimpleNamespace()
+            self._moe_vram_strategy = types.SimpleNamespace()
+            self._dense_vram_strategy_explicit = False
+            self._moe_vram_strategy_explicit = False
             self._layer_events = []
 
         def _check_loop_stop(self):
@@ -464,6 +476,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         looper,
         layers=layers,
         layer_modules=layer_modules,
+        planning_layer_modules=layer_modules,
         layers_prefix="model.layers",
         fallback=True,
         shared_kv_cache_dict={},
@@ -623,7 +636,12 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             self._module_device_map = {}
             self._quant_device_lock = threading.Lock()
             self._moe_subset_threshold = 16
-            self._vram_strategy = types.SimpleNamespace()
+            self._dense_quant_devices = [torch.device("cpu")]
+            self._moe_quant_devices = [torch.device("cpu")]
+            self._dense_vram_strategy = types.SimpleNamespace()
+            self._moe_vram_strategy = types.SimpleNamespace()
+            self._dense_vram_strategy_explicit = False
+            self._moe_vram_strategy_explicit = False
             self._layer_events = []
             self.named_module_layers = []
 
@@ -673,6 +691,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
         looper,
         layers=[torch.nn.Linear(64, 64) for _ in range(3)],
         layer_modules=[["foo"]],
+        planning_layer_modules=[["foo"]],
         layers_prefix="model.layers",
         fallback=True,
         shared_kv_cache_dict={},
@@ -850,7 +869,12 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
             self._module_device_map = {}
             self._quant_device_lock = threading.Lock()
             self._moe_subset_threshold = 16
-            self._vram_strategy = types.SimpleNamespace()
+            self._dense_quant_devices = [torch.device("cpu")]
+            self._moe_quant_devices = [torch.device("cpu")]
+            self._dense_vram_strategy = types.SimpleNamespace()
+            self._moe_vram_strategy = types.SimpleNamespace()
+            self._dense_vram_strategy_explicit = False
+            self._moe_vram_strategy_explicit = False
             self.forward_replay_calls = []
 
         def _run_forward_batches(self, **kwargs):
@@ -891,6 +915,7 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
         looper,
         layers=[torch.nn.Linear(1, 1, bias=False) for _ in range(2)],
         layer_modules=[["self_attn.q_proj"]],
+        planning_layer_modules=[["self_attn.q_proj"]],
         layers_prefix="model.layers",
         fallback=True,
         shared_kv_cache_dict={},
@@ -1407,7 +1432,12 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             self._module_device_map = {}
             self._quant_device_lock = threading.Lock()
             self._moe_subset_threshold = 16
-            self._vram_strategy = types.SimpleNamespace()
+            self._dense_quant_devices = [torch.device("cpu")]
+            self._moe_quant_devices = [torch.device("cpu")]
+            self._dense_vram_strategy = types.SimpleNamespace()
+            self._moe_vram_strategy = types.SimpleNamespace()
+            self._dense_vram_strategy_explicit = False
+            self._moe_vram_strategy_explicit = False
             self._current_subset = None
             self.support_batch_quantize = False
             self.moe_routing_override = None
@@ -1492,6 +1522,12 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
         looper,
         layers=layers,
         layer_modules=[
+            ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+            ["self_attn.o_proj"],
+            ["mlp.gate_proj", "mlp.up_proj"],
+            ["mlp.down_proj"],
+        ],
+        planning_layer_modules=[
             ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
             ["self_attn.o_proj"],
             ["mlp.gate_proj", "mlp.up_proj"],

@@ -50,7 +50,7 @@ def _make_quant_config(device: torch.device | str = "cpu") -> QuantizeConfig:
         quant_method=METHOD.AWQ,
         format=FORMAT.GEMM,
         device=device,
-        vram_strategy=VramStrategy.EXCLUSIVE,
+        dense_vram_strategy=VramStrategy.EXCLUSIVE,
     )
 
 
@@ -155,7 +155,7 @@ def test_module_looper_subset_callback_invoked():
         quantize_config=quant_cfg,
         layer_callback=None,
         subset_callback=None,
-        supported_vram_strategies=[VramStrategy.EXCLUSIVE],
+        supported_dense_vram_strategies=[VramStrategy.EXCLUSIVE],
     )
 
     looper = ModuleLooper(model=dummy_model, processors=[])
@@ -311,9 +311,11 @@ def test_stage_subset_early_stop_and_callbacks():
         quantize_config=quant_cfg,
         layer_callback=None,
         subset_callback=None,
-        supported_vram_strategies=[VramStrategy.EXCLUSIVE, VramStrategy.BALANCED],
+        supported_dense_vram_strategies=[VramStrategy.EXCLUSIVE, VramStrategy.BALANCED],
         layer_modules_strict=True,
         lm_head="lm_head",
+        shell_module_materialize=lambda target_submodule, device, role, named_module=None: target_submodule,
+        prepare_layer_replay_kwargs=lambda layer, layer_input, additional_inputs, target_device: additional_inputs,
     )
 
     processor = _StubAWQProcessor(quant_cfg)

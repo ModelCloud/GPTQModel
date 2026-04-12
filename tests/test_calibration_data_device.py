@@ -625,14 +625,20 @@ class _DummyGPTQModelForLooper:
         compute_device_filter=None,
         quant_device="cuda:0",
         auto_forward_data_parallel=True,
-        vram_strategy="exclusive",
+        dense_vram_strategy="exclusive",
+        dense_vram_strategy_devices=None,
+        moe_vram_strategy="exclusive",
+        moe_vram_strategy_devices=None,
     ):
         self.quantize_config = types.SimpleNamespace(
             device=torch.device(quant_device),
             calibration_data_device=calibration_data_device,
             compute_device_filter=compute_device_filter,
             auto_forward_data_parallel=auto_forward_data_parallel,
-            vram_strategy=vram_strategy,
+            dense_vram_strategy=dense_vram_strategy,
+            dense_vram_strategy_devices=dense_vram_strategy_devices,
+            moe_vram_strategy=moe_vram_strategy,
+            moe_vram_strategy_devices=moe_vram_strategy_devices,
             moe_routing_bypass=lambda: False,
             moe=None,
             gc_mode=None,
@@ -642,7 +648,7 @@ class _DummyGPTQModelForLooper:
         self.lm_head = None
         self.quant_region_timer = None
         self.moe_lifecycle_hooks = None
-        # Don't set supported_vram_strategies so getattr uses default value
+        # Don't set supported dense/MoE strategy lists so getattr uses default values
 
 
 def test_compute_device_filter_applied_to_quant_devices(monkeypatch):
