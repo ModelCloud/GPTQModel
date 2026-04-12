@@ -27,4 +27,4 @@ class TestQwen3MoeFOEM(ModelTest):
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
     def test_moe_awq(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

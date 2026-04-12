@@ -23,4 +23,4 @@ class TestLongLlama(ModelTest):
     LOAD_BACKEND = BACKEND.TORCH
 
     def test_longllama(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

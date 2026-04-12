@@ -20,4 +20,4 @@ class TestSeedOSS(ModelTest):
     EVAL_BATCH_SIZE = 6
 
     def test_seed_oss(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

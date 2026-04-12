@@ -16,7 +16,7 @@ from gptqmodel import BACKEND
 from tests.eval import evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
 
-class TestLmEval(unittest.TestCase):
+class TestEvalRuntime(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
@@ -37,9 +37,9 @@ class TestLmEval(unittest.TestCase):
                 tasks=[self.task],
             )
 
-           print('--------lm_eval Eval Result---------')
+           print('--------Evalution Eval Result---------')
            print(format_eval_result_table(results))
-           print('--------lm_eval Result End---------')
+           print('--------Evalution Result End---------')
 
            metrics = get_eval_task_metrics(results, self.task)
            acc_norm_score = metrics.get('accuracy,loglikelihood_norm')
@@ -59,9 +59,9 @@ class TestLmEval(unittest.TestCase):
                 }
             )
 
-           print('--------lm_eval Eval Result---------')
+           print('--------Evalution Eval Result---------')
            print(format_eval_result_table(results))
-           print('--------lm_eval Result End---------')
+           print('--------Evalution Result End---------')
 
            metrics = get_eval_task_metrics(results, self.task)
            acc_norm_score = metrics.get('accuracy,loglikelihood_norm')

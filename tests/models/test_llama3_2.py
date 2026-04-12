@@ -110,4 +110,4 @@ class TestLlama3_2(ModelTest):
     # b1 = 0.315, b4 = 0.3106, b8 = 0.3148, b32 = 0.3148, b16 = 0.3234
 
     def test_llama3_2(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

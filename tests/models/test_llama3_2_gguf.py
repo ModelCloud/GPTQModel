@@ -54,7 +54,7 @@ class TestLlama3_2_GGUF(ModelTest):
     KERNEL_INFERENCE = {GGUFTorchLinear}
 
     def test_llama3_2_gguf_full_model(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 
         module = self.model.model.model.layers[0].self_attn.q_proj
         assert isinstance(module, GGUFTorchLinear)

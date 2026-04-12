@@ -191,7 +191,7 @@ def test_mode_specific_baseline_value_supports_gpu_mapping(monkeypatch):
     assert helper._mode_specific_baseline_value("NATIVE_ARC_CHALLENGE_ACC") == 0.53
 
 
-def test_lm_eval_threads_seed_and_explicit_greedy_gen_kwargs(monkeypatch):
+def test_evalution_threads_seed_and_explicit_greedy_gen_kwargs(monkeypatch):
     captured = {}
 
     class _Harness(ModelTest):
@@ -213,7 +213,7 @@ def test_lm_eval_threads_seed_and_explicit_greedy_gen_kwargs(monkeypatch):
         lambda self: SimpleNamespace(name="AUTO"),
     )
 
-    results = helper.lm_eval("/tmp/model", extra_args={"device": "cuda:0"})
+    results = helper.evaluate_model("/tmp/model", extra_args={"device": "cuda:0"})
 
     assert results == {"arc_challenge": {"accuracy,loglikelihood": 1.0}}
     assert captured["model_args"]["device"] == "cuda:0"
@@ -222,7 +222,7 @@ def test_lm_eval_threads_seed_and_explicit_greedy_gen_kwargs(monkeypatch):
     assert captured["gen_kwargs"] == "do_sample=false,temperature=0.0,top_p=1.0,top_k=50"
 
 
-def test_quant_lm_eval_runs_evalution_for_prequantized_model_without_cached_post_quant_results(monkeypatch):
+def test_quantize_and_evaluate_runs_evalution_for_prequantized_model_without_cached_post_quant_results(monkeypatch):
     class _PrequantizedModel:
         quantized = True
 
@@ -235,15 +235,15 @@ def test_quant_lm_eval_runs_evalution_for_prequantized_model_without_cached_post
 
         def __init__(self):
             super().__init__(methodName="runTest")
-            self.lm_eval_calls = 0
+            self.evaluate_model_calls = 0
 
         def quantModel(self, *args, **kwargs):
             self._post_quant_eval_records = {}
             self._loaded_model_was_prequantized = True
             return _PrequantizedModel(), None, None
 
-        def lm_eval(self, model, trust_remote_code=False, delete_quantized_model=False, extra_args=None):
-            self.lm_eval_calls += 1
+        def evaluate_model(self, model, trust_remote_code=False, delete_quantized_model=False, extra_args=None):
+            self.evaluate_model_calls += 1
             assert model is self.model
             assert delete_quantized_model is False
             return {
@@ -258,9 +258,9 @@ def test_quant_lm_eval_runs_evalution_for_prequantized_model_without_cached_post
     monkeypatch.setattr(_Harness, "check_kernel", lambda self, model, expected: None)
     monkeypatch.setattr(_Harness, "_cleanup_quantized_model", lambda self, model, enabled=False: None)
 
-    helper.quant_lm_eval()
+    helper.quantize_and_evaluate()
 
-    assert helper.lm_eval_calls == 1
+    assert helper.evaluate_model_calls == 1
     assert helper._post_quant_eval_records[BACKEND.TORCH_FUSED] == {
         "arc_challenge": {
             "accuracy,loglikelihood": 0.30,

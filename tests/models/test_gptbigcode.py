@@ -30,4 +30,4 @@ class TestGptBigCode(ModelTest):
     TRUST_REMOTE_CODE = True
 
     def test_gptbigcode(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

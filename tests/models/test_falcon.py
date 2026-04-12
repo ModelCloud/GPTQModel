@@ -23,4 +23,4 @@ class TestFalcon(ModelTest):
     USE_VLLM = False
 
     def test_falcon(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

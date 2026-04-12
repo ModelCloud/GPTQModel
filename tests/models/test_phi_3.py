@@ -31,4 +31,4 @@ class TestPhi_3(ModelTest):
     }
 
     def test_phi_3(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

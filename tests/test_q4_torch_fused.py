@@ -28,4 +28,4 @@ class TestsTorchFused(ModelTest):
     USE_VLLM = False
 
     def test_torch_fused(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

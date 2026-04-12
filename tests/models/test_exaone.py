@@ -30,4 +30,4 @@ class TestExaone(ModelTest):
             )
 
     def test_exaone(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

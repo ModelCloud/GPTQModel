@@ -22,4 +22,4 @@ class TestGPTOSS(ModelTest):
     USE_VLLM = False
 
     def test_gpt_oss(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

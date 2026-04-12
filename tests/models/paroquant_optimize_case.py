@@ -209,4 +209,4 @@ class BaseLlama3_2ParoQuantOptimizeTest(ModelTest):
         )
 
     def test_llama3_2_paroquant(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

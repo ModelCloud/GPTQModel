@@ -942,7 +942,7 @@ class ModelTest(unittest.TestCase):
         previous_backend = self.LOAD_BACKEND
         self.LOAD_BACKEND = backend
         try:
-            task_results = self.lm_eval(
+            task_results = self.evaluate_model(
                 model=model,
                 trust_remote_code=self.TRUST_REMOTE_CODE,
                 delete_quantized_model=False,
@@ -1056,8 +1056,8 @@ class ModelTest(unittest.TestCase):
                     backend=backend,
             )
             model.tokenizer or self.load_tokenizer(model_path, trust_remote_code=trust_remote_code)
-            # Pre-lm-eval smoke prompts are intentionally disabled to keep quantization tests
-            # focused only on lm_eval task execution.
+            # Pre-evaluation smoke prompts are intentionally disabled to keep quantization tests
+            # focused only on task execution.
             # inference_records[backend] = self.run_generic_inference_checks(model, tokenizer, backend)
 
             should_reuse = can_reuse and backend == target_backend and not self.USE_VLLM
@@ -1689,7 +1689,7 @@ class ModelTest(unittest.TestCase):
 
         return model
 
-    def lm_eval(self, model, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
+    def evaluate_model(self, model, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
         try:
             task_names = self._normalize_task_list()
             aggregated_results = {}
@@ -1781,7 +1781,7 @@ class ModelTest(unittest.TestCase):
                 print(f"batch {old_batch} OOM, retrying with batch {self.EVAL_BATCH_SIZE}")
 
                 if int(self.EVAL_BATCH_SIZE) > 0:
-                    results = self.lm_eval(model=model,
+                    results = self.evaluate_model(model=model,
                                            trust_remote_code=trust_remote_code,
                                            delete_quantized_model=delete_quantized_model,
                                            extra_args=extra_args)
@@ -1826,7 +1826,7 @@ class ModelTest(unittest.TestCase):
                 "Baseline fallback: evaluating current native model `%s` to verify whether stored expectations are stale.",
                 native_model_id,
             )
-            cached = self.lm_eval(
+            cached = self.evaluate_model(
                 model=native_model_id,
                 trust_remote_code=self.TRUST_REMOTE_CODE,
                 delete_quantized_model=False,
@@ -1884,7 +1884,7 @@ class ModelTest(unittest.TestCase):
         )
         return True
 
-    def quant_lm_eval(self):
+    def quantize_and_evaluate(self):
         self.model = None
         # TODO fix me: LOAD_QUANTIZED_MODEL doesn't make any sense when we have QUANT_SAVE_PATH
         #if self.QUANT_SAVE_PATH:
@@ -1898,13 +1898,13 @@ class ModelTest(unittest.TestCase):
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
         if self._debug_layer_stop_triggered():
-            log.info("DEBUG mode: skipping lm_eval and baseline checks after early layer stop.")
+            log.info("DEBUG mode: skipping evaluation and baseline checks after early layer stop.")
             return
 
         eval_records = getattr(self, "_post_quant_eval_records", {})
         target_backend = self._current_load_backend()
         if eval_records and len(eval_records) == 1 and target_backend in eval_records:
-            log.info("Reusing evaluation results for backend `%s`; skipping duplicate lm_eval run", target_backend.name)
+            log.info("Reusing evaluation results for backend `%s`; skipping duplicate evaluation run", target_backend.name)
             task_results = eval_records[target_backend]
         else:
             task_results = eval_records.get(target_backend)
@@ -1915,7 +1915,7 @@ class ModelTest(unittest.TestCase):
                         target_backend.name,
                     )
                     with self.model_compat_test_context():
-                        task_results = self.lm_eval(
+                        task_results = self.evaluate_model(
                             model=self.SAVE_PATH if self.SAVE_PATH else self.model,
                             trust_remote_code=self.TRUST_REMOTE_CODE,
                             delete_quantized_model=False,
@@ -1924,7 +1924,7 @@ class ModelTest(unittest.TestCase):
                 else:
                     raise AssertionError(
                         "Post-quant eval results were not produced. "
-                        "The Stage-2 lm_eval fallback is disabled."
+                        "The Stage-2 evaluation fallback is disabled."
                     )
         self.check_results(task_results)
         self._cleanup_quantized_model(self.model, enabled=self.DELETE_QUANTIZED_MODEL)

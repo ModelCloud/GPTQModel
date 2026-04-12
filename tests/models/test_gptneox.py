@@ -16,5 +16,5 @@ class TestGptNeoX(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
     def test_gptneox(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 

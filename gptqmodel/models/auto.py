@@ -357,7 +357,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
 
 
 @contextmanager
-def _hide_unsupported_quantization_config_for_lm_eval(model):
+def _hide_unsupported_quantization_config_for_eval(model):
     config = getattr(model, "config", None)
     if config is None:
         yield
@@ -383,6 +383,12 @@ def _hide_unsupported_quantization_config_for_lm_eval(model):
         yield
     finally:
         setattr(config, "quantization_config", quantization_config)
+
+
+@contextmanager
+def _hide_unsupported_quantization_config_for_lm_eval(model):
+    with _hide_unsupported_quantization_config_for_eval(model):
+        yield
 
 
 def _get_config_load_kwargs(kwargs: dict) -> dict:

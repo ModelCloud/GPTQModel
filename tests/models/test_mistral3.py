@@ -26,4 +26,4 @@ class TestMistral3(ModelTest):
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     def test_mistral3(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

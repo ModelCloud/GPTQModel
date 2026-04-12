@@ -95,9 +95,6 @@ tests:
   test_evalplus.py:
     - http://10.0.13.31/files/evalplus-0.4.0.dev44-py3-none-any.whl
 
-  test_lm_eval.py:
-    - peft
-
   test_nemotron_ultra.py:
     - http://10.0.13.31/files/causal_conv1d-1.6.0-cp313-cp313-linux_x86_64.whl
 

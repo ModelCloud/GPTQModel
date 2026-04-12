@@ -20,4 +20,4 @@ class TestLlama4(ModelTest):
     USE_FLASH_ATTN = False
 
     def test_llama4(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

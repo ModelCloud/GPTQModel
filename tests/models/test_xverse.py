@@ -29,4 +29,4 @@ class TestXVerse(ModelTest):
                 self.skipTest(f"Tokenizer assets are incompatible with the installed tokenizers runtime: {exc}")
             raise
 
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

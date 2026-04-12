@@ -40,5 +40,5 @@ class TestInternlm2_5(ModelTest):
 
     def test_internlm2_5(self):
         # transformers<=4.44.2 run normal
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 

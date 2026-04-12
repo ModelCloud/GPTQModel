@@ -23,4 +23,4 @@ class TestApertus(ModelTest):
     LOAD_BACKEND = BACKEND.TORCH
 
     def test_apertus(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

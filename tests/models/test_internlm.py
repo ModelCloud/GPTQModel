@@ -32,4 +32,4 @@ class TestInternlm(ModelTest):
 
     def test_internlm(self):
         # transformers<=4.44.2 run normal
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

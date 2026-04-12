@@ -18,4 +18,4 @@ class TestOpt(ModelTest):
     INPUTS_MAX_LENGTH = 2048 # opt embedding is max 2048
 
     def test_opt(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

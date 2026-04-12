@@ -18,4 +18,4 @@ class TestErnie4_5(ModelTest):
     USE_FLASH_ATTN = False
 
     def test_exaone(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

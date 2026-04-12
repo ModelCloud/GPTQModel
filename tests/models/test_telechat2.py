@@ -28,4 +28,4 @@ class TestTeleChat_2(ModelTest):
 
 
     def test_telechat2(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

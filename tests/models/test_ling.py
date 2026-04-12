@@ -29,4 +29,4 @@ class TestLing(ModelTest):
     CALIB_NOISE_PERCENT = 0.025
 
     def test_mimo(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

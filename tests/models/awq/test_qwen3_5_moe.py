@@ -38,4 +38,4 @@ class TestQwen3_5Moe(ModelTest):
     VRAM_STRATEGY = VramStrategy.BALANCED
 
     def test_qwen3_5_moe(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

@@ -16,5 +16,5 @@ class TestGemma(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = 0.3839590443686007
 
     def test_gemma(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 

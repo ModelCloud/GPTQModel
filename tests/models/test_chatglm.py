@@ -35,4 +35,4 @@ class TestChatGlm(ModelTest):
         assert isinstance(model.all_tied_weights_keys, dict)
 
     def test_chatglm(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

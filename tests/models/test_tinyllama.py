@@ -17,4 +17,4 @@ class TestTinyllama(ModelTest):
     TRUST_REMOTE_CODE = True
 
     def test_tinyllama(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

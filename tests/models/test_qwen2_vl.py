@@ -68,11 +68,11 @@ class TestQwen2_VL(ModelTest):
         self.assertIn("dog", output_text)
 
 
-        # check lm_eval results
+        # check evaluation results
         self.check_kernel(model, self.KERNEL_INFERENCE)
 
         with self.model_compat_test_context():
-            task_results = self.lm_eval(model=model,
+            task_results = self.evaluate_model(model=model,
                                         trust_remote_code=self.TRUST_REMOTE_CODE,
                                         delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
         self.check_results(task_results)
