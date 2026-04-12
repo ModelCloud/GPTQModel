@@ -138,6 +138,60 @@ def test_gptq_marlin_gemm_dispatches_bf16_to_torch_ops(monkeypatch):
     assert out.dtype == torch.bfloat16
 
 
+def test_gptq_marlin_gemm_passes_float_global_scale_to_torch_ops(monkeypatch):
+    fp16_loader = _FakeLoader()
+    bf16_loader = _FakeLoader()
+    captured = {}
+
+    def fake_gemm(*args):
+        captured["global_scale_dtype"] = args[5].dtype
+        captured["global_scale_shape"] = tuple(args[5].shape)
+        return torch.zeros((args[11], args[12]), dtype=args[0].dtype)
+
+    fp16_loader.ops["gptq_marlin_gemm_fp16"] = fake_gemm
+
+    monkeypatch.setattr(marlin_utils, "_MARLIN_FP16_TORCH_OPS_EXTENSION", fp16_loader)
+    monkeypatch.setattr(marlin_utils, "_MARLIN_BF16_TORCH_OPS_EXTENSION", bf16_loader)
+
+    out = marlin_utils.gptq_marlin_gemm(
+        a=torch.ones((1, 64), dtype=torch.float16),
+        c=None,
+        b_q_weight=torch.zeros((16, 64), dtype=torch.int32),
+        b_bias=None,
+        b_scales=torch.ones((4, 64), dtype=torch.float16),
+        global_scale=torch.tensor([1.0], dtype=torch.float32),
+        b_zeros=None,
+        g_idx=None,
+        perm=None,
+        workspace=torch.zeros(1, dtype=torch.int32),
+        b_q_type=scalar_types.float4_e2m1f,
+        size_m=1,
+        size_n=64,
+        size_k=64,
+    )
+
+    assert fp16_loader.op_calls == ["gptq_marlin_gemm_fp16"]
+    assert bf16_loader.op_calls == []
+    assert captured == {"global_scale_dtype": torch.float32, "global_scale_shape": (1,)}
+    assert out.shape == (1, 64)
+    assert out.dtype == torch.float16
+
+
+def test_nvfp4_global_scale_contract_is_float_in_marlin_sources():
+    marlin_root = marlin_utils._marlin_root()
+    kernel_h = (marlin_root / "kernel.h").read_text(encoding="utf-8")
+    gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
+    template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
+
+    assert "const float *__restrict__ global_scale_ptr" in kernel_h
+    assert 'global_scale = torch::empty({0}, options_fp32);' in gemm_cu
+    assert 'global_scale.scalar_type() == at::ScalarType::Float' in gemm_cu
+    assert "global_scale.data_ptr<float>()" in gemm_cu
+    assert "float global_scale_f32 = 1.0f;" in template_h
+    assert "c0 *= global_scale_f32;" in template_h
+    assert "c1 *= global_scale_f32;" in template_h
+
+
 def test_gptq_marlin_repack_prefers_requested_dtype_extension(monkeypatch):
     fp16_loader = _FakeLoader()
     bf16_loader = _FakeLoader()

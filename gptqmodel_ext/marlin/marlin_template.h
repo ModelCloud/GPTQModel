@@ -350,11 +350,10 @@ __global__ void Marlin(
       has_zp && !is_zp_float && !std::is_same<scalar_t, nv_bfloat16>::value ||
       has_zp && !is_zp_float && !(w_type == vllm::kU8);
 
-  scalar_t2 global_scale;
+  float global_scale_f32 = 1.0f;
   if constexpr (w_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
     // NVFP4 format requires global scale
-    uint16_t val = scale2_ptr[0];
-    global_scale = Dtype::num2num2(*reinterpret_cast<scalar_t*>(&val));
+    global_scale_f32 = global_scale_ptr[0];
   }
 
   constexpr bool has_act_order = group_blocks == 0;
@@ -1498,7 +1497,8 @@ __global__ void Marlin(
       }
 
       if constexpr (w_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
-        res = __hmul2(res, global_scale);
+        c0 *= global_scale_f32;
+        c1 *= global_scale_f32;
       }
       if (has_bias && last) {
         scalar_t2 tmp_bias = b_bias[0];

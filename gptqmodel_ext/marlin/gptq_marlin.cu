@@ -864,7 +864,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     TORCH_CHECK(b_q_type == vllm::kFE2M1f && group_size == 16,
                 "global_scale can only be used for nvfp4 format.");
   } else {
-    global_scale = torch::empty({0}, options);
+    global_scale = torch::empty({0}, options_fp32);
     TORCH_CHECK(!(b_q_type == vllm::kFE2M1f && group_size == 16),
                 "the global_scale parameter must be passed for nvfp4 format.");
   }
@@ -942,6 +942,8 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
               " is below min_workspace_size = ", min_workspace_size);
 
   int dev = a.get_device();
+  TORCH_CHECK(global_scale.scalar_type() == at::ScalarType::Float,
+              "scalar type of global_scale must be float");
   #if MARLIN_ENABLE_FP16
   if (a.scalar_type() == at::ScalarType::Half) {
     void* scales_ptr;
@@ -966,7 +968,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     marlin::marlin_mm<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
         c_tmp.data_ptr<float>(), b_bias.data_ptr<at::Half>(), scales_ptr,
-        global_scale.data_ptr<at::Half>(), b_zeros.data_ptr(), g_idx.data_ptr(),
+        global_scale.data_ptr<float>(), b_zeros.data_ptr(), g_idx.data_ptr(),
         perm.data_ptr(), a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
         a.stride(0), workspace.data_ptr(), b_q_type, has_bias, has_act_order,
         is_k_full, has_zp, num_groups, group_size, dev,
@@ -1001,7 +1003,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
         c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
         b_bias.data_ptr<at::BFloat16>(), scales_ptr,
-        global_scale.data_ptr<at::BFloat16>(), b_zeros.data_ptr(),
+        global_scale.data_ptr<float>(), b_zeros.data_ptr(),
         g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
         size_m, size_n, size_k, a.stride(0), workspace.data_ptr(), b_q_type,
         has_bias, has_act_order, is_k_full, has_zp, num_groups, group_size, dev,

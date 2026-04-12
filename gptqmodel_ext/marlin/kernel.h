@@ -12,7 +12,7 @@
       int4 *__restrict__ C, int4 *__restrict__ C_tmp,                          \
       const int4 *__restrict__ b_bias_ptr,                                     \
       const int4 *__restrict__ scales_ptr,                                     \
-      const uint16_t *__restrict__ scale2_ptr,                                 \
+      const float *__restrict__ global_scale_ptr,                              \
       const int4 *__restrict__ zp_ptr, const int *__restrict__ g_idx,          \
       int num_groups, int prob_m, int prob_n, int prob_k, int lda, int *locks, \
       bool has_bias, bool use_atomic_add, bool use_fp32_reduce,                \
