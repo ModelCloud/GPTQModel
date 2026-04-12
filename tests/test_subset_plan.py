@@ -75,6 +75,8 @@ def test_build_subset_plan_balanced_moe_uses_serial_forward_and_device_map():
 
     def _group_key(name: str):
         parts = name.split(".")
+        if "experts" not in parts:
+            return None
         expert_index = parts.index("experts")
         return ".".join(parts[:expert_index + 2])
 
@@ -117,6 +119,51 @@ def test_build_subset_plan_balanced_moe_uses_serial_forward_and_device_map():
         "mlp.experts.1.gate_proj": torch.device("cuda:1"),
         "mlp.experts.1.up_proj": torch.device("cuda:1"),
     }
+
+
+def test_build_subset_plan_balanced_moe_pins_untouched_modules_to_baseline_device():
+    looper = _make_looper()
+    looper._vram_strategy = VramStrategy.BALANCED
+    looper._quant_devices = [torch.device("cuda:0"), torch.device("cuda:1")]
+
+    def _group_key(name: str):
+        parts = name.split(".")
+        if "experts" not in parts:
+            return None
+        expert_index = parts.index("experts")
+        return ".".join(parts[:expert_index + 2])
+
+    looper._extract_moe_group_key.side_effect = _group_key
+
+    processor = _StubProcessor(
+        ExecutionConfig(
+            require_fwd=True,
+            fwd_replay_after_process=True,
+        )
+    )
+    subset = {
+        "mlp.experts.0.gate_proj": _make_named_module("mlp.experts.0.gate_proj"),
+        "mlp.experts.0.up_proj": _make_named_module("mlp.experts.0.up_proj"),
+        "mlp.experts.1.gate_proj": _make_named_module("mlp.experts.1.gate_proj"),
+        "mlp.experts.1.up_proj": _make_named_module("mlp.experts.1.up_proj"),
+    }
+    full = {name: named.module for name, named in subset.items()}
+    full["self_attn.o_proj"] = torch.nn.Linear(4, 4, bias=False)
+
+    plan = build_subset_plan(
+        looper,
+        processor=processor,
+        subset=subset,
+        subset_index=0,
+        subset_total=1,
+        full=full,
+        fallback=True,
+        layer_inputs=[[torch.zeros(3, 4)], [torch.zeros(2, 4)]],
+    )
+
+    assert plan.forward_device_map["mlp.experts.0.gate_proj"] == torch.device("cuda:0")
+    assert plan.forward_device_map["mlp.experts.1.gate_proj"] == torch.device("cuda:1")
+    assert plan.forward_device_map["self_attn.o_proj"] == torch.device("cpu")
 
 
 def test_build_layer_subset_plans_merges_groups_for_single_pass_processors():

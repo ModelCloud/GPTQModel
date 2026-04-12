@@ -38,6 +38,7 @@ from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_
 from ..quantization.config import METHOD, VramStrategy
 from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.ctx import ctx
+from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.device import get_device, get_device_new
 from ..utils.disk import estimate_disk_io_speed
 from ..utils.logger import setup_logger, log_time_block
@@ -728,6 +729,11 @@ class ModuleLooper():
         with self._quant_device_lock:
             cached = self._module_device_map.get(key)
             if cached is not None:
+                emit_device_telemetry(
+                    "quant_device_cache_hit",
+                    module=key,
+                    target_device=cached,
+                )
                 return cached
             device: Optional[torch.device]
             if len(self._quant_devices) <= 1:
@@ -740,6 +746,12 @@ class ModuleLooper():
                 device = fallback_device
 
             self._module_device_map[key] = device
+            emit_device_telemetry(
+                "quant_device_assign",
+                module=key,
+                target_device=device,
+                fallback_device=fallback_device,
+            )
             return device
 
     def _apply_forward_device_overrides(
@@ -776,6 +788,12 @@ class ModuleLooper():
             if current is not None:
                 previous[name] = current
 
+            emit_device_telemetry(
+                "forward_override_apply",
+                module=getattr(named_module, "full_name", name) if named_module is not None else name,
+                current_device=current,
+                target_device=target,
+            )
             move_to(module_ref, device=target)
             rehome_module_to_device(module_ref, target, move_parameters=True, move_buffers=True)
             if isinstance(named_module, NamedModule):
@@ -806,6 +824,11 @@ class ModuleLooper():
                 module_ref = named_module.module if isinstance(named_module, NamedModule) else named_module
             if module_ref is None:
                 continue
+            emit_device_telemetry(
+                "forward_override_restore",
+                module=getattr(named_module, "full_name", name) if named_module is not None else name,
+                target_device=revert_device,
+            )
             move_to(module_ref, device=revert_device)
             rehome_module_to_device(module_ref, revert_device, move_parameters=True, move_buffers=True)
             if isinstance(named_module, NamedModule):
@@ -897,6 +920,11 @@ class ModuleLooper():
     ) -> torch.device:
         """Place a named module and its processor task on the chosen device."""
 
+        try:
+            previous_device = get_device(named_module.module)
+        except Exception:
+            previous_device = None
+
         target_device = self._assign_quant_device_for_module(
             named_module,
             fallback_device=fallback_device,
@@ -917,6 +945,12 @@ class ModuleLooper():
 
         setattr(named_module, "target_device", target_device)
         setattr(named_module.module, "target_device", target_device)
+        emit_device_telemetry(
+            "quant_prepare",
+            module=getattr(named_module, "full_name", named_module.name),
+            previous_device=previous_device,
+            target_device=target_device,
+        )
 
         self._rehome_processor_task(processor, named_module, target_device)
 

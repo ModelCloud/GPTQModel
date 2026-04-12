@@ -230,6 +230,43 @@ def _collect_subset_forward_progress(
     return batch_count, forward_row_counts, forward_total_rows
 
 
+def _resolve_forward_baseline_devices(
+    subset: Dict[str, NamedModule],
+    full,
+) -> Dict[str, torch.device]:
+    """Capture the baseline device for each layer module before subset execution mutates it."""
+
+    candidates: Dict[str, object] = {}
+    if full:
+        candidates.update(full)
+    for name, named_module in subset.items():
+        candidates.setdefault(name, named_module)
+
+    baseline: Dict[str, torch.device] = {}
+    fallback_device: Optional[torch.device] = None
+    for name, module_ref in candidates.items():
+        actual_module = module_ref.module if isinstance(module_ref, NamedModule) else module_ref
+        try:
+            device = get_device(actual_module)
+        except Exception:
+            device = None
+        if device is not None and device != META and fallback_device is None:
+            fallback_device = device
+        baseline[name] = device
+
+    if fallback_device is None:
+        return {}
+
+    resolved: Dict[str, torch.device] = {}
+    for name, device in baseline.items():
+        if device is None or device == META:
+            device = fallback_device
+        if device is not None and device != META:
+            resolved[name] = device
+
+    return resolved
+
+
 def build_subset_plan(
     looper: "ModuleLooper",
     *,
@@ -312,6 +349,17 @@ def build_subset_plan(
                         target_device = devices[device_idx]
                         for module_name in moe_groups[group_key]:
                             forward_device_map[module_name] = target_device
+
+                    # Once balanced MoE routing pins any expert family to explicit
+                    # devices, the rest of the layer must also be anchored to the
+                    # baseline layer placement. Otherwise untouched modules can
+                    # inherit stale round-robin quant devices from earlier subsets.
+                    baseline_devices = _resolve_forward_baseline_devices(
+                        subset=subset,
+                        full=full,
+                    )
+                    for module_name, baseline_device in baseline_devices.items():
+                        forward_device_map.setdefault(module_name, baseline_device)
 
         # Balanced MoE subsets stay serial so replica fan-out does not fight the
         # explicit per-expert device assignment planned above.
