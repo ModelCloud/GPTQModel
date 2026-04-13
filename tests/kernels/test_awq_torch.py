@@ -29,7 +29,7 @@ def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
     return packed
 
 
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_awq_torch_matches_manual_dequant(dtype):
     if dtype not in AwqTorchLinear.SUPPORTS_DTYPES:
         pytest.skip(f"dtype {dtype} not supported by AwqTorchLinear")
@@ -48,8 +48,8 @@ def test_awq_torch_matches_manual_dequant(dtype):
 
     int_weight = torch.randint(0, 2**bits, size=(in_features, out_features), dtype=torch.int32)
     zero_points = torch.randint(0, 2**bits, size=(groups, pack_cols), dtype=torch.int32)
-    scales = (torch.rand(groups, pack_cols, dtype=torch.float16) * 2.0) + 0.25
-    bias = torch.randn(out_features, dtype=torch.float16)
+    scales = ((torch.rand(groups, pack_cols, dtype=torch.float32) * 2.0) + 0.25).to(dtype)
+    bias = torch.randn(out_features, dtype=dtype)
 
     qweight = _pack_awq_tensor(int_weight, bits)
     qzeros = _pack_awq_tensor(zero_points, bits)
@@ -62,22 +62,24 @@ def test_awq_torch_matches_manual_dequant(dtype):
         in_features=in_features,
         out_features=out_features,
         bias=True,
+        dtype=dtype,
         register_buffers=True,
     )
 
     module.qweight.copy_(qweight)
     module.qzeros.copy_(qzeros)
-    module.scales = module.scales.to(dtype=torch.float16)
-    module.scales.copy_(scales.to(torch.float16))
-    module.bias.copy_(bias)
+    module.scales.copy_(scales.to(module.scales.dtype))
+    module.bias.copy_(bias.to(module.bias.dtype))
     module.post_init()
     module.eval()
 
     batch = 4
     x = torch.randn(batch, in_features, dtype=dtype)
 
-    bias_expected = module.bias
+    output_first = module(x)
+    output_second = module(x)
 
+    bias_expected = module.bias.to(dtype=dtype)
     dequant_weight = dequantize_gemm(
         qweight=module.qweight,
         qzeros=module.qzeros,
@@ -85,12 +87,11 @@ def test_awq_torch_matches_manual_dequant(dtype):
         bits=bits,
         group_size=group_size,
     ).to(dtype=dtype)
-
     expected = torch.matmul(x.to(dtype), dequant_weight)
     expected = expected + bias_expected
 
-    output_first = module(x)
-    output_second = module(x)
+    assert output_first.dtype == dtype
+    assert output_second.dtype == dtype
 
     atol = 1e-4 if dtype == torch.float32 else 5e-3
     rtol = 1e-4 if dtype == torch.float32 else 5e-3

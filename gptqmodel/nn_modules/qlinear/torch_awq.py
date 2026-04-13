@@ -36,7 +36,7 @@ class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = False
 
@@ -56,6 +56,7 @@ class AwqTorchLinear(AWQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ):
+        self.compute_dtype = kwargs.get("dtype") or torch.float16
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -70,8 +71,17 @@ class AwqTorchLinear(AWQuantLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
+        if register_buffers:
+            if self.scales is not None and self.scales.dtype != self.compute_dtype:
+                self.scales = self.scales.to(dtype=self.compute_dtype)
+            if self.bias is not None and self.bias.dtype != self.compute_dtype:
+                self.bias = self.bias.to(dtype=self.compute_dtype)
 
     def post_init(self):
+        if self.scales is not None and self.scales.dtype not in (torch.float16, torch.bfloat16):
+            self.scales = self.scales.to(dtype=torch.float16)
+        if self.bias is not None and self.bias.dtype not in (torch.float16, torch.bfloat16):
+            self.bias = self.bias.to(dtype=torch.float16)
         super().post_init()
 
     def extra_repr(self) -> str:
@@ -88,9 +98,11 @@ class AwqTorchLinear(AWQuantLinear):
         zeros = zeros.t().contiguous()
         scale_zeros = zeros * scales
 
-        self.register_buffer("scales", scales.clone().half())
+        scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        self.register_buffer("scales", scales.clone().to(scale_dtype))
         if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.clone().half())
+            bias_dtype = linear.bias.dtype if linear.bias.dtype in (torch.float16, torch.bfloat16) else scale_dtype
+            self.register_buffer("bias", linear.bias.clone().to(bias_dtype))
         else:
             self.bias = None
 
@@ -134,10 +146,26 @@ class AwqTorchLinear(AWQuantLinear):
         self.register_buffer("qweight", qweight)
         self.register_buffer("qzeros", qzeros)
 
+    def _ensure_runtime_dtype(self, *, device: torch.device, dtype: torch.dtype) -> None:
+        if self.scales.device != device or self.scales.dtype != dtype or not self.scales.is_contiguous():
+            self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
+        if self.bias is not None and (
+            self.bias.device != device or self.bias.dtype != dtype or not self.bias.is_contiguous()
+        ):
+            self.bias = self.bias.to(device=device, dtype=dtype).contiguous()
+
     def forward(self, x: torch.Tensor):
+        input_dtype = x.dtype
+        compute_dtype = input_dtype if input_dtype in (torch.float16, torch.bfloat16) else torch.float16
         original_shape = x.shape[:-1] + (self.out_features,)
         device = x.device
         x_flat = x.reshape(-1, x.shape[-1])
+        if x_flat.dtype != compute_dtype or x_flat.device != device:
+            x_flat = x_flat.to(device=device, dtype=compute_dtype)
+        elif not x_flat.is_contiguous():
+            x_flat = x_flat.contiguous()
+
+        self._ensure_runtime_dtype(device=device, dtype=compute_dtype)
 
         weight = dequantize_gemm(
             qweight=self.qweight,
@@ -146,9 +174,10 @@ class AwqTorchLinear(AWQuantLinear):
             bits=self.bits,
             group_size=self.group_size,
         )
-        assert weight.dtype == torch.float16, f"weight {weight.dtype} is not float16"
-        if weight.dtype != x_flat.dtype or weight.device != device:
-            weight = weight.to(device=device, dtype=x_flat.dtype)
+        if weight.dtype not in (torch.float16, torch.bfloat16):
+            raise AssertionError(f"weight {weight.dtype} is not float16 or bfloat16")
+        if weight.dtype != compute_dtype or weight.device != device or not weight.is_contiguous():
+            weight = weight.to(device=device, dtype=compute_dtype).contiguous()
 
         output = torch.matmul(x_flat, weight)
 
@@ -157,6 +186,9 @@ class AwqTorchLinear(AWQuantLinear):
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)
+
+        if output.dtype != input_dtype:
+            output = output.to(dtype=input_dtype)
 
         output = output.reshape(original_shape)
 

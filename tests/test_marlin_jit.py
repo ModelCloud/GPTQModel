@@ -10,6 +10,7 @@ import pytest
 import torch
 
 import gptqmodel.nn_modules.qlinear.marlin as marlin_qlinear_module
+import gptqmodel.nn_modules.qlinear.marlin_awq as marlin_awq_qlinear_module
 import gptqmodel.utils.marlin as marlin_utils
 from gptqmodel import extension as extension_api
 from gptqmodel.utils import cpp as cpp_module
@@ -405,6 +406,107 @@ def test_marlin_quant_linear_post_init_uses_compute_dtype_for_repack(monkeypatch
     module.post_init()
 
     assert captured == {"dtype": torch.bfloat16, "shape": tuple(module.qweight.shape)}
+
+
+def test_marlin_quant_linear_registers_runtime_buffers_in_compute_dtype(monkeypatch):
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+
+    module = marlin_qlinear_module.MarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=64,
+        bias=True,
+        dtype=torch.bfloat16,
+    )
+
+    assert module.scales.dtype == torch.bfloat16
+    assert module.bias.dtype == torch.bfloat16
+
+
+def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_available", lambda dtype: True)
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_error", lambda dtype: "")
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_make_workspace_new",
+        lambda device: torch.zeros(1, dtype=torch.int32, device=device),
+    )
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "gptq_marlin_repack",
+        lambda b_q_weight, perm, size_k, size_n, num_bits, dtype=None: b_q_weight,
+    )
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_permute_scales",
+        lambda scales, size_k, size_n, group_size: scales,
+    )
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_permute_bias", lambda bias: bias)
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "apply_gptq_marlin_linear",
+        lambda **kwargs: (
+            captured.update(
+                {
+                    "input_dtype": kwargs["input"].dtype,
+                    "scale_dtype": kwargs["weight_scale"].dtype,
+                    "bias_dtype": kwargs["bias"].dtype,
+                }
+            )
+            or torch.zeros(
+                (kwargs["input"].shape[0], kwargs["output_size_per_partition"]),
+                dtype=kwargs["input"].dtype,
+            )
+        ),
+    )
+
+    module = marlin_qlinear_module.MarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=64,
+        bias=True,
+        dtype=torch.float16,
+    )
+    module.post_init()
+
+    out = module(torch.randn(2, 128, dtype=torch.bfloat16))
+
+    assert captured == {
+        "input_dtype": torch.bfloat16,
+        "scale_dtype": torch.bfloat16,
+        "bias_dtype": torch.bfloat16,
+    }
+    assert module.bias.dtype == torch.bfloat16
+    assert out.dtype == torch.bfloat16
+
+
+def test_awq_marlin_quant_linear_registers_runtime_buffers_in_compute_dtype(monkeypatch):
+    monkeypatch.setattr(marlin_awq_qlinear_module, "marlin_import_exception", None)
+
+    module = marlin_awq_qlinear_module.AwqMarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=64,
+        bias=True,
+        dtype=torch.bfloat16,
+        register_buffers=True,
+    )
+
+    assert torch.bfloat16 in marlin_awq_qlinear_module.AwqMarlinLinear.SUPPORTS_DTYPES
+    assert module.scales.dtype == torch.bfloat16
+    assert module.bias.dtype == torch.bfloat16
 
 
 def test_marlin_runtime_error_appends_cuda_extra_install_hint_for_missing_headers(monkeypatch):

@@ -24,7 +24,6 @@ from gptqmodel.utils.structure import (
     alias_all_from_turtle_if_meta,
     alias_from_turtle_for_submodule,
 )
-from gptqmodel.utils.structure import log as structure_log
 
 
 class _LinearWithBuffers(nn.Module):
@@ -306,18 +305,6 @@ def _build_rect_fused_expert_checkpoint_tensors(
         )
 
     return checkpoint_tensors
-
-
-def _capture_structure_warnings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Capture LazyTurtle warnings without depending on the logging backend implementation."""
-
-    warnings: list[str] = []
-
-    def _record_warning(message: str, *args):
-        warnings.append(message % args if args else message)
-
-    monkeypatch.setattr(structure_log, "warning", _record_warning, raising=False)
-    return warnings
 
 
 def test_offload_to_disk_writes_single_dat_file(tmp_path):
@@ -1244,8 +1231,8 @@ def test_alias_all_from_turtle_materializes_leaf_transposed_expert_gate_proj_fro
     torch.testing.assert_close(expert.bias, expected.bias)
 
 
-def test_lazy_turtle_warns_when_submodule_materialization_cannot_match_target_shape(monkeypatch, tmp_path):
-    """Shape-derived transform failures should produce warnings instead of silently skipping the tensor."""
+def test_lazy_turtle_raises_when_submodule_materialization_cannot_match_target_shape(tmp_path):
+    """Shape-derived transform failures should fail materialization immediately."""
 
     source_model = _HybridWrapper(width=16)
     shell_model = _HybridWrapper(width=16)
@@ -1253,25 +1240,21 @@ def test_lazy_turtle_warns_when_submodule_materialization_cannot_match_target_sh
 
     shell_model.block.dt_bias = nn.Parameter(torch.empty(8, device="meta"), requires_grad=source_model.block.dt_bias.requires_grad)
     source = _build_lazy_turtle_from_module(tmp_path, source_model)
-    warnings = _capture_structure_warnings(monkeypatch)
 
-    alias_from_turtle_for_submodule(
-        target_model=shell_model,
-        turtle_model=source,
-        target_submodule=shell_model.block,
-        device=torch.device("cpu"),
-    )
-
-    assert any(
-        "skip submodule materialization param `dt_bias`" in warning
-        and "could not be reshaped into the target layout" in warning
-        and "target_shape=(8,)" in warning
-        for warning in warnings
-    )
+    with pytest.raises(
+        RuntimeError,
+        match=r"submodule materialization param `dt_bias`.*could not be reshaped into the target layout.*target_shape=\(8,\)",
+    ):
+        alias_from_turtle_for_submodule(
+            target_model=shell_model,
+            turtle_model=source,
+            target_submodule=shell_model.block,
+            device=torch.device("cpu"),
+        )
 
 
-def test_alias_all_from_turtle_warns_when_direct_meta_shape_mismatch_slips_past_transform(monkeypatch, tmp_path):
-    """Keep an explicit warning path for post-transform shape mismatches in direct-meta sync."""
+def test_alias_all_from_turtle_raises_when_direct_meta_shape_mismatch_slips_past_transform(monkeypatch, tmp_path):
+    """Post-transform shape mismatches in direct-meta sync should fail immediately."""
 
     source_model = _HybridWrapper(width=16)
     shell_model = _HybridWrapper(width=16)
@@ -1282,7 +1265,6 @@ def test_alias_all_from_turtle_warns_when_direct_meta_shape_mismatch_slips_past_
         requires_grad=source_model.block.dt_bias.requires_grad,
     )
     source = _build_lazy_turtle_from_module(tmp_path, source_model)
-    warnings = _capture_structure_warnings(monkeypatch)
 
     original_transform = LazyTurtle._transform_checkpoint_tensor
 
@@ -1294,18 +1276,14 @@ def test_alias_all_from_turtle_warns_when_direct_meta_shape_mismatch_slips_past_
 
     # `_transform_checkpoint_tensor()` now guards most shape mismatches up front.
     # Monkeypatch it here so the regression test still exercises the downstream
-    # warning branch that protects against malformed custom transforms.
+    # hard-failure branch that protects against malformed custom transforms.
     monkeypatch.setattr(LazyTurtle, "_transform_checkpoint_tensor", staticmethod(_return_wrong_shape))
 
-    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=source)
-
-    assert any(
-        "skip direct-meta sync param `dt_bias`" in warning
-        and "shape does not match the transformed checkpoint tensor" in warning
-        and "source_shape=(15,)" in warning
-        and "target_shape=(16,)" in warning
-        for warning in warnings
-    )
+    with pytest.raises(
+        RuntimeError,
+        match=r"direct-meta sync param `dt_bias`.*shape does not match the transformed checkpoint tensor.*source_shape=\(15,\).*target_shape=\(16,\)",
+    ):
+        alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=source)
 
 
 def test_alias_all_from_lazy_turtle_restores_direct_meta_tensors(tmp_path):

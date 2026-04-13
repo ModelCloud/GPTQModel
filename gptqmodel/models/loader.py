@@ -1378,7 +1378,7 @@ def ModelLoader(cls):
                         f"Detected capability: `{device_capability}`."
                     )
 
-            # Marlin supports fp16 and bf16 compute for GPTQ and AWQ on Ampere+.
+            # GPTQ Marlin and AWQ Marlin support fp16 and bf16 compute on Ampere+.
             if backend == BACKEND.GPTQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
             if backend == BACKEND.AWQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
