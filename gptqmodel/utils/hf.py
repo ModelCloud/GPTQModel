@@ -26,8 +26,7 @@ from ..nn_modules.qlinear.gguf import (
     _dequantize_prism_q1_0_g128,
     _is_prism_q1_0_g128,
 )
-from ..utils import _MONKEY_PATCH_LOCK
-from ..utils import internal_gguf
+from ..utils import _MONKEY_PATCH_LOCK, internal_gguf
 
 
 # Compatibility wrapper for no_init_weights across different transformers versions

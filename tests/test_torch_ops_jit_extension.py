@@ -186,6 +186,45 @@ def test_cuda_include_paths_with_fallback_skip_wheel_headers_when_local_cuda_has
     assert include_paths == ["/tmp/extension"]
 
 
+def test_cuda_cache_fingerprint_payload_includes_resolved_arch_flags(monkeypatch, tmp_path):
+    """Guard CUDA cache keys so stale binaries cannot cross architecture targets."""
+
+    loader = _make_loader(tmp_path, requires_cuda=True)
+
+    monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_device_capability", lambda _index: (12, 0))
+    monkeypatch.setattr(
+        cpp_module,
+        "resolved_cuda_arch_flags",
+        lambda: [
+            "-gencode=arch=compute_120,code=compute_120",
+            "-gencode=arch=compute_120,code=sm_120",
+        ],
+    )
+
+    payload = loader._cuda_cache_fingerprint_payload()
+
+    assert payload == [
+        "cuda_ext=1",
+        "visible_caps=12.0",
+        (
+            "resolved_arch_flags="
+            "-gencode=arch=compute_120,code=compute_120,"
+            "-gencode=arch=compute_120,code=sm_120"
+        ),
+    ]
+
+
+def test_default_torch_ops_build_root_ignores_removed_global_override(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_EXT_BUILD_BASE", "/tmp/obsolete-jit-root")
+
+    assert cpp_module.default_torch_ops_build_root("marlin") == (
+        Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / "marlin"
+    )
+
+
 def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
     """Guard cache reuse so startup skips expensive JIT rebuilds when ops are already built."""
 
@@ -326,6 +365,39 @@ def test_torch_ops_jit_extension_appends_detected_cuda_include_paths(monkeypatch
         "/tmp/nvidia/cu13/include",
         "/tmp/nvidia/cusparse/include",
     ]
+
+
+def test_torch_ops_jit_extension_uses_original_compile_paths(monkeypatch, tmp_path):
+    local_root = tmp_path / "repo"
+    (local_root / "src").mkdir(parents=True)
+    (local_root / "include").mkdir(parents=True)
+    source_path = local_root / "src" / "unit_test.cpp"
+    include_path = local_root / "include"
+    source_path.write_text('#include "unit_test.h"\nint kernel() { return 1; }\n', encoding="utf-8")
+    (include_path / "unit_test.h").write_text("inline int unit_test_header() { return 1; }\n", encoding="utf-8")
+
+    loader = _make_loader(
+        tmp_path,
+        sources=[str(source_path)],
+        extra_include_paths=[str(include_path), "/usr/local/cuda/include"],
+    )
+
+    state = {"ready": False}
+    compile_calls = []
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+
+    def fake_compile(**kwargs):
+        compile_calls.append(kwargs)
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert compile_calls[0]["sources"] == [str(source_path)]
+    assert compile_calls[0]["extra_include_paths"] == [str(include_path), "/usr/local/cuda/include"]
 
 
 def test_torch_ops_jit_extension_skips_cuda_wheel_include_paths_when_local_headers_exist(monkeypatch, tmp_path):

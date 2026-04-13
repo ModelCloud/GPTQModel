@@ -49,6 +49,14 @@ GROUP_BLOCKS = [0, 1, -1, 2, 4, 8]
 DTYPES = ["fp16", "bf16"]
 
 
+def _is_4bit_weight(scalar_type: str) -> bool:
+    return scalar_type in {
+        "vllm::kU4",
+        "vllm::kU4B8",
+        "vllm::kFE2M1f",
+    }
+
+
 def remove_old_kernels() -> None:
     root = Path(__file__).parent
     for path in root.glob("kernel_*.cu"):
@@ -70,6 +78,10 @@ def _write_kernel_file(scalar_type: str, dtype: str, templates: list[str]) -> Pa
 
 def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
     results: list[str] = []
+    stage_values = ["pipe_stages"]
+    if dtype == "fp16":
+        # Turing uses a shorter pipeline depth than Ampere+.
+        stage_values.insert(0, 2)
     for group_blocks, m_blocks, thread_configs in itertools.product(
             GROUP_BLOCKS, THREAD_M_BLOCKS, THREAD_CONFIGS):
 
@@ -86,9 +98,9 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
             if m_blocks > 1 and thread_configs[0] != 64:
                 continue
 
-        # we only support channelwise quantization and group_size == 128
-        # for fp8
-        if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 8]:
+        # FP8 weights support channelwise/group128 in both fp16 and bf16, and
+        # group32 microscaling (MXFP8) in bf16.
+        if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 2, 8]:
             continue
         # nvfp4 only supports group_size == 16
         # mxfp4 only supports group_size == 32
@@ -118,27 +130,42 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
             if dtype == "fp16":
                 # we cannot safely dequantize e8m0 to fp16, so skip this
                 continue
+        elif scalar_type == "vllm::kFE4M3fn" and group_blocks == 2:
+            s_type = "vllm::kFE8M0fnu"
+            if dtype == "fp16":
+                # MXFP8 is only supported with bf16 compute.
+                continue
         elif dtype == "fp16":
             s_type = "vllm::kFloat16"
         elif dtype == "bf16":
             s_type = "vllm::kBFloat16"
 
         for is_zp_float in is_zp_float_list:
-            template_str = jinja2.Template(TEMPLATE).render(
-                scalar_t=c_dtype,
-                w_type_id=scalar_type + ".id()",
-                s_type_id=s_type + ".id()",
-                threads=threads,
-                thread_m_blocks=max(m_blocks, 1),
-                thread_n_blocks=n_blocks,
-                thread_k_blocks=k_blocks,
-                m_block_size_8=m_blocks == 0.5,
-                stages="pipe_stages",
-                group_blocks=group_blocks,
-                is_zp_float=is_zp_float,
-            )
+            for stage_value in stage_values:
+                if (
+                    stage_value == 2
+                    and _is_4bit_weight(scalar_type)
+                    and max(m_blocks, 1) * 2 > k_blocks
+                ):
+                    # Our dense Turing kernels need enough B-stage capacity to
+                    # cover the output tile. For 4-bit weights this rules out
+                    # the larger M tiles when thread_k_blocks == 4.
+                    continue
+                template_str = jinja2.Template(TEMPLATE).render(
+                    scalar_t=c_dtype,
+                    w_type_id=scalar_type + ".id()",
+                    s_type_id=s_type + ".id()",
+                    threads=threads,
+                    thread_m_blocks=max(m_blocks, 1),
+                    thread_n_blocks=n_blocks,
+                    thread_k_blocks=k_blocks,
+                    m_block_size_8=m_blocks == 0.5,
+                    stages=stage_value,
+                    group_blocks=group_blocks,
+                    is_zp_float=is_zp_float,
+                )
 
-            results.append(template_str)
+                results.append(template_str)
 
     return results
 

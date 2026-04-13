@@ -27,6 +27,7 @@ class _ExtensionSpec:
     aliases: tuple[str, ...]
     resolve: Callable[[], TorchOpsJitExtension]
     supported: Callable[[], bool] | None = None
+    unsupported_error: Callable[[], str] | None = None
 
 
 def _resolve_attr(module_name: str, attr_name: str):
@@ -82,6 +83,7 @@ _EXTENSION_SPECS = (
         aliases=("gptq_machete", "awq_machete"),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.machete", "_MACHETE_TORCH_OPS_EXTENSION"),
         supported=lambda: _resolve_attr("gptqmodel.utils.machete", "_validate_machete_device_support")(),
+        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.machete", "machete_runtime_error")(),
     ),
     _ExtensionSpec(
         name="marlin_fp16",
@@ -148,6 +150,15 @@ def _resolve_requested_extensions(name: str) -> tuple[str, ...]:
     )
 
 
+def _spec_unsupported_error(spec: _ExtensionSpec) -> str:
+    if spec.unsupported_error is None:
+        return f"{spec.name} is not supported on this host."
+    try:
+        return spec.unsupported_error() or f"{spec.name} is not supported on this host."
+    except Exception:
+        return f"{spec.name} is not supported on this host."
+
+
 def _process_loaded(extension: TorchOpsJitExtension) -> bool:
     return extension._ops_available()
 
@@ -177,8 +188,11 @@ def _extension_for_name(name: str) -> TorchOpsJitExtension:
 
 def _load_one(name: str, *, use_cache: bool) -> TorchOpsJitExtension:
     extension_name = _resolve_single_extension_name(name)
+    spec = _EXTENSION_SPECS_BY_NAME[extension_name]
+    if not _spec_supported(spec):
+        raise RuntimeError(_spec_unsupported_error(spec))
     with _extension_api_lock(extension_name):
-        extension = _EXTENSION_SPECS_BY_NAME[extension_name].resolve()
+        extension = spec.resolve()
 
         if not use_cache:
             if _process_loaded(extension):

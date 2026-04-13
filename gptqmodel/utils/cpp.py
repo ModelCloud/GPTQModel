@@ -18,7 +18,7 @@ from typing import Callable, Optional, Sequence
 
 import pcre
 import torch
-from torch.utils.cpp_extension import CUDA_HOME, _get_build_directory, load
+from torch.utils.cpp_extension import CUDA_HOME, _get_build_directory, _get_cuda_arch_flags, load
 
 from .env import env_flag
 from .jit_compile_baselines import get_jit_compile_baseline_seconds
@@ -318,6 +318,15 @@ def cuda_include_paths_with_fallback(
     return _dedupe_path_strings(resolved_include_paths)
 
 
+def resolved_cuda_arch_flags() -> list[str]:
+    """Return the effective NVCC arch flags Torch will emit for this host."""
+
+    try:
+        return list(_get_cuda_arch_flags())
+    except Exception:
+        return []
+
+
 def torch_cxx11_abi_flag() -> int:
     """Return the ABI mode local JIT extensions must match for this torch build."""
 
@@ -384,6 +393,7 @@ def default_jit_cuda_cflags(
     include_ptxas_verbosity: bool = True,
     include_fatbin_compression: bool = False,
     include_diag_suppress: bool = False,
+    nvcc_threads: str | int | None = None,
 ) -> list[str]:
     """Return the common NVCC flags for torch.ops JIT CUDA extensions."""
 
@@ -395,7 +405,8 @@ def default_jit_cuda_cflags(
     )
 
     if include_nvcc_threads:
-        flags.extend(["--threads", os.getenv("NVCC_THREADS", _DEFAULT_NVCC_THREADS)])
+        resolved_nvcc_threads = str(nvcc_threads) if nvcc_threads is not None else os.getenv("NVCC_THREADS", _DEFAULT_NVCC_THREADS)
+        flags.extend(["--threads", resolved_nvcc_threads])
         if resolved_opt_level is not None:
             optimization_level = (
                 resolved_opt_level[1:] if resolved_opt_level.startswith("O") else resolved_opt_level
@@ -561,12 +572,18 @@ class TorchOpsJitExtension:
         if not self.requires_cuda:
             return ["cuda_ext=0"]
 
+        payload = ["cuda_ext=1"]
         override = os.getenv("TORCH_CUDA_ARCH_LIST")
         if override:
-            return ["cuda_ext=1", f"arch_list={override}"]
+            payload.append(f"arch_list={override}")
+            arch_flags = resolved_cuda_arch_flags()
+            if arch_flags:
+                payload.append(f"resolved_arch_flags={','.join(arch_flags)}")
+            return payload
 
         if not torch.cuda.is_available():
-            return ["cuda_ext=1", "cuda_available=0"]
+            payload.append("cuda_available=0")
+            return payload
 
         capabilities: set[str] = set()
         for device_index in range(torch.cuda.device_count()):
@@ -574,8 +591,14 @@ class TorchOpsJitExtension:
             capabilities.add(f"{major}.{minor}")
 
         if not capabilities:
-            return ["cuda_ext=1", "visible_caps=none"]
-        return ["cuda_ext=1", f"visible_caps={','.join(sorted(capabilities))}"]
+            payload.append("visible_caps=none")
+        else:
+            payload.append(f"visible_caps={','.join(sorted(capabilities))}")
+
+        arch_flags = resolved_cuda_arch_flags()
+        if arch_flags:
+            payload.append(f"resolved_arch_flags={','.join(arch_flags)}")
+        return payload
 
     def build_root(self) -> Path:
         """Return the fingerprinted filesystem directory that caches this JIT extension."""
@@ -720,9 +743,11 @@ class TorchOpsJitExtension:
             started = time.perf_counter()
             build_invocation_succeeded = False
             try:
+                resolved_sources = self._resolve_sequence(self.sources)
+                extra_include_paths = self._resolved_extra_include_paths()
                 kwargs = {
                     "name": self.name,
-                    "sources": self._resolve_sequence(self.sources),
+                    "sources": resolved_sources,
                     "build_directory": str(build_root),
                     "is_python_module": False,
                     "verbose": env_flag(self.verbose_env, default=False) if self.verbose_env else False,
@@ -733,13 +758,11 @@ class TorchOpsJitExtension:
                 extra_cuda_cflags = self._resolve_sequence(self.extra_cuda_cflags)
                 if extra_cuda_cflags:
                     kwargs["extra_cuda_cflags"] = extra_cuda_cflags
-                extra_include_paths = self._resolved_extra_include_paths()
                 if extra_include_paths:
                     kwargs["extra_include_paths"] = extra_include_paths
                 extra_ldflags = self._resolve_sequence(self.extra_ldflags)
                 if extra_ldflags:
                     kwargs["extra_ldflags"] = extra_ldflags
-
                 load(**kwargs)
                 build_invocation_succeeded = True
             except Exception as exc:  # pragma: no cover - build depends on host toolchain

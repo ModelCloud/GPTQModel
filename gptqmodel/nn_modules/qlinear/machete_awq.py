@@ -22,12 +22,54 @@ from ...utils.machete import (
     machete_runtime_error,
     pack_quantized_values_into_int32,
 )
-from ...utils.marlin import replace_parameter, unpack_cols
+from ...utils.marlin import replace_parameter, replace_tensor, unpack_cols
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
 
 
 log = setup_logger()
+
+
+def _undo_awq_interleave(values: torch.Tensor, num_bits: int) -> torch.Tensor:
+    if num_bits == 4:
+        undo_interleave = [0, 4, 1, 5, 2, 6, 3, 7]
+    elif num_bits == 8:
+        undo_interleave = [0, 2, 1, 3]
+    else:
+        raise ValueError(f"Unsupported AWQ num_bits={num_bits}")
+
+    return (
+        values.reshape(-1, len(undo_interleave))[:, undo_interleave]
+        .reshape(values.shape)
+        .contiguous()
+    )
+
+
+def _replace_registered_tensor(
+    module: torch.nn.Module,
+    name: str,
+    new_tensor: torch.Tensor,
+) -> None:
+    if name in module._parameters:
+        replace_parameter(
+            module,
+            name,
+            torch.nn.Parameter(new_tensor, requires_grad=False),
+        )
+        return
+
+    if name in module._buffers:
+        current = getattr(module, name)
+        if (
+            current.dtype == new_tensor.dtype
+            and current.untyped_storage().nbytes() == new_tensor.untyped_storage().nbytes()
+        ):
+            replace_tensor(module, name, new_tensor)
+        else:
+            module._buffers[name] = new_tensor
+        return
+
+    raise KeyError(f"{module.__class__.__name__}.{name} is not a registered tensor")
 
 
 class AwqMacheteLinear(AWQuantLinear):
@@ -118,6 +160,7 @@ class AwqMacheteLinear(AWQuantLinear):
             self.in_features,
             self.out_features,
         ).to(device=device)
+        qweight_int = _undo_awq_interleave(qweight_int, self.bits)
 
         packed = pack_quantized_values_into_int32(
             qweight_int,
@@ -131,18 +174,10 @@ class AwqMacheteLinear(AWQuantLinear):
             b_type=self.weight_type,
             group_scales_type=self.scales.dtype,
         )
-        replace_parameter(
-            self,
-            "qweight",
-            torch.nn.Parameter(prepacked.contiguous(), requires_grad=False),
-        )
+        _replace_registered_tensor(self, "qweight", prepacked.contiguous())
 
         # Ensure scales are contiguous and resident on the correct device.
-        replace_parameter(
-            self,
-            "scales",
-            torch.nn.Parameter(self.scales.contiguous(), requires_grad=False),
-        )
+        _replace_registered_tensor(self, "scales", self.scales.contiguous())
 
         # Convert zero-points: unpack columns, then pre-apply scales as expected by machete_mm
         effective_group_size = self.in_features if self.group_size == -1 else self.group_size
@@ -154,14 +189,11 @@ class AwqMacheteLinear(AWQuantLinear):
             num_groups,
             self.out_features,
         ).to(device=device)
+        qzeros_unpacked = _undo_awq_interleave(qzeros_unpacked, self.bits)
 
         scales = self.scales
         qzeros_fp = (-1.0 * scales.to(dtype=scales.dtype) * qzeros_unpacked.to(scales.dtype)).contiguous()
-        replace_parameter(
-            self,
-            "qzeros",
-            torch.nn.Parameter(qzeros_fp, requires_grad=False),
-        )
+        _replace_registered_tensor(self, "qzeros", qzeros_fp)
 
         if self.bias is not None:
             self.bias = self.bias.to(device=device)

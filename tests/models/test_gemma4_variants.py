@@ -7,9 +7,9 @@ import os
 import unittest
 
 from huggingface_hub import snapshot_download
+from model_test import ModelTest
 
 from gptqmodel.quantization.config import GcMode, VramStrategy
-from model_test import ModelTest
 
 
 def _ensure_local_model_dir(local_path: str, repo_id: str) -> str:

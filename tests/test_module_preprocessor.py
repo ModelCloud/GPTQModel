@@ -5,7 +5,13 @@ import torch
 
 from gptqmodel.looper.module_preprocessor import ModulePreProcessor
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.quantization.config import AutoModuleDecoderConfig, QuantizeConfig, SmoothMAD, SmootherConfig, TensorParallelPadderConfig
+from gptqmodel.quantization.config import (
+    AutoModuleDecoderConfig,
+    QuantizeConfig,
+    SmootherConfig,
+    SmoothMAD,
+    TensorParallelPadderConfig,
+)
 
 
 def test_module_preprocessor_records_auto_module_decoder_plan():

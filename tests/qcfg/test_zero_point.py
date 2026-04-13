@@ -31,6 +31,20 @@ def test_awq_zero_point_overrides_sym():
     assert cfg.sym is False
 
 
+def test_awq_missing_desc_act_defaults_to_false():
+    payload = {
+        "bits": 4,
+        "group_size": 128,
+        "quant_method": "awq",
+        "format": "gemm",
+        "zero_point": True,
+    }
+
+    cfg = QuantizeConfig.from_quant_config(payload)
+
+    assert cfg.desc_act is False
+
+
 def test_awq_to_dict_uses_zero_point():
     cfg = QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, sym=False)
     payload = cfg.to_dict()

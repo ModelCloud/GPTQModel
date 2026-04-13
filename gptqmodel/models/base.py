@@ -44,10 +44,10 @@ from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..quantization.config import (
-    AutoModuleDecoderConfig,
     FORMAT,
     METHOD,
     QUANTIZE_BLACK_LIST,
+    AutoModuleDecoderConfig,
     BaseQuantizeConfig,
     GcMode,
     VramStrategy,

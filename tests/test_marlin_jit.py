@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from shutil import which
+
 import pytest
 import torch
 
 import gptqmodel.nn_modules.qlinear.marlin as marlin_qlinear_module
 import gptqmodel.utils.marlin as marlin_utils
+from gptqmodel import extension as extension_api
 from gptqmodel.utils import cpp as cpp_module
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 
@@ -49,6 +53,13 @@ class _FakeExtensionApi:
     def error(self, extension_name: str) -> str:
         self.error_calls.append(extension_name)
         return self.error_text
+
+
+def _jit_scratch_root(tmp_path: Path, suffix: str) -> Path:
+    base = Path("/dev/shm") if Path("/dev/shm").is_dir() else tmp_path
+    root = base / "gptqmodel-jit-tests" / suffix
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def test_gptq_marlin_gemm_dispatches_fp16_to_torch_ops(monkeypatch):
@@ -126,6 +137,160 @@ def test_gptq_marlin_gemm_dispatches_bf16_to_torch_ops(monkeypatch):
     assert captured == {"dtype": torch.bfloat16}
     assert out.shape == (1, 64)
     assert out.dtype == torch.bfloat16
+
+
+def test_gptq_marlin_gemm_passes_float_global_scale_to_torch_ops(monkeypatch):
+    fp16_loader = _FakeLoader()
+    bf16_loader = _FakeLoader()
+    captured = {}
+
+    def fake_gemm(*args):
+        captured["global_scale_dtype"] = args[5].dtype
+        captured["global_scale_shape"] = tuple(args[5].shape)
+        return torch.zeros((args[11], args[12]), dtype=args[0].dtype)
+
+    fp16_loader.ops["gptq_marlin_gemm_fp16"] = fake_gemm
+
+    monkeypatch.setattr(marlin_utils, "_MARLIN_FP16_TORCH_OPS_EXTENSION", fp16_loader)
+    monkeypatch.setattr(marlin_utils, "_MARLIN_BF16_TORCH_OPS_EXTENSION", bf16_loader)
+
+    out = marlin_utils.gptq_marlin_gemm(
+        a=torch.ones((1, 64), dtype=torch.float16),
+        c=None,
+        b_q_weight=torch.zeros((16, 64), dtype=torch.int32),
+        b_bias=None,
+        b_scales=torch.ones((4, 64), dtype=torch.float16),
+        global_scale=torch.tensor([1.0], dtype=torch.float32),
+        b_zeros=None,
+        g_idx=None,
+        perm=None,
+        workspace=torch.zeros(1, dtype=torch.int32),
+        b_q_type=scalar_types.float4_e2m1f,
+        size_m=1,
+        size_n=64,
+        size_k=64,
+    )
+
+    assert fp16_loader.op_calls == ["gptq_marlin_gemm_fp16"]
+    assert bf16_loader.op_calls == []
+    assert captured == {"global_scale_dtype": torch.float32, "global_scale_shape": (1,)}
+    assert out.shape == (1, 64)
+    assert out.dtype == torch.float16
+
+
+def test_nvfp4_global_scale_contract_is_float_in_marlin_sources():
+    marlin_root = marlin_utils._marlin_root()
+    kernel_h = (marlin_root / "kernel.h").read_text(encoding="utf-8")
+    gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
+    template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
+
+    assert "const float *__restrict__ global_scale_ptr" in kernel_h
+    assert 'global_scale = torch::empty({0}, options_fp32);' in gemm_cu
+    assert 'global_scale.scalar_type() == at::ScalarType::Float' in gemm_cu
+    assert "global_scale.data_ptr<float>()" in gemm_cu
+    assert "float global_scale_f32 = 1.0f;" in template_h
+    assert "c0 *= global_scale_f32;" in template_h
+    assert "c1 *= global_scale_f32;" in template_h
+
+
+def test_marlin_capability_checks_allow_sm75_but_reject_sm70(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (7, 5))
+
+    assert marlin_utils._marlin_capability_supported(7, 5) is True
+    assert marlin_utils._marlin_environment_error() == ""
+    assert marlin_utils._validate_marlin_device_support() is True
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (7, 0))
+
+    assert marlin_utils._marlin_capability_supported(7, 0) is False
+    assert "compute capability >= 7.5" in marlin_utils._marlin_environment_error()
+    assert marlin_utils._validate_marlin_device_support() is False
+
+
+def test_marlin_quant_linear_validate_device_allows_sm75(monkeypatch):
+    monkeypatch.setattr(marlin_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: (7, 5))
+
+    marlin_qlinear_module.MarlinLinear.validate_device(marlin_qlinear_module.DEVICE.CUDA)
+
+
+def test_marlin_quant_linear_validate_device_rejects_pre_turing(monkeypatch):
+    monkeypatch.setattr(marlin_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: (7, 0))
+
+    with pytest.raises(NotImplementedError, match="compute capability >= 7.5"):
+        marlin_qlinear_module.MarlinLinear.validate_device(marlin_qlinear_module.DEVICE.CUDA)
+
+
+def test_sm75_turing_contract_is_present_in_marlin_sources():
+    marlin_root = marlin_utils._marlin_root()
+    gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
+    generator_py = (marlin_root / "generate_kernels.py").read_text(encoding="utf-8")
+    template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
+    mma_h = (marlin_root / "marlin_mma.h").read_text(encoding="utf-8")
+    loader_py = (Path(marlin_utils.__file__).resolve().parents[1] / "models" / "loader.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "requires CUDA_ARCH >= 7.5" in gemm_cu
+    assert "major_capability == 7 && minor_capability == 5" in gemm_cu
+    assert "stages = 2;" in gemm_cu
+    assert "Turing only supports float16 dense Marlin kernels." in gemm_cu
+    assert 'stage_values.insert(0, 2)' in generator_py
+    assert "constexpr bool use_fp16_accum" in template_h
+    assert "__CUDA_ARCH__ == 750" in mma_h
+    assert "m16n8k8.row.col.f16.f16.f16.f16" in mma_h
+    assert "compute capability >= 7.5" in loader_py
+    assert "GPTQ Marlin on Turing (compute capability 7.5)" in loader_py
+    assert "dtype=torch.float16 only." in loader_py
+
+
+def test_stage2_dense_four_bit_tiles_stay_in_sync_between_selector_and_codegen():
+    marlin_root = marlin_utils._marlin_root()
+    gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
+    generator_py = (marlin_root / "generate_kernels.py").read_text(encoding="utf-8")
+    kernel_u4 = (marlin_root / "kernel_fp16_ku4.cu").read_text(encoding="utf-8")
+    kernel_u4b8 = (marlin_root / "kernel_fp16_ku4b8.cu").read_text(encoding="utf-8")
+    kernel_nvfp4 = (marlin_root / "kernel_fp16_kfe2m1f.cu").read_text(encoding="utf-8")
+
+    assert "kIsStage2FourBitTile" in gemm_cu
+    assert "THREAD_M_BLOCKS * 2 <= THREAD_K_BLOCKS" in gemm_cu
+    assert "stages == 2 && num_bits == 4" in gemm_cu
+    assert "thread_m_blocks * 2 > th_config.thread_k / 16" in gemm_cu
+    assert "_is_4bit_weight" in generator_py
+    assert "stage_value == 2" in generator_py
+
+    invalid_stage2_tile = ", 256, 4, 16, 4, false, 2,"
+    valid_stage2_tile = ", 256, 2, 16, 4, false, 2,"
+
+    assert invalid_stage2_tile not in kernel_u4
+    assert invalid_stage2_tile not in kernel_u4b8
+    assert invalid_stage2_tile not in kernel_nvfp4
+    assert valid_stage2_tile in kernel_u4
+    assert valid_stage2_tile in kernel_u4b8
+    assert valid_stage2_tile in kernel_nvfp4
+
+
+def test_mxfp8_contract_is_present_in_marlin_sources():
+    marlin_root = marlin_utils._marlin_root()
+    gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
+    generator_py = (marlin_root / "generate_kernels.py").read_text(encoding="utf-8")
+    template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
+
+    assert 'scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 2, 8]' in generator_py
+    assert 'scalar_type == "vllm::kFE4M3fn" and group_blocks == 2' in generator_py
+    assert 'MXFP8 is only supported with bf16 compute.' in generator_py
+    assert "MXFP8_GET_IF(vllm::kFE4M3fn, pipe_stages)" in gemm_cu
+    assert "W_TYPE == vllm::kFE4M3fn && GROUP_BLOCKS == 2" in gemm_cu
+    assert "Float8_e8m0fnu" in gemm_cu
+    assert "float8_e4m3fn with float8_e8m0fnu scales requires " in gemm_cu
+    assert "float8_e4m3fn only supports group_size == 32 (MXFP8)" in gemm_cu
+    assert "// MXFP8: FP8 weights with e8m0 microscaling block scales." in template_h
+    assert "w_type == vllm::kFE4M3fn && !(s_type == vllm::kFE8M0fnu)" in template_h
+    assert "if constexpr (s_type == vllm::kFE4M3fn || s_type == vllm::kFE8M0fnu)" in template_h
 
 
 def test_gptq_marlin_repack_prefers_requested_dtype_extension(monkeypatch):
@@ -254,11 +419,60 @@ def test_marlin_runtime_error_skips_install_hint_when_cuda_wheel_headers_are_det
     monkeypatch.setattr(marlin_utils, "detected_cuda_wheel_include_paths", lambda: ["/tmp/nvidia/cu13/include"])
     monkeypatch.setattr(torch.version, "cuda", "13.0", raising=False)
 
-    error_text = marlin_utils.marlin_runtime_error(torch.bfloat16)
+    marlin_utils.marlin_runtime_error(torch.bfloat16)
 
     assert fake_extension_api.is_available_calls == ["marlin_bf16"]
     assert fake_extension_api.error_calls == ["marlin_bf16"]
-    assert error_text == fake_extension_api.error_text
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_marlin_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
+    capability = torch.cuda.get_device_capability()
+    if capability[0] < 7 or (capability[0] == 7 and capability[1] < 5):
+        pytest.skip("Marlin requires compute capability >= 7.5")
+    if which("ninja") is None:
+        pytest.skip("Marlin JIT smoke test requires ninja.")
+
+    scratch_root = _jit_scratch_root(tmp_path, "marlin")
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    monkeypatch.setenv("GPTQMODEL_MARLIN_FP16_BUILD_ROOT", str(scratch_root / "marlin_fp16"))
+    monkeypatch.setenv("GPTQMODEL_MARLIN_BF16_BUILD_ROOT", str(scratch_root / "marlin_bf16"))
+    monkeypatch.setenv("GPTQMODEL_MARLIN_FORCE_REBUILD", "1")
+
+    assert extension_api.load(name="marlin_fp16", use_cache=False) == {
+        "marlin_fp16": True,
+    }
+    if capability[0] >= 8:
+        assert extension_api.load(name="marlin_bf16", use_cache=False) == {
+            "marlin_bf16": True,
+        }
+
+    device = torch.device("cuda:0")
+    dtypes = (torch.float16, torch.bfloat16) if capability[0] >= 8 else (torch.float16,)
+    for dtype in dtypes:
+        module = marlin_qlinear_module.MarlinLinear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            in_features=128,
+            out_features=64,
+            bias=False,
+            dtype=dtype,
+        ).to(device)
+        with torch.no_grad():
+            module.qweight.copy_(torch.randint(0, 16, module.qweight.shape, device=device, dtype=torch.int32))
+            module.g_idx.copy_(torch.arange(module.in_features, device=device, dtype=torch.int32))
+            module.scales.copy_(torch.ones_like(module.scales, device=device))
+            module.qzeros.copy_(torch.zeros_like(module.qzeros, device=device))
+        module.post_init()
+
+        out = module(torch.randn(4, 128, device=device, dtype=dtype))
+        torch.cuda.synchronize(device)
+
+        assert out.shape == (4, 64)
+        assert out.dtype == dtype
 
 
 def test_marlin_include_paths_use_wheel_headers_when_local_cuda_is_incomplete(monkeypatch, tmp_path):

@@ -3030,6 +3030,11 @@ class AWQConfig(PreProcessorConfig):
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
         return AWQ_EXPORT_FORMATS
 
+    def default_desc_act(self) -> bool:
+        # AWQ runtimes do not use GPTQ-style activation reordering unless the
+        # checkpoint explicitly asks for it.
+        return False
+
     def __post_init__(self):
         self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
