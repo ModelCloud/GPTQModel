@@ -62,6 +62,7 @@ from ..utils.importer import (
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
 from ..utils.machete import _validate_machete_device_support
+from ..utils.mentaray import _mentaray_capability_supported, _validate_mentaray_device_support
 from ..utils.marlin import _marlin_capability_supported, _validate_marlin_device_support
 from ..utils.model import (
     auto_dtype,
@@ -962,8 +963,15 @@ def ModelLoader(cls):
 
         if format_code == FORMAT.MARLIN:
             # format marlin requires marlin kernel
-            expected_marlin_backends = [BACKEND.AWQ_MARLIN] if qcfg.quant_method == METHOD.AWQ else [BACKEND.GPTQ_MARLIN]
-            expected_marlin_backend = expected_marlin_backends[0]
+            if qcfg.quant_method == METHOD.AWQ:
+                expected_marlin_backends = [BACKEND.AWQ_MENTARAY, BACKEND.AWQ_MARLIN]
+            else:
+                expected_marlin_backends = [BACKEND.GPTQ_MENTARAY, BACKEND.GPTQ_MARLIN]
+            expected_marlin_backend = (
+                expected_marlin_backends[0]
+                if _validate_mentaray_device_support()
+                else expected_marlin_backends[-1]
+            )
             if backend not in expected_marlin_backends and backend != BACKEND.AUTO:
                 raise TypeError(
                     f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.{expected_marlin_backend.name}: actual = `{backend}`."
@@ -1353,11 +1361,11 @@ def ModelLoader(cls):
                     f"Kernel: Machete kernel requires compute capability >= 9.0. Detected capability: {torch.cuda.get_device_capability()}"
                 )
 
-        if backend in [BACKEND.GPTQ_MARLIN, BACKEND.AWQ_MARLIN] and (
+        if backend in [BACKEND.GPTQ_MARLIN, BACKEND.AWQ_MARLIN, BACKEND.GPTQ_MENTARAY, BACKEND.AWQ_MENTARAY] and (
                 preload_qlinear_kernel == ExllamaV2Linear or format_code == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
-                    "Format: The loading of sharded checkpoints with Marlin is currently not supported."
+                    "Format: The loading of sharded checkpoints with Marlin/MentaRay is currently not supported."
                 )
             device_capability = torch.cuda.get_device_capability()
             if backend == BACKEND.GPTQ_MARLIN:
@@ -1371,19 +1379,35 @@ def ModelLoader(cls):
                         "Kernel: GPTQ Marlin on Turing (compute capability 7.5) supports "
                         "dtype=torch.float16 only."
                     )
-            else:
+            elif backend == BACKEND.AWQ_MARLIN:
                 if not _marlin_capability_supported(*device_capability) or device_capability[0] < 8:
                     raise ValueError(
                         "Kernel: AWQ Marlin requires compute capability >= 8.0. "
                         f"Detected capability: `{device_capability}`."
                     )
+            elif backend == BACKEND.GPTQ_MENTARAY:
+                if not _validate_mentaray_device_support():
+                    raise ValueError(
+                        "Kernel: MentaRay kernel requires compute capability 8.0 for the "
+                        f"GPTQ MentaRay backend. Detected capability: `{device_capability}`."
+                    )
+            else:
+                if not _mentaray_capability_supported(*device_capability):
+                    raise ValueError(
+                        "Kernel: AWQ MentaRay requires compute capability 8.0. "
+                        f"Detected capability: `{device_capability}`."
+                    )
 
-            # GPTQ Marlin supports fp16 and bf16 compute, while AWQ Marlin
-            # remains fp16-only for now.
+            # GPTQ Marlin and MentaRay support fp16 and bf16 compute.
+            # AWQ Marlin remains fp16-only while AWQ MentaRay supports bf16.
             if backend == BACKEND.GPTQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
             if backend == BACKEND.AWQ_MARLIN and dtype != torch.float16:
                 raise ValueError("AWQ Marlin kernel requires dtype=torch.float16.")
+            if backend == BACKEND.GPTQ_MENTARAY and dtype not in (torch.float16, torch.bfloat16):
+                raise ValueError("MentaRay kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
+            if backend == BACKEND.AWQ_MENTARAY and dtype not in (torch.float16, torch.bfloat16):
+                raise ValueError("AWQ MentaRay kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
 
 
         if backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
@@ -1410,6 +1434,8 @@ def ModelLoader(cls):
             BACKEND.AWQ_MACHETE,
             BACKEND.GPTQ_MARLIN,
             BACKEND.AWQ_MARLIN,
+            BACKEND.GPTQ_MENTARAY,
+            BACKEND.AWQ_MENTARAY,
             BACKEND.GPTQ_BITBLAS,
             BACKEND.AWQ_BITBLAS,
         ]:

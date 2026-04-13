@@ -33,6 +33,7 @@ from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+from gptqmodel.nn_modules.qlinear.mentaray import MentaRayLinear
 
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
@@ -634,7 +635,7 @@ def hf_convert_gptq_v1_to_v2_format(
 ) -> Tuple[nn.Module, bool]:
     if checkpoint_format == "gptq":
         # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-        if qlinear_kernel is MarlinLinear:
+        if qlinear_kernel in (MarlinLinear, MentaRayLinear):
             return model, False
 
         cfg = QuantizeConfig(bits=bits)

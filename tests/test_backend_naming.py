@@ -9,6 +9,11 @@ def test_legacy_marlin_backend_normalizes_by_quant_method():
     assert normalize_backend(BACKEND.MARLIN, quant_method=METHOD.AWQ) == BACKEND.AWQ_MARLIN
 
 
+def test_legacy_mentaray_backend_normalizes_by_quant_method():
+    assert normalize_backend(BACKEND.MENTARAY, quant_method=METHOD.GPTQ) == BACKEND.GPTQ_MENTARAY
+    assert normalize_backend(BACKEND.MENTARAY, quant_method=METHOD.AWQ) == BACKEND.AWQ_MENTARAY
+
+
 def test_legacy_torch_backend_normalizes_by_quant_method():
     assert normalize_backend("torch", quant_method=METHOD.GPTQ) == BACKEND.GPTQ_TORCH
     assert normalize_backend("torch", quant_method=METHOD.FP8) == BACKEND.FP8_TORCH
