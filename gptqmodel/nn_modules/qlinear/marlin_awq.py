@@ -55,7 +55,7 @@ class AwqMarlinLinear(AWQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = False
 
@@ -127,7 +127,7 @@ class AwqMarlinLinear(AWQuantLinear):
                     torch.empty(
                         self.in_features // self.group_size,
                         self.out_features,
-                        dtype=torch.float16,
+                        dtype=self.compute_dtype,
                     ),
                     requires_grad=False
                 )
@@ -138,7 +138,7 @@ class AwqMarlinLinear(AWQuantLinear):
                     "bias",
                     torch.zeros(
                         (out_features),
-                        dtype=torch.float16,
+                        dtype=self.compute_dtype,
                     ),
                 )
             else:

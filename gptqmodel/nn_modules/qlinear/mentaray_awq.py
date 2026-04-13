@@ -110,13 +110,13 @@ class AwqMentaRayLinear(AWQuantLinear):
             self.register_parameter(
                 "scales",
                 torch.nn.Parameter(
-                    torch.empty(self.in_features // self.group_size, self.out_features, dtype=torch.float16),
+                    torch.empty(self.in_features // self.group_size, self.out_features, dtype=self.compute_dtype),
                     requires_grad=False,
                 ),
             )
 
             if bias:
-                self.register_buffer("bias", torch.zeros((out_features), dtype=torch.float16))
+                self.register_buffer("bias", torch.zeros((out_features), dtype=self.compute_dtype))
             else:
                 self.bias = None
 
