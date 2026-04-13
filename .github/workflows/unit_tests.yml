@@ -218,8 +218,12 @@ jobs:
 
       - name: Prepare common envs
         run: |
-          python3 -c 'import json; torch_envs=json.loads("""${{ needs.list-test-files.outputs.torch-envs }}"""); model_envs=json.loads("""${{ needs.list-test-files.outputs.model-envs }}"""); data=torch_envs + model_envs; [print(f"{item[\"env_name\"]}\t{item[\"test_script\"]}\t{item[\"python_version\"]}") for item in data]' \
-          | while IFS=$'\t' read -r env_name test_script python_version; do
+          mapfile -t env_rows < <(
+            python3 -c 'import json; torch_envs=json.loads("""${{ needs.list-test-files.outputs.torch-envs }}"""); model_envs=json.loads("""${{ needs.list-test-files.outputs.model-envs }}"""); data=torch_envs + model_envs; [print(f"{item[\"env_name\"]}\t{item[\"test_script\"]}\t{item[\"python_version\"]}") for item in data]'
+          )
+
+          for row in "${env_rows[@]}"; do
+              IFS=$'\t' read -r env_name test_script python_version <<< "$row"
               echo "preparing env=$env_name test=$test_script py=$python_version"
               source /opt/uv/setup_uv_venv.sh "$env_name"
 
@@ -251,7 +255,7 @@ jobs:
                 uv pip install "$url"
               done
               /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-            done
+          done
 
   torch:
     needs:
