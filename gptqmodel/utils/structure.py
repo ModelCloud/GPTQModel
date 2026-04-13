@@ -953,7 +953,7 @@ class LazyTurtle:
         return self._resolve_fused_expert_tensor_name("", combined_name)
 
     @staticmethod
-    def _warn_materialization_skip(
+    def _materialization_issue_message(
         *,
         phase: str,
         kind: str,
@@ -966,8 +966,8 @@ class LazyTurtle:
         expert_index: Optional[int] = None,
         split_index: Optional[int] = None,
         split_dim: Optional[int] = None,
-    ) -> None:
-        """Emit a consistent warning when a checkpoint-backed tensor cannot be materialized."""
+    ) -> str:
+        """Build a consistent error message for checkpoint-backed materialization failures."""
 
         details = []
         if full_name is not None:
@@ -984,14 +984,9 @@ class LazyTurtle:
             details.append(f"split_dim={split_dim}")
 
         suffix = f" ({', '.join(details)})" if details else ""
-        log.warning(
-            "LazyTurtle: skip %s %s `%s` under `%s`: %s%s",
-            phase,
-            kind,
-            rel_name,
-            module_path or "<root>",
-            reason,
-            suffix,
+        return (
+            f"LazyTurtle: {phase} {kind} `{rel_name}` under `{module_path or '<root>'}`: "
+            f"{reason}{suffix}"
         )
 
     def _load_checkpoint_tensors_for_module_path(
@@ -1046,30 +1041,23 @@ class LazyTurtle:
         for rel_name in t_params:
             full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
             if full_name is None:
-                self._warn_materialization_skip(
-                    phase="submodule materialization",
-                    kind="param",
-                    module_path=module_path,
-                    rel_name=rel_name,
-                    reason="no checkpoint tensor mapping was found",
-                    target_shape=tuple(t_params[rel_name].shape),
-                )
                 continue
             shard = self._weight_map.get(full_name)
             if shard is None:
-                self._warn_materialization_skip(
-                    phase="submodule materialization",
-                    kind="param",
-                    module_path=module_path,
-                    rel_name=rel_name,
-                    reason="checkpoint tensor mapping resolved to a missing shard",
-                    full_name=full_name,
-                    target_shape=tuple(t_params[rel_name].shape),
-                    expert_index=expert_index,
-                    split_index=split_index,
-                    split_dim=split_dim,
+                raise RuntimeError(
+                    self._materialization_issue_message(
+                        phase="submodule materialization",
+                        kind="param",
+                        module_path=module_path,
+                        rel_name=rel_name,
+                        reason="checkpoint tensor mapping resolved to a missing shard",
+                        full_name=full_name,
+                        target_shape=tuple(t_params[rel_name].shape),
+                        expert_index=expert_index,
+                        split_index=split_index,
+                        split_dim=split_dim,
+                    )
                 )
-                continue
             grouped_names.setdefault(shard, []).append(("param", rel_name, full_name, expert_index, split_index, split_dim))
 
         for rel_name, target_buffer in list(t_bufs.items()):
@@ -1120,7 +1108,7 @@ class LazyTurtle:
                             prefer_transposed=prefer_transposed,
                         )
                         if tensor is None:
-                            self._warn_materialization_skip(
+                            raise RuntimeError(self._materialization_issue_message(
                                 phase="submodule materialization",
                                 kind=kind,
                                 module_path=module_path,
@@ -1132,12 +1120,11 @@ class LazyTurtle:
                                 expert_index=expert_index,
                                 split_index=split_index,
                                 split_dim=split_dim,
-                            )
-                            continue
+                            ))
                         if kind == "param":
                             target_param = t_params.get(rel_name)
                             if target_param is None:
-                                self._warn_materialization_skip(
+                                raise RuntimeError(self._materialization_issue_message(
                                     phase="submodule materialization",
                                     kind=kind,
                                     module_path=module_path,
@@ -1148,10 +1135,9 @@ class LazyTurtle:
                                     expert_index=expert_index,
                                     split_index=split_index,
                                     split_dim=split_dim,
-                                )
-                                continue
+                                ))
                             if target_param.shape != tensor.shape:
-                                self._warn_materialization_skip(
+                                raise RuntimeError(self._materialization_issue_message(
                                     phase="submodule materialization",
                                     kind=kind,
                                     module_path=module_path,
@@ -1163,8 +1149,7 @@ class LazyTurtle:
                                     expert_index=expert_index,
                                     split_index=split_index,
                                     split_dim=split_dim,
-                                )
-                                continue
+                                ))
                             target_param_new = _ensure_target_storage_on_device_(target_param, device)
                             if target_param_new is not target_param:
                                 t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
@@ -1188,7 +1173,7 @@ class LazyTurtle:
                             continue
 
                         if tuple(target_buffer.shape) != tuple(source.shape):
-                            self._warn_materialization_skip(
+                            raise RuntimeError(self._materialization_issue_message(
                                 phase="submodule materialization",
                                 kind=kind,
                                 module_path=module_path,
@@ -1200,8 +1185,7 @@ class LazyTurtle:
                                 expert_index=expert_index,
                                 split_index=split_index,
                                 split_dim=split_dim,
-                            )
-                            continue
+                            ))
 
                         if getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
                             new_buffer = torch.empty_like(target_buffer, device=device)
@@ -1358,18 +1342,10 @@ class LazyTurtle:
 
                 full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, name)
                 if full_name is None:
-                    self._warn_materialization_skip(
-                        phase="direct-meta sync",
-                        kind="param",
-                        module_path=module_path,
-                        rel_name=name,
-                        reason="no checkpoint tensor mapping was found",
-                        target_shape=tuple(shell_param.shape),
-                    )
                     continue
                 shard = self._weight_map.get(full_name)
                 if shard is None:
-                    self._warn_materialization_skip(
+                    raise RuntimeError(self._materialization_issue_message(
                         phase="direct-meta sync",
                         kind="param",
                         module_path=module_path,
@@ -1380,8 +1356,7 @@ class LazyTurtle:
                         expert_index=expert_index,
                         split_index=split_index,
                         split_dim=split_dim,
-                    )
-                    continue
+                    ))
 
                 source_path = os.path.join(self.model_local_path, shard)
                 with safe_open(source_path, framework="pt", device="cpu") as handler:
@@ -1395,7 +1370,7 @@ class LazyTurtle:
                     prefer_transposed=getattr(shell_sub, "is_transposed", None),
                 )
                 if source_param is None:
-                    self._warn_materialization_skip(
+                    raise RuntimeError(self._materialization_issue_message(
                         phase="direct-meta sync",
                         kind="param",
                         module_path=module_path,
@@ -1407,11 +1382,10 @@ class LazyTurtle:
                         expert_index=expert_index,
                         split_index=split_index,
                         split_dim=split_dim,
-                    )
-                    continue
+                    ))
 
                 if shell_param.shape != source_param.shape:
-                    self._warn_materialization_skip(
+                    raise RuntimeError(self._materialization_issue_message(
                         phase="direct-meta sync",
                         kind="param",
                         module_path=module_path,
@@ -1423,8 +1397,7 @@ class LazyTurtle:
                         expert_index=expert_index,
                         split_index=split_index,
                         split_dim=split_dim,
-                    )
-                    continue
+                    ))
 
                 cache_key = (full_name, expert_index, split_index, split_dim, shell_param.dtype, shell_param.requires_grad)
                 new_param = param_cache.get(cache_key)
@@ -1446,18 +1419,10 @@ class LazyTurtle:
 
                 full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, name)
                 if full_name is None:
-                    self._warn_materialization_skip(
-                        phase="direct-meta sync",
-                        kind="buffer",
-                        module_path=module_path,
-                        rel_name=name,
-                        reason="no checkpoint tensor mapping was found",
-                        target_shape=tuple(shell_buffer.shape),
-                    )
                     continue
                 shard = self._weight_map.get(full_name)
                 if shard is None:
-                    self._warn_materialization_skip(
+                    raise RuntimeError(self._materialization_issue_message(
                         phase="direct-meta sync",
                         kind="buffer",
                         module_path=module_path,
@@ -1468,8 +1433,7 @@ class LazyTurtle:
                         expert_index=expert_index,
                         split_index=split_index,
                         split_dim=split_dim,
-                    )
-                    continue
+                    ))
 
                 source_path = os.path.join(self.model_local_path, shard)
                 with safe_open(source_path, framework="pt", device="cpu") as handler:
@@ -1483,7 +1447,7 @@ class LazyTurtle:
                     prefer_transposed=getattr(shell_sub, "is_transposed", None),
                 )
                 if source_buffer is None:
-                    self._warn_materialization_skip(
+                    raise RuntimeError(self._materialization_issue_message(
                         phase="direct-meta sync",
                         kind="buffer",
                         module_path=module_path,
@@ -1495,11 +1459,10 @@ class LazyTurtle:
                         expert_index=expert_index,
                         split_index=split_index,
                         split_dim=split_dim,
-                    )
-                    continue
+                    ))
 
                 if shell_buffer.shape != source_buffer.shape:
-                    self._warn_materialization_skip(
+                    raise RuntimeError(self._materialization_issue_message(
                         phase="direct-meta sync",
                         kind="buffer",
                         module_path=module_path,
@@ -1511,8 +1474,7 @@ class LazyTurtle:
                         expert_index=expert_index,
                         split_index=split_index,
                         split_dim=split_dim,
-                    )
-                    continue
+                    ))
 
                 persistent = name not in getattr(shell_sub, "_non_persistent_buffers_set", set())
                 cache_key = (full_name, expert_index, split_index, split_dim, shell_buffer.dtype)
