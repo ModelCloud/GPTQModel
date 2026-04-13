@@ -243,7 +243,6 @@ jobs:
           uv pip uninstall gptqmodel || true
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
           uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           for pkg in defuser pypcre tokenicer logbar evalution; do
             uv pip uninstall "$pkg" || true
           done
@@ -320,7 +319,6 @@ jobs:
           uv pip uninstall gptqmodel || true
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
           uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           for pkg in defuser pypcre tokenicer logbar evalution; do
             uv pip uninstall "$pkg" || true
           done
@@ -395,6 +393,11 @@ jobs:
             --test-name "${{ matrix.test_script }}")"
           echo "using gpu=$gpu uv env=$env_name"
           /opt/uv/setup_uv_venv.sh $env_name
+
+      - name: Install package from source
+        run: |
+          uv pip uninstall gptqmodel || true
+          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
@@ -504,6 +507,11 @@ jobs:
             --test-name "${{ matrix.test_script }}")"
           echo "using uv env: $env_name"
           /opt/uv/setup_uv_venv.sh $env_name
+
+      - name: Install package from source
+        run: |
+          uv pip uninstall gptqmodel || true
+          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
       - name: Find suitable GPU
         if: ${{ !cancelled() }}
