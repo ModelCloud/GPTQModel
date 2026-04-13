@@ -172,7 +172,7 @@ class MarlinLinear(GPTQQuantLinear):
                 torch.empty(
                     scales_and_zp_size,
                     self.out_features,
-                    dtype=torch.float16,
+                    dtype=self.compute_dtype,
                 ),
                 requires_grad=False
             ),
@@ -192,7 +192,7 @@ class MarlinLinear(GPTQQuantLinear):
         )
 
         if bias:
-            self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
+            self.register_buffer("bias", torch.zeros((self.out_features), dtype=self.compute_dtype))
         else:
             self.bias = None
 
@@ -311,6 +311,8 @@ class MarlinLinear(GPTQQuantLinear):
         # make sure scales is synced with x/input
         if x.dtype != self.scales.dtype:
             replace_parameter(self, "scales", self.scales.to(dtype=x.dtype))
+        if self.bias is not None and self.bias.dtype != x.dtype:
+            self.bias.data = self.bias.data.to(dtype=x.dtype)
 
         out = apply_gptq_marlin_linear(
             input=x.contiguous() if self.is_lm_head else x,
