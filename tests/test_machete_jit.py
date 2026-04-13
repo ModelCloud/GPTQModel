@@ -267,6 +267,24 @@ def test_machete_post_init_transforms_loaded_qzeros_for_asymmetric_gptq(monkeypa
     assert module.has_zero_points is True
 
 
+def test_machete_forward_rejects_missing_qzeros_for_asymmetric_gptq():
+    module = MacheteLinear(
+        bits=4,
+        group_size=64,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        dtype=torch.float16,
+    )
+    module.has_zero_points = True
+    module.qzeros = torch.nn.Parameter(torch.empty(0, dtype=torch.float16), requires_grad=False)
+
+    with pytest.raises(AssertionError, match="requires non-empty qzeros"):
+        module(torch.randn(2, 128, dtype=torch.float16))
+
+
 def test_machete_hopper_arch_cuda_cflags_add_sm90a_when_torch_only_targets_sm90(monkeypatch):
     class _Props:
         name = "NVIDIA H200"

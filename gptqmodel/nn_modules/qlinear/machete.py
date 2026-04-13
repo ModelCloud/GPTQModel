@@ -297,7 +297,13 @@ class MacheteLinear(GPTQQuantLinear):
         if group_scales.dtype != input_2d.dtype:
             group_scales = group_scales.to(dtype=input_2d.dtype)
 
-        group_zeros = self.qzeros if self.has_zero_points and self.qzeros.numel() > 0 else None
+        if self.has_zero_points:
+            assert self.qzeros is not None and self.qzeros.numel() > 0, (
+                "Asymmetric MacheteLinear requires non-empty qzeros after post_init()."
+            )
+            group_zeros = self.qzeros
+        else:
+            group_zeros = None
 
         output = machete_mm(
             a=input_2d,
