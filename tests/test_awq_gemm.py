@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import pytest
-
 from awq_test_utils import run_quantized_awq_generation_test
 
 from gptqmodel import BACKEND

@@ -9,9 +9,9 @@ from shutil import which
 import pytest
 import torch
 
-from gptqmodel import extension as extension_api
 import gptqmodel.nn_modules.qlinear.marlin as marlin_qlinear_module
 import gptqmodel.utils.marlin as marlin_utils
+from gptqmodel import extension as extension_api
 from gptqmodel.utils import cpp as cpp_module
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 
@@ -419,7 +419,7 @@ def test_marlin_runtime_error_skips_install_hint_when_cuda_wheel_headers_are_det
     monkeypatch.setattr(marlin_utils, "detected_cuda_wheel_include_paths", lambda: ["/tmp/nvidia/cu13/include"])
     monkeypatch.setattr(torch.version, "cuda", "13.0", raising=False)
 
-    error_text = marlin_utils.marlin_runtime_error(torch.bfloat16)
+    marlin_utils.marlin_runtime_error(torch.bfloat16)
 
     assert fake_extension_api.is_available_calls == ["marlin_bf16"]
     assert fake_extension_api.error_calls == ["marlin_bf16"]

@@ -20,9 +20,9 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.quantization.config import (
-    AutoModuleDecoderConfig,
     FORMAT,
     METHOD,
+    AutoModuleDecoderConfig,
     GGUFBits,
     GGUFConfig,
     QuantizeConfig,

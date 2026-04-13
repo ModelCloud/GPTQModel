@@ -24,8 +24,8 @@ from ...utils.machete import (
     machete_runtime_available,
     machete_runtime_error,
     pack_quantized_values_into_int32,
-    query_machete_supported_quant_types,
     query_machete_supported_group_sizes,
+    query_machete_supported_quant_types,
     unpack_quantized_values_into_int32,
 )
 from ...utils.marlin import replace_parameter

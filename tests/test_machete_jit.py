@@ -13,10 +13,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from gptqmodel import extension as extension_api
 import gptqmodel.nn_modules.qlinear.machete as machete_linear_module
-from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 import gptqmodel.utils.machete as machete_utils
+from gptqmodel import extension as extension_api
+from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 
 

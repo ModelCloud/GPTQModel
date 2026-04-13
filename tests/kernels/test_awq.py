@@ -41,8 +41,8 @@ except Exception as exc:  # pragma: no cover - triton import may fail in CI
     awq_triton_import_exception = exc
 
 from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
-from gptqmodel.utils.machete import _validate_machete_device_support, machete_runtime_error
 from gptqmodel.utils.exllamav2 import ScratchSpace
+from gptqmodel.utils.machete import _validate_machete_device_support, machete_runtime_error
 
 
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")

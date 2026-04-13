@@ -10,6 +10,7 @@ from typing import Iterable
 
 import pytest
 import torch
+from tests.models.model_test import ModelTest
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
@@ -17,7 +18,6 @@ from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from tests.models.model_test import ModelTest
 
 
 pytestmark = [
