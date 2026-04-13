@@ -396,6 +396,10 @@ jobs:
 
           mv "$lock_file" "$unlock_file"
 
+          echo "::group::pip list"
+            uv pip list
+          echo "::endgroup::"
+
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
         run: |
