@@ -352,14 +352,17 @@ jobs:
 
       - name: Install package from source
         run: |
-          env_dir="/opt/uv/venvs/${ENV_NAME}"
           install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
           lock_dir="/opt/uv/locks"
           lock_file="${lock_dir}/${ENV_NAME}.${install_key}.lock"
-          stamp_file="${env_dir}/.gptqmodel_install_${install_key}.done"
+          unlock_file="${lock_dir}/${ENV_NAME}.${install_key}.unlock"
 
           mkdir -p "$lock_dir"
-          mkdir -p "$env_dir"
+
+          if [ -f "$unlock_file" ]; then
+            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
+            exit 0
+          fi
 
           exec 9>"$lock_file"
           cleanup_lock() {
@@ -377,22 +380,21 @@ jobs:
             flock 9
           fi
 
+          if [ -f "$unlock_file" ]; then
+            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
+            exit 0
+          fi
+
           printf 'test=%s job=%s run=%s env=%s\n' \
             "${{ matrix.test_script }}" \
             "${{ github.job }}" \
             "${{ needs.check-vm.outputs.run_id }}" \
             "${ENV_NAME}" > "$lock_file"
 
-          if [ -f "$stamp_file" ]; then
-            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
-            exit 0
-          fi
-
           uv pip uninstall gptqmodel || true
           uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
-          rm -f "${env_dir}"/.gptqmodel_install_*.done
-          touch "$stamp_file"
+          mv "$lock_file" "$unlock_file"
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
@@ -541,14 +543,17 @@ jobs:
 
       - name: Install package from source
         run: |
-          env_dir="/opt/uv/venvs/${ENV_NAME}"
           install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
           lock_dir="/opt/uv/locks"
           lock_file="${lock_dir}/${ENV_NAME}.${install_key}.lock"
-          stamp_file="${env_dir}/.gptqmodel_install_${install_key}.done"
+          unlock_file="${lock_dir}/${ENV_NAME}.${install_key}.unlock"
 
           mkdir -p "$lock_dir"
-          mkdir -p "$env_dir"
+
+          if [ -f "$unlock_file" ]; then
+            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
+            exit 0
+          fi
 
           exec 9>"$lock_file"
           cleanup_lock() {
@@ -566,22 +571,21 @@ jobs:
             flock 9
           fi
 
+          if [ -f "$unlock_file" ]; then
+            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
+            exit 0
+          fi
+
           printf 'test=%s job=%s run=%s env=%s\n' \
             "${{ matrix.test_script }}" \
             "${{ github.job }}" \
             "${{ needs.check-vm.outputs.run_id }}" \
             "${ENV_NAME}" > "$lock_file"
 
-          if [ -f "$stamp_file" ]; then
-            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
-            exit 0
-          fi
-
           uv pip uninstall gptqmodel || true
           uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
-          rm -f "${env_dir}"/.gptqmodel_install_*.done
-          touch "$stamp_file"
+          mv "$lock_file" "$unlock_file"
 
       - name: Find suitable GPU
         if: ${{ !cancelled() }}
