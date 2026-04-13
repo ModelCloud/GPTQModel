@@ -40,7 +40,12 @@
 #endif
 
 #include <ATen/ATen.h>
+#include <cstdio>
 #include <cstdlib>
+#include <mutex>
+#include <string>
+#include <type_traits>
+#include <unordered_set>
 
 #ifndef MARLIN_SHARED_MEM_GUARD_BYTES
 #  define MARLIN_SHARED_MEM_GUARD_BYTES 0 // 512
@@ -242,6 +247,99 @@ int mentaray_blocks_per_sm_limit(int sms) {
   return mentaray_env_override("GPTQMODEL_MENTARAY_MAX_BLOCKS_PER_SM", 1);
 }
 
+bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
+                     int prob_m, int prob_n, int prob_k, int num_bits,
+                     int group_size, bool has_act_order, bool is_k_full,
+                     bool has_zp, bool is_zp_float, int stages,
+                     int max_shared_mem);
+
+bool mentaray_trace_enabled() {
+  return mentaray_env_override("GPTQMODEL_MENTARAY_TRACE_CONFIG", 0) > 0;
+}
+
+template <typename scalar_t>
+char const* mentaray_trace_dtype_name() {
+  return std::is_same<scalar_t, nv_bfloat16>::value ? "bf16" : "fp16";
+}
+
+template <typename scalar_t>
+void mentaray_trace_exec_config(char const* selection_mode, bool has_zp,
+                                bool has_act_order, bool is_k_full, int prob_m,
+                                int prob_n, int prob_k, int prob_m_split,
+                                int thread_m_blocks,
+                                thread_config_t const& th_config,
+                                int blocks_per_sm, int sms,
+                                int max_shared_mem_new) {
+  if (!mentaray_trace_enabled()) return;
+
+  static std::mutex trace_mutex;
+  static std::unordered_set<std::string> seen_configs;
+
+  std::string key = std::string(mentaray_trace_dtype_name<scalar_t>()) + "|" +
+                    selection_mode + "|" + (has_zp ? "awq" : "gptq") + "|" +
+                    (has_act_order ? "act" : "noact") + "|" +
+                    (is_k_full ? "kfull" : "kpartial") + "|" +
+                    std::to_string(prob_m) + "|" + std::to_string(prob_n) +
+                    "|" + std::to_string(prob_k) + "|" +
+                    std::to_string(prob_m_split) + "|" +
+                    std::to_string(thread_m_blocks) + "|" +
+                    std::to_string(th_config.thread_k) + "|" +
+                    std::to_string(th_config.thread_n) + "|" +
+                    std::to_string(th_config.num_threads) + "|" +
+                    std::to_string(blocks_per_sm) + "|" +
+                    std::to_string(sms) + "|" +
+                    std::to_string(max_shared_mem_new);
+
+  {
+    std::lock_guard<std::mutex> guard(trace_mutex);
+    if (!seen_configs.insert(key).second) return;
+  }
+
+  std::fprintf(stderr,
+               "MENTARAY_TRACE mode=%s quant=%s dtype=%s act=%d k_full=%d "
+               "m=%d n=%d k=%d m_split=%d tm=%d tk=%d tn=%d threads=%d "
+               "blocks_per_sm=%d sms=%d smem=%d\n",
+               selection_mode, has_zp ? "awq" : "gptq",
+               mentaray_trace_dtype_name<scalar_t>(), has_act_order ? 1 : 0,
+               is_k_full ? 1 : 0, prob_m, prob_n, prob_k, prob_m_split,
+               thread_m_blocks, th_config.thread_k, th_config.thread_n,
+               th_config.num_threads, blocks_per_sm, sms, max_shared_mem_new);
+  std::fflush(stderr);
+}
+
+int mentaray_resolve_active_blocks(
+    MarlinFuncPtr kernel, thread_config_t const& th_config, int cache_size,
+    int blocks_per_sm_limit, int thread_m_blocks, int prob_m, int prob_n,
+    int prob_k, int num_bits, int group_size, bool has_act_order,
+    bool is_k_full, bool has_zp, bool is_zp_float, int stages,
+    int max_shared_mem) {
+  int active_blocks = 1;
+  if (blocks_per_sm_limit > 1) {
+    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         cache_size);
+    auto occupancy_status = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &active_blocks, kernel, th_config.num_threads, cache_size);
+    if (occupancy_status != cudaSuccess || active_blocks < 1) {
+      active_blocks = 1;
+    }
+    active_blocks = min(active_blocks, blocks_per_sm_limit);
+  }
+
+  while (active_blocks > 1) {
+    int adjusted_shared_mem =
+        max_shared_mem / active_blocks -
+        MARLIN_MULTI_BLOCK_SHARED_MEM_GUARD_BYTES;
+    if (is_valid_config(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
+                        num_bits, group_size, has_act_order, is_k_full, has_zp,
+                        is_zp_float, stages, adjusted_shared_mem)) {
+      break;
+    }
+    active_blocks--;
+  }
+
+  return active_blocks;
+}
+
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
                           int prob_n, int prob_k, int num_bits, int group_size,
                           bool has_act_order, bool is_k_full, int stages) {
@@ -313,7 +411,7 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
 bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
                      int prob_m, int prob_n, int prob_k, int num_bits,
                      int group_size, bool has_act_order, bool is_k_full,
-                     int has_zp, int is_zp_float, int stages,
+                     bool has_zp, bool is_zp_float, int stages,
                      int max_shared_mem) {
   // Sanity
   if (th_config.thread_k == -1 || th_config.thread_n == -1 ||
@@ -719,28 +817,10 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
 
     if (kernel == MarlinDefault) continue;
 
-    int active_blocks = 1;
-    if (blocks_per_sm_limit > 1) {
-      cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                           cache_size);
-      auto occupancy_status = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-          &active_blocks, kernel, th_config.num_threads, cache_size);
-      if (occupancy_status != cudaSuccess || active_blocks < 1) {
-        active_blocks = 1;
-      }
-      active_blocks = min(active_blocks, blocks_per_sm_limit);
-    }
-
-    while (active_blocks > 1) {
-      int adjusted_shared_mem =
-          max_shared_mem / active_blocks - MARLIN_MULTI_BLOCK_SHARED_MEM_GUARD_BYTES;
-      if (is_valid_config(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
-                          num_bits, group_size, has_act_order, is_k_full,
-                          has_zp, is_zp_float, stages, adjusted_shared_mem)) {
-        break;
-      }
-      active_blocks--;
-    }
+    int active_blocks = mentaray_resolve_active_blocks(
+        kernel, th_config, cache_size, blocks_per_sm_limit, thread_m_blocks,
+        prob_m, prob_n, prob_k, num_bits, group_size, has_act_order, is_k_full,
+        has_zp, is_zp_float, stages, max_shared_mem);
 
     return {active_blocks, th_config};
   }
@@ -859,6 +939,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     if (par_count > max_par) par_count = max_par;
     int prob_m_split =
         par_count > 0 ? (par_count * (max_thread_m_blocks * 16)) : rest_m;
+    bool manual_override = false;
 
     int thread_k = thread_k_init;
     int thread_n = thread_n_init;
@@ -868,6 +949,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     if (thread_n == -1) {
       thread_n = mentaray_env_override("GPTQMODEL_MENTARAY_THREAD_N");
     }
+    manual_override = thread_k != -1 && thread_n != -1;
 
     int thread_m_blocks = min(div_ceil(prob_m_split, 16), max_thread_m_blocks);
     int m_block_size_8 = prob_m_split <= 8;
@@ -875,9 +957,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     // Set thread config
     exec_config_t exec_cfg;
     thread_config_t thread_tfg;
-    if (thread_k != -1 && thread_n != -1) {
+    if (manual_override) {
       thread_tfg = mentaray_lookup_thread_config(thread_k, thread_n);
-      exec_cfg = exec_config_t{1, thread_tfg};
+      exec_cfg = exec_config_t{mentaray_blocks_per_sm_limit(sms), thread_tfg};
       TORCH_CHECK(prob_n % thread_n == 0, "prob_n = ", prob_n,
                   " is not divisible by thread_n = ", thread_n);
       TORCH_CHECK(prob_k % thread_k == 0, "prob_k = ", prob_k,
@@ -937,6 +1019,17 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                   ", num_threads = ", num_threads, ", num_bits = ", num_bits);
     }
 
+    if (manual_override) {
+      int manual_cache_size = get_kernel_cache_size(
+          thread_tfg, thread_m_blocks, prob_m_split, prob_n, prob_k, num_bits,
+          group_size, has_act_order, is_k_full, has_zp, is_zp_float, stages);
+      exec_cfg.blocks_per_sm = mentaray_resolve_active_blocks(
+          kernel, thread_tfg, manual_cache_size, exec_cfg.blocks_per_sm,
+          thread_m_blocks, prob_m_split, prob_n, prob_k, num_bits, group_size,
+          has_act_order, is_k_full, has_zp, is_zp_float, stages,
+          max_shared_mem);
+    }
+
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                          max_shared_mem_new);
 
@@ -945,6 +1038,11 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
     // avoid ">>>" being formatted to "> > >"
     // clang-format off
+    mentaray_trace_exec_config<scalar_t>(
+        manual_override ? "manual" : "auto",
+        has_zp, has_act_order, is_k_full, prob_m, prob_n, prob_k, prob_m_split,
+        thread_m_blocks, thread_tfg, exec_cfg.blocks_per_sm, sms,
+        max_shared_mem_new);
     kernel<<<blocks, num_threads, max_shared_mem_new, stream>>>(
         A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, s_ptr, s2_ptr, zp_ptr,
         g_idx_ptr, num_groups,
