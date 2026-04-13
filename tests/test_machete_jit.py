@@ -53,14 +53,28 @@ class _FakeExtensionApi:
         raise AssertionError(f"unexpected op {op_name}")
 
 
+def _write_fake_cutlass_checkout(destination: Path, *, version: str) -> None:
+    major, minor, patch = version.split(".")
+    (destination / "include" / "cutlass").mkdir(parents=True, exist_ok=True)
+    (destination / "tools" / "library" / "include").mkdir(parents=True, exist_ok=True)
+    (destination / "tools" / "util" / "include").mkdir(parents=True, exist_ok=True)
+    (destination / "python").mkdir(parents=True, exist_ok=True)
+    (destination / "include" / "cutlass" / "cutlass.h").write_text("// cutlass\n", encoding="utf-8")
+    (destination / "include" / "cutlass" / "version.h").write_text(
+        (
+            "#pragma once\n"
+            f"#define CUTLASS_MAJOR {major}\n"
+            f"#define CUTLASS_MINOR {minor}\n"
+            f"#define CUTLASS_PATCH {patch}\n"
+        ),
+        encoding="utf-8",
+    )
+    (destination / "python" / "cutlass_library.py").write_text("# cutlass python\n", encoding="utf-8")
+
+
 def _write_fake_cutlass_archive(destination: Path) -> None:
     staging_root = destination.parent / f"cutlass-{machete_utils._CUTLASS_VERSION}"
-    (staging_root / "include" / "cutlass").mkdir(parents=True, exist_ok=True)
-    (staging_root / "tools" / "library" / "include").mkdir(parents=True, exist_ok=True)
-    (staging_root / "tools" / "util" / "include").mkdir(parents=True, exist_ok=True)
-    (staging_root / "python").mkdir(parents=True, exist_ok=True)
-    (staging_root / "include" / "cutlass" / "cutlass.h").write_text("// cutlass\n", encoding="utf-8")
-    (staging_root / "python" / "cutlass_library.py").write_text("# cutlass python\n", encoding="utf-8")
+    _write_fake_cutlass_checkout(staging_root, version=machete_utils._CUTLASS_VERSION)
 
     with tarfile.open(destination, "w:gz") as archive:
         archive.add(staging_root, arcname=f"cutlass-{machete_utils._CUTLASS_VERSION}")
@@ -372,14 +386,71 @@ def test_ensure_cutlass_source_bootstraps_repo_local_checkout(monkeypatch, tmp_p
 
 def test_cutlass_checkout_complete_accepts_tools_util_layout(tmp_path):
     cutlass_root = tmp_path / "cutlass"
-    (cutlass_root / "include" / "cutlass").mkdir(parents=True, exist_ok=True)
-    (cutlass_root / "tools" / "library" / "include").mkdir(parents=True, exist_ok=True)
-    (cutlass_root / "tools" / "util" / "include").mkdir(parents=True, exist_ok=True)
+    _write_fake_cutlass_checkout(cutlass_root, version=machete_utils._CUTLASS_VERSION)
     (cutlass_root / "python" / "cutlass_library").mkdir(parents=True, exist_ok=True)
-    (cutlass_root / "include" / "cutlass" / "cutlass.h").write_text("// cutlass\n", encoding="utf-8")
+    (cutlass_root / "python" / "cutlass_library.py").unlink()
     (cutlass_root / "python" / "cutlass_library" / "__init__.py").write_text("# bindings\n", encoding="utf-8")
 
     assert machete_utils._cutlass_checkout_complete(cutlass_root)
+
+
+def test_cutlass_checkout_version_reads_header_macros(tmp_path):
+    cutlass_root = tmp_path / "cutlass"
+    _write_fake_cutlass_checkout(cutlass_root, version="3.5.0")
+
+    assert machete_utils._cutlass_checkout_version(cutlass_root) == "3.5.0"
+
+
+def test_ensure_cutlass_source_rejects_mismatched_configured_checkout(monkeypatch, tmp_path):
+    wrong_cutlass = tmp_path / "wrong-cutlass"
+    _write_fake_cutlass_checkout(wrong_cutlass, version="3.5.0")
+    monkeypatch.setattr(machete_utils, "_machete_project_root", lambda: tmp_path / "project")
+    monkeypatch.setenv("GPTQMODEL_CUTLASS_DIR", str(wrong_cutlass))
+
+    with pytest.raises(RuntimeError, match=r"CUTLASS v3\.5\.0.*requires v4\.4\.2"):
+        machete_utils._ensure_cutlass_source()
+
+
+def test_ensure_cutlass_source_marks_matching_repo_local_checkout_without_redownload(monkeypatch, tmp_path):
+    repo_root = tmp_path
+    repo_cutlass = repo_root / "cutlass"
+    _write_fake_cutlass_checkout(repo_cutlass, version=machete_utils._CUTLASS_VERSION)
+    download_calls: list[Path] = []
+
+    monkeypatch.setattr(machete_utils, "_machete_project_root", lambda: repo_root)
+    monkeypatch.delenv("GPTQMODEL_CUTLASS_DIR", raising=False)
+    monkeypatch.setattr(
+        machete_utils,
+        "_download_cutlass_archive",
+        lambda _url, destination: download_calls.append(destination),
+    )
+
+    cutlass_root = machete_utils._ensure_cutlass_source()
+
+    assert cutlass_root == repo_cutlass.resolve()
+    assert (repo_cutlass / machete_utils._CUTLASS_VERSION_MARKER).read_text(encoding="utf-8").strip() == machete_utils._CUTLASS_VERSION
+    assert download_calls == []
+
+
+def test_ensure_cutlass_source_refreshes_repo_local_checkout_when_version_mismatches(monkeypatch, tmp_path):
+    archive_path = tmp_path / f"cutlass-v{machete_utils._CUTLASS_VERSION}.tar.gz"
+    _write_fake_cutlass_archive(archive_path)
+    repo_cutlass = tmp_path / "cutlass"
+    _write_fake_cutlass_checkout(repo_cutlass, version="3.5.0")
+
+    monkeypatch.setattr(machete_utils, "_machete_project_root", lambda: tmp_path)
+    monkeypatch.delenv("GPTQMODEL_CUTLASS_DIR", raising=False)
+    monkeypatch.setattr(
+        machete_utils,
+        "_download_cutlass_archive",
+        lambda _url, destination: shutil.copyfile(archive_path, destination),
+    )
+
+    cutlass_root = machete_utils._ensure_cutlass_source()
+
+    assert cutlass_root == repo_cutlass.resolve()
+    assert machete_utils._cutlass_checkout_version(cutlass_root) == machete_utils._CUTLASS_VERSION
+    assert (cutlass_root / machete_utils._CUTLASS_VERSION_MARKER).read_text(encoding="utf-8").strip() == machete_utils._CUTLASS_VERSION
 
 
 def test_scaled_mm_epilogues_c3x_matches_cutlass_442_broadcast_signatures():
