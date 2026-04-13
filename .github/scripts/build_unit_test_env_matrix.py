@@ -1,0 +1,60 @@
+import argparse
+import json
+from pathlib import Path
+
+import yaml
+from get_unit_test_env_name import build_env_name
+from parse_test_config import parse_test_config
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--group", required=True)
+    parser.add_argument("--tests-json", required=True)
+    parser.add_argument(
+        "--deps-file",
+        default=Path(__file__).with_name("deps.yaml"),
+    )
+    parser.add_argument(
+        "--config-file",
+        default=Path(__file__).with_name("test.yaml"),
+    )
+    args = parser.parse_args()
+
+    tests = json.loads(args.tests_json or "[]")
+    if not tests:
+        print("[]")
+        return
+
+    with Path(args.deps_file).open("r", encoding="utf-8") as f:
+        deps = yaml.safe_load(f) or {}
+
+    envs: dict[str, dict[str, str]] = {}
+    for test_name in tests:
+        env_name = build_env_name(test_name, deps)
+        config = parse_test_config(args.config_file, args.group, test_name)
+        py = str(config["py"])
+
+        entry = envs.get(env_name)
+        if entry is None:
+            envs[env_name] = {
+                "env_name": env_name,
+                "test_script": test_name,
+                "python_version": py,
+            }
+            continue
+
+        if entry["python_version"] != py:
+            raise ValueError(
+                f"conflicting python_version for env {env_name}: "
+                f"{entry['python_version']} vs {py}"
+            )
+
+        if test_name < entry["test_script"]:
+            entry["test_script"] = test_name
+
+    print(json.dumps(sorted(envs.values(), key=lambda item: item["env_name"])))
+
+
+if __name__ == "__main__":
+    main()

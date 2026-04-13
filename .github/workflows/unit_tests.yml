@@ -132,6 +132,8 @@ jobs:
       torch-files: ${{ steps.files.outputs.torch-files }}
       model-files: ${{ steps.files.outputs.model-files }}
       m4-files: ${{ steps.files.outputs.m4-files }}
+      torch-envs: ${{ steps.files.outputs.torch-envs }}
+      model-envs: ${{ steps.files.outputs.model-envs }}
 
     steps:
       - name: Checkout Codes
@@ -158,20 +160,186 @@ jobs:
 
           IFS='|' read -r torch_test_files model_test_files mlx_files <<< "$test_files"
 
+          torch_envs=$(python3 .github/scripts/build_unit_test_env_matrix.py \
+            --group tests \
+            --tests-json "$torch_test_files")
+          model_envs=$(python3 .github/scripts/build_unit_test_env_matrix.py \
+            --group tests/models \
+            --tests-json "$model_test_files")
+
           echo "torch-files=$torch_test_files" >> "$GITHUB_OUTPUT"
           echo "model-files=$model_test_files" >> "$GITHUB_OUTPUT"
           echo "m4-files=$mlx_files" >> "$GITHUB_OUTPUT"
+          echo "torch-envs=$torch_envs" >> "$GITHUB_OUTPUT"
+          echo "model-envs=$model_envs" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
           echo "Torch Test files: $torch_test_files"
           echo "Model Compat Test files: $model_test_files"
           echo "MLX Test files: $mlx_files"
+          echo "Torch envs: $torch_envs"
+          echo "Model envs: $model_envs"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
+
+  prepare-torch-envs:
+    needs:
+      - list-test-files
+      - check-vm
+    runs-on: [ self-hosted, xeon5 ]
+    container:
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu24.04_0325
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
+      volumes:
+        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
+        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
+        - /dev/dri/by-path:/dev/dri/by-path
+        - /monster/ci/models:/monster/data/model
+        - /monster/ci/dataset:/monster/data/model/dataset
+        - /monster/ci/huggingface:/github/home/.cache/huggingface
+        - /monster/ci/uv:/opt/uv
+        - /monster/ci/env:/opt/env
+        - /monster/ci/dist:/opt/dist
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
+      matrix:
+        include: ${{ fromJSON(needs.list-test-files.outputs.torch-envs) }}
+    if: always() && !cancelled() && needs.list-test-files.outputs.torch-envs != '[]'
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
+
+      - name: Prepare uv env
+        run: |
+          echo "preparing env=${{ matrix.env_name }} test=${{ matrix.test_script }} py=${{ matrix.python_version }}"
+          /opt/uv/setup_uv_venv.sh "${{ matrix.env_name }}"
+
+          python -V
+          which python
+          which pip || true
+
+          bash /opt/env/init_compiler_no_env.sh \
+            "${{ needs.check-vm.outputs.cuda_version }}" \
+            "${{ env.TORCH_VERSION }}" \
+            "${{ matrix.python_version }}"
+
+          python .github/scripts/install_deps.py "${{ matrix.test_script }}"
+          python .github/scripts/uninstall_deps.py "${{ matrix.test_script }}"
+
+      - name: Install package from source
+        run: |
+          uv pip uninstall gptqmodel || true
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          for pkg in defuser pypcre tokenicer logbar evalution; do
+            uv pip uninstall "$pkg" || true
+          done
+          for url in \
+            "$DEFUSER_GIT_URL" \
+            "$PYPCRE_GIT_URL" \
+            "$TOKENICER_GIT_URL" \
+            "$LOGBAR_GIT_URL" \
+            "$EVALUTION_GIT_URL"
+          do
+            uv pip install "$url"
+          done
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+
+  prepare-model-envs:
+    needs:
+      - list-test-files
+      - check-vm
+    runs-on: [ self-hosted, xeon5 ]
+    container:
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu24.04_0325
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
+      volumes:
+        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
+        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
+        - /dev/dri/by-path:/dev/dri/by-path
+        - /monster/ci/models:/monster/data/model
+        - /monster/ci/dataset:/monster/data/model/dataset
+        - /monster/ci/huggingface:/github/home/.cache/huggingface
+        - /monster/ci/uv:/opt/uv
+        - /monster/ci/env:/opt/env
+        - /monster/ci/dist:/opt/dist
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
+      matrix:
+        include: ${{ fromJSON(needs.list-test-files.outputs.model-envs) }}
+    if: always() && !cancelled() && needs.list-test-files.outputs.model-envs != '[]'
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
+
+      - name: Prepare uv env
+        run: |
+          echo "preparing env=${{ matrix.env_name }} test=${{ matrix.test_script }} py=${{ matrix.python_version }}"
+          /opt/uv/setup_uv_venv.sh "${{ matrix.env_name }}"
+
+          python -V
+          which python
+          which pip || true
+
+          bash /opt/env/init_compiler_no_env.sh \
+            "${{ needs.check-vm.outputs.cuda_version }}" \
+            "${{ env.TORCH_VERSION }}" \
+            "${{ matrix.python_version }}"
+
+          python .github/scripts/install_deps.py "${{ matrix.test_script }}"
+          python .github/scripts/uninstall_deps.py "${{ matrix.test_script }}"
+
+      - name: Install package from source
+        run: |
+          uv pip uninstall gptqmodel || true
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          for pkg in defuser pypcre tokenicer logbar evalution; do
+            uv pip uninstall "$pkg" || true
+          done
+          for url in \
+            "$DEFUSER_GIT_URL" \
+            "$PYPCRE_GIT_URL" \
+            "$TOKENICER_GIT_URL" \
+            "$LOGBAR_GIT_URL" \
+            "$EVALUTION_GIT_URL"
+          do
+            uv pip install "$url"
+          done
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
 
   torch:
     needs:
       - list-test-files
       - check-vm
+      - prepare-torch-envs
     runs-on: [ self-hosted, xeon5 ]
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu24.04_0325
@@ -215,138 +383,18 @@ jobs:
 
       - name: Activate uv env
         run: |
-          echo "-- loading unit test's config --"
-          source /opt/uv/setup_uv_venv.sh unit_test_env
-
           config_json="$(python3 .github/scripts/parse_test_config.py \
             --group tests \
             --test-name "${{ matrix.test_script }}")"
 
-          py="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["py"])')"
           gpu="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["gpu"])')"
 
-          echo "PYTHON_VERSION=$py" >> "$GITHUB_ENV"
           echo "GPU_COUNT=$gpu" >> "$GITHUB_ENV"
           
-          echo "using py=$py gpu=$gpu for test ${{ matrix.test_script }}"
-          echo "-- loaded --"
-
-          echo "-- setting up env --"
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
             --test-name "${{ matrix.test_script }}")"
-          echo "using uv env: $env_name"
+          echo "using gpu=$gpu uv env=$env_name"
           /opt/uv/setup_uv_venv.sh $env_name
-          echo "-- set --"
-
-      - name: Setup uv env
-        run: |
-          python -V
-          which python
-          which pip || true
-
-          echo "--- setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=${{ env.PYTHON_VERSION }}"
-          bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
-
-          echo ""
-          echo ""
-
-          echo "--- installing required deps..."
-          python .github/scripts/install_deps.py ${{ matrix.test_script }}
-
-          echo ""
-          echo ""
-
-          echo "--- uninstalling required deps..."
-          python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
-
-      # - name: Install Evalution
-      #   run: |
-      #     uv pip install git+https://x-access-token:${{ secrets.REPO_TOKEN }}@github.com/ModelCloud/Evalution.git
-      #      - name: Install requirements
-      #        run: |
-      #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version${{ env.PYTHON_VERSION }}
-
-      #      - name: Download source from local
-      #        continue-on-error: true
-      #        run: |
-      #          curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
-      #          ls -ahl .
-      #          sha256=$(sha256sum $file_name)
-      #          echo "sha256=$sha256"
-      #          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
-
-      # - name: Download source from github
-      #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
-      #   uses: actions/download-artifact@v8
-      #   with:
-      #     name: source
-      #     path: dist
-      #     run-id: ${{ github.run_id }}
-
-      #     - name: Uncompress source
-      #      continue-on-error: true
-      #     run: |
-      #      find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
-      #     ls -ahl .
-      #    tar -zxf gptqmodel_source.tar.gz
-
-      - name: Install package from source
-        run: |
-          uv pip uninstall gptqmodel || true
-          # make sure torch & torchvision are corresponded
-          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-
-          echo "===== install package from checkout ====="
-          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-
-          echo "===== install ModelCloud git deps ====="
-          for pkg in defuser pypcre tokenicer logbar evalution; do
-            uv pip uninstall "$pkg" || true
-          done
-          for url in \
-            "$DEFUSER_GIT_URL" \
-            "$PYPCRE_GIT_URL" \
-            "$TOKENICER_GIT_URL" \
-            "$LOGBAR_GIT_URL" \
-            "$EVALUTION_GIT_URL"
-          do
-            uv pip install "$url"
-          done
-
-          # deps may reinstalled torch
-          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-
-      - name: Print uv env
-        run: |
-          echo "::group::uv python list"
-          uv python list
-          echo "::endgroup::"
-
-          which python
-          which pip || true
-          python -V
-
-          echo "::group::uv python list"
-          uv python list
-          echo "::endgroup::"
-
-          echo "== nvcc =="
-          nvcc --version
-
-          echo "== torch =="
-          uv pip show torch || true
-
-          echo "::group::project files"
-          ls -ahl
-          echo "::endgroup::"
-
-          echo "== torch =="
-          uv pip show torch
-
-          echo "::group::pip list"
-          uv pip list
-          echo "::endgroup::"
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
@@ -408,6 +456,7 @@ jobs:
     needs:
       - list-test-files
       - check-vm
+      - prepare-model-envs
     runs-on: [ self-hosted, xeon5 ]
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu24.04_0325
@@ -449,76 +498,12 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Clean uv
-        run: |
-          ls
-          # uv cache clean
-
       - name: Activate uv env
         run: |
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
             --test-name "${{ matrix.test_script }}")"
           echo "using uv env: $env_name"
           /opt/uv/setup_uv_venv.sh $env_name
-
-      - name: Setup uv env
-        run: |
-          python -V
-          which python
-          which pip || true
-
-          echo "setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=${{ env.PYTHON_VERSION }}"
-          bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
-          python .github/scripts/install_deps.py ${{ matrix.test_script }}
-          python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
-
-      - name: Install package from source
-        run: |
-          uv pip uninstall gptqmodel || true
-          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          for pkg in defuser pypcre tokenicer logbar evalution; do
-            uv pip uninstall "$pkg" || true
-          done
-          for url in \
-            "$DEFUSER_GIT_URL" \
-            "$PYPCRE_GIT_URL" \
-            "$TOKENICER_GIT_URL" \
-            "$LOGBAR_GIT_URL" \
-            "$EVALUTION_GIT_URL"
-          do
-            uv pip install "$url"
-          done
-          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-
-      - name: Print uv env
-        run: |
-          echo "::group::uv python list"
-          uv python list
-          echo "::endgroup::"
-
-          which python
-          which pip || true
-          python -V
-
-          echo "::group::uv python list"
-          uv python list
-          echo "::endgroup::"
-
-          echo "== nvcc =="
-          nvcc --version
-
-          echo "::group::project files"
-          ls -ahl
-          echo "::endgroup::"
-
-          echo "== torch =="
-          uv pip show torch
-
-          echo "::group::pip list"
-          uv pip list
-          echo "::endgroup::"
 
       - name: Find suitable GPU
         if: ${{ !cancelled() }}
