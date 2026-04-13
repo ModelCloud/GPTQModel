@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from shutil import copy2
 from shutil import which
 
 import pytest
@@ -291,6 +292,30 @@ def test_mxfp8_contract_is_present_in_marlin_sources():
     assert "// MXFP8: FP8 weights with e8m0 microscaling block scales." in template_h
     assert "w_type == vllm::kFE4M3fn && !(s_type == vllm::kFE8M0fnu)" in template_h
     assert "if constexpr (s_type == vllm::kFE4M3fn || s_type == vllm::kFE8M0fnu)" in template_h
+
+
+def test_ensure_generated_marlin_kernels_repairs_stale_generated_sources(monkeypatch, tmp_path):
+    source_root = marlin_utils._marlin_root()
+    test_root = tmp_path / "marlin"
+    test_root.mkdir()
+    copy2(source_root / "generate_kernels.py", test_root / "generate_kernels.py")
+
+    monkeypatch.setattr(marlin_utils, "_marlin_root", lambda: test_root)
+
+    assert marlin_utils._ensure_generated_marlin_kernels() == test_root
+
+    kernel_path = test_root / "kernel_bf16_kfe4m3fn.cu"
+    original_text = kernel_path.read_text(encoding="utf-8")
+    assert "vllm::kFE8M0fnu.id()" in original_text
+
+    stale_text = "\n".join(
+        line for line in original_text.splitlines() if "vllm::kFE8M0fnu.id()" not in line
+    ) + "\n"
+    kernel_path.write_text(stale_text, encoding="utf-8")
+    assert "vllm::kFE8M0fnu.id()" not in kernel_path.read_text(encoding="utf-8")
+
+    assert marlin_utils._ensure_generated_marlin_kernels() == test_root
+    assert kernel_path.read_text(encoding="utf-8") == original_text
 
 
 def test_gptq_marlin_repack_prefers_requested_dtype_extension(monkeypatch):

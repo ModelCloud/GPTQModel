@@ -133,10 +133,17 @@ def _marlin_header_install_hint(error_text: str) -> str:
 
 def _ensure_generated_marlin_kernels() -> Path:
     root = _marlin_root()
-    if list(root.glob("kernel_fp16_*.cu")) and list(root.glob("kernel_bf16_*.cu")):
+    generator = root / "generate_kernels.py"
+    check_result = subprocess.run(
+        [sys.executable, str(generator), "--check"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if check_result.returncode == 0:
         return root
 
-    generator = root / "generate_kernels.py"
     result = subprocess.run(
         [sys.executable, str(generator)],
         cwd=str(root),
@@ -145,7 +152,7 @@ def _ensure_generated_marlin_kernels() -> Path:
         check=False,
     )
     if result.returncode != 0:
-        details = (result.stderr or result.stdout or "").strip()
+        details = (result.stderr or result.stdout or check_result.stderr or check_result.stdout or "").strip()
         raise RuntimeError(
             "Marlin kernel generation failed"
             + (f": {details}" if details else ".")
