@@ -224,7 +224,7 @@ jobs:
       - name: Prepare uv env
         run: |
           echo "preparing env=${{ matrix.env_name }} test=${{ matrix.test_script }} py=${{ matrix.python_version }}"
-          /opt/uv/setup_uv_venv.sh "${{ matrix.env_name }}"
+          source /opt/uv/setup_uv_venv.sh "${{ matrix.env_name }}"
 
           python -V
           which python
@@ -300,7 +300,7 @@ jobs:
       - name: Prepare uv env
         run: |
           echo "preparing env=${{ matrix.env_name }} test=${{ matrix.test_script }} py=${{ matrix.python_version }}"
-          /opt/uv/setup_uv_venv.sh "${{ matrix.env_name }}"
+          source /opt/uv/setup_uv_venv.sh "${{ matrix.env_name }}"
 
           python -V
           which python
