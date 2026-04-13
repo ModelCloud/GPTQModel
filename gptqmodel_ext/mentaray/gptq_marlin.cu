@@ -247,6 +247,14 @@ int mentaray_blocks_per_sm_limit(int sms) {
   return mentaray_env_override("GPTQMODEL_MENTARAY_MAX_BLOCKS_PER_SM", 1);
 }
 
+int mentaray_max_thread_m_blocks() {
+  int override =
+      mentaray_env_override("GPTQMODEL_MENTARAY_MAX_THREAD_M_BLOCKS", 4);
+  if (override < 1) return 1;
+  if (override > 4) return 4;
+  return override;
+}
+
 bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
                      int prob_m, int prob_n, int prob_k, int num_bits,
                      int group_size, bool has_act_order, bool is_k_full,
@@ -933,14 +941,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   if (prob_n <= 4096) max_par = 16 * 8;
   int max_shared_mem_new = max_shared_mem;
   int rest_m = prob_m;
-  int max_thread_m_blocks = 4;
+  int max_thread_m_blocks = mentaray_max_thread_m_blocks();
+  bool full_sm80 = mentaray_prefers_full_sm80(sms);
   while (rest_m) {
-    int par_count = rest_m / (max_thread_m_blocks * 16);
-    if (par_count > max_par) par_count = max_par;
-    int prob_m_split =
-        par_count > 0 ? (par_count * (max_thread_m_blocks * 16)) : rest_m;
-    bool manual_override = false;
-
     int thread_k = thread_k_init;
     int thread_n = thread_n_init;
     if (thread_k == -1) {
@@ -949,9 +952,24 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     if (thread_n == -1) {
       thread_n = mentaray_env_override("GPTQMODEL_MENTARAY_THREAD_N");
     }
-    manual_override = thread_k != -1 && thread_n != -1;
+    bool manual_override = thread_k != -1 && thread_n != -1;
+    int attempt_thread_m_blocks = max_thread_m_blocks;
+    // On 124-SM A100 boards, an exact M=96 launch maps to 3 M tiles. Running
+    // it as a single tm=2 launch keeps all 129 CTA tiles in one pass and
+    // consistently beats the default 64+32 split.
+    if (!manual_override && full_sm80 && rest_m == 96 &&
+        attempt_thread_m_blocks > 2) {
+      attempt_thread_m_blocks = 2;
+    }
 
-    int thread_m_blocks = min(div_ceil(prob_m_split, 16), max_thread_m_blocks);
+    int par_count = rest_m / (attempt_thread_m_blocks * 16);
+    if (par_count > max_par) par_count = max_par;
+    int prob_m_split = par_count > 0
+                           ? (par_count * (attempt_thread_m_blocks * 16))
+                           : rest_m;
+
+    int thread_m_blocks =
+        min(div_ceil(prob_m_split, 16), attempt_thread_m_blocks);
     int m_block_size_8 = prob_m_split <= 8;
 
     // Set thread config
@@ -971,8 +989,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
           num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
           stages, max_shared_mem, sms);
       thread_tfg = exec_cfg.tb_cfg;
-      if (thread_tfg.thread_k == -1 && max_thread_m_blocks > 1) {
-        max_thread_m_blocks--;
+      if (thread_tfg.thread_k == -1 && attempt_thread_m_blocks > 1) {
+        max_thread_m_blocks = attempt_thread_m_blocks - 1;
         continue;
       }
     }
