@@ -329,11 +329,10 @@ def _machete_extra_cuda_cflags() -> list[str]:
             include_ptxas_verbosity=False,
             include_fatbin_compression=True,
             include_diag_suppress=True,
+            nvcc_threads=_MACHETE_JIT_NVCC_THREADS,
         ),
         *_machete_hopper_arch_cuda_cflags(),
     ]
-    if "--threads" in flags:
-        flags[flags.index("--threads") + 1] = _MACHETE_JIT_NVCC_THREADS
     if _machete_cuda_version_at_least(12, 8):
         flags.insert(0, "-static-global-template-stub=false")
     return flags

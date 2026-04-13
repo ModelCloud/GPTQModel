@@ -393,6 +393,7 @@ def default_jit_cuda_cflags(
     include_ptxas_verbosity: bool = True,
     include_fatbin_compression: bool = False,
     include_diag_suppress: bool = False,
+    nvcc_threads: str | int | None = None,
 ) -> list[str]:
     """Return the common NVCC flags for torch.ops JIT CUDA extensions."""
 
@@ -404,7 +405,8 @@ def default_jit_cuda_cflags(
     )
 
     if include_nvcc_threads:
-        flags.extend(["--threads", os.getenv("NVCC_THREADS", _DEFAULT_NVCC_THREADS)])
+        resolved_nvcc_threads = str(nvcc_threads) if nvcc_threads is not None else os.getenv("NVCC_THREADS", _DEFAULT_NVCC_THREADS)
+        flags.extend(["--threads", resolved_nvcc_threads])
         if resolved_opt_level is not None:
             optimization_level = (
                 resolved_opt_level[1:] if resolved_opt_level.startswith("O") else resolved_opt_level
