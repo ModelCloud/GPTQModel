@@ -56,7 +56,7 @@ class MacheteLinear(GPTQQuantLinear):
     SUPPORTS_ADAPTERS = [Lora]
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
-    REQUIRES_FORMAT_V2 = False
+    REQUIRES_FORMAT_V2 = True
 
     QUANT_TYPE = "machete"
 
