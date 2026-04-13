@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,7 @@ _MACHETE_OPS_NAMESPACE = "gptqmodel_machete"
 _CUTLASS_VERSION = "4.4.2"
 _CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{_CUTLASS_VERSION}.tar.gz"
 _CUTLASS_VERSION_MARKER = ".gptqmodel_cutlass_version"
+_CUTLASS_VERSION_DEFINE_PATTERN = re.compile(r"^\s*#define\s+CUTLASS_(MAJOR|MINOR|PATCH)\s+(\d+)\s*$", re.MULTILINE)
 _MACHETE_REQUIRED_COMPUTE_CAPABILITY = (9, 0)
 _MACHETE_MIN_SHARED_MEMORY_PER_BLOCK_OPTIN = 204800
 _MACHETE_SM90A_ARCH_FLAGS = (
@@ -104,13 +106,54 @@ def _repo_local_cutlass_version_marker(cutlass_root: Path) -> Path:
     return cutlass_root / _CUTLASS_VERSION_MARKER
 
 
+def _cutlass_checkout_version(cutlass_root: Path) -> Optional[str]:
+    version_header = cutlass_root / "include" / "cutlass" / "version.h"
+    if not version_header.is_file():
+        return None
+
+    macros = {
+        name: value
+        for name, value in _CUTLASS_VERSION_DEFINE_PATTERN.findall(version_header.read_text(encoding="utf-8"))
+    }
+    required_macros = {"MAJOR", "MINOR", "PATCH"}
+    if macros.keys() < required_macros:
+        return None
+
+    return f"{macros['MAJOR']}.{macros['MINOR']}.{macros['PATCH']}"
+
+
+def _cutlass_checkout_version_error(cutlass_root: Path) -> Optional[str]:
+    version = _cutlass_checkout_version(cutlass_root)
+    if version is None:
+        return (
+            f"`{cutlass_root}` is missing a readable `include/cutlass/version.h`; "
+            f"GPTQModel requires CUTLASS v{_CUTLASS_VERSION}."
+        )
+    if version != _CUTLASS_VERSION:
+        return (
+            f"`{cutlass_root}` contains CUTLASS v{version}, but GPTQModel requires v{_CUTLASS_VERSION}."
+        )
+    return None
+
+
 def _repo_local_cutlass_version_matches(cutlass_root: Path) -> bool:
     marker = _repo_local_cutlass_version_marker(cutlass_root)
-    return marker.is_file() and marker.read_text(encoding="utf-8").strip() == _CUTLASS_VERSION
+    return (
+        _cutlass_checkout_version(cutlass_root) == _CUTLASS_VERSION
+        and marker.is_file()
+        and marker.read_text(encoding="utf-8").strip() == _CUTLASS_VERSION
+    )
 
 
 def _mark_repo_local_cutlass_version(cutlass_root: Path) -> None:
     _repo_local_cutlass_version_marker(cutlass_root).write_text(f"{_CUTLASS_VERSION}\n", encoding="utf-8")
+
+
+def _use_repo_local_cutlass(cutlass_root: Path) -> Path:
+    if not _repo_local_cutlass_version_matches(cutlass_root):
+        _mark_repo_local_cutlass_version(cutlass_root)
+    os.environ["GPTQMODEL_CUTLASS_DIR"] = str(cutlass_root)
+    return cutlass_root
 
 
 def _download_cutlass_archive(url: str, destination: Path) -> None:
@@ -138,22 +181,38 @@ def _ensure_cutlass_source() -> Path:
     configured_root = os.getenv("GPTQMODEL_CUTLASS_DIR")
     if configured_root:
         configured_path = Path(configured_root).expanduser().resolve()
-        if _cutlass_checkout_complete(configured_path) and (
-            configured_path != repo_local_root or _repo_local_cutlass_version_matches(configured_path)
-        ):
-            return configured_path
-        log.info(
-            "Machete: GPTQMODEL_CUTLASS_DIR=`%s` is incomplete; falling back to repo-local CUTLASS checkout.",
-            configured_path,
-        )
+        if _cutlass_checkout_complete(configured_path):
+            version_error = _cutlass_checkout_version_error(configured_path)
+            if version_error is None:
+                if configured_path == repo_local_root:
+                    return _use_repo_local_cutlass(configured_path)
+                return configured_path
+            if configured_path != repo_local_root:
+                raise RuntimeError(
+                    "Machete: GPTQMODEL_CUTLASS_DIR points to an incompatible CUTLASS checkout. "
+                    f"{version_error} Unset GPTQMODEL_CUTLASS_DIR to allow auto-download, or point it at a "
+                    f"CUTLASS v{_CUTLASS_VERSION} checkout."
+                )
+            log.info(
+                "Machete: GPTQMODEL_CUTLASS_DIR points to stale repo-local CUTLASS checkout `%s`; refreshing to v%s.",
+                configured_path,
+                _CUTLASS_VERSION,
+            )
+        else:
+            log.info(
+                "Machete: GPTQMODEL_CUTLASS_DIR=`%s` is incomplete; falling back to repo-local CUTLASS checkout.",
+                configured_path,
+            )
 
-    if _cutlass_checkout_complete(repo_local_root) and _repo_local_cutlass_version_matches(repo_local_root):
-        os.environ["GPTQMODEL_CUTLASS_DIR"] = str(repo_local_root)
-        return repo_local_root
+    if _cutlass_checkout_complete(repo_local_root):
+        if _cutlass_checkout_version_error(repo_local_root) is None:
+            return _use_repo_local_cutlass(repo_local_root)
     if repo_local_root.exists():
+        current_version = _cutlass_checkout_version(repo_local_root)
         log.info(
-            "Machete: refreshing repo-local CUTLASS checkout at `%s` to v%s.",
+            "Machete: refreshing repo-local CUTLASS checkout at `%s`%s to v%s.",
             repo_local_root,
+            f" from v{current_version}" if current_version else "",
             _CUTLASS_VERSION,
         )
 
@@ -176,8 +235,7 @@ def _ensure_cutlass_source() -> Path:
         extracted_root.replace(repo_local_root)
         _mark_repo_local_cutlass_version(repo_local_root)
 
-    os.environ["GPTQMODEL_CUTLASS_DIR"] = str(repo_local_root)
-    return repo_local_root
+    return _use_repo_local_cutlass(repo_local_root)
 
 
 def _machete_generated_dir() -> Path:
