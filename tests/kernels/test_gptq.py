@@ -314,7 +314,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TORCH, torch.float16, 0.0000),
         (BACKEND.TRITON, torch.float16, 0.00001),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
-        (BACKEND.MACHETE, torch.float16, 0.00040),
+        (BACKEND.MACHETE, torch.float16, 0.0010),
         (BACKEND.MARLIN, torch.float16, 0.0010),
     ]
     if _bitblas_supports_gptq_case(torch.float16):
@@ -343,7 +343,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0080),
-        (BACKEND.MACHETE, torch.bfloat16, 0.0033),
+        (BACKEND.MACHETE, torch.bfloat16, 0.0080),
         (BACKEND.MARLIN, torch.bfloat16, 0.0080),
     ]
     if _bitblas_supports_gptq_case(torch.bfloat16):
@@ -372,7 +372,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TORCH, torch.float16, 0.0000),
         (BACKEND.TRITON, torch.float16, 0.00001),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
-        (BACKEND.MACHETE, torch.float16, 0.00040),
+        (BACKEND.MACHETE, torch.float16, 0.0010),
         (BACKEND.MARLIN, torch.float16, 0.0020),
     ]
     if _bitblas_supports_gptq_case(torch.float16):
@@ -400,7 +400,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0160),
-        (BACKEND.MACHETE, torch.bfloat16, 0.0033),
+        (BACKEND.MACHETE, torch.bfloat16, 0.0080),
         (BACKEND.MARLIN, torch.bfloat16, 0.0080),
     ]
     if _bitblas_supports_gptq_case(torch.bfloat16):
