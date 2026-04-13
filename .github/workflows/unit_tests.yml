@@ -310,7 +310,8 @@ jobs:
           gpu="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["gpu"])')"
 
           echo "GPU_COUNT=$gpu" >> "$GITHUB_ENV"
-          has_specific_deps="$(PYTHONPATH=.github/scripts python3 -c 'from pathlib import Path; import yaml; from deps_utils import has_specific_deps; deps = yaml.safe_load(Path(\".github/scripts/deps.yaml\").read_text(encoding=\"utf-8\")) or {}; print(\"1\" if has_specific_deps(\"${{ matrix.test_script }}\", deps) else \"0\")')"
+          has_specific_deps="$(python3 .github/scripts/has_specific_deps.py \
+            --test-name "${{ matrix.test_script }}")"
           echo "HAS_SPECIFIC_DEPS=$has_specific_deps" >> "$GITHUB_ENV"
           
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
@@ -450,7 +451,8 @@ jobs:
         run: |
           source /opt/uv/setup_uv_venv.sh unit_test_env
 
-          has_specific_deps="$(PYTHONPATH=.github/scripts python3 -c 'from pathlib import Path; import yaml; from deps_utils import has_specific_deps; deps = yaml.safe_load(Path(\".github/scripts/deps.yaml\").read_text(encoding=\"utf-8\")) or {}; print(\"1\" if has_specific_deps(\"${{ matrix.test_script }}\", deps) else \"0\")')"
+          has_specific_deps="$(python3 .github/scripts/has_specific_deps.py \
+            --test-name "${{ matrix.test_script }}")"
           echo "HAS_SPECIFIC_DEPS=$has_specific_deps" >> "$GITHUB_ENV"
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
             --test-name "${{ matrix.test_script }}")"
