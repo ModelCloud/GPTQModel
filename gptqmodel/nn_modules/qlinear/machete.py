@@ -24,6 +24,7 @@ from ...utils.machete import (
     machete_runtime_available,
     machete_runtime_error,
     pack_quantized_values_into_int32,
+    query_machete_supported_quant_types,
     query_machete_supported_group_sizes,
     unpack_quantized_values_into_int32,
 )
@@ -42,7 +43,7 @@ class MacheteLinear(GPTQQuantLinear):
     SUPPORTS_BITS = [4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
-    SUPPORTS_SYM = [True]
+    SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
@@ -62,6 +63,8 @@ class MacheteLinear(GPTQQuantLinear):
     TYPE_MAP = {
         (4, True): scalar_types.uint4b8,
         (8, True): scalar_types.uint8b128,
+        (4, False): scalar_types.uint4,
+        (8, False): scalar_types.uint8,
     }
 
     def __init__(
@@ -130,7 +133,8 @@ class MacheteLinear(GPTQQuantLinear):
             ),
         )
 
-        # Zero points unused for symmetric GPTQ
+        # Register GPTQ checkpoint-compatible qzero storage even for symmetric
+        # configs so Accelerate can bind tensors before post_init().
         self.register_parameter(
             "qzeros",
             torch.nn.Parameter(
@@ -148,7 +152,7 @@ class MacheteLinear(GPTQQuantLinear):
         else:
             self.bias = None
 
-        self.weight_type = self.TYPE_MAP[(self.bits, sym)]
+        self.weight_type = self.TYPE_MAP[(self.bits, self.sym)]
         self.has_zero_points = False
 
         # Buffer storing permutation applied to activations (empty when unused)
@@ -178,9 +182,11 @@ class MacheteLinear(GPTQQuantLinear):
         quant_type = cls.TYPE_MAP.get((bits, sym))
         if quant_type is None:
             return False, ValueError(f"Machete does not support bits={bits}, sym={sym}")
+        if quant_type not in query_machete_supported_quant_types(zero_points=not sym):
+            return False, ValueError(f"Machete does not support bits={bits}, sym={sym}")
 
         group_size = args.get("group_size")
-        dtype = args.get("dtype", torch.float16)
+        dtype = args.get("dtype") or torch.float16
         if group_size not in query_machete_supported_group_sizes(dtype):
             return False, ValueError(
                 f"Machete does not support group_size={group_size} for dtype={dtype}"
@@ -233,18 +239,36 @@ class MacheteLinear(GPTQQuantLinear):
             torch.nn.Parameter(prepacked.contiguous(), requires_grad=False),
         )
 
+        scales = self.scales.data.contiguous()
         replace_parameter(
             self,
             "scales",
-            torch.nn.Parameter(self.scales.data.contiguous(), requires_grad=False),
+            torch.nn.Parameter(scales, requires_grad=False),
         )
 
-        replace_parameter(
-            self,
-            "qzeros",
-            torch.nn.Parameter(torch.empty(0, dtype=self.pack_dtype, device=device), requires_grad=False),
-        )
-        self.has_zero_points = False
+        if self.sym:
+            replace_parameter(
+                self,
+                "qzeros",
+                torch.nn.Parameter(
+                    torch.empty(0, dtype=self.pack_dtype, device=device),
+                    requires_grad=False,
+                ),
+            )
+            self.has_zero_points = False
+        else:
+            qzeros_unpacked = unpack_quantized_values_into_int32(
+                self.qzeros.data,
+                self.weight_type,
+                packed_dim=1,
+            )
+            qzeros_fp = (-1.0 * scales * qzeros_unpacked.to(scales.dtype)).contiguous()
+            replace_parameter(
+                self,
+                "qzeros",
+                torch.nn.Parameter(qzeros_fp, requires_grad=False),
+            )
+            self.has_zero_points = True
 
         if self.bias is not None:
             self.bias = self.bias.to(device=device)

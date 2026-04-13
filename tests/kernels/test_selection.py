@@ -11,6 +11,9 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
+from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
+from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
+from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.quantization import FORMAT, METHOD
@@ -357,6 +360,87 @@ def test_explicit_gguf_triton_backend_selects_triton_kernel(monkeypatch):
     )
 
     assert qlinear_cls is GGUFTritonKernel
+
+
+def test_explicit_awq_marlin_backend_selects_asymmetric_kernel(monkeypatch):
+    monkeypatch.setattr(
+        AwqMarlinLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        AwqMarlinLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        device=DEVICE.CUDA,
+        backend=BACKEND.MARLIN,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is AwqMarlinLinear
+
+
+def test_explicit_awq_machete_backend_selects_asymmetric_kernel(monkeypatch):
+    monkeypatch.setattr(
+        AwqMacheteLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        AwqMacheteLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        device=DEVICE.CUDA,
+        backend=BACKEND.MACHETE,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is AwqMacheteLinear
+
+
+def test_explicit_gptq_machete_backend_selects_asymmetric_kernel(monkeypatch):
+    monkeypatch.setattr(
+        MacheteLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        MacheteLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        device=DEVICE.CUDA,
+        backend=BACKEND.MACHETE,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is MacheteLinear
 
 
 def test_torch_fused_auto_device_prefers_xpu_or_cpu(monkeypatch):

@@ -200,6 +200,73 @@ def test_machete_post_init_discards_loaded_qzeros_for_symmetric_gptq(monkeypatch
     assert module.has_zero_points is False
 
 
+def test_machete_validate_accepts_asymmetric_gptq(monkeypatch):
+    monkeypatch.setattr(
+        MacheteLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        machete_linear_module,
+        "_validate_machete_device_support",
+        lambda: True,
+    )
+
+    ok, err = MacheteLinear.validate(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=128,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert ok is True
+    assert err is None
+
+
+def test_machete_post_init_transforms_loaded_qzeros_for_asymmetric_gptq(monkeypatch):
+    module = MacheteLinear(
+        bits=4,
+        group_size=64,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        dtype=torch.float16,
+    )
+    with torch.no_grad():
+        module.qweight.copy_(torch.randint(0, 16, module.qweight.shape, dtype=torch.int32))
+        module.g_idx.copy_(torch.tensor([0] * 64 + [1] * 64, dtype=torch.int32))
+        module.scales.copy_(torch.rand_like(module.scales) + 0.25)
+        module.qzeros.copy_(torch.randint(0, 16, module.qzeros.shape, dtype=torch.int32))
+
+    expected_qzeros = (
+        -1.0
+        * module.scales.detach().clone()
+        * machete_utils.unpack_quantized_values_into_int32(
+            module.qzeros.detach().clone(),
+            module.weight_type,
+            packed_dim=1,
+        ).to(module.scales.dtype)
+    ).contiguous()
+
+    monkeypatch.setattr(
+        machete_linear_module,
+        "machete_prepack_B",
+        lambda weight, **_kwargs: weight.contiguous(),
+    )
+
+    module.post_init()
+
+    torch.testing.assert_close(module.qzeros, expected_qzeros)
+    assert module.qzeros.dtype == torch.float16
+    assert module.has_zero_points is True
+
+
 def test_machete_hopper_arch_cuda_cflags_add_sm90a_when_torch_only_targets_sm90(monkeypatch):
     class _Props:
         name = "NVIDIA H200"
@@ -440,6 +507,29 @@ def _jit_scratch_root(tmp_path: Path, suffix: str) -> Path:
     return root
 
 
+def _dense_asymmetric_gptq_reference(
+    *,
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+    g_idx: torch.Tensor,
+    weight_type,
+) -> torch.Tensor:
+    int_weight = machete_utils.unpack_quantized_values_into_int32(
+        qweight,
+        weight_type,
+        packed_dim=0,
+    ).to(dtype=scales.dtype)
+    int_zeros = machete_utils.unpack_quantized_values_into_int32(
+        qzeros,
+        weight_type,
+        packed_dim=1,
+    ).to(dtype=scales.dtype)
+    dense_weight = scales[g_idx.long()] * (int_weight - int_zeros[g_idx.long()])
+    return x @ dense_weight
+
+
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_machete_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
@@ -476,3 +566,56 @@ def test_machete_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
 
     assert out.shape == (4, 128)
     assert out.dtype == torch.float16
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_machete_cuda_asymmetric_gptq_matches_dense_reference(monkeypatch, tmp_path):
+    if not machete_utils._validate_machete_device_support():
+        pytest.skip(machete_utils.machete_runtime_error())
+
+    scratch_root = _jit_scratch_root(tmp_path, "machete-asym")
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    monkeypatch.delenv("GPTQMODEL_CUTLASS_DIR", raising=False)
+    monkeypatch.setenv("GPTQMODEL_MACHETE_BUILD_ROOT", str(scratch_root / "machete"))
+
+    assert extension_api.load(name="machete", use_cache=True) == {"machete": True}
+
+    device = torch.device("cuda:0")
+    module = MacheteLinear(
+        bits=4,
+        group_size=64,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        dtype=torch.float16,
+    ).to(device)
+
+    qweight = torch.randint(0, 16, module.qweight.shape, device=device, dtype=torch.int32)
+    qzeros = torch.randint(0, 16, module.qzeros.shape, device=device, dtype=torch.int32)
+    scales = (torch.rand(module.scales.shape, device=device, dtype=torch.float16) + 0.25).contiguous()
+    g_idx = torch.tensor([0] * 64 + [1] * 64, device=device, dtype=torch.int32)
+    x = torch.randn(8, 128, device=device, dtype=torch.float16)
+
+    with torch.no_grad():
+        module.qweight.copy_(qweight)
+        module.qzeros.copy_(qzeros)
+        module.scales.copy_(scales)
+        module.g_idx.copy_(g_idx)
+
+    expected = _dense_asymmetric_gptq_reference(
+        x=x,
+        qweight=qweight,
+        qzeros=qzeros,
+        scales=scales,
+        g_idx=g_idx,
+        weight_type=module.weight_type,
+    )
+
+    module.post_init()
+    actual = module(x)
+    torch.cuda.synchronize(device)
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
