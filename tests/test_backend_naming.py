@@ -9,9 +9,13 @@ def test_legacy_marlin_backend_normalizes_by_quant_method():
     assert normalize_backend(BACKEND.MARLIN, quant_method=METHOD.AWQ) == BACKEND.AWQ_MARLIN
 
 
-def test_legacy_mentaray_backend_normalizes_to_marlin_by_quant_method():
-    assert normalize_backend(BACKEND.MENTARAY, quant_method=METHOD.GPTQ) == BACKEND.GPTQ_MARLIN
-    assert normalize_backend(BACKEND.MENTARAY, quant_method=METHOD.AWQ) == BACKEND.AWQ_MARLIN
+def test_removed_mentaray_backend_names_are_rejected():
+    with pytest.raises(ValueError):
+        normalize_backend("mentaray", quant_method=METHOD.GPTQ)
+    with pytest.raises(ValueError):
+        normalize_backend("gptq_mentaray")
+    with pytest.raises(ValueError):
+        normalize_backend("awq_mentaray")
 
 
 def test_legacy_torch_backend_normalizes_by_quant_method():
