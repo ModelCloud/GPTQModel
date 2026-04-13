@@ -199,11 +199,6 @@ jobs:
         - /monster/ci/uv:/opt/uv
         - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
-      matrix:
-        include: ${{ fromJSON(needs.list-test-files.outputs.torch-envs) }}
     if: always() && !cancelled() && needs.list-test-files.outputs.torch-envs != '[]'
     steps:
       - name: Checkout Codes
@@ -221,41 +216,42 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Prepare uv env
+      - name: Prepare common envs
         run: |
-          echo "preparing env=${{ matrix.env_name }} test=${{ matrix.test_script }} py=${{ matrix.python_version }}"
-          source /opt/uv/setup_uv_venv.sh "${{ matrix.env_name }}"
+          python3 -c 'import json; data=json.loads("""${{ needs.list-test-files.outputs.torch-envs }}"""); [print(f"{item[\"env_name\"]}\t{item[\"test_script\"]}\t{item[\"python_version\"]}") for item in data]' \
+          | while IFS=$'\t' read -r env_name test_script python_version; do
+              echo "preparing env=$env_name test=$test_script py=$python_version"
+              source /opt/uv/setup_uv_venv.sh "$env_name"
 
-          python -V
-          which python
-          which pip || true
+              python -V
+              which python
+              which pip || true
 
-          bash /opt/env/init_compiler_no_env.sh \
-            "${{ needs.check-vm.outputs.cuda_version }}" \
-            "${{ env.TORCH_VERSION }}" \
-            "${{ matrix.python_version }}"
+              bash /opt/env/init_compiler_no_env.sh \
+                "${{ needs.check-vm.outputs.cuda_version }}" \
+                "${{ env.TORCH_VERSION }}" \
+                "$python_version"
 
-          python .github/scripts/install_deps.py "${{ matrix.test_script }}"
-          python .github/scripts/uninstall_deps.py "${{ matrix.test_script }}"
+              python .github/scripts/install_deps.py "$test_script"
+              python .github/scripts/uninstall_deps.py "$test_script"
 
-      - name: Install package from source
-        run: |
-          uv pip uninstall gptqmodel || true
-          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          for pkg in defuser pypcre tokenicer logbar evalution; do
-            uv pip uninstall "$pkg" || true
-          done
-          for url in \
-            "$DEFUSER_GIT_URL" \
-            "$PYPCRE_GIT_URL" \
-            "$TOKENICER_GIT_URL" \
-            "$LOGBAR_GIT_URL" \
-            "$EVALUTION_GIT_URL"
-          do
-            uv pip install "$url"
-          done
-          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+              uv pip uninstall gptqmodel || true
+              /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+              uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+              for pkg in defuser pypcre tokenicer logbar evalution; do
+                uv pip uninstall "$pkg" || true
+              done
+              for url in \
+                "$DEFUSER_GIT_URL" \
+                "$PYPCRE_GIT_URL" \
+                "$TOKENICER_GIT_URL" \
+                "$LOGBAR_GIT_URL" \
+                "$EVALUTION_GIT_URL"
+              do
+                uv pip install "$url"
+              done
+              /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+            done
 
   prepare-model:
     needs:
@@ -275,11 +271,6 @@ jobs:
         - /monster/ci/uv:/opt/uv
         - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
-      matrix:
-        include: ${{ fromJSON(needs.list-test-files.outputs.model-envs) }}
     if: always() && !cancelled() && needs.list-test-files.outputs.model-envs != '[]'
     steps:
       - name: Checkout Codes
@@ -297,41 +288,42 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Prepare uv env
+      - name: Prepare common envs
         run: |
-          echo "preparing env=${{ matrix.env_name }} test=${{ matrix.test_script }} py=${{ matrix.python_version }}"
-          source /opt/uv/setup_uv_venv.sh "${{ matrix.env_name }}"
+          python3 -c 'import json; data=json.loads("""${{ needs.list-test-files.outputs.model-envs }}"""); [print(f"{item[\"env_name\"]}\t{item[\"test_script\"]}\t{item[\"python_version\"]}") for item in data]' \
+          | while IFS=$'\t' read -r env_name test_script python_version; do
+              echo "preparing env=$env_name test=$test_script py=$python_version"
+              source /opt/uv/setup_uv_venv.sh "$env_name"
 
-          python -V
-          which python
-          which pip || true
+              python -V
+              which python
+              which pip || true
 
-          bash /opt/env/init_compiler_no_env.sh \
-            "${{ needs.check-vm.outputs.cuda_version }}" \
-            "${{ env.TORCH_VERSION }}" \
-            "${{ matrix.python_version }}"
+              bash /opt/env/init_compiler_no_env.sh \
+                "${{ needs.check-vm.outputs.cuda_version }}" \
+                "${{ env.TORCH_VERSION }}" \
+                "$python_version"
 
-          python .github/scripts/install_deps.py "${{ matrix.test_script }}"
-          python .github/scripts/uninstall_deps.py "${{ matrix.test_script }}"
+              python .github/scripts/install_deps.py "$test_script"
+              python .github/scripts/uninstall_deps.py "$test_script"
 
-      - name: Install package from source
-        run: |
-          uv pip uninstall gptqmodel || true
-          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          for pkg in defuser pypcre tokenicer logbar evalution; do
-            uv pip uninstall "$pkg" || true
-          done
-          for url in \
-            "$DEFUSER_GIT_URL" \
-            "$PYPCRE_GIT_URL" \
-            "$TOKENICER_GIT_URL" \
-            "$LOGBAR_GIT_URL" \
-            "$EVALUTION_GIT_URL"
-          do
-            uv pip install "$url"
-          done
-          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+              uv pip uninstall gptqmodel || true
+              /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+              uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+              for pkg in defuser pypcre tokenicer logbar evalution; do
+                uv pip uninstall "$pkg" || true
+              done
+              for url in \
+                "$DEFUSER_GIT_URL" \
+                "$PYPCRE_GIT_URL" \
+                "$TOKENICER_GIT_URL" \
+                "$LOGBAR_GIT_URL" \
+                "$EVALUTION_GIT_URL"
+              do
+                uv pip install "$url"
+              done
+              /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+            done
 
   torch:
     needs:

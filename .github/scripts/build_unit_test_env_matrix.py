@@ -7,6 +7,11 @@ from deps_utils import has_specific_deps
 from get_unit_test_env_name import build_env_name
 from parse_test_config import parse_test_config
 
+SHARED_COMMON_ENVS = {
+    "gptqmodel_unit_tests_common",
+    "gptqmodel_unit_tests_models_common",
+}
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -36,6 +41,9 @@ def main() -> None:
             continue
 
         env_name = build_env_name(test_name, deps)
+        if env_name not in SHARED_COMMON_ENVS:
+            continue
+
         config = parse_test_config(args.config_file, args.group, test_name)
         py = str(config["py"])
 
