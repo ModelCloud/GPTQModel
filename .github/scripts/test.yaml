@@ -11,6 +11,36 @@ tests:
     gpu: 2
     py: 3.14t
 
+  test_torch:
+    gpu: 2
+
+  test_threadx:
+    gpu: 2
+
+  test_threadx_cpu:
+    gpu: 2
+
+  test_gpu_gpu_memory_copy:
+    gpu: 2
+
+  test_named_module:
+    gpu: 4
+
+  test_gptq:
+    gpu: 7
+
+  test_cuda_event_stream_activation_buffer:
+    gpu: 7
+
+  test_g2h_tensor_quality:
+    gpu: 7
+
+  test_fp8_minimax2_test:
+    gpu: 8
+
+  test_hessian:
+    gpu: 8
+
 
 tests/models:
   py: 3.13

@@ -511,7 +511,8 @@ class ForwardExecutor:
                         target_device = input_device if calib_device_cfg is not None else cur_layer_device
                         # Move each batch result to its final target device as
                         # soon as the worker finishes.
-                        results[batch_idx] = move_to(module_output, device=target_device)
+                        primary = module_output[0] if isinstance(module_output, tuple) else module_output
+                        results[batch_idx] = move_to(primary, device=target_device)
                         del module_output
                     if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
                         shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)

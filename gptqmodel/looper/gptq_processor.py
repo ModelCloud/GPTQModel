@@ -495,6 +495,14 @@ class GPTQProcessor(LoopProcessor):
         else:
             return "gptq"
 
+    def _release_host_buffers(self, *tensors: torch.Tensor) -> None:
+        """Retain the old cleanup hook for streaming tests and external callers.
+
+        Host buffers are now owned by the stream ticket lifecycle instead of a
+        dedicated GPTQProcessor pool, so release is intentionally a no-op.
+        """
+        _ = tensors
+
     def has_captured_input_ids(self, name: str) -> bool:
         """Reports whether the module saw at least one captured forward batch."""
 
