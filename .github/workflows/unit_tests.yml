@@ -224,7 +224,9 @@ jobs:
       - name: Prepare common envs
         run: |
           mapfile -t env_rows < <(
-            python3 -c 'import json; torch_envs=json.loads("""${{ needs.list-test-files.outputs.torch-envs }}"""); model_envs=json.loads("""${{ needs.list-test-files.outputs.model-envs }}"""); data=torch_envs + model_envs; [print(f"{item[\"env_name\"]}\t{item[\"test_script\"]}\t{item[\"python_version\"]}") for item in data]'
+            python3 .github/scripts/print_env_rows.py \
+              --torch-envs-json '${{ needs.list-test-files.outputs.torch-envs }}' \
+              --model-envs-json '${{ needs.list-test-files.outputs.model-envs }}'
           )
 
           for row in "${env_rows[@]}"; do
