@@ -4,8 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from shutil import copy2
-from shutil import which
+from shutil import copy2, which
 
 import pytest
 import torch

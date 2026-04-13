@@ -111,10 +111,7 @@ def _cutlass_checkout_version(cutlass_root: Path) -> Optional[str]:
     if not version_header.is_file():
         return None
 
-    macros = {
-        name: value
-        for name, value in _CUTLASS_VERSION_DEFINE_PATTERN.findall(version_header.read_text(encoding="utf-8"))
-    }
+    macros = dict(_CUTLASS_VERSION_DEFINE_PATTERN.findall(version_header.read_text(encoding="utf-8")))
     required_macros = {"MAJOR", "MINOR", "PATCH"}
     if macros.keys() < required_macros:
         return None
