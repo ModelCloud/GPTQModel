@@ -370,9 +370,18 @@ jobs:
           trap cleanup_lock EXIT
 
           if ! flock -n 9; then
+            if [ -s "$lock_file" ]; then
+              echo "lock owner: $(cat "$lock_file")"
+            fi
             echo "waiting for lock: $lock_file"
             flock 9
           fi
+
+          printf 'test=%s job=%s run=%s env=%s\n' \
+            "${{ matrix.test_script }}" \
+            "${{ github.job }}" \
+            "${{ needs.check-vm.outputs.run_id }}" \
+            "${ENV_NAME}" > "$lock_file"
 
           if [ -f "$stamp_file" ]; then
             echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
@@ -550,9 +559,18 @@ jobs:
           trap cleanup_lock EXIT
 
           if ! flock -n 9; then
+            if [ -s "$lock_file" ]; then
+              echo "lock owner: $(cat "$lock_file")"
+            fi
             echo "waiting for lock: $lock_file"
             flock 9
           fi
+
+          printf 'test=%s job=%s run=%s env=%s\n' \
+            "${{ matrix.test_script }}" \
+            "${{ github.job }}" \
+            "${{ needs.check-vm.outputs.run_id }}" \
+            "${ENV_NAME}" > "$lock_file"
 
           if [ -f "$stamp_file" ]; then
             echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
