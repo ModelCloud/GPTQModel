@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import sys
 from pathlib import Path
 
 import jinja2
@@ -62,18 +63,57 @@ def remove_old_kernels() -> None:
     for path in root.glob("kernel_*.cu"):
         path.unlink(missing_ok=True)
 
-def _write_kernel_file(scalar_type: str, dtype: str, templates: list[str]) -> Path:
-    root = Path(__file__).parent
-    scalar_suffix = scalar_type.split("::", 1)[1].lower() if "::" in scalar_type else scalar_type.lower()
-    output_path = root / f"kernel_{dtype}_{scalar_suffix}.cu"
 
+def _kernel_output_path(root: Path, scalar_type: str, dtype: str) -> Path:
+    scalar_suffix = scalar_type.split("::", 1)[1].lower() if "::" in scalar_type else scalar_type.lower()
+    return root / f"kernel_{dtype}_{scalar_suffix}.cu"
+
+
+def _render_kernel_file_text(scalar_type: str, dtype: str, templates: list[str]) -> str:
     lines = [FILE_HEAD, "", f"// Instantiations for dtype={dtype}, weight={scalar_type}", ""]
     lines.append("\n".join(templates))
     lines.append("")
     lines.append(FILE_TAIL)
+    return "\n".join(lines)
 
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+def _write_kernel_file(root: Path, scalar_type: str, dtype: str, templates: list[str]) -> Path:
+    output_path = _kernel_output_path(root, scalar_type, dtype)
+    output_path.write_text(_render_kernel_file_text(scalar_type, dtype, templates), encoding="utf-8")
     return output_path
+
+
+def build_expected_kernels(root: Path | None = None) -> dict[Path, str]:
+    root = root or Path(__file__).parent
+    expected: dict[Path, str] = {}
+    for scalar_type, dtype in itertools.product(SCALAR_TYPES, DTYPES):
+        templates = render_templates_for_combo(scalar_type, dtype)
+        if not templates:
+            continue
+        output_path = _kernel_output_path(root, scalar_type, dtype)
+        expected[output_path] = _render_kernel_file_text(scalar_type, dtype, templates)
+
+    if not expected:
+        raise RuntimeError("No marlin kernels were generated; check template configuration.")
+    return expected
+
+
+def generated_kernels_are_current(root: Path | None = None) -> bool:
+    root = root or Path(__file__).parent
+    expected = build_expected_kernels(root)
+    expected_names = {path.name for path in expected}
+    existing_names = {path.name for path in root.glob("kernel_*.cu")}
+    if existing_names != expected_names:
+        return False
+
+    for output_path, expected_text in expected.items():
+        try:
+            current_text = output_path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if current_text != expected_text:
+            return False
+    return True
 
 
 def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
@@ -170,20 +210,17 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
     return results
 
 
-def generate_new_kernels() -> None:
-    emitted = False
-    for scalar_type, dtype in itertools.product(SCALAR_TYPES, DTYPES):
-        templates = render_templates_for_combo(scalar_type, dtype)
-        if not templates:
-            continue
-
-        _write_kernel_file(scalar_type, dtype, templates)
-        emitted = True
-
-    if not emitted:
-        raise RuntimeError("No marlin kernels were generated; check template configuration.")
+def generate_new_kernels(root: Path | None = None) -> None:
+    root = root or Path(__file__).parent
+    expected = build_expected_kernels(root)
+    for path in root.glob("kernel_*.cu"):
+        if path not in expected:
+            path.unlink(missing_ok=True)
+    for output_path, rendered in expected.items():
+        output_path.write_text(rendered, encoding="utf-8")
 
 
 if __name__ == "__main__":
-    remove_old_kernels()
+    if "--check" in sys.argv[1:]:
+        raise SystemExit(0 if generated_kernels_are_current() else 1)
     generate_new_kernels()
