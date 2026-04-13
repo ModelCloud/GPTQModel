@@ -962,8 +962,8 @@ def ModelLoader(cls):
 
         if format_code == FORMAT.MARLIN:
             # format marlin requires marlin kernel
-            expected_marlin_backends = [BACKEND.AWQ_MARLIN] if qcfg.quant_method == METHOD.AWQ else [BACKEND.GPTQ_MARLIN]
-            expected_marlin_backend = expected_marlin_backends[0]
+            expected_marlin_backend = BACKEND.AWQ_MARLIN if qcfg.quant_method == METHOD.AWQ else BACKEND.GPTQ_MARLIN
+            expected_marlin_backends = [expected_marlin_backend]
             if backend not in expected_marlin_backends and backend != BACKEND.AUTO:
                 raise TypeError(
                     f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.{expected_marlin_backend.name}: actual = `{backend}`."
@@ -1371,14 +1371,14 @@ def ModelLoader(cls):
                         "Kernel: GPTQ Marlin on Turing (compute capability 7.5) supports "
                         "dtype=torch.float16 only."
                     )
-            else:
+            elif backend == BACKEND.AWQ_MARLIN:
                 if not _marlin_capability_supported(*device_capability) or device_capability[0] < 8:
                     raise ValueError(
                         "Kernel: AWQ Marlin requires compute capability >= 8.0. "
                         f"Detected capability: `{device_capability}`."
                     )
 
-            # GPTQ Marlin and AWQ Marlin support fp16 and bf16 compute.
+            # GPTQ Marlin and AWQ Marlin support fp16 and bf16 compute on Ampere+.
             if backend == BACKEND.GPTQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
             if backend == BACKEND.AWQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):

@@ -179,10 +179,32 @@ thread_config_t large_batch_thread_configs[] = {
     {64, 128, 128},
     {128, 64, 128}};
 
+thread_config_t full_sm80_small_batch_thread_configs[] = {
+    // Near-full GA100 boards benefit from lighter tiles to create more work
+    // across the observed 124 SMs without relying on 2 blocks/SM.
+    {64, 128, 128},
+    {128, 128, 256},
+    {128, 64, 128}};
+
+thread_config_t full_sm80_large_batch_thread_configs[] = {
+    {64, 128, 128},
+    {64, 256, 256},
+    {128, 64, 128}};
+
+thread_config_t full_sm80_heavy_batch_thread_configs[] = {
+    {64, 256, 256},
+    {64, 128, 128},
+    {128, 64, 128}};
+
 typedef struct {
   int blocks_per_sm;
   thread_config_t tb_cfg;
 } exec_config_t;
+
+bool marlin_prefers_full_sm80(int major_capability, int minor_capability,
+                              int sms) {
+  return major_capability == 8 && minor_capability == 0 && sms >= 124;
+}
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
                           int prob_n, int prob_k, int num_bits, int group_size,
@@ -606,15 +628,34 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
                                     int group_size, bool has_act_order,
                                     bool is_k_full, bool has_zp,
                                     bool is_zp_float, int stages,
-                                    int max_shared_mem, int sms) {
+                                    int max_shared_mem, int major_capability,
+                                    int minor_capability, int sms) {
   exec_config_t exec_cfg = exec_config_t{1, thread_config_t{-1, -1, -1}};
-  thread_config_t* thread_configs = thread_m_blocks > 1
-                                        ? large_batch_thread_configs
-                                        : small_batch_thread_configs;
+  bool full_sm80 =
+      marlin_prefers_full_sm80(major_capability, minor_capability, sms);
+  bool heavy_batch = full_sm80 && prob_m >= 128;
+  thread_config_t const* thread_configs =
+      prob_m > 16
+          ? (heavy_batch ? full_sm80_heavy_batch_thread_configs
+             : (full_sm80 ? full_sm80_large_batch_thread_configs
+                          : large_batch_thread_configs))
+          : (full_sm80 ? full_sm80_small_batch_thread_configs
+                       : small_batch_thread_configs);
   int thread_configs_size =
-      thread_m_blocks > 1
-          ? sizeof(large_batch_thread_configs) / sizeof(thread_config_t)
-          : sizeof(small_batch_thread_configs) / sizeof(thread_config_t);
+      prob_m > 16
+          ? (heavy_batch
+                 ? static_cast<int>(sizeof(full_sm80_heavy_batch_thread_configs) /
+                                    sizeof(thread_config_t))
+             : (full_sm80
+                    ? static_cast<int>(sizeof(full_sm80_large_batch_thread_configs) /
+                                       sizeof(thread_config_t))
+                    : static_cast<int>(sizeof(large_batch_thread_configs) /
+                                       sizeof(thread_config_t))))
+          : (full_sm80
+                 ? static_cast<int>(sizeof(full_sm80_small_batch_thread_configs) /
+                                    sizeof(thread_config_t))
+                 : static_cast<int>(sizeof(small_batch_thread_configs) /
+                                    sizeof(thread_config_t)));
 
   for (int i = 0; i < thread_configs_size; i++) {
     thread_config_t th_config = thread_configs[i];
@@ -757,16 +798,28 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   int max_shared_mem_new = max_shared_mem;
   int rest_m = prob_m;
   int max_thread_m_blocks = 4;
+  bool full_sm80 =
+      marlin_prefers_full_sm80(major_capability, minor_capability, sms);
   while (rest_m) {
-    int par_count = rest_m / (max_thread_m_blocks * 16);
-    if (par_count > max_par) par_count = max_par;
-    int prob_m_split =
-        par_count > 0 ? (par_count * (max_thread_m_blocks * 16)) : rest_m;
-
     int thread_k = thread_k_init;
     int thread_n = thread_n_init;
+    bool manual_override = thread_k != -1 && thread_n != -1;
+    int attempt_thread_m_blocks = max_thread_m_blocks;
+    // On 124-SM A100 boards, an exact M=96 launch maps to 3 M tiles. Running
+    // it as a single tm=2 launch keeps all 129 CTA tiles in one pass and
+    // consistently beats the default 64+32 split.
+    if (!manual_override && full_sm80 && rest_m == 96 &&
+        attempt_thread_m_blocks > 2) {
+      attempt_thread_m_blocks = 2;
+    }
 
-    int thread_m_blocks = min(div_ceil(prob_m_split, 16), max_thread_m_blocks);
+    int par_count = rest_m / (attempt_thread_m_blocks * 16);
+    if (par_count > max_par) par_count = max_par;
+    int prob_m_split =
+        par_count > 0 ? (par_count * (attempt_thread_m_blocks * 16)) : rest_m;
+
+    int thread_m_blocks =
+        min(div_ceil(prob_m_split, 16), attempt_thread_m_blocks);
     int m_block_size_8 = prob_m_split <= 8;
 
     // Set thread config
@@ -784,10 +837,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       exec_cfg = determine_exec_config<scalar_t>(
           q_type, prob_m_split, prob_n, prob_k, thread_m_blocks, m_block_size_8,
           num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
-          stages, max_shared_mem, sms);
+          stages, max_shared_mem, major_capability, minor_capability, sms);
       thread_tfg = exec_cfg.tb_cfg;
-      if (thread_tfg.thread_k == -1 && max_thread_m_blocks > 1) {
-        max_thread_m_blocks--;
+      if (thread_tfg.thread_k == -1 && attempt_thread_m_blocks > 1) {
+        max_thread_m_blocks = attempt_thread_m_blocks - 1;
         continue;
       }
     }

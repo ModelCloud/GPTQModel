@@ -107,7 +107,7 @@ def _import_all_qlinear_kernels() -> None:
             continue
         try:
             importlib.import_module(f"{qlinear_pkg.__name__}.{name}")
-        except ImportError as exc:
+        except (ImportError, OSError) as exc:
             log.debug(f"Skipping qlinear module import `{name}`: {exc}")
 
 
