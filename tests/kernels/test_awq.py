@@ -78,7 +78,7 @@ class TestAwqKernelOutput(unittest.TestCase):
     baseline_backend = BACKEND.TORCH_AWQ
     backend_cases = [
         (baseline_backend, torch.float16, 0.0),
-        # (baseline_backend, torch.bfloat16, 0.0),
+        (baseline_backend, torch.bfloat16, 0.0),
         (BACKEND.GEMM, torch.float16, 0.004),
         (BACKEND.BITBLAS_AWQ, torch.float16, 0.004),
         # (BACKEND.GEMM, torch.bfloat16, 0.05),
@@ -212,16 +212,9 @@ class TestAwqKernelOutput(unittest.TestCase):
             if torch_module is None:
                 raise unittest.SkipTest("Torch AWQ kernel unavailable for baseline.")
 
-            forward_kwargs = {}
-            if dtype == torch.bfloat16:
-                forward_kwargs = {
-                    "compute_dtype": torch.float16,
-                    "output_dtype": dtype,
-                }
             cls.reference_results[dtype] = cls._forward(
                 torch_module,
                 converted_inputs,
-                **forward_kwargs,
             )
 
     @classmethod
