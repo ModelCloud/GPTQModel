@@ -201,8 +201,9 @@ typedef struct {
   thread_config_t tb_cfg;
 } exec_config_t;
 
-bool marlin_prefers_full_sm80(int sms) {
-  return sms >= 120;
+bool marlin_prefers_full_sm80(int major_capability, int minor_capability,
+                              int sms) {
+  return major_capability == 8 && minor_capability == 0 && sms >= 124;
 }
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
@@ -627,9 +628,11 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
                                     int group_size, bool has_act_order,
                                     bool is_k_full, bool has_zp,
                                     bool is_zp_float, int stages,
-                                    int max_shared_mem, int sms) {
+                                    int max_shared_mem, int major_capability,
+                                    int minor_capability, int sms) {
   exec_config_t exec_cfg = exec_config_t{1, thread_config_t{-1, -1, -1}};
-  bool full_sm80 = marlin_prefers_full_sm80(sms);
+  bool full_sm80 =
+      marlin_prefers_full_sm80(major_capability, minor_capability, sms);
   bool heavy_batch = full_sm80 && prob_m >= 128;
   thread_config_t const* thread_configs =
       prob_m > 16
@@ -795,7 +798,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   int max_shared_mem_new = max_shared_mem;
   int rest_m = prob_m;
   int max_thread_m_blocks = 4;
-  bool full_sm80 = marlin_prefers_full_sm80(sms);
+  bool full_sm80 =
+      marlin_prefers_full_sm80(major_capability, minor_capability, sms);
   while (rest_m) {
     int thread_k = thread_k_init;
     int thread_n = thread_n_init;
@@ -833,7 +837,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       exec_cfg = determine_exec_config<scalar_t>(
           q_type, prob_m_split, prob_n, prob_k, thread_m_blocks, m_block_size_8,
           num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
-          stages, max_shared_mem, sms);
+          stages, max_shared_mem, major_capability, minor_capability, sms);
       thread_tfg = exec_cfg.tb_cfg;
       if (thread_tfg.thread_k == -1 && attempt_thread_m_blocks > 1) {
         max_thread_m_blocks = attempt_thread_m_blocks - 1;
