@@ -96,6 +96,7 @@ jobs:
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
+      install_ts: ${{ steps.get_ip.outputs.install_ts }}
       max-parallel: ${{ steps.get_ip.outputs['max-parallel'] }}
       cuda_version: ${{ env.CUDA_VERSION }}
     steps:
@@ -120,6 +121,10 @@ jobs:
           fi
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "artifact_id=$run_id"
+
+          install_ts="$(date +%s)"
+          echo "install_ts=$install_ts" >> "$GITHUB_OUTPUT"
+          echo "install_ts=$install_ts"
 
           max_p=${{ github.event.inputs['max-parallel'] }}
           max_p="{\"size\": ${max_p:-20}}"
@@ -320,6 +325,7 @@ jobs:
           
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
             --test-name "${{ matrix.test_script }}")"
+          echo "ENV_NAME=$env_name" >> "$GITHUB_ENV"
           echo "using gpu=$gpu specific=$has_specific_deps uv env=$env_name"
           /opt/uv/setup_uv_venv.sh $env_name
 
@@ -346,8 +352,38 @@ jobs:
 
       - name: Install package from source
         run: |
+          env_dir="/opt/uv/venvs/${ENV_NAME}"
+          install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
+          lock_dir="/opt/uv/locks"
+          lock_file="${lock_dir}/${ENV_NAME}.${install_key}.lock"
+          stamp_file="${env_dir}/.gptqmodel_install_${install_key}.done"
+
+          mkdir -p "$lock_dir"
+          mkdir -p "$env_dir"
+
+          exec 9>"$lock_file"
+          cleanup_lock() {
+            flock -u 9 || true
+            exec 9>&- || true
+            rm -f "$lock_file"
+          }
+          trap cleanup_lock EXIT
+
+          if ! flock -n 9; then
+            echo "waiting for lock: $lock_file"
+            flock 9
+          fi
+
+          if [ -f "$stamp_file" ]; then
+            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
+            exit 0
+          fi
+
           uv pip uninstall gptqmodel || true
           uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+
+          rm -f "${env_dir}"/.gptqmodel_install_*.done
+          touch "$stamp_file"
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
@@ -392,6 +428,15 @@ jobs:
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
         run: |
+          if [ -n "${ENV_NAME:-}" ]; then
+            install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
+            lock_file="/opt/uv/locks/${ENV_NAME}.${install_key}.lock"
+            if [ -e "$lock_file" ]; then
+              echo "removing leftover install lock: $lock_file"
+              rm -f "$lock_file"
+            fi
+          fi
+
           python .github/scripts/release_gpu.py \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
@@ -460,6 +505,7 @@ jobs:
           echo "HAS_SPECIFIC_DEPS=$has_specific_deps" >> "$GITHUB_ENV"
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
             --test-name "${{ matrix.test_script }}")"
+          echo "ENV_NAME=$env_name" >> "$GITHUB_ENV"
           echo "using specific=$has_specific_deps uv env=$env_name"
           /opt/uv/setup_uv_venv.sh $env_name
 
@@ -486,8 +532,38 @@ jobs:
 
       - name: Install package from source
         run: |
+          env_dir="/opt/uv/venvs/${ENV_NAME}"
+          install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
+          lock_dir="/opt/uv/locks"
+          lock_file="${lock_dir}/${ENV_NAME}.${install_key}.lock"
+          stamp_file="${env_dir}/.gptqmodel_install_${install_key}.done"
+
+          mkdir -p "$lock_dir"
+          mkdir -p "$env_dir"
+
+          exec 9>"$lock_file"
+          cleanup_lock() {
+            flock -u 9 || true
+            exec 9>&- || true
+            rm -f "$lock_file"
+          }
+          trap cleanup_lock EXIT
+
+          if ! flock -n 9; then
+            echo "waiting for lock: $lock_file"
+            flock 9
+          fi
+
+          if [ -f "$stamp_file" ]; then
+            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
+            exit 0
+          fi
+
           uv pip uninstall gptqmodel || true
           uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+
+          rm -f "${env_dir}"/.gptqmodel_install_*.done
+          touch "$stamp_file"
 
       - name: Find suitable GPU
         if: ${{ !cancelled() }}
@@ -524,6 +600,15 @@ jobs:
       - name: Release GPU
         if: always()
         run: |
+          if [ -n "${ENV_NAME:-}" ]; then
+            install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
+            lock_file="/opt/uv/locks/${ENV_NAME}.${install_key}.lock"
+            if [ -e "$lock_file" ]; then
+              echo "removing leftover install lock: $lock_file"
+              rm -f "$lock_file"
+            fi
+          fi
+
           python .github/scripts/release_gpu.py \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
