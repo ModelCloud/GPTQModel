@@ -52,6 +52,9 @@ log = LogBar.shared()
 DEVICE = torch.device("cuda:0")
 CPU_DEVICE = torch.device("cpu")
 
+AWQ_MARLIN_FP16_ATOL = 0.006
+AWQ_MARLIN_BF16_ATOL = 0.02
+
 GREEN = "\033[32m"
 RED = "\033[31m"
 RESET = "\033[0m"
@@ -84,9 +87,9 @@ class TestAwqKernelOutput(unittest.TestCase):
         # (BACKEND.GEMM, torch.bfloat16, 0.05),
         (BACKEND.TRITON, torch.float16, 0.004),
         (BACKEND.MACHETE, torch.float16, 0.006),
-        (BACKEND.MARLIN, torch.float16, 0.006),
+        (BACKEND.MARLIN, torch.float16, AWQ_MARLIN_FP16_ATOL),
         (BACKEND.TORCH_FUSED_AWQ, torch.float16, 0.004),
-        # (BACKEND.MARLIN, torch.bfloat16, 0.05),
+        # (BACKEND.MARLIN, torch.bfloat16, AWQ_MARLIN_BF16_ATOL),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
     ]
 
@@ -743,7 +746,7 @@ class TestAwqKernelOutput(unittest.TestCase):
                 actual_outputs=actual_result.outputs,
                 backend=BACKEND.MARLIN,
                 dtype=torch.bfloat16,
-                atol=0.05,
+                atol=AWQ_MARLIN_BF16_ATOL,
                 title="AWQ Kernel Output torch.bfloat16",
                 reference_label="Torch AWQ output",
                 reference_mean_ms=reference_result.mean_ms,
