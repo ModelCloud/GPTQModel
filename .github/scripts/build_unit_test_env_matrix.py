@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import yaml
+from deps_utils import has_specific_deps
 from get_unit_test_env_name import build_env_name
 from parse_test_config import parse_test_config
 
@@ -31,6 +32,9 @@ def main() -> None:
 
     envs: dict[str, dict[str, str]] = {}
     for test_name in tests:
+        if has_specific_deps(test_name, deps):
+            continue
+
         env_name = build_env_name(test_name, deps)
         config = parse_test_config(args.config_file, args.group, test_name)
         py = str(config["py"])

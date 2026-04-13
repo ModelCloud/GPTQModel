@@ -388,11 +388,34 @@ jobs:
           gpu="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["gpu"])')"
 
           echo "GPU_COUNT=$gpu" >> "$GITHUB_ENV"
+          has_specific_deps="$(PYTHONPATH=.github/scripts python3 -c 'from pathlib import Path; import yaml; from deps_utils import has_specific_deps; deps = yaml.safe_load(Path(\".github/scripts/deps.yaml\").read_text(encoding=\"utf-8\")) or {}; print(\"1\" if has_specific_deps(\"${{ matrix.test_script }}\", deps) else \"0\")')"
+          echo "HAS_SPECIFIC_DEPS=$has_specific_deps" >> "$GITHUB_ENV"
           
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
             --test-name "${{ matrix.test_script }}")"
-          echo "using gpu=$gpu uv env=$env_name"
+          echo "using gpu=$gpu specific=$has_specific_deps uv env=$env_name"
           /opt/uv/setup_uv_venv.sh $env_name
+
+      - name: Setup uv env
+        if: env.HAS_SPECIFIC_DEPS == '1'
+        run: |
+          config_json="$(python3 .github/scripts/parse_test_config.py \
+            --group tests \
+            --test-name "${{ matrix.test_script }}")"
+          py="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["py"])')"
+
+          python -V
+          which python
+          which pip || true
+
+          echo "--- setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=$py"
+          bash /opt/env/init_compiler_no_env.sh "${{ needs.check-vm.outputs.cuda_version }}" "${{ env.TORCH_VERSION }}" "$py"
+
+          echo "--- installing required deps..."
+          python .github/scripts/install_deps.py "${{ matrix.test_script }}"
+
+          echo "--- uninstalling required deps..."
+          python .github/scripts/uninstall_deps.py "${{ matrix.test_script }}"
 
       - name: Install package from source
         run: |
@@ -503,10 +526,33 @@ jobs:
 
       - name: Activate uv env
         run: |
+          has_specific_deps="$(PYTHONPATH=.github/scripts python3 -c 'from pathlib import Path; import yaml; from deps_utils import has_specific_deps; deps = yaml.safe_load(Path(\".github/scripts/deps.yaml\").read_text(encoding=\"utf-8\")) or {}; print(\"1\" if has_specific_deps(\"${{ matrix.test_script }}\", deps) else \"0\")')"
+          echo "HAS_SPECIFIC_DEPS=$has_specific_deps" >> "$GITHUB_ENV"
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
             --test-name "${{ matrix.test_script }}")"
-          echo "using uv env: $env_name"
+          echo "using specific=$has_specific_deps uv env=$env_name"
           /opt/uv/setup_uv_venv.sh $env_name
+
+      - name: Setup uv env
+        if: env.HAS_SPECIFIC_DEPS == '1'
+        run: |
+          config_json="$(python3 .github/scripts/parse_test_config.py \
+            --group tests/models \
+            --test-name "${{ matrix.test_script }}")"
+          py="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["py"])')"
+
+          python -V
+          which python
+          which pip || true
+
+          echo "--- setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=$py"
+          bash /opt/env/init_compiler_no_env.sh "${{ needs.check-vm.outputs.cuda_version }}" "${{ env.TORCH_VERSION }}" "$py"
+
+          echo "--- installing required deps..."
+          python .github/scripts/install_deps.py "${{ matrix.test_script }}"
+
+          echo "--- uninstalling required deps..."
+          python .github/scripts/uninstall_deps.py "${{ matrix.test_script }}"
 
       - name: Install package from source
         run: |
