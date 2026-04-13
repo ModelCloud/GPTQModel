@@ -16,7 +16,6 @@ import torch
 import gptqmodel.nn_modules.qlinear.machete as machete_linear_module
 import gptqmodel.utils.machete as machete_utils
 from gptqmodel import extension as extension_api
-from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 
 
@@ -136,7 +135,7 @@ def test_machete_static_runtime_error_checks_optin_shared_memory(monkeypatch):
 
 
 def test_machete_registers_checkpoint_compatible_qzeros_shape_for_symmetric_gptq():
-    module = MacheteLinear(
+    module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=128,
         desc_act=False,
@@ -152,7 +151,7 @@ def test_machete_registers_checkpoint_compatible_qzeros_shape_for_symmetric_gptq
 
 
 def test_machete_load_state_dict_accepts_checkpoint_qzeros_shape():
-    module = MacheteLinear(
+    module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=128,
         desc_act=False,
@@ -171,7 +170,7 @@ def test_machete_load_state_dict_accepts_checkpoint_qzeros_shape():
 
 
 def test_machete_post_init_discards_loaded_qzeros_for_symmetric_gptq(monkeypatch):
-    module = MacheteLinear(
+    module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=128,
         desc_act=False,
@@ -202,7 +201,7 @@ def test_machete_post_init_discards_loaded_qzeros_for_symmetric_gptq(monkeypatch
 
 def test_machete_validate_accepts_asymmetric_gptq(monkeypatch):
     monkeypatch.setattr(
-        MacheteLinear,
+        machete_linear_module.MacheteLinear,
         "cached_validate_once",
         classmethod(lambda qlinear_cls: (True, None)),
     )
@@ -212,7 +211,7 @@ def test_machete_validate_accepts_asymmetric_gptq(monkeypatch):
         lambda: True,
     )
 
-    ok, err = MacheteLinear.validate(
+    ok, err = machete_linear_module.MacheteLinear.validate(
         bits=4,
         group_size=128,
         desc_act=False,
@@ -228,7 +227,7 @@ def test_machete_validate_accepts_asymmetric_gptq(monkeypatch):
 
 
 def test_machete_post_init_transforms_loaded_qzeros_for_asymmetric_gptq(monkeypatch):
-    module = MacheteLinear(
+    module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=64,
         desc_act=False,
@@ -268,7 +267,7 @@ def test_machete_post_init_transforms_loaded_qzeros_for_asymmetric_gptq(monkeypa
 
 
 def test_machete_forward_rejects_missing_qzeros_for_asymmetric_gptq():
-    module = MacheteLinear(
+    module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=64,
         desc_act=False,
@@ -563,7 +562,7 @@ def test_machete_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
     assert extension_api.load(name="machete", use_cache=False) == {"machete": True}
 
     device = torch.device("cuda:0")
-    module = MacheteLinear(
+    module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=128,
         desc_act=False,
@@ -600,7 +599,7 @@ def test_machete_cuda_asymmetric_gptq_matches_dense_reference(monkeypatch, tmp_p
     assert extension_api.load(name="machete", use_cache=True) == {"machete": True}
 
     device = torch.device("cuda:0")
-    module = MacheteLinear(
+    module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=64,
         desc_act=False,
