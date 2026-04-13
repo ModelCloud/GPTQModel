@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from gptqmodel import extension as extension_api
+import gptqmodel.nn_modules.qlinear.machete as machete_linear_module
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 import gptqmodel.utils.machete as machete_utils
 from gptqmodel.utils.marlin_scalar_type import scalar_types
@@ -132,6 +133,71 @@ def test_machete_static_runtime_error_checks_optin_shared_memory(monkeypatch):
 
     assert str(machete_utils._MACHETE_MIN_SHARED_MEMORY_PER_BLOCK_OPTIN) in error
     assert "98304" in error
+
+
+def test_machete_registers_checkpoint_compatible_qzeros_shape_for_symmetric_gptq():
+    module = MacheteLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=8192,
+        out_features=3072,
+        bias=False,
+        dtype=torch.float16,
+    )
+
+    assert module.qzeros.shape == (64, 384)
+    assert module.qzeros.dtype == torch.int32
+
+
+def test_machete_load_state_dict_accepts_checkpoint_qzeros_shape():
+    module = MacheteLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=8192,
+        out_features=3072,
+        bias=False,
+        dtype=torch.float16,
+    )
+    state_dict = module.state_dict()
+    state_dict["qzeros"] = torch.zeros((64, 384), dtype=torch.int32)
+
+    module.load_state_dict(state_dict)
+
+    assert module.qzeros.shape == (64, 384)
+
+
+def test_machete_post_init_discards_loaded_qzeros_for_symmetric_gptq(monkeypatch):
+    module = MacheteLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        dtype=torch.float16,
+    )
+    with torch.no_grad():
+        module.qweight.copy_(torch.randint(0, 16, module.qweight.shape, dtype=torch.int32))
+        module.g_idx.copy_(torch.arange(module.in_features, dtype=torch.int32))
+        module.scales.copy_(torch.ones_like(module.scales))
+        module.qzeros.copy_(torch.randint(0, 16, module.qzeros.shape, dtype=torch.int32))
+
+    monkeypatch.setattr(
+        machete_linear_module,
+        "machete_prepack_B",
+        lambda weight, **_kwargs: weight.contiguous(),
+    )
+
+    module.post_init()
+
+    assert module.qzeros.numel() == 0
+    assert module.qzeros.dtype == torch.int32
+    assert module.has_zero_points is False
 
 
 def test_machete_hopper_arch_cuda_cflags_add_sm90a_when_torch_only_targets_sm90(monkeypatch):

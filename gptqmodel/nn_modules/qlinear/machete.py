@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Tuple
 
 import torch
@@ -116,12 +117,12 @@ class MacheteLinear(GPTQQuantLinear):
         )
 
         # Scales
-        scales_rows = self.in_features if self.group_size == -1 else self.in_features // self.group_size
+        grouped_rows = math.ceil(self.in_features / self.group_size)
         self.register_parameter(
             "scales",
             torch.nn.Parameter(
                 torch.empty(
-                    scales_rows,
+                    grouped_rows,
                     self.out_features,
                     dtype=torch.float16,
                 ),
@@ -133,7 +134,11 @@ class MacheteLinear(GPTQQuantLinear):
         self.register_parameter(
             "qzeros",
             torch.nn.Parameter(
-                torch.empty(0, dtype=torch.float16),
+                torch.empty(
+                    grouped_rows,
+                    self.out_features // self.pack_factor,
+                    dtype=self.pack_dtype,
+                ),
                 requires_grad=False,
             ),
         )
@@ -237,7 +242,7 @@ class MacheteLinear(GPTQQuantLinear):
         replace_parameter(
             self,
             "qzeros",
-            torch.nn.Parameter(torch.empty(0, dtype=self.scales.dtype, device=device), requires_grad=False),
+            torch.nn.Parameter(torch.empty(0, dtype=self.pack_dtype, device=device), requires_grad=False),
         )
         self.has_zero_points = False
 
