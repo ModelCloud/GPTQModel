@@ -52,6 +52,9 @@ log = LogBar.shared()
 DEVICE = torch.device("cuda:0")
 CPU_DEVICE = torch.device("cpu")
 
+AWQ_MARLIN_FP16_ATOL = 0.006
+AWQ_MARLIN_BF16_ATOL = 0.02
+
 GREEN = "\033[32m"
 RED = "\033[31m"
 RESET = "\033[0m"
@@ -73,20 +76,20 @@ class TestAwqKernelOutput(unittest.TestCase):
     TARGET = "model.layers.20.self_attn.v_proj"
     BITS = 4
     GROUP_SIZE = 128
-    SUPPORTED_DTYPES = (torch.float16,)
+    SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
 
     baseline_backend = BACKEND.TORCH_AWQ
     backend_cases = [
         (baseline_backend, torch.float16, 0.0),
-        # (baseline_backend, torch.bfloat16, 0.0),
+        (baseline_backend, torch.bfloat16, 0.0),
         (BACKEND.GEMM, torch.float16, 0.004),
         (BACKEND.BITBLAS_AWQ, torch.float16, 0.004),
         # (BACKEND.GEMM, torch.bfloat16, 0.05),
         (BACKEND.TRITON, torch.float16, 0.004),
         (BACKEND.MACHETE, torch.float16, 0.006),
-        (BACKEND.MARLIN, torch.float16, 0.006),
+        (BACKEND.MARLIN, torch.float16, AWQ_MARLIN_FP16_ATOL),
         (BACKEND.TORCH_FUSED_AWQ, torch.float16, 0.004),
-        # (BACKEND.MARLIN, torch.bfloat16, 0.05),
+        # (BACKEND.MARLIN, torch.bfloat16, AWQ_MARLIN_BF16_ATOL),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
     ]
 
@@ -212,16 +215,9 @@ class TestAwqKernelOutput(unittest.TestCase):
             if torch_module is None:
                 raise unittest.SkipTest("Torch AWQ kernel unavailable for baseline.")
 
-            forward_kwargs = {}
-            if dtype == torch.bfloat16:
-                forward_kwargs = {
-                    "compute_dtype": torch.float16,
-                    "output_dtype": dtype,
-                }
             cls.reference_results[dtype] = cls._forward(
                 torch_module,
                 converted_inputs,
-                **forward_kwargs,
             )
 
     @classmethod
@@ -353,6 +349,8 @@ class TestAwqKernelOutput(unittest.TestCase):
         qzeros_cpu: torch.Tensor,
         scales_cpu: torch.Tensor,
         bias_cpu: torch.Tensor,
+        *,
+        dtype: torch.dtype = torch.float16,
     ) -> Optional[AwqMarlinLinear]:
         if marlin_import_exception is not None:
             cls.backend_skip_reason[BACKEND.MARLIN] = f"AWQ Marlin kernel unavailable: {marlin_import_exception}"
@@ -374,14 +372,15 @@ class TestAwqKernelOutput(unittest.TestCase):
             in_features=cls.in_features,
             out_features=cls.out_features,
             bias=True,
+            dtype=dtype,
             adapter=None,
             register_buffers=True,
         ).to(cls.device)
 
         module.qweight.data.copy_(qweight_cpu.to(cls.device))
         module.qzeros.data.copy_(qzeros_cpu.to(cls.device))
-        module.scales.data.copy_(scales_cpu.to(torch.float16).to(cls.device))
-        module.bias.data.copy_(bias_cpu.to(torch.float16).to(cls.device))
+        module.scales.data.copy_(scales_cpu.to(dtype).to(cls.device))
+        module.bias.data.copy_(bias_cpu.to(dtype).to(cls.device))
 
         module.eval()
         module.post_init()
@@ -720,6 +719,43 @@ class TestAwqKernelOutput(unittest.TestCase):
             reference_mean_ms=reference_result.mean_ms,
             actual_mean_ms=actual_result.mean_ms,
         )
+
+    def test_awq_marlin_bfloat16_outputs(self) -> None:
+        self._maybe_skip_backend(BACKEND.MARLIN)
+
+        if not self.cuda_available:
+            self.skipTest("CUDA is required for AWQ Marlin kernel.")
+        if not torch.cuda.is_bf16_supported():
+            self.skipTest("CUDA bfloat16 not supported on this device.")
+
+        module = self._build_marlin_module(
+            self.qweight_cpu,
+            self.qzeros_cpu,
+            self.scales_cpu,
+            self.bias_cpu,
+            dtype=torch.bfloat16,
+        )
+        if module is None:
+            self.skipTest("AWQ Marlin bf16 module unavailable.")
+
+        try:
+            reference_result = self.reference_results[torch.bfloat16]
+            actual_result = self._forward(module, self.inputs[torch.bfloat16])
+            self._summarize_results(
+                reference_outputs=reference_result.outputs,
+                actual_outputs=actual_result.outputs,
+                backend=BACKEND.MARLIN,
+                dtype=torch.bfloat16,
+                atol=AWQ_MARLIN_BF16_ATOL,
+                title="AWQ Kernel Output torch.bfloat16",
+                reference_label="Torch AWQ output",
+                reference_mean_ms=reference_result.mean_ms,
+                actual_mean_ms=actual_result.mean_ms,
+            )
+        finally:
+            del module
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     @parameterized.expand(
         [
