@@ -179,6 +179,8 @@ def test_machete_extra_cuda_cflags_keep_only_required_torch_undefines(monkeypatc
     flags = machete_utils._machete_extra_cuda_cflags()
 
     assert flags[:3] == list(machete_utils._MACHETE_REQUIRED_TORCH_NVCC_UNDEFINES)
+    assert "--threads" in flags
+    assert flags[flags.index("--threads") + 1] == machete_utils._MACHETE_JIT_NVCC_THREADS
     assert "-U__CUDA_NO_BFLOAT16_OPERATORS__" not in flags
     assert "-U__CUDA_NO_BFLOAT162_OPERATORS__" not in flags
     assert "-U__CUDA_NO_BFLOAT162_CONVERSIONS__" not in flags

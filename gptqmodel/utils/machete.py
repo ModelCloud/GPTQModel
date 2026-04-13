@@ -43,6 +43,7 @@ _MACHETE_SM90A_ARCH_FLAGS = (
     "-gencode=arch=compute_90a,code=sm_90a",
     "-gencode=arch=compute_90a,code=compute_90a",
 )
+_MACHETE_JIT_NVCC_THREADS = "16"
 _MACHETE_REQUIRED_TORCH_NVCC_UNDEFINES = (
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
@@ -331,6 +332,8 @@ def _machete_extra_cuda_cflags() -> list[str]:
         ),
         *_machete_hopper_arch_cuda_cflags(),
     ]
+    if "--threads" in flags:
+        flags[flags.index("--threads") + 1] = _MACHETE_JIT_NVCC_THREADS
     if _machete_cuda_version_at_least(12, 8):
         flags.insert(0, "-static-global-template-stub=false")
     return flags
