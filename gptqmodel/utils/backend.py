@@ -20,7 +20,7 @@ class BACKEND(str, Enum):
     GPTQ_EXLLAMA_V2 = "gptq_exllama_v2"  # FASTER: optimized for batching > 1
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
-    GPTQ_MENTARAY = "gptq_mentaray"  # sm80-specialized Marlin-derived kernel tuned for full-SM A100 boards
+    GPTQ_MENTARAY = GPTQ_MARLIN  # retired alias kept for compatibility
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
 
@@ -39,7 +39,7 @@ class BACKEND(str, Enum):
     AWQ_BITBLAS = "awq_bitblas"
     AWQ_MACHETE = "awq_machete"
     AWQ_MARLIN = "awq_marlin"
-    AWQ_MENTARAY = "awq_mentaray"
+    AWQ_MENTARAY = AWQ_MARLIN  # retired alias kept for compatibility
     AWQ_EXLLAMA_V2 = "awq_exllama_v2"
 
     # ParoQuant kernels
@@ -73,7 +73,7 @@ class BACKEND(str, Enum):
     EXLLAMA_V3 = "exllama_v3"
     MACHETE = "machete"
     MARLIN = "marlin"
-    MENTARAY = "mentaray"
+    MENTARAY = MARLIN  # retired alias kept for compatibility
     BITBLAS = "bitblas"
     GEMM = "gemm"
     GEMM_TRITON = "gemm_triton"
@@ -102,7 +102,6 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.EXLLAMA_V2: BACKEND.GPTQ_EXLLAMA_V2,
         BACKEND.MACHETE: BACKEND.GPTQ_MACHETE,
         BACKEND.MARLIN: BACKEND.GPTQ_MARLIN,
-        BACKEND.MENTARAY: BACKEND.GPTQ_MENTARAY,
         BACKEND.BITBLAS: BACKEND.GPTQ_BITBLAS,
     },
     "awq": {
@@ -120,7 +119,6 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.BITBLAS_AWQ: BACKEND.AWQ_BITBLAS,
         BACKEND.MACHETE: BACKEND.AWQ_MACHETE,
         BACKEND.MARLIN: BACKEND.AWQ_MARLIN,
-        BACKEND.MENTARAY: BACKEND.AWQ_MENTARAY,
         BACKEND.EXLLAMA_V2: BACKEND.AWQ_EXLLAMA_V2,
     },
     "paroquant": {

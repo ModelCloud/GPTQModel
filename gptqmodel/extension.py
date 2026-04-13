@@ -87,23 +87,13 @@ _EXTENSION_SPECS = (
     ),
     _ExtensionSpec(
         name="marlin_fp16",
-        aliases=(),
+        aliases=("mentaray_fp16",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin", "_MARLIN_FP16_TORCH_OPS_EXTENSION"),
     ),
     _ExtensionSpec(
         name="marlin_bf16",
-        aliases=(),
+        aliases=("mentaray_bf16",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin", "_MARLIN_BF16_TORCH_OPS_EXTENSION"),
-    ),
-    _ExtensionSpec(
-        name="mentaray_fp16",
-        aliases=(),
-        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.mentaray", "_MENTARAY_FP16_TORCH_OPS_EXTENSION"),
-    ),
-    _ExtensionSpec(
-        name="mentaray_bf16",
-        aliases=(),
-        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.mentaray", "_MENTARAY_BF16_TORCH_OPS_EXTENSION"),
     ),
     _ExtensionSpec(
         name="paroquant",
@@ -116,7 +106,7 @@ _EXTENSION_SPECS_BY_NAME = {spec.name: spec for spec in _EXTENSION_SPECS}
 
 _EXTENSION_GROUPS = {
     "marlin": ("marlin_fp16", "marlin_bf16"),
-    "mentaray": ("mentaray_fp16", "mentaray_bf16"),
+    "mentaray": ("marlin_fp16", "marlin_bf16"),
 }
 
 _EXTENSION_ALIASES = {
