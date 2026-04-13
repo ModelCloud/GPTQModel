@@ -22,6 +22,7 @@ from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
 from gptqmodel.nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
+from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import (
     AwqMarlinLinear,
     marlin_import_exception,
@@ -40,6 +41,7 @@ except Exception as exc:  # pragma: no cover - triton import may fail in CI
     awq_triton_import_exception = exc
 
 from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
+from gptqmodel.utils.machete import _validate_machete_device_support, machete_runtime_error
 from gptqmodel.utils.exllamav2 import ScratchSpace
 
 
@@ -81,6 +83,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         (BACKEND.BITBLAS_AWQ, torch.float16, 0.004),
         # (BACKEND.GEMM, torch.bfloat16, 0.05),
         (BACKEND.TRITON, torch.float16, 0.004),
+        (BACKEND.MACHETE, torch.float16, 0.006),
         (BACKEND.MARLIN, torch.float16, 0.006),
         (BACKEND.TORCH_FUSED_AWQ, torch.float16, 0.004),
         # (BACKEND.MARLIN, torch.bfloat16, 0.05),
@@ -98,8 +101,11 @@ class TestAwqKernelOutput(unittest.TestCase):
             cls.backend_skip_reason[BACKEND.GEMM] = "CUDA is required for GEMM backend."
             cls.backend_skip_reason[BACKEND.BITBLAS_AWQ] = "CUDA is required for BitBLAS AWQ backend."
             cls.backend_skip_reason[BACKEND.TRITON] = "CUDA is required for AWQ Triton backend."
+            cls.backend_skip_reason[BACKEND.MACHETE] = "CUDA is required for AWQ Machete kernel."
             cls.backend_skip_reason[BACKEND.MARLIN] = "CUDA is required for AWQ Marlin kernel."
             cls.backend_skip_reason[BACKEND.EXLLAMA_V2] = "CUDA is required for ExLlama v2 AWQ kernel."
+        elif not _validate_machete_device_support():
+            cls.backend_skip_reason[BACKEND.MACHETE] = machete_runtime_error()
         elif os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
             cls.backend_skip_reason[BACKEND.BITBLAS_AWQ] = "BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)."
         elif not BITBLAS_AVAILABLE:
@@ -149,6 +155,16 @@ class TestAwqKernelOutput(unittest.TestCase):
         except Exception as exc:
             cls.backend_skip_reason[BACKEND.BITBLAS_AWQ] = f"AWQ BitBLAS kernel unavailable: {exc}"
             cls.modules[BACKEND.BITBLAS_AWQ] = None
+
+        try:
+            cls.modules[BACKEND.MACHETE] = (
+                cls._build_machete_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+                if BACKEND.MACHETE not in cls.backend_skip_reason
+                else None
+            )
+        except Exception as exc:
+            cls.backend_skip_reason[BACKEND.MACHETE] = f"AWQ Machete kernel unavailable: {exc}"
+            cls.modules[BACKEND.MACHETE] = None
 
         try:
             cls.modules[BACKEND.TRITON] = (
@@ -219,6 +235,8 @@ class TestAwqKernelOutput(unittest.TestCase):
     @classmethod
     def _load_weight_map(cls) -> Dict[str, str]:
         index_path = cls.MODEL_PATH / "model.safetensors.index.json"
+        if not index_path.is_file():
+            raise unittest.SkipTest(f"AWQ checkpoint not available at {index_path}")
         with open(index_path, "r") as handle:
             index = json.load(handle)
         return index["weight_map"]
@@ -351,7 +369,36 @@ class TestAwqKernelOutput(unittest.TestCase):
         module = AwqMarlinLinear(
             bits=cls.BITS,
             group_size=cls.GROUP_SIZE,
-            sym=True,
+            sym=False,
+            desc_act=False,
+            in_features=cls.in_features,
+            out_features=cls.out_features,
+            bias=True,
+            adapter=None,
+            register_buffers=True,
+        ).to(cls.device)
+
+        module.qweight.data.copy_(qweight_cpu.to(cls.device))
+        module.qzeros.data.copy_(qzeros_cpu.to(cls.device))
+        module.scales.data.copy_(scales_cpu.to(torch.float16).to(cls.device))
+        module.bias.data.copy_(bias_cpu.to(torch.float16).to(cls.device))
+
+        module.eval()
+        module.post_init()
+        return module
+
+    @classmethod
+    def _build_machete_module(
+        cls,
+        qweight_cpu: torch.Tensor,
+        qzeros_cpu: torch.Tensor,
+        scales_cpu: torch.Tensor,
+        bias_cpu: torch.Tensor,
+    ) -> Optional[AwqMacheteLinear]:
+        module = AwqMacheteLinear(
+            bits=cls.BITS,
+            group_size=cls.GROUP_SIZE,
+            sym=False,
             desc_act=False,
             in_features=cls.in_features,
             out_features=cls.out_features,
