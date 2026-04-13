@@ -1,41 +1,11 @@
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import yaml
+from deps_utils import collect_pkgs, resolve_test_path
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
-
-
-def resolve_test_path(raw_name: str) -> Path:
-    return Path("tests") / f"{raw_name}.py"
-
-
-def collect_pkgs(test_path: Path, deps: dict):
-    specific_pkgs = set()
-
-    common_pkgs = set(deps.get("common") or [])
-
-    specific_pkgs.update(deps.get("tests", {}).get(test_path.name) or [])
-
-    test_path_str = test_path.as_posix()
-    for key, value in deps.items():
-        if not (isinstance(key, str) and key.startswith("tests/")):
-            continue
-        if not test_path_str.startswith(key + "/"):
-            continue
-
-        if isinstance(value, list):
-            specific_pkgs.update(value)
-
-        elif isinstance(value, dict):
-            specific_pkgs.update(value.get(test_path.name) or [])
-
-        else:
-            pass
-
-    return specific_pkgs, common_pkgs
 
 
 def uv_uninstall(pkgs):

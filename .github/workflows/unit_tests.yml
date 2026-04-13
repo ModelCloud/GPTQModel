@@ -232,7 +232,9 @@ jobs:
           echo "-- loaded --"
 
           echo "-- setting up env --"
-          env_name="gptqmodel_test_cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${py}_${{ matrix.test_script }}"
+          env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
+            --test-name "${{ matrix.test_script }}")"
+          echo "using uv env: $env_name"
           /opt/uv/setup_uv_venv.sh $env_name
           echo "-- set --"
 
@@ -454,7 +456,9 @@ jobs:
 
       - name: Activate uv env
         run: |
-          env_name="gptqmodel_test_cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_${{ matrix.test_script }}"
+          env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
+            --test-name "${{ matrix.test_script }}")"
+          echo "using uv env: $env_name"
           /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Setup uv env

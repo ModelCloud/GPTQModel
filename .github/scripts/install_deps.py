@@ -2,15 +2,12 @@ import os
 import re
 import subprocess
 import sys
-from pathlib import Path
 
 import yaml
+from deps_utils import collect_pkgs, resolve_test_path
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 _PKG_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+")
-
-def resolve_test_path(raw_name: str) -> Path:
-    return Path("tests") / f"{raw_name}.py"
 
 def normalize_pkg_spec(s: str) -> str:
     s = (s or "").strip()
@@ -52,36 +49,6 @@ def pkg_key(spec: str) -> str:
         return spec.lower()
 
     return match.group(0).lower().replace("_", "-")
-
-def collect_pkgs(test_path: Path, deps: dict):
-    specific_pkgs = set()
-
-    common_pkgs = set(deps.get("common") or [])
-
-    specific_pkgs.update(deps.get("tests", {}).get(test_path.name) or [])
-
-    test_path_str = test_path.as_posix()
-    for key, value in deps.items():
-        if not (isinstance(key, str) and key.startswith("tests/")):
-            continue
-        if not test_path_str.startswith(key + "/"):
-            continue
-
-        if isinstance(value, list):
-            specific_pkgs.update(value)
-
-        elif isinstance(value, dict):
-            specific_pkgs.update(value.get(test_path.name) or [])
-
-        else:
-            pass
-
-    specific_pkg_keys = {pkg_key(pkg) for pkg in specific_pkgs}
-    common_pkgs = {pkg for pkg in common_pkgs if pkg_key(pkg) not in specific_pkg_keys}
-
-    return specific_pkgs, common_pkgs
-
-
 
 def pip_install(pkgs):
     if not pkgs:
@@ -130,6 +97,8 @@ if __name__ == "__main__":
         deps = yaml.safe_load(f)
 
     specific_pkgs, common_pkgs = collect_pkgs(test_path, deps)
+    specific_pkg_keys = {pkg_key(pkg) for pkg in specific_pkgs}
+    common_pkgs = {pkg for pkg in common_pkgs if pkg_key(pkg) not in specific_pkg_keys}
 
     uv_install(specific_pkgs)
 
