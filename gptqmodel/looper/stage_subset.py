@@ -16,7 +16,7 @@ MoE chunking, coverage handling, and device routing are easier to reason about.
 from __future__ import annotations
 
 import logging
-import math
+import os
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
@@ -32,10 +32,12 @@ from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
-from ..quantization.config import VramStrategy, GcMode, ExpertsRoutingBypass
+from ..quantization.config import GcMode, ExpertsRoutingBypass, VramStrategy
+from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
+from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import torch_empty_cache, torch_sync
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -91,6 +93,7 @@ class SubsetPlan:
     forward_device_map: Dict[str, torch.device]
     calibration_coverage_policy: CalibrationCoveragePolicy
     module_chunks: List[Dict[str, NamedModule]]
+    restore_forward_device_overrides: bool = True
 
     @property
     def subset_forward_serial(self) -> bool:
@@ -230,6 +233,128 @@ def _collect_subset_forward_progress(
     return batch_count, forward_row_counts, forward_total_rows
 
 
+def _resolve_forward_baseline_devices(
+    subset: Dict[str, NamedModule],
+    full,
+) -> Dict[str, torch.device]:
+    """Capture the baseline device for each layer module before subset execution mutates it."""
+
+    candidates: Dict[str, object] = {}
+    if full:
+        candidates.update(full)
+    for name, named_module in subset.items():
+        candidates.setdefault(name, named_module)
+
+    baseline: Dict[str, torch.device] = {}
+    fallback_device: Optional[torch.device] = None
+    for name, module_ref in candidates.items():
+        actual_module = module_ref.module if isinstance(module_ref, NamedModule) else module_ref
+        try:
+            device = get_device(actual_module)
+        except Exception:
+            device = None
+        if device is not None and device != META and fallback_device is None:
+            fallback_device = device
+        baseline[name] = device
+
+    if fallback_device is None:
+        return {}
+
+    resolved: Dict[str, torch.device] = {}
+    for name, device in baseline.items():
+        if device is None or device == META:
+            device = fallback_device
+        if device is not None and device != META:
+            resolved[name] = device
+
+    return resolved
+
+
+def _collect_layer_candidate_names(
+    subset: Dict[str, NamedModule],
+    full,
+) -> List[str]:
+    """Return the stable layer module order used for device planning."""
+
+    names: List[str] = list(subset.keys())
+    if full is None:
+        return names
+
+    for candidate in full.keys():
+        if candidate not in subset:
+            names.append(candidate)
+    return names
+
+
+def _collect_assignable_moe_group_keys(
+    moe_groups: Dict[str, List[str]],
+) -> List[str]:
+    """Return expert families that should stay co-located on one device."""
+
+    assignable_group_keys: List[str] = []
+    for group_key, module_names in moe_groups.items():
+        suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
+        # Some MoE families route pairs like gate/up or w1/w3 together.
+        if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
+            assignable_group_keys.append(group_key)
+    return assignable_group_keys
+
+
+def _normalize_planning_module_name(module_name: str) -> str:
+    """Strip model-tree annotations so planning blocks map back to live module names."""
+
+    return module_name.split(":", 1)[0]
+
+
+def _collect_dense_groups(
+    layer_candidate_names: List[str],
+    layer_moe_group_key_by_name: Dict[str, Optional[str]],
+    planning_layer_modules: Optional[List[List[str]]],
+) -> Dict[str, List[str]]:
+    """Collect dense modules into model-tree-defined calculation groups."""
+
+    remaining_dense_names = [
+        module_name
+        for module_name in layer_candidate_names
+        if layer_moe_group_key_by_name.get(module_name) is None
+    ]
+    if not remaining_dense_names:
+        return {}
+
+    dense_groups: Dict[str, List[str]] = {}
+    remaining_dense_set = set(remaining_dense_names)
+
+    if planning_layer_modules:
+        # Reuse the model-tree execution blocks for dense placement so the
+        # planner follows the same grouping definitions users already maintain.
+        for block_index, block in enumerate(planning_layer_modules):
+            block_dense_names: List[str] = []
+            block_seen = set()
+            for block_entry in block:
+                module_name = _normalize_planning_module_name(block_entry)
+                if module_name in block_seen:
+                    continue
+                block_seen.add(module_name)
+                if module_name not in remaining_dense_set:
+                    continue
+                if layer_moe_group_key_by_name.get(module_name) is not None:
+                    continue
+                block_dense_names.append(module_name)
+
+            if block_dense_names:
+                dense_groups[f"planning:{block_index}"] = block_dense_names
+                for module_name in block_dense_names:
+                    remaining_dense_set.discard(module_name)
+
+    for module_name in remaining_dense_names:
+        if module_name not in remaining_dense_set:
+            continue
+        dense_groups[module_name] = [module_name]
+        remaining_dense_set.discard(module_name)
+
+    return dense_groups
+
+
 def build_subset_plan(
     looper: "ModuleLooper",
     *,
@@ -240,6 +365,7 @@ def build_subset_plan(
     full,
     fallback,
     layer_inputs: List[List[torch.Tensor]],
+    planning_layer_modules: Optional[List[List[str]]] = None,
 ) -> SubsetPlan:
     """Plan subset execution before any hooks, forwards, or quant work begin.
 
@@ -257,74 +383,104 @@ def build_subset_plan(
     moe_groups: Dict[str, List[str]] = {}
     forward_device_map: Dict[str, torch.device] = {}
     subset_forward_serial = False
+    restore_forward_device_overrides = True
 
-    attention_subset = bool(subset) and all(
-        looper._is_attention_module_name(name) for name in subset
-    )
-    moe_group_key_by_name: Dict[str, Optional[str]] = {
+    layer_candidate_names = _collect_layer_candidate_names(subset=subset, full=full)
+    subset_moe_group_key_by_name: Dict[str, Optional[str]] = {
         name: looper._extract_moe_group_key(name)
         for name in subset
     }
-    moe_module_names = [
-        name for name, group_key in moe_group_key_by_name.items()
+    layer_moe_group_key_by_name: Dict[str, Optional[str]] = {
+        name: looper._extract_moe_group_key(name)
+        for name in layer_candidate_names
+    }
+    subset_moe_module_names = [
+        name for name, group_key in subset_moe_group_key_by_name.items()
         if group_key is not None
     ]
-    is_moe_subset = len(moe_module_names) >= looper._moe_subset_threshold
-    moe_modules_set = set(moe_module_names)
+    layer_moe_module_names = [
+        name for name, group_key in layer_moe_group_key_by_name.items()
+        if group_key is not None
+    ]
+    is_moe_subset = len(subset_moe_module_names) >= looper._moe_subset_threshold
+    layer_has_moe = len(layer_moe_module_names) >= looper._moe_subset_threshold
+    moe_modules_set = set(subset_moe_module_names)
 
-    if is_moe_subset:
-        combined_names: List[str] = list(subset.keys())
-        if full is not None:
-            for candidate in full.keys():
-                if candidate not in subset:
-                    combined_names.append(candidate)
-
-        for module_name in combined_names:
+    if layer_has_moe:
+        for module_name in layer_candidate_names:
             # Group experts across the full MoE family so device placement is
             # consistent even when the current subset only contains one slice.
-            group_key = looper._extract_moe_group_key(module_name)
+            group_key = layer_moe_group_key_by_name[module_name]
             if group_key is None:
                 continue
             moe_groups.setdefault(group_key, []).append(module_name)
+    dense_groups = _collect_dense_groups(
+        layer_candidate_names,
+        layer_moe_group_key_by_name,
+        planning_layer_modules,
+    )
 
-        for name, named_module in subset.items():
-            setattr(named_module, "moe_enabled", name in moe_modules_set)
+    for name, named_module in subset.items():
+        setattr(named_module, "moe_enabled", name in moe_modules_set)
 
-        if looper._vram_strategy == VramStrategy.BALANCED:
-            devices = [
-                dev for dev in looper._quant_devices
-                if dev is not None and getattr(dev, "type", None) != "cpu"
-            ]
-            if len(devices) > 1 and moe_groups:
-                assignable_group_keys: List[str] = []
-                for group_key, module_names in moe_groups.items():
-                    suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
-                    # Some MoE families route pairs like gate/up or w1/w3 together.
-                    if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
-                        assignable_group_keys.append(group_key)
+    dense_strategy_active = bool(getattr(looper, "_dense_vram_strategy_explicit", False))
+    moe_strategy_active = bool(getattr(looper, "_moe_vram_strategy_explicit", False)) and bool(moe_groups)
 
-                if assignable_group_keys:
-                    groups_per_device = max(
-                        math.ceil(len(assignable_group_keys) / len(devices)), 1
-                    )
+    if dense_strategy_active or moe_strategy_active:
+        dense_devices = [
+            dev for dev in getattr(looper, "_dense_quant_devices", [])
+            if dev is not None and getattr(dev, "type", None) != "cpu"
+        ] or list(getattr(looper, "_dense_quant_devices", []))
+        moe_devices = [
+            dev for dev in getattr(looper, "_moe_quant_devices", [])
+            if dev is not None and getattr(dev, "type", None) != "cpu"
+        ] or list(getattr(looper, "_moe_quant_devices", []))
+
+        if dense_strategy_active and dense_groups and dense_devices:
+            dense_group_keys = list(dense_groups.keys())
+            if looper._dense_vram_strategy == VramStrategy.BALANCED and len(dense_devices) > 1:
+                for group_index, group_key in enumerate(dense_group_keys):
+                    target_device = dense_devices[group_index % len(dense_devices)]
+                    for module_name in dense_groups[group_key]:
+                        forward_device_map[module_name] = target_device
+            else:
+                target_device = dense_devices[0]
+                for group_key in dense_group_keys:
+                    for module_name in dense_groups[group_key]:
+                        forward_device_map[module_name] = target_device
+
+        if moe_strategy_active and moe_groups and moe_devices:
+            assignable_group_keys = _collect_assignable_moe_group_keys(moe_groups)
+            if assignable_group_keys:
+                if looper._moe_vram_strategy == VramStrategy.BALANCED and len(moe_devices) > 1:
                     for group_index, group_key in enumerate(assignable_group_keys):
-                        device_idx = min(group_index // groups_per_device, len(devices) - 1)
-                        target_device = devices[device_idx]
+                        target_device = moe_devices[group_index % len(moe_devices)]
+                        for module_name in moe_groups[group_key]:
+                            forward_device_map[module_name] = target_device
+                else:
+                    target_device = moe_devices[0]
+                    for group_key in assignable_group_keys:
                         for module_name in moe_groups[group_key]:
                             forward_device_map[module_name] = target_device
 
-        # Balanced MoE subsets stay serial so replica fan-out does not fight the
-        # explicit per-expert device assignment planned above.
-        subset_forward_serial = looper._vram_strategy == VramStrategy.BALANCED
-        if subset_forward_serial:
-            active_group_count = len(moe_groups)
-            if active_group_count == 0:
-                subset_forward_serial = False
-            elif attention_subset and active_group_count <= looper._moe_subset_threshold:
-                subset_forward_serial = False
-    else:
-        for named_module in subset.values():
-            setattr(named_module, "moe_enabled", False)
+        if forward_device_map:
+            # Once either dense or expert placement is explicit, anchor every
+            # untouched module back to its baseline placement so stale quant
+            # devices never leak into a later subset forward.
+            baseline_devices = _resolve_forward_baseline_devices(
+                subset=subset,
+                full=full,
+            )
+            for module_name, baseline_device in baseline_devices.items():
+                forward_device_map.setdefault(module_name, baseline_device)
+
+            for module_name, named_module in subset.items():
+                preferred_device = forward_device_map.get(module_name)
+                if preferred_device is not None:
+                    named_module.state["preferred_quant_device"] = preferred_device
+
+            restore_forward_device_overrides = False
+            subset_forward_serial = True
 
     auto_forward_data_parallel = getattr(
         looper.gptq_model.quantize_config,
@@ -372,6 +528,7 @@ def build_subset_plan(
         forward_device_map=forward_device_map,
         calibration_coverage_policy=calibration_coverage_policy,
         module_chunks=module_chunks,
+        restore_forward_device_overrides=restore_forward_device_overrides,
     )
 
 
@@ -381,6 +538,7 @@ def build_layer_subset_plans(
     processor: LoopProcessor,
     module: torch.nn.Module,
     layer_modules: List[List[str]],
+    planning_layer_modules: Optional[List[List[str]]],
     layer_inputs: List[List[torch.Tensor]],
     full,
     is_lm_head_module: bool,
@@ -428,9 +586,67 @@ def build_layer_subset_plans(
             full=full,
             fallback=fallback,
             layer_inputs=layer_inputs,
+            planning_layer_modules=planning_layer_modules,
         )
         for index, subset in enumerate(subsets)
     ]
+
+
+def _emit_moe_parallel_quant_subset_telemetry(
+    *,
+    plan: SubsetPlan,
+    quant_target_devices: Dict[str, torch.device],
+    futures_count: int,
+    layer_index: int,
+) -> None:
+    """Capture the worker fan-out used for one MoE quant subset when telemetry is enabled."""
+
+    if not plan.moe_groups or futures_count <= 0:
+        return
+
+    unique_devices = sorted({str(device) for device in quant_target_devices.values() if device is not None})
+    thread_pool_workers: Dict[str, int] = {}
+    thread_pool_total_workers: Optional[int] = None
+    thread_pool_total_inflight: Optional[int] = None
+
+    collect_snapshot = getattr(DEVICE_THREAD_POOL, "_collect_state_snapshot", None)
+    if callable(collect_snapshot):
+        try:
+            snapshot = collect_snapshot()
+        except Exception:
+            snapshot = None
+        if isinstance(snapshot, dict):
+            workers = snapshot.get("workers") or {}
+            thread_pool_workers = {
+                device_name: int(workers.get(device_name, 0))
+                for device_name in unique_devices
+            }
+            total_workers = snapshot.get("total_workers")
+            total_inflight = snapshot.get("total_inflight")
+            if total_workers is not None:
+                thread_pool_total_workers = int(total_workers)
+            if total_inflight is not None:
+                thread_pool_total_inflight = int(total_inflight)
+
+    total_parallel_workers = sum(thread_pool_workers.values())
+    emit_device_telemetry(
+        "moe_parallel_quant_subset",
+        layer_index=layer_index,
+        subset_index=plan.subset_index + 1,
+        subset_total=plan.subset_total,
+        module_count=len(plan.modules),
+        moe_group_count=len(plan.moe_groups),
+        submitted_tasks=futures_count,
+        quant_devices=unique_devices,
+        thread_pool_workers=thread_pool_workers,
+        thread_pool_total_workers=thread_pool_total_workers,
+        thread_pool_total_inflight=thread_pool_total_inflight,
+        python_gil_env=os.environ.get("PYTHON_GIL"),
+        python_gil_controllable=has_gil_control(),
+        python_gil_disabled=has_gil_disabled(),
+        free_threaded_parallel_quant_eligible=bool(has_gil_disabled() and futures_count > 1),
+        free_threaded_parallel_quant_active=bool(total_parallel_workers > 1 and futures_count > 1),
+    )
 
 
 def _run_single_subset_pass(
@@ -630,7 +846,7 @@ def _run_single_subset_pass(
                 preserve_module_devices=preserve_devices,
             )
         finally:
-            if forward_device_map:
+            if forward_device_map and plan.restore_forward_device_overrides:
                 looper._restore_forward_device_overrides(
                     subset,
                     previous_forward_devices,
@@ -830,6 +1046,13 @@ def _run_single_subset_pass(
                 subset_total,
             )
         )
+
+    _emit_moe_parallel_quant_subset_telemetry(
+        plan=plan,
+        quant_target_devices=quant_target_devices,
+        futures_count=len(futures),
+        layer_index=layer_index,
+    )
 
     for fut in futures:
         # Collect results in submission order so the final subset map preserves

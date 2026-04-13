@@ -253,7 +253,11 @@ def _replay_layer_outputs(
             preserve_module_devices=replay_preserve_module_devices,
         )
     finally:
-        if replay_modules is not None and replay_forward_device_map:
+        if (
+            replay_modules is not None
+            and replay_forward_device_map
+            and (replay_plan is None or replay_plan.restore_forward_device_overrides)
+        ):
             looper._restore_forward_device_overrides(
                 replay_modules,
                 replay_prev_devices,
@@ -350,6 +354,7 @@ def run_layer_stage(
     *,
     layers: List[torch.nn.Module],
     layer_modules: List[List[str]],
+    planning_layer_modules: List[List[str]],
     layers_prefix: Optional[str],
     fallback,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
@@ -483,6 +488,7 @@ def run_layer_stage(
                 processor=processor,
                 module=module,
                 layer_modules=layer_modules,
+                planning_layer_modules=planning_layer_modules,
                 layer_inputs=layer_inputs,
                 full=full,
                 is_lm_head_module=is_lm_head_module,

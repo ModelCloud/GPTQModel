@@ -1,4 +1,5 @@
 import threading
+import sys
 import types
 from typing import Dict
 
@@ -26,7 +27,14 @@ from gptqmodel.quantization.config import QuantizeConfig
 class _DummyQModel:
     def __init__(self):
         self.support_batch_quantize = False
-        self.quantize_config = types.SimpleNamespace(device=None, vram_strategy="exclusive", moe_routing_bypass=lambda : False)
+        self.quantize_config = types.SimpleNamespace(
+            device=None,
+            dense_vram_strategy="exclusive",
+            dense_vram_strategy_devices=None,
+            moe_vram_strategy="exclusive",
+            moe_vram_strategy_devices=None,
+            moe_routing_bypass=lambda: False,
+        )
         self.layer_callback = None
 
 
@@ -62,6 +70,71 @@ def test_cache_inputs_delegates_to_stage_capture(monkeypatch):
     assert captured["looper"] is looper
     assert captured["kwargs"]["layers"] == layers
     assert captured["kwargs"]["calibration_data"] is data
+
+
+def test_assign_quant_device_prefers_balanced_hint():
+    looper = _make_looper()
+    looper._quant_devices = [torch.device("cuda:0"), torch.device("cuda:1")]
+    looper._module_device_map = {}
+    looper._quant_device_rr = 0
+
+    named = NamedModule(
+        torch.nn.Linear(4, 4, bias=False),
+        name="mlp.experts.1.gate_proj",
+        full_name="model.layers.0.mlp.experts.1.gate_proj",
+        layer_index=0,
+    )
+    named.state["preferred_quant_device"] = torch.device("cuda:1")
+
+    target = looper._assign_quant_device_for_module(
+        named,
+        fallback_device=torch.device("cuda:0"),
+    )
+
+    assert target == torch.device("cuda:1")
+    assert looper._module_device_map[named.full_name] == torch.device("cuda:1")
+    assert looper._quant_device_rr == 0
+
+
+def test_module_looper_runtime_telemetry_reports_gil_and_split_pools(monkeypatch):
+    emitted = []
+    info_logs = []
+    warn_logs = []
+    module_looper_module = sys.modules[ModuleLooper.__module__]
+
+    monkeypatch.setattr(
+        module_looper_module,
+        "emit_device_telemetry",
+        lambda event, **fields: emitted.append((event, fields)),
+    )
+    monkeypatch.setattr(module_looper_module, "has_gil_control", lambda: True)
+    monkeypatch.setattr(module_looper_module, "has_gil_disabled", lambda: True)
+    monkeypatch.setattr(module_looper_module.os, "environ", {"PYTHON_GIL": "0"})
+    monkeypatch.setattr(module_looper_module.log, "info", lambda *args, **kwargs: info_logs.append(args))
+    monkeypatch.setattr(module_looper_module.log, "warn", lambda *args, **kwargs: warn_logs.append(args))
+
+    looper = ModuleLooper.__new__(ModuleLooper)
+    looper.gptq_model = types.SimpleNamespace(dynamic_expert_index=object())
+    looper._dense_quant_devices = [torch.device("cuda:0")]
+    looper._moe_quant_devices = [torch.device("cuda:1"), torch.device("cuda:2")]
+    looper._dense_vram_strategy = "exclusive"
+    looper._moe_vram_strategy = "balanced"
+    looper.moe_routing_override = 256
+    looper.moe_routing_bypass = False
+
+    looper._emit_moe_parallel_quant_runtime()
+
+    assert info_logs
+    assert not warn_logs
+    assert len(emitted) == 1
+    event, fields = emitted[0]
+    assert event == "moe_parallel_quant_runtime"
+    assert fields["dense_devices"] == ["cuda:0"]
+    assert fields["moe_devices"] == ["cuda:1", "cuda:2"]
+    assert fields["routing_override"] == 256
+    assert fields["python_gil_env"] == "0"
+    assert fields["python_gil_disabled"] is True
+    assert fields["free_threaded_parallel_quant_eligible"] is True
 
 
 class _TinyLayer(torch.nn.Module):
@@ -392,7 +465,12 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             self._module_device_map = {}
             self._quant_device_lock = threading.Lock()
             self._moe_subset_threshold = 16
-            self._vram_strategy = types.SimpleNamespace()
+            self._dense_quant_devices = [torch.device("cpu")]
+            self._moe_quant_devices = [torch.device("cpu")]
+            self._dense_vram_strategy = types.SimpleNamespace()
+            self._moe_vram_strategy = types.SimpleNamespace()
+            self._dense_vram_strategy_explicit = False
+            self._moe_vram_strategy_explicit = False
             self._layer_events = []
 
         def _check_loop_stop(self):
@@ -440,6 +518,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         looper,
         layers=layers,
         layer_modules=layer_modules,
+        planning_layer_modules=layer_modules,
         layers_prefix="model.layers",
         fallback=True,
         shared_kv_cache_dict={},
@@ -599,7 +678,12 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             self._module_device_map = {}
             self._quant_device_lock = threading.Lock()
             self._moe_subset_threshold = 16
-            self._vram_strategy = types.SimpleNamespace()
+            self._dense_quant_devices = [torch.device("cpu")]
+            self._moe_quant_devices = [torch.device("cpu")]
+            self._dense_vram_strategy = types.SimpleNamespace()
+            self._moe_vram_strategy = types.SimpleNamespace()
+            self._dense_vram_strategy_explicit = False
+            self._moe_vram_strategy_explicit = False
             self._layer_events = []
             self.named_module_layers = []
 
@@ -649,6 +733,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
         looper,
         layers=[torch.nn.Linear(64, 64) for _ in range(3)],
         layer_modules=[["foo"]],
+        planning_layer_modules=[["foo"]],
         layers_prefix="model.layers",
         fallback=True,
         shared_kv_cache_dict={},
@@ -826,7 +911,12 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
             self._module_device_map = {}
             self._quant_device_lock = threading.Lock()
             self._moe_subset_threshold = 16
-            self._vram_strategy = types.SimpleNamespace()
+            self._dense_quant_devices = [torch.device("cpu")]
+            self._moe_quant_devices = [torch.device("cpu")]
+            self._dense_vram_strategy = types.SimpleNamespace()
+            self._moe_vram_strategy = types.SimpleNamespace()
+            self._dense_vram_strategy_explicit = False
+            self._moe_vram_strategy_explicit = False
             self.forward_replay_calls = []
 
         def _run_forward_batches(self, **kwargs):
@@ -867,6 +957,7 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
         looper,
         layers=[torch.nn.Linear(1, 1, bias=False) for _ in range(2)],
         layer_modules=[["self_attn.q_proj"]],
+        planning_layer_modules=[["self_attn.q_proj"]],
         layers_prefix="model.layers",
         fallback=True,
         shared_kv_cache_dict={},
@@ -1089,6 +1180,105 @@ def test_replay_layer_outputs_with_plan_uses_plan_metadata_and_device_overrides(
     assert timer_records[0][1]["source"] == "model.layers.0:subset1/1"
 
 
+def test_replay_layer_outputs_with_plan_can_skip_override_restore():
+    tensor = torch.zeros(1, 1, 1)
+    replay_modules = {
+        "self_attn.q_proj": NamedModule(
+            torch.nn.Linear(1, 1, bias=False),
+            name="self_attn.q_proj",
+            full_name="model.layers.0.self_attn.q_proj",
+            layer_index=0,
+        )
+    }
+    replay_plan = SubsetPlan(
+        modules=replay_modules,
+        subset_index=0,
+        subset_total=1,
+        execute_forward=True,
+        replay_after_process=True,
+        forward_mode="serial",
+        batch_count=1,
+        forward_row_counts=[1],
+        forward_total_rows=1,
+        moe_groups={},
+        forward_device_map={"self_attn.q_proj": torch.device("cuda:0")},
+        calibration_coverage_policy=CalibrationCoveragePolicy(
+            validate_input_coverage=False,
+            fallback_enabled=True,
+            prune_uncovered_modules=False,
+            record_dynamic_exclusions=False,
+        ),
+        module_chunks=[replay_modules],
+        restore_forward_device_overrides=False,
+    )
+
+    class DummyPB:
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            return self
+
+        def title(self, *_):
+            return self
+
+        def subtitle(self, *_):
+            return self
+
+        def draw(self):
+            return self
+
+        def close(self):
+            return self
+
+    class DummyLogger:
+        def pb(self, iterable):
+            return DummyPB()
+
+    class DummyLooper:
+        def __init__(self):
+            self._current_subset = replay_modules
+            self.forward_calls = []
+
+        def _run_forward_batches(self, **kwargs):
+            self.forward_calls.append(kwargs)
+            return [[tensor]]
+
+        def _apply_forward_device_overrides(self, modules, forward_device_map, fallback_modules=None):
+            self.forward_override_modules = modules
+            self.forward_override_map = forward_device_map
+            return {"self_attn.q_proj": torch.device("cpu")}
+
+        def _restore_forward_device_overrides(self, modules, previous_devices, fallback_modules=None):
+            raise AssertionError("restore should be skipped when replay_plan disables it")
+
+    looper = DummyLooper()
+    processor = types.SimpleNamespace(num_batches=None)
+
+    outputs = _replay_layer_outputs(
+        looper,
+        module=torch.nn.Linear(1, 1, bias=False),
+        processor=processor,
+        layer_inputs=[[tensor]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.layers.0",
+        full={},
+        log=DummyLogger(),
+        region_timer=None,
+        replay_plan=replay_plan,
+    )
+
+    assert outputs == [[tensor]]
+    assert looper.forward_override_modules is replay_modules
+    assert looper.forward_override_map == {"self_attn.q_proj": torch.device("cuda:0")}
+
+
 class _ToySelfAttention(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -1284,7 +1474,12 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             self._module_device_map = {}
             self._quant_device_lock = threading.Lock()
             self._moe_subset_threshold = 16
-            self._vram_strategy = types.SimpleNamespace()
+            self._dense_quant_devices = [torch.device("cpu")]
+            self._moe_quant_devices = [torch.device("cpu")]
+            self._dense_vram_strategy = types.SimpleNamespace()
+            self._moe_vram_strategy = types.SimpleNamespace()
+            self._dense_vram_strategy_explicit = False
+            self._moe_vram_strategy_explicit = False
             self._current_subset = None
             self.support_batch_quantize = False
             self.moe_routing_override = None
@@ -1369,6 +1564,12 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
         looper,
         layers=layers,
         layer_modules=[
+            ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+            ["self_attn.o_proj"],
+            ["mlp.gate_proj", "mlp.up_proj"],
+            ["mlp.down_proj"],
+        ],
+        planning_layer_modules=[
             ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
             ["self_attn.o_proj"],
             ["mlp.gate_proj", "mlp.up_proj"],

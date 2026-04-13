@@ -213,8 +213,17 @@ class BaseQModel(nn.Module):
     # monkey patch api for trust_remote_code=True models that have broken transformer compat
     require_monkeypatch = False
 
-    # VRAM strategy support list
-    supported_vram_strategies: List[VramStrategy] = [VramStrategy.EXCLUSIVE, VramStrategy.BALANCED]
+    # Dense-pool strategy support list
+    supported_dense_vram_strategies: List[VramStrategy] = [
+        VramStrategy.EXCLUSIVE,
+        VramStrategy.BALANCED,
+    ]
+
+    # MoE expert-pool strategy support list
+    supported_moe_vram_strategies: List[VramStrategy] = [
+        VramStrategy.EXCLUSIVE,
+        VramStrategy.BALANCED,
+    ]
 
     # some models have broken attention mask codes so we need to only use batch 1 with no masks
     support_batch_quantize = True

@@ -86,7 +86,8 @@ class TestMoEConfig(ModelTest):
     DATASET_SIZE = 1
 
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B-layers-1"
-    VRAM_STRATEGY = VramStrategy.BALANCED
+    DENSE_VRAM_STRATEGY = VramStrategy.EXCLUSIVE
+    MOE_VRAM_STRATEGY = VramStrategy.BALANCED
 
     calibration_dataset = None
     calibration_dataset_token_size = None

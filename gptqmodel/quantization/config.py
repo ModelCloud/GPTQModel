@@ -114,7 +114,7 @@ class METHOD(str, Enum):
 
 
 class VramStrategy(str, Enum):
-    """Strategies for assigning quantization work across available VRAM."""
+    """Placement strategies shared by dense and MoE device pools."""
 
     EXCLUSIVE = "exclusive"
     BALANCED = "balanced"
@@ -1878,19 +1878,70 @@ def _normalize_foem(foem: Optional[Union[FOEMConfig, Dict[str, Any]]]) -> Option
     return foem
 
 
-def _normalize_vram_strategy(value: Union[str, VramStrategy]) -> VramStrategy:
+def _normalize_dense_vram_strategy(value: Union[str, VramStrategy]) -> VramStrategy:
+    """Validate one user-supplied dense-pool placement strategy value."""
+
     if isinstance(value, str):
         try:
             return VramStrategy(value.lower())
         except ValueError as exc:
             raise ValueError(
-                f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VramStrategy]}."
+                f"QuantizeConfig: `dense_vram_strategy` must be one of {[v.value for v in VramStrategy]}."
             ) from exc
     if not isinstance(value, VramStrategy):
         raise ValueError(
-            f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VramStrategy]}."
+            f"QuantizeConfig: `dense_vram_strategy` must be one of {[v.value for v in VramStrategy]}."
         )
     return value
+
+
+def _normalize_moe_vram_strategy(value: Union[str, VramStrategy]) -> VramStrategy:
+    """Validate one user-supplied MoE expert-pool placement strategy value."""
+
+    if isinstance(value, str):
+        try:
+            return VramStrategy(value.lower())
+        except ValueError as exc:
+            raise ValueError(
+                f"QuantizeConfig: `moe_vram_strategy` must be one of {[v.value for v in VramStrategy]}."
+            ) from exc
+    if not isinstance(value, VramStrategy):
+        raise ValueError(
+            f"QuantizeConfig: `moe_vram_strategy` must be one of {[v.value for v in VramStrategy]}."
+        )
+    return value
+
+
+def _normalize_strategy_devices(
+    value: Optional[List[Union[str, torch.device]]],
+    *,
+    field_name: str,
+) -> Optional[List[str]]:
+    """Normalize one user-facing strategy device pool to stable device strings."""
+
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(f"QuantizeConfig: `{field_name}` must be a list of device strings or torch.device values.")
+    if not value:
+        raise ValueError(f"QuantizeConfig: `{field_name}` must not be empty when provided.")
+
+    # Import lazily to keep config parsing light and avoid depending on looper
+    # modules unless the caller actually configures explicit device pools.
+    from ..utils.looper_helpers import normalize_device_like
+
+    normalized_devices: List[str] = []
+    seen = set()
+    for raw_device in value:
+        normalized = normalize_device_like(raw_device)
+        if normalized is None:
+            raise ValueError(f"QuantizeConfig: `{field_name}` contains an unsupported device value: {raw_device!r}.")
+        key = str(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_devices.append(key)
+    return normalized_devices
 
 
 def _normalize_gc_mode(value: Union[str, GcMode]) -> GcMode:
@@ -2301,7 +2352,29 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         "leading in some cases to slower forwarding or vram OOM"}
     )
 
-    vram_strategy: VramStrategy = field(default=VramStrategy.EXCLUSIVE)
+    # User-facing dense-pool strategy. The dense pool owns the serial path:
+    # qkv, z, out_proj, norms, router, shared expert, and dense MLP modules.
+    dense_vram_strategy: VramStrategy = field(
+        default=VramStrategy.EXCLUSIVE,
+        metadata={"help": "Dense pool placement strategy. The dense pool owns qkv, z, out_proj, norms, router, shared expert, and dense MLP modules."},
+    )
+    # Optional dense-pool device list, relative to CUDA_VISIBLE_DEVICES. In
+    # BALANCED mode, model-tree calculation groups stay together, so qkv is not split.
+    dense_vram_strategy_devices: Optional[List[Union[str, torch.device]]] = field(
+        default=None,
+        metadata={"help": "Explicit device pool for dense modules. In dense BALANCED mode, modules are assigned by calculation groups, so qkv stays co-located."},
+    )
+    # User-facing expert-pool strategy. Expert families are placed as whole
+    # units so gate/up/down for one expert stay on the same device.
+    moe_vram_strategy: VramStrategy = field(
+        default=VramStrategy.EXCLUSIVE,
+        metadata={"help": "MoE expert-pool placement strategy. Expert families stay co-located and can be balanced across this pool."},
+    )
+    # Optional expert-pool device list, relative to CUDA_VISIBLE_DEVICES.
+    moe_vram_strategy_devices: Optional[List[Union[str, torch.device]]] = field(
+        default=None,
+        metadata={"help": "Explicit device pool for MoE expert modules. Each expert family (gate/up/down) stays on one device."},
+    )
 
     gc_mode: GcMode = field(
         default=GcMode.INTERVAL,
@@ -2457,7 +2530,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.offload_to_disk_path = f"./gptqmodel_offload/{path_key}/"
             log.info(f"QuantizeConfig: offload_to_disk_path auto set to `{self.offload_to_disk_path}`")
 
-        self.vram_strategy = _normalize_vram_strategy(self.vram_strategy)
+        self.dense_vram_strategy = _normalize_dense_vram_strategy(self.dense_vram_strategy)
+        self.dense_vram_strategy_devices = _normalize_strategy_devices(
+            self.dense_vram_strategy_devices,
+            field_name="dense_vram_strategy_devices",
+        )
+        self.moe_vram_strategy = _normalize_moe_vram_strategy(self.moe_vram_strategy)
+        self.moe_vram_strategy_devices = _normalize_strategy_devices(
+            self.moe_vram_strategy_devices,
+            field_name="moe_vram_strategy_devices",
+        )
         self.gc_mode = _normalize_gc_mode(self.gc_mode)
         self.moe = _normalize_moe_config(self.moe)
 
@@ -2670,7 +2752,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "gc_mode": "gc_mode",
             "wait_for_submodule_finalizers": "wait_for_submodule_finalizers",
             "auto_forward_data_parallel": "auto_forward_data_parallel",
-            "vram_strategy": "vram_strategy",
+            "dense_vram_strategy": "dense_vram_strategy",
+            "dense_vram_strategy_devices": "dense_vram_strategy_devices",
+            "moe_vram_strategy": "moe_vram_strategy",
+            "moe_vram_strategy_devices": "moe_vram_strategy_devices",
             "moe": "moe",
             "offload_to_disk": "offload_to_disk",
             "offload_to_disk_path": "offload_to_disk_path",
@@ -2801,9 +2886,18 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         meta_payload["gc_mode"] = self.gc_mode.value if isinstance(self.gc_mode, GcMode) else self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
-        meta_payload["vram_strategy"] = (
-            self.vram_strategy.value if isinstance(self.vram_strategy, VramStrategy) else self.vram_strategy
+        meta_payload["dense_vram_strategy"] = (
+            self.dense_vram_strategy.value
+            if isinstance(self.dense_vram_strategy, VramStrategy)
+            else self.dense_vram_strategy
         )
+        meta_payload["dense_vram_strategy_devices"] = self.dense_vram_strategy_devices
+        meta_payload["moe_vram_strategy"] = (
+            self.moe_vram_strategy.value
+            if isinstance(self.moe_vram_strategy, VramStrategy)
+            else self.moe_vram_strategy
+        )
+        meta_payload["moe_vram_strategy_devices"] = self.moe_vram_strategy_devices
         self._update_meta_payload(meta_payload)
 
         out = {
@@ -3605,7 +3699,16 @@ class EXL3Config(BaseQuantizeConfig):
             self.offload_to_disk_path = f"./gptqmodel_offload/{path_key}/"
             log.info(f"QuantizeConfig: offload_to_disk_path auto set to `{self.offload_to_disk_path}`")
 
-        self.vram_strategy = _normalize_vram_strategy(self.vram_strategy)
+        self.dense_vram_strategy = _normalize_dense_vram_strategy(self.dense_vram_strategy)
+        self.dense_vram_strategy_devices = _normalize_strategy_devices(
+            self.dense_vram_strategy_devices,
+            field_name="dense_vram_strategy_devices",
+        )
+        self.moe_vram_strategy = _normalize_moe_vram_strategy(self.moe_vram_strategy)
+        self.moe_vram_strategy_devices = _normalize_strategy_devices(
+            self.moe_vram_strategy_devices,
+            field_name="moe_vram_strategy_devices",
+        )
         self.gc_mode = _normalize_gc_mode(self.gc_mode)
         self.moe = _normalize_moe_config(self.moe)
 
@@ -3750,7 +3853,10 @@ class GGUFConfig(PreProcessorConfig):
                 "gc_mode",
                 "wait_for_submodule_finalizers",
                 "auto_forward_data_parallel",
-                "vram_strategy",
+                "dense_vram_strategy",
+                "dense_vram_strategy_devices",
+                "moe_vram_strategy",
+                "moe_vram_strategy_devices",
                 "weight_only",
             ):
                 meta_payload.pop(key, None)

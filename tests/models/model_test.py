@@ -165,7 +165,10 @@ DEFAULT_TASK_NAMES = ("arc_challenge",)
 class ModelTest(unittest.TestCase):
     DEBUG = True # enable extra debug output
 
-    VRAM_STRATEGY = VramStrategy.EXCLUSIVE
+    DENSE_VRAM_STRATEGY = VramStrategy.EXCLUSIVE
+    DENSE_VRAM_STRATEGY_DEVICES = None
+    MOE_VRAM_STRATEGY = VramStrategy.EXCLUSIVE
+    MOE_VRAM_STRATEGY_DEVICES = None
     TRUST_REMOTE_CODE = False
     TORCH_DTYPE = "auto"
     EVAL_BATCH_SIZE = "auto"
@@ -1398,7 +1401,10 @@ class ModelTest(unittest.TestCase):
                     block_size=self.BNB_BLOCK_SIZE,
                     compress_statistics=self.BNB_COMPRESS_STATISTICS,
                     adapter=self.EORA,
-                    vram_strategy=self.VRAM_STRATEGY,
+                    dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
+                    dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+                    moe_vram_strategy=self.MOE_VRAM_STRATEGY,
+                    moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
                     dynamic=self.DYNAMIC,
                     moe=self.MOE_CONFIG,
                     offload_to_disk=self.OFFLOAD_TO_DISK,
@@ -1412,7 +1418,10 @@ class ModelTest(unittest.TestCase):
                     opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
                     opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
                     adapter=self.EORA,
-                    vram_strategy=self.VRAM_STRATEGY,
+                    dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
+                    dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+                    moe_vram_strategy=self.MOE_VRAM_STRATEGY,
+                    moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
                     dynamic=self.DYNAMIC,
                     moe=self.MOE_CONFIG,
                     offload_to_disk=self.OFFLOAD_TO_DISK,
@@ -1427,7 +1436,10 @@ class ModelTest(unittest.TestCase):
                     bits=self.BITS,
                     adapter=self.EORA,
                     pack_impl="cpu",
-                    vram_strategy=self.VRAM_STRATEGY,
+                    dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
+                    dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+                    moe_vram_strategy=self.MOE_VRAM_STRATEGY,
+                    moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
                     dynamic=self.DYNAMIC,
                     moe=self.MOE_CONFIG,
                     smoother=self.WEIGHT_ONLY.smooth,
@@ -1439,7 +1451,10 @@ class ModelTest(unittest.TestCase):
                     format=self.FORMAT,
                     adapter=self.EORA,
                     pack_impl="cpu",
-                    vram_strategy=self.VRAM_STRATEGY,
+                    dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
+                    dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+                    moe_vram_strategy=self.MOE_VRAM_STRATEGY,
+                    moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
                     dynamic=self.DYNAMIC,
                     moe=self.MOE_CONFIG,
                     smoother=self.WEIGHT_ONLY.smooth,
@@ -1453,7 +1468,10 @@ class ModelTest(unittest.TestCase):
                 format=self.FORMAT,
                 adapter=self.EORA,
                 pack_impl="cpu",
-                vram_strategy=self.VRAM_STRATEGY,
+                dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
+                dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+                moe_vram_strategy=self.MOE_VRAM_STRATEGY,
+                moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
                 dynamic=self.DYNAMIC,
                 moe=self.MOE_CONFIG,
                 smooth=self.WEIGHT_ONLY.smooth,
@@ -1472,7 +1490,10 @@ class ModelTest(unittest.TestCase):
             foem=copy.deepcopy(self.FOEM),
             adapter=self.EORA,
             pack_impl="cpu",
-            vram_strategy=self.VRAM_STRATEGY,
+            dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
+            dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+            moe_vram_strategy=self.MOE_VRAM_STRATEGY,
+            moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
             damp_percent=self.DAMP_PERCENT,
             mse=self.MSE,
             dynamic=self.DYNAMIC,

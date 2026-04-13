@@ -19,6 +19,7 @@ import math
 import threading
 import time
 import logging
+import os
 from concurrent.futures import as_completed
 from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING, Any
 
@@ -38,6 +39,7 @@ from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_
 from ..quantization.config import METHOD, VramStrategy
 from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.ctx import ctx
+from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.device import get_device, get_device_new
 from ..utils.disk import estimate_disk_io_speed
 from ..utils.logger import setup_logger, log_time_block
@@ -51,6 +53,7 @@ from ..utils.looper_helpers import (
 )
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, MoETopKState, set_moe_topk, restore_moe_topk
 from ..utils.offload import offload_to_disk
+from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
 from .. import DEVICE_THREAD_POOL
 from .awq_processor import AWQProcessor
@@ -93,6 +96,42 @@ def _restrict_quant_devices_for_method(method: Any, quant_devices: List[torch.de
         return [non_cpu_devices[0]]
 
     return quant_devices[:1]
+
+
+def _resolve_strategy_device_pool(
+    configured_devices: Optional[List[str]],
+    available_devices: List[torch.device],
+    *,
+    label: str,
+) -> List[torch.device]:
+    """Resolve one strategy device pool as a validated subset of available devices."""
+
+    if not configured_devices:
+        return list(available_devices)
+
+    available_by_name = {
+        str(normalize_device_like(device)): normalize_device_like(device)
+        for device in available_devices
+        if normalize_device_like(device) is not None
+    }
+    resolved: List[torch.device] = []
+    for device_name in configured_devices:
+        normalized = normalize_device_like(device_name)
+        if normalized is None:
+            raise ValueError(f"ModuleLooper: {label} device pool contains an unsupported device value: {device_name!r}.")
+        matched = available_by_name.get(str(normalized))
+        if matched is None:
+            raise ValueError(
+                f"ModuleLooper: {label} device pool {configured_devices} must be a subset of the visible compute devices "
+                f"{list(available_by_name.keys())}."
+            )
+        if matched not in resolved:
+            resolved.append(matched)
+
+    if not resolved:
+        raise ValueError(f"ModuleLooper: {label} device pool is empty after normalization.")
+
+    return resolved
 
 
 class StopMainLoop(Exception):
@@ -189,23 +228,79 @@ class ModuleLooper():
         self._quant_device_rr = 0
         self._module_device_map: Dict[str, torch.device] = {}
         self._quant_device_lock = threading.Lock()
-        vram_strategy = getattr(self.gptq_model.quantize_config, "vram_strategy", VramStrategy.EXCLUSIVE)
-        if isinstance(vram_strategy, str):
+
+        # Resolve the user-facing split dense/MoE placement settings once at
+        # looper construction time so subset planning can reuse stable pools.
+        dense_vram_strategy = getattr(self.gptq_model.quantize_config, "dense_vram_strategy", VramStrategy.EXCLUSIVE)
+        if isinstance(dense_vram_strategy, str):
             try:
-                vram_strategy = VramStrategy(vram_strategy.lower())
+                dense_vram_strategy = VramStrategy(dense_vram_strategy.lower())
             except ValueError:
-                vram_strategy = VramStrategy.EXCLUSIVE
-        supported_strategies = getattr(self.gptq_model, "supported_vram_strategies", [VramStrategy.EXCLUSIVE, VramStrategy.BALANCED])
-        if isinstance(supported_strategies, VramStrategy):
-            supported_strategies = [supported_strategies]
-        if vram_strategy not in supported_strategies:
+                dense_vram_strategy = VramStrategy.EXCLUSIVE
+        supported_dense_strategies = getattr(
+            self.gptq_model,
+            "supported_dense_vram_strategies",
+            [
+                VramStrategy.EXCLUSIVE,
+                VramStrategy.BALANCED,
+            ],
+        )
+        if isinstance(supported_dense_strategies, VramStrategy):
+            supported_dense_strategies = [supported_dense_strategies]
+        if dense_vram_strategy not in supported_dense_strategies:
             log.debug(
-                "ModuleLooper: Model %s does not support VRAM strategy %s; falling back to exclusive.",
+                "ModuleLooper: Model %s does not support dense VRAM strategy %s; falling back to exclusive.",
                 getattr(self.gptq_model, "__class__", type(self.gptq_model)).__name__,
-                vram_strategy,
+                dense_vram_strategy,
             )
-            vram_strategy = VramStrategy.EXCLUSIVE
-        self._vram_strategy = vram_strategy
+            dense_vram_strategy = VramStrategy.EXCLUSIVE
+
+        moe_vram_strategy = getattr(
+            self.gptq_model.quantize_config,
+            "moe_vram_strategy",
+            VramStrategy.EXCLUSIVE,
+        )
+        if isinstance(moe_vram_strategy, str):
+            try:
+                moe_vram_strategy = VramStrategy(moe_vram_strategy.lower())
+            except ValueError:
+                moe_vram_strategy = VramStrategy.EXCLUSIVE
+        supported_moe_strategies = getattr(
+            self.gptq_model,
+            "supported_moe_vram_strategies",
+            [
+                VramStrategy.EXCLUSIVE,
+                VramStrategy.BALANCED,
+            ],
+        )
+        if isinstance(supported_moe_strategies, VramStrategy):
+            supported_moe_strategies = [supported_moe_strategies]
+        if moe_vram_strategy not in supported_moe_strategies:
+            log.debug(
+                "ModuleLooper: Model %s does not support MoE VRAM strategy %s; falling back to exclusive.",
+                getattr(self.gptq_model, "__class__", type(self.gptq_model)).__name__,
+                moe_vram_strategy,
+            )
+            moe_vram_strategy = VramStrategy.EXCLUSIVE
+
+        self._dense_vram_strategy = dense_vram_strategy
+        self._moe_vram_strategy = moe_vram_strategy
+        dense_strategy_devices = getattr(self.gptq_model.quantize_config, "dense_vram_strategy_devices", None)
+        moe_strategy_devices = getattr(self.gptq_model.quantize_config, "moe_vram_strategy_devices", None)
+        self._dense_quant_devices = _resolve_strategy_device_pool(
+            dense_strategy_devices,
+            quant_devices,
+            label="dense_vram_strategy_devices",
+        )
+        self._moe_quant_devices = _resolve_strategy_device_pool(
+            moe_strategy_devices,
+            quant_devices,
+            label="moe_vram_strategy_devices",
+        )
+        # Keep a cheap flag so the planner can skip split-pool logic entirely
+        # when the user leaves a pool on the default exclusive behavior.
+        self._dense_vram_strategy_explicit = bool(dense_strategy_devices) or self._dense_vram_strategy != VramStrategy.EXCLUSIVE
+        self._moe_vram_strategy_explicit = bool(moe_strategy_devices) or self._moe_vram_strategy != VramStrategy.EXCLUSIVE
 
         self._moe_subset_threshold = 16
         self._subset_callback = getattr(self.gptq_model, "subset_callback", None)
@@ -220,9 +315,63 @@ class ModuleLooper():
         else:
             self.moe_routing_override = None
         self.moe_routing_bypass = self.gptq_model.quantize_config.moe_routing_bypass()
+        self._emit_moe_parallel_quant_runtime()
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
+
+    def _emit_moe_parallel_quant_runtime(self) -> None:
+        """Log the runtime knobs that decide whether MoE quant can fan out efficiently."""
+
+        if not getattr(self.gptq_model, "dynamic_expert_index", None):
+            return
+
+        dense_devices = [str(device) for device in self._dense_quant_devices]
+        moe_devices = [str(device) for device in self._moe_quant_devices]
+        gil_env = os.environ.get("PYTHON_GIL")
+        gil_disabled = has_gil_disabled()
+        gil_controllable = has_gil_control()
+        routing_mode = (
+            "override"
+            if self.moe_routing_override is not None
+            else "bypass"
+            if self.moe_routing_bypass
+            else "native"
+        )
+        free_threaded_parallel_quant_eligible = bool(gil_disabled and len(self._moe_quant_devices) > 0)
+
+        log.info(
+            "ModuleLooper: MoE quant runtime dense_pool=%s moe_pool=%s routing_mode=%s routing_override=%s "
+            "PYTHON_GIL=%s gil_disabled=%s free_threaded_parallel_quant_eligible=%s",
+            dense_devices,
+            moe_devices,
+            routing_mode,
+            self.moe_routing_override,
+            gil_env,
+            gil_disabled,
+            free_threaded_parallel_quant_eligible,
+        )
+        if moe_devices and gil_controllable and not gil_disabled:
+            log.warn(
+                "ModuleLooper: MoE quant is configured for device fan-out across %s but Python GIL is still enabled; "
+                "rerun with PYTHON_GIL=0 to unlock the free-threaded parallel quant path.",
+                moe_devices,
+            )
+
+        emit_device_telemetry(
+            "moe_parallel_quant_runtime",
+            dense_devices=dense_devices,
+            moe_devices=moe_devices,
+            dense_strategy=self._dense_vram_strategy,
+            moe_strategy=self._moe_vram_strategy,
+            routing_mode=routing_mode,
+            routing_override=self.moe_routing_override,
+            routing_bypass=self.moe_routing_bypass,
+            python_gil_env=gil_env,
+            python_gil_controllable=gil_controllable,
+            python_gil_disabled=gil_disabled,
+            free_threaded_parallel_quant_eligible=free_threaded_parallel_quant_eligible,
+        )
 
     class MoERoutingOverrideContext:
         """
@@ -728,9 +877,22 @@ class ModuleLooper():
         with self._quant_device_lock:
             cached = self._module_device_map.get(key)
             if cached is not None:
+                emit_device_telemetry(
+                    "quant_device_cache_hit",
+                    module=key,
+                    target_device=cached,
+                )
                 return cached
             device: Optional[torch.device]
-            if len(self._quant_devices) <= 1:
+            preferred_device = normalize_device_like(named_module.state.get("preferred_quant_device"))
+            if preferred_device is not None and any(dev == preferred_device for dev in self._quant_devices if dev is not None):
+                device = preferred_device
+                emit_device_telemetry(
+                    "quant_device_preferred_hint",
+                    module=key,
+                    target_device=device,
+                )
+            elif len(self._quant_devices) <= 1:
                 device = self._quant_devices[0]
             else:
                 device = self._quant_devices[self._quant_device_rr % len(self._quant_devices)]
@@ -740,6 +902,12 @@ class ModuleLooper():
                 device = fallback_device
 
             self._module_device_map[key] = device
+            emit_device_telemetry(
+                "quant_device_assign",
+                module=key,
+                target_device=device,
+                fallback_device=fallback_device,
+            )
             return device
 
     def _apply_forward_device_overrides(
@@ -776,6 +944,12 @@ class ModuleLooper():
             if current is not None:
                 previous[name] = current
 
+            emit_device_telemetry(
+                "forward_override_apply",
+                module=getattr(named_module, "full_name", name) if named_module is not None else name,
+                current_device=current,
+                target_device=target,
+            )
             move_to(module_ref, device=target)
             rehome_module_to_device(module_ref, target, move_parameters=True, move_buffers=True)
             if isinstance(named_module, NamedModule):
@@ -806,6 +980,11 @@ class ModuleLooper():
                 module_ref = named_module.module if isinstance(named_module, NamedModule) else named_module
             if module_ref is None:
                 continue
+            emit_device_telemetry(
+                "forward_override_restore",
+                module=getattr(named_module, "full_name", name) if named_module is not None else name,
+                target_device=revert_device,
+            )
             move_to(module_ref, device=revert_device)
             rehome_module_to_device(module_ref, revert_device, move_parameters=True, move_buffers=True)
             if isinstance(named_module, NamedModule):
@@ -897,6 +1076,11 @@ class ModuleLooper():
     ) -> torch.device:
         """Place a named module and its processor task on the chosen device."""
 
+        try:
+            previous_device = get_device(named_module.module)
+        except Exception:
+            previous_device = None
+
         target_device = self._assign_quant_device_for_module(
             named_module,
             fallback_device=fallback_device,
@@ -917,6 +1101,12 @@ class ModuleLooper():
 
         setattr(named_module, "target_device", target_device)
         setattr(named_module.module, "target_device", target_device)
+        emit_device_telemetry(
+            "quant_prepare",
+            module=getattr(named_module, "full_name", named_module.name),
+            previous_device=previous_device,
+            target_device=target_device,
+        )
 
         self._rehome_processor_task(processor, named_module, target_device)
 
@@ -1270,6 +1460,11 @@ class ModuleLooper():
             is_awq_quantize=is_awq_quantize,
             include_capture_only=requires_activation_capture,
         )
+        planning_layer_modules = self.gptq_model.full_layer_modules(
+            model_config=self.gptq_model.model.config,
+            is_awq_quantize=is_awq_quantize,
+            include_capture_only=requires_activation_capture,
+        )
 
         # true-sequential will replay the quantized activations after each subset has been quantized to be used for next subset quantization
         # this should always be true for gptq unless you want lower but misleading error_loss that is misleading and will lead to lower post-quantized model
@@ -1301,6 +1496,7 @@ class ModuleLooper():
             self,
             layers=layers,
             layer_modules=layer_modules,
+            planning_layer_modules=planning_layer_modules,
             layers_prefix=layers_prefix,
             fallback=fallback,
             shared_kv_cache_dict=shared_kv_cache_dict,

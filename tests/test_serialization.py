@@ -92,7 +92,10 @@ class TestSerialization(unittest.TestCase):
                 chunk_bytes=4096,
                 staging_dtype=torch.bfloat16,
             ),
-            vram_strategy=VramStrategy.BALANCED,
+            dense_vram_strategy=VramStrategy.BALANCED,
+            dense_vram_strategy_devices=["cuda:0", "cuda:1"],
+            moe_vram_strategy=VramStrategy.BALANCED,
+            moe_vram_strategy_devices=["cuda:2", "cuda:3"],
         )
 
         payload = cfg.to_dict()
@@ -109,7 +112,10 @@ class TestSerialization(unittest.TestCase):
             "mock_quantization",
             "act_group_aware",
             "hessian",
-            "vram_strategy",
+            "dense_vram_strategy",
+            "dense_vram_strategy_devices",
+            "moe_vram_strategy",
+            "moe_vram_strategy_devices",
         ]
         for field in meta_only_fields:
             self.assertNotIn(field, payload)
@@ -126,7 +132,10 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(meta["hessian"]["chunk_size"], cfg.hessian.chunk_size)
         self.assertEqual(meta["hessian"]["chunk_bytes"], cfg.hessian.chunk_bytes)
         self.assertEqual(meta["hessian"]["staging_dtype"], "bfloat16")
-        self.assertEqual(meta["vram_strategy"], cfg.vram_strategy.value)
+        self.assertEqual(meta["dense_vram_strategy"], cfg.dense_vram_strategy.value)
+        self.assertEqual(meta["dense_vram_strategy_devices"], cfg.dense_vram_strategy_devices)
+        self.assertEqual(meta["moe_vram_strategy"], cfg.moe_vram_strategy.value)
+        self.assertEqual(meta["moe_vram_strategy_devices"], cfg.moe_vram_strategy_devices)
 
     def test_gptaq_config_none_serialization(self):
         cfg = QuantizeConfig()
