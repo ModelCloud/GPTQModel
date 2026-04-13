@@ -181,7 +181,7 @@ jobs:
           echo "Model envs: $model_envs"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
-  prepare-torch-envs:
+  prepare:
     needs:
       - list-test-files
       - check-vm
@@ -257,7 +257,7 @@ jobs:
           done
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
 
-  prepare-model-envs:
+  prepare-model:
     needs:
       - list-test-files
       - check-vm
@@ -337,7 +337,7 @@ jobs:
     needs:
       - list-test-files
       - check-vm
-      - prepare-torch-envs
+      - prepare
     runs-on: [ self-hosted, xeon5 ]
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu24.04_0325
@@ -459,7 +459,7 @@ jobs:
     needs:
       - list-test-files
       - check-vm
-      - prepare-model-envs
+      - prepare-model
     runs-on: [ self-hosted, xeon5 ]
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu24.04_0325
