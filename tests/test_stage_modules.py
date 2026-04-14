@@ -1,5 +1,5 @@
-import threading
 import sys
+import threading
 import types
 from typing import Dict
 

@@ -16,6 +16,7 @@ import torch
 from .env import env_flag
 from .logger import setup_logger
 
+
 log = setup_logger()
 
 _DEVICE_TELEMETRY_ENV = "GPTQMODEL_DEVICE_TELEMETRY"
