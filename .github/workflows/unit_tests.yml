@@ -107,6 +107,12 @@ jobs:
           echo "artifact_id: ${{ github.event.inputs.artifact_id }}"
           echo "selected server: ${{ github.event.inputs.server }}"
 
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
       - name: Set server
         id: get_ip
         run: |
