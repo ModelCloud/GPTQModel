@@ -235,8 +235,8 @@ jobs:
 
           for row in "${env_rows[@]}"; do
               echo "::group::updating env for $row"
-                IFS=$'\t' read -r env_name test_script python_version <<< "$row"
-                echo "preparing env=$env_name test=$test_script py=$python_version"
+                IFS=$'\t' read -r env_name python_version <<< "$row"
+                echo "preparing env=$env_name py=$python_version"
                 source /opt/uv/setup_uv_venv.sh "$env_name"
           
                 python -V
@@ -247,9 +247,6 @@ jobs:
                   "${{ needs.check-vm.outputs.cuda_version }}" \
                   "${{ env.TORCH_VERSION }}" \
                   "$python_version"
-          
-                python .github/scripts/install_deps.py "$test_script"
-                python .github/scripts/uninstall_deps.py "$test_script"
           
                 uv pip uninstall gptqmodel || true
                 /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}

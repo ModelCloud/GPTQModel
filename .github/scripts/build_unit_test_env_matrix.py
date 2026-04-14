@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import yaml
+
 from deps_utils import has_specific_deps
 from get_unit_test_env_name import build_env_name
 from parse_test_config import parse_test_config
@@ -51,7 +52,6 @@ def main() -> None:
         if entry is None:
             envs[env_name] = {
                 "env_name": env_name,
-                "test_script": test_name,
                 "python_version": py,
             }
             continue
@@ -61,9 +61,6 @@ def main() -> None:
                 f"conflicting python_version for env {env_name}: "
                 f"{entry['python_version']} vs {py}"
             )
-
-        if test_name < entry["test_script"]:
-            entry["test_script"] = test_name
 
     print(json.dumps(sorted(envs.values(), key=lambda item: item["env_name"])))
 

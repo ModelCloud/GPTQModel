@@ -12,7 +12,7 @@ def main() -> None:
     model_envs = json.loads(args.model_envs_json or "[]")
 
     for item in [*torch_envs, *model_envs]:
-        print(f'{item["env_name"]}\t{item["test_script"]}\t{item["python_version"]}')
+        print(f'{item["env_name"]}\t{item["python_version"]}')
 
 
 if __name__ == "__main__":
