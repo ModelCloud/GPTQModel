@@ -367,6 +367,7 @@ jobs:
           python .github/scripts/uninstall_deps.py "${{ matrix.test_script }}"
 
       - name: Install package from source
+        if: ${{ env.ENV_NAME != 'gptqmodel_unit_tests_common' && env.ENV_NAME != 'gptqmodel_unit_tests_models_common' }}
         run: |
           install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
           lock_dir="/opt/uv/locks"
@@ -569,6 +570,7 @@ jobs:
           python .github/scripts/uninstall_deps.py "${{ matrix.test_script }}"
 
       - name: Install package from source
+        if: ${{ env.ENV_NAME != 'gptqmodel_unit_tests_common' && env.ENV_NAME != 'gptqmodel_unit_tests_models_common' }}
         run: |
           install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
           lock_dir="/opt/uv/locks"
