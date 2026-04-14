@@ -318,6 +318,8 @@ jobs:
 
       - name: Activate uv env
         run: |
+          # fix fatal: detected dubious ownership in repository at '/__w/GPTQModel/GPTQModel'
+          git config --global --add safe.directory /__w/GPTQModel/GPTQModel
           source /opt/uv/setup_uv_venv.sh unit_test_env
 
           config_json="$(python3 .github/scripts/parse_test_config.py \
