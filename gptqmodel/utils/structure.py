@@ -31,6 +31,7 @@ import json
 import os
 import re
 import threading
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
 import pcre
@@ -552,6 +553,15 @@ def _ensure_target_storage_on_device_(param: torch.nn.Parameter, device: torch.d
     return param
 
 
+@dataclass(frozen=True)
+class _MoEAliasSpec:
+    """MoE path/group information extracted from a model definition's module tree."""
+
+    root_path: tuple[str, ...]
+    experts_path: tuple[str, ...]
+    leaf_groups: tuple[tuple[str, ...], ...]
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local safetensors models.
 
@@ -566,21 +576,16 @@ class LazyTurtle:
 
     supports_reload = False
     is_lazy_checkpoint_source = True
-    _MOE_CONTAINER_ALIASES: tuple[tuple[str, ...], ...] = (("block_sparse_moe", "mlp", "moe"),)
-    _MOE_LEAF_ALIASES: Dict[str, tuple[str, ...]] = {
-        "w1": ("w1", "gate_proj", "gate"),
-        "gate_proj": ("gate_proj", "gate", "w1"),
-        "gate": ("gate", "gate_proj", "w1"),
-        "w2": ("w2", "down_proj", "down"),
-        "down_proj": ("down_proj", "down", "w2"),
-        "down": ("down", "down_proj", "w2"),
-        "w3": ("w3", "up_proj", "up"),
-        "up_proj": ("up_proj", "up", "w3"),
-        "up": ("up", "up_proj", "w3"),
+    # Minimal legacy root-name fallbacks. These are only used after we have already
+    # identified the current path as an MoE path from the model definition/module tree.
+    _LEGACY_MOE_ROOT_ALIASES: tuple[str, ...] = ("mlp", "moe", "block_sparse_moe")
+    # Legacy expert-leaf fallbacks keyed by (group_index, leaf_index) within the
+    # module-tree-defined expert projection groups.
+    _LEGACY_MOE_SLOT_ALIASES: Dict[tuple[int, int], tuple[str, ...]] = {
+        (0, 0): ("gate_proj", "gate", "w1"),
+        (0, 1): ("up_proj", "up", "w3"),
+        (1, 0): ("down_proj", "down", "w2"),
     }
-    _MOE_LEAF_PATTERN = re.compile(
-        r"^(?P<prefix>(?:.*\.)?experts\.\d+)\.(?P<leaf>w1|w2|w3|gate_proj|gate|up_proj|up|down_proj|down)\.(?P<tensor>weight|bias)$"
-    )
 
     def __init__(
         self,
@@ -588,11 +593,20 @@ class LazyTurtle:
         model_local_path: str,
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
+        module_tree: Optional[Any] = None,
     ) -> None:
         self.model_local_path = model_local_path
         self.config = copy.deepcopy(config)
         self._model_init_kwargs = dict(model_init_kwargs or {})
         self._weight_map = self._load_weight_map(model_local_path)
+        self._module_tree = copy.deepcopy(module_tree)
+        self._module_tree_layer_prefix, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
+        # Cache runtime expert child ordering per resolved MoE root so repeated tensor
+        # materialization does not keep re-walking the same live module structure.
+        self._runtime_leaf_group_cache: Dict[
+            tuple[str, tuple[str, ...], tuple[str, ...], tuple[tuple[str, ...], ...]],
+            tuple[tuple[str, ...], ...],
+        ] = {}
         self._lock = threading.RLock()
 
     @classmethod
@@ -602,6 +616,7 @@ class LazyTurtle:
         model_local_path: Optional[str],
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
+        module_tree: Optional[Any] = None,
     ) -> Optional["LazyTurtle"]:
         if not model_local_path or not os.path.isdir(model_local_path):
             return None
@@ -611,6 +626,7 @@ class LazyTurtle:
                 model_local_path=model_local_path,
                 config=config,
                 model_init_kwargs=model_init_kwargs,
+                module_tree=module_tree,
             )
         except Exception as exc:
             log.debug(
@@ -659,6 +675,7 @@ class LazyTurtle:
             return self._load_checkpoint_tensors_for_module_path(
                 module_path=path,
                 recurse=recurse,
+                target_model=target_model,
             )
 
     def sync_all_meta(
@@ -672,8 +689,15 @@ class LazyTurtle:
         del require_class_match, verify_shapes
 
         materialized = 0
-        param_cache: Dict[tuple[str, torch.dtype, bool], nn.Parameter] = {}
-        buffer_cache: Dict[tuple[str, torch.dtype], torch.Tensor] = {}
+        param_cache: Dict[
+            tuple[str, Optional[int], Optional[int], Optional[int], torch.dtype, bool],
+            nn.Parameter,
+        ] = {}
+        buffer_cache: Dict[
+            tuple[str, Optional[int], Optional[int], Optional[int], torch.dtype],
+            torch.Tensor,
+        ] = {}
+        modules_by_name = dict(shell_model.named_modules())
 
         with self._lock, torch.inference_mode():
             for qname, shell_sub in list(shell_model.named_modules()):
@@ -682,6 +706,7 @@ class LazyTurtle:
                     module_path=qname,
                     param_cache=param_cache,
                     buffer_cache=buffer_cache,
+                    modules_by_name=modules_by_name,
                 )
 
         if tie_after and hasattr(shell_model, "tie_weights") and getattr(shell_model.config, "tie_word_embeddings", False):
@@ -726,45 +751,330 @@ class LazyTurtle:
             return module_path
         return f"{module_path}.{rel_name}"
 
-    def _candidate_name_aliases(self, full_name: str) -> list[str]:
-        """Expand known MoE path aliases for one tensor name."""
+    @staticmethod
+    def _parse_module_spec(module_spec: str) -> tuple[str, tuple[str, ...]]:
+        """Split a module-tree token into its plain name and its `:flag` suffixes."""
 
-        queue = [full_name]
-        seen = {full_name}
-        aliases: list[str] = []
+        parts = module_spec.split(":") if isinstance(module_spec, str) else [str(module_spec)]
+        return parts[0], tuple(part for part in parts[1:] if part)
 
-        while queue:
-            current = queue.pop(0)
-            aliases.append(current)
+    @classmethod
+    def _build_moe_alias_specs(cls, module_tree: Optional[Any]) -> tuple[tuple[str, ...], tuple[_MoEAliasSpec, ...]]:
+        """Extract source-side MoE roots, expert paths, and grouped expert leaves from `module_tree`."""
 
-            parts = current.split(".")
-            for idx, part in enumerate(parts):
-                for group in self._MOE_CONTAINER_ALIASES:
-                    if part not in group:
+        if not isinstance(module_tree, list):
+            return (), ()
+
+        layer_prefix: list[str] = []
+        specs: list[_MoEAliasSpec] = []
+        seen_specs: set[tuple[tuple[str, ...], tuple[str, ...], tuple[tuple[str, ...], ...]]] = set()
+
+        for item in module_tree:
+            if item == "#":
+                break
+            if isinstance(item, str):
+                name, _flags = cls._parse_module_spec(item)
+                layer_prefix.append(name)
+
+        def walk(node: Any, path: tuple[str, ...], moe_root: Optional[tuple[str, ...]]) -> None:
+            if isinstance(node, dict):
+                for raw_key, value in node.items():
+                    if raw_key == "#":
+                        walk(value, path + ("#",), moe_root)
                         continue
-                    for alt in group:
-                        if alt == part:
-                            continue
-                        candidate_parts = list(parts)
-                        candidate_parts[idx] = alt
-                        alias = ".".join(candidate_parts)
-                        if alias in seen:
-                            continue
-                        seen.add(alias)
-                        queue.append(alias)
+                    if not isinstance(raw_key, str):
+                        continue
+                    name, flags = cls._parse_module_spec(raw_key)
+                    next_path = path + (name,)
+                    next_moe_root = next_path if "moe" in flags and moe_root is None else moe_root
+                    walk(value, next_path, next_moe_root)
+                return
 
-            match = self._MOE_LEAF_PATTERN.match(current)
-            if match is None:
+            if isinstance(node, (tuple, list)) and all(isinstance(item, str) for item in node):
+                if moe_root is None or "#" not in path:
+                    return
+
+                placeholder_index = path.index("#")
+                experts_path = path[:placeholder_index]
+                grouped: Dict[int, list[str]] = {}
+                for raw_leaf in node:
+                    leaf_name, flags = cls._parse_module_spec(raw_leaf)
+                    group_index = 0
+                    for flag in flags:
+                        if flag.isdigit():
+                            group_index = int(flag)
+                            break
+                    grouped.setdefault(group_index, []).append(leaf_name)
+
+                if not grouped:
+                    return
+
+                leaf_groups = tuple(tuple(grouped[group]) for group in sorted(grouped))
+                spec_key = (moe_root, experts_path, leaf_groups)
+                if spec_key in seen_specs:
+                    return
+                seen_specs.add(spec_key)
+                specs.append(
+                    _MoEAliasSpec(
+                        root_path=moe_root,
+                        experts_path=experts_path,
+                        leaf_groups=leaf_groups,
+                    )
+                )
+                return
+
+            if isinstance(node, (tuple, list)):
+                for item in node:
+                    walk(item, path, moe_root)
+
+        found_hash = False
+        for item in module_tree:
+            if item == "#":
+                found_hash = True
                 continue
-            prefix = match.group("prefix")
-            leaf = match.group("leaf")
-            tensor_name = match.group("tensor")
-            for alt_leaf in self._MOE_LEAF_ALIASES.get(leaf, (leaf,)):
-                alias = f"{prefix}.{alt_leaf}.{tensor_name}"
-                if alias in seen:
+            if not found_hash:
+                continue
+            walk(item, (), None)
+
+        return tuple(layer_prefix), tuple(specs)
+
+    def _split_layer_relative_path(self, name: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Return `(layer_prefix_with_index, relative_parts)` for a full runtime/checkpoint name."""
+
+        parts = tuple(part for part in name.split(".") if part)
+        prefix = self._module_tree_layer_prefix
+        if prefix:
+            max_start = len(parts) - len(prefix)
+            for start in range(max_start + 1):
+                end = start + len(prefix)
+                if parts[start:end] != prefix:
                     continue
-                seen.add(alias)
-                queue.append(alias)
+                if end >= len(parts) or not parts[end].isdigit():
+                    continue
+                return parts[start : end + 1], parts[end + 1 :]
+        return (), parts
+
+    @staticmethod
+    def _module_has_numeric_children(module: nn.Module) -> bool:
+        """Detect expert containers like `experts.0`, `experts.1`, ... from the live module tree."""
+
+        return any(name.isdigit() for name, _child in module.named_children())
+
+    @staticmethod
+    def _module_has_direct_tensors(module: nn.Module) -> bool:
+        """Treat immediate parameter/buffer owners as projection leaves for runtime group inference."""
+
+        return any(True for _ in module.named_parameters(recurse=False)) or any(
+            True for _ in module.named_buffers(recurse=False)
+        )
+
+    def _find_runtime_moe_context(
+        self,
+        module_name: str,
+        modules_by_name: Optional[Dict[str, nn.Module]],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Walk upward from a runtime module to find the enclosing MoE root and its expert container."""
+
+        if modules_by_name is None or not self._moe_alias_specs:
+            return None, None
+
+        preferred_expert_names = {
+            spec.experts_path[-1]
+            for spec in self._moe_alias_specs
+            if spec.experts_path
+        }
+        current = module_name
+
+        while True:
+            module = modules_by_name.get(current)
+            if module is not None:
+                fallback_experts_path = None
+                for child_name, child in module.named_children():
+                    if not self._module_has_numeric_children(child):
+                        continue
+                    experts_path = self._join_tensor_name(current, child_name)
+                    if child_name in preferred_expert_names:
+                        return current, experts_path
+                    if fallback_experts_path is None:
+                        fallback_experts_path = experts_path
+                if fallback_experts_path is not None:
+                    return current, fallback_experts_path
+
+            if not current:
+                break
+            current = current.rpartition(".")[0]
+
+        return None, None
+
+    def _runtime_leaf_groups_for_spec(
+        self,
+        runtime_root_path: str,
+        spec: _MoEAliasSpec,
+        modules_by_name: Optional[Dict[str, nn.Module]],
+    ) -> tuple[tuple[str, ...], ...]:
+        """Infer runtime expert leaf ordering so module-tree groups can be mapped positionally."""
+
+        cache_key = (runtime_root_path, spec.root_path, spec.experts_path, spec.leaf_groups)
+        cached = self._runtime_leaf_group_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        runtime_groups: tuple[tuple[str, ...], ...] = ()
+        if modules_by_name is None:
+            self._runtime_leaf_group_cache[cache_key] = runtime_groups
+            return runtime_groups
+
+        root_module = modules_by_name.get(runtime_root_path)
+        if root_module is None:
+            self._runtime_leaf_group_cache[cache_key] = runtime_groups
+            return runtime_groups
+
+        experts_name = spec.experts_path[-1] if spec.experts_path else None
+        experts_module = getattr(root_module, experts_name, None) if experts_name and hasattr(root_module, experts_name) else None
+        if not isinstance(experts_module, nn.Module) or not self._module_has_numeric_children(experts_module):
+            experts_module = None
+            for _child_name, child in root_module.named_children():
+                if self._module_has_numeric_children(child):
+                    experts_module = child
+                    break
+
+        if experts_module is not None:
+            sample_expert = None
+            for expert_name, expert_module in experts_module.named_children():
+                if expert_name.isdigit():
+                    sample_expert = expert_module
+                    break
+
+            if sample_expert is not None:
+                leaf_names = [
+                    child_name
+                    for child_name, child in sample_expert.named_children()
+                    if self._module_has_direct_tensors(child)
+                ]
+                if not leaf_names:
+                    leaf_names = [child_name for child_name, _child in sample_expert.named_children()]
+
+                group_sizes = [len(group) for group in spec.leaf_groups]
+                required_leaf_count = sum(group_sizes)
+                if required_leaf_count > 0 and len(leaf_names) >= required_leaf_count:
+                    grouped_names: list[tuple[str, ...]] = []
+                    offset = 0
+                    for group_size in group_sizes:
+                        grouped_names.append(tuple(leaf_names[offset : offset + group_size]))
+                        offset += group_size
+                    runtime_groups = tuple(grouped_names)
+
+        self._runtime_leaf_group_cache[cache_key] = runtime_groups
+        return runtime_groups
+
+    def _root_alias_variants(self, root_path: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+        """Expand a source MoE root with the small set of known legacy root-name variants."""
+
+        variants: list[tuple[str, ...]] = [root_path]
+        if root_path and root_path[-1] in self._LEGACY_MOE_ROOT_ALIASES:
+            for alias in self._LEGACY_MOE_ROOT_ALIASES:
+                candidate = root_path[:-1] + (alias,)
+                if candidate not in variants:
+                    variants.append(candidate)
+        return tuple(variants)
+
+    def _leaf_alias_variants(
+        self,
+        spec: _MoEAliasSpec,
+        group_index: int,
+        leaf_index: int,
+    ) -> tuple[str, ...]:
+        """Expand one source expert leaf with the slot-level legacy aliases for that MoE group position."""
+
+        source_leaf = spec.leaf_groups[group_index][leaf_index]
+        variants = [source_leaf]
+        for alias in self._LEGACY_MOE_SLOT_ALIASES.get((group_index, leaf_index), ()):
+            if alias not in variants:
+                variants.append(alias)
+        return tuple(variants)
+
+    def _expert_prefix_variants(
+        self,
+        spec: _MoEAliasSpec,
+        expert_index: str,
+    ) -> tuple[tuple[str, ...], ...]:
+        """Expand an expert path with root-level legacy aliases while preserving the expert subtree layout."""
+
+        variants: list[tuple[str, ...]] = [spec.experts_path + (expert_index,)]
+        if spec.root_path and tuple(spec.experts_path[: len(spec.root_path)]) == spec.root_path:
+            expert_tail = spec.experts_path[len(spec.root_path) :]
+            for root_alias in self._root_alias_variants(spec.root_path):
+                candidate = root_alias + expert_tail + (expert_index,)
+                if candidate not in variants:
+                    variants.append(candidate)
+        return tuple(variants)
+
+    def _module_tree_name_aliases(
+        self,
+        name: str,
+        *,
+        modules_by_name: Optional[Dict[str, nn.Module]],
+        is_tensor: bool,
+    ) -> list[str]:
+        """Generate context-aware MoE aliases using module-tree metadata plus live runtime ordering."""
+
+        if modules_by_name is None or not self._moe_alias_specs or not name:
+            return []
+
+        module_name = name.rsplit(".", 1)[0] if is_tensor else name
+        runtime_root_path, runtime_experts_path = self._find_runtime_moe_context(module_name, modules_by_name)
+        if runtime_root_path is None:
+            return []
+
+        layer_head, rel_parts = self._split_layer_relative_path(name)
+        _runtime_layer_head, runtime_root_rel = self._split_layer_relative_path(runtime_root_path)
+        _runtime_experts_head, runtime_experts_rel = self._split_layer_relative_path(runtime_experts_path or "")
+        if not rel_parts or not runtime_root_rel:
+            return []
+
+        aliases: list[str] = []
+        seen = {name}
+
+        for spec in self._moe_alias_specs:
+            if tuple(rel_parts[: len(runtime_root_rel)]) == runtime_root_rel:
+                tail = rel_parts[len(runtime_root_rel) :]
+                for root_alias in self._root_alias_variants(spec.root_path):
+                    alias = ".".join(layer_head + root_alias + tail)
+                    if alias not in seen:
+                        seen.add(alias)
+                        aliases.append(alias)
+
+            if not runtime_experts_rel:
+                continue
+            if len(rel_parts) < len(runtime_experts_rel) + 2:
+                continue
+            if tuple(rel_parts[: len(runtime_experts_rel)]) != runtime_experts_rel:
+                continue
+
+            expert_index = rel_parts[len(runtime_experts_rel)]
+            runtime_leaf = rel_parts[len(runtime_experts_rel) + 1]
+            if not expert_index.isdigit():
+                continue
+
+            runtime_groups = self._runtime_leaf_groups_for_spec(runtime_root_path, spec, modules_by_name)
+            if not runtime_groups:
+                continue
+
+            for group_index, runtime_group in enumerate(runtime_groups):
+                if runtime_leaf not in runtime_group:
+                    continue
+                leaf_index = runtime_group.index(runtime_leaf)
+                if group_index >= len(spec.leaf_groups) or leaf_index >= len(spec.leaf_groups[group_index]):
+                    continue
+
+                tail = rel_parts[len(runtime_experts_rel) + 2 :]
+                for source_prefix in self._expert_prefix_variants(spec, expert_index):
+                    for leaf_alias in self._leaf_alias_variants(spec, group_index, leaf_index):
+                        alias = ".".join(layer_head + source_prefix + (leaf_alias,) + tail)
+                        if alias not in seen:
+                            seen.add(alias)
+                            aliases.append(alias)
+                break
 
         return aliases
 
@@ -786,25 +1096,66 @@ class LazyTurtle:
             candidates.append(candidate)
         return candidates
 
-    def _resolve_checkpoint_module_path(self, module_path: str) -> str:
+    def _resolve_checkpoint_module_path(
+        self,
+        module_path: str,
+        *,
+        modules_by_name: Optional[Dict[str, nn.Module]] = None,
+    ) -> str:
         """Resolve a shell module path to the checkpoint path when wrappers add extra roots."""
 
-        for candidate in self._candidate_module_paths(module_path):
-            for alias in self._candidate_name_aliases(candidate):
-                prefix = f"{alias}."
-                if any(full_name.startswith(prefix) for full_name in self._weight_map):
-                    return alias
+        candidates = [module_path]
+        candidates.extend(
+            self._module_tree_name_aliases(
+                module_path,
+                modules_by_name=modules_by_name,
+                is_tensor=False,
+            )
+        )
+        candidates.extend(self._candidate_module_paths(module_path))
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            prefix = f"{candidate}."
+            if any(full_name.startswith(prefix) for full_name in self._weight_map):
+                return candidate
         return module_path
 
-    def _resolve_checkpoint_tensor_name(self, module_path: str, rel_name: str) -> str:
-        """Resolve a tensor name against checkpoint aliases derived from the shell module path."""
+    def _resolve_checkpoint_tensor_name(
+        self,
+        module_path: str,
+        rel_name: str,
+        *,
+        modules_by_name: Optional[Dict[str, nn.Module]] = None,
+    ) -> str:
+        """Resolve a tensor name against wrapper stripping and module-tree-derived MoE aliases."""
 
-        for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
-            candidate_name = self._join_tensor_name(candidate_path, rel_name)
-            for alias in self._candidate_name_aliases(candidate_name):
-                if alias in self._weight_map:
-                    return alias
-        return self._join_tensor_name(module_path, rel_name)
+        full_name = self._join_tensor_name(module_path, rel_name)
+        candidates = [full_name]
+        candidates.extend(
+            self._module_tree_name_aliases(
+                full_name,
+                modules_by_name=modules_by_name,
+                is_tensor=True,
+            )
+        )
+        candidates.extend(
+            self._join_tensor_name(candidate_path, rel_name)
+            for candidate_path in self._candidate_module_paths(module_path, allow_empty=True)
+        )
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate in self._weight_map:
+                return candidate
+
+        return full_name
 
     def _resolve_split_gate_up_tensor_name(
         self,
@@ -987,10 +1338,16 @@ class LazyTurtle:
         self,
         module_path: str,
         rel_name: str,
+        *,
+        modules_by_name: Optional[Dict[str, nn.Module]] = None,
     ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
         """Resolve a target tensor name to its checkpoint source and optional fused split index."""
 
-        full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
+        full_name = self._resolve_checkpoint_tensor_name(
+            module_path,
+            rel_name,
+            modules_by_name=modules_by_name,
+        )
         if full_name in self._weight_map:
             return full_name, None, None, None
 
@@ -1054,10 +1411,15 @@ class LazyTurtle:
         *,
         module_path: str,
         recurse: bool,
+        target_model: Optional[nn.Module] = None,
     ) -> Dict[str, torch.Tensor]:
         """Return raw checkpoint tensors keyed by submodule-relative names."""
 
-        resolved_module_path = self._resolve_checkpoint_module_path(module_path)
+        modules_by_name = dict(target_model.named_modules()) if target_model is not None else None
+        resolved_module_path = self._resolve_checkpoint_module_path(
+            module_path,
+            modules_by_name=modules_by_name,
+        )
         prefix = f"{resolved_module_path}."
         grouped_names: Dict[str, list[tuple[str, str]]] = {}
         for full_name, shard in self._weight_map.items():
@@ -1099,7 +1461,11 @@ class LazyTurtle:
 
         grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
         for rel_name in t_params:
-            full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
+            full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(
+                module_path,
+                rel_name,
+                modules_by_name=modules_by_name,
+            )
             if full_name is None:
                 continue
             shard = self._weight_map.get(full_name)
@@ -1121,9 +1487,17 @@ class LazyTurtle:
             grouped_names.setdefault(shard, []).append(("param", rel_name, full_name, expert_index, split_index, split_dim))
 
         for rel_name, target_buffer in list(t_bufs.items()):
-            full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
+            full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(
+                module_path,
+                rel_name,
+                modules_by_name=modules_by_name,
+            )
             if full_name is None:
-                full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
+                full_name = self._resolve_checkpoint_tensor_name(
+                    module_path,
+                    rel_name,
+                    modules_by_name=modules_by_name,
+                )
                 expert_index = None
                 split_index = None
                 split_dim = None
@@ -1392,6 +1766,7 @@ class LazyTurtle:
         module_path: str,
         param_cache: Dict[tuple[str, Optional[int], Optional[int], Optional[int], torch.dtype, bool], nn.Parameter],
         buffer_cache: Dict[tuple[str, Optional[int], Optional[int], Optional[int], torch.dtype], torch.Tensor],
+        modules_by_name: Optional[Dict[str, nn.Module]],
     ) -> int:
         synced = 0
 
@@ -1400,7 +1775,11 @@ class LazyTurtle:
                 if not _is_meta_tensor(shell_param):
                     continue
 
-                full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, name)
+                full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(
+                    module_path,
+                    name,
+                    modules_by_name=modules_by_name,
+                )
                 if full_name is None:
                     continue
                 shard = self._weight_map.get(full_name)
@@ -1477,7 +1856,11 @@ class LazyTurtle:
                 if not _is_meta_tensor(shell_buffer):
                     continue
 
-                full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, name)
+                full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(
+                    module_path,
+                    name,
+                    modules_by_name=modules_by_name,
+                )
                 if full_name is None:
                     continue
                 shard = self._weight_map.get(full_name)
