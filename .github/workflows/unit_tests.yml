@@ -233,43 +233,56 @@ jobs:
             echo "$i: ${env_rows[$i]}"
           done
 
+          pids=()
           for row in "${env_rows[@]}"; do
+            (
               echo "::group::updating env for $row"
-                IFS=$'\t' read -r env_name python_version <<< "$row"
-                echo "preparing env=$env_name py=$python_version"
-                source /opt/uv/setup_uv_venv.sh "$env_name"
-          
-                python -V
-                which python
-                which pip || true
-          
-                bash /opt/env/init_compiler_no_env.sh \
-                  "${{ needs.check-vm.outputs.cuda_version }}" \
-                  "${{ env.TORCH_VERSION }}" \
-                  "$python_version"
-          
-                uv pip uninstall gptqmodel || true
-                /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-                uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-                for pkg in defuser pypcre tokenicer logbar evalution; do
-                  uv pip uninstall "$pkg" || true
-                done
-                for url in \
-                  "$DEFUSER_GIT_URL" \
-                  "$PYPCRE_GIT_URL" \
-                  "$TOKENICER_GIT_URL" \
-                  "$LOGBAR_GIT_URL" \
-                  "$EVALUTION_GIT_URL"
-                do
-                  uv pip install "$url"
-                done
-                /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-          
-                echo "::group::pip list"
-                  uv pip list
-                echo "::endgroup::"
+              IFS=$'\t' read -r env_name python_version <<< "$row"
+              echo "preparing env=$env_name py=$python_version"
+              source /opt/uv/setup_uv_venv.sh "$env_name"
+
+              python -V
+              which python
+              which pip || true
+
+              bash /opt/env/init_compiler_no_env.sh \
+                "${{ needs.check-vm.outputs.cuda_version }}" \
+                "${{ env.TORCH_VERSION }}" \
+                "$python_version"
+
+              uv pip uninstall gptqmodel || true
+              /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+              uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+              for pkg in defuser pypcre tokenicer logbar evalution; do
+                uv pip uninstall "$pkg" || true
+              done
+              for url in \
+                "$DEFUSER_GIT_URL" \
+                "$PYPCRE_GIT_URL" \
+                "$TOKENICER_GIT_URL" \
+                "$LOGBAR_GIT_URL" \
+                "$EVALUTION_GIT_URL"
+              do
+                uv pip install "$url"
+              done
+              /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+
+              echo "::group::pip list"
+                uv pip list
               echo "::endgroup::"
+              echo "::endgroup::"
+            ) &
+            pids+=("$!")
           done
+
+          status=0
+          for pid in "${pids[@]}"; do
+            if ! wait "$pid"; then
+              status=1
+            fi
+          done
+
+          exit "$status"
 
   torch:
     needs:
