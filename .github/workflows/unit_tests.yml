@@ -407,7 +407,6 @@ jobs:
           # somehow torch will be downgrade to 2.10
           uv pip install torch torchvision torchaudio -U --torch-backend=${{ env.UV_TORCH_BACKEND }}
 
-
           mv "$lock_file" "$unlock_file"
 
           echo "::group::pip list"
@@ -602,7 +601,10 @@ jobs:
 
           uv pip uninstall gptqmodel || true
           uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-
+          uv pip install torch torchvision torchaudio -U --torch-backend=${{ env.UV_TORCH_BACKEND }}
+          echo "::group::pip list"
+            uv pip list
+          echo "::endgroup::"
           mv "$lock_file" "$unlock_file"
 
       - name: Find suitable GPU
