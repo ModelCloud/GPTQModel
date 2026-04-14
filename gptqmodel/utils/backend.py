@@ -15,6 +15,7 @@ class BACKEND(str, Enum):
     GPTQ_TORCH_FUSED = "gptq_torch_fused"  # optimized for Intel XPU
     GPTQ_TORCH_INT8 = "gptq_torch_int8"  # optimized CPU int8 fused kernel
     GPTQ_TORCH = "gptq_torch"  # GOOD: about 80% of triton
+    GPTQ_TORCH_FP8 = "gptq_torch_fp8"  # GPTQ torch runtime with FP8 input activation quantize/dequantize
     GPTQ_TRITON = "gptq_triton"  # VERY GOOD: all-around kernel
     BITSANDBYTES = "bitsandbytes"  # bitsandbytes 4-bit/8-bit kernel with optional CPU/CUDA support
     GPTQ_EXLLAMA_V2 = "gptq_exllama_v2"  # FASTER: optimized for batching > 1
@@ -142,6 +143,59 @@ def _normalize_method(method: Optional[Union[str, Any]]) -> Optional[str]:
         return None
     value = getattr(method, "value", method)
     return str(value).lower()
+
+
+def resolve_activation_backend(
+    backend: Optional[BACKEND],
+    *,
+    quant_method: Optional[Union[str, Any]],
+    checkpoint_format: Optional[Union[str, Any]],
+    activation: Any,
+) -> Optional[BACKEND]:
+    """Resolve the dedicated runtime backend used by activation-aware quantization paths."""
+
+    if activation is None:
+        return backend
+
+    method = _normalize_method(quant_method)
+    format_value = getattr(checkpoint_format, "value", checkpoint_format)
+    normalized_format = "gptq" if format_value is None else str(format_value).strip().lower()
+
+    if method == "gptq":
+        if normalized_format not in {"gptq", "gptq_v2"}:
+            raise ValueError(
+                "GPTQ activation quantization currently only supports FORMAT.GPTQ and FORMAT.GPTQ_V2."
+            )
+
+        if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE, BACKEND.TORCH, BACKEND.GPTQ_TORCH):
+            return BACKEND.GPTQ_TORCH_FP8
+        if backend == BACKEND.GPTQ_TORCH_FP8:
+            return backend
+
+        raise ValueError(
+            "GPTQ activation quantization currently requires BACKEND.AUTO, BACKEND.AUTO_TRAINABLE, "
+            "BACKEND.TORCH, BACKEND.GPTQ_TORCH, or BACKEND.GPTQ_TORCH_FP8."
+        )
+
+    if method == "awq":
+        if normalized_format != "gemm":
+            raise ValueError(
+                "AWQ activation quantization currently only supports FORMAT.GEMM through the dedicated W4A8 lifecycle."
+            )
+
+        if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE, BACKEND.TORCH, BACKEND.AWQ_TORCH):
+            return BACKEND.AWQ_TORCH
+        if backend == BACKEND.AWQ_TORCH:
+            return backend
+
+        raise ValueError(
+            "AWQ activation quantization currently requires BACKEND.AUTO, BACKEND.AUTO_TRAINABLE, "
+            "BACKEND.TORCH, or BACKEND.AWQ_TORCH."
+        )
+
+    raise ValueError(
+        "Activation quantization currently only supports METHOD.AWQ and METHOD.GPTQ."
+    )
 
 
 def normalize_backend(

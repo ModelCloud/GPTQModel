@@ -38,7 +38,7 @@ from ..nn_modules.qlinear.gguf import GGUFTorchLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2, BaseQuantizeConfig, resolve_quant_format
 from ..utils import internal_gguf
-from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
+from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile, resolve_activation_backend
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
@@ -853,6 +853,12 @@ def ModelLoader(cls):
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
         backend = normalize_backend(backend, quant_method=export_quant_method)
+        backend = resolve_activation_backend(
+            backend,
+            quant_method=export_quant_method,
+            checkpoint_format=format_code,
+            activation=getattr(qcfg, "activation", None),
+        )
 
         # Prism/Bonsai sign-only GGUF tensors only have a torch runtime today.
         # Bypass higher-priority GGUF backends that either do not support 1-bit

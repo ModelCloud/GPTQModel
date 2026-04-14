@@ -2385,6 +2385,15 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
     if "activation" in normalized:
         if "input_activations" in normalized:
             raise ValueError("QuantizeConfig: pass only one of `activation` or `input_activations`.")
+        activation_method = normalized.get(METHOD_FIELD_CODE)
+        if activation_method is None and QUANT_METHOD_FIELD in normalized:
+            activation_method = normalized[QUANT_METHOD_FIELD]
+        if activation_method is not None and str(getattr(activation_method, "value", activation_method)).strip().lower() != METHOD.AWQ.value:
+            raise ValueError(
+                "QuantizeConfig: user-facing `activation` currently selects the dedicated AWQ W4A8 path and requires `method='awq'`."
+            )
+        normalized.setdefault(METHOD_FIELD_CODE, METHOD.AWQ)
+        normalized.setdefault(FORMAT_FIELD_CODE, FORMAT.GEMM)
         normalized["input_activations"] = normalized.pop("activation")
     return normalized
 
@@ -3278,6 +3287,11 @@ class AWQConfig(PreProcessorConfig):
             self.format = FORMAT.GEMM
         super().__post_init__()
         self.input_activations = _normalize_input_activations(self.input_activations)
+        if self.activation is not None and self.format != FORMAT.GEMM:
+            raise ValueError(
+                "AWQConfig: activation quantization currently uses the dedicated AWQ W4A8 GEMM lifecycle, "
+                "so `format` must be `gemm`."
+            )
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)

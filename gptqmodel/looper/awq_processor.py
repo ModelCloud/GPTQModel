@@ -535,7 +535,7 @@ class AWQProcessor(LoopProcessor):
     def quantize_dequantize_input(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the configured activation QDQ path used by both AWQ search and replay."""
 
-        return quantize_dequantize_input(x, getattr(self.qcfg, "input_activations", None))
+        return quantize_dequantize_input(x, getattr(self.qcfg, "activation", None))
 
     def _should_fallback_group(
         self,

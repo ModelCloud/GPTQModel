@@ -1,7 +1,8 @@
 import pytest
 
+from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization.config import METHOD
-from gptqmodel.utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
+from gptqmodel.utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile, resolve_activation_backend
 
 
 def test_legacy_marlin_backend_normalizes_by_quant_method():
@@ -32,6 +33,28 @@ def test_awq_specific_legacy_backends_normalize_to_canonical_names():
 def test_name_based_lookup_accepts_canonical_member_names():
     assert normalize_backend("GPTQ_MARLIN") == BACKEND.GPTQ_MARLIN
     assert normalize_backend("AWQ_GEMM_TRITON") == BACKEND.AWQ_GEMM_TRITON
+    assert normalize_backend("GPTQ_TORCH_FP8") == BACKEND.GPTQ_TORCH_FP8
+
+
+def test_activation_backend_resolution_routes_awq_auto_to_dedicated_torch_path():
+    resolved = resolve_activation_backend(
+        BACKEND.AUTO,
+        quant_method=METHOD.AWQ,
+        checkpoint_format=FORMAT.GEMM,
+        activation={"method": "fp8", "format": "f8_e4m3"},
+    )
+
+    assert resolved == BACKEND.AWQ_TORCH
+
+
+def test_activation_backend_resolution_rejects_non_dedicated_awq_backend():
+    with pytest.raises(ValueError, match="AWQ activation quantization currently requires"):
+        resolve_activation_backend(
+            BACKEND.AWQ_GEMM,
+            quant_method=METHOD.AWQ,
+            checkpoint_format=FORMAT.GEMM,
+            activation={"method": "fp8", "format": "f8_e4m3"},
+        )
 
 
 @pytest.mark.parametrize(

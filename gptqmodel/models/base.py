@@ -64,7 +64,7 @@ from ..quantization.dtype import (
 )
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.attn_mask import normalize_seq_mask
-from ..utils.backend import BACKEND, normalize_backend
+from ..utils.backend import BACKEND, normalize_backend, resolve_activation_backend
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
 from ..utils.hf import autofix_hf_model_config
@@ -732,6 +732,12 @@ class BaseQModel(nn.Module):
 
         requested_backend = backend
         requested_backend = normalize_backend(requested_backend, quant_method=export_quant_method)
+        requested_backend = resolve_activation_backend(
+            requested_backend,
+            quant_method=export_quant_method,
+            checkpoint_format=format_code,
+            activation=getattr(self.quantize_config, "activation", None),
+        )
 
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):

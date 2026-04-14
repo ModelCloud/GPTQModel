@@ -85,6 +85,20 @@ def test_awq_user_facing_activation_alias_normalizes_to_input_activations():
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
+def test_activation_surface_defaults_to_awq_w4a8_path():
+    cfg = QuantizeConfig(
+        activation={
+            "method": "fp8",
+            "format": "f8_e4m3",
+        },
+    )
+
+    assert isinstance(cfg, AWQConfig)
+    assert cfg.quant_method == METHOD.AWQ
+    assert cfg.format == FORMAT.GEMM
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
 def test_awq_activation_property_setter_normalizes_user_facing_payload():
     cfg = QuantizeConfig(
         quant_method=METHOD.AWQ,
@@ -99,6 +113,31 @@ def test_awq_activation_property_setter_normalizes_user_facing_payload():
     assert isinstance(cfg.activation, InputActivationQuantConfig)
     assert cfg.input_activations.format == "float8_e4m3fn"
     assert cfg.to_dict()["meta"]["input_activations"]["format"] == "float8_e4m3fn"
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
+def test_activation_surface_rejects_non_awq_method():
+    with pytest.raises(ValueError, match="dedicated AWQ W4A8 path"):
+        QuantizeConfig(
+            quant_method=METHOD.GPTQ,
+            activation={
+                "method": "fp8",
+                "format": "f8_e4m3",
+            },
+        )
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
+def test_awq_activation_surface_rejects_non_gemm_format():
+    with pytest.raises(ValueError, match="format` must be `gemm`"):
+        QuantizeConfig(
+            quant_method=METHOD.AWQ,
+            format=FORMAT.MARLIN,
+            activation={
+                "method": "fp8",
+                "format": "f8_e4m3",
+            },
+        )
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
