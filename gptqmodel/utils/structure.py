@@ -30,6 +30,7 @@ import inspect
 import json
 import os
 import threading
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
 import pcre
@@ -551,6 +552,18 @@ def _ensure_target_storage_on_device_(param: torch.nn.Parameter, device: torch.d
     return param
 
 
+@dataclass(frozen=True)
+class _MoEAliasSpec:
+    """MoE alias groups derived entirely from the model definition's `module_tree`."""
+
+    runtime_root_path: tuple[str, ...]
+    root_alias_paths: tuple[tuple[str, ...], ...]
+    runtime_experts_path: tuple[str, ...]
+    expert_alias_paths: tuple[tuple[str, ...], ...]
+    runtime_leaf_groups: tuple[tuple[str, ...], ...]
+    leaf_alias_groups: tuple[tuple[tuple[str, ...], ...], ...]
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local safetensors models.
 
@@ -571,11 +584,15 @@ class LazyTurtle:
         model_local_path: str,
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
+        module_tree: Optional[Any] = None,
     ) -> None:
         self.model_local_path = model_local_path
         self.config = copy.deepcopy(config)
         self._model_init_kwargs = dict(model_init_kwargs or {})
         self._weight_map = self._load_weight_map(model_local_path)
+        # Lazy checkpoint name resolution must come from model-definition truth.
+        self._module_tree = copy.deepcopy(module_tree)
+        self._module_tree_layer_prefix, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
         self._lock = threading.RLock()
 
     @classmethod
@@ -585,6 +602,7 @@ class LazyTurtle:
         model_local_path: Optional[str],
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
+        module_tree: Optional[Any] = None,
     ) -> Optional["LazyTurtle"]:
         if not model_local_path or not os.path.isdir(model_local_path):
             return None
@@ -594,6 +612,7 @@ class LazyTurtle:
                 model_local_path=model_local_path,
                 config=config,
                 model_init_kwargs=model_init_kwargs,
+                module_tree=module_tree,
             )
         except Exception as exc:
             log.debug(
@@ -710,6 +729,200 @@ class LazyTurtle:
         return f"{module_path}.{rel_name}"
 
     @staticmethod
+    def _parse_module_spec(module_spec: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Split one module-tree token into ordered aliases and `:flag` suffixes."""
+
+        parts = module_spec.split(":") if isinstance(module_spec, str) else [str(module_spec)]
+        aliases = tuple(alias for alias in parts[0].split("|") if alias) if parts else (str(module_spec),)
+        if not aliases:
+            aliases = (str(module_spec),)
+        flags = tuple(part for part in parts[1:] if part)
+        return aliases, flags
+
+    @staticmethod
+    def _expand_path_aliases(path_aliases: tuple[tuple[str, ...], ...]) -> tuple[tuple[str, ...], ...]:
+        """Expand a sequence of aliased path segments into every concrete path variant."""
+
+        paths: list[tuple[str, ...]] = [()]
+        for segment_aliases in path_aliases:
+            next_paths: list[tuple[str, ...]] = []
+            for prefix in paths:
+                for alias in segment_aliases:
+                    candidate = prefix + (alias,)
+                    if candidate not in next_paths:
+                        next_paths.append(candidate)
+            paths = next_paths
+        return tuple(paths)
+
+    @classmethod
+    def _build_moe_alias_specs(cls, module_tree: Optional[Any]) -> tuple[tuple[str, ...], tuple[_MoEAliasSpec, ...]]:
+        """Extract runtime/checkpoint MoE aliases directly from the model definition's `module_tree`."""
+
+        if not isinstance(module_tree, list):
+            return (), ()
+
+        layer_prefix: list[str] = []
+        specs: list[_MoEAliasSpec] = []
+        seen_specs: set[
+            tuple[
+                tuple[str, ...],
+                tuple[tuple[str, ...], ...],
+                tuple[str, ...],
+                tuple[tuple[str, ...], ...],
+                tuple[tuple[tuple[str, ...], ...], ...],
+            ]
+        ] = set()
+
+        for item in module_tree:
+            if item == "#":
+                break
+            if isinstance(item, str):
+                aliases, _flags = cls._parse_module_spec(item)
+                layer_prefix.append(aliases[0])
+
+        def walk(node: Any, path: tuple[Any, ...], moe_root: Optional[tuple[tuple[str, ...], ...]]) -> None:
+            if isinstance(node, dict):
+                for raw_key, value in node.items():
+                    if raw_key == "#":
+                        walk(value, path + ("#",), moe_root)
+                        continue
+                    if not isinstance(raw_key, str):
+                        continue
+                    aliases, flags = cls._parse_module_spec(raw_key)
+                    next_path = path + (aliases,)
+                    next_moe_root = next_path if "moe" in flags and moe_root is None else moe_root
+                    walk(value, next_path, next_moe_root)
+                return
+
+            if isinstance(node, (tuple, list)) and all(isinstance(item, str) for item in node):
+                if moe_root is None or "#" not in path:
+                    return
+
+                placeholder_index = path.index("#")
+                experts_path_aliases = tuple(path[:placeholder_index])
+                grouped: Dict[int, list[tuple[str, ...]]] = {}
+                for raw_leaf in node:
+                    leaf_aliases, flags = cls._parse_module_spec(raw_leaf)
+                    group_index = 0
+                    for flag in flags:
+                        if flag.isdigit():
+                            group_index = int(flag)
+                            break
+                    grouped.setdefault(group_index, []).append(leaf_aliases)
+
+                if not grouped:
+                    return
+
+                leaf_alias_groups = tuple(tuple(grouped[group]) for group in sorted(grouped))
+                runtime_root_path = tuple(segment[0] for segment in moe_root)
+                runtime_experts_path = tuple(segment[0] for segment in experts_path_aliases)
+                runtime_leaf_groups = tuple(
+                    tuple(leaf_aliases[0] for leaf_aliases in group)
+                    for group in leaf_alias_groups
+                )
+                root_alias_paths = cls._expand_path_aliases(moe_root)
+                expert_alias_paths = cls._expand_path_aliases(experts_path_aliases)
+                spec_key = (
+                    runtime_root_path,
+                    root_alias_paths,
+                    runtime_experts_path,
+                    expert_alias_paths,
+                    leaf_alias_groups,
+                )
+                if spec_key in seen_specs:
+                    return
+                seen_specs.add(spec_key)
+                specs.append(
+                    _MoEAliasSpec(
+                        runtime_root_path=runtime_root_path,
+                        root_alias_paths=root_alias_paths,
+                        runtime_experts_path=runtime_experts_path,
+                        expert_alias_paths=expert_alias_paths,
+                        runtime_leaf_groups=runtime_leaf_groups,
+                        leaf_alias_groups=leaf_alias_groups,
+                    )
+                )
+                return
+
+            if isinstance(node, (tuple, list)):
+                for item in node:
+                    walk(item, path, moe_root)
+
+        found_hash = False
+        for item in module_tree:
+            if item == "#":
+                found_hash = True
+                continue
+            if not found_hash:
+                continue
+            walk(item, (), None)
+
+        return tuple(layer_prefix), tuple(specs)
+
+    def _split_layer_relative_path(self, name: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Return `(layer_prefix_with_index, relative_parts)` for a runtime or checkpoint tensor path."""
+
+        parts = tuple(part for part in name.split(".") if part)
+        prefix = self._module_tree_layer_prefix
+        if prefix:
+            max_start = len(parts) - len(prefix)
+            for start in range(max_start + 1):
+                end = start + len(prefix)
+                if parts[start:end] != prefix:
+                    continue
+                if end >= len(parts) or not parts[end].isdigit():
+                    continue
+                return parts[start : end + 1], parts[end + 1 :]
+        return (), parts
+
+    def _module_tree_name_aliases(self, name: str) -> list[str]:
+        """Generate checkpoint-name candidates from MoE aliases declared in `module_tree`."""
+
+        if not self._moe_alias_specs or not name:
+            return []
+
+        layer_head, rel_parts = self._split_layer_relative_path(name)
+        if not rel_parts:
+            return []
+
+        aliases: list[str] = []
+        seen = {name}
+
+        for spec in self._moe_alias_specs:
+            if tuple(rel_parts[: len(spec.runtime_root_path)]) == spec.runtime_root_path:
+                tail = rel_parts[len(spec.runtime_root_path) :]
+                for root_alias in spec.root_alias_paths:
+                    alias = ".".join(layer_head + root_alias + tail)
+                    if alias not in seen:
+                        seen.add(alias)
+                        aliases.append(alias)
+
+            if len(rel_parts) < len(spec.runtime_experts_path) + 2:
+                continue
+            if tuple(rel_parts[: len(spec.runtime_experts_path)]) != spec.runtime_experts_path:
+                continue
+
+            expert_index = rel_parts[len(spec.runtime_experts_path)]
+            runtime_leaf = rel_parts[len(spec.runtime_experts_path) + 1]
+            if not expert_index.isdigit():
+                continue
+
+            for group_index, runtime_group in enumerate(spec.runtime_leaf_groups):
+                if runtime_leaf not in runtime_group:
+                    continue
+                leaf_index = runtime_group.index(runtime_leaf)
+                tail = rel_parts[len(spec.runtime_experts_path) + 2 :]
+                for expert_alias_path in spec.expert_alias_paths:
+                    for leaf_alias in spec.leaf_alias_groups[group_index][leaf_index]:
+                        alias = ".".join(layer_head + expert_alias_path + (expert_index, leaf_alias) + tail)
+                        if alias not in seen:
+                            seen.add(alias)
+                            aliases.append(alias)
+                break
+
+        return aliases
+
+    @staticmethod
     def _candidate_module_paths(module_path: str, *, allow_empty: bool = False) -> list[str]:
         """Return progressively stripped module path aliases for checkpoint lookup."""
 
@@ -730,20 +943,41 @@ class LazyTurtle:
     def _resolve_checkpoint_module_path(self, module_path: str) -> str:
         """Resolve a shell module path to the checkpoint path when wrappers add extra roots."""
 
-        for candidate in self._candidate_module_paths(module_path):
+        candidates = [module_path]
+        candidates.extend(self._module_tree_name_aliases(module_path))
+        candidates.extend(self._candidate_module_paths(module_path))
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
             prefix = f"{candidate}."
             if any(full_name.startswith(prefix) for full_name in self._weight_map):
                 return candidate
         return module_path
 
     def _resolve_checkpoint_tensor_name(self, module_path: str, rel_name: str) -> str:
-        """Resolve a tensor name against checkpoint paths derived from the shell module path."""
+        """Resolve a tensor name against checkpoint paths declared by `module_tree` and shell path prefixes."""
 
+        full_name = self._join_tensor_name(module_path, rel_name)
+        candidates: list[str] = []
+        seen: set[str] = set()
         for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
             candidate_name = self._join_tensor_name(candidate_path, rel_name)
-            if candidate_name in self._weight_map:
-                return candidate_name
-        return self._join_tensor_name(module_path, rel_name)
+            if candidate_name not in seen:
+                seen.add(candidate_name)
+                candidates.append(candidate_name)
+            for alias in self._module_tree_name_aliases(candidate_name):
+                if alias in seen:
+                    continue
+                seen.add(alias)
+                candidates.append(alias)
+
+        for candidate in candidates:
+            if candidate in self._weight_map:
+                return candidate
+        return full_name
 
     def _resolve_split_gate_up_tensor_name(
         self,

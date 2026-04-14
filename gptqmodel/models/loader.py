@@ -656,6 +656,7 @@ def ModelLoader(cls):
                     model_local_path=model_local_path,
                     config=model.config,
                     model_init_kwargs=shell_model_init_kwargs,
+                    module_tree=copy.deepcopy(getattr(cls, "module_tree", None)),
                 )
 
                 if turtle_model is None:

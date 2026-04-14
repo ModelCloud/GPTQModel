@@ -372,11 +372,27 @@ class BaseQModel(nn.Module):
             if node == "#":
                 break
             if isinstance(node, str):
-                prefix_parts.append(node)
+                module_name, _ = cls._parse_module_flags(node)
+                prefix_parts.append(module_name)
             else:
                 break  # stop if unexpected nested structure
 
         return [".".join(prefix_parts)] if prefix_parts else []
+
+    @classmethod
+    def _parse_module_aliases(cls, module_spec: str) -> List[str]:
+        """
+        Parse a module specification into its ordered runtime/checkpoint aliases.
+
+        The first alias is the runtime shell name. Any later aliases are
+        alternate checkpoint names declared directly in the model definition.
+        """
+        parts = module_spec.split(":") if isinstance(module_spec, str) else []
+        name = parts[0] if parts else module_spec
+        if not isinstance(name, str):
+            return [name]
+        aliases = [alias for alias in name.split("|") if alias]
+        return aliases or [name]
 
     @classmethod
     def _parse_module_flags(cls, module_spec: str) -> tuple[str, List[str]]:
@@ -385,7 +401,8 @@ class BaseQModel(nn.Module):
         Example: "gate:moe:!" -> ("gate", ["moe", "!"])
         """
         parts = module_spec.split(":") if isinstance(module_spec, str) else []
-        name = parts[0] if parts else module_spec
+        aliases = cls._parse_module_aliases(module_spec) if isinstance(module_spec, str) else [module_spec]
+        name = aliases[0] if aliases else module_spec
         flags = [p for p in parts[1:] if p]
         return name, flags
 
@@ -2494,10 +2511,7 @@ class BaseQModel(nn.Module):
         group_seq = count()
 
         def _parse_token(token: str) -> tuple[str, List[str]]:
-            parts = token.split(":")
-            name = parts[0]
-            flags = [p for p in parts[1:] if p]
-            return name, flags
+            return cls._parse_module_flags(token)
 
         def _group_from_flags(flags: List[str]) -> int:
             for flag in flags:
@@ -2705,14 +2719,14 @@ class BaseQModel(nn.Module):
 
         assert sharp_idx > 0, "failed to get_base_modules"
         # root_path = ["model"] or ["model", "language_model"]
-        root_path = tree[:sharp_idx-1]
+        root_path = [cls._parse_module_flags(node)[0] if isinstance(node, str) else node for node in tree[:sharp_idx-1]]
 
         out = []
         # Traverse each layer in root_path
         for i in range(len(root_path)):
             path = root_path[:i + 1]
             base = model
-            exclude = tree[len(path)]
+            exclude = cls._parse_module_flags(tree[len(path)])[0] if isinstance(tree[len(path)], str) else tree[len(path)]
 
             for node in path:
                 base = getattr(base, node)
@@ -2739,6 +2753,7 @@ class BaseQModel(nn.Module):
         if isinstance(node, dict):
             new_dict = {}
             for k, v in node.items():
+                clean_key = self._parse_module_flags(k)[0] if isinstance(k, str) else k
                 # Expand tuple-of-strings blocks (special handling)
                 if isinstance(v, (tuple, list)) and all(isinstance(x, str) for x in v):
                     # Rule 1: check if ALL entries are :!
@@ -2746,16 +2761,16 @@ class BaseQModel(nn.Module):
                         continue  # skip this parent entirely
 
                     # Rule 2: strip :! and :digit markers
-                    cleaned = tuple(x.split(":")[0] for x in v)
-                    new_dict[k] = cleaned
+                    cleaned = tuple(self._parse_module_flags(x)[0] for x in v)
+                    new_dict[clean_key] = cleaned
                 else:
                     # Recurse deeper
-                    new_dict[k] = self.generate_layers_modules_tree_simple(v)
+                    new_dict[clean_key] = self.generate_layers_modules_tree_simple(v)
             return new_dict
 
         # If it's a plain string (unlikely here), strip markers
         if isinstance(node, str):
-            return node.split(":")[0]
+            return self._parse_module_flags(node)[0]
 
         # For other types, return as-is
         return node
