@@ -7,21 +7,15 @@ from typing import Any, Optional
 
 import torch
 
-from .config import InputActivationQuantConfig
+from .config import InputActivationQuantConfig, _normalize_input_activations
 
 
 def normalize_input_activations(
     payload: Optional[InputActivationQuantConfig | dict[str, Any]],
 ) -> Optional[InputActivationQuantConfig]:
-    if payload is None:
-        return None
-    if isinstance(payload, InputActivationQuantConfig):
-        return payload
-    if isinstance(payload, dict):
-        return InputActivationQuantConfig(**payload)
-    raise ValueError(
-        "`input_activations` must be an InputActivationQuantConfig, dict, or None."
-    )
+    """Reuse the shared config normalizer so helpers accept the same activation payloads as QuantizeConfig."""
+
+    return _normalize_input_activations(payload)
 
 
 def quantize_dequantize_input(

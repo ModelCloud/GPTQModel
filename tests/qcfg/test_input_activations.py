@@ -64,3 +64,52 @@ def test_awq_input_activations_roundtrip_through_meta_payload():
     assert isinstance(restored.input_activations, InputActivationQuantConfig)
     assert restored.input_activations.format == "float8_e4m3fn"
     assert restored.quant_linear_init_kwargs()["input_activations"]["format"] == "float8_e4m3fn"
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
+def test_awq_user_facing_activation_alias_normalizes_to_input_activations():
+    cfg = QuantizeConfig(
+        quant_method=METHOD.AWQ,
+        format=FORMAT.GEMM,
+        activation={
+            "method": "fp8",
+            "format": "f8_e4m3",
+        },
+    )
+
+    assert isinstance(cfg, AWQConfig)
+    assert isinstance(cfg.activation, InputActivationQuantConfig)
+    assert cfg.activation is cfg.input_activations
+    assert cfg.input_activations.format == "float8_e4m3fn"
+    assert cfg.input_activations.dynamic is True
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
+def test_awq_activation_property_setter_normalizes_user_facing_payload():
+    cfg = QuantizeConfig(
+        quant_method=METHOD.AWQ,
+        format=FORMAT.GEMM,
+    )
+
+    cfg.activation = {
+        "method": "fp8",
+        "format": "f8_e4m3",
+    }
+
+    assert isinstance(cfg.activation, InputActivationQuantConfig)
+    assert cfg.input_activations.format == "float8_e4m3fn"
+    assert cfg.to_dict()["meta"]["input_activations"]["format"] == "float8_e4m3fn"
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
+def test_awq_user_facing_activation_alias_rejects_removed_scales_key():
+    with pytest.raises(ValueError, match="no longer accepts `scales`"):
+        QuantizeConfig(
+            quant_method=METHOD.AWQ,
+            format=FORMAT.GEMM,
+            activation={
+                "method": "fp8",
+                "format": "f8_e4m3",
+                "scales": "static",
+            },
+        )

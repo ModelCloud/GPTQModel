@@ -703,16 +703,22 @@ def _normalize_exl3_bits(bits: Union[int, float, str]) -> float:
 # support so config payloads can use either shorthand or exact dtype names.
 _FP8_FMT_ALIASES = {
     "e4m3": "float8_e4m3fn",
+    "f8_e4m3": "float8_e4m3fn",
     "float8_e4m3": "float8_e4m3fn",
     "float8_e4m3fn": "float8_e4m3fn",
     "e5m2": "float8_e5m2",
+    "f8_e5m2": "float8_e5m2",
     "float8_e5m2": "float8_e5m2",
     "e4m3fnuz": "float8_e4m3fnuz",
+    "f8_e4m3fnuz": "float8_e4m3fnuz",
     "float8_e4m3fnuz": "float8_e4m3fnuz",
     "e5m2fnuz": "float8_e5m2fnuz",
+    "f8_e5m2fnuz": "float8_e5m2fnuz",
     "float8_e5m2fnuz": "float8_e5m2fnuz",
     "e8m0": "float8_e8m0fnu",
     "e8m0fnu": "float8_e8m0fnu",
+    "f8_e8m0": "float8_e8m0fnu",
+    "f8_e8m0fnu": "float8_e8m0fnu",
     "float8_e8m0": "float8_e8m0fnu",
     "float8_e8m0fnu": "float8_e8m0fnu",
 }
@@ -722,6 +728,9 @@ _BITSANDBYTES_4BIT_FORMATS = {"fp4", "nf4"}
 _BITSANDBYTES_8BIT_FORMATS = {"int8"}
 _BITSANDBYTES_FORMATS = _BITSANDBYTES_4BIT_FORMATS | _BITSANDBYTES_8BIT_FORMATS
 _BITSANDBYTES_BLOCK_SIZES = {32, 64, 128, 256, 512, 1024, 2048, 4096}
+# User-facing activation={} payloads intentionally expose a smaller surface than
+# the canonical input_activations checkpoint schema.
+_ACTIVATION_METHOD_ALIASES = {"fp8", "float8"}
 
 
 def _looks_like_fp8_fmt(value: Any) -> bool:
@@ -1530,6 +1539,7 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     # map deprecated aliases to canonical fields
     FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
     QUANT_METHOD_FIELD: METHOD_FIELD_CODE,
+    "activation": "input_activations",
     "bnb_quant_type": FORMAT_FIELD_CODE,
     "bnb_block_size": "block_size",
     "bnb_compress_statistics": "compress_statistics",
@@ -1932,12 +1942,48 @@ def _normalize_input_activations(
     if input_activations is None:
         return None
     if isinstance(input_activations, dict):
+        input_activations = _normalize_user_activation_payload(input_activations)
         return InputActivationQuantConfig(**input_activations)
     if not isinstance(input_activations, InputActivationQuantConfig):
         raise ValueError(
             "QuantizeConfig: `input_activations` must be an InputActivationQuantConfig, dict, or None."
         )
     return input_activations
+
+
+def _normalize_user_activation_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate user-facing activation={} shorthand into canonical input_activations kwargs."""
+
+    normalized = dict(payload)
+    method = normalized.pop("method", normalized.pop("dtype", None))
+
+    if "scales" in normalized or "scale_mode" in normalized or "scale" in normalized:
+        raise ValueError(
+            "QuantizeConfig: `activation` no longer accepts `scales`; scale handling is implied by the activation method/format."
+        )
+
+    # Canonical payloads can continue to use the internal input_activations schema
+    # directly. The alias path is only activated when callers provide the new
+    # user-facing activation method or omit it while specifying a format.
+    if method is None and "format" not in normalized:
+        return normalized
+
+    if method is None:
+        method = "fp8"
+    method = str(method).strip().lower()
+    if method not in _ACTIVATION_METHOD_ALIASES:
+        supported = ", ".join(sorted(_ACTIVATION_METHOD_ALIASES))
+        raise ValueError(
+            f"QuantizeConfig: activation `method` must be one of {{{supported}}}, got `{method}`."
+        )
+
+    normalized.setdefault("num_bits", 8)
+    normalized.setdefault("type", "float")
+    normalized.setdefault("format", "float8_e4m3fn")
+    normalized.setdefault("strategy", "tensor")
+    normalized.setdefault("dynamic", True)
+    normalized.setdefault("implementation", "reference")
+    return normalized
 
 
 def _normalize_dense_vram_strategy(value: Union[str, VramStrategy]) -> VramStrategy:
@@ -2336,6 +2382,10 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
     if FORMAT_FIELD_CODE not in normalized and FORMAT_FIELD_CHECKPOINT in normalized:
         normalized[FORMAT_FIELD_CODE] = normalized[FORMAT_FIELD_CHECKPOINT]
     normalized.pop(FORMAT_FIELD_CHECKPOINT, None)
+    if "activation" in normalized:
+        if "input_activations" in normalized:
+            raise ValueError("QuantizeConfig: pass only one of `activation` or `input_activations`.")
+        normalized["input_activations"] = normalized.pop("activation")
     return normalized
 
 
@@ -2476,6 +2526,22 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     @checkpoint_format.setter
     def checkpoint_format(self, value) -> None:
         self.format = value
+
+    @property
+    def activation(self) -> Optional[InputActivationQuantConfig]:
+        """Expose the user-facing activation alias through the canonical runtime field."""
+
+        return getattr(self, "input_activations", None)
+
+    @activation.setter
+    def activation(self, value: Optional[Union[InputActivationQuantConfig, Dict[str, Any]]]) -> None:
+        """Normalize writes to cfg.activation so callers can avoid internal field names."""
+
+        if not hasattr(self, "input_activations"):
+            if value is None:
+                return
+            raise AttributeError(f"{self.__class__.__name__} does not support `activation`.")
+        self.input_activations = _normalize_input_activations(value)
 
     @property
     def runtime_bits(self):
