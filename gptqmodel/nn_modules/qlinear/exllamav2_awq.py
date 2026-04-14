@@ -138,6 +138,7 @@ class AwqExllamaV2Linear(AWQuantLinear):
         if not exllamav2_awq_runtime_available():
             raise ModuleNotFoundError("ExLlamaV2 AWQ torch.ops kernels are not properly installed. Error: " + exllamav2_awq_runtime_error())
 
+        x = self.quantize_dequantize_input(x)
         input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.out_features,)
 

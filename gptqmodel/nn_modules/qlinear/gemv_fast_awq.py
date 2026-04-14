@@ -157,6 +157,7 @@ class AwqGEMVFastLinear(AWQuantLinear):
         if not awq_runtime_available():
             raise ModuleNotFoundError("AWQ torch.ops kernels are not properly installed. Error: " + awq_runtime_error())
 
+        x = self.quantize_dequantize_input(x)
         inputs = x
         inputs_dim = inputs.dim()
 

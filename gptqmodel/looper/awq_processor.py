@@ -28,6 +28,7 @@ from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.input_activations import quantize_dequantize_input
 from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
@@ -531,6 +532,11 @@ class AWQProcessor(LoopProcessor):
 
         self._module_forward_kwargs = refreshed
 
+    def quantize_dequantize_input(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the configured activation QDQ path used by both AWQ search and replay."""
+
+        return quantize_dequantize_input(x, getattr(self.qcfg, "input_activations", None))
+
     def _should_fallback_group(
         self,
         layer_names: List[str],
@@ -849,8 +855,10 @@ class AWQProcessor(LoopProcessor):
         if "use_cache" in kwargs:
             kwargs.pop("use_cache")
 
-        # Put x on the right device
+        # Put x on the right device, then apply the same activation QDQ path that
+        # replay/runtime will use so AWQ search sees the intended W4A8 inputs.
         inp = inp.to(next(module2inspect.parameters()).device)
+        inp = self.quantize_dequantize_input(inp)
 
         # [STEP 1]: Compute per-channel mean of normalised weights
         # Stream across each Linear instead of concatenating all weights at once. This mirrors the
@@ -925,7 +933,8 @@ class AWQProcessor(LoopProcessor):
             named_linears[name].to(get_best_device())
 
             max_val = self._compute_best_clip(
-                named_linears[name].weight, input_feat[name]
+                named_linears[name].weight,
+                self.quantize_dequantize_input(input_feat[name].to(named_linears[name].weight.device)),
             )
             clip_list.append((name, max_val))
             named_linears[name].cpu()
@@ -1242,6 +1251,10 @@ class AWQProcessor(LoopProcessor):
                         converted.append(item)
                 if changed:
                     module_kwargs[key] = type(value)(converted)
+
+        # Replay through the same activation-QDQ path that packed AWQ modules will
+        # use later, so post-quant layer outputs stay lifecycle-consistent.
+        x = self.quantize_dequantize_input(x)
 
         supports_position_ids = False
         supports_position_embeddings = False
@@ -1630,6 +1643,7 @@ class AWQProcessor(LoopProcessor):
                     pack_dtype=self.qcfg.pack_dtype,
                     format=self.format,
                     register_buffers=False,
+                    init_kwargs=self.qcfg.quant_linear_init_kwargs(),
                 )
         if timer is not None and create_start is not None:
             timer.record(

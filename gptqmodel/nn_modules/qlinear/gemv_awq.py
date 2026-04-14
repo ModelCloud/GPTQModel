@@ -117,6 +117,7 @@ class AwqGEMVLinear(AWQuantLinear):
         super().post_init()
 
     def forward(self, x: torch.Tensor):
+        x = self.quantize_dequantize_input(x)
         out_shape = x.shape[:-1] + (self.out_features,)
         inputs = x.reshape(-1, x.shape[-1])
 

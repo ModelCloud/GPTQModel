@@ -255,6 +255,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
             )
 
     def forward(self, x: torch.Tensor):
+        x = self.quantize_dequantize_input(x)
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
         input_dtype = x_flat.dtype

@@ -201,6 +201,7 @@ class AwqMacheteLinear(AWQuantLinear):
         super().post_init()
 
     def forward(self, x: torch.Tensor):
+        x = self.quantize_dequantize_input(x)
         if x.shape[0] == 0:
             return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
 

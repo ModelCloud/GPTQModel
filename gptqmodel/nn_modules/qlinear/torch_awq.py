@@ -155,6 +155,7 @@ class AwqTorchLinear(AWQuantLinear):
             self.bias = self.bias.to(device=device, dtype=dtype).contiguous()
 
     def forward(self, x: torch.Tensor):
+        x = self.quantize_dequantize_input(x)
         input_dtype = x.dtype
         compute_dtype = input_dtype if input_dtype in (torch.float16, torch.bfloat16) else torch.float16
         original_shape = x.shape[:-1] + (self.out_features,)

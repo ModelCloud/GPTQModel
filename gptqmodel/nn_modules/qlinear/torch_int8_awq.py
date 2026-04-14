@@ -188,6 +188,7 @@ class TorchInt8AwqLinear(AWQuantLinear):
         self.transform_cpu(dtype)
 
     def forward(self, x: torch.Tensor):
+        x = self.quantize_dequantize_input(x)
         if self.training:
             raise NotImplementedError("TorchInt8AwqLinear does not support training mode.")
         if self.int8_module is None:

@@ -247,6 +247,7 @@ class AwqMarlinLinear(AWQuantLinear):
             "Use marlin_post_init() on the whole model."
         )
 
+        x = self.quantize_dequantize_input(x)
         x = x.contiguous() if self.is_lm_head else x
 
         if self.scales.dtype != x.dtype:
