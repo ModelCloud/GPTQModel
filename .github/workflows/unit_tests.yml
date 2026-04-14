@@ -400,7 +400,7 @@ jobs:
             "${ENV_NAME}" > "$lock_file"
 
           uv pip uninstall gptqmodel || true
-          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          uv pip install . --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
           mv "$lock_file" "$unlock_file"
 
