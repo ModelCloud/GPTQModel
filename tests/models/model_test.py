@@ -220,6 +220,9 @@ class ModelTest(unittest.TestCase):
     BNB_FORMAT = None
     BNB_BLOCK_SIZE = None
     BNB_COMPRESS_STATISTICS = None
+    # Optional user-facing activation quantization payload passed through the
+    # dedicated activation-aware lifecycle under test.
+    ACTIVATION = None
 
     PAROQUANT_ROTATION_EPOCHS = None
     PAROQUANT_FINETUNE_EPOCHS = None
@@ -1500,6 +1503,7 @@ class ModelTest(unittest.TestCase):
             hessian=HessianConfig(chunk_size=self.HESSIAN_CHUNK_SIZE),
             moe=self.MOE_CONFIG,
             offload_to_disk=self.OFFLOAD_TO_DISK,
+            activation=copy.deepcopy(self.ACTIVATION),
         )
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):
