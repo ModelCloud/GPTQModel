@@ -223,11 +223,22 @@ jobs:
 
       - name: Prepare common envs
         run: |
-          mapfile -t env_rows < <(
+          mapfile -t raw_env_rows < <(
             python3 .github/scripts/print_env_rows.py \
               --torch-envs-json '${{ needs.list-test-files.outputs.torch-envs }}' \
               --model-envs-json '${{ needs.list-test-files.outputs.model-envs }}'
           )
+
+          env_rows=()
+          declare -A seen_envs=()
+          for row in "${raw_env_rows[@]}"; do
+            IFS=$'\t' read -r env_name python_version <<< "$row"
+            if [ -n "${seen_envs[$env_name]:-}" ]; then
+              continue
+            fi
+            seen_envs["$env_name"]=1
+            env_rows+=("$row")
+          done
           
           for i in "${!env_rows[@]}"; do
             echo "$i: ${env_rows[$i]}"
