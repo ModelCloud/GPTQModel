@@ -337,7 +337,7 @@ jobs:
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
             --test-name "${{ matrix.test_script }}")"
           echo "ENV_NAME=$env_name" >> "$GITHUB_ENV"
-          uv_cache_dir="$(pwd)/$env_name"
+          uv_cache_dir="${UV_CACHE_DIR%/}/$env_name"
           mkdir -p "$uv_cache_dir"
           echo "UV_CACHE_DIR=$uv_cache_dir" >> "$GITHUB_ENV"
           export UV_CACHE_DIR=$uv_cache_dir
@@ -539,7 +539,7 @@ jobs:
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
             --test-name "${{ matrix.test_script }}")"
           echo "ENV_NAME=$env_name" >> "$GITHUB_ENV"
-          uv_cache_dir="$(pwd)/$env_name"
+          uv_cache_dir="${UV_CACHE_DIR%/}/$env_name"
           mkdir -p "$uv_cache_dir"
           echo "UV_CACHE_DIR=$uv_cache_dir" >> "$GITHUB_ENV"
           export UV_CACHE_DIR=$uv_cache_dir
