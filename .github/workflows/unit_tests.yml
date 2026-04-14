@@ -337,7 +337,12 @@ jobs:
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
             --test-name "${{ matrix.test_script }}")"
           echo "ENV_NAME=$env_name" >> "$GITHUB_ENV"
+          uv_cache_dir="$(pwd)/$env_name"
+          mkdir -p "$uv_cache_dir"
+          echo "UV_CACHE_DIR=$uv_cache_dir" >> "$GITHUB_ENV"
+          export UV_CACHE_DIR=$uv_cache_dir
           echo "using gpu=$gpu specific=$has_specific_deps uv env=$env_name"
+          echo "using uv cache dir=$uv_cache_dir"
           /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Setup uv env
@@ -534,7 +539,12 @@ jobs:
           env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
             --test-name "${{ matrix.test_script }}")"
           echo "ENV_NAME=$env_name" >> "$GITHUB_ENV"
+          uv_cache_dir="$(pwd)/$env_name"
+          mkdir -p "$uv_cache_dir"
+          echo "UV_CACHE_DIR=$uv_cache_dir" >> "$GITHUB_ENV"
+          export UV_CACHE_DIR=$uv_cache_dir
           echo "using specific=$has_specific_deps uv env=$env_name"
+          echo "using uv cache dir=$uv_cache_dir"
           /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Setup uv env
