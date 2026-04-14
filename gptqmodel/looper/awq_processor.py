@@ -28,7 +28,7 @@ from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
-from ..quantization.input_activations import quantize_dequantize_input
+from ..quantization.input_activations import calibrate_input_scale_inv, quantize_dequantize_input
 from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
@@ -198,6 +198,9 @@ class AWQProcessor(LoopProcessor):
         self.duo_scaling = True
 
         self._module_forward_kwargs: Dict[str, torch.Tensor] = {}
+        # Stores one calibrated FP8 input scale per linear module for the AWQ
+        # W4A8 static activation path.
+        self._activation_scale_inv_by_module: Dict[str, torch.Tensor] = {}
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
         self._rotary_source_id: Optional[int] = None
@@ -532,10 +535,42 @@ class AWQProcessor(LoopProcessor):
 
         self._module_forward_kwargs = refreshed
 
-    def quantize_dequantize_input(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the configured activation QDQ path used by both AWQ search and replay."""
+    def _calibrate_activation_scale_inv(
+        self,
+        module_names: List[str],
+        x: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """Calibrate and cache the static FP8 input scale shared by one AWQ scaling group."""
 
-        return quantize_dequantize_input(x, getattr(self.qcfg, "activation", None))
+        activation = getattr(self.qcfg, "activation", None)
+        if activation is None or activation.dynamic:
+            return None
+
+        for module_name in module_names:
+            cached = self._activation_scale_inv_by_module.get(module_name)
+            if cached is not None:
+                return cached.to(device=x.device, dtype=torch.float32)
+
+        scale_inv = calibrate_input_scale_inv(x, activation)
+        if scale_inv is None:
+            return None
+        cached_scale_inv = scale_inv.detach().to(device="cpu", dtype=torch.float32).reshape(())
+        for module_name in module_names:
+            self._activation_scale_inv_by_module[module_name] = cached_scale_inv
+        return cached_scale_inv.to(device=x.device, dtype=torch.float32)
+
+    def quantize_dequantize_input(
+        self,
+        x: torch.Tensor,
+        *,
+        module_names: Optional[List[str]] = None,
+    ) -> torch.Tensor:
+        """Apply the configured activation QDQ path used by both AWQ search and packed inference."""
+
+        scale_inv = None
+        if module_names:
+            scale_inv = self._calibrate_activation_scale_inv(module_names, x)
+        return quantize_dequantize_input(x, getattr(self.qcfg, "activation", None), scale_inv=scale_inv)
 
     def _should_fallback_group(
         self,
@@ -855,10 +890,11 @@ class AWQProcessor(LoopProcessor):
         if "use_cache" in kwargs:
             kwargs.pop("use_cache")
 
+        layer_names = [get_op_name(module, linear) for linear in layers]
         # Put x on the right device, then apply the same activation QDQ path that
         # replay/runtime will use so AWQ search sees the intended W4A8 inputs.
         inp = inp.to(next(module2inspect.parameters()).device)
-        inp = self.quantize_dequantize_input(inp)
+        inp = self.quantize_dequantize_input(inp, module_names=layer_names)
 
         # [STEP 1]: Compute per-channel mean of normalised weights
         # Stream across each Linear instead of concatenating all weights at once. This mirrors the
@@ -902,7 +938,7 @@ class AWQProcessor(LoopProcessor):
             module_kwargs.setdefault(key, value)
 
         with ctx(torch.inference_mode()):
-            fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
+            fp16_output = self._module_forward(inp, module2inspect, module_kwargs, apply_activation_qdq=False)
 
         fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
 
@@ -913,7 +949,7 @@ class AWQProcessor(LoopProcessor):
 
         return (
             get_op_name(module, prev_op),
-            tuple([get_op_name(module, m) for m in layers]),
+            tuple(layer_names),
             best_scales,
             loss
         )
@@ -934,7 +970,10 @@ class AWQProcessor(LoopProcessor):
 
             max_val = self._compute_best_clip(
                 named_linears[name].weight,
-                self.quantize_dequantize_input(input_feat[name].to(named_linears[name].weight.device)),
+                self.quantize_dequantize_input(
+                    input_feat[name].to(named_linears[name].weight.device),
+                    module_names=[name],
+                ),
             )
             clip_list.append((name, max_val))
             named_linears[name].cpu()
@@ -1161,7 +1200,7 @@ class AWQProcessor(LoopProcessor):
                 fc.weight.div_(scales_view)
 
             # W * X
-            int_w_output = self._module_forward(x, module2inspect, kwargs)
+            int_w_output = self._module_forward(x, module2inspect, kwargs, apply_activation_qdq=False)
             int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
 
             # compute mean squared error (L2 norm)
@@ -1224,7 +1263,7 @@ class AWQProcessor(LoopProcessor):
 
     @torch.inference_mode()
     def _module_forward(
-            self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
+            self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict, *, apply_activation_qdq: bool = True
     ) -> torch.Tensor:
         """Runs a module forward with sanitized kwargs and optional micro-batching."""
 
@@ -1254,7 +1293,8 @@ class AWQProcessor(LoopProcessor):
 
         # Replay through the same activation-QDQ path that packed AWQ modules will
         # use later, so post-quant layer outputs stay lifecycle-consistent.
-        x = self.quantize_dequantize_input(x)
+        if apply_activation_qdq:
+            x = self.quantize_dequantize_input(x)
 
         supports_position_ids = False
         supports_position_embeddings = False
@@ -1657,6 +1697,10 @@ class AWQProcessor(LoopProcessor):
             for name, submodule in find_modules(self.gptq_model.model, [quant_linear_cls]).items()
             if name == module.full_name
         }
+        qmodule = qModules.get(module.full_name)
+        activation_scale_inv = self._activation_scale_inv_by_module.get(module.full_name)
+        if qmodule is not None and activation_scale_inv is not None and hasattr(qmodule, "set_input_scale_inv"):
+            qmodule.set_input_scale_inv(activation_scale_inv)
         pack_start = time.perf_counter() if timer is not None else None
         with log_time_block(
                 "pack",

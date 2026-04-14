@@ -1414,10 +1414,14 @@ class AWQuantLinear(PackedGroupedQuantLinear):
                  register_buffers: bool = False,
                  **kwargs):
         # AWQ W4A8 carries activation QDQ metadata at runtime so replay/inference can
-        # use the same simplified activation path that calibration/search used.
+        # use the same calibrated activation path that calibration/search used.
         self.input_activations = normalize_input_activations(kwargs.pop("input_activations", None))
         super().__init__(bias=bias, register_buffers=False, **kwargs)
 
+        if self.input_activations is not None and not self.input_activations.dynamic:
+            # Static AWQ W4A8 stores one calibrated per-module FP8 input scale so
+            # save/load reuses the same activation quantization parameters.
+            self.register_buffer("input_scale_inv", t.ones((), dtype=t.float32))
 
         in_features = self.in_features
         out_features = self.out_features
@@ -1450,7 +1454,17 @@ class AWQuantLinear(PackedGroupedQuantLinear):
     def quantize_dequantize_input(self, x: t.Tensor) -> t.Tensor:
         """Apply optional runtime activation QDQ for AWQ W4A8 modules."""
 
-        return quantize_dequantize_input(x, self.input_activations)
+        input_scale_inv = getattr(self, "input_scale_inv", None)
+        return quantize_dequantize_input(x, self.input_activations, scale_inv=input_scale_inv)
+
+    def set_input_scale_inv(self, scale_inv: t.Tensor) -> None:
+        """Store the calibrated static FP8 input scale used by this packed AWQ module."""
+
+        scale_inv = scale_inv.detach().to(device="cpu", dtype=t.float32).reshape(())
+        if hasattr(self, "input_scale_inv"):
+            self.input_scale_inv.data.copy_(scale_inv)
+        else:
+            self.register_buffer("input_scale_inv", scale_inv)
 
     # TODO FIX ME. this hack was needed because other part of code forgot to call nn.module register_buffer()!
     def list_buffers(self) -> List:

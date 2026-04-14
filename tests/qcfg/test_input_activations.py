@@ -81,7 +81,7 @@ def test_awq_user_facing_activation_alias_normalizes_to_input_activations():
     assert isinstance(cfg.activation, InputActivationQuantConfig)
     assert cfg.activation is cfg.input_activations
     assert cfg.input_activations.format == "float8_e4m3fn"
-    assert cfg.input_activations.dynamic is True
+    assert cfg.input_activations.dynamic is False
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
@@ -112,6 +112,7 @@ def test_awq_activation_property_setter_normalizes_user_facing_payload():
 
     assert isinstance(cfg.activation, InputActivationQuantConfig)
     assert cfg.input_activations.format == "float8_e4m3fn"
+    assert cfg.input_activations.dynamic is False
     assert cfg.to_dict()["meta"]["input_activations"]["format"] == "float8_e4m3fn"
 
 

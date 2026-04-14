@@ -1164,7 +1164,7 @@ class AutoModuleDecoderConfig(BasePreProcessorConfig):
 
 @dataclass
 class InputActivationQuantConfig:
-    """Describe GPTQ runtime input activation quantization for one linear module."""
+    """Describe activation quantization metadata shared by the W4A8 runtime paths."""
 
     num_bits: int = 8
     type: str = "float"
@@ -1174,7 +1174,7 @@ class InputActivationQuantConfig:
     implementation: str = "reference"
 
     def __post_init__(self):
-        """Normalize supported phase-1 W4A8 settings."""
+        """Normalize the activation quantization state used across config and runtime."""
 
         self.num_bits = int(self.num_bits)
         if self.num_bits != 8:
@@ -1193,8 +1193,10 @@ class InputActivationQuantConfig:
             raise ValueError("InputActivationQuantConfig: `strategy` must be `tensor` or `token`.")
 
         self.dynamic = bool(self.dynamic)
-        if not self.dynamic:
-            raise ValueError("InputActivationQuantConfig: phase-1 only supports `dynamic=True`.")
+        if not self.dynamic and self.strategy != "tensor":
+            raise ValueError(
+                "InputActivationQuantConfig: static activation calibration currently requires `strategy='tensor'`."
+            )
         self.implementation = str(self.implementation).strip().lower()
         if self.implementation not in {"reference"}:
             raise ValueError("InputActivationQuantConfig: `implementation` must be `reference`.")
@@ -1981,7 +1983,9 @@ def _normalize_user_activation_payload(payload: Dict[str, Any]) -> Dict[str, Any
     normalized.setdefault("type", "float")
     normalized.setdefault("format", "float8_e4m3fn")
     normalized.setdefault("strategy", "tensor")
-    normalized.setdefault("dynamic", True)
+    # The user-facing activation surface targets the calibrated static-scale
+    # AWQ W4A8 path rather than the older dynamic reference implementation.
+    normalized.setdefault("dynamic", False)
     normalized.setdefault("implementation", "reference")
     return normalized
 

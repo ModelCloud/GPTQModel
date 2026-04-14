@@ -54,6 +54,18 @@ class TestLlama3_2_AWQ_W4A8(ModelTest):
         "format": "f8_e4m3",
     }
 
+    def _assert_static_activation_scales(self, model):
+        """Ensure the reloaded AWQ W4A8 modules kept their calibrated static FP8 input scales."""
+
+        qmodules = [module for _, module in model.named_modules() if isinstance(module, AwqTorchLinear)]
+        self.assertTrue(qmodules, "Expected at least one AWQ linear module in the quantized model.")
+
+        first = qmodules[0]
+        self.assertIsNotNone(first.input_activations)
+        self.assertFalse(first.input_activations.dynamic)
+        self.assertTrue(hasattr(first, "input_scale_inv"))
+        self.assertGreater(float(first.input_scale_inv.item()), 0.0)
+
     def test_llama3_2_awq_w4a8_smoke(self):
         model, tokenizer, _ = self.quantModel(
             self.NATIVE_MODEL_ID,
@@ -64,6 +76,7 @@ class TestLlama3_2_AWQ_W4A8(ModelTest):
         )
         try:
             self.check_kernel(model, self.KERNEL_INFERENCE)
+            self._assert_static_activation_scales(model)
             self.assertInference(model, tokenizer)
         finally:
             self._cleanup_quantized_model(model, enabled=self.DELETE_QUANTIZED_MODEL)

@@ -12,6 +12,10 @@ from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.input_activations import (
+    calibrate_input_scale_inv,
+    quantize_dequantize_input,
+)
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
@@ -95,6 +99,43 @@ class TestAwqInputActivations:
         torch.testing.assert_close(observed["x"], expected, atol=1e-3, rtol=1e-3)
         torch.testing.assert_close(observed["x_mean"], expected_mean, atol=1e-3, rtol=1e-3)
         torch.testing.assert_close(observed["fp16_output"], expected_output, atol=1e-3, rtol=1e-3)
+
+    def test_awq_static_activation_path_caches_calibrated_input_scale(self, monkeypatch):
+        qcfg = QuantizeConfig(
+            bits=4,
+            group_size=16,
+            sym=False,
+            activation={
+                "method": "fp8",
+                "format": "f8_e4m3",
+            },
+        )
+        processor = self._RuntimeTestAWQProcessor(qcfg)
+
+        first = torch.randn(2, 3, 16, dtype=torch.float16)
+        second = torch.randn(2, 3, 16, dtype=torch.float16) * 2.0
+        expected_scale_inv = calibrate_input_scale_inv(first, qcfg.activation)
+        expected_second = quantize_dequantize_input(second, qcfg.activation, scale_inv=expected_scale_inv)
+
+        observed_calls = {"count": 0}
+        original = awq_processor_module.calibrate_input_scale_inv
+
+        def wrapped_calibrate(*args, **kwargs):
+            observed_calls["count"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(awq_processor_module, "calibrate_input_scale_inv", wrapped_calibrate)
+
+        processor.quantize_dequantize_input(first, module_names=["linear"])
+        actual_second = processor.quantize_dequantize_input(second, module_names=["linear"])
+
+        assert observed_calls["count"] == 1
+        assert "linear" in processor._activation_scale_inv_by_module
+        torch.testing.assert_close(
+            processor._activation_scale_inv_by_module["linear"],
+            expected_scale_inv.detach().to(device="cpu", dtype=torch.float32).reshape(()),
+        )
+        torch.testing.assert_close(actual_second, expected_second, atol=1e-3, rtol=1e-3)
 
     def test_awq_torch_linear_applies_runtime_input_activation_qdq(self):
         qcfg = QuantizeConfig(
@@ -180,3 +221,67 @@ class TestAwqInputActivations:
 
         assert "kwargs" in created
         assert created["kwargs"]["init_kwargs"]["input_activations"]["format"] == "float8_e4m3fn"
+
+    def test_awq_pack_module_sets_calibrated_static_input_scale(self, monkeypatch):
+        qcfg = QuantizeConfig(
+            bits=4,
+            group_size=16,
+            sym=False,
+            activation={
+                "method": "fp8",
+                "format": "f8_e4m3",
+            },
+        )
+        processor = self._RuntimeTestAWQProcessor(qcfg)
+        processor._activation_scale_inv_by_module["linear"] = torch.tensor(321.0, dtype=torch.float32)
+
+        created = {}
+        packed = {}
+
+        def fake_create_quant_module(*args, **kwargs):
+            created["kwargs"] = kwargs
+
+        def fake_pack_module(*args, **kwargs):
+            packed["called"] = True
+            return "fake_pack"
+
+        class _FakeQuantModule:
+            """Track the calibrated static activation scale passed into the packed module."""
+
+            def __init__(self):
+                self.input_scale_inv = None
+
+            def set_input_scale_inv(self, scale_inv):
+                self.input_scale_inv = scale_inv.detach().clone()
+
+        fake_qmodule = _FakeQuantModule()
+
+        def fake_find_modules(*args, **kwargs):
+            return {"linear": fake_qmodule}
+
+        monkeypatch.setattr(awq_processor_module, "create_quant_module", fake_create_quant_module)
+        monkeypatch.setattr(awq_processor_module, "pack_module", fake_pack_module)
+        monkeypatch.setattr(awq_processor_module, "find_modules", fake_find_modules)
+
+        class _FakeNamedModule:
+            """Minimal named-module stub for AWQ static activation pack tests."""
+
+            def __init__(self):
+                self.name = "linear"
+                self.full_name = "linear"
+                self.layer_index = 0
+                self.module = nn.Linear(16, 8, bias=True, dtype=torch.float16)
+                self.weight = self.module.weight
+                self.state = {
+                    "q_zeros": torch.zeros(8, 1, dtype=torch.float16),
+                    "q_scales": torch.ones(8, 1, dtype=torch.float16),
+                }
+
+            def stream_sync(self):
+                return None
+
+        processor.pack_module(_FakeNamedModule())
+
+        assert "kwargs" in created
+        assert packed["called"] is True
+        torch.testing.assert_close(fake_qmodule.input_scale_inv, torch.tensor(321.0, dtype=torch.float32))
