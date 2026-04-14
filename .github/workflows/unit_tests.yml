@@ -228,6 +228,10 @@ jobs:
               --torch-envs-json '${{ needs.list-test-files.outputs.torch-envs }}' \
               --model-envs-json '${{ needs.list-test-files.outputs.model-envs }}'
           )
+          
+          for i in "${!env_rows[@]}"; do
+            echo "$i: ${env_rows[$i]}"
+          done
 
           for row in "${env_rows[@]}"; do
               echo "::group::updating env for $row"
