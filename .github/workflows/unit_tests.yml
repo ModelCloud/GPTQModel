@@ -230,6 +230,7 @@ jobs:
           )
 
           for row in "${env_rows[@]}"; do
+              echo "updating env for $row"
               IFS=$'\t' read -r env_name test_script python_version <<< "$row"
               echo "preparing env=$env_name test=$test_script py=$python_version"
               source /opt/uv/setup_uv_venv.sh "$env_name"
@@ -262,6 +263,11 @@ jobs:
                 uv pip install "$url"
               done
               /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+          
+          
+              echo "::group::pip list"
+                uv pip list
+              echo "::endgroup::"
           done
 
   torch:
