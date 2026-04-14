@@ -19,6 +19,7 @@ from torch.nn.modules.conv import _ConvNd
 from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
+from ...quantization.input_activations import normalize_input_activations, quantize_dequantize_input
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
@@ -1412,6 +1413,9 @@ class AWQuantLinear(PackedGroupedQuantLinear):
                  bias: bool = False,
                  register_buffers: bool = False,
                  **kwargs):
+        # AWQ W4A8 carries activation QDQ metadata at runtime so replay/inference can
+        # use the same simplified activation path that calibration/search used.
+        self.input_activations = normalize_input_activations(kwargs.pop("input_activations", None))
         super().__init__(bias=bias, register_buffers=False, **kwargs)
 
 
@@ -1442,6 +1446,11 @@ class AWQuantLinear(PackedGroupedQuantLinear):
                 self.register_buffer("bias", t.zeros(out_features, dtype=t.float16))
             else:
                 self.bias = None
+
+    def quantize_dequantize_input(self, x: t.Tensor) -> t.Tensor:
+        """Apply optional runtime activation QDQ for AWQ W4A8 modules."""
+
+        return quantize_dequantize_input(x, self.input_activations)
 
     # TODO FIX ME. this hack was needed because other part of code forgot to call nn.module register_buffer()!
     def list_buffers(self) -> List:

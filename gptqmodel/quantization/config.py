@@ -1154,6 +1154,54 @@ class AutoModuleDecoderConfig(BasePreProcessorConfig):
 
 
 @dataclass
+class InputActivationQuantConfig:
+    """Describe GPTQ runtime input activation quantization for one linear module."""
+
+    num_bits: int = 8
+    type: str = "float"
+    format: str = "float8_e4m3fn"
+    strategy: str = "tensor"
+    dynamic: bool = True
+    implementation: str = "reference"
+
+    def __post_init__(self):
+        """Normalize supported phase-1 W4A8 settings."""
+
+        self.num_bits = int(self.num_bits)
+        if self.num_bits != 8:
+            raise ValueError("InputActivationQuantConfig: `num_bits` must be `8`.")
+
+        self.type = str(self.type).strip().lower()
+        if self.type != "float":
+            raise ValueError("InputActivationQuantConfig: phase-1 only supports `type='float'`.")
+
+        self.format = _normalize_fp8_fmt(self.format)
+
+        self.strategy = str(self.strategy).strip().lower()
+        if self.strategy in {"row", "per_token", "tokenwise"}:
+            self.strategy = "token"
+        if self.strategy not in {"tensor", "token"}:
+            raise ValueError("InputActivationQuantConfig: `strategy` must be `tensor` or `token`.")
+
+        self.dynamic = bool(self.dynamic)
+        if not self.dynamic:
+            raise ValueError("InputActivationQuantConfig: phase-1 only supports `dynamic=True`.")
+        self.implementation = str(self.implementation).strip().lower()
+        if self.implementation not in {"reference"}:
+            raise ValueError("InputActivationQuantConfig: `implementation` must be `reference`.")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "num_bits": self.num_bits,
+            "type": self.type,
+            "format": self.format,
+            "strategy": self.strategy,
+            "dynamic": self.dynamic,
+            "implementation": self.implementation,
+        }
+
+
+@dataclass
 class TensorParallelPadderConfig(BasePreProcessorConfig):
     """Configure tensor-parallel-safe column padding derived from module weight shapes."""
 
@@ -1876,6 +1924,20 @@ def _normalize_foem(foem: Optional[Union[FOEMConfig, Dict[str, Any]]]) -> Option
     if not isinstance(foem, FOEMConfig):
         raise ValueError("QuantizeConfig: `foem` must be a FOEMConfig, dict, or None.")
     return foem
+
+
+def _normalize_input_activations(
+    input_activations: Optional[Union[InputActivationQuantConfig, Dict[str, Any]]],
+) -> Optional[InputActivationQuantConfig]:
+    if input_activations is None:
+        return None
+    if isinstance(input_activations, dict):
+        return InputActivationQuantConfig(**input_activations)
+    if not isinstance(input_activations, InputActivationQuantConfig):
+        raise ValueError(
+            "QuantizeConfig: `input_activations` must be an InputActivationQuantConfig, dict, or None."
+        )
+    return input_activations
 
 
 def _normalize_dense_vram_strategy(value: Union[str, VramStrategy]) -> VramStrategy:
@@ -2747,6 +2809,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "hessian": "hessian",
             "gptaq": "gptaq",
             "foem": "foem",
+            "input_activations": "input_activations",
             "weight_only": "weight_only",
             "preprocessors": "preprocessors",
             "gc_mode": "gc_mode",
@@ -3018,6 +3081,7 @@ class GPTQConfig(PreProcessorConfig):
     mse: float = field(default=0.0)
     gptaq: Optional[GPTAQConfig] = field(default=None)
     foem: Optional[FOEMConfig] = field(default=None)
+    input_activations: Optional[Union[InputActivationQuantConfig, Dict[str, Any]]] = field(default=None)
     mock_quantization: bool = field(
         default=False,
         metadata={"help": "Skip heavy computations for fast model loading validation"},
@@ -3050,6 +3114,7 @@ class GPTQConfig(PreProcessorConfig):
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
         self.foem = _normalize_foem(self.foem)
+        self.input_activations = _normalize_input_activations(self.input_activations)
 
         if act_group_aware_user_value is None:
             self.act_group_aware = self.method == METHOD.GPTQ
@@ -3102,6 +3167,8 @@ class GPTQConfig(PreProcessorConfig):
         meta_payload["mse"] = self.mse
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
+        if self.input_activations is not None:
+            meta_payload["input_activations"] = self.input_activations.to_dict()
         meta_payload["hessian"] = {
             "chunk_size": self.hessian.chunk_size,
             "chunk_bytes": self.hessian.chunk_bytes,
@@ -3112,11 +3179,19 @@ class GPTQConfig(PreProcessorConfig):
         out["sym"] = self.sym
         out[FORMAT_FIELD_CODE] = self.format
 
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        if self.input_activations is None:
+            return {}
+        return {
+            "input_activations": self.input_activations.to_dict(),
+        }
+
 
 @dataclass
 class AWQConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.AWQ)
     format: FORMAT = field(default=FORMAT.GEMM)
+    input_activations: Optional[Union[InputActivationQuantConfig, Dict[str, Any]]] = field(default=None)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.AWQ,)
@@ -3136,6 +3211,19 @@ class AWQConfig(PreProcessorConfig):
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
         super().__post_init__()
+        self.input_activations = _normalize_input_activations(self.input_activations)
+
+    def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
+        super()._update_meta_payload(meta_payload)
+        if self.input_activations is not None:
+            meta_payload["input_activations"] = self.input_activations.to_dict()
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        if self.input_activations is None:
+            return {}
+        return {
+            "input_activations": self.input_activations.to_dict(),
+        }
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym
