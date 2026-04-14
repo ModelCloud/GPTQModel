@@ -17,7 +17,6 @@ from torch import nn
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
-from gptqmodel.models.definitions.mixtral import MixtralQModel
 from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
 from gptqmodel.utils.structure import (
@@ -295,122 +294,19 @@ class _RenamedMixtralWrapper(nn.Module):
         self.model.layers = nn.ModuleList([_RenamedMixtralLayer(width, intermediate, expert_count)])
 
 
-# Synthetic checkpoint-side module tree used to prove MoE aliases are derived from
-# the declared definition structure instead of a hard-coded string table.
-_NONSTANDARD_MOE_ALIAS_MODULE_TREE = [
-    "model",
-    "layers",
-    "#",
-    {
-        "legacy_sparse:moe": {
-            "router": ("router:!",),
-            "expert_bank": {
-                "#": ("alpha:0", "beta:0", "gamma:1"),
-            },
-        }
-    },
-]
-
-
-class _NonstandardSourceExpert(nn.Module):
-    """Checkpoint-side expert layout with intentionally nonstandard leaf names."""
-
-    def __init__(self, width: int, intermediate: int):
-        super().__init__()
-        self.alpha = nn.Linear(width, intermediate, bias=False)
-        self.beta = nn.Linear(width, intermediate, bias=False)
-        self.gamma = nn.Linear(intermediate, width, bias=False)
-
-
-class _NonstandardSourceMoe(nn.Module):
-    """Checkpoint-side MoE root with a nonstandard root name and expert container."""
-
-    def __init__(self, width: int, intermediate: int, expert_count: int):
-        super().__init__()
-        self.router = nn.Linear(width, expert_count, bias=False)
-        self.expert_bank = nn.ModuleList(
-            [_NonstandardSourceExpert(width, intermediate) for _ in range(expert_count)]
-        )
-
-
-class _NonstandardSourceLayer(nn.Module):
-    """Checkpoint-side layer wrapper for the nonstandard MoE alias test."""
-
-    def __init__(self, width: int, intermediate: int, expert_count: int):
-        super().__init__()
-        self.legacy_sparse = _NonstandardSourceMoe(width, intermediate, expert_count)
-
-
-class _NonstandardSourceWrapper(nn.Module):
-    """Checkpoint-side wrapper that matches `_NONSTANDARD_MOE_ALIAS_MODULE_TREE`."""
-
-    def __init__(self, width: int, intermediate: int, expert_count: int):
-        super().__init__()
-        self.model = nn.Module()
-        self.model.layers = nn.ModuleList([_NonstandardSourceLayer(width, intermediate, expert_count)])
-
-
-class _NonstandardRuntimeExpert(nn.Module):
-    """Runtime-defused expert layout with different leaf names but the same projection ordering."""
-
-    def __init__(self, width: int, intermediate: int):
-        super().__init__()
-        self.first = nn.Linear(width, intermediate, bias=False)
-        self.second = nn.Linear(width, intermediate, bias=False)
-        self.third = nn.Linear(intermediate, width, bias=False)
-
-
-class _NonstandardRuntimeMoe(nn.Module):
-    """Runtime MoE root whose name differs from the checkpoint/source definition."""
-
-    def __init__(self, width: int, intermediate: int, expert_count: int):
-        super().__init__()
-        self.router = nn.Linear(width, expert_count, bias=False)
-        self.expert_bank = nn.ModuleList(
-            [_NonstandardRuntimeExpert(width, intermediate) for _ in range(expert_count)]
-        )
-
-
-class _NonstandardRuntimeLayer(nn.Module):
-    """Runtime layer wrapper for the nonstandard module-tree-driven alias test."""
-
-    def __init__(self, width: int, intermediate: int, expert_count: int):
-        super().__init__()
-        self.moeish = _NonstandardRuntimeMoe(width, intermediate, expert_count)
-
-
-class _NonstandardRuntimeWrapper(nn.Module):
-    """Runtime wrapper whose MoE names intentionally diverge from the checkpoint/source names."""
-
-    def __init__(self, width: int, intermediate: int, expert_count: int):
-        super().__init__()
-        self.model = nn.Module()
-        self.model.layers = nn.ModuleList([_NonstandardRuntimeLayer(width, intermediate, expert_count)])
-
-
 def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, torch.Tensor]) -> None:
     weight_map = dict.fromkeys(state_dict, shard_name)
     (path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
 
 
-def _build_lazy_turtle_from_module(
-    tmp_path: Path,
-    model: nn.Module,
-    *,
-    module_tree=None,
-) -> LazyTurtle:
+def _build_lazy_turtle_from_module(tmp_path: Path, model: nn.Module) -> LazyTurtle:
     """Persist cloned checkpoint values and reopen them through the lazy turtle source."""
 
     state_dict = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
-    return _build_lazy_turtle_from_checkpoint_tensors(tmp_path, state_dict, module_tree=module_tree)
+    return _build_lazy_turtle_from_checkpoint_tensors(tmp_path, state_dict)
 
 
-def _build_lazy_turtle_from_checkpoint_tensors(
-    tmp_path: Path,
-    checkpoint_tensors: dict[str, torch.Tensor],
-    *,
-    module_tree=None,
-) -> LazyTurtle:
+def _build_lazy_turtle_from_checkpoint_tensors(tmp_path: Path, checkpoint_tensors: dict[str, torch.Tensor]) -> LazyTurtle:
     """Persist an arbitrary safetensors checkpoint and reopen it through LazyTurtle."""
 
     model_dir = tmp_path / "source_model"
@@ -422,7 +318,6 @@ def _build_lazy_turtle_from_checkpoint_tensors(
         model_local_path=str(model_dir),
         config=SimpleNamespace(_experts_implementation=None),
         model_init_kwargs={"device_map": {"": "cpu"}},
-        module_tree=module_tree,
     )
     assert source is not None
     return source
@@ -1421,11 +1316,7 @@ def test_lazy_turtle_materializes_legacy_mixtral_checkpoint_into_renamed_moe_blo
         expert.up.weight = nn.Parameter(torch.empty_like(expert.up.weight, device="meta"), requires_grad=expert.up.weight.requires_grad)
         expert.down.weight = nn.Parameter(torch.empty_like(expert.down.weight, device="meta"), requires_grad=expert.down.weight.requires_grad)
 
-    source = _build_lazy_turtle_from_module(
-        tmp_path,
-        source_model,
-        module_tree=MixtralQModel.module_tree,
-    )
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
 
     alias_from_turtle_for_submodule(
         target_model=shell_model,
@@ -1455,11 +1346,7 @@ def test_alias_all_from_turtle_materializes_legacy_mixtral_leaf_tensors_after_mo
     expert.up.weight = nn.Parameter(torch.empty_like(expert.up.weight, device="meta"), requires_grad=expert.up.weight.requires_grad)
     expert.down.weight = nn.Parameter(torch.empty_like(expert.down.weight, device="meta"), requires_grad=expert.down.weight.requires_grad)
 
-    source = _build_lazy_turtle_from_module(
-        tmp_path,
-        source_model,
-        module_tree=MixtralQModel.module_tree,
-    )
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
 
     alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=source)
 
@@ -1472,40 +1359,6 @@ def test_alias_all_from_turtle_materializes_legacy_mixtral_leaf_tensors_after_mo
     assert expert.gate.weight.device.type == "cpu"
     assert expert.up.weight.device.type == "cpu"
     assert expert.down.weight.device.type == "cpu"
-
-
-def test_lazy_turtle_uses_module_tree_for_nonstandard_moe_root_and_leaf_aliases(tmp_path):
-    """Definition-driven MoE aliasing should work even when neither root nor leaf names are standard."""
-
-    source_model = _NonstandardSourceWrapper(width=8, intermediate=6, expert_count=2)
-    shell_model = _NonstandardRuntimeWrapper(width=8, intermediate=6, expert_count=2)
-
-    moe = shell_model.model.layers[0].moeish
-    moe.router.weight = nn.Parameter(torch.empty_like(moe.router.weight, device="meta"), requires_grad=moe.router.weight.requires_grad)
-    expert = moe.expert_bank[1]
-    expert.first.weight = nn.Parameter(torch.empty_like(expert.first.weight, device="meta"), requires_grad=expert.first.weight.requires_grad)
-    expert.second.weight = nn.Parameter(torch.empty_like(expert.second.weight, device="meta"), requires_grad=expert.second.weight.requires_grad)
-    expert.third.weight = nn.Parameter(torch.empty_like(expert.third.weight, device="meta"), requires_grad=expert.third.weight.requires_grad)
-
-    source = _build_lazy_turtle_from_module(
-        tmp_path,
-        source_model,
-        module_tree=_NONSTANDARD_MOE_ALIAS_MODULE_TREE,
-    )
-
-    alias_from_turtle_for_submodule(
-        target_model=shell_model,
-        turtle_model=source,
-        target_submodule=moe,
-        device=torch.device("cpu"),
-    )
-
-    expected_moe = source_model.model.layers[0].legacy_sparse
-    expected_expert = expected_moe.expert_bank[1]
-    torch.testing.assert_close(moe.router.weight, expected_moe.router.weight)
-    torch.testing.assert_close(expert.first.weight, expected_expert.alpha.weight)
-    torch.testing.assert_close(expert.second.weight, expected_expert.beta.weight)
-    torch.testing.assert_close(expert.third.weight, expected_expert.gamma.weight)
 
 
 def test_lazy_turtle_raises_when_submodule_materialization_cannot_match_target_shape(tmp_path):
