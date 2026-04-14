@@ -29,6 +29,7 @@ import copy
 import inspect
 import json
 import os
+import re
 import threading
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
@@ -565,6 +566,21 @@ class LazyTurtle:
 
     supports_reload = False
     is_lazy_checkpoint_source = True
+    _MOE_CONTAINER_ALIASES: tuple[tuple[str, ...], ...] = (("block_sparse_moe", "mlp", "moe"),)
+    _MOE_LEAF_ALIASES: Dict[str, tuple[str, ...]] = {
+        "w1": ("w1", "gate_proj", "gate"),
+        "gate_proj": ("gate_proj", "gate", "w1"),
+        "gate": ("gate", "gate_proj", "w1"),
+        "w2": ("w2", "down_proj", "down"),
+        "down_proj": ("down_proj", "down", "w2"),
+        "down": ("down", "down_proj", "w2"),
+        "w3": ("w3", "up_proj", "up"),
+        "up_proj": ("up_proj", "up", "w3"),
+        "up": ("up", "up_proj", "w3"),
+    }
+    _MOE_LEAF_PATTERN = re.compile(
+        r"^(?P<prefix>(?:.*\.)?experts\.\d+)\.(?P<leaf>w1|w2|w3|gate_proj|gate|up_proj|up|down_proj|down)\.(?P<tensor>weight|bias)$"
+    )
 
     def __init__(
         self,
@@ -710,6 +726,48 @@ class LazyTurtle:
             return module_path
         return f"{module_path}.{rel_name}"
 
+    def _candidate_name_aliases(self, full_name: str) -> list[str]:
+        """Expand known MoE path aliases for one tensor name."""
+
+        queue = [full_name]
+        seen = {full_name}
+        aliases: list[str] = []
+
+        while queue:
+            current = queue.pop(0)
+            aliases.append(current)
+
+            parts = current.split(".")
+            for idx, part in enumerate(parts):
+                for group in self._MOE_CONTAINER_ALIASES:
+                    if part not in group:
+                        continue
+                    for alt in group:
+                        if alt == part:
+                            continue
+                        candidate_parts = list(parts)
+                        candidate_parts[idx] = alt
+                        alias = ".".join(candidate_parts)
+                        if alias in seen:
+                            continue
+                        seen.add(alias)
+                        queue.append(alias)
+
+            match = self._MOE_LEAF_PATTERN.match(current)
+            if match is None:
+                continue
+            prefix = match.group("prefix")
+            leaf = match.group("leaf")
+            tensor_name = match.group("tensor")
+            for alt_leaf in self._MOE_LEAF_ALIASES.get(leaf, (leaf,)):
+                alias = f"{prefix}.{alt_leaf}.{tensor_name}"
+                if alias in seen:
+                    continue
+                seen.add(alias)
+                queue.append(alias)
+
+        return aliases
+
     @staticmethod
     def _candidate_module_paths(module_path: str, *, allow_empty: bool = False) -> list[str]:
         """Return progressively stripped module path aliases for checkpoint lookup."""
@@ -732,9 +790,10 @@ class LazyTurtle:
         """Resolve a shell module path to the checkpoint path when wrappers add extra roots."""
 
         for candidate in self._candidate_module_paths(module_path):
-            prefix = f"{candidate}."
-            if any(full_name.startswith(prefix) for full_name in self._weight_map):
-                return candidate
+            for alias in self._candidate_name_aliases(candidate):
+                prefix = f"{alias}."
+                if any(full_name.startswith(prefix) for full_name in self._weight_map):
+                    return alias
         return module_path
 
     def _resolve_checkpoint_tensor_name(self, module_path: str, rel_name: str) -> str:
@@ -742,8 +801,9 @@ class LazyTurtle:
 
         for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
             candidate_name = self._join_tensor_name(candidate_path, rel_name)
-            if candidate_name in self._weight_map:
-                return candidate_name
+            for alias in self._candidate_name_aliases(candidate_name):
+                if alias in self._weight_map:
+                    return alias
         return self._join_tensor_name(module_path, rel_name)
 
     def _resolve_split_gate_up_tensor_name(

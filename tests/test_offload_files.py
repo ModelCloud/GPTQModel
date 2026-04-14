@@ -222,6 +222,78 @@ class _RectFusedExpertsWrapper(nn.Module):
             self.block.experts.add_module(str(expert_idx), _RectExpert(width, intermediate))
 
 
+class _LegacyMixtralExpert(nn.Module):
+    """Legacy Mixtral checkpoint layout that stores per-expert weights as w1/w2/w3."""
+
+    def __init__(self, width: int, intermediate: int):
+        super().__init__()
+        self.w1 = nn.Linear(width, intermediate, bias=False)
+        self.w2 = nn.Linear(intermediate, width, bias=False)
+        self.w3 = nn.Linear(width, intermediate, bias=False)
+
+
+class _LegacyMixtralSparseMoe(nn.Module):
+    """Legacy sparse-MoE container keyed under `block_sparse_moe`."""
+
+    def __init__(self, width: int, intermediate: int, expert_count: int):
+        super().__init__()
+        self.gate = nn.Linear(width, expert_count, bias=False)
+        self.experts = nn.ModuleList(
+            [_LegacyMixtralExpert(width, intermediate) for _ in range(expert_count)]
+        )
+
+
+class _LegacyMixtralLayer(nn.Module):
+    def __init__(self, width: int, intermediate: int, expert_count: int):
+        super().__init__()
+        self.block_sparse_moe = _LegacyMixtralSparseMoe(width, intermediate, expert_count)
+
+
+class _LegacyMixtralWrapper(nn.Module):
+    """Tiny nested wrapper that mimics legacy Mixtral checkpoint paths."""
+
+    def __init__(self, width: int, intermediate: int, expert_count: int):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([_LegacyMixtralLayer(width, intermediate, expert_count)])
+
+
+class _RenamedMixtralExpert(nn.Module):
+    """Runtime-defused expert layout using gate/up/down leaf names."""
+
+    def __init__(self, width: int, intermediate: int):
+        super().__init__()
+        self.gate = nn.Linear(width, intermediate, bias=False)
+        self.up = nn.Linear(width, intermediate, bias=False)
+        self.down = nn.Linear(intermediate, width, bias=False)
+
+
+class _RenamedMixtralSparseMoe(nn.Module):
+    """Runtime-defused sparse-MoE container keyed under `moe`."""
+
+    def __init__(self, width: int, intermediate: int, expert_count: int):
+        super().__init__()
+        self.gate = nn.Linear(width, expert_count, bias=False)
+        self.experts = nn.ModuleList(
+            [_RenamedMixtralExpert(width, intermediate) for _ in range(expert_count)]
+        )
+
+
+class _RenamedMixtralLayer(nn.Module):
+    def __init__(self, width: int, intermediate: int, expert_count: int):
+        super().__init__()
+        self.moe = _RenamedMixtralSparseMoe(width, intermediate, expert_count)
+
+
+class _RenamedMixtralWrapper(nn.Module):
+    """Tiny nested wrapper that mimics defused runtime Mixtral paths."""
+
+    def __init__(self, width: int, intermediate: int, expert_count: int):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([_RenamedMixtralLayer(width, intermediate, expert_count)])
+
+
 def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, torch.Tensor]) -> None:
     weight_map = dict.fromkeys(state_dict, shard_name)
     (path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
@@ -1229,6 +1301,64 @@ def test_alias_all_from_turtle_materializes_leaf_transposed_expert_gate_proj_fro
     expected = source_model.block.experts.get_submodule("1").gate_proj
     torch.testing.assert_close(expert.weight, expected.weight)
     torch.testing.assert_close(expert.bias, expected.bias)
+
+
+def test_lazy_turtle_materializes_legacy_mixtral_checkpoint_into_renamed_moe_block(tmp_path):
+    """Legacy `block_sparse_moe` / `w1,w2,w3` checkpoints should hydrate renamed defused MoE modules."""
+
+    source_model = _LegacyMixtralWrapper(width=8, intermediate=6, expert_count=2)
+    shell_model = _RenamedMixtralWrapper(width=8, intermediate=6, expert_count=2)
+
+    moe = shell_model.model.layers[0].moe
+    moe.gate.weight = nn.Parameter(torch.empty_like(moe.gate.weight, device="meta"), requires_grad=moe.gate.weight.requires_grad)
+    for expert in moe.experts:
+        expert.gate.weight = nn.Parameter(torch.empty_like(expert.gate.weight, device="meta"), requires_grad=expert.gate.weight.requires_grad)
+        expert.up.weight = nn.Parameter(torch.empty_like(expert.up.weight, device="meta"), requires_grad=expert.up.weight.requires_grad)
+        expert.down.weight = nn.Parameter(torch.empty_like(expert.down.weight, device="meta"), requires_grad=expert.down.weight.requires_grad)
+
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=moe,
+        device=torch.device("cpu"),
+    )
+
+    expected_moe = source_model.model.layers[0].block_sparse_moe
+    torch.testing.assert_close(moe.gate.weight, expected_moe.gate.weight)
+    for actual_expert, expected_expert in zip(moe.experts, expected_moe.experts):
+        torch.testing.assert_close(actual_expert.gate.weight, expected_expert.w1.weight)
+        torch.testing.assert_close(actual_expert.up.weight, expected_expert.w3.weight)
+        torch.testing.assert_close(actual_expert.down.weight, expected_expert.w2.weight)
+
+
+def test_alias_all_from_turtle_materializes_legacy_mixtral_leaf_tensors_after_moe_rename(tmp_path):
+    """Direct meta sync should resolve legacy Mixtral checkpoint names after defused runtime renames."""
+
+    source_model = _LegacyMixtralWrapper(width=8, intermediate=6, expert_count=2)
+    shell_model = _RenamedMixtralWrapper(width=8, intermediate=6, expert_count=2)
+
+    moe = shell_model.model.layers[0].moe
+    moe.gate.weight = nn.Parameter(torch.empty_like(moe.gate.weight, device="meta"), requires_grad=moe.gate.weight.requires_grad)
+    expert = moe.experts[1]
+    expert.gate.weight = nn.Parameter(torch.empty_like(expert.gate.weight, device="meta"), requires_grad=expert.gate.weight.requires_grad)
+    expert.up.weight = nn.Parameter(torch.empty_like(expert.up.weight, device="meta"), requires_grad=expert.up.weight.requires_grad)
+    expert.down.weight = nn.Parameter(torch.empty_like(expert.down.weight, device="meta"), requires_grad=expert.down.weight.requires_grad)
+
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+
+    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=source)
+
+    expected_moe = source_model.model.layers[0].block_sparse_moe
+    expected_expert = expected_moe.experts[1]
+    torch.testing.assert_close(moe.gate.weight, expected_moe.gate.weight)
+    torch.testing.assert_close(expert.gate.weight, expected_expert.w1.weight)
+    torch.testing.assert_close(expert.up.weight, expected_expert.w3.weight)
+    torch.testing.assert_close(expert.down.weight, expected_expert.w2.weight)
+    assert expert.gate.weight.device.type == "cpu"
+    assert expert.up.weight.device.type == "cpu"
+    assert expert.down.weight.device.type == "cpu"
 
 
 def test_lazy_turtle_raises_when_submodule_materialization_cannot_match_target_shape(tmp_path):
