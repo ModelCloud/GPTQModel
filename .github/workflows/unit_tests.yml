@@ -191,7 +191,7 @@ jobs:
 
       - name: Prepare common envs
         run: |
-          source /opt/uv/setup_uv_venv.sh gptqmodel_unit_pre_env
+          source /opt/uv/setup_uv_venv.sh gptqmodel_unit_pre_env 3.14t
           uv pip install pyyaml -U
           python3 .github/scripts/ci_workflow.py prepare-common-envs \
             --torch-envs-json '${{ needs.list-test-files.outputs.torch-envs }}' \
@@ -253,7 +253,6 @@ jobs:
 
       - name: Activate uv env
         run: |
-          # fix fatal: detected dubious ownership in repository at '/__w/GPTQModel/GPTQModel'
           source /opt/uv/setup_uv_venv.sh unit_test_env
           python3 .github/scripts/ci_workflow.py activate-test-env \
             --group tests \
