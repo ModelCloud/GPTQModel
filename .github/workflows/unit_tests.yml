@@ -495,3 +495,44 @@ jobs:
           uv venv local_uv_env
           source local_uv_env/bin/activate
           uv pip install . torch -U
+
+  prepare-compat:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.parser.outputs.versions || '[]' }}
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Generate version matrix
+        id: parser
+        run: |
+          versions=$(python ci_loop_versions.py setuptools ">=77.0.1,<83")
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
+  check-compat:
+    needs: prepare-compat
+    if: needs.prepare.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.prepare.outputs.versions) }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install package with selected setuptools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . "setuptools==${{ matrix.version }}"
+
+      - name: Show versions
+        run: |
+          python --version
+          python -m pip show setuptools
