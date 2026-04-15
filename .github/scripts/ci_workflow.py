@@ -23,7 +23,7 @@ from ci_common import append_github_env, append_github_output, load_json, run_co
 
 
 def command_check_vm(args: argparse.Namespace) -> int:
-    run_id = args.artifact_id or args.github_run_id
+    run_id = args.github_run_id
     install_ts = args.install_ts or str(int(time.time()))
     max_parallel = str(args.max_parallel or "20").strip()
     max_parallel_json = json.dumps({"size": int(max_parallel)})
@@ -34,7 +34,7 @@ def command_check_vm(args: argparse.Namespace) -> int:
     append_github_output("max-parallel", max_parallel_json)
 
     print(f"ip: {args.runner_ip}")
-    print(f"artifact_id={run_id}")
+    print(f"run_id={run_id}")
     print(f"install_ts={install_ts}")
     print(f"max-parallel={max_parallel_json}")
     return 0
@@ -388,7 +388,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_vm = subparsers.add_parser("check-vm")
     check_vm.add_argument("--runner-ip", required=True)
-    check_vm.add_argument("--artifact-id", default="")
     check_vm.add_argument("--github-run-id", required=True)
     check_vm.add_argument("--max-parallel", default="")
     check_vm.add_argument("--install-ts", default="")

@@ -30,10 +30,6 @@ on:
         description: 'Regex to filter test files'
         required: false
         default: ''
-      artifact_id:
-        description: 'Run id for artifact to be downloaded'
-        required: false
-        default: ''
       max-parallel:
         description: 'Parallel jobs'
         required: false
@@ -46,13 +42,6 @@ on:
         options:
           - 'fast'
           - 'slow'
-      server:
-        description: 'Wheel Build Server'
-        type: choice
-        default: '["self-hosted", "xeon5"]'
-        options:
-          - '["self-hosted", "xeon5"]'
-          - '["self-hosted", "zen4"]'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -104,8 +93,6 @@ jobs:
         run: |
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
-          echo "artifact_id: ${{ github.event.inputs.artifact_id }}"
-          echo "selected server: ${{ github.event.inputs.server }}"
 
       - name: Checkout Codes
         uses: actions/checkout@v6
@@ -113,12 +100,11 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - name: Set server
+      - name: Set runner metadata
         id: get_ip
         run: |
           python3 .github/scripts/ci_workflow.py check-vm \
             --runner-ip "$RUNNER" \
-            --artifact-id "${{ github.event.inputs.artifact_id }}" \
             --github-run-id "${{ github.run_id }}" \
             --max-parallel "${{ github.event.inputs['max-parallel'] }}"
 
@@ -234,7 +220,7 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
-    if: always() && !cancelled() && needs.list-test-files.outputs.torch-files != '[]' #  || github.event.inputs.artifact_id != ''
+    if: always() && !cancelled() && needs.list-test-files.outputs.torch-files != '[]'
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
