@@ -14,6 +14,7 @@ from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.input_activations import (
     calibrate_input_scale_inv,
+    quantize_input,
     quantize_dequantize_input,
 )
 
@@ -135,6 +136,28 @@ class TestAwqInputActivations:
             expected_scale_inv.detach().to(device="cpu", dtype=torch.float32).reshape(()),
         )
         torch.testing.assert_close(actual_second, expected_second, atol=1e-3, rtol=1e-3)
+
+    def test_quantize_input_returns_fp8_tensor_and_runtime_scale(self):
+        x = torch.tensor([[1.0, -2.0, 3.0, -4.0]], dtype=torch.float16)
+        x_q, scale = quantize_input(
+            x,
+            self._input_activations_config(dynamic=True, strategy="token"),
+        )
+
+        assert x_q.dtype is torch.float8_e4m3fn
+        assert scale.dtype is torch.float32
+        assert tuple(scale.shape) == (1, 1)
+
+        x_dq = x_q.to(torch.float32) * scale
+        torch.testing.assert_close(
+            x_dq.to(torch.float16),
+            quantize_dequantize_input(
+                x,
+                self._input_activations_config(dynamic=True, strategy="token"),
+            ),
+            atol=1e-3,
+            rtol=1e-3,
+        )
 
     def test_awq_torch_linear_applies_runtime_input_activation_qdq(self):
         qcfg = QuantizeConfig(

@@ -19,7 +19,7 @@ from torch.nn.modules.conv import _ConvNd
 from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
-from ...quantization.input_activations import normalize_input_activations, quantize_dequantize_input
+from ...quantization.input_activations import normalize_input_activations, quantize_dequantize_input, quantize_input
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
@@ -1456,6 +1456,12 @@ class AWQuantLinear(PackedGroupedQuantLinear):
 
         input_scale_inv = getattr(self, "input_scale_inv", None)
         return quantize_dequantize_input(x, self.input_activations, scale_inv=input_scale_inv)
+
+    def quantize_input(self, x: t.Tensor) -> Tuple[t.Tensor, Optional[t.Tensor]]:
+        """Quantize inputs for fused activation-aware kernels and return dequant scales."""
+
+        input_scale_inv = getattr(self, "input_scale_inv", None)
+        return quantize_input(x, self.input_activations, scale_inv=input_scale_inv)
 
     def set_input_scale_inv(self, scale_inv: t.Tensor) -> None:
         """Store the calibrated static FP8 input scale used by this packed AWQ module."""

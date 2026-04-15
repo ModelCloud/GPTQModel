@@ -20,6 +20,7 @@ from ...utils.marlin import (
     apply_awq_marlin_linear,
     awq_marlin_repack,
     awq_to_marlin_zero_points,
+    marlin_int4_fp8_preprocess,
     marlin_import_exception,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
@@ -27,6 +28,7 @@ from ...utils.marlin import (
     marlin_permute_scales,
     marlin_runtime_available,
     marlin_runtime_error,
+    marlin_supports_fp8_input,
     replace_parameter,
 )
 from ...utils.marlin_scalar_type import scalar_types
@@ -185,6 +187,14 @@ class AwqMarlinLinear(AWQuantLinear):
             if not has_cuda_v8:
                 raise NotImplementedError("Marlin kernel only supports compute capability >= 8.0.")
 
+    def _fused_input_dtype(self) -> Optional[torch.dtype]:
+        input_activations = getattr(self, "input_activations", None)
+        if input_activations is None or not input_activations.dynamic:
+            return None
+        if input_activations.format != "float8_e4m3fn":
+            return None
+        return getattr(torch, input_activations.format)
+
     def post_init(self):
         device = self.qweight.device
 
@@ -196,6 +206,23 @@ class AwqMarlinLinear(AWQuantLinear):
 
         # Allocate marlin workspace
         self.workspace = marlin_make_workspace_new(device)
+        self.marlin_input_dtype = self._fused_input_dtype()
+        is_a_8bit = self.marlin_input_dtype is not None
+
+        if self.marlin_input_dtype is not None:
+            if not marlin_supports_fp8_input(device):
+                capability = torch.cuda.get_device_capability(device)
+                raise NotImplementedError(
+                    "AWQ Marlin FP8 input activations require compute capability >= 8.9. "
+                    f"Detected capability: `{capability}`."
+                )
+            marlin_int4_fp8_preprocess(
+                self.qweight,
+                self.qzeros,
+                inplace=True,
+                dtype=self.compute_dtype,
+            )
+            self.scales.data = self.scales.data * 512
 
         # Repack weights from AWQ format to marlin format.
         marlin_qweight = awq_marlin_repack(
@@ -203,6 +230,7 @@ class AwqMarlinLinear(AWQuantLinear):
             self.in_features,
             self.out_features,
             self.bits,
+            is_a_8bit=is_a_8bit,
             dtype=self.compute_dtype)
         replace_parameter(self, "qweight", marlin_qweight)
 
@@ -211,7 +239,8 @@ class AwqMarlinLinear(AWQuantLinear):
             self.scales,
             size_k=self.in_features,
             size_n=self.out_features,
-            group_size=self.group_size)
+            group_size=self.group_size,
+            is_a_8bit=is_a_8bit)
         replace_parameter(self, "scales", marlin_scales)
 
         # Permute zero-points from AWQ format to marlin format.
@@ -219,7 +248,8 @@ class AwqMarlinLinear(AWQuantLinear):
             self.qzeros,
             size_k=self.in_features // self.group_size,
             size_n=self.out_features,
-            num_bits=self.bits)
+            num_bits=self.bits,
+            is_a_8bit=is_a_8bit)
         replace_parameter(self, "qzeros", marlin_zp)
 
         # Not-used
@@ -247,17 +277,25 @@ class AwqMarlinLinear(AWQuantLinear):
             "Use marlin_post_init() on the whole model."
         )
 
-        x = self.quantize_dequantize_input(x)
-        x = x.contiguous() if self.is_lm_head else x
+        adapter_x = x
+        a_scales = None
+        x_kernel = self.quantize_dequantize_input(x)
+        target_compute_dtype = x_kernel.dtype
 
-        if self.scales.dtype != x.dtype:
-            self.scales.data = self.scales.data.to(x.dtype)
+        if self.marlin_input_dtype is not None:
+            x_kernel, a_scales = self.quantize_input(x)
+            target_compute_dtype = self.compute_dtype
 
-        if self.bias is not None and self.bias.dtype != x.dtype:
-            self.bias.data = self.bias.data.to(x.dtype)
+        x_kernel = x_kernel.contiguous() if self.is_lm_head or not x_kernel.is_contiguous() else x_kernel
+
+        if self.scales.dtype != target_compute_dtype:
+            self.scales.data = self.scales.data.to(target_compute_dtype)
+
+        if self.bias is not None and self.bias.dtype != target_compute_dtype:
+            self.bias.data = self.bias.data.to(target_compute_dtype)
 
         out = apply_awq_marlin_linear(
-            input=x,
+            input=x_kernel,
             weight=self.qweight,
             weight_scale=self.scales,
             weight_zp=self.qzeros,
@@ -267,11 +305,12 @@ class AwqMarlinLinear(AWQuantLinear):
             quant_type=self.weight_type,
             output_size_per_partition=self.out_features,
             input_size_per_partition=self.in_features,
+            a_scales=a_scales,
             bias=self.bias,
         )
 
         if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
+            out = self.adapter.apply(x=adapter_x, out=out)
 
         return out
 

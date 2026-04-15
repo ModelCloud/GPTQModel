@@ -168,20 +168,14 @@ debug
 # .vscode
 .vscode/
 /.codex/
+/private/
+/.private/
 
 example.py
 
 # dynamically generated from template
-/gptqmodel_ext/marlin/kernel_bf16_kfe2m1f.cu
-/gptqmodel_ext/marlin/kernel_bf16_kfe4m3fn.cu
-/gptqmodel_ext/marlin/kernel_bf16_ku4.cu
-/gptqmodel_ext/marlin/kernel_bf16_ku4b8.cu
-/gptqmodel_ext/marlin/kernel_bf16_ku8b128.cu
-/gptqmodel_ext/marlin/kernel_fp16_kfe2m1f.cu
-/gptqmodel_ext/marlin/kernel_fp16_kfe4m3fn.cu
-/gptqmodel_ext/marlin/kernel_fp16_ku4.cu
-/gptqmodel_ext/marlin/kernel_fp16_ku4b8.cu
-/gptqmodel_ext/marlin/kernel_fp16_ku8b128.cu
+/gptqmodel_ext/marlin/*kernel_*.cu
+/gptqmodel_ext/marlin/kernel_selector.h
 /gptqmodel_offload/
 /benchmark_artifcats/
 /benchmark_artifacts/

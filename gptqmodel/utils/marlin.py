@@ -4,6 +4,8 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +23,7 @@ from .cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
     detected_cuda_wheel_include_paths,
+    resolved_cuda_arch_flags,
 )
 from .marlin_scalar_type import ScalarType
 from .rocm import IS_ROCM
@@ -45,6 +48,22 @@ def _marlin_capability_supported(major: int, minor: int) -> bool:
     return major > 7 or (major == 7 and minor >= 5)
 
 
+def marlin_supports_fp8_input_capability(major: int, minor: int) -> bool:
+    """Real FP8 Marlin inputs need native FP8 tensorcore support."""
+
+    return major > 8 or (major == 8 and minor >= 9)
+
+
+def marlin_supports_fp8_input(device: Optional[torch.device] = None) -> bool:
+    if not torch.cuda.is_available() or not hasattr(torch, "float8_e4m3fn"):
+        return False
+    try:
+        major, minor = torch.cuda.get_device_capability(device)
+    except Exception:  # pragma: no cover - depends on host CUDA runtime
+        return False
+    return marlin_supports_fp8_input_capability(major, minor)
+
+
 def _marlin_environment_error() -> str:
     if IS_ROCM:
         return "Marlin kernel is not supported on ROCm."
@@ -64,6 +83,51 @@ marlin_import_exception = _marlin_environment_error() or None
 
 def _marlin_root() -> Path:
     return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "marlin"
+
+
+def _marlin_generator_arch_list() -> str | None:
+    arch_codes: set[int] = set()
+    arch_pattern = re.compile(r"(?:compute|sm)_([0-9]+)")
+
+    for flag in resolved_cuda_arch_flags():
+        for raw_code in arch_pattern.findall(flag):
+            try:
+                arch_codes.add(int(raw_code))
+            except ValueError:
+                continue
+
+    override = os.getenv("TORCH_CUDA_ARCH_LIST")
+    if not arch_codes and override:
+        for token in override.replace(";", ",").split(","):
+            cleaned = token.strip().lower().replace("+ptx", "")
+            if not cleaned:
+                continue
+            if "." in cleaned:
+                major_text, minor_text = cleaned.split(".", maxsplit=1)
+                if major_text.isdigit() and minor_text[:1].isdigit():
+                    arch_codes.add(int(major_text) * 10 + int(minor_text[:1]))
+            elif cleaned.isdigit():
+                arch_codes.add(int(cleaned))
+
+    if not arch_codes and torch.cuda.is_available():
+        supported_sms = []
+        for arch in getattr(torch.cuda, "get_arch_list", lambda: [])():
+            if arch.startswith("sm_"):
+                suffix = arch.split("_", maxsplit=1)[1].rstrip("af")
+                if suffix.isdigit():
+                    supported_sms.append(int(suffix))
+        max_supported_sm = max(supported_sms) if supported_sms else None
+
+        for device_index in range(torch.cuda.device_count()):
+            major, minor = torch.cuda.get_device_capability(device_index)
+            capability = major * 10 + minor
+            if max_supported_sm is not None:
+                capability = min(capability, max_supported_sm)
+            arch_codes.add(capability)
+
+    if not arch_codes:
+        return None
+    return ",".join(f"{arch // 10}.{arch % 10}" for arch in sorted(arch_codes))
 
 
 def _marlin_cuda_version_at_least(major: int, minor: int) -> bool:
@@ -134,8 +198,13 @@ def _marlin_header_install_hint(error_text: str) -> str:
 def _ensure_generated_marlin_kernels() -> Path:
     root = _marlin_root()
     generator = root / "generate_kernels.py"
+    arch_list = _marlin_generator_arch_list()
+    check_cmd = [sys.executable, str(generator)]
+    if arch_list:
+        check_cmd.extend(["--arch-list", arch_list])
+    check_cmd.append("--check")
     check_result = subprocess.run(
-        [sys.executable, str(generator), "--check"],
+        check_cmd,
         cwd=str(root),
         capture_output=True,
         text=True,
@@ -144,8 +213,11 @@ def _ensure_generated_marlin_kernels() -> Path:
     if check_result.returncode == 0:
         return root
 
+    generate_cmd = [sys.executable, str(generator)]
+    if arch_list:
+        generate_cmd.extend(["--arch-list", arch_list])
     result = subprocess.run(
-        [sys.executable, str(generator)],
+        generate_cmd,
         cwd=str(root),
         capture_output=True,
         text=True,
@@ -167,9 +239,10 @@ def _marlin_sources(dtype_tag: str) -> list[str]:
         str(root / f"gptq_marlin_{dtype_tag}.cu"),
         str(root / "gptq_marlin_repack.cu"),
         str(root / "awq_marlin_repack.cu"),
+        str(root / "marlin_int4_fp8_preprocess.cu"),
     ]
-    sources.extend(str(path) for path in sorted(root.glob(f"kernel_{dtype_tag}_*.cu")))
-    if len(sources) <= 4:
+    sources.extend(str(path) for path in sorted(root.glob("*kernel_*.cu")))
+    if len(sources) <= 5:
         raise RuntimeError(f"Marlin {dtype_tag} sources are incomplete under `{root}`.")
     return sources
 
@@ -203,7 +276,7 @@ def _marlin_extra_cuda_cflags() -> list[str]:
 _MARLIN_FP16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_MARLIN_FP16_OPS_NAME,
     namespace=_MARLIN_FP16_NAMESPACE,
-    required_ops=("gptq_marlin_gemm_fp16", "gptq_marlin_repack", "awq_marlin_repack"),
+    required_ops=("gptq_marlin_gemm_fp16", "gptq_marlin_repack", "awq_marlin_repack", "marlin_int4_fp8_preprocess"),
     sources=lambda: _marlin_sources("fp16"),
     build_root_env="GPTQMODEL_MARLIN_FP16_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("marlin_fp16"),
@@ -220,7 +293,7 @@ _MARLIN_FP16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
 _MARLIN_BF16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_MARLIN_BF16_OPS_NAME,
     namespace=_MARLIN_BF16_NAMESPACE,
-    required_ops=("gptq_marlin_gemm_bf16", "gptq_marlin_repack", "awq_marlin_repack"),
+    required_ops=("gptq_marlin_gemm_bf16", "gptq_marlin_repack", "awq_marlin_repack", "marlin_int4_fp8_preprocess"),
     sources=lambda: _marlin_sources("bf16"),
     build_root_env="GPTQMODEL_MARLIN_BF16_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("marlin_bf16"),
@@ -397,9 +470,9 @@ def replace_tensor(layer: torch.nn.Module, name: str,
 
 
 def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
-                          group_size: int) -> torch.Tensor:
+                          group_size: int, is_a_8bit: bool = False) -> torch.Tensor:
     scale_perm, scale_perm_single = get_scale_perms()
-    if group_size < size_k and group_size != -1:
+    if group_size < size_k and group_size != -1 and not is_a_8bit:
         s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
     else:
         s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
@@ -466,6 +539,7 @@ def apply_gptq_marlin_linear(
         output_size_per_partition: int,
         input_size_per_partition: int,
         is_k_full: bool,
+        a_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         use_fp32_reduce: bool = True,
         use_atomics: bool = False,
@@ -497,7 +571,8 @@ def apply_gptq_marlin_linear(
                               is_k_full=is_k_full,
                               use_atomic_add=use_atomics,
                               use_fp32_reduce=use_fp32_reduce,
-                              is_zp_float=False)
+                              is_zp_float=False,
+                              a_scales=a_scales)
 
     return output.reshape(out_shape)
 
@@ -513,6 +588,7 @@ def apply_awq_marlin_linear(
         quant_type: ScalarType,
         output_size_per_partition: int,
         input_size_per_partition: int,
+        a_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         use_fp32_reduce: bool = True) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
@@ -540,7 +616,8 @@ def apply_awq_marlin_linear(
                               size_k=input_size_per_partition,
                               use_atomic_add=use_atomic_add,
                               use_fp32_reduce=use_fp32_reduce,
-                              is_zp_float=False)
+                              is_zp_float=False,
+                              a_scales=a_scales)
 
     return output.reshape(out_shape)
 
@@ -562,14 +639,18 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      is_k_full: bool = True,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
-                     is_zp_float: bool = False) -> torch.Tensor:
-    if _marlin_runtime_dtype(a.dtype) == torch.bfloat16:
+                     is_zp_float: bool = False,
+                     a_scales: Optional[torch.Tensor] = None) -> torch.Tensor:
+    dispatch_dtype = a.dtype if a.dtype in (torch.float16, torch.bfloat16) else (
+        c.dtype if c is not None else b_scales.dtype
+    )
+    if _marlin_runtime_dtype(dispatch_dtype) == torch.bfloat16:
         op_name = "gptq_marlin_gemm_bf16"
     else:
         op_name = "gptq_marlin_gemm_fp16"
 
     op = _marlin_resolve_op(
-        dtype=a.dtype,
+        dtype=dispatch_dtype,
         op_name=op_name,
     )
     return op(
@@ -578,6 +659,7 @@ def gptq_marlin_gemm(a: torch.Tensor,
         b_q_weight,
         b_bias,
         b_scales,
+        a_scales,
         global_scale,
         b_zeros,
         g_idx,
@@ -598,24 +680,38 @@ def gptq_marlin_gemm(a: torch.Tensor,
 def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                        size_k: int, size_n: int,
                        num_bits: int,
+                       is_a_8bit: bool = False,
                        dtype: Optional[torch.dtype] = None) -> torch.Tensor:
     op = _marlin_resolve_op(
         dtype=dtype,
         op_name="gptq_marlin_repack",
     )
-    return op(b_q_weight, perm, size_k, size_n, num_bits)
+    return op(b_q_weight, perm, size_k, size_n, num_bits, is_a_8bit)
 
 
 def awq_marlin_repack(b_q_weight: torch.Tensor,
                       size_k: int,
                       size_n: int,
                       num_bits: int,
+                      is_a_8bit: bool = False,
                       dtype: Optional[torch.dtype] = None) -> torch.Tensor:
     op = _marlin_resolve_op(
         dtype=dtype,
         op_name="awq_marlin_repack",
     )
-    return op(b_q_weight, size_k, size_n, num_bits)
+    return op(b_q_weight, size_k, size_n, num_bits, is_a_8bit)
+
+
+def marlin_int4_fp8_preprocess(qweight: torch.Tensor,
+                               qzeros: Optional[torch.Tensor] = None,
+                               *,
+                               inplace: bool = False,
+                               dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    op = _marlin_resolve_op(
+        dtype=dtype,
+        op_name="marlin_int4_fp8_preprocess",
+    )
+    return op(qweight, qzeros, inplace)
 
 
 def get_pack_factor(num_bits):
@@ -680,7 +776,7 @@ def unpack_cols(
 
 
 def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
-                       num_bits: int) -> torch.Tensor:
+                       num_bits: int, is_a_8bit: bool = False) -> torch.Tensor:
     # Permute zero-points in a similar way to scales, but do not use the
     # "single" permutation, since zero-points are applied on every MMA
     scale_perm, _ = get_scale_perms()
@@ -694,7 +790,8 @@ def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
     else:
         raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
 
-    zp = zp.reshape((-1, len(interleave)))[:, interleave].ravel()
+    if not is_a_8bit:
+        zp = zp.reshape((-1, len(interleave)))[:, interleave].ravel()
     zp = zp.reshape((-1, size_n)).contiguous()
     zp = pack_cols(zp, num_bits, size_k, size_n)
 
@@ -702,7 +799,8 @@ def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
 
 
 def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
-                              size_n: int, num_bits: int) -> torch.Tensor:
+                              size_n: int, num_bits: int,
+                              is_a_8bit: bool = False) -> torch.Tensor:
     # AWQ zero-points are quantized and packed on the column dim.
     # In addition, the values are permuted based on dequantizer.
     # Here we undo both of these, and then apply marlin permutation
@@ -720,7 +818,7 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
     q_zp = q_zp.reshape((-1, len(undo_interleave)))[:, undo_interleave].ravel()
     q_zp = q_zp.reshape((-1, size_n)).contiguous()
 
-    marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits)
+    marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits, is_a_8bit)
     return marlin_zp
 
 

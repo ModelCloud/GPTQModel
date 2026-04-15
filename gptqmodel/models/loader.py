@@ -1384,6 +1384,17 @@ def ModelLoader(cls):
                         "Kernel: AWQ Marlin requires compute capability >= 8.0. "
                         f"Detected capability: `{device_capability}`."
                     )
+                input_activations = getattr(qcfg, "input_activations", None)
+                if (
+                    input_activations is not None
+                    and input_activations.dynamic
+                    and input_activations.format == "float8_e4m3fn"
+                    and not (device_capability[0] > 8 or (device_capability[0] == 8 and device_capability[1] >= 9))
+                ):
+                    raise ValueError(
+                        "Kernel: AWQ Marlin FP8 input activations require compute capability >= 8.9. "
+                        f"Detected capability: `{device_capability}`."
+                    )
 
             # GPTQ Marlin and AWQ Marlin support fp16 and bf16 compute on Ampere+.
             if backend == BACKEND.GPTQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):

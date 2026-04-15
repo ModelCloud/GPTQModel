@@ -2,6 +2,7 @@ import pytest
 
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization.config import METHOD
+import gptqmodel.utils.backend as backend_module
 from gptqmodel.utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile, resolve_activation_backend
 
 
@@ -52,6 +53,26 @@ def test_activation_backend_resolution_routes_awq_auto_to_dedicated_torch_path()
     )
 
     assert resolved == BACKEND.AWQ_TORCH
+
+
+def test_activation_backend_resolution_routes_dynamic_awq_fp8_auto_to_marlin(monkeypatch):
+    monkeypatch.setattr(backend_module, "_awq_dynamic_fp8_marlin_available", lambda payload: True)
+
+    resolved = resolve_activation_backend(
+        BACKEND.AUTO,
+        quant_method=METHOD.AWQ,
+        checkpoint_format=FORMAT.GEMM,
+        input_activations={
+            "type": "float",
+            "bits": 8,
+            "format": "float8_e4m3fn",
+            "strategy": "token",
+            "dynamic": True,
+            "symmetric": True,
+        },
+    )
+
+    assert resolved == BACKEND.AWQ_MARLIN
 
 
 def test_activation_backend_resolution_rejects_non_dedicated_awq_backend():
