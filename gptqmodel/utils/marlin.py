@@ -21,6 +21,7 @@ from .cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
     detected_cuda_wheel_include_paths,
+    local_nvcc_version_at_least,
 )
 from .marlin_scalar_type import ScalarType
 from .rocm import IS_ROCM
@@ -64,18 +65,6 @@ marlin_import_exception = _marlin_environment_error() or None
 
 def _marlin_root() -> Path:
     return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "marlin"
-
-
-def _marlin_cuda_version_at_least(major: int, minor: int) -> bool:
-    raw = getattr(torch.version, "cuda", None)
-    if not raw:
-        return False
-    try:
-        parts = raw.split(".")
-        current = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-    except (TypeError, ValueError):  # pragma: no cover - depends on torch build metadata
-        return False
-    return current >= (major, minor)
 
 
 def _marlin_cuda_extra_name() -> str | None:
@@ -195,7 +184,7 @@ def _marlin_extra_cuda_cflags() -> list[str]:
         include_fatbin_compression=True,
         include_diag_suppress=True,
     )
-    if _marlin_cuda_version_at_least(12, 8):
+    if local_nvcc_version_at_least(12, 8):
         flags.insert(0, "-static-global-template-stub=false")
     return flags
 

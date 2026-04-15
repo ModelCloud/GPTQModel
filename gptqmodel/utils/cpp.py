@@ -9,7 +9,9 @@ import hashlib
 import logging
 import math
 import os
+import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -54,6 +56,29 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
 # the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
 _DEFAULT_NVCC_THREADS = "8"
+
+
+def local_nvcc_version_at_least(major: int, minor: int) -> bool:
+    nvcc_path = shutil.which("nvcc")
+    if not nvcc_path:
+        return False
+
+    try:
+        result = subprocess.run(
+            [nvcc_path, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+
+    version_text = (result.stdout or "") + "\n" + (result.stderr or "")
+    match = re.search(r"release\s+(\d+)\.(\d+)", version_text)
+    if not match:
+        return False
+
+    return (int(match.group(1)), int(match.group(2))) >= (major, minor)
 
 
 def _format_compile_duration_seconds(seconds: float) -> str:
