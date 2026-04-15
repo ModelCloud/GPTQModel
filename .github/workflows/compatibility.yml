@@ -13,14 +13,18 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      versions: ${{ steps.parser.outputs.versions }}
+      versions: ${{ steps.parser.outputs.versions || '[]' }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
 
       - name: Check license line changed
         id: check
         run: |
-          if git diff HEAD~1 HEAD -- pyproject.toml | grep -q '^[+-].*license = "Apache-2.0"'; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff HEAD~1 HEAD -- pyproject.toml | grep -q '^[+-].*license = "Apache-2.0"'; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -40,6 +44,7 @@ jobs:
 
   check:
     needs: prepare
+    if: needs.prepare.outputs.versions != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
