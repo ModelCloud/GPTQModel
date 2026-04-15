@@ -22,7 +22,7 @@ jobs:
       - name: Generate version matrix
         id: parser
         run: |
-          versions=$(python ci_loop_versions.py setuptools ">=77.0.1,<83")
+          versions=$(python .github/scripts/ci_loop_versions.py setuptools ">=77.0.1,<83")
           echo "versions=$versions" >> "$GITHUB_OUTPUT"
 
   check-compat:
