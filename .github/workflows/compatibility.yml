@@ -15,6 +15,7 @@ jobs:
     outputs:
       versions: ${{ steps.parser.outputs.versions || '[]' }}
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
