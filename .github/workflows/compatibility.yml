@@ -23,6 +23,7 @@ jobs:
       - name: Generate version matrix
         id: parser
         run: |
+          python -m pip install --upgrade requests packaging
           versions=$(python .github/scripts/ci_loop_versions.py setuptools ">=77.0.1,<83")
           echo "versions=$versions" >> "$GITHUB_OUTPUT"
 
