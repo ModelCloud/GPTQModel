@@ -91,7 +91,7 @@ jobs:
       - check-vm
     if: ${{ inputs.github_vm == false }}
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu24.04_0325
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:130-ubuntu24.04_0325
       volumes:
         - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
         - /monster/ci/uv:/opt/uv
