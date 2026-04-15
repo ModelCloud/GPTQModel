@@ -8,6 +8,7 @@ from typing import Any, Optional
 import torch
 
 from .config import InputActivationQuantConfig, _normalize_input_activations
+from .input_activations_triton import supports_triton_fp8_input_quant, triton_quantize_input_dynamic_fp8
 
 
 def normalize_input_activations(
@@ -61,6 +62,19 @@ def quantize_input(
     fp8_dtype = getattr(torch, config.format)
     fp8_info = torch.finfo(fp8_dtype)
     fp8_max = fp8_info.max
+
+    if supports_triton_fp8_input_quant(
+        x,
+        fp8_dtype,
+        dynamic=config.dynamic,
+        strategy=config.strategy,
+    ):
+        return triton_quantize_input_dynamic_fp8(
+            x,
+            fp8_dtype=fp8_dtype,
+            strategy=config.strategy,
+        )
+
     x_work = x.to(torch.float32)
 
     if config.dynamic:
