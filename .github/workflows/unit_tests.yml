@@ -169,7 +169,7 @@ jobs:
           echo "MLX Test files: $mlx_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
-  torch:
+  test:
     needs:
       - list-test-files
       - check-vm
@@ -571,7 +571,7 @@ jobs:
         run: |
           rm -rf rm -rf ./* .[^.] .??*
 
-  torch-test:
+  check-torch:
     runs-on: [ self-hosted, xeon5 ]
     container:
       image: 10.0.13.31:5000/nvidia/cuda:130-ubuntu24.04_0325
