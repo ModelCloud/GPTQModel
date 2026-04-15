@@ -30,6 +30,10 @@ on:
         description: 'Regex to filter test files'
         required: false
         default: ''
+      artifact_id:
+        description: 'Run id for artifact to be downloaded'
+        required: false
+        default: ''
       max-parallel:
         description: 'Parallel jobs'
         required: false
@@ -42,6 +46,13 @@ on:
         options:
           - 'fast'
           - 'slow'
+      server:
+        description: 'Wheel Build Server'
+        type: choice
+        default: '["self-hosted", "xeon5"]'
+        options:
+          - '["self-hosted", "xeon5"]'
+          - '["self-hosted", "zen4"]'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -85,7 +96,6 @@ jobs:
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
-      install_ts: ${{ steps.get_ip.outputs.install_ts }}
       max-parallel: ${{ steps.get_ip.outputs['max-parallel'] }}
       cuda_version: ${{ env.CUDA_VERSION }}
     steps:
@@ -93,20 +103,28 @@ jobs:
         run: |
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
+          echo "artifact_id: ${{ github.event.inputs.artifact_id }}"
+          echo "selected server: ${{ github.event.inputs.server }}"
 
-      - name: Checkout Codes
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
-
-      - name: Set runner metadata
+      - name: Set server
         id: get_ip
         run: |
-          python3 .github/scripts/ci_workflow.py check-vm \
-            --runner-ip "$RUNNER" \
-            --github-run-id "${{ github.run_id }}" \
-            --max-parallel "${{ github.event.inputs['max-parallel'] }}"
+          echo "ip=$RUNNER" >> "$GITHUB_OUTPUT"
+
+          echo "ip: $ip"
+
+          if [ -n "${{ github.event.inputs.artifact_id }}" ]; then
+            run_id="${{ github.event.inputs.artifact_id }}"
+          else
+            run_id="${{ github.run_id }}"
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "artifact_id=$run_id"
+
+          max_p=${{ github.event.inputs['max-parallel'] }}
+          max_p="{\"size\": ${max_p:-20}}"
+          echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
+          echo "max-parallel=$max_p"
 
   list-test-files:
     runs-on: ubuntu-latest
@@ -114,8 +132,6 @@ jobs:
       torch-files: ${{ steps.files.outputs.torch-files }}
       model-files: ${{ steps.files.outputs.model-files }}
       m4-files: ${{ steps.files.outputs.m4-files }}
-      torch-envs: ${{ steps.files.outputs.torch-envs }}
-      model-envs: ${{ steps.files.outputs.model-envs }}
 
     steps:
       - name: Checkout Codes
@@ -136,66 +152,26 @@ jobs:
       - name: List files
         id: files
         run: |
-          python3 .github/scripts/ci_workflow.py list-tests \
-            --ignored-test-files "$IGNORED_TEST_FILES" \
-            --test-regex "${{ github.event.inputs.test_regex }}"
+          test_files=$(python3 .github/scripts/list_test_files.py \
+          --ignored-test-files "$IGNORED_TEST_FILES" \
+          --test-regex "${{ github.event.inputs.test_regex }}")
 
-  prepare:
-    needs:
-      - list-test-files
-      - check-vm
-    runs-on: [ self-hosted, xeon5 ]
-    container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu24.04_0325
-      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
-      volumes:
-        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
-        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
-        - /dev/dri/by-path:/dev/dri/by-path
-        - /monster/ci/models:/monster/data/model
-        - /monster/ci/dataset:/monster/data/model/dataset
-        - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/uv:/opt/uv
-        - /monster/ci/env:/opt/env
-        - /monster/ci/dist:/opt/dist
-    if: always() && !cancelled() && (needs.list-test-files.outputs.torch-envs != '[]' || needs.list-test-files.outputs.model-envs != '[]')
-    steps:
-      - name: Checkout Codes
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
+          IFS='|' read -r torch_test_files model_test_files mlx_files <<< "$test_files"
 
-      - name: Fetch PR by number
-        if: ${{ github.event.inputs.pr_number != 0 }}
-        run: |
-          PR_NUMBER=${{ github.event.inputs.pr_number }}
-          echo "pr number $PR_NUMBER"
-          git config --global --add safe.directory $(pwd)
-          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
-          git checkout pr-${PR_NUMBER}
+          echo "torch-files=$torch_test_files" >> "$GITHUB_OUTPUT"
+          echo "model-files=$model_test_files" >> "$GITHUB_OUTPUT"
+          echo "m4-files=$mlx_files" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare common envs
-        run: |
-          source /opt/uv/setup_uv_venv.sh gptqmodel_unit_pre_env
-          uv pip install pyyaml -U
-          python3 .github/scripts/ci_workflow.py prepare-common-envs \
-            --torch-envs-json '${{ needs.list-test-files.outputs.torch-envs }}' \
-            --model-envs-json '${{ needs.list-test-files.outputs.model-envs }}' \
-            --cuda-version "${{ needs.check-vm.outputs.cuda_version }}" \
-            --torch-version "${{ env.TORCH_VERSION }}" \
-            --runner "$RUNNER" \
-            --repo-url "$DEFUSER_GIT_URL" \
-            --repo-url "$PYPCRE_GIT_URL" \
-            --repo-url "$TOKENICER_GIT_URL" \
-            --repo-url "$LOGBAR_GIT_URL" \
-            --repo-url "$EVALUTION_GIT_URL"
+          echo "Test files: $test_files"
+          echo "Torch Test files: $torch_test_files"
+          echo "Model Compat Test files: $model_test_files"
+          echo "MLX Test files: $mlx_files"
+          echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   torch:
     needs:
       - list-test-files
       - check-vm
-      - prepare
     runs-on: [ self-hosted, xeon5 ]
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu24.04_0325
@@ -207,12 +183,13 @@ jobs:
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/uv:/opt/uv
-        # - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
-        # - /monster/ci/uv/uv:/opt/uv/uv
-        # - /monster/ci/uv/uvx:/opt/uv/uvx
-        # - /monster/ci/uv/env:/opt/uv/env
-        # - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
+        # - /monster/ci/uv:/opt/uv
+        - /github/workspace:/opt/uv
+        - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
+        - /monster/ci/uv/uv:/opt/uv/uv
+        - /monster/ci/uv/uvx:/opt/uv/uvx
+        - /monster/ci/uv/env:/opt/uv/env
+        - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
         - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
     strategy:
@@ -220,7 +197,7 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
-    if: always() && !cancelled() && needs.list-test-files.outputs.torch-files != '[]'
+    if: always() && !cancelled() && needs.list-test-files.outputs.torch-files != '[]' #  || github.event.inputs.artifact_id != ''
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
@@ -239,40 +216,127 @@ jobs:
 
       - name: Activate uv env
         run: |
-          source /opt/uv/setup_uv_venv.sh gptqmodel_unit_test_env
-          python3 .github/scripts/ci_workflow.py activate-test-env \
+          echo "-- loading unit test's config --"
+          source /opt/uv/setup_uv_venv.sh unit_test_env
+
+          config_json="$(python3 .github/scripts/parse_test_config.py \
             --group tests \
-            --test-name "${{ matrix.test_script }}" \
-            --write-gpu-count \
-            --fix-safe-directory
+            --test-name "${{ matrix.test_script }}")"
+
+          py="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["py"])')"
+          gpu="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["gpu"])')"
+
+          echo "PYTHON_VERSION=$py" >> "$GITHUB_ENV"
+          echo "GPU_COUNT=$gpu" >> "$GITHUB_ENV"
+          
+          echo "using py=$py gpu=$gpu for test ${{ matrix.test_script }}"
+          echo "-- loaded --"
+
+          echo "-- setting up env --"
+          env_name="gptqmodel_test_cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${py}_${{ matrix.test_script }}"
+          /opt/uv/setup_uv_venv.sh $env_name
+          echo "-- set --"
 
       - name: Setup uv env
-        if: env.HAS_SPECIFIC_DEPS == '1'
         run: |
-          python3 .github/scripts/ci_workflow.py setup-specific-env \
-            --group tests \
-            --test-name "${{ matrix.test_script }}" \
-            --cuda-version "${{ needs.check-vm.outputs.cuda_version }}" \
-            --torch-version "${{ env.TORCH_VERSION }}"
+          python -V
+          which python
+          which pip || true
+
+          echo "--- setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=${{ env.PYTHON_VERSION }}"
+          bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
+
+          echo ""
+          echo ""
+
+          echo "--- installing required deps..."
+          python .github/scripts/install_deps.py ${{ matrix.test_script }}
+
+          echo ""
+          echo ""
+
+          echo "--- uninstalling required deps..."
+          python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
+
+      # - name: Install Evalution
+      #   run: |
+      #     uv pip install git+https://x-access-token:${{ secrets.REPO_TOKEN }}@github.com/ModelCloud/Evalution.git
+      #      - name: Install requirements
+      #        run: |
+      #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version${{ env.PYTHON_VERSION }}
+
+      #      - name: Download source from local
+      #        continue-on-error: true
+      #        run: |
+      #          curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
+      #          ls -ahl .
+      #          sha256=$(sha256sum $file_name)
+      #          echo "sha256=$sha256"
+      #          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
+
+      # - name: Download source from github
+      #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
+      #   uses: actions/download-artifact@v8
+      #   with:
+      #     name: source
+      #     path: dist
+      #     run-id: ${{ github.run_id }}
+
+      #     - name: Uncompress source
+      #      continue-on-error: true
+      #     run: |
+      #      find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
+      #     ls -ahl .
+      #    tar -zxf gptqmodel_source.tar.gz
 
       - name: Install package from source
-        if: ${{ env.ENV_NAME != 'gptqmodel_unit_tests_common' && env.ENV_NAME != 'gptqmodel_unit_tests_models_common' }}
         run: |
-          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
-          python3 .github/scripts/ci_workflow.py install-package \
-            --env-name "${ENV_NAME}_$safe_ref" \
-            --install-key "${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}" \
-            --test-script "${{ matrix.test_script }}" \
-            --job "${{ github.job }}" \
-            --run-id "${{ needs.check-vm.outputs.run_id }}" \
-            --runner "$RUNNER" \
-            --uv-torch-backend "${{ env.UV_TORCH_BACKEND }}" \
-            --no-build-isolation
+          uv pip uninstall gptqmodel || true
+          # make sure torch & torchvision are corresponded
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+
+          echo "===== install package from checkout ====="
+          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+
+          # deps may reinstalled torch
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+
+      - name: Print uv env
+        run: |
+          echo "::group::uv python list"
+          uv python list
+          echo "::endgroup::"
+
+          which python
+          which pip || true
+          python -V
+
+          echo "::group::uv python list"
+          uv python list
+          echo "::endgroup::"
+
+          echo "== nvcc =="
+          nvcc --version
+
+          echo "== torch =="
+          uv pip show torch || true
+
+          echo "::group::project files"
+          ls -ahl
+          echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch
+
+          echo "::group::pip list"
+          uv pip list
+          echo "::endgroup::"
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
         run: |
-          python3 .github/scripts/ci_gpu.py allocate \
+          python .github/scripts/allocate_gpu.py \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --test "${{ matrix.test_script }}" \
@@ -289,7 +353,7 @@ jobs:
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             extra_args+=(--clear-cuda --xpu-mode)
           fi
-          python3 .github/scripts/ci_tests.py run \
+          python .github/scripts/run_tests.py \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --test-script "${{ matrix.test_script }}" \
@@ -301,19 +365,18 @@ jobs:
         if: ${{ !cancelled() &&  failure() }}
         continue-on-error: true
         run: |
-          python3 .github/scripts/ci_tests.py check-log \
-            --run-id "${{ github.run_id }}" \
-            --test-script "${{ matrix.test_script }}"
+          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
+          log_file=$log_dir/${{ matrix.test_script }}.log
+
+          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
+          
+          tail -n 200 $log_file
+          exit 1
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
         run: |
-          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
-
-          python3 .github/scripts/ci_workflow.py cleanup-install-lock \
-            --env-name "${ENV_NAME:-}_$safe_ref" \
-            --install-key "${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
-          python3 .github/scripts/ci_gpu.py release \
+          python .github/scripts/release_gpu.py \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
@@ -330,7 +393,6 @@ jobs:
     needs:
       - list-test-files
       - check-vm
-      - prepare
     runs-on: [ self-hosted, xeon5 ]
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu24.04_0325
@@ -342,12 +404,13 @@ jobs:
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/uv:/opt/uv
-        # - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
-        # - /monster/ci/uv/uv:/opt/uv/uv
-        # - /monster/ci/uv/uvx:/opt/uv/uvx
-        # - /monster/ci/uv/env:/opt/uv/env
-        # - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
+        # - /monster/ci/uv:/opt/uv
+        - /github/workspace:/opt/uv
+        - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
+        - /monster/ci/uv/uv:/opt/uv/uv
+        - /monster/ci/uv/uvx:/opt/uv/uvx
+        - /monster/ci/uv/env:/opt/uv/env
+        - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
         - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
     strategy:
@@ -372,40 +435,66 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
+      - name: Clean uv
+        run: |
+          uv cache clean
+
       - name: Activate uv env
         run: |
-          source /opt/uv/setup_uv_venv.sh gptqmodel_unit_test_env
-          python3 .github/scripts/ci_workflow.py activate-test-env \
-            --group tests/models \
-            --test-name "${{ matrix.test_script }}"
+          env_name="gptqmodel_test_cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_${{ matrix.test_script }}"
+          /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Setup uv env
-        if: env.HAS_SPECIFIC_DEPS == '1'
         run: |
-          python3 .github/scripts/ci_workflow.py setup-specific-env \
-            --group tests/models \
-            --test-name "${{ matrix.test_script }}" \
-            --cuda-version "${{ needs.check-vm.outputs.cuda_version }}" \
-            --torch-version "${{ env.TORCH_VERSION }}"
+          python -V
+          which python
+          which pip || true
+
+          echo "setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=${{ env.PYTHON_VERSION }}"
+          bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
+          python .github/scripts/install_deps.py ${{ matrix.test_script }}
+          python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
 
       - name: Install package from source
-        if: ${{ env.ENV_NAME != 'gptqmodel_unit_tests_common' && env.ENV_NAME != 'gptqmodel_unit_tests_models_common' }}
         run: |
-          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
+          uv pip uninstall gptqmodel || true
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
 
-          python3 .github/scripts/ci_workflow.py install-package \
-            --env-name "${ENV_NAME}_$safe_ref" \
-            --install-key "${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}" \
-            --test-script "${{ matrix.test_script }}" \
-            --job "${{ github.job }}" \
-            --run-id "${{ needs.check-vm.outputs.run_id }}" \
-            --runner "$RUNNER" \
-            --uv-torch-backend "${{ env.UV_TORCH_BACKEND }}"
+      - name: Print uv env
+        run: |
+          echo "::group::uv python list"
+          uv python list
+          echo "::endgroup::"
+
+          which python
+          which pip || true
+          python -V
+
+          echo "::group::uv python list"
+          uv python list
+          echo "::endgroup::"
+
+          echo "== nvcc =="
+          nvcc --version
+
+          echo "::group::project files"
+          ls -ahl
+          echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch
+
+          echo "::group::pip list"
+          uv pip list
+          echo "::endgroup::"
 
       - name: Find suitable GPU
         if: ${{ !cancelled() }}
         run: |
-          python3 .github/scripts/ci_gpu.py allocate \
+          python .github/scripts/allocate_gpu.py \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --test "${{ matrix.test_script }}" \
@@ -415,7 +504,7 @@ jobs:
 
       - name: Run tests
         run: |
-          python3 .github/scripts/ci_tests.py run \
+          python .github/scripts/run_tests.py \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --test-script "${{ matrix.test_script }}" \
@@ -427,19 +516,17 @@ jobs:
         if: ${{ !cancelled() && failure() }}
         continue-on-error: true
         run: |
-          python3 .github/scripts/ci_tests.py check-log \
-            --run-id "${{ github.run_id }}" \
-            --test-script "${{ matrix.test_script }}"
+          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
+          log_file=$log_dir/${{ matrix.test_script }}.log
+
+          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
+          tail -n 200 $log_file
+          exit 1
 
       - name: Release GPU
         if: always()
         run: |
-          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
-
-          python3 .github/scripts/ci_workflow.py cleanup-install-lock \
-            --env-name "${ENV_NAME:-}_$safe_ref" \
-            --install-key "${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
-          python3 .github/scripts/ci_gpu.py release \
+          python .github/scripts/release_gpu.py \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
@@ -495,3 +582,47 @@ jobs:
           uv venv local_uv_env
           source local_uv_env/bin/activate
           uv pip install . torch -U
+
+
+  prepare-setuptools:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.parser.outputs.versions || '[]' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Generate version matrix
+        id: parser
+        run: |
+          python -m pip install --upgrade requests packaging
+          versions=$(python .github/scripts/ci_loop_versions.py setuptools ">=77.0.1,<83")
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
+  check-setuptools:
+    needs: prepare-setuptools
+    if: needs.prepare-setuptools.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.prepare-setuptools.outputs.versions) }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install package with selected setuptools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . "setuptools==${{ matrix.version }}"
+
+      - name: Show versions
+        run: |
+          python --version
+          python -m pip show setuptools
