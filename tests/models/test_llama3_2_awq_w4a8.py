@@ -49,8 +49,12 @@ class TestLlama3_2_AWQ_W4A8(ModelTest):
     KERNEL_QUANT = {AwqTorchLinear}
     KERNEL_INFERENCE = {AwqTorchLinear}
     INPUT_ACTIVATIONS = {
-        "method": "fp8",
-        "format": "f8_e4m3",
+        "type": "float",
+        "bits": 8,
+        "format": "float8_e4m3fn",
+        "strategy": "tensor",
+        "dynamic": False,
+        "symmetric": True,
     }
     # GPU 0 on this host reports as the Ampere datacenter board `PG506-230`,
     # and ModelTest resolves that path through the shared A100-class baseline.

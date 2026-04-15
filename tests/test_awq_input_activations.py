@@ -47,15 +47,17 @@ class TestAwqInputActivations:
             )
 
     @staticmethod
-    def _input_activations_config() -> dict:
-        return {
-            "num_bits": 8,
+    def _input_activations_config(**overrides) -> dict:
+        payload = {
             "type": "float",
+            "bits": 8,
             "format": "float8_e4m3fn",
             "strategy": "tensor",
-            "dynamic": True,
-            "implementation": "reference",
+            "dynamic": False,
+            "symmetric": True,
         }
+        payload.update(overrides)
+        return payload
 
     def test_awq_search_best_scale_uses_quantized_input_activations(self, monkeypatch):
         qcfg = QuantizeConfig(
@@ -64,7 +66,7 @@ class TestAwqInputActivations:
             bits=4,
             group_size=16,
             sym=False,
-            input_activations=self._input_activations_config(),
+            input_activations=self._input_activations_config(dynamic=True),
         )
         processor = self._RuntimeTestAWQProcessor(qcfg)
 
@@ -105,10 +107,7 @@ class TestAwqInputActivations:
             bits=4,
             group_size=16,
             sym=False,
-            input_activations={
-                "method": "fp8",
-                "format": "f8_e4m3",
-            },
+            input_activations=self._input_activations_config(),
         )
         processor = self._RuntimeTestAWQProcessor(qcfg)
 
@@ -169,7 +168,7 @@ class TestAwqInputActivations:
             in_features=16,
             out_features=32,
             bias=True,
-            input_activations=self._input_activations_config(),
+            input_activations=self._input_activations_config(dynamic=True),
         )
         candidate.pack(linear, scales, zeros)
 
@@ -185,7 +184,7 @@ class TestAwqInputActivations:
             bits=4,
             group_size=16,
             sym=False,
-            input_activations=self._input_activations_config(),
+            input_activations=self._input_activations_config(dynamic=True),
         )
         processor = self._RuntimeTestAWQProcessor(qcfg)
 
@@ -227,10 +226,7 @@ class TestAwqInputActivations:
             bits=4,
             group_size=16,
             sym=False,
-            input_activations={
-                "method": "fp8",
-                "format": "f8_e4m3",
-            },
+            input_activations=self._input_activations_config(),
         )
         processor = self._RuntimeTestAWQProcessor(qcfg)
         processor._activation_scale_inv_by_module["linear"] = torch.tensor(321.0, dtype=torch.float32)

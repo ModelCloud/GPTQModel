@@ -8,17 +8,25 @@ from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import AWQConfig, GPTQConfig, InputActivationQuantConfig, QuantizeConfig
 
 
+def _canonical_input_activations(**overrides):
+    payload = {
+        "type": "float",
+        "bits": 8,
+        "format": "float8_e4m3fn",
+        "strategy": "tensor",
+        "dynamic": False,
+        "symmetric": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
 def test_gptq_input_activations_roundtrip_through_runtime_payload():
     cfg = QuantizeConfig(
-        input_activations={
-            "num_bits": 8,
-            "type": "float",
-            "format": "e4m3",
-            "strategy": "tensor",
-            "dynamic": True,
-            "implementation": "reference",
-        }
+        quant_method=METHOD.GPTQ,
+        format=FORMAT.GPTQ,
+        input_activations=_canonical_input_activations(format="e4m3"),
     )
 
     assert isinstance(cfg, GPTQConfig)
@@ -41,14 +49,7 @@ def test_awq_input_activations_roundtrip_through_runtime_payload():
     cfg = QuantizeConfig(
         quant_method=METHOD.AWQ,
         format=FORMAT.GEMM,
-        input_activations={
-            "num_bits": 8,
-            "type": "float",
-            "format": "e4m3",
-            "strategy": "tensor",
-            "dynamic": True,
-            "implementation": "reference",
-        },
+        input_activations=_canonical_input_activations(format="e4m3"),
     )
 
     assert isinstance(cfg, AWQConfig)
@@ -67,29 +68,24 @@ def test_awq_input_activations_roundtrip_through_runtime_payload():
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
-def test_awq_input_activations_shorthand_normalizes_runtime_payload():
+def test_awq_input_activations_roundtrip_preserves_canonical_runtime_payload():
     cfg = QuantizeConfig(
         quant_method=METHOD.AWQ,
         format=FORMAT.GEMM,
-        input_activations={
-            "method": "fp8",
-            "format": "f8_e4m3",
-        },
+        input_activations=_canonical_input_activations(),
     )
 
     assert isinstance(cfg, AWQConfig)
     assert isinstance(cfg.input_activations, InputActivationQuantConfig)
     assert cfg.input_activations.format == "float8_e4m3fn"
     assert cfg.input_activations.dynamic is False
+    assert cfg.input_activations.symmetric is True
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
 def test_input_activations_surface_defaults_to_awq_w4a8_path():
     cfg = QuantizeConfig(
-        input_activations={
-            "method": "fp8",
-            "format": "f8_e4m3",
-        },
+        input_activations=_canonical_input_activations(),
     )
 
     assert isinstance(cfg, AWQConfig)
@@ -98,21 +94,20 @@ def test_input_activations_surface_defaults_to_awq_w4a8_path():
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
-def test_awq_input_activations_payload_roundtrips_without_alias():
+def test_awq_input_activations_payload_roundtrips_without_meta_alias():
     cfg = QuantizeConfig(
         quant_method=METHOD.AWQ,
         format=FORMAT.GEMM,
-        input_activations={
-            "method": "fp8",
-            "format": "f8_e4m3",
-        },
+        input_activations=_canonical_input_activations(),
     )
 
     assert isinstance(cfg.input_activations, InputActivationQuantConfig)
     assert cfg.input_activations.format == "float8_e4m3fn"
     assert cfg.input_activations.dynamic is False
+    assert cfg.input_activations.symmetric is True
     payload = cfg.to_dict()
     assert payload["input_activations"]["format"] == "float8_e4m3fn"
+    assert payload["input_activations"]["symmetric"] is True
     assert "input_activations" not in payload["meta"]
 
 
@@ -121,8 +116,8 @@ def test_activation_alias_is_rejected():
     with pytest.raises(ValueError, match="`activation` is no longer supported"):
         QuantizeConfig(
             activation={
-                "method": "fp8",
-                "format": "f8_e4m3",
+                "type": "float",
+                "bits": 8,
             },
         )
 
@@ -133,22 +128,45 @@ def test_awq_input_activations_surface_rejects_non_gemm_format():
         QuantizeConfig(
             quant_method=METHOD.AWQ,
             format=FORMAT.MARLIN,
-            input_activations={
-                "method": "fp8",
-                "format": "f8_e4m3",
-            },
+            input_activations=_canonical_input_activations(),
         )
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
-def test_input_activations_shorthand_rejects_removed_scales_key():
-    with pytest.raises(ValueError, match="no longer accepts `scales`"):
+def test_input_activations_rejects_removed_method_key():
+    with pytest.raises(ValueError, match="remove legacy keys `method`"):
         QuantizeConfig(
             quant_method=METHOD.AWQ,
             format=FORMAT.GEMM,
             input_activations={
                 "method": "fp8",
-                "format": "f8_e4m3",
+                "type": "float",
+                "bits": 8,
+            },
+        )
+
+
+def test_input_activations_rejects_removed_implementation_key():
+    with pytest.raises(ValueError, match="remove legacy keys `implementation`"):
+        QuantizeConfig(
+            quant_method=METHOD.AWQ,
+            format=FORMAT.GEMM,
+            input_activations={
+                "implementation": "reference",
+                "type": "float",
+                "bits": 8,
+            },
+        )
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
+def test_input_activations_rejects_removed_scales_key():
+    with pytest.raises(ValueError, match="no longer accepts `scales`"):
+        QuantizeConfig(
+            quant_method=METHOD.AWQ,
+            format=FORMAT.GEMM,
+            input_activations={
+                **_canonical_input_activations(),
                 "scales": "static",
             },
         )
@@ -168,12 +186,12 @@ def test_input_activations_in_meta_is_rejected():
                 "quant_method": "awq",
                 "meta": {
                     "input_activations": {
-                        "num_bits": 8,
                         "type": "float",
+                        "bits": 8,
                         "format": "float8_e4m3fn",
                         "strategy": "tensor",
                         "dynamic": False,
-                        "implementation": "reference",
+                        "symmetric": True,
                     }
                 },
             }

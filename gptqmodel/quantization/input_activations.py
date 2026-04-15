@@ -13,7 +13,7 @@ from .config import InputActivationQuantConfig, _normalize_input_activations
 def normalize_input_activations(
     payload: Optional[InputActivationQuantConfig | dict[str, Any]],
 ) -> Optional[InputActivationQuantConfig]:
-    """Reuse the shared config normalizer so helpers accept the same activation payloads as QuantizeConfig."""
+    """Reuse the shared config normalizer so helpers accept the same activation schema as QuantizeConfig."""
 
     return _normalize_input_activations(payload)
 
@@ -50,7 +50,7 @@ def quantize_dequantize_input(
     *,
     scale_inv: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Reference activation QDQ used by the current activation-aware W4A8 paths."""
+    """Reference activation quantize-then-dequantize path used by current W4A8 runtimes."""
 
     config = normalize_input_activations(payload)
     if config is None:

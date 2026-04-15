@@ -728,9 +728,6 @@ _BITSANDBYTES_4BIT_FORMATS = {"fp4", "nf4"}
 _BITSANDBYTES_8BIT_FORMATS = {"int8"}
 _BITSANDBYTES_FORMATS = _BITSANDBYTES_4BIT_FORMATS | _BITSANDBYTES_8BIT_FORMATS
 _BITSANDBYTES_BLOCK_SIZES = {32, 64, 128, 256, 512, 1024, 2048, 4096}
-# User-facing input_activations={} payloads intentionally expose a smaller
-# surface than the canonical checkpoint schema.
-_ACTIVATION_METHOD_ALIASES = {"fp8", "float8"}
 
 
 def _looks_like_fp8_fmt(value: Any) -> bool:
@@ -1164,25 +1161,25 @@ class AutoModuleDecoderConfig(BasePreProcessorConfig):
 
 @dataclass
 class InputActivationQuantConfig:
-    """Describe activation quantization metadata shared by the W4A8 runtime paths."""
+    """Canonical runtime schema for activation quantization metadata in W4A8 paths."""
 
-    num_bits: int = 8
     type: str = "float"
+    bits: int = 8
     format: str = "float8_e4m3fn"
     strategy: str = "tensor"
-    dynamic: bool = True
-    implementation: str = "reference"
+    dynamic: bool = False
+    symmetric: bool = True
 
     def __post_init__(self):
         """Normalize the activation quantization state used across config and runtime."""
 
-        self.num_bits = int(self.num_bits)
-        if self.num_bits != 8:
-            raise ValueError("InputActivationQuantConfig: `num_bits` must be `8`.")
-
         self.type = str(self.type).strip().lower()
         if self.type != "float":
             raise ValueError("InputActivationQuantConfig: phase-1 only supports `type='float'`.")
+
+        self.bits = int(self.bits)
+        if self.bits != 8:
+            raise ValueError("InputActivationQuantConfig: `bits` must be `8`.")
 
         self.format = _normalize_fp8_fmt(self.format)
 
@@ -1197,18 +1194,21 @@ class InputActivationQuantConfig:
             raise ValueError(
                 "InputActivationQuantConfig: static activation calibration currently requires `strategy='tensor'`."
             )
-        self.implementation = str(self.implementation).strip().lower()
-        if self.implementation not in {"reference"}:
-            raise ValueError("InputActivationQuantConfig: `implementation` must be `reference`.")
+
+        self.symmetric = bool(self.symmetric)
+        if not self.symmetric:
+            raise ValueError(
+                "InputActivationQuantConfig: current W4A8 activation quantization only supports `symmetric=True`."
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "num_bits": self.num_bits,
             "type": self.type,
+            "bits": self.bits,
             "format": self.format,
             "strategy": self.strategy,
             "dynamic": self.dynamic,
-            "implementation": self.implementation,
+            "symmetric": self.symmetric,
         }
 
 
@@ -1943,7 +1943,7 @@ def _normalize_input_activations(
     if input_activations is None:
         return None
     if isinstance(input_activations, dict):
-        input_activations = _normalize_user_activation_payload(input_activations)
+        input_activations = _normalize_input_activation_payload(input_activations)
         return InputActivationQuantConfig(**input_activations)
     if not isinstance(input_activations, InputActivationQuantConfig):
         raise ValueError(
@@ -1952,50 +1952,35 @@ def _normalize_input_activations(
     return input_activations
 
 
-def _normalize_user_activation_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Translate concise input_activations payloads into canonical runtime kwargs."""
+def _normalize_input_activation_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the stable activation schema used by runtime and checkpoint payloads."""
 
     normalized = dict(payload)
-    method = normalized.pop("method", normalized.pop("dtype", None))
 
     if "scales" in normalized or "scale_mode" in normalized or "scale" in normalized:
         raise ValueError(
-            "QuantizeConfig: `input_activations` no longer accepts `scales`; scale handling is implied by the activation method/format."
+            "QuantizeConfig: `input_activations` no longer accepts `scales`; scale handling belongs to the activation quantization format itself."
         )
 
-    # Canonical payloads can continue to use the full input_activations schema
-    # directly. The shorthand path is only activated when callers provide an
-    # activation method or omit it while specifying a format.
-    if method is None and "format" not in normalized:
-        return normalized
-
-    if method is None:
-        method = "fp8"
-    method = str(method).strip().lower()
-    if method not in _ACTIVATION_METHOD_ALIASES:
-        supported = ", ".join(sorted(_ACTIVATION_METHOD_ALIASES))
+    legacy_keys = sorted({"method", "dtype", "implementation"} & set(normalized))
+    if legacy_keys:
+        legacy_keys_str = ", ".join(f"`{key}`" for key in legacy_keys)
         raise ValueError(
-            f"QuantizeConfig: input_activations `method` must be one of {{{supported}}}, got `{method}`."
+            "QuantizeConfig: `input_activations` only accepts the canonical runtime schema "
+            "`{type, bits, format, strategy, dynamic, symmetric}`; "
+            f"remove legacy keys {legacy_keys_str}."
         )
 
-    normalized.setdefault("num_bits", 8)
-    normalized.setdefault("type", "float")
-    normalized.setdefault("format", "float8_e4m3fn")
-    normalized.setdefault("strategy", "tensor")
-    # The concise input_activations surface targets the calibrated static-scale
-    # AWQ W4A8 path rather than the older dynamic reference implementation.
-    normalized.setdefault("dynamic", False)
-    normalized.setdefault("implementation", "reference")
+    allowed_keys = {"type", "bits", "format", "strategy", "dynamic", "symmetric"}
+    unsupported_keys = sorted(set(normalized) - allowed_keys)
+    if unsupported_keys:
+        unsupported_keys_str = ", ".join(f"`{key}`" for key in unsupported_keys)
+        raise ValueError(
+            "QuantizeConfig: `input_activations` only accepts the canonical runtime schema "
+            f"`{{type, bits, format, strategy, dynamic, symmetric}}`; got unsupported keys {unsupported_keys_str}."
+        )
+
     return normalized
-
-
-def _uses_input_activation_shorthand(payload: Any) -> bool:
-    """Return whether an input_activations payload uses the concise W4A8 shorthand surface."""
-
-    if not isinstance(payload, dict):
-        return False
-    keys = {str(key).strip().lower() for key in payload.keys()}
-    return bool(keys) and keys.issubset({"method", "dtype", "format"})
 
 
 def _normalize_dense_vram_strategy(value: Union[str, VramStrategy]) -> VramStrategy:
@@ -2399,14 +2384,10 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
         normalized[FORMAT_FIELD_CODE] = normalized[FORMAT_FIELD_CHECKPOINT]
     normalized.pop(FORMAT_FIELD_CHECKPOINT, None)
 
-    if (
-        "input_activations" in normalized
-        and METHOD_FIELD_CODE not in normalized
-        and FORMAT_FIELD_CODE not in normalized
-        and _uses_input_activation_shorthand(normalized["input_activations"])
-    ):
-        # Concise W4A8 configs default to the dedicated AWQ GEMM path unless the
-        # caller explicitly requests another method or format.
+    if "input_activations" in normalized and METHOD_FIELD_CODE not in normalized and FORMAT_FIELD_CODE not in normalized:
+        # Activation-aware quantization defaults to the dedicated AWQ GEMM W4A8
+        # lifecycle unless the caller explicitly requests another quantization
+        # family or checkpoint format.
         normalized[METHOD_FIELD_CODE] = METHOD.AWQ
         normalized[FORMAT_FIELD_CODE] = FORMAT.GEMM
     return normalized
@@ -2877,14 +2858,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         if not format_field_present and legacy_checkpoint_format is not None:
             normalized[FORMAT_FIELD_CODE] = legacy_checkpoint_format
 
-        if (
-            "input_activations" in normalized
-            and not method_field_present
-            and not format_field_present
-            and _uses_input_activation_shorthand(normalized["input_activations"])
-        ):
-            # Concise W4A8 configs default to the dedicated AWQ GEMM path unless
-            # the caller explicitly requests another method or format.
+        if "input_activations" in normalized and not method_field_present and not format_field_present:
+            # Activation-aware checkpoints default to the dedicated AWQ GEMM
+            # W4A8 lifecycle unless they declare another quantization family or
+            # format explicitly.
             normalized[METHOD_FIELD_CODE] = METHOD.AWQ
             normalized[FORMAT_FIELD_CODE] = FORMAT.GEMM
 

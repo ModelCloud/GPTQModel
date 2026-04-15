@@ -196,7 +196,14 @@ def test_current_load_backend_resolves_auto_to_torch_backend_for_activation_runt
     class _ActivationHarness(ModelTest):
         METHOD = METHOD.AWQ
         LOAD_BACKEND = BACKEND.AUTO
-        INPUT_ACTIVATIONS = {"method": "fp8", "format": "f8_e4m3"}
+        INPUT_ACTIVATIONS = {
+            "type": "float",
+            "bits": 8,
+            "format": "float8_e4m3fn",
+            "strategy": "tensor",
+            "dynamic": False,
+            "symmetric": True,
+        }
 
     helper = _ActivationHarness(methodName="runTest")
 
