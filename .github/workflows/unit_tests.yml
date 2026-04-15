@@ -489,23 +489,23 @@ jobs:
           uv venv pypi_pip_env
           source pypi_pip_env/bin/activate
           uv pip install pip -U
-          pip install gptqmodel torch
+          pip install gptqmodel torch -U
 
       - name: Test pypi uv
         run: |
           uv venv pypi_uv_env
           source pypi_uv_env/bin/activate
-          uv pip install gptqmodel torch
+          uv pip install gptqmodel torch -U
 
       - name: test local pip
         run: |
           uv venv local_pip_env
           source local_env/bin/activate
           uv pip install pip -U
-          pip install . torch
+          pip install . torch -U
 
       - name: test local uv
         run: |
           uv venv local_uv_env
           source local_env/bin/activate
-          uv pip install . torch
+          uv pip install . torch -U
