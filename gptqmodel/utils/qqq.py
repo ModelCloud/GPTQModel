@@ -22,6 +22,7 @@ def _qqq_sources() -> list[str]:
     return [
         str(root / "qqq.cpp"),
         str(root / "qqq_gemm.cu"),
+        str(root / "qqq_gemm_w4a4.cu"),
     ]
 
 

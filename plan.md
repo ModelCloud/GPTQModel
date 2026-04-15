@@ -2,43 +2,47 @@
 
 Date: 2026-04-15
 Current branch: `w4a8`
-Prototype commit: `4a2b4076`
+Base prototype commit: `4a2b4076`
+Current status: `prototype working, packed-A4 staged inside GEMM`
 
 ## Status
 
-Overall status: `prototype working`
+Overall status: `functional prototype with in-kernel packed-A4 staging`
 
 What is complete:
 
 - `QQQConfig` supports `activation_bits={4,8}`
 - checkpoint save/load preserves `activation_bits`
-- `QQQLinear` can execute `A8` and `A4`
+- `QQQLinear` can execute `A8` and packed `A4`
 - a dedicated `qqq_w4a4_gemm` torch op exists
-- end-to-end quantize, save, reload, and generate works
-- smoke validation completed on GPUs `8` and `9`
-- unit tests and a local benchmark driver were added
+- packed `A4` is unpacked inside the GEMM tile staging path
+- there is no standalone activation unpack kernel or dense temporary `A8` tensor
+- end-to-end reload, generate, and prefill benchmark works on GPUs `8` and `9`
 
 What is not complete:
 
-- true fused `W4A4` kernel
+- tensor-core path that consumes packed `A4` more natively than the current shared-memory unpack staging
 - optimized decode and prefill performance
 - accuracy evaluation beyond smoke testing
-- kernel-level tuning for occupancy, shared memory staging, and register pressure
+- deeper kernel tuning for occupancy, shared memory staging, and register pressure
 
 ## Measured Progress
 
-Validation completed on 2026-04-15 with `/monster/data/model/Llama-3.2-1B-Instruct`.
+Validation completed on 2026-04-15 with `/monster/data/model/Llama-3.2-1B-Instruct` and checkpoint `/tmp/llama3_2_1b_instruct_qqq_w4a4_gpu8`.
 
 Results:
 
-- GPU `8`: `A8 41.65 ms`, `A4 56.70 ms`, `1.36x` slower
-- GPU `9`: `A8 42.80 ms`, `A4 56.52 ms`, `1.32x` slower
+- GPU `8`: prefill `A8 40.75 ms`, `A4 55.20 ms`, `1.35x` slower
+- GPU `9`: prefill `A8 41.95 ms`, `A4 58.94 ms`, `1.40x` slower
+- GPU `8`: generate `32` tokens in `2.146 s`
+- GPU `9`: generate `32` tokens in `2.259 s`
 
 Interpretation:
 
-- functionality is proven
-- current performance is not good enough to justify the path as a production kernel
-- the unpack bridge is the main reason the prototype loses to `A8`
+- functionality is proven on both requested A100s
+- the unpack bridge limitation is removed
+- the remaining loss is now inside the kernel path itself, not a separate activation materialization step
+- current performance is still not good enough to justify the path as a production kernel
 
 ## Milestones
 
@@ -58,22 +62,37 @@ Exit criteria:
 
 - quantize, save, reload, generate, and benchmark on local A100s
 
-### M1: Real Fused Kernel
+### M1: In-Kernel Packed-A4 Staging
+
+Status: `done`
+
+Scope:
+
+- direct packed `A4` consumption by the `W4A4` GEMM entrypoint
+- remove temporary unpack-to-`int8` tensor
+- unpack directly into the GEMM shared-memory `A` tile
+
+Exit criteria:
+
+- no standalone unpack kernel
+- stable execution on both PCI-order GPUs `8` and `9`
+
+### M2: More Native Packed-A4 Kernel
 
 Status: `next`
 
 Scope:
 
-- direct packed `A4` consumption in the GEMM kernel
-- remove temporary unpack-to-`int8` tensor
-- keep current scale semantics where possible
+- reduce the critical-path cost of A4 unpack
+- improve overlap between packed-A4 staging, W4 dequant, and MMA
+- evaluate whether cp.async-assisted packed-A4 staging or a deeper kernel rewrite is needed
 
 Exit criteria:
 
-- `W4A4` prefill is no slower than current `W4A8` baseline
-- kernel stable on both PCI-order GPUs `8` and `9`
+- `W4A4` prefill is no slower than current `W4A8` baseline on local A100s
+- kernel remains stable on both PCI-order GPUs `8` and `9`
 
-### M2: Accuracy Validation
+### M3: Accuracy Validation
 
 Status: `pending`
 
@@ -86,7 +105,7 @@ Exit criteria:
 
 - acceptable loss relative to runtime savings
 
-### M3: Production Hardening
+### M4: Production Hardening
 
 Status: `pending`
 
@@ -103,14 +122,14 @@ Exit criteria:
 
 ## Immediate Next Tasks
 
-1. Replace the unpack bridge with a fused kernel path for packed `A4`.
-2. Benchmark prefill and decode separately on GPUs `8` and `9`.
-3. Measure accuracy against the existing `W4A8` QQQ path.
-4. Decide whether the kernel should stay QQQ-specific or become a more general Marlin-style backend path.
+1. Profile the packed-A4 fetch path and quantify where the remaining slowdown is spent.
+2. Decide whether to add cp.async-assisted packed-A4 staging or move to a more native nibble-aware MMA feed path.
+3. Benchmark decode separately from prefill on GPUs `8` and `9`.
+4. Measure accuracy against the existing `W4A8` QQQ path.
 
 ## Risks
 
-- `A4` may not recover enough bandwidth savings to beat `A8` once scale handling and scheduling costs are included.
+- `A4` may not recover enough bandwidth savings to beat `A8` once unpack and scale handling costs are included.
 - Accuracy loss from runtime `A4` activation quantization may be too large for production use.
 - A100 `sm_80` lacks native FP8/FP4 tensor-core modes, so all gains depend on integer path quality.
-- A new fused kernel is materially more complex than the prototype bridge.
+- A more native fused kernel is materially more complex than the current staging-level prototype.

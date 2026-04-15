@@ -118,6 +118,39 @@ __device__ inline void mma(const FragA& a_frag, const FragB& frag_b, FragC& frag
   );
 }
 
+__device__ inline void unpack_signed_int4x8(uint32_t packed, uint32_t& out_lo, uint32_t& out_hi) {
+  out_lo = 0;
+  out_hi = 0;
+  #pragma unroll
+  for (int i = 0; i < 8; i++) {
+    int v = (packed >> (4 * i)) & 0xF;
+    if (v >= 8)
+      v -= 16;
+    uint32_t byte = static_cast<uint32_t>(static_cast<uint8_t>(static_cast<int8_t>(v)));
+    if (i < 4)
+      out_lo |= byte << (8 * i);
+    else
+      out_hi |= byte << (8 * (i - 4));
+  }
+}
+
+__device__ inline void unpack_packed_a4_block(const int4& packed, int4& out0, int4& out1) {
+  const uint32_t* src = reinterpret_cast<const uint32_t*>(&packed);
+  uint32_t unpacked[8];
+  #pragma unroll
+  for (int i = 0; i < 4; i++)
+    unpack_signed_int4x8(src[i], unpacked[2 * i], unpacked[2 * i + 1]);
+
+  reinterpret_cast<uint32_t*>(&out0)[0] = unpacked[0];
+  reinterpret_cast<uint32_t*>(&out0)[1] = unpacked[1];
+  reinterpret_cast<uint32_t*>(&out0)[2] = unpacked[2];
+  reinterpret_cast<uint32_t*>(&out0)[3] = unpacked[3];
+  reinterpret_cast<uint32_t*>(&out1)[0] = unpacked[4];
+  reinterpret_cast<uint32_t*>(&out1)[1] = unpacked[5];
+  reinterpret_cast<uint32_t*>(&out1)[2] = unpacked[6];
+  reinterpret_cast<uint32_t*>(&out1)[3] = unpacked[7];
+}
+
 // Instruction for loading a full 16x16 matrix fragment of operand A from shared memory, directly in tensor core layout.
 __device__ inline void ldsm4(FragA& frag_a, const void* smem_ptr) {
   uint32_t* a = reinterpret_cast<uint32_t*>(&frag_a);
@@ -245,10 +278,11 @@ template <
   const int thread_n_blocks, // same for n dimension (output) 
   const int thread_k_blocks, // same for k dimension (reduction)
   const int stages, // number of stages for the async global->shared fetch pipeline
-  const int group_blocks = -1 // number of consecutive 16x16 blocks with a separate quantization scale
+  const int group_blocks = -1, // number of consecutive 16x16 blocks with a separate quantization scale
+  const bool packed_act = false
 >
 __global__ void Marlin(
-  const int4* __restrict__ A, // int8 input matrix of shape mxk 
+  const int4* __restrict__ A, // int8 input matrix of shape mxk or packed int4 input matrix of shape mx(k / 8)
   const int4* __restrict__ B, // 4bit quantized weight matrix of shape kxn 
         int4* __restrict__ C, // int32 global_reduce buffer of shape (max_par*16*4)xn , as int8 tensor core's output is int32 dtype
         int4* __restrict__ D, // fp16 output buffer of shape mxn
@@ -276,6 +310,9 @@ __global__ void Marlin(
     prob_m = 16 * thread_m_blocks;
   }
 
+  int a_gl_stride = packed_act ? prob_k / 32 : prob_k / 16;
+  constexpr int a_gl_tile_chunks = packed_act ? (thread_k_blocks / 2) : thread_k_blocks;
+
   int k_tiles = prob_k / 16 / thread_k_blocks;
   int n_tiles = prob_n / 16 / thread_n_blocks;
   int iters = ceildiv(k_tiles * n_tiles * parallel, gridDim.x);
@@ -294,7 +331,7 @@ __global__ void Marlin(
 
   // We can easily implement parallel problem execution by just remapping indices and advancing global pointers
   if (slice_col_par >= n_tiles) {
-    A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_k / 16;
+    A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * a_gl_stride;
     C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 4;
     D += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
     s1 += (slice_col_par / n_tiles) * 16 * thread_m_blocks;
@@ -329,7 +366,7 @@ __global__ void Marlin(
       }
     }
     if (slice_col == n_tiles) {
-      A += 16 * thread_m_blocks * prob_k / 16;
+      A += 16 * thread_m_blocks * a_gl_stride;
       C += 16 * thread_m_blocks * prob_n / 4;
       D += 16 * thread_m_blocks * prob_n / 8;
       s1 += 16 * thread_m_blocks;
@@ -339,16 +376,15 @@ __global__ void Marlin(
   };
   init_slice();
 
-  int a_gl_stride = prob_k / 16; // stride of the A matrix in global memory
   // We typically use `constexpr` to indicate that this value is a compile-time constant
   constexpr int a_sh_stride = 16 * thread_k_blocks / 16; // stride of an A matrix tile in shared memory
-  constexpr int a_gl_rd_delta_o = 16 * thread_k_blocks / 16; // delta between subsequent A tiles in global memory
-  int a_gl_rd_delta_i = a_gl_stride * (threads / a_gl_rd_delta_o); // between subsequent accesses within a tile
-  constexpr int a_sh_wr_delta = a_sh_stride * (threads / a_gl_rd_delta_o); // between shared memory writes
+  int a_gl_rd_delta_i = a_gl_stride * (threads / a_gl_tile_chunks); // between subsequent accesses within a tile
+  constexpr int a_sh_wr_delta = threads; // between shared memory writes
   constexpr int a_sh_rd_delta_o = 1 * ((threads / 32) / (thread_n_blocks / 4)); // between shared memory tile reads
   constexpr int a_sh_rd_delta_i = a_sh_stride * 16; // within a shared memory tile
   constexpr int a_sh_stage = a_sh_stride * (16 * thread_m_blocks); // overall size of a tile
   constexpr int a_sh_wr_iters = ceildiv(a_sh_stage, a_sh_wr_delta); // number of shared write iterations for a tile
+  constexpr int a_packed_sh_wr_iters = ceildiv(a_sh_stage / 2, threads); // packed int4 loads per tile
 
   int b_gl_stride = 16 * prob_n / 32;
   constexpr int b_sh_stride = 32 * thread_n_blocks / 4;
@@ -369,10 +405,10 @@ __global__ void Marlin(
   int s3_gl_rd_delta = s3_gl_stride;
 
   // Global A read index of current thread.
-  int a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) + (threadIdx.x % a_gl_rd_delta_o);
-  a_gl_rd += a_gl_rd_delta_o * slice_row;
+  int a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_tile_chunks) + (threadIdx.x % a_gl_tile_chunks);
+  a_gl_rd += a_gl_tile_chunks * slice_row;
   // Shared write index of current thread.
-  int a_sh_wr = a_sh_stride * (threadIdx.x / a_gl_rd_delta_o) + (threadIdx.x % a_gl_rd_delta_o);
+  int a_sh_wr = a_sh_stride * (threadIdx.x / a_gl_tile_chunks) + (threadIdx.x % a_gl_tile_chunks);
   // Shared read index.
   // NOTE(HandH1998): int8 input a only need 16 threads to load 16x16 matrix
   int a_sh_rd = a_sh_stride * ((threadIdx.x % 32) % 16);
@@ -415,13 +451,14 @@ __global__ void Marlin(
   for (int i = 0; i < a_sh_wr_iters; i++)
     a_sh_wr_pred[i] = a_sh_wr_delta * i + a_sh_wr < a_sh_stride * prob_m;
 
+
   // To ensure that writing and reading A tiles to/from shared memory, the latter in fragment format, is fully bank
   // conflict free, we need to use a rather fancy XOR-based layout. The key here is that neither reads nor writes of 
   // the 16-byte `int4` blocks of 8 consecutive threads involve the same shared memory banks. Further, it seems (based
   // on NSight-Compute) that each warp must also write a consecutive memory segment?
   auto transform_a = [&] (int i) {
-    int row = i / a_gl_rd_delta_o;
-    return a_gl_rd_delta_o * row + (i % a_gl_rd_delta_o) ^ row;
+    int row = i / a_sh_stride;
+    return a_sh_stride * row + (i % a_sh_stride) ^ row;
   };
   // Since the computation of this remapping is non-trivial and, due to our main loop unrolls, all shared memory 
   // accesses are static, we simply precompute both transformed reads and writes.
@@ -472,13 +509,29 @@ __global__ void Marlin(
   auto fetch_to_shared = [&] (int pipe, int a_off, bool pred = true) {
     if (pred) {
       int4* sh_a_stage = sh_a + a_sh_stage * pipe;
-      #pragma unroll
-      for (int i = 0; i < a_sh_wr_iters; i++) {
-        cp_async4_pred(
-          &sh_a_stage[a_sh_wr_trans[i]],
-          &A[a_gl_rd_delta_i * i + a_gl_rd + a_gl_rd_delta_o * a_off],
-          a_sh_wr_pred[i]
-        );
+      if constexpr (packed_act) {
+        // Keep packed A4 transient: unpack directly into the shared-memory A tile
+        // that the existing W4/int8 MMA path already consumes.
+        #pragma unroll
+        for (int i = 0; i < a_packed_sh_wr_iters; i++) {
+          int packed_linear = threads * i + threadIdx.x;
+          if (packed_linear < a_gl_tile_chunks * prob_m) {
+            int4 packed = A[a_gl_rd_delta_i * i + a_gl_rd + a_gl_tile_chunks * a_off];
+            int4 unpacked_lo, unpacked_hi;
+            unpack_packed_a4_block(packed, unpacked_lo, unpacked_hi);
+            sh_a_stage[transform_a(2 * packed_linear)] = unpacked_lo;
+            sh_a_stage[transform_a(2 * packed_linear + 1)] = unpacked_hi;
+          }
+        }
+      } else {
+        #pragma unroll
+        for (int i = 0; i < a_sh_wr_iters; i++) {
+          cp_async4_pred(
+            &sh_a_stage[a_sh_wr_trans[i]],
+            &A[a_gl_rd_delta_i * i + a_gl_rd + a_gl_tile_chunks * a_off],
+            a_sh_wr_pred[i]
+          );
+        }
       }
       int4* sh_b_stage = sh_b + b_sh_stage * pipe;
       #pragma unroll
@@ -735,7 +788,7 @@ __global__ void Marlin(
     zero_accums();
     wait_for_stage();
     fetch_to_registers(0, 0);
-    a_gl_rd += a_gl_rd_delta_o * (stages - 1);
+    a_gl_rd += a_gl_tile_chunks * (stages - 1);
   };
   start_pipes();
 
@@ -759,7 +812,7 @@ __global__ void Marlin(
       if (slice_iters == 0)
         break;
     }
-    a_gl_rd += a_gl_rd_delta_o * stages;
+    a_gl_rd += a_gl_tile_chunks * stages;
 
     // Process results and, if necessary, proceed to the next column slice. While this pattern may not be the most
     // readable, other ways of writing the loop seemed to noticeably worse performance after compliation.
@@ -804,7 +857,7 @@ __global__ void Marlin(
       slice_col++;
       init_slice();
       if (slice_iters) {
-        a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) + (threadIdx.x % a_gl_rd_delta_o);
+        a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_tile_chunks) + (threadIdx.x % a_gl_tile_chunks);
         #pragma unroll
         for (int i = 0; i < b_sh_wr_iters; i++)
           B_ptr[i] += b_sh_stride - b_gl_rd_delta_o * k_tiles;
@@ -846,7 +899,7 @@ typedef struct {
   int num_threads;
 } thread_config_t;
 
-thread_config_t small_batch_thread_configs[] = {
+static thread_config_t small_batch_thread_configs[] = {
     // Ordered by priority
 
     // thread_k, thread_n, num_threads
@@ -856,7 +909,7 @@ thread_config_t small_batch_thread_configs[] = {
     {64, 128, 128},   // Reduce K 2X, same N
 };
 
-thread_config_t large_batch_thread_configs[] = {
+static thread_config_t large_batch_thread_configs[] = {
     // Ordered by priority
 
     // thread_k, thread_n, num_threads
@@ -866,7 +919,7 @@ thread_config_t large_batch_thread_configs[] = {
     {128, 64, 128},   // Reduce N 4X, increase K 2X
 };
 
-bool is_valid_config(thread_config_t const& th_config, int prob_m, int prob_n,
+static bool is_valid_config(thread_config_t const& th_config, int prob_m, int prob_n,
                      int prob_k) {
   // Sanity
   if (th_config.thread_k == -1 || th_config.thread_n == -1 ||
@@ -898,7 +951,7 @@ bool is_valid_config(thread_config_t const& th_config, int prob_m, int prob_n,
   return true;
 }
 
-thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k) {
+static thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k) {
   if (prob_m <= 16) {
     for (auto th_config : small_batch_thread_configs) {
       if (is_valid_config(th_config, prob_m, prob_n, prob_k)) {
@@ -924,11 +977,11 @@ thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k) {
            thread_k_blocks == THREAD_K_BLOCKS &&                                   \
            group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS) {           \
     cudaFuncSetAttribute(Marlin<NUM_THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS,     \
-                                THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS>,            \
+                                THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS, packed_act>,\
                          cudaFuncAttributeMaxDynamicSharedMemorySize,              \
                          max_shared_mem);                                          \
     Marlin<NUM_THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,         \
-           STAGES, GROUP_BLOCKS>                                                   \
+           STAGES, GROUP_BLOCKS, packed_act>                                       \
         <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                         \
             A_ptr, B_ptr, C_ptr, D_ptr, s1_ptr, s2_ptr, s3_ptr,                    \
             prob_m, prob_n, prob_k, locks);                                        \
@@ -949,7 +1002,8 @@ thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k) {
 const int ERR_PROB_SHAPE = 1;
 const int ERR_KERN_SHAPE = 2;
 
-int qqq_cuda(
+template <bool packed_act>
+static int qqq_cuda_impl(
   const void* A,
   const void* B,
         void* C, // int32 reduce buffer
@@ -1013,6 +1067,7 @@ int qqq_cuda(
   const int4* s3_ptr = (const int4*) s3;
 
   int* locks = (int*) workspace;
+  int a_problem_stride = packed_act ? prob_k / 32 : prob_k / 16;
 
   int ret = 0;
   for (int i = 0; i < tot_m_blocks; i += 4) {
@@ -1039,7 +1094,7 @@ int qqq_cuda(
     else
       ret = ERR_KERN_SHAPE;
 
-    A_ptr += 16 * thread_m_blocks * (prob_k / 16) * par;
+    A_ptr += 16 * thread_m_blocks * a_problem_stride * par;
     D_ptr += 16 * thread_m_blocks * (prob_n / 8) * par;
     s1_ptr += 16 * thread_m_blocks * par;
   }
@@ -1047,7 +1102,41 @@ int qqq_cuda(
   return ret;
 }
 
-void qqq_gemm(
+static int qqq_cuda_w4a4(
+  const void* A,
+  const void* B,
+        void* C,
+        void* D,
+  const void* s1,
+  const void* s2,
+  const void* s3,
+  int prob_m,
+  int prob_n,
+  int prob_k,
+  void* workspace,
+  int groupsize,
+  int dev,
+  cudaStream_t stream,
+  int thread_k,
+  int thread_n,
+  int sms,
+  int max_par
+) {
+  return qqq_cuda_impl<true>(
+    A, B, C, D, s1, s2, s3,
+    prob_m, prob_n, prob_k,
+    workspace,
+    groupsize,
+    dev,
+    stream,
+    thread_k,
+    thread_n,
+    sms,
+    max_par
+  );
+}
+
+void qqq_w4a4_gemm(
   const torch::Tensor& A,
   const torch::Tensor& B,
         torch::Tensor& C,
@@ -1056,14 +1145,20 @@ void qqq_gemm(
   const torch::Tensor& s2,
   const torch::Tensor& s3,
         torch::Tensor& workspace,
-  int thread_k = -1,
-  int thread_n = -1,
-  int sms = -1,
-  int max_par = 8
+  int thread_k,
+  int thread_n,
+  int sms,
+  int max_par
 ) {
+  if (A.dtype() != torch::kInt32)
+    AT_ERROR("A dtype must be int32 packed signed-int4, but got ", A.dtype(), ".");
+  if (A.dim() != 2)
+    AT_ERROR("A must be rank-2 packed signed-int4 tensor, but got rank ", A.dim(), ".");
+
   int prob_m = A.size(0);
+  int packed_k = A.size(1);
+  int prob_k = packed_k * pack_factor_4bit;
   int prob_n = C.size(1);
-  int prob_k = A.size(1);
   int groupsize = (s3.numel() == 0) ? -1 : prob_k / s3.size(0);
   if (groupsize != -1 && groupsize * s3.size(0) != prob_k)
     AT_ERROR("k=", prob_k, " not compatible with ", s3.size(0), " groups.");
@@ -1075,8 +1170,10 @@ void qqq_gemm(
      AT_ERROR("s2 dtype must be float32, but got ", s2.dtype(), ".");
   if (s3.dtype() != torch::kFloat16)
      AT_ERROR("s3 dtype must be float16, but got ", s3.dtype(), ".");
+
   int dev = A.get_device();
-  int err = qqq_cuda(
+  cudaStream_t stream = c10::cuda::getCurrentCUDAStream(dev);
+  int err = qqq_cuda_w4a4(
     A.data_ptr(),
     B.data_ptr(),
     C.data_ptr(),
@@ -1088,7 +1185,7 @@ void qqq_gemm(
     workspace.data_ptr(),
     groupsize,
     dev,
-    c10::cuda::getCurrentCUDAStream(dev),
+    stream,
     thread_k,
     thread_n,
     sms,
