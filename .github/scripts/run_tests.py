@@ -1,34 +1,48 @@
 import argparse
 import os
-import re
 import signal
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from pathlib import Path
 
-from ci_common import append_github_env, fetch_text
 
-LOG_ERROR_PATTERN = re.compile(
-    r"nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|"
-    r"Exception|is the correct path|No such file or directory|Repo id must be in"
-)
+def append_github_env(name: str, value: str) -> None:
+    github_env = os.environ.get("GITHUB_ENV")
+    if not github_env:
+        return
+    with open(github_env, "a", encoding="utf-8") as fh:
+        fh.write(f"{name}={value}\n")
+
+
+def fetch_text(url: str, *, timeout: float, suppress_error: bool = False) -> str:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        if suppress_error:
+            print(f"Request failed for {url}: {exc}")
+            return ""
+        raise
 
 
 def kill_process_group(proc: subprocess.Popen[str]) -> None:
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
+        # Process (or process group) is already gone; nothing to do.
         pass
 
 
 def start_keepalive_monitor(
-    *,
-    proc: subprocess.Popen[str],
-    keep_alive_url: str,
-    interval_sec: int,
+        *,
+        proc: subprocess.Popen[str],
+        keep_alive_url: str,
+        interval_sec: int,
 ) -> tuple[threading.Thread, threading.Event, dict[str, int]]:
     stop_event = threading.Event()
     state = {"forced_exit_code": 0}
@@ -36,9 +50,10 @@ def start_keepalive_monitor(
     def worker() -> None:
         print(f"start to keep alive... {keep_alive_url}")
         while not stop_event.wait(interval_sec):
-            response = fetch_text(keep_alive_url, timeout=10, suppress_error=True)
-            if int(response.strip()) < 0:
-                print(f"Server returned {response.strip()}, terminating job...")
+            resp = fetch_text(keep_alive_url, timeout=10, suppress_error=True)
+            # if resp.strip() == "-1":
+            if int(resp.strip()) < 0:
+                print(f"Server returned {resp.strip()}, terminating job...")
                 state["forced_exit_code"] = 3
                 kill_process_group(proc)
                 stop_event.set()
@@ -53,25 +68,25 @@ def start_keepalive_monitor(
 def stream_process_output(proc: subprocess.Popen[str], log_file: Path) -> int:
     assert proc.stdout is not None
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    with log_file.open("w", encoding="utf-8") as handle:
+    with log_file.open("w", encoding="utf-8") as fh:
         for line in proc.stdout:
             print(line, end="")
-            handle.write(line)
+            fh.write(line)
     return proc.wait()
 
 
 def maybe_uninstall_vllm() -> None:
-    uninstall_command = ["uv", "pip", "uninstall", "vllm", "-y"]
-    print(f"+ {' '.join(uninstall_command)}")
-    subprocess.run(uninstall_command, check=False)
+    uninstall_cmd = ["uv", "pip", "uninstall", "vllm", "-y"]
+    print(f"+ {' '.join(uninstall_cmd)}")
+    subprocess.run(uninstall_cmd, check=False)
 
-    list_command = ["uv", "pip", "list"]
-    print(f"+ {' '.join(list_command)}")
-    subprocess.run(list_command, check=False)
+    list_cmd = ["uv", "pip", "list"]
+    print(f"+ {' '.join(list_cmd)}")
+    subprocess.run(list_cmd, check=False)
 
 
-def log_vram(base_url: str, run_id: str, gpu_id: str, execution_time: int, test_name: str) -> None:
-    encoded_test = urllib.parse.quote(test_name, safe="")
+def log_vram(base_url: str, run_id: str, gpu_id: str, execution_time: int, test: str) -> None:
+    encoded_test = urllib.parse.quote(test, safe="")
     url = (
         f"{base_url}/gpu/logVram?runid={run_id}&gpu={gpu_id}"
         f"&range={execution_time}&unit=second&test={encoded_test}"
@@ -79,10 +94,23 @@ def log_vram(base_url: str, run_id: str, gpu_id: str, execution_time: int, test_
     try:
         print(fetch_text(url, timeout=30, suppress_error=True))
     except Exception:
+        # Logging VRAM usage is best-effort; failures must not affect the main test flow.
         pass
 
 
-def command_run(args: argparse.Namespace) -> int:
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base-url", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--test-script", required=True)
+    parser.add_argument("--runner", required=True)
+    parser.add_argument("--gpu-id", default="")
+    parser.add_argument("--model-test-mode")
+    parser.add_argument("--clear-cuda", action="store_true")
+    parser.add_argument("--xpu-mode", action="store_true")
+    parser.add_argument("--monitor-interval-sec", type=int, default=60)
+    args = parser.parse_args()
+
     env = os.environ.copy()
     if args.clear_cuda:
         env["CUDA_VISIBLE_DEVICES"] = ""
@@ -101,11 +129,11 @@ def command_run(args: argparse.Namespace) -> int:
     log_file = log_dir / f"{args.test_script}.log"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    pytest_command = ["pytest", "--durations=0", f"tests/{args.test_script}.py"]
-    print(f"+ {' '.join(pytest_command)}")
+    pytest_cmd = ["pytest", "--durations=0", f"tests/{args.test_script}.py"]
+    print(f"+ {' '.join(pytest_cmd)}")
 
     proc = subprocess.Popen(
-        pytest_command,
+        pytest_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -155,7 +183,8 @@ def command_run(args: argparse.Namespace) -> int:
 
     try:
         for entry in sorted(log_dir.iterdir()):
-            size = entry.stat().st_size
+            stat = entry.stat()
+            size = stat.st_size
             print(f"{size:>10} {entry.name}")
     except OSError as exc:
         print(f"Failed to list log dir: {exc}")
@@ -165,57 +194,6 @@ def command_run(args: argparse.Namespace) -> int:
         log_vram(args.base_url, args.run_id, gpu_id, execution_time, args.test_script)
 
     return 0
-
-
-def command_check_log(args: argparse.Namespace) -> int:
-    log_file = Path(f"/opt/dist/GPTQModel/{args.run_id}/logs/{args.test_script}.log")
-    if not log_file.exists():
-        print(f"Log file not found: {log_file}")
-        return 1
-
-    lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    matches = [
-        f"{index}:{line}"
-        for index, line in enumerate(lines, start=1)
-        if LOG_ERROR_PATTERN.search(line)
-    ]
-    for line in matches[:50]:
-        print(line)
-
-    tail_lines = lines[-200:]
-    for line in tail_lines:
-        print(line)
-    return 1
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    run = subparsers.add_parser("run")
-    run.add_argument("--base-url", required=True)
-    run.add_argument("--run-id", required=True)
-    run.add_argument("--test-script", required=True)
-    run.add_argument("--runner", required=True)
-    run.add_argument("--gpu-id", default="")
-    run.add_argument("--model-test-mode")
-    run.add_argument("--clear-cuda", action="store_true")
-    run.add_argument("--xpu-mode", action="store_true")
-    run.add_argument("--monitor-interval-sec", type=int, default=60)
-    run.set_defaults(handler=command_run)
-
-    check_log = subparsers.add_parser("check-log")
-    check_log.add_argument("--run-id", required=True)
-    check_log.add_argument("--test-script", required=True)
-    check_log.set_defaults(handler=command_check_log)
-
-    return parser
-
-
-def main() -> int:
-    parser = build_parser()
-    args = parser.parse_args()
-    return args.handler(args)
 
 
 if __name__ == "__main__":
