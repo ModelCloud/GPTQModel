@@ -540,11 +540,9 @@ tokens = model.generate("Capital of France is")[0]
 result = model.tokenizer.decode(tokens)
 
 print(f"Result: {result}")
-# For more details on EoRA, please see GPTQModel/examples/eora
+# For more details on EoRA, please see docs/eora/
 # Please use the benchmark tools in later part of this README to evaluate EoRA effectiveness
 ```
-
-For more advanced features of model quantization, please refer to [this script](https://github.com/ModelCloud/GPTQModel/blob/main/examples/quantization/basic_usage_wikitext2.py)
 
 ### How to Add Support for a New Model
 
