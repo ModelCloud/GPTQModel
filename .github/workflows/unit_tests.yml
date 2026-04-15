@@ -220,19 +220,19 @@ jobs:
       - name: uncompress uv cache
         continue-on-error: true
         run: |
-          if [ -f /monster/ci/dist/uv.tar.zst ]; then
+          if [ -f /opt/dist/uv.tar.zst ]; then
             mkdir -p /opt/uv/cache/tmp
             rm -rf /opt/uv/cache/tmp/*
-            tar -I zstd -xf /monster/ci/dist/uv.tar.zst -C /opt/uv/cache/tmp
+            tar -I zstd -xf /opt/dist/uv.tar.zst -C /opt/uv/cache/tmp
           
             rm -rf /opt/uv/cache/uv
             mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
           fi
           
-          if [ -f /monster/ci/dist/uv.tar.xz ]; then
+          if [ -f /opt/dist/uv.tar.xz ]; then
             mkdir -p /opt/uv/cache/tmp
             rm -rf /opt/uv/cache/tmp/*
-            tar -xJf /monster/ci/dist/uv.tar.xz -C /opt/uv/cache/tmp
+            tar -xJf /opt/dist/uv.tar.xz -C /opt/uv/cache/tmp
           
             rm -rf /opt/uv/cache/uv
             mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
@@ -478,11 +478,11 @@ jobs:
       - name: uncompress uv cache
         continue-on-error: true
         run: |
-          if [ -f /monster/ci/dist/uv.tar.zst ]; then
+          if [ -f /opt/dist/uv.tar.zst ]; then
             echo "decompressing uv.tar.zst..."
             mkdir -p /opt/uv/cache/tmp
             rm -rf /opt/uv/cache/tmp/*
-            tar -I zstd -xf /monster/ci/dist/uv.tar.zst -C /opt/uv/cache/tmp
+            tar -I zstd -xf /opt/dist/uv.tar.zst -C /opt/uv/cache/tmp
           
             rm -rf /opt/uv/cache/uv
             mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
@@ -492,11 +492,11 @@ jobs:
             ls -ahl /opt/uv/cache/uv
           fi
           
-          if [ -f /monster/ci/dist/uv.tar.xz ]; then
+          if [ -f /opt/dist/uv.tar.xz ]; then
             echo "decompressing uv.tar.xz..."
             mkdir -p /opt/uv/cache/tmp
             rm -rf /opt/uv/cache/tmp/*
-            tar -xJf /monster/ci/dist/uv.tar.xz -C /opt/uv/cache/tmp
+            tar -xJf /opt/dist/uv.tar.xz -C /opt/uv/cache/tmp
           
             rm -rf /opt/uv/cache/uv
             mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
