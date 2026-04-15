@@ -27,12 +27,12 @@ jobs:
 
   check-setuptools:
     needs: prepare-setuptools
-    if: needs.prepare.outputs.versions != '[]'
+    if: needs.prepare-setuptools.outputs.versions != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.prepare.outputs.versions) }}
+        version: ${{ fromJSON(needs.prepare-setuptools.outputs.versions) }}
 
     steps:
       - uses: actions/checkout@v6
