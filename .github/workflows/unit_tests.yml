@@ -220,32 +220,45 @@ jobs:
       - name: decompress uv cache
         continue-on-error: true
         run: |
-          if [ -f /opt/dist/uv.tar.zst ]; then
-            echo "decompressing uv.tar.zst..."
-            mkdir -p /opt/uv/cache/tmp
-            rm -rf /opt/uv/cache/tmp/*
-            tar -I zstd -xf /opt/dist/uv.tar.zst -C /opt/uv/cache/tmp
-          
-            rm -rf /opt/uv/cache/uv
-            mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
-            echo "done!"
-            ls -ahl /opt/uv/cache
-            echo "=========="
-            ls -ahl /opt/uv/cache/uv
-          fi
-          
           if [ -f /opt/dist/uv.tar.xz ]; then
-            echo "decompressing uv.tar.xz..."
-            mkdir -p /opt/uv/cache/tmp
-            rm -rf /opt/uv/cache/tmp/*
-            tar -xJf /opt/dist/uv.tar.xz -C /opt/uv/cache/tmp
+            TAR_FILE="/opt/dist/uv.tar.xz"
+            LAST_FILE="/opt/uv/cache/lastmodified"
           
-            rm -rf /opt/uv/cache/uv
-            mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
-            echo "done!"
-            ls -ahl /opt/uv/cache
-            echo "=========="
-            ls -ahl /opt/uv/cache/uv
+            # Get modification time of tar.xz file (epoch seconds)
+            TAR_MTIME=$(stat -c %Y "$TAR_FILE")
+          
+            # Read last recorded modification time if file exists
+            if [ -f "$LAST_FILE" ]; then
+              LAST_MTIME=$(cat "$LAST_FILE")
+            else
+              LAST_MTIME=0
+            fi
+          
+            # Compare timestamps to decide whether to decompress
+            if [ "$TAR_MTIME" = "$LAST_MTIME" ]; then
+              echo "uv.tar.xz unchanged, skip decompress"
+            else
+              echo "decompressing uv.tar.xz..."
+          
+              # Prepare temporary directory
+              mkdir -p /opt/uv/cache/tmp
+              rm -rf /opt/uv/cache/tmp/*
+          
+              # Extract archive
+              tar -xJf "$TAR_FILE" -C /opt/uv/cache/tmp
+          
+              # Replace existing uv directory
+              rm -rf /opt/uv/cache/uv
+              mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
+          
+              # Record latest modification time
+              echo "$TAR_MTIME" > "$LAST_FILE"
+          
+              echo "done!"
+              ls -ahl /opt/uv/cache
+              echo "=========="
+              ls -ahl /opt/uv/cache/uv
+            fi
           fi
 
       - name: Activate uv env
@@ -488,32 +501,45 @@ jobs:
       - name: decompress uv cache
         continue-on-error: true
         run: |
-          if [ -f /opt/dist/uv.tar.zst ]; then
-            echo "decompressing uv.tar.zst..."
-            mkdir -p /opt/uv/cache/tmp
-            rm -rf /opt/uv/cache/tmp/*
-            tar -I zstd -xf /opt/dist/uv.tar.zst -C /opt/uv/cache/tmp
-          
-            rm -rf /opt/uv/cache/uv
-            mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
-            echo "done!"
-            ls -ahl /opt/uv/cache
-            echo "=========="
-            ls -ahl /opt/uv/cache/uv
-          fi
-          
           if [ -f /opt/dist/uv.tar.xz ]; then
-            echo "decompressing uv.tar.xz..."
-            mkdir -p /opt/uv/cache/tmp
-            rm -rf /opt/uv/cache/tmp/*
-            tar -xJf /opt/dist/uv.tar.xz -C /opt/uv/cache/tmp
+            TAR_FILE="/opt/dist/uv.tar.xz"
+            LAST_FILE="/opt/uv/cache/lastmodified"
           
-            rm -rf /opt/uv/cache/uv
-            mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
-            echo "done!"
-            ls -ahl /opt/uv/cache
-            echo "=========="
-            ls -ahl /opt/uv/cache/uv
+            # Get modification time of tar.xz file (epoch seconds)
+            TAR_MTIME=$(stat -c %Y "$TAR_FILE")
+          
+            # Read last recorded modification time if file exists
+            if [ -f "$LAST_FILE" ]; then
+              LAST_MTIME=$(cat "$LAST_FILE")
+            else
+              LAST_MTIME=0
+            fi
+          
+            # Compare timestamps to decide whether to decompress
+            if [ "$TAR_MTIME" = "$LAST_MTIME" ]; then
+              echo "uv.tar.xz unchanged, skip decompress"
+            else
+              echo "decompressing uv.tar.xz..."
+          
+              # Prepare temporary directory
+              mkdir -p /opt/uv/cache/tmp
+              rm -rf /opt/uv/cache/tmp/*
+          
+              # Extract archive
+              tar -xJf "$TAR_FILE" -C /opt/uv/cache/tmp
+          
+              # Replace existing uv directory
+              rm -rf /opt/uv/cache/uv
+              mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
+          
+              # Record latest modification time
+              echo "$TAR_MTIME" > "$LAST_FILE"
+          
+              echo "done!"
+              ls -ahl /opt/uv/cache
+              echo "=========="
+              ls -ahl /opt/uv/cache/uv
+            fi
           fi
 
       - name: Activate uv env
