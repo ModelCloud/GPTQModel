@@ -191,6 +191,8 @@ jobs:
 
       - name: Prepare common envs
         run: |
+          source /opt/uv/setup_uv_venv.sh gptqmodel_unit_pre_env
+          uv pip install pyyaml -U
           python3 .github/scripts/ci_workflow.py prepare-common-envs \
             --torch-envs-json '${{ needs.list-test-files.outputs.torch-envs }}' \
             --model-envs-json '${{ needs.list-test-files.outputs.model-envs }}' \
