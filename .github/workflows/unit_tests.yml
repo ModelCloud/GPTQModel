@@ -186,6 +186,8 @@ jobs:
         - /monster/ci/huggingface:/github/home/.cache/huggingface
         # - /monster/ci/uv:/opt/uv
         - /github/workspace:/opt/uv
+        - /monster/ci/uv/python:/opt/uv/python
+        - /monster/ci/uv/cache/python:/opt/uv/cache/python
         - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
         - /monster/ci/uv/uv:/opt/uv/uv
         - /monster/ci/uv/uvx:/opt/uv/uvx
@@ -421,6 +423,8 @@ jobs:
         - /monster/ci/huggingface:/github/home/.cache/huggingface
         # - /monster/ci/uv:/opt/uv
         - /github/workspace:/opt/uv
+        - /monster/ci/uv/python:/opt/uv/python
+        - /monster/ci/uv/cache/python:/opt/uv/cache/python
         - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
         - /monster/ci/uv/uv:/opt/uv/uv
         - /monster/ci/uv/uvx:/opt/uv/uvx
