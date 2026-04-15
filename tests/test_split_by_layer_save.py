@@ -1,4 +1,5 @@
 import copy
+import csv
 import json
 import os
 from types import SimpleNamespace
@@ -7,7 +8,19 @@ import torch
 import torch.nn as nn
 from accelerate import load_checkpoint_in_model
 
-from gptqmodel.models.writer import ModelWriter
+from gptqmodel.models.writer import (
+    ModelWriter,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_TIME,
+    QUANT_ACT_LOG_DYNAMIC,
+    QUANT_ACT_LOG_FILE,
+    QUANT_ACT_LOG_FORMAT,
+    QUANT_ACT_LOG_TYPE,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_NSAMPLES,
+)
 from gptqmodel.quantization.config import FORMAT, METHOD
 
 
@@ -110,6 +123,7 @@ def _build_writer(tmp_path):
     instance.quantized = True
     instance.quantize_config = _DummyQuantizeConfig()
     instance.quant_log = []
+    instance.quant_act_log = []
     instance.load_quantized_model = False
     instance.qlinear_kernel = _DummyKernel()
     instance.model_local_path = str(tmp_path / "original")
@@ -134,7 +148,7 @@ def test_save_quantized_split_by_layer_writes_per_layer_dirs(tmp_path, monkeypat
     _patch_writer_env(monkeypatch)
 
     save_dir = tmp_path / "save"
-    writer.save_quantized(save_dir=str(save_dir), split_by="layer", max_shard_size=None)
+    writer.save_quantized(save_dir=str(save_dir), split_by=None, max_shard_size=None)
 
     assert (save_dir / "model.layers.0" / "layer.safetensors").exists()
     assert (save_dir / "model.layers.1" / "layer.safetensors").exists()
@@ -197,3 +211,56 @@ def test_split_by_layer_index_loads_nested_layer_shards(tmp_path, monkeypatch):
     reloaded_state = reloaded.state_dict()
     for name, expected in expected_state.items():
         torch.testing.assert_close(reloaded_state[name], expected)
+
+
+def test_save_quantized_writes_quant_act_log_to_separate_csv(tmp_path, monkeypatch):
+    writer = _build_writer(tmp_path)
+    _patch_writer_env(monkeypatch)
+    writer.quant_act_log = [
+        {
+            PROCESS_LOG_NAME: "awq_act",
+            PROCESS_LOG_LAYER: 0,
+            PROCESS_LOG_MODULE: "model.layers.0",
+            QUANT_ACT_LOG_TYPE: "activation_output_loss",
+            QUANT_LOG_LOSS: "0.1250000000",
+            QUANT_LOG_NSAMPLES: "1024",
+            PROCESS_LOG_TIME: "0.010",
+            QUANT_ACT_LOG_FORMAT: "float8_e4m3fn",
+            QUANT_ACT_LOG_DYNAMIC: True,
+        },
+        {
+            PROCESS_LOG_NAME: "awq_act",
+            PROCESS_LOG_LAYER: 0,
+            PROCESS_LOG_MODULE: "model.layers.0",
+            QUANT_ACT_LOG_TYPE: "total_output_loss",
+            QUANT_LOG_LOSS: "0.2500000000",
+            QUANT_LOG_NSAMPLES: "1024",
+            PROCESS_LOG_TIME: "0.010",
+            QUANT_ACT_LOG_FORMAT: "float8_e4m3fn",
+            QUANT_ACT_LOG_DYNAMIC: True,
+        },
+    ]
+
+    save_dir = tmp_path / "save_act_log"
+    writer.save_quantized(save_dir=str(save_dir), split_by=None, max_shard_size=None)
+
+    quant_act_log_path = save_dir / QUANT_ACT_LOG_FILE
+    assert quant_act_log_path.exists()
+    assert not (save_dir / "quant_log.csv").exists()
+
+    with open(quant_act_log_path, newline="", encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+
+    assert rows[0] == [
+        PROCESS_LOG_NAME,
+        PROCESS_LOG_LAYER,
+        PROCESS_LOG_MODULE,
+        QUANT_ACT_LOG_TYPE,
+        QUANT_LOG_LOSS,
+        QUANT_LOG_NSAMPLES,
+        PROCESS_LOG_TIME,
+        QUANT_ACT_LOG_FORMAT,
+        QUANT_ACT_LOG_DYNAMIC,
+    ]
+    assert rows[1][0:4] == ["awq_act", "0", "model.layers.0", "activation_output_loss"]
+    assert rows[2][0:4] == ["awq_act", "0", "model.layers.0", "total_output_loss"]

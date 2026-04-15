@@ -256,6 +256,7 @@ class WeightOnlyLooper:
 
         total_log = {self.processor.name(): self.processor.log}
         self.gptq_model.quant_log = self.processor.log
+        self.gptq_model.quant_act_log = getattr(self.processor, "quant_act_log", [])
         self.processor.finalize(model=self.gptq_model)
         return total_log
 

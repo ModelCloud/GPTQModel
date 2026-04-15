@@ -10,6 +10,7 @@ from torch import nn
 import gptqmodel.looper.awq_processor as awq_processor_module
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.models.writer import QUANT_ACT_LOG_TYPE
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.input_activations import (
@@ -103,6 +104,57 @@ class TestAwqInputActivations:
         torch.testing.assert_close(observed["x"], expected, atol=1e-3, rtol=1e-3)
         torch.testing.assert_close(observed["x_mean"], expected_mean, atol=1e-3, rtol=1e-3)
         torch.testing.assert_close(observed["fp16_output"], expected_output, atol=1e-3, rtol=1e-3)
+
+    def test_awq_input_activation_metrics_are_logged_separately(self, monkeypatch):
+        qcfg = QuantizeConfig(
+            quant_method=METHOD.AWQ,
+            format=FORMAT.GEMM,
+            bits=4,
+            group_size=16,
+            sym=False,
+            input_activations=self._input_activations_config(dynamic=True),
+        )
+        processor = self._RuntimeTestAWQProcessor(qcfg)
+
+        parent = nn.Module()
+        parent.prev = nn.LayerNorm(16, elementwise_affine=False, dtype=torch.float16)
+        parent.linear = nn.Linear(16, 16, bias=False, dtype=torch.float16)
+
+        x = torch.randn(2, 3, 16, dtype=torch.float16)
+        x_device = x.to(parent.linear.weight.device)
+        qdq_x = processor.quantize_dequantize_input(x_device)
+        expected_activation_loss = processor._compute_loss(parent.linear(x_device), parent.linear(qdq_x), x_device.device)
+
+        def fake_compute_best_scale(self, x_arg, w_mean, x_mean, module2inspect, linears2scale, fp16_output, kwargs, reference_output=None):
+            return torch.ones(x_arg.shape[-1], dtype=torch.float32), 0.0, 0.25
+
+        monkeypatch.setattr(AWQProcessor, "_compute_best_scale", fake_compute_best_scale)
+
+        AWQProcessor._search_best_scale(
+            processor,
+            module=parent,
+            prev_op=parent.prev,
+            layers=[parent.linear],
+            inp=x,
+            module2inspect=parent.linear,
+            kwargs={},
+        )
+
+        metrics = processor._activation_loss_by_module["linear"]
+        assert metrics["format"] == "float8_e4m3fn"
+        assert metrics["dynamic"] is True
+        assert metrics["activation_output_loss"] == pytest.approx(expected_activation_loss)
+        assert metrics["total_output_loss"] == pytest.approx(0.25)
+
+        named_module = types.SimpleNamespace(layer_index=0, name="linear")
+        processor._append_activation_log_rows(named_module, duration=0.123)
+
+        assert len(processor.quant_act_log) == 2
+        assert {entry[QUANT_ACT_LOG_TYPE] for entry in processor.quant_act_log} == {
+            "activation_output_loss",
+            "total_output_loss",
+        }
+        assert processor.log == []
 
     def test_awq_static_activation_path_caches_calibrated_input_scale(self, monkeypatch):
         qcfg = QuantizeConfig(

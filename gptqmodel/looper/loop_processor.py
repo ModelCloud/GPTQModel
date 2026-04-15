@@ -133,6 +133,7 @@ class LoopProcessor:
 
         # logging
         self.log = []
+        self.quant_act_log = []
         self.log_call_count = 0
         self._log_column_labels: List[str] = []
         self._log_columns = None

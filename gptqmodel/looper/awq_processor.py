@@ -20,7 +20,8 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_ACT_LOG_DYNAMIC,
+                             QUANT_ACT_LOG_FORMAT, QUANT_ACT_LOG_TYPE, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
@@ -201,6 +202,9 @@ class AWQProcessor(LoopProcessor):
         # Stores one calibrated FP8 input scale per linear module for the AWQ
         # W4A8 static activation path.
         self._activation_scale_inv_by_module: Dict[str, torch.Tensor] = {}
+        # Stores activation-only and combined-runtime losses by module so they
+        # can be persisted into quant_act_log.csv separately from quant_log.csv.
+        self._activation_loss_by_module: Dict[str, Dict[str, object]] = {}
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
         self._rotary_source_id: Optional[int] = None
@@ -891,10 +895,13 @@ class AWQProcessor(LoopProcessor):
             kwargs.pop("use_cache")
 
         layer_names = [get_op_name(module, linear) for linear in layers]
+        input_activations = getattr(self.qcfg, "input_activations", None)
         # Put x on the right device, then apply the same activation QDQ path that
         # replay/runtime will use so AWQ search sees the intended W4A8 inputs.
         inp = inp.to(next(module2inspect.parameters()).device)
-        inp = self.quantize_dequantize_input(inp, module_names=layer_names)
+        reference_inp = inp
+        if input_activations is not None:
+            inp = self.quantize_dequantize_input(inp, module_names=layer_names)
 
         # [STEP 1]: Compute per-channel mean of normalised weights
         # Stream across each Linear instead of concatenating all weights at once. This mirrors the
@@ -937,14 +944,47 @@ class AWQProcessor(LoopProcessor):
         for key, value in global_allowed_kwargs.items():
             module_kwargs.setdefault(key, value)
 
+        reference_output = None
         with ctx(torch.inference_mode()):
+            if input_activations is not None:
+                reference_output = self._module_forward(
+                    reference_inp,
+                    module2inspect,
+                    module_kwargs,
+                    apply_activation_qdq=False,
+                )
             fp16_output = self._module_forward(inp, module2inspect, module_kwargs, apply_activation_qdq=False)
 
+        if reference_output is not None:
+            reference_output = reference_output.clip(
+                torch.finfo(reference_output.dtype).min,
+                torch.finfo(reference_output.dtype).max,
+            )
         fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
+        activation_output_loss = None
+        if reference_output is not None:
+            activation_output_loss = self._compute_loss(reference_output, fp16_output, inp.device)
 
         # [STEP 4]: Compute loss
-        best_scales, loss = self._compute_best_scale(
-            inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs
+        compute_kwargs = {}
+        try:
+            if reference_output is not None and "reference_output" in inspect.signature(self._compute_best_scale).parameters:
+                compute_kwargs["reference_output"] = reference_output
+        except (TypeError, ValueError):
+            pass
+        best_scale_result = self._compute_best_scale(
+            inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs, **compute_kwargs
+        )
+        if isinstance(best_scale_result, tuple) and len(best_scale_result) >= 3:
+            best_scales, loss, total_output_loss = best_scale_result[:3]
+        else:
+            best_scales, loss = best_scale_result
+            total_output_loss = None
+
+        self._cache_activation_loss_metrics(
+            module_names=layer_names,
+            activation_output_loss=activation_output_loss,
+            total_output_loss=total_output_loss,
         )
 
         return (
@@ -953,6 +993,33 @@ class AWQProcessor(LoopProcessor):
             best_scales,
             loss
         )
+
+    def _cache_activation_loss_metrics(
+        self,
+        *,
+        module_names: List[str],
+        activation_output_loss: Optional[float],
+        total_output_loss: Optional[float],
+    ) -> None:
+        """Cache activation-side reconstruction metrics for later persistence."""
+
+        input_activations = getattr(self.qcfg, "input_activations", None)
+        if input_activations is None:
+            return
+
+        payload: Dict[str, object] = {
+            QUANT_ACT_LOG_FORMAT: input_activations.format,
+            QUANT_ACT_LOG_DYNAMIC: bool(input_activations.dynamic),
+        }
+        if activation_output_loss is not None:
+            payload["activation_output_loss"] = float(activation_output_loss)
+        if total_output_loss is not None:
+            payload["total_output_loss"] = float(total_output_loss)
+        if len(payload) <= 2:
+            return
+
+        for module_name in module_names:
+            self._activation_loss_by_module[module_name] = dict(payload)
 
     @torch.inference_mode()
     def _search_best_clip(self, layer, named_linears, input_feat):
@@ -1144,6 +1211,7 @@ class AWQProcessor(LoopProcessor):
         linears2scale: List[nn.Linear],
         fp16_output: torch.Tensor,
         kwargs: Dict={},
+        reference_output: Optional[torch.Tensor] = None,
     ):
         """
         Compute loss and select best scales
@@ -1159,6 +1227,7 @@ class AWQProcessor(LoopProcessor):
         best_ratio = -1
         best_scales = None
         best_error = float("inf")
+        best_total_error = None
 
         # Clone the original FP weights to CPU once so we can mutate/restore without load_state_dict overhead
         orig_weights_cpu: Dict[nn.Linear, torch.Tensor] = {
@@ -1211,6 +1280,8 @@ class AWQProcessor(LoopProcessor):
                 best_error = loss
                 best_ratio = ratio
                 best_scales = scales.clone()
+                if reference_output is not None:
+                    best_total_error = self._compute_loss(reference_output, int_w_output, device)
             for fc in linears2scale:
                 fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
 
@@ -1225,6 +1296,8 @@ class AWQProcessor(LoopProcessor):
 
         assert torch.isnan(best_scales).sum() == 0, best_scales
 
+        if reference_output is not None:
+            return best_scales.detach().cpu(), best_error, best_total_error
         return best_scales.detach().cpu(), best_error
 
     @torch.inference_mode()
@@ -1260,6 +1333,58 @@ class AWQProcessor(LoopProcessor):
         loss /= num_elements
 
         return loss
+
+    def _append_activation_log_rows(self, named_module: NamedModule, *, duration: float) -> None:
+        """Append activation-only metrics to quant_act_log without touching quant_log."""
+
+        metrics = self._activation_loss_by_module.get(named_module.name)
+        if metrics is None:
+            metrics = next(
+                (
+                    value
+                    for module_name, value in self._activation_loss_by_module.items()
+                    if named_module.name in module_name
+                ),
+                None,
+            )
+        if not metrics:
+            return
+
+        rows = []
+        for loss_type in ("activation_output_loss", "total_output_loss"):
+            value = metrics.get(loss_type)
+            if value is None:
+                continue
+            rows.append(
+                {
+                    PROCESS_LOG_NAME: f"{self.name()}_act",
+                    PROCESS_LOG_LAYER: named_module.layer_index,
+                    PROCESS_LOG_MODULE: named_module.name,
+                    QUANT_ACT_LOG_TYPE: loss_type,
+                    QUANT_LOG_LOSS: f"{float(value):.10f}",
+                    QUANT_LOG_NSAMPLES: f"{self._nsamples_total}",
+                    PROCESS_LOG_TIME: f"{duration:.3f}",
+                    QUANT_ACT_LOG_FORMAT: metrics.get(QUANT_ACT_LOG_FORMAT, ""),
+                    QUANT_ACT_LOG_DYNAMIC: metrics.get(QUANT_ACT_LOG_DYNAMIC, ""),
+                }
+            )
+
+        if not rows:
+            return
+
+        with self.lock:
+            self.quant_act_log.extend(rows)
+
+        for row in rows:
+            log.info(
+                "awq_act | layer=%s module=%s metric=%s loss=%s samples=%s time=%ss",
+                row[PROCESS_LOG_LAYER],
+                row[PROCESS_LOG_MODULE],
+                row[QUANT_ACT_LOG_TYPE],
+                row[QUANT_LOG_LOSS],
+                row[QUANT_LOG_NSAMPLES],
+                row[PROCESS_LOG_TIME],
+            )
 
     @torch.inference_mode()
     def _module_forward(
@@ -1499,6 +1624,7 @@ class AWQProcessor(LoopProcessor):
                 self._nsamples_total,
                 f"{duration:.3f}",
             )
+            self._append_activation_log_rows(named_module, duration=duration)
 
     def _sanitize_kwargs(self, inputs_kwargs, module):
         """

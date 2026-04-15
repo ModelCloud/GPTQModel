@@ -332,6 +332,9 @@ class BaseQModel(nn.Module):
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
+        # Stores activation-quantization-only metrics separately so quant_log
+        # keeps its existing weight-quantization semantics.
+        self.quant_act_log = []
 
         if self.require_load_processor:
             self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.require_trust_remote_code)

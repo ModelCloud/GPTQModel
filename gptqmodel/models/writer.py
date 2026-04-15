@@ -76,6 +76,10 @@ QUANT_LOG_DAMP = "damp"
 PROCESS_LOG_TIME = "time"
 PROCESS_LOG_FWD_TIME = "fwd_time"
 PROCESS_USED_MEMORY = "(v)ram"
+QUANT_ACT_LOG_FILE = "quant_act_log.csv"
+QUANT_ACT_LOG_TYPE = "loss_type"
+QUANT_ACT_LOG_FORMAT = "format"
+QUANT_ACT_LOG_DYNAMIC = "dynamic"
 
 EORA_DEFAULT_FILE = "eora.safetensors"
 
@@ -474,6 +478,40 @@ def ModelWriter(cls):
                 w.writerow([PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, QUANT_LOG_DAMP, PROCESS_LOG_TIME])
                 w.writerows([[entry.get(PROCESS_LOG_LAYER), entry.get(PROCESS_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
                               entry.get(QUANT_LOG_DAMP), entry.get(PROCESS_LOG_TIME)] for entry in self.quant_log])
+
+        quant_act_log = getattr(self, "quant_act_log", None)
+        if quant_act_log:
+            with open(os.path.join(save_dir, QUANT_ACT_LOG_FILE), mode='w', newline='') as file:
+                w = csv.writer(file)
+                w.writerow(
+                    [
+                        PROCESS_LOG_NAME,
+                        PROCESS_LOG_LAYER,
+                        PROCESS_LOG_MODULE,
+                        QUANT_ACT_LOG_TYPE,
+                        QUANT_LOG_LOSS,
+                        QUANT_LOG_NSAMPLES,
+                        PROCESS_LOG_TIME,
+                        QUANT_ACT_LOG_FORMAT,
+                        QUANT_ACT_LOG_DYNAMIC,
+                    ]
+                )
+                w.writerows(
+                    [
+                        [
+                            entry.get(PROCESS_LOG_NAME),
+                            entry.get(PROCESS_LOG_LAYER),
+                            entry.get(PROCESS_LOG_MODULE),
+                            entry.get(QUANT_ACT_LOG_TYPE),
+                            entry.get(QUANT_LOG_LOSS),
+                            entry.get(QUANT_LOG_NSAMPLES),
+                            entry.get(PROCESS_LOG_TIME),
+                            entry.get(QUANT_ACT_LOG_FORMAT),
+                            entry.get(QUANT_ACT_LOG_DYNAMIC),
+                        ]
+                        for entry in quant_act_log
+                    ]
+                )
 
         pre_quantized_size_mb = get_model_files_size(self.model_local_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
