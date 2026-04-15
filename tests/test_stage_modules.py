@@ -10,6 +10,7 @@ from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.looper.forward_executor import ForwardExecutor
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.looper.stage_layer import (
     _capture_pristine_group_context,
@@ -205,6 +206,142 @@ class _TinyLooper:
         return int(tensor.shape[0]) if tensor.ndim > 0 else int(tensor.numel())
 
 
+class _TinyExecutorLayer(torch.nn.Module):
+    def forward(self, hidden_states, **kwargs):
+        return hidden_states
+
+
+class _RecordingCtx:
+    def __init__(self, sink):
+        self.sink = sink
+
+    def __enter__(self):
+        self.sink.append("enter")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _DummyForwardProcessor:
+    num_batches = None
+
+    def _set_current_batch_index(self, _idx):
+        return None
+
+
+class _ImmediateFuture:
+    def __init__(self, result):
+        self._result = result
+
+    def result(self):
+        return self._result
+
+
+class _ImmediateThreadPool:
+    def submit(self, _device, fn, *args, **kwargs):
+        return _ImmediateFuture(fn(*args, **kwargs))
+
+    def submit_serial(self, _device, fn, *args, **kwargs):
+        return _ImmediateFuture(fn(*args, **kwargs))
+
+
+def _make_forward_executor_looper(
+    *,
+    override_entries=None,
+    lifecycle_entries=None,
+    moe_routing_override=None,
+    moe_routing_bypass=False,
+    should_use_moe_lifecycle=False,
+):
+    def _override_context(*_args, **_kwargs):
+        if override_entries is None:
+            raise AssertionError("override should stay disabled")
+        return _RecordingCtx(override_entries)
+
+    def _lifecycle_context(*_args, **_kwargs):
+        if lifecycle_entries is None:
+            raise AssertionError("lifecycle should stay disabled")
+        return _RecordingCtx(lifecycle_entries)
+
+    return types.SimpleNamespace(
+        _resolve_batch_total=lambda _num_batches, layer_inputs: len(layer_inputs),
+        _collect_row_counts=lambda layer_inputs: [int(batch[0].shape[0]) for batch in layer_inputs],
+        _set_processor_mask=lambda _processor, _mask: None,
+        _batch_row_count=lambda batch_inputs: int(batch_inputs[0].shape[0]),
+        support_batch_quantize=False,
+        gptq_model=types.SimpleNamespace(
+            quantize_config=types.SimpleNamespace(
+                calibration_data_device=None,
+                compute_device_filter=None,
+            ),
+            prepare_layer_replay_kwargs=lambda layer, layer_input, additional_inputs, target_device: additional_inputs,
+        ),
+        moe_routing_override=moe_routing_override,
+        moe_routing_bypass=moe_routing_bypass,
+        MoERoutingOverrideContext=_override_context,
+        MoELifecycleContext=_lifecycle_context,
+        _should_use_moe_lifecycle=lambda *_args, **_kwargs: should_use_moe_lifecycle,
+        _current_subset=None,
+    )
+
+
+def _run_executor_single(executor, processor, *, apply_moe_config):
+    return executor.run_single(
+        module=_TinyExecutorLayer(),
+        processor=processor,
+        layer_inputs=[[torch.zeros(1, 1, 1)]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        need_outputs=True,
+        reuse_kv=False,
+        apply_moe_config=apply_moe_config,
+    )
+
+
+def _run_executor_parallel(executor, processor, *, apply_moe_config):
+    def clone_module_for_devices_fn(module, devices, progress_callback=None):
+        del progress_callback
+        return {device: module for device in devices}
+
+    def forward_batch_worker_fn(
+        _replica,
+        _processor,
+        batch_idx,
+        _batch_inputs,
+        _batch_kwargs,
+        _attention_mask,
+        _position_ids,
+        **_kwargs,
+    ):
+        return batch_idx, torch.zeros(1, 1, 1), None
+
+    return executor.run_parallel(
+        module=_TinyExecutorLayer(),
+        processor=processor,
+        layer_inputs=[[torch.zeros(1, 1, 1)], [torch.zeros(1, 1, 1)]],
+        layer_input_kwargs=[{}, {}],
+        position_ids=[None, None],
+        attention_masks=[None, None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        need_outputs=True,
+        reuse_kv=False,
+        devices=[torch.device("cuda:0"), torch.device("cuda:1")],
+        apply_moe_config=apply_moe_config,
+        clone_module_for_devices_fn=clone_module_for_devices_fn,
+        forward_batch_worker_fn=forward_batch_worker_fn,
+        device_thread_pool=_ImmediateThreadPool(),
+    )
+
+
 def test_stage_layer_forces_sync_finalizers_for_paroquant():
     looper = types.SimpleNamespace(
         gptq_model=types.SimpleNamespace(
@@ -323,6 +460,82 @@ def test_stage_inputs_capture_collects_real_inputs():
     assert torch.equal(cache.layer_input_kwargs[0]["extra"], extra.unsqueeze(0))
     assert gptq_model._hook_started is True
     assert gptq_model._hook_finished is True
+
+
+def test_forward_executor_run_single_can_skip_moe_routing_override_for_replay():
+    """Replay must skip top-k override, while quant-time forward still enables it."""
+
+    override_entries = []
+    looper = _make_forward_executor_looper(
+        override_entries=override_entries,
+        lifecycle_entries=[],
+        moe_routing_override=256,
+    )
+    executor = ForwardExecutor(looper)
+    processor = _DummyForwardProcessor()
+
+    # Replay path: do not install any MoE routing override context.
+    outputs = _run_executor_single(executor, processor, apply_moe_config=False)
+
+    assert len(outputs) == 1
+    assert override_entries == []
+
+    override_entries.clear()
+    outputs = _run_executor_single(executor, processor, apply_moe_config=True)
+
+    assert len(outputs) == 1
+    assert override_entries == ["enter"]
+
+
+def test_forward_executor_run_single_can_skip_moe_lifecycle_for_replay():
+    """Replay must also skip bypass/lifecycle hooks, not just routing override."""
+
+    lifecycle_entries = []
+    looper = _make_forward_executor_looper(
+        lifecycle_entries=lifecycle_entries,
+        moe_routing_bypass=True,
+        should_use_moe_lifecycle=True,
+    )
+    executor = ForwardExecutor(looper)
+    processor = _DummyForwardProcessor()
+
+    # Replay path: bypass routing stays off, so lifecycle hooks must not run.
+    outputs = _run_executor_single(executor, processor, apply_moe_config=False)
+
+    assert len(outputs) == 1
+    assert lifecycle_entries == []
+
+    outputs = _run_executor_single(executor, processor, apply_moe_config=True)
+
+    assert len(outputs) == 1
+    assert lifecycle_entries == ["enter"]
+
+
+def test_forward_executor_run_parallel_can_skip_moe_config_for_replay():
+    """Parallel replay must skip the same MoE config that serial replay skips."""
+
+    override_entries = []
+    looper = _make_forward_executor_looper(
+        override_entries=override_entries,
+        lifecycle_entries=[],
+        moe_routing_override=8,
+        moe_routing_bypass=True,
+        should_use_moe_lifecycle=True,
+    )
+    executor = ForwardExecutor(looper)
+    processor = _DummyForwardProcessor()
+
+    # Replay path: each replica should stay on the model's native router.
+    outputs = _run_executor_parallel(executor, processor, apply_moe_config=False)
+
+    assert len(outputs) == 2
+    assert override_entries == []
+
+    # Quant-time path: replicas should still install the quant-time MoE context.
+    outputs = _run_executor_parallel(executor, processor, apply_moe_config=True)
+
+    assert len(outputs) == 2
+    assert override_entries == ["enter", "enter"]
 
 
 def test_run_layer_stage_invokes_subset_stage(monkeypatch):
@@ -979,6 +1192,8 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
 
 
 def test_replay_layer_outputs_without_plan_uses_generic_progress():
+    """Untouched-layer replay should use generic progress and disable MoE config."""
+
     input_tensor = torch.ones(2, 1, 1)
     expected_output = input_tensor + 3.0
     timer_records = []
@@ -1058,6 +1273,7 @@ def test_replay_layer_outputs_without_plan_uses_generic_progress():
     assert looper.forward_calls[0]["progress_total_rows"] == 2
     assert looper.forward_calls[0]["force_serial"] is False
     assert looper.forward_calls[0]["preserve_module_devices"] is False
+    assert looper.forward_calls[0]["apply_moe_config"] is False
     assert looper._current_subset is None
     assert len(outputs) == 1
     assert len(outputs[0]) == 1
@@ -1066,6 +1282,8 @@ def test_replay_layer_outputs_without_plan_uses_generic_progress():
 
 
 def test_replay_layer_outputs_with_plan_uses_plan_metadata_and_device_overrides():
+    """Subset-driven replay should keep its plan metadata but still disable MoE config."""
+
     tensor = torch.zeros(1, 1, 1)
     replay_modules = {
         "self_attn.q_proj": NamedModule(
@@ -1171,16 +1389,20 @@ def test_replay_layer_outputs_with_plan_uses_plan_metadata_and_device_overrides(
     assert looper.forward_calls[0]["progress_total_rows"] == 5
     assert looper.forward_calls[0]["force_serial"] is True
     assert looper.forward_calls[0]["preserve_module_devices"] is True
+    assert looper.forward_calls[0]["apply_moe_config"] is False
     assert looper._current_subset is None
     assert outputs == [[tensor]]
     assert looper.forward_override_modules is replay_modules
     assert looper.forward_override_map == {"self_attn.q_proj": torch.device("cuda:0")}
+    assert looper.forward_calls[0]["apply_moe_config"] is False
     assert looper.restored_override_modules is replay_modules
     assert looper.restored_previous_devices == {"self_attn.q_proj": torch.device("cpu")}
     assert timer_records[0][1]["source"] == "model.layers.0:subset1/1"
 
 
 def test_replay_layer_outputs_with_plan_can_skip_override_restore():
+    """Replay should honor plans that intentionally keep module overrides installed."""
+
     tensor = torch.zeros(1, 1, 1)
     replay_modules = {
         "self_attn.q_proj": NamedModule(
@@ -1277,6 +1499,130 @@ def test_replay_layer_outputs_with_plan_can_skip_override_restore():
     assert outputs == [[tensor]]
     assert looper.forward_override_modules is replay_modules
     assert looper.forward_override_map == {"self_attn.q_proj": torch.device("cuda:0")}
+
+
+def test_replay_layer_outputs_with_multi_device_plan_skips_moe_config():
+    """Multi-device replay should disable MoE config without changing override install."""
+
+    tensor = torch.zeros(1, 1, 1)
+    replay_modules = {
+        "self_attn.q_proj": NamedModule(
+            torch.nn.Linear(1, 1, bias=False),
+            name="self_attn.q_proj",
+            full_name="model.layers.0.self_attn.q_proj",
+            layer_index=0,
+        )
+    }
+    replay_plan = SubsetPlan(
+        modules=replay_modules,
+        subset_index=0,
+        subset_total=1,
+        execute_forward=True,
+        replay_after_process=True,
+        forward_mode="serial",
+        batch_count=2,
+        forward_row_counts=[2, 3],
+        forward_total_rows=5,
+        moe_groups={},
+        forward_device_map={
+            "self_attn.q_proj": torch.device("cuda:0"),
+            "mlp.experts.0.gate_proj": torch.device("cuda:1"),
+        },
+        calibration_coverage_policy=CalibrationCoveragePolicy(
+            validate_input_coverage=False,
+            fallback_enabled=True,
+            prune_uncovered_modules=False,
+            record_dynamic_exclusions=False,
+        ),
+        module_chunks=[replay_modules],
+        restore_forward_device_overrides=False,
+    )
+    timer_records = []
+
+    class DummyPB:
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            return self
+
+        def title(self, *_):
+            return self
+
+        def subtitle(self, *_):
+            return self
+
+        def draw(self):
+            return self
+
+        def close(self):
+            return self
+
+    class DummyLogger:
+        def pb(self, iterable):
+            return DummyPB()
+
+    class DummyTimer:
+        def record(self, *args, **kwargs):
+            timer_records.append((args, kwargs))
+
+    class DummyLooper:
+        def __init__(self):
+            self._current_subset = replay_modules
+            self.forward_calls = []
+            self.override_calls = []
+
+        def _run_forward_batches(self, **kwargs):
+            self.forward_calls.append(kwargs)
+            return [[tensor]]
+
+        def _apply_forward_device_overrides(self, modules, forward_device_map, fallback_modules=None):
+            self.override_calls.append((modules, forward_device_map, fallback_modules))
+            return {}
+
+        def _restore_forward_device_overrides(self, modules, previous_devices, fallback_modules=None):
+            raise AssertionError("restore should be skipped when replay_plan disables it")
+
+    looper = DummyLooper()
+    processor = types.SimpleNamespace(num_batches=None)
+
+    outputs = _replay_layer_outputs(
+        looper,
+        module=torch.nn.Linear(1, 1, bias=False),
+        processor=processor,
+        layer_inputs=[[tensor]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.layers.0",
+        full={},
+        log=DummyLogger(),
+        region_timer=DummyTimer(),
+        replay_plan=replay_plan,
+    )
+
+    assert outputs == [[tensor]]
+    assert looper.override_calls == [
+        (
+            replay_modules,
+            {
+                "self_attn.q_proj": torch.device("cuda:0"),
+                "mlp.experts.0.gate_proj": torch.device("cuda:1"),
+            },
+            {},
+        )
+    ]
+    assert len(looper.forward_calls) == 1
+    assert looper.forward_calls[0]["progress_rows_per_batch"] == [2, 3]
+    assert looper.forward_calls[0]["progress_total_rows"] == 5
+    assert looper.forward_calls[0]["force_serial"] is True
+    assert looper.forward_calls[0]["preserve_module_devices"] is True
+    assert looper.forward_calls[0]["apply_moe_config"] is False
+    assert timer_records[0][1]["source"] == "model.layers.0:subset1/1"
 
 
 class _ToySelfAttention(torch.nn.Module):

@@ -1134,6 +1134,7 @@ class ModuleLooper():
         progress_total_rows: Optional[int] = None,
         force_serial: bool = False,
         preserve_module_devices: bool = False,
+        apply_moe_config: bool = True,
     ) -> List[List[torch.Tensor]]:
         """Run cached batches through the module using serial or parallel execution."""
 
@@ -1157,6 +1158,7 @@ class ModuleLooper():
             progress_total_rows=progress_total_rows,
             force_serial=force_serial,
             preserve_module_devices=preserve_module_devices,
+            apply_moe_config=apply_moe_config,
             select_forward_devices_fn=select_forward_devices,
         )
 
@@ -1181,6 +1183,7 @@ class ModuleLooper():
         progress_rows_per_batch: Optional[List[int]] = None,
         progress_total_rows: Optional[int] = None,
         preserve_module_devices: bool = False,
+        apply_moe_config: bool = True,
     ) -> List[List[torch.Tensor]]:
         """Run cached batches on a single device and return ordered outputs when requested."""
 
@@ -1203,6 +1206,7 @@ class ModuleLooper():
             progress_rows_per_batch=progress_rows_per_batch,
             progress_total_rows=progress_total_rows,
             preserve_module_devices=preserve_module_devices,
+            apply_moe_config=apply_moe_config,
         )
 
     def _run_forward_batches_parallel(
@@ -1226,6 +1230,7 @@ class ModuleLooper():
         progress_stage: Optional[str] = None,
         progress_rows_per_batch: Optional[List[int]] = None,
         progress_total_rows: Optional[int] = None,
+        apply_moe_config: bool = True,
     ) -> List[List[torch.Tensor]]:
         """Run cached batches across device replicas and preserve batch ordering in the result."""
 
@@ -1248,6 +1253,7 @@ class ModuleLooper():
             progress_stage=progress_stage,
             progress_rows_per_batch=progress_rows_per_batch,
             progress_total_rows=progress_total_rows,
+            apply_moe_config=apply_moe_config,
             clone_module_for_devices_fn=clone_module_for_devices,
             forward_batch_worker_fn=forward_batch_worker,
             device_thread_pool=DEVICE_THREAD_POOL,
