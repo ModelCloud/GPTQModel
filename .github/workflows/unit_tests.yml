@@ -406,7 +406,7 @@ jobs:
         run: |
           rm -rf rm -rf ./* .[^.] .??*
 
-  torch-models:
+  test-models:
     needs:
       - list-test-files
       - check-vm
