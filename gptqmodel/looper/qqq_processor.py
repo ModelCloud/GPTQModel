@@ -274,6 +274,7 @@ class QQQProcessor(LoopProcessor):
                 pack_dtype=self.qcfg.pack_dtype,
                 format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                 register_buffers=False,
+                init_kwargs=self.qcfg.quant_linear_init_kwargs(),
             )
 
         # pack module

@@ -21,7 +21,7 @@
  */
 
 #include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAStream.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -949,6 +949,25 @@ thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k) {
 const int ERR_PROB_SHAPE = 1;
 const int ERR_KERN_SHAPE = 2;
 
+__global__ void unpack_signed_int4_kernel(
+  const int32_t* __restrict__ src,
+  int8_t* __restrict__ dst,
+  int total_packed
+) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= total_packed)
+    return;
+
+  uint32_t packed = reinterpret_cast<const uint32_t*>(src)[idx];
+  #pragma unroll
+  for (int i = 0; i < 8; i++) {
+    int v = (packed >> (4 * i)) & 0xF;
+    if (v >= 8)
+      v -= 16;
+    dst[idx * 8 + i] = static_cast<int8_t>(v);
+  }
+}
+
 int qqq_cuda(
   const void* A,
   const void* B,
@@ -1088,7 +1107,91 @@ void qqq_gemm(
     workspace.data_ptr(),
     groupsize,
     dev,
-    at::cuda::getCurrentCUDAStream(dev),
+    c10::cuda::getCurrentCUDAStream(dev),
+    thread_k,
+    thread_n,
+    sms,
+    max_par
+  );
+
+  if (err == ERR_PROB_SHAPE) {
+    AT_ERROR(
+      "Problem (m=", prob_m, ", n=", prob_n, ", k=", prob_k, ")",
+      " not compatible with thread_k=", thread_k, ", thread_n=", thread_n, "."
+    );
+  } else if (err == ERR_KERN_SHAPE) {
+    AT_ERROR(
+      "No kernel implementation for thread_k=", thread_k, ", thread_n=", thread_n, ", groupsize=", groupsize, "."
+    );
+  }
+}
+
+void qqq_w4a4_gemm(
+  const torch::Tensor& A,
+  const torch::Tensor& B,
+        torch::Tensor& C,
+        torch::Tensor& D,
+  const torch::Tensor& s1,
+  const torch::Tensor& s2,
+  const torch::Tensor& s3,
+        torch::Tensor& workspace,
+  int thread_k,
+  int thread_n,
+  int sms,
+  int max_par
+) {
+  if (A.dtype() != torch::kInt32)
+    AT_ERROR("A dtype must be int32 packed signed-int4, but got ", A.dtype(), ".");
+  if (A.dim() != 2)
+    AT_ERROR("A must be rank-2 packed signed-int4 tensor, but got rank ", A.dim(), ".");
+
+  int prob_m = A.size(0);
+  int packed_k = A.size(1);
+  int prob_k = packed_k * pack_factor_4bit;
+  int prob_n = C.size(1);
+  int groupsize = (s3.numel() == 0) ? -1 : prob_k / s3.size(0);
+  if (groupsize != -1 && groupsize * s3.size(0) != prob_k)
+    AT_ERROR("k=", prob_k, " not compatible with ", s3.size(0), " groups.");
+  if (workspace.numel() < prob_n / 128 * max_par)
+    AT_ERROR("workspace must be of size at least ", prob_n / 128 * max_par, ".");
+  if (s1.dtype() != torch::kFloat32)
+     AT_ERROR("s1 dtype must be float32, but got ", s1.dtype(), ".");
+  if (s2.dtype() != torch::kFloat32)
+     AT_ERROR("s2 dtype must be float32, but got ", s2.dtype(), ".");
+  if (s3.dtype() != torch::kFloat16)
+     AT_ERROR("s3 dtype must be float16, but got ", s3.dtype(), ".");
+
+  int dev = A.get_device();
+  cudaStream_t stream = c10::cuda::getCurrentCUDAStream(dev);
+  auto unpacked = torch::empty(
+    {prob_m, prob_k},
+    torch::TensorOptions().device(A.device()).dtype(torch::kInt8)
+  );
+
+  int total_packed = A.numel();
+  if (total_packed > 0) {
+    constexpr int threads = 256;
+    int blocks = ceildiv(total_packed, threads);
+    unpack_signed_int4_kernel<<<blocks, threads, 0, stream>>>(
+      A.data_ptr<int32_t>(),
+      unpacked.data_ptr<int8_t>(),
+      total_packed
+    );
+  }
+
+  int err = qqq_cuda(
+    unpacked.data_ptr(),
+    B.data_ptr(),
+    C.data_ptr(),
+    D.data_ptr(),
+    s1.data_ptr(),
+    s2.data_ptr(),
+    s3.data_ptr(),
+    prob_m, prob_n, prob_k,
+    workspace.data_ptr(),
+    groupsize,
+    dev,
+    stream,
     thread_k,
     thread_n,
     sms,

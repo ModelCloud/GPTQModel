@@ -3517,6 +3517,7 @@ class ParoConfig(PreProcessorConfig):
 class QQQConfig(GPTQConfig):
     method: METHOD = field(default=METHOD.QQQ)
     format: FORMAT = field(default=FORMAT.QQQ)
+    activation_bits: int = field(default=8)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.QQQ,)
@@ -3526,6 +3527,21 @@ class QQQConfig(GPTQConfig):
 
     def default_desc_act(self) -> bool:
         return True
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.activation_bits = int(self.activation_bits)
+        if self.activation_bits not in {4, 8}:
+            raise ValueError("QQQConfig: `activation_bits` must be one of {4, 8}.")
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {
+            "activation_bits": self.activation_bits,
+        }
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        super()._update_output_payload(out)
+        out["activation_bits"] = self.activation_bits
 
 
 @dataclass

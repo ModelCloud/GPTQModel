@@ -47,7 +47,7 @@ def _qqq_extra_cuda_cflags() -> list[str]:
 _QQQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_QQQ_OPS_NAME,
     namespace=_QQQ_OPS_NAMESPACE,
-    required_ops=("qqq_gemm",),
+    required_ops=("qqq_gemm", "qqq_w4a4_gemm"),
     sources=_qqq_sources,
     build_root_env="GPTQMODEL_QQQ_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qqq"),
@@ -116,10 +116,41 @@ def qqq_gemm(
     )
 
 
+def qqq_w4a4_gemm(
+    A,
+    B,
+    C,
+    D,
+    s1,
+    s2,
+    s3,
+    workspace,
+    thread_k=-1,
+    thread_n=-1,
+    sms=-1,
+    max_par=16,
+):
+    return _extension_api().op("qqq", "qqq_w4a4_gemm")(
+        A,
+        B,
+        C,
+        D,
+        s1,
+        s2,
+        s3,
+        workspace,
+        thread_k,
+        thread_n,
+        sms,
+        max_par,
+    )
+
+
 __all__ = [
     "clear_qqq_extension_cache",
     "prewarm_qqq_extension",
     "qqq_gemm",
+    "qqq_w4a4_gemm",
     "qqq_runtime_available",
     "qqq_runtime_error",
 ]

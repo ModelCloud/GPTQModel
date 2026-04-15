@@ -36,3 +36,18 @@ void qqq_gemm(
   int sms = -1,
   int max_par = 8
 );
+
+void qqq_w4a4_gemm(
+  const torch::Tensor& A,
+  const torch::Tensor& B,
+        torch::Tensor& C,
+        torch::Tensor& D,
+  const torch::Tensor& s1,
+  const torch::Tensor& s2,
+  const torch::Tensor& s3,
+        torch::Tensor& workspace,
+  int thread_k = -1,
+  int thread_n = -1,
+  int sms = -1,
+  int max_par = 8
+);

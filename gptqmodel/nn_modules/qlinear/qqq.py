@@ -17,7 +17,7 @@ from ...nn_modules.qlinear import GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
+from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error, qqq_w4a4_gemm
 from ...utils.rocm import IS_ROCM
 
 
@@ -44,6 +44,29 @@ def mul(
     if not qqq_runtime_available():
         raise ModuleNotFoundError("QQQ torch.ops kernels are not properly installed. Error: " + qqq_runtime_error())
     qqq_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par)
+
+
+def mul_w4a4(
+    A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16
+):
+    """Packed INT4xINT4 prototype based on the existing QQQ W4A8 runtime."""
+    if not qqq_runtime_available():
+        raise ModuleNotFoundError("QQQ torch.ops kernels are not properly installed. Error: " + qqq_runtime_error())
+    qqq_w4a4_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par)
+
+
+def pack_signed_int4(x: torch.Tensor) -> torch.Tensor:
+    """Pack signed int4 codes along the last dimension into one int32 per 8 values."""
+    if x.dtype != torch.int8:
+        raise TypeError(f"pack_signed_int4 expects int8 inputs, got {x.dtype}.")
+    if x.shape[-1] % 8 != 0:
+        raise ValueError(f"pack_signed_int4 expects the last dimension to be divisible by 8, got {x.shape[-1]}.")
+
+    x_u = (x.to(dtype=torch.int16) & 0xF).to(dtype=torch.int32)
+    shape = x_u.shape
+    packed = x_u.reshape(*shape[:-1], shape[-1] // 8, 8)
+    shifts = torch.tensor([0, 4, 8, 12, 16, 20, 24, 28], device=x.device, dtype=torch.int32)
+    return torch.sum(torch.bitwise_left_shift(packed, shifts.view(*([1] * (packed.ndim - 1)), 8)), dim=-1, dtype=torch.int32)
 
 
 class QQQLinear(GroupedQuantLinear):
@@ -86,6 +109,9 @@ class QQQLinear(GroupedQuantLinear):
         adapter: Adapter = None,
         register_buffers: bool = True,
         **kwargs):
+        self.activation_bits = int(kwargs.pop("activation_bits", 8))
+        if self.activation_bits not in {4, 8}:
+            raise ValueError(f"{self.__class__.__name__} only supports activation_bits in {{4, 8}}. actual={self.activation_bits}")
         self.tile = 16
         self.max_par = 16
 
@@ -215,11 +241,14 @@ class QQQLinear(GroupedQuantLinear):
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         in_features = args.get("in_features")
         out_features = args.get("out_features")
+        activation_bits = int(args.get("activation_bits", 8))
         if in_features and out_features and not any(
                 in_features % thread_k == 0 and out_features % thread_n == 0
                     for thread_k, thread_n in cls.IN_OUTPUT_FEATURES_DIVISIBLE_BY
         ):
             raise ValueError(f"{cls} not supported `infeatures`: {in_features} and `outfeatures`: {out_features}.")
+        if activation_bits not in {4, 8}:
+            raise ValueError(f"{cls} only supports activation_bits in {{4, 8}}. actual={activation_bits}")
 
         return cls._validate(**args)
 
@@ -355,11 +384,16 @@ class QQQLinear(GroupedQuantLinear):
             #    # self.bias = linear.bias.clone().to(torch.float16)
             #    self.register_buffer("bias", linear.bias.clone().to(torch.float16))
 
-    # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
-        quant_scale = x.abs().max(dim=-1, keepdim=True)[0].div(127.0).to(torch.float32)
-        x = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)
-        return x, quant_scale
+        abs_max = x.abs().max(dim=-1, keepdim=True)[0]
+        if self.activation_bits == 4:
+            quant_scale = torch.where(abs_max > 0, abs_max.div(7.0), torch.ones_like(abs_max)).to(torch.float32)
+            x_q = (x / quant_scale).round().clamp(-8, 7).to(torch.int8)
+            return pack_signed_int4(x_q), quant_scale
+
+        quant_scale = torch.where(abs_max > 0, abs_max.div(127.0), torch.ones_like(abs_max)).to(torch.float32)
+        x_q = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)
+        return x_q, quant_scale
 
     def forward(self, A):
         # TODO FIXME: parent should never call us if there is no data to process
@@ -376,17 +410,30 @@ class QQQLinear(GroupedQuantLinear):
         A = A.reshape(-1, A.shape[-1]) # .to(dtype=torch.float16)
         quant_A, s1 = self.dynamic_quant(A)
         D = torch.empty(A.shape[0], self.out_features, dtype=A.dtype, device=A.device)
-        mul(
-            quant_A, # A
-            self.B, # B
-            self.reduce_buffer, # C
-            D, # D
-            s1, # s1
-            self.s_channel, # s2
-            self.s_group, # s3
-            self.workspace,
-            max_par=self.max_par,
-        )
+        if self.activation_bits == 4:
+            mul_w4a4(
+                quant_A, # A
+                self.B, # B
+                self.reduce_buffer, # C
+                D, # D
+                s1, # s1
+                self.s_channel, # s2
+                self.s_group, # s3
+                self.workspace,
+                max_par=self.max_par,
+            )
+        else:
+            mul(
+                quant_A, # A
+                self.B, # B
+                self.reduce_buffer, # C
+                D, # D
+                s1, # s1
+                self.s_channel, # s2
+                self.s_group, # s3
+                self.workspace,
+                max_par=self.max_par,
+            )
 
         # TODO: check if we should reshape at end
         D = D.reshape(out_shape)
