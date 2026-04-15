@@ -138,7 +138,7 @@ class TestLlama3_2_AWQ_W4A8_FP8_Dynamic(ModelTest):
         first = qmodules[0]
         self.assertIsNotNone(first.input_activations)
         self.assertTrue(first.input_activations.dynamic)
-        self.assertEqual(first.input_activations.format, "float8_e4m3fn")
+        self.assertEqual(first.input_activations.dtype, "float8_e4m3fn")
         self.assertEqual(getattr(first, "marlin_input_dtype", None), torch.float8_e4m3fn)
 
     def test_llama3_2_awq_w4a8_fp8_dynamic_solar_mass_prompt(self) -> None:

@@ -44,9 +44,7 @@ def test_load_dispatches_activation_quantized_checkpoint_to_from_quantized(monke
         "quant_method": "awq",
         "format": "gemm",
         "input_activations": {
-            "bits": 8,
-            "type": "float",
-            "format": "float8_e4m3fn",
+            "dtype": "float8_e4m3fn",
             "strategy": "token",
             "dynamic": True,
             "symmetric": True,

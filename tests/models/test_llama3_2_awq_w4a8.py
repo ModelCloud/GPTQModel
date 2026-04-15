@@ -49,9 +49,7 @@ class TestLlama3_2_AWQ_W4A8(ModelTest):
     KERNEL_QUANT = {AwqTorchLinear}
     KERNEL_INFERENCE = {AwqTorchLinear}
     INPUT_ACTIVATIONS = {
-        "type": "float",
-        "bits": 8,
-        "format": "float8_e4m3fn",
+        "dtype": "float8_e4m3fn",
         "strategy": "tensor",
         "dynamic": False,
         "symmetric": True,

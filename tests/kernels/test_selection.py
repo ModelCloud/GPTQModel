@@ -27,9 +27,7 @@ from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
 def _dynamic_awq_input_activations():
     return {
-        "type": "float",
-        "bits": 8,
-        "format": "float8_e4m3fn",
+        "dtype": "float8_e4m3fn",
         "strategy": "token",
         "dynamic": True,
         "symmetric": True,

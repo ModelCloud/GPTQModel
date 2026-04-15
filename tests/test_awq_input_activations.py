@@ -51,9 +51,7 @@ class TestAwqInputActivations:
     @staticmethod
     def _input_activations_config(**overrides) -> dict:
         payload = {
-            "type": "float",
-            "bits": 8,
-            "format": "float8_e4m3fn",
+            "dtype": "float8_e4m3fn",
             "strategy": "tensor",
             "dynamic": False,
             "symmetric": True,
@@ -140,7 +138,7 @@ class TestAwqInputActivations:
         )
 
         metrics = processor._activation_loss_by_module["linear"]
-        assert metrics["format"] == "float8_e4m3fn"
+        assert metrics["dtype"] == "float8_e4m3fn"
         assert metrics["dynamic"] is True
         assert metrics["activation_output_loss"] == pytest.approx(expected_activation_loss)
         assert metrics["total_output_loss"] == pytest.approx(0.25)
@@ -346,7 +344,7 @@ class TestAwqInputActivations:
         processor.pack_module(_FakeNamedModule())
 
         assert "kwargs" in created
-        assert created["kwargs"]["init_kwargs"]["input_activations"]["format"] == "float8_e4m3fn"
+        assert created["kwargs"]["init_kwargs"]["input_activations"]["dtype"] == "float8_e4m3fn"
 
     def test_awq_pack_module_sets_calibrated_static_input_scale(self, monkeypatch):
         qcfg = QuantizeConfig(

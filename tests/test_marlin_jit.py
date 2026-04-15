@@ -657,9 +657,7 @@ def test_awq_marlin_post_init_prepares_dynamic_fp8_runtime(monkeypatch):
         dtype=torch.float16,
         register_buffers=True,
         input_activations={
-            "type": "float",
-            "bits": 8,
-            "format": "float8_e4m3fn",
+            "dtype": "float8_e4m3fn",
             "strategy": "token",
             "dynamic": True,
             "symmetric": True,
@@ -714,9 +712,7 @@ def test_awq_marlin_forward_uses_real_fp8_inputs_for_dynamic_path(monkeypatch):
         dtype=torch.float16,
         register_buffers=True,
         input_activations={
-            "type": "float",
-            "bits": 8,
-            "format": "float8_e4m3fn",
+            "dtype": "float8_e4m3fn",
             "strategy": "token",
             "dynamic": True,
             "symmetric": True,

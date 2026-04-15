@@ -14,8 +14,8 @@ from gptqmodel.models.writer import (
     PROCESS_LOG_NAME,
     PROCESS_LOG_TIME,
     QUANT_ACT_LOG_DYNAMIC,
+    QUANT_ACT_LOG_DTYPE,
     QUANT_ACT_LOG_FILE,
-    QUANT_ACT_LOG_FORMAT,
     QUANT_ACT_LOG_TYPE,
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
@@ -225,7 +225,7 @@ def test_save_quantized_writes_quant_act_log_to_separate_csv(tmp_path, monkeypat
             QUANT_LOG_LOSS: "0.1250000000",
             QUANT_LOG_NSAMPLES: "1024",
             PROCESS_LOG_TIME: "0.010",
-            QUANT_ACT_LOG_FORMAT: "float8_e4m3fn",
+            QUANT_ACT_LOG_DTYPE: "float8_e4m3fn",
             QUANT_ACT_LOG_DYNAMIC: True,
         },
         {
@@ -236,7 +236,7 @@ def test_save_quantized_writes_quant_act_log_to_separate_csv(tmp_path, monkeypat
             QUANT_LOG_LOSS: "0.2500000000",
             QUANT_LOG_NSAMPLES: "1024",
             PROCESS_LOG_TIME: "0.010",
-            QUANT_ACT_LOG_FORMAT: "float8_e4m3fn",
+            QUANT_ACT_LOG_DTYPE: "float8_e4m3fn",
             QUANT_ACT_LOG_DYNAMIC: True,
         },
     ]
@@ -259,7 +259,7 @@ def test_save_quantized_writes_quant_act_log_to_separate_csv(tmp_path, monkeypat
         QUANT_LOG_LOSS,
         QUANT_LOG_NSAMPLES,
         PROCESS_LOG_TIME,
-        QUANT_ACT_LOG_FORMAT,
+        QUANT_ACT_LOG_DTYPE,
         QUANT_ACT_LOG_DYNAMIC,
     ]
     assert rows[1][0:4] == ["awq_act", "0", "model.layers.0", "activation_output_loss"]

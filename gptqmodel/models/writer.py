@@ -78,7 +78,7 @@ PROCESS_LOG_FWD_TIME = "fwd_time"
 PROCESS_USED_MEMORY = "(v)ram"
 QUANT_ACT_LOG_FILE = "quant_act_log.csv"
 QUANT_ACT_LOG_TYPE = "loss_type"
-QUANT_ACT_LOG_FORMAT = "format"
+QUANT_ACT_LOG_DTYPE = "dtype"
 QUANT_ACT_LOG_DYNAMIC = "dynamic"
 
 EORA_DEFAULT_FILE = "eora.safetensors"
@@ -492,7 +492,7 @@ def ModelWriter(cls):
                         QUANT_LOG_LOSS,
                         QUANT_LOG_NSAMPLES,
                         PROCESS_LOG_TIME,
-                        QUANT_ACT_LOG_FORMAT,
+                        QUANT_ACT_LOG_DTYPE,
                         QUANT_ACT_LOG_DYNAMIC,
                     ]
                 )
@@ -506,7 +506,7 @@ def ModelWriter(cls):
                             entry.get(QUANT_LOG_LOSS),
                             entry.get(QUANT_LOG_NSAMPLES),
                             entry.get(PROCESS_LOG_TIME),
-                            entry.get(QUANT_ACT_LOG_FORMAT),
+                            entry.get(QUANT_ACT_LOG_DTYPE),
                             entry.get(QUANT_ACT_LOG_DYNAMIC),
                         ]
                         for entry in quant_act_log

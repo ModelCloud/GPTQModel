@@ -20,8 +20,8 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_ACT_LOG_DYNAMIC,
-                             QUANT_ACT_LOG_FORMAT, QUANT_ACT_LOG_TYPE, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_ACT_LOG_DTYPE,
+                             QUANT_ACT_LOG_DYNAMIC, QUANT_ACT_LOG_TYPE, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
@@ -1010,7 +1010,7 @@ class AWQProcessor(LoopProcessor):
             return
 
         payload: Dict[str, object] = {
-            QUANT_ACT_LOG_FORMAT: input_activations.format,
+            QUANT_ACT_LOG_DTYPE: input_activations.dtype,
             QUANT_ACT_LOG_DYNAMIC: bool(input_activations.dynamic),
         }
         if activation_output_loss is not None:
@@ -1366,7 +1366,7 @@ class AWQProcessor(LoopProcessor):
                     QUANT_LOG_LOSS: f"{float(value):.10f}",
                     QUANT_LOG_NSAMPLES: f"{self._nsamples_total}",
                     PROCESS_LOG_TIME: f"{duration:.3f}",
-                    QUANT_ACT_LOG_FORMAT: metrics.get(QUANT_ACT_LOG_FORMAT, ""),
+                    QUANT_ACT_LOG_DTYPE: metrics.get(QUANT_ACT_LOG_DTYPE, ""),
                     QUANT_ACT_LOG_DYNAMIC: metrics.get(QUANT_ACT_LOG_DYNAMIC, ""),
                 }
             )

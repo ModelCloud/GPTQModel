@@ -383,9 +383,9 @@ class BaseQuantLinear(nn.Module):
         if config is None:
             return True, None
 
-        if not hasattr(t, config.format):
+        if not hasattr(t, config.dtype):
             return False, NotImplementedError(
-                f"{cls} requires a PyTorch build with activation dtype `{config.format}`."
+                f"{cls} requires a PyTorch build with activation dtype `{config.dtype}`."
             )
 
         if not cls.SUPPORTS_INPUT_ACTIVATIONS:

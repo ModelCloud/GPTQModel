@@ -33,7 +33,7 @@ def calibrate_input_scale_inv(
     if not x.is_floating_point():
         raise TypeError(f"Activation calibration expects floating-point inputs, got `{x.dtype}`.")
 
-    fp8_dtype = getattr(torch, config.format)
+    fp8_dtype = getattr(torch, config.dtype)
     fp8_max = torch.finfo(fp8_dtype).max
     x_work = x.to(torch.float32)
     abs_max = x_work.abs().amax()
@@ -59,7 +59,7 @@ def quantize_input(
     if not x.is_floating_point():
         raise TypeError(f"Activation quantization expects floating-point inputs, got `{x.dtype}`.")
 
-    fp8_dtype = getattr(torch, config.format)
+    fp8_dtype = getattr(torch, config.dtype)
     fp8_info = torch.finfo(fp8_dtype)
     fp8_max = fp8_info.max
 

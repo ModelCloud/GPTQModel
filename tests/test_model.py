@@ -700,9 +700,7 @@ def test_is_supported_quantization_config_accepts_gptqmodel_input_activation_qua
             "quant_method": "awq",
             "format": "gemm",
             "input_activations": {
-                "bits": 8,
-                "type": "float",
-                "format": "float8_e4m3fn",
+                "dtype": "float8_e4m3fn",
                 "strategy": "token",
                 "dynamic": True,
                 "symmetric": True,

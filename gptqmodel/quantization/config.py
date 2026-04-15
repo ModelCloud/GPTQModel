@@ -1163,9 +1163,7 @@ class AutoModuleDecoderConfig(BasePreProcessorConfig):
 class InputActivationQuantConfig:
     """Canonical runtime schema for activation quantization metadata in W4A8 paths."""
 
-    type: str = "float"
-    bits: int = 8
-    format: str = "float8_e4m3fn"
+    dtype: str = "float8_e4m3fn"
     strategy: str = "tensor"
     dynamic: bool = False
     symmetric: bool = True
@@ -1173,15 +1171,7 @@ class InputActivationQuantConfig:
     def __post_init__(self):
         """Normalize the activation quantization state used across config and runtime."""
 
-        self.type = str(self.type).strip().lower()
-        if self.type != "float":
-            raise ValueError("InputActivationQuantConfig: phase-1 only supports `type='float'`.")
-
-        self.bits = int(self.bits)
-        if self.bits != 8:
-            raise ValueError("InputActivationQuantConfig: `bits` must be `8`.")
-
-        self.format = _normalize_fp8_fmt(self.format)
+        self.dtype = _normalize_fp8_fmt(self.dtype)
 
         self.strategy = str(self.strategy).strip().lower()
         if self.strategy in {"row", "per_token", "tokenwise"}:
@@ -1203,13 +1193,21 @@ class InputActivationQuantConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "type": self.type,
-            "bits": self.bits,
-            "format": self.format,
+            "dtype": self.dtype,
             "strategy": self.strategy,
             "dynamic": self.dynamic,
             "symmetric": self.symmetric,
         }
+
+    @property
+    def format(self) -> str:
+        """Backward-compatible alias for legacy checkpoint/runtime code."""
+
+        return self.dtype
+
+    @format.setter
+    def format(self, value: str) -> None:
+        self.dtype = _normalize_fp8_fmt(value)
 
 
 @dataclass
@@ -1957,27 +1955,45 @@ def _normalize_input_activation_payload(payload: Dict[str, Any]) -> Dict[str, An
 
     normalized = dict(payload)
 
+    legacy_dtype = normalized.pop("format", None)
+    legacy_type = normalized.pop("type", None)
+    legacy_bits = normalized.pop("bits", None)
+
+    if "dtype" in normalized and legacy_dtype is not None:
+        if _normalize_fp8_fmt(normalized["dtype"]) != _normalize_fp8_fmt(legacy_dtype):
+            raise ValueError(
+                "QuantizeConfig: `input_activations.dtype` and legacy `input_activations.format` disagree."
+            )
+    elif legacy_dtype is not None:
+        normalized["dtype"] = legacy_dtype
+
+    if legacy_type is not None and str(legacy_type).strip().lower() != "float":
+        raise ValueError("QuantizeConfig: legacy `input_activations.type` must resolve to `float`.")
+
+    if legacy_bits is not None and int(legacy_bits) != 8:
+        raise ValueError("QuantizeConfig: legacy `input_activations.bits` must resolve to `8`.")
+
     if "scales" in normalized or "scale_mode" in normalized or "scale" in normalized:
         raise ValueError(
-            "QuantizeConfig: `input_activations` no longer accepts `scales`; scale handling belongs to the activation quantization format itself."
+            "QuantizeConfig: `input_activations` no longer accepts `scales`; scale handling belongs to the activation quantization dtype itself."
         )
 
-    legacy_keys = sorted({"method", "dtype", "implementation"} & set(normalized))
+    legacy_keys = sorted({"method", "implementation"} & set(normalized))
     if legacy_keys:
         legacy_keys_str = ", ".join(f"`{key}`" for key in legacy_keys)
         raise ValueError(
             "QuantizeConfig: `input_activations` only accepts the canonical runtime schema "
-            "`{type, bits, format, strategy, dynamic, symmetric}`; "
+            "`{dtype, strategy, dynamic, symmetric}`; "
             f"remove legacy keys {legacy_keys_str}."
         )
 
-    allowed_keys = {"type", "bits", "format", "strategy", "dynamic", "symmetric"}
+    allowed_keys = {"dtype", "strategy", "dynamic", "symmetric"}
     unsupported_keys = sorted(set(normalized) - allowed_keys)
     if unsupported_keys:
         unsupported_keys_str = ", ".join(f"`{key}`" for key in unsupported_keys)
         raise ValueError(
             "QuantizeConfig: `input_activations` only accepts the canonical runtime schema "
-            f"`{{type, bits, format, strategy, dynamic, symmetric}}`; got unsupported keys {unsupported_keys_str}."
+            f"`{{dtype, strategy, dynamic, symmetric}}`; got unsupported keys {unsupported_keys_str}."
         )
 
     return normalized

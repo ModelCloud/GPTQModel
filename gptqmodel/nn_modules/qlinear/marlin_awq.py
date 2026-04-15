@@ -205,7 +205,7 @@ class AwqMarlinLinear(AWQuantLinear):
         if config is None:
             return True, None
 
-        if not config.dynamic or config.format != "float8_e4m3fn":
+        if not config.dynamic or config.dtype != "float8_e4m3fn":
             return True, None
 
         if device is not None and device != DEVICE.CUDA:
@@ -234,9 +234,9 @@ class AwqMarlinLinear(AWQuantLinear):
         input_activations = getattr(self, "input_activations", None)
         if input_activations is None or not input_activations.dynamic:
             return None
-        if input_activations.format != "float8_e4m3fn":
+        if input_activations.dtype != "float8_e4m3fn":
             return None
-        return getattr(torch, input_activations.format)
+        return getattr(torch, input_activations.dtype)
 
     def post_init(self):
         device = self.qweight.device
