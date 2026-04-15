@@ -17,7 +17,10 @@ from gptqmodel.quantization.input_activations import (
     quantize_dequantize_input,
     quantize_input,
 )
-from gptqmodel.quantization.input_activations_triton import supports_triton_fp8_input_quant
+from gptqmodel.quantization.input_activations_triton import (
+    resolve_triton_fp8_input_quant_mode,
+    supports_triton_fp8_input_quant,
+)
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
@@ -258,6 +261,28 @@ class TestAwqInputActivations:
         diff = fast_q.float() * fast_scale - ref_q.float() * ref_scale
         mismatch_frac = (diff != 0).float().mean().item()
         assert mismatch_frac <= 0.01
+        assert diff.pow(2).mean().sqrt().item() <= 0.01
+        assert diff.abs().max().item() <= 0.35
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton FP8 QDQ path.")
+    def test_quantize_dequantize_input_triton_scale_only_fast_path_matches_reference(self, monkeypatch):
+        x = torch.randn(16, 128, 3584, device="cuda", dtype=torch.bfloat16)
+        payload = self._input_activations_config(dynamic=True, strategy="tensor")
+
+        if resolve_triton_fp8_input_quant_mode(
+            x,
+            torch.float8_e4m3fn,
+            dynamic=True,
+            strategy="tensor",
+        ) != "scale_only":
+            pytest.skip("Triton FP8 scale-only fast path is not available on this GPU/runtime.")
+
+        monkeypatch.setenv("GPTQMODEL_DISABLE_TRITON_INPUT_QUANT", "1")
+        ref = quantize_dequantize_input(x, payload)
+        monkeypatch.delenv("GPTQMODEL_DISABLE_TRITON_INPUT_QUANT", raising=False)
+        fast = quantize_dequantize_input(x, payload)
+
+        diff = fast.float() - ref.float()
         assert diff.pow(2).mean().sqrt().item() <= 0.01
         assert diff.abs().max().item() <= 0.35
 

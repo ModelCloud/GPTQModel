@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
 
 from ..utils.env import env_flag
@@ -16,11 +18,14 @@ except ImportError:  # pragma: no cover - exercised via availability gating.
     tl = None
 
 
-# Restrict the fast path to Ada/Hopper-or-newer CUDA devices where FP8 tensor
-# storage is expected to behave like the fused W4A8 runtime.
+# Restrict the FP8-output path to Ada/Hopper-or-newer CUDA devices where
+# Triton's FP8 element type matches the fused W4A8 runtime expectations.
 _MIN_FP8_CAPABILITY = (8, 9)
+_MIN_SCALE_ONLY_CAPABILITY = (8, 0)
 _PARTIAL_BLOCK_K = 256
 _MIN_TOKEN_ROWS_FOR_TRITON = 64
+_MIN_SCALE_ONLY_ROWS_FOR_TRITON = 2048
+_MIN_SCALE_ONLY_COLS_FOR_TRITON = 3072
 _QUANT_BLOCK_M = 8
 _QUANT_BLOCK_K = 128
 
@@ -37,30 +42,56 @@ def triton_input_quant_available() -> bool:
     )
 
 
+@lru_cache(maxsize=None)
+def _cuda_device_capability(device_index: int | None) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(device_index)
+
+
+def _device_capability(device: torch.device) -> tuple[int, int]:
+    return _cuda_device_capability(device.index)
+
+
+def resolve_triton_fp8_input_quant_mode(
+    x: torch.Tensor,
+    fp8_dtype: torch.dtype,
+    *,
+    dynamic: bool,
+    strategy: str,
+) -> str | None:
+    """Return the supported Triton FP8 quantization mode for this tensor, if any."""
+
+    if not triton_input_quant_available():
+        return None
+    if fp8_dtype is not torch.float8_e4m3fn:
+        return None
+    if not dynamic or strategy not in {"token", "tensor"}:
+        return None
+    if x.device.type != "cuda" or not x.is_floating_point():
+        return None
+    if x.dtype not in {torch.float16, torch.bfloat16, torch.float32}:
+        return None
+    if x.numel() == 0 or x.ndim == 0 or x.shape[-1] == 0:
+        return None
+    if not x.is_contiguous() or x.stride(-1) != 1:
+        return None
+
+    major, minor = _device_capability(x.device)
+    if major > _MIN_FP8_CAPABILITY[0] or (major == _MIN_FP8_CAPABILITY[0] and minor >= _MIN_FP8_CAPABILITY[1]):
+        if strategy != "token" or _token_rows_are_large_enough_for_triton(x):
+            return "full"
+        return None
+
+    if (major > _MIN_SCALE_ONLY_CAPABILITY[0] or (
+        major == _MIN_SCALE_ONLY_CAPABILITY[0] and minor >= _MIN_SCALE_ONLY_CAPABILITY[1]
+    )) and _scale_only_shape_is_large_enough_for_triton(x):
+        return "scale_only"
+    return None
+
+
 def supports_triton_fp8_input_quant(x: torch.Tensor, fp8_dtype: torch.dtype, *, dynamic: bool, strategy: str) -> bool:
     """Gate the fast path to the exact runtime shape used by fused AWQ W4A8."""
 
-    if not triton_input_quant_available():
-        return False
-    if fp8_dtype is not torch.float8_e4m3fn:
-        return False
-    if not dynamic or strategy not in {"token", "tensor"}:
-        return False
-    if x.device.type != "cuda" or not x.is_floating_point():
-        return False
-    if x.dtype not in {torch.float16, torch.bfloat16, torch.float32}:
-        return False
-    if x.numel() == 0 or x.ndim == 0 or x.shape[-1] == 0:
-        return False
-    if not x.is_contiguous() or x.stride(-1) != 1:
-        return False
-    if strategy == "token" and not _token_rows_are_large_enough_for_triton(x):
-        return False
-
-    major, minor = torch.cuda.get_device_capability(x.device)
-    return major > _MIN_FP8_CAPABILITY[0] or (
-        major == _MIN_FP8_CAPABILITY[0] and minor >= _MIN_FP8_CAPABILITY[1]
-    )
+    return resolve_triton_fp8_input_quant_mode(x, fp8_dtype, dynamic=dynamic, strategy=strategy) == "full"
 
 
 @triton.jit
@@ -171,6 +202,47 @@ def _token_rows_are_large_enough_for_triton(x: torch.Tensor) -> bool:
     return x.reshape(-1, x.shape[-1]).shape[0] >= _MIN_TOKEN_ROWS_FOR_TRITON
 
 
+def _scale_only_shape_is_large_enough_for_triton(x: torch.Tensor) -> bool:
+    """Use the reduction-only path only where it wins on local sm_80 A100-class GPUs."""
+
+    rows, cols = x.reshape(-1, x.shape[-1]).shape
+    return rows >= _MIN_SCALE_ONLY_ROWS_FOR_TRITON and cols >= _MIN_SCALE_ONLY_COLS_FOR_TRITON
+
+
+def _compute_dynamic_fp8_scale_triton(
+    x: torch.Tensor,
+    *,
+    strategy: str,
+    fp8_max: float,
+) -> torch.Tensor:
+    """Compute the dynamic FP8 scale with Triton reductions and exact PyTorch post-processing."""
+
+    x_2d = x.reshape(-1, x.shape[-1])
+    rows, cols = x_2d.shape
+    num_blocks = triton.cdiv(cols, _PARTIAL_BLOCK_K)
+    partial_absmax = torch.empty((rows, num_blocks), device=x.device, dtype=torch.float32)
+    _partial_absmax_kernel[(rows, num_blocks)](
+        x_2d,
+        partial_absmax,
+        rows,
+        cols,
+        x_2d.stride(0),
+        x_2d.stride(1),
+        partial_absmax.stride(0),
+        BLOCK_K=_PARTIAL_BLOCK_K,
+    )
+
+    if strategy == "token":
+        abs_max = partial_absmax.amax(dim=1, keepdim=True).reshape(*x.shape[:-1], 1)
+    elif strategy == "tensor":
+        abs_max = partial_absmax.amax().reshape(())
+    else:  # pragma: no cover - public dispatcher rejects unsupported strategies.
+        raise ValueError(f"Unsupported activation strategy for Triton FP8 quantization: `{strategy}`.")
+
+    min_scale = torch.full_like(abs_max, 1.0 / (fp8_max * 512.0))
+    return torch.maximum(abs_max / fp8_max, min_scale)
+
+
 def triton_quantize_input_dynamic_fp8(
     x: torch.Tensor,
     *,
@@ -178,9 +250,6 @@ def triton_quantize_input_dynamic_fp8(
     strategy: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize a CUDA activation tensor to FP8 without materializing full-size FP32 staging buffers."""
-
-    if not supports_triton_fp8_input_quant(x, fp8_dtype, dynamic=True, strategy=strategy):
-        raise ValueError("Triton FP8 dynamic quantization is not available for this tensor/configuration.")
 
     x_2d = x.reshape(-1, x.shape[-1])
     rows, cols = x_2d.shape
@@ -257,8 +326,29 @@ def triton_quantize_input_dynamic_fp8(
     return out, scale
 
 
+def triton_quantize_dequantize_input_dynamic_fp8_scale_only(
+    x: torch.Tensor,
+    *,
+    fp8_dtype: torch.dtype,
+    strategy: str,
+) -> torch.Tensor:
+    """Quantize-dequantize using Triton only for the FP8 scale reduction.
+
+    This is the exact large-shape fallback used on Ampere-class GPUs where
+    Triton cannot natively emit the same FP8 element type as PyTorch's
+    `float8_e4m3fn`.
+    """
+
+    fp8_info = torch.finfo(fp8_dtype)
+    scale = _compute_dynamic_fp8_scale_triton(x, strategy=strategy, fp8_max=float(fp8_info.max))
+    x_q = torch.clamp(x.to(torch.float32) / scale, min=fp8_info.min, max=fp8_info.max).to(fp8_dtype)
+    return (x_q.to(torch.float32) * scale).to(x.dtype)
+
+
 __all__ = [
+    "resolve_triton_fp8_input_quant_mode",
     "supports_triton_fp8_input_quant",
     "triton_input_quant_available",
     "triton_quantize_input_dynamic_fp8",
+    "triton_quantize_dequantize_input_dynamic_fp8_scale_only",
 ]
