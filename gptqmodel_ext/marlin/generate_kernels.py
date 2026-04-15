@@ -185,6 +185,8 @@ def _detected_arch_tokens() -> list[str]:
                 if tokens:
                     return tokens
         except Exception:
+            # Capability probing is best-effort here; fall back to the conservative
+            # default arch list when the local CUDA runtime cannot be queried.
             pass
 
     return ["7.5", "8.0", "8.9"]

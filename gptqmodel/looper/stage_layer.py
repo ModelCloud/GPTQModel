@@ -251,6 +251,9 @@ def _replay_layer_outputs(
             progress_total_rows=replay_total_rows,
             force_serial=replay_force_serial,
             preserve_module_devices=replay_preserve_module_devices,
+            # Replay should emit next-layer activations under the model's native router.
+            # And reduce the execution time of `forward()`.
+            apply_moe_config=False,
         )
     finally:
         if (

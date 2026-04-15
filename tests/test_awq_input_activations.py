@@ -8,7 +8,6 @@ import torch
 from torch import nn
 
 import gptqmodel.looper.awq_processor as awq_processor_module
-from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.models.writer import QUANT_ACT_LOG_TYPE
 from gptqmodel.quantization import FORMAT, METHOD
@@ -23,7 +22,7 @@ from gptqmodel.quantization.input_activations_triton import supports_triton_fp8_
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Current PyTorch build does not provide FP8 dtypes.")
 class TestAwqInputActivations:
-    class _RuntimeTestAWQProcessor(AWQProcessor):
+    class _RuntimeTestAWQProcessor(awq_processor_module.AWQProcessor):
         """Small AWQ harness that exercises calibration/replay code without a full model."""
 
         def __init__(self, qcfg: QuantizeConfig):
@@ -89,9 +88,9 @@ class TestAwqInputActivations:
             observed["fp16_output"] = fp16_output.detach().clone()
             return torch.ones(x_arg.shape[-1], dtype=torch.float32), 0.0
 
-        monkeypatch.setattr(AWQProcessor, "_compute_best_scale", fake_compute_best_scale)
+        monkeypatch.setattr(awq_processor_module.AWQProcessor, "_compute_best_scale", fake_compute_best_scale)
 
-        AWQProcessor._search_best_scale(
+        awq_processor_module.AWQProcessor._search_best_scale(
             processor,
             module=parent,
             prev_op=parent.prev,
@@ -128,9 +127,9 @@ class TestAwqInputActivations:
         def fake_compute_best_scale(self, x_arg, w_mean, x_mean, module2inspect, linears2scale, fp16_output, kwargs, reference_output=None):
             return torch.ones(x_arg.shape[-1], dtype=torch.float32), 0.0, 0.25
 
-        monkeypatch.setattr(AWQProcessor, "_compute_best_scale", fake_compute_best_scale)
+        monkeypatch.setattr(awq_processor_module.AWQProcessor, "_compute_best_scale", fake_compute_best_scale)
 
-        AWQProcessor._search_best_scale(
+        awq_processor_module.AWQProcessor._search_best_scale(
             processor,
             module=parent,
             prev_op=parent.prev,

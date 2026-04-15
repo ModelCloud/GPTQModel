@@ -30,10 +30,6 @@ on:
         description: 'Regex to filter test files'
         required: false
         default: ''
-      artifact_id:
-        description: 'Run id for artifact to be downloaded'
-        required: false
-        default: ''
       max-parallel:
         description: 'Parallel jobs'
         required: false
@@ -46,13 +42,6 @@ on:
         options:
           - 'fast'
           - 'slow'
-      server:
-        description: 'Wheel Build Server'
-        type: choice
-        default: '["self-hosted", "xeon5"]'
-        options:
-          - '["self-hosted", "xeon5"]'
-          - '["self-hosted", "zen4"]'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -104,32 +93,20 @@ jobs:
         run: |
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
-          echo "artifact_id: ${{ github.event.inputs.artifact_id }}"
-          echo "selected server: ${{ github.event.inputs.server }}"
 
-      - name: Set server
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
+      - name: Set runner metadata
         id: get_ip
         run: |
-          echo "ip=$RUNNER" >> "$GITHUB_OUTPUT"
-
-          echo "ip: $ip"
-
-          if [ -n "${{ github.event.inputs.artifact_id }}" ]; then
-            run_id="${{ github.event.inputs.artifact_id }}"
-          else
-            run_id="${{ github.run_id }}"
-          fi
-          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-          echo "artifact_id=$run_id"
-
-          install_ts="$(date +%s)"
-          echo "install_ts=$install_ts" >> "$GITHUB_OUTPUT"
-          echo "install_ts=$install_ts"
-
-          max_p=${{ github.event.inputs['max-parallel'] }}
-          max_p="{\"size\": ${max_p:-20}}"
-          echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
-          echo "max-parallel=$max_p"
+          python3 .github/scripts/ci_workflow.py check-vm \
+            --runner-ip "$RUNNER" \
+            --github-run-id "${{ github.run_id }}" \
+            --max-parallel "${{ github.event.inputs['max-parallel'] }}"
 
   list-test-files:
     runs-on: ubuntu-latest
@@ -159,32 +136,9 @@ jobs:
       - name: List files
         id: files
         run: |
-          test_files=$(python3 .github/scripts/list_test_files.py \
-          --ignored-test-files "$IGNORED_TEST_FILES" \
-          --test-regex "${{ github.event.inputs.test_regex }}")
-
-          IFS='|' read -r torch_test_files model_test_files mlx_files <<< "$test_files"
-
-          torch_envs=$(python3 .github/scripts/build_unit_test_env_matrix.py \
-            --group tests \
-            --tests-json "$torch_test_files")
-          model_envs=$(python3 .github/scripts/build_unit_test_env_matrix.py \
-            --group tests/models \
-            --tests-json "$model_test_files")
-
-          echo "torch-files=$torch_test_files" >> "$GITHUB_OUTPUT"
-          echo "model-files=$model_test_files" >> "$GITHUB_OUTPUT"
-          echo "m4-files=$mlx_files" >> "$GITHUB_OUTPUT"
-          echo "torch-envs=$torch_envs" >> "$GITHUB_OUTPUT"
-          echo "model-envs=$model_envs" >> "$GITHUB_OUTPUT"
-
-          echo "Test files: $test_files"
-          echo "Torch Test files: $torch_test_files"
-          echo "Model Compat Test files: $model_test_files"
-          echo "MLX Test files: $mlx_files"
-          echo "Torch envs: $torch_envs"
-          echo "Model envs: $model_envs"
-          echo "Ignored Test files: $IGNORED_TEST_FILES"
+          python3 .github/scripts/ci_workflow.py list-tests \
+            --ignored-test-files "$IGNORED_TEST_FILES" \
+            --test-regex "${{ github.event.inputs.test_regex }}"
 
   prepare:
     needs:
@@ -223,77 +177,19 @@ jobs:
 
       - name: Prepare common envs
         run: |
-          mapfile -t raw_env_rows < <(
-            python3 .github/scripts/print_env_rows.py \
-              --torch-envs-json '${{ needs.list-test-files.outputs.torch-envs }}' \
-              --model-envs-json '${{ needs.list-test-files.outputs.model-envs }}'
-          )
-
-          env_rows=()
-          declare -A seen_envs=()
-          for row in "${raw_env_rows[@]}"; do
-            IFS=$'\t' read -r env_name python_version <<< "$row"
-            if [ -n "${seen_envs[$env_name]:-}" ]; then
-              continue
-            fi
-            seen_envs["$env_name"]=1
-            env_rows+=("$row")
-          done
-          
-          for i in "${!env_rows[@]}"; do
-            echo "$i: ${env_rows[$i]}"
-          done
-
-          pids=()
-          for row in "${env_rows[@]}"; do
-            (
-              echo "::group::updating env for $row"
-              IFS=$'\t' read -r env_name python_version <<< "$row"
-              echo "preparing env=$env_name py=$python_version"
-              source /opt/uv/setup_uv_venv.sh "$env_name"
-
-              python -V
-              which python
-              which pip || true
-
-              bash /opt/env/init_compiler_no_env.sh \
-                "${{ needs.check-vm.outputs.cuda_version }}" \
-                "${{ env.TORCH_VERSION }}" \
-                "$python_version"
-
-              uv pip uninstall gptqmodel || true
-              /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-              uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-              for pkg in defuser pypcre tokenicer logbar evalution; do
-                uv pip uninstall "$pkg" || true
-              done
-              for url in \
-                "$DEFUSER_GIT_URL" \
-                "$PYPCRE_GIT_URL" \
-                "$TOKENICER_GIT_URL" \
-                "$LOGBAR_GIT_URL" \
-                "$EVALUTION_GIT_URL"
-              do
-                uv pip install "$url"
-              done
-              /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-
-              echo "::group::pip list"
-                uv pip list
-              echo "::endgroup::"
-              echo "::endgroup::"
-            ) &
-            pids+=("$!")
-          done
-
-          status=0
-          for pid in "${pids[@]}"; do
-            if ! wait "$pid"; then
-              status=1
-            fi
-          done
-
-          exit "$status"
+          source /opt/uv/setup_uv_venv.sh gptqmodel_unit_pre_env
+          uv pip install pyyaml -U
+          python3 .github/scripts/ci_workflow.py prepare-common-envs \
+            --torch-envs-json '${{ needs.list-test-files.outputs.torch-envs }}' \
+            --model-envs-json '${{ needs.list-test-files.outputs.model-envs }}' \
+            --cuda-version "${{ needs.check-vm.outputs.cuda_version }}" \
+            --torch-version "${{ env.TORCH_VERSION }}" \
+            --runner "$RUNNER" \
+            --repo-url "$DEFUSER_GIT_URL" \
+            --repo-url "$PYPCRE_GIT_URL" \
+            --repo-url "$TOKENICER_GIT_URL" \
+            --repo-url "$LOGBAR_GIT_URL" \
+            --repo-url "$EVALUTION_GIT_URL"
 
   torch:
     needs:
@@ -324,7 +220,7 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
-    if: always() && !cancelled() && needs.list-test-files.outputs.torch-files != '[]' #  || github.event.inputs.artifact_id != ''
+    if: always() && !cancelled() && needs.list-test-files.outputs.torch-files != '[]'
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
@@ -343,110 +239,40 @@ jobs:
 
       - name: Activate uv env
         run: |
-          # fix fatal: detected dubious ownership in repository at '/__w/GPTQModel/GPTQModel'
-          git config --global --add safe.directory /__w/GPTQModel/GPTQModel
-          source /opt/uv/setup_uv_venv.sh unit_test_env
-
-          config_json="$(python3 .github/scripts/parse_test_config.py \
+          source /opt/uv/setup_uv_venv.sh gptqmodel_unit_test_env
+          python3 .github/scripts/ci_workflow.py activate-test-env \
             --group tests \
-            --test-name "${{ matrix.test_script }}")"
-
-          gpu="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["gpu"])')"
-
-          echo "GPU_COUNT=$gpu" >> "$GITHUB_ENV"
-          has_specific_deps="$(python3 .github/scripts/has_specific_deps.py \
-            --test-name "${{ matrix.test_script }}")"
-          echo "HAS_SPECIFIC_DEPS=$has_specific_deps" >> "$GITHUB_ENV"
-          
-          env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
-            --test-name "${{ matrix.test_script }}")"
-          echo "ENV_NAME=$env_name" >> "$GITHUB_ENV"
-          uv_cache_dir="${UV_CACHE_DIR%/}/$env_name"
-          mkdir -p "$uv_cache_dir"
-          echo "UV_CACHE_DIR=$uv_cache_dir" >> "$GITHUB_ENV"
-          export UV_CACHE_DIR=$uv_cache_dir
-          echo "using gpu=$gpu specific=$has_specific_deps uv env=$env_name"
-          echo "using uv cache dir=$uv_cache_dir"
-          /opt/uv/setup_uv_venv.sh $env_name
+            --test-name "${{ matrix.test_script }}" \
+            --write-gpu-count \
+            --fix-safe-directory
 
       - name: Setup uv env
         if: env.HAS_SPECIFIC_DEPS == '1'
         run: |
-          config_json="$(python3 .github/scripts/parse_test_config.py \
+          python3 .github/scripts/ci_workflow.py setup-specific-env \
             --group tests \
-            --test-name "${{ matrix.test_script }}")"
-          py="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["py"])')"
-
-          python -V
-          which python
-          which pip || true
-
-          echo "--- setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=$py"
-          bash /opt/env/init_compiler_no_env.sh "${{ needs.check-vm.outputs.cuda_version }}" "${{ env.TORCH_VERSION }}" "$py"
-
-          echo "--- installing required deps..."
-          python .github/scripts/install_deps.py "${{ matrix.test_script }}"
-
-          echo "--- uninstalling required deps..."
-          python .github/scripts/uninstall_deps.py "${{ matrix.test_script }}"
+            --test-name "${{ matrix.test_script }}" \
+            --cuda-version "${{ needs.check-vm.outputs.cuda_version }}" \
+            --torch-version "${{ env.TORCH_VERSION }}"
 
       - name: Install package from source
         if: ${{ env.ENV_NAME != 'gptqmodel_unit_tests_common' && env.ENV_NAME != 'gptqmodel_unit_tests_models_common' }}
         run: |
-          install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
-          lock_dir="/opt/uv/locks"
-          lock_file="${lock_dir}/${ENV_NAME}.${install_key}.lock"
-          unlock_file="${lock_dir}/${ENV_NAME}.${install_key}.unlock"
-
-          mkdir -p "$lock_dir"
-
-          if [ -f "$unlock_file" ]; then
-            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
-            exit 0
-          fi
-
-          exec 9>"$lock_file"
-          cleanup_lock() {
-            flock -u 9 || true
-            exec 9>&- || true
-            rm -f "$lock_file"
-          }
-          trap cleanup_lock EXIT
-
-          if ! flock -n 9; then
-            if [ -s "$lock_file" ]; then
-              echo "lock owner: $(cat "$lock_file")"
-            fi
-            echo "waiting for lock: $lock_file"
-            flock 9
-          fi
-
-          if [ -f "$unlock_file" ]; then
-            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
-            exit 0
-          fi
-
-          printf 'test=%s job=%s run=%s env=%s\n' \
-            "${{ matrix.test_script }}" \
-            "${{ github.job }}" \
-            "${{ needs.check-vm.outputs.run_id }}" \
-            "${ENV_NAME}" > "$lock_file"
-
-          uv pip uninstall gptqmodel || true
-          uv pip install . --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          # somehow torch will be downgrade to 2.10
-          uv pip install torch torchvision torchaudio -U --torch-backend=${{ env.UV_TORCH_BACKEND }}
-
-          mv "$lock_file" "$unlock_file"
-
-          echo "::group::pip list"
-            uv pip list
-          echo "::endgroup::"
+          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
+          python3 .github/scripts/ci_workflow.py install-package \
+            --env-name "${ENV_NAME}_$safe_ref" \
+            --install-key "${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}" \
+            --test-script "${{ matrix.test_script }}" \
+            --job "${{ github.job }}" \
+            --run-id "${{ needs.check-vm.outputs.run_id }}" \
+            --runner "$RUNNER" \
+            --uv-torch-backend "${{ env.UV_TORCH_BACKEND }}" \
+            --no-build-isolation
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
         run: |
-          python .github/scripts/allocate_gpu.py \
+          python3 .github/scripts/ci_gpu.py allocate \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --test "${{ matrix.test_script }}" \
@@ -463,7 +289,7 @@ jobs:
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             extra_args+=(--clear-cuda --xpu-mode)
           fi
-          python .github/scripts/run_tests.py \
+          python3 .github/scripts/ci_tests.py run \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --test-script "${{ matrix.test_script }}" \
@@ -475,27 +301,19 @@ jobs:
         if: ${{ !cancelled() &&  failure() }}
         continue-on-error: true
         run: |
-          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
-          log_file=$log_dir/${{ matrix.test_script }}.log
-
-          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
-          
-          tail -n 200 $log_file
-          exit 1
+          python3 .github/scripts/ci_tests.py check-log \
+            --run-id "${{ github.run_id }}" \
+            --test-script "${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
         run: |
-          if [ -n "${ENV_NAME:-}" ]; then
-            install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
-            lock_file="/opt/uv/locks/${ENV_NAME}.${install_key}.lock"
-            if [ -e "$lock_file" ]; then
-              echo "removing leftover install lock: $lock_file"
-              rm -f "$lock_file"
-            fi
-          fi
+          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
 
-          python .github/scripts/release_gpu.py \
+          python3 .github/scripts/ci_workflow.py cleanup-install-lock \
+            --env-name "${ENV_NAME:-}_$safe_ref" \
+            --install-key "${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
+          python3 .github/scripts/ci_gpu.py release \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
@@ -556,97 +374,38 @@ jobs:
 
       - name: Activate uv env
         run: |
-          source /opt/uv/setup_uv_venv.sh unit_test_env
-
-          has_specific_deps="$(python3 .github/scripts/has_specific_deps.py \
-            --test-name "${{ matrix.test_script }}")"
-          echo "HAS_SPECIFIC_DEPS=$has_specific_deps" >> "$GITHUB_ENV"
-          env_name="$(python3 .github/scripts/get_unit_test_env_name.py \
-            --test-name "${{ matrix.test_script }}")"
-          echo "ENV_NAME=$env_name" >> "$GITHUB_ENV"
-          uv_cache_dir="${UV_CACHE_DIR%/}/$env_name"
-          mkdir -p "$uv_cache_dir"
-          echo "UV_CACHE_DIR=$uv_cache_dir" >> "$GITHUB_ENV"
-          export UV_CACHE_DIR=$uv_cache_dir
-          echo "using specific=$has_specific_deps uv env=$env_name"
-          echo "using uv cache dir=$uv_cache_dir"
-          /opt/uv/setup_uv_venv.sh $env_name
+          source /opt/uv/setup_uv_venv.sh gptqmodel_unit_test_env
+          python3 .github/scripts/ci_workflow.py activate-test-env \
+            --group tests/models \
+            --test-name "${{ matrix.test_script }}"
 
       - name: Setup uv env
         if: env.HAS_SPECIFIC_DEPS == '1'
         run: |
-          config_json="$(python3 .github/scripts/parse_test_config.py \
+          python3 .github/scripts/ci_workflow.py setup-specific-env \
             --group tests/models \
-            --test-name "${{ matrix.test_script }}")"
-          py="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["py"])')"
-
-          python -V
-          which python
-          which pip || true
-
-          echo "--- setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=$py"
-          bash /opt/env/init_compiler_no_env.sh "${{ needs.check-vm.outputs.cuda_version }}" "${{ env.TORCH_VERSION }}" "$py"
-
-          echo "--- installing required deps..."
-          python .github/scripts/install_deps.py "${{ matrix.test_script }}"
-
-          echo "--- uninstalling required deps..."
-          python .github/scripts/uninstall_deps.py "${{ matrix.test_script }}"
+            --test-name "${{ matrix.test_script }}" \
+            --cuda-version "${{ needs.check-vm.outputs.cuda_version }}" \
+            --torch-version "${{ env.TORCH_VERSION }}"
 
       - name: Install package from source
         if: ${{ env.ENV_NAME != 'gptqmodel_unit_tests_common' && env.ENV_NAME != 'gptqmodel_unit_tests_models_common' }}
         run: |
-          install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
-          lock_dir="/opt/uv/locks"
-          lock_file="${lock_dir}/${ENV_NAME}.${install_key}.lock"
-          unlock_file="${lock_dir}/${ENV_NAME}.${install_key}.unlock"
+          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
 
-          mkdir -p "$lock_dir"
-
-          if [ -f "$unlock_file" ]; then
-            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
-            exit 0
-          fi
-
-          exec 9>"$lock_file"
-          cleanup_lock() {
-            flock -u 9 || true
-            exec 9>&- || true
-            rm -f "$lock_file"
-          }
-          trap cleanup_lock EXIT
-
-          if ! flock -n 9; then
-            if [ -s "$lock_file" ]; then
-              echo "lock owner: $(cat "$lock_file")"
-            fi
-            echo "waiting for lock: $lock_file"
-            flock 9
-          fi
-
-          if [ -f "$unlock_file" ]; then
-            echo "gptqmodel already installed for ${ENV_NAME} @ ${install_key}, skipping"
-            exit 0
-          fi
-
-          printf 'test=%s job=%s run=%s env=%s\n' \
-            "${{ matrix.test_script }}" \
-            "${{ github.job }}" \
-            "${{ needs.check-vm.outputs.run_id }}" \
-            "${ENV_NAME}" > "$lock_file"
-
-          uv pip uninstall gptqmodel || true
-          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          uv pip install torch torchvision torchaudio -U --torch-backend=${{ env.UV_TORCH_BACKEND }}
-          echo "::group::pip list"
-            uv pip list
-          echo "::endgroup::"
-          mv "$lock_file" "$unlock_file"
+          python3 .github/scripts/ci_workflow.py install-package \
+            --env-name "${ENV_NAME}_$safe_ref" \
+            --install-key "${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}" \
+            --test-script "${{ matrix.test_script }}" \
+            --job "${{ github.job }}" \
+            --run-id "${{ needs.check-vm.outputs.run_id }}" \
+            --runner "$RUNNER" \
+            --uv-torch-backend "${{ env.UV_TORCH_BACKEND }}"
 
       - name: Find suitable GPU
         if: ${{ !cancelled() }}
         run: |
-          python .github/scripts/allocate_gpu.py \
+          python3 .github/scripts/ci_gpu.py allocate \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --test "${{ matrix.test_script }}" \
@@ -656,7 +415,7 @@ jobs:
 
       - name: Run tests
         run: |
-          python .github/scripts/run_tests.py \
+          python3 .github/scripts/ci_tests.py run \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --test-script "${{ matrix.test_script }}" \
@@ -668,26 +427,19 @@ jobs:
         if: ${{ !cancelled() && failure() }}
         continue-on-error: true
         run: |
-          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
-          log_file=$log_dir/${{ matrix.test_script }}.log
-
-          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
-          tail -n 200 $log_file
-          exit 1
+          python3 .github/scripts/ci_tests.py check-log \
+            --run-id "${{ github.run_id }}" \
+            --test-script "${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always()
         run: |
-          if [ -n "${ENV_NAME:-}" ]; then
-            install_key="${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
-            lock_file="/opt/uv/locks/${ENV_NAME}.${install_key}.lock"
-            if [ -e "$lock_file" ]; then
-              echo "removing leftover install lock: $lock_file"
-              rm -f "$lock_file"
-            fi
-          fi
+          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
 
-          python .github/scripts/release_gpu.py \
+          python3 .github/scripts/ci_workflow.py cleanup-install-lock \
+            --env-name "${ENV_NAME:-}_$safe_ref" \
+            --install-key "${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
+          python3 .github/scripts/ci_gpu.py release \
             --base-url "http://${XEON5}" \
             --run-id "${{ github.run_id }}" \
             --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
@@ -700,147 +452,46 @@ jobs:
         run: |
           rm -rf rm -rf ./* .[^.] .??*
 
-#  show-statistics:
-#    runs-on: [ self-hosted, xeon5 ]
-#    if: always() && inputs['exclusive-gpu'] && !cancelled()
-#    container:
-#      image: modelcloud/gptqmodel:alpine-ci-v1
-#    needs:
-#      - torch
-#    steps:
-#      - name: Print statistics
-#        run: curl "http://$RUNNER/gpu/get_vram_logs?id=${{ github.run_id }}"
+  torch-test:
+    runs-on: [ self-hosted, xeon5 ]
+    container:
+      image: 10.0.13.31:5000/nvidia/cuda:130-ubuntu24.04_0325
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
+      volumes:
+        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
+        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
+        - /dev/dri/by-path:/dev/dri/by-path
+        - /monster/ci/uv:/opt/uv
+        - /monster/ci/env:/opt/env
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
 
-#  m4:
-#    runs-on: [ self-hosted, m4 ]
-#    needs:
-#      - check-vm
-#      - list-test-files
-#    if: false && (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && (needs.list-test-files.outputs.m4-files != '' && needs.list-test-files.outputs.m4-files != '[]') && !cancelled()
-#    strategy:
-#      fail-fast: false
-#      matrix:
-#        test_script: ${{ fromJSON(needs.list-test-files.outputs.m4-files) }}
-#    steps:
-#      - name: Print Env
-#        run: |
-#          echo "repo: ${{ env.repo }}"
-#          echo "ref: ${{ env.ref }}"
-#          ls -ahl .
-#
-#      - name: Checkout Codes
-#        uses: actions/checkout@v6
-#        with:
-#          repository: ${{ env.repo }}
-#          ref: ${{ env.ref }}
-#
-#      - name: Run test
-#        run: |
-#          export PATH="/opt/homebrew/bin:$PATH" && eval "$(pyenv init -)"
-#          rm -rf venv || true
-#
-#          echo "=== checking models dir is mounted"
-#          ls ../../../monster
-#
-#          echo "=== activating venv"
-#          pyenv global 3.11.11 && python -m venv venv
-#          source venv/bin/activate
-#
-#          rm profile.sb || true
-#
-#          curl -O http://$RUNNER/scripts/m4/profile.sb
-#
-#          echo "=== installing uv setuptools build"
-#          pip install setuptools build -U -i http://$RUNNER/simple --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-#
-#          echo "=== installing test tools"
-#          uv pip install pytest parameterized vllm device-smi mlx-lm -U -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-#
-#          echo "=== installing gptqmodel"
-#          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-#
-#          echo "replacing model path"
-#          find tests -name "*.py" -exec sed -i '' 's/\/monster\/data\/model/..\/..\/..\/monster/g' {} +
-#
-#          TEST=${{ matrix.test_script }}
-#          if [[ ! "$TEST" == *.py ]]; then
-#          TEST="$TEST.py"
-#          fi
-#          echo "=== running test: $TEST"
-#          pytest tests/$TEST
-#
-#      - name: Clean cache
-#        if: always()
-#        run: |
-#          source venv/bin/activate && pip cache purge && uv cache clean || true
-#          rm -rf ../GPTQModel && mkdir ../GPTQModel
-#
-#  mac-test:
-#    runs-on: macos-latest
-#    env:
-#      CUDA_VISIBLE_DEVICES: ''
-#      TORCH_CUDA_ARCH_LIST: ''
-#      MAX_JOBS: 3
-#      BUILD_QQQ: 0
-#      BUILD_EORA: 0
-#      GPTQMODEL_BUILD_EXLLAMA_V1: 0
-#      GPTQMODEL_BUILD_EORA: 0
-#      GPTQMODEL_FORCE_BUILD: 0
-#    steps:
-#      - name: Checkout Codes
-#        uses: actions/checkout@v6
-#
-#      - uses: actions/setup-python@v6
-#        with:
-#          python-version: 3.12
-#          cache: 'pip'
-#
-##       it wastes too much time to find which exactly one caused installation failed, just unset them all.....
-#      - name: Install dependencies
-#        run: |
-#          unset CUDA_DEVICE_ORDER
-#          unset CUDA_VISIBLE_DEVICES
-#          unset TORCH_CUDA_ARCH_LIST
-#          unset PYTORCH_ALLOC_CONF
-#          unset MAX_JOBS
-#          unset RUNNER
-#          unset XEON5
-#          unset UV_INDEX_URL
-#          unset CUDA_VERSION
-#          unset TORCH_VERSION
-#          unset PYTHON_VERSION
-#          unset # PYTHON_GIL
-#          unset BUILD_QQQ
-#          unset BUILD_EORA
-#          unset GPTQMODEL_BUILD_EXLLAMA_V1
-#          unset GPTQMODEL_BUILD_EORA
-#          unset LEGACY_TESTS
-#          unset IGNORED_TEST_FILES
-#          unset GPTQMODEL_FORCE_BUILD
-#          unset repo
-#          unset ref
-#
-#          python -V
-#          python -m venv venv
-#          source venv/bin/activate
-#          pip install pip uv setuptools build wheel torch -U
-#          pip install meson-python -U
-#          pip install numpy==2.2.6 -U
-#
-#          uv pip install -e .
-#          pip install pip Pillow device_smi pypcre tokenicer threadpoolctl accelerate logbar transformers optimum torch -U
-#
-#      - name: Run test
-#        run: |
-#          source venv/bin/activate
-#          python - <<'PY'
-#          import os
-#          from transformers import pipeline
-#          os.environ["CUDA_VISIBLE_DEVICES"] = ""
-#          os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-#          llm_pipeline = pipeline(model="JunHowie/Qwen3-0.6B-GPTQ-Int4")
-#          output = llm_pipeline("Which city is the capital of France?", max_new_tokens=100)
-#          print(output)
-#
-#          assert "paris" in output.lower()
-#          PY
+      - name: Test pypi pip
+        run: |
+          uv venv pypi_pip_env
+          source pypi_pip_env/bin/activate
+          uv pip install pip -U
+          pip install gptqmodel torch -U
+
+      - name: Test pypi uv
+        run: |
+          uv venv pypi_uv_env
+          source pypi_uv_env/bin/activate
+          uv pip install gptqmodel torch -U
+
+      - name: test local pip
+        run: |
+          uv venv local_pip_env
+          source local_pip_env/bin/activate
+          uv pip install pip -U
+          pip install . torch -U
+
+      - name: test local uv
+        run: |
+          uv venv local_uv_env
+          source local_uv_env/bin/activate
+          uv pip install . torch -U

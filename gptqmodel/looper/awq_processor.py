@@ -971,6 +971,8 @@ class AWQProcessor(LoopProcessor):
             if reference_output is not None and "reference_output" in inspect.signature(self._compute_best_scale).parameters:
                 compute_kwargs["reference_output"] = reference_output
         except (TypeError, ValueError):
+            # Some mocked callables and C++/Torch wrappers do not expose an inspectable
+            # Python signature; in that case we fall back to the legacy call shape.
             pass
         best_scale_result = self._compute_best_scale(
             inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs, **compute_kwargs
@@ -1625,7 +1627,6 @@ class AWQProcessor(LoopProcessor):
                 f"{duration:.3f}",
             )
             self._append_activation_log_rows(named_module, duration=duration)
-
     def _sanitize_kwargs(self, inputs_kwargs, module):
         """
         Remove the arguments that are not supported in the module's
