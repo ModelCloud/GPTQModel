@@ -40,6 +40,8 @@
 #endif
 
 #include <ATen/ATen.h>
+#include <mutex>
+#include <vector>
 
 #ifndef MARLIN_SHARED_MEM_GUARD_BYTES
 #  define MARLIN_SHARED_MEM_GUARD_BYTES 0 // 512
@@ -204,6 +206,50 @@ typedef struct {
 bool marlin_prefers_full_sm80(int major_capability, int minor_capability,
                               int sms) {
   return major_capability == 8 && minor_capability == 0 && sms >= 124;
+}
+
+int marlin_full_sm80_exact_thread_m_blocks(int prob_m) {
+  switch (prob_m) {
+    case 96:
+      return 2;
+    case 160:
+      return 2;
+    default:
+      return -1;
+  }
+}
+
+struct marlin_device_info_t {
+  int sms = 0;
+  int max_shared_mem = 0;
+  int major_capability = 0;
+  int minor_capability = 0;
+};
+
+marlin_device_info_t query_marlin_device_info(int device) {
+  marlin_device_info_t info;
+  cudaDeviceGetAttribute(&info.sms, cudaDevAttrMultiProcessorCount, device);
+  cudaDeviceGetAttribute(&info.max_shared_mem,
+                         cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+  cudaDeviceGetAttribute(&info.major_capability,
+                         cudaDevAttrComputeCapabilityMajor, device);
+  cudaDeviceGetAttribute(&info.minor_capability,
+                         cudaDevAttrComputeCapabilityMinor, device);
+  return info;
+}
+
+marlin_device_info_t get_marlin_device_info(int device) {
+  static std::mutex mutex;
+  static std::vector<marlin_device_info_t> cache;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (device >= static_cast<int>(cache.size())) {
+    cache.resize(device + 1);
+  }
+  marlin_device_info_t& info = cache[device];
+  if (info.sms == 0) {
+    info = query_marlin_device_info(device);
+  }
+  return info;
 }
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
@@ -755,10 +801,11 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
   if (has_act_order) {
     // Permute A columns
-    int block_rows = div_ceil(prob_m, sms);
+    int permute_blocks = min(sms, max(prob_m, 1));
+    int block_rows = div_ceil(prob_m, permute_blocks);
     // avoid ">>>" being formatted to "> > >"
     // clang-format off
-    permute_cols_kernel<<<sms, default_threads, 0, stream>>>(
+    permute_cols_kernel<<<permute_blocks, default_threads, 0, stream>>>(
         A_ptr, perm_ptr, a_tmp_ptr, prob_m, prob_k, lda, block_rows);
     // clang-format on
     A_ptr = a_tmp_ptr;
@@ -770,17 +817,12 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     if (is_k_full) has_act_order = false;
   }
 
-  int max_shared_mem = 0;
-  cudaDeviceGetAttribute(&max_shared_mem,
-                         cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+  marlin_device_info_t device_info = get_marlin_device_info(dev);
+  int max_shared_mem = device_info.max_shared_mem;
   TORCH_CHECK(max_shared_mem > 0);
 
-  int major_capability = 0;
-  int minor_capability = 0;
-  cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor,
-                         dev);
-  cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor,
-                         dev);
+  int major_capability = device_info.major_capability;
+  int minor_capability = device_info.minor_capability;
   TORCH_CHECK(major_capability > 7 ||
                   (major_capability == 7 && minor_capability >= 5),
               "marlin kernel only supports Turing or newer GPUs.");
@@ -800,23 +842,31 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   int max_thread_m_blocks = 4;
   bool full_sm80 =
       marlin_prefers_full_sm80(major_capability, minor_capability, sms);
+  bool disable_full_sm80_exact_split = false;
   while (rest_m) {
     int thread_k = thread_k_init;
     int thread_n = thread_n_init;
     bool manual_override = thread_k != -1 && thread_n != -1;
     int attempt_thread_m_blocks = max_thread_m_blocks;
-    // On 124-SM A100 boards, an exact M=96 launch maps to 3 M tiles. Running
-    // it as a single tm=2 launch keeps all 129 CTA tiles in one pass and
-    // consistently beats the default 64+32 split.
-    if (!manual_override && full_sm80 && rest_m == 96 &&
-        attempt_thread_m_blocks > 2) {
-      attempt_thread_m_blocks = 2;
+    bool force_exact_split = false;
+    // On the local 124-SM sm_80 boards, a few exact-M shapes consistently beat
+    // the generic split path when we keep all M tiles in one launch. This
+    // avoids tiny remainder launches such as 128+32.
+    if (!manual_override && full_sm80 && !disable_full_sm80_exact_split) {
+      int exact_thread_m_blocks = marlin_full_sm80_exact_thread_m_blocks(rest_m);
+      if (exact_thread_m_blocks > 0 &&
+          rest_m % (exact_thread_m_blocks * 16) == 0 &&
+          attempt_thread_m_blocks > exact_thread_m_blocks) {
+        attempt_thread_m_blocks = exact_thread_m_blocks;
+        force_exact_split = true;
+      }
     }
 
     int par_count = rest_m / (attempt_thread_m_blocks * 16);
     if (par_count > max_par) par_count = max_par;
     int prob_m_split =
         par_count > 0 ? (par_count * (attempt_thread_m_blocks * 16)) : rest_m;
+    if (force_exact_split) prob_m_split = rest_m;
 
     int thread_m_blocks =
         min(div_ceil(prob_m_split, 16), attempt_thread_m_blocks);
@@ -839,6 +889,11 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
           num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
           stages, max_shared_mem, major_capability, minor_capability, sms);
       thread_tfg = exec_cfg.tb_cfg;
+      if (thread_tfg.thread_k == -1 && force_exact_split) {
+        disable_full_sm80_exact_split = true;
+        max_thread_m_blocks = 4;
+        continue;
+      }
       if (thread_tfg.thread_k == -1 && attempt_thread_m_blocks > 1) {
         max_thread_m_blocks = attempt_thread_m_blocks - 1;
         continue;
@@ -967,8 +1022,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   // auto -1)
   int thread_n = -1;
   // sms: number of SMs to use for the kernel
-  int sms = -1;
-  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
+  int sms = marlin::get_marlin_device_info(a.get_device()).sms;
 
   // Alloc buffers
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
