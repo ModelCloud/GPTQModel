@@ -500,12 +500,12 @@ jobs:
       - name: test local pip
         run: |
           uv venv local_pip_env
-          source local_env/bin/activate
+          source local_pip_env/bin/activate
           uv pip install pip -U
           pip install . torch -U
 
       - name: test local uv
         run: |
           uv venv local_uv_env
-          source local_env/bin/activate
+          source local_uv_env/bin/activate
           uv pip install . torch -U
