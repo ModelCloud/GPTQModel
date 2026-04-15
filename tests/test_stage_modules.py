@@ -6,11 +6,11 @@ from typing import Dict
 import torch
 
 import gptqmodel.looper.stage_subset as stage_subset_module
+from gptqmodel.looper.forward_executor import ForwardExecutor
 from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
-from gptqmodel.looper.forward_executor import ForwardExecutor
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.looper.stage_layer import (
     _capture_pristine_group_context,
@@ -307,7 +307,7 @@ def _run_executor_single(executor, processor, *, apply_moe_config):
 def _run_executor_parallel(executor, processor, *, apply_moe_config):
     def clone_module_for_devices_fn(module, devices, progress_callback=None):
         del progress_callback
-        return {device: module for device in devices}
+        return dict.fromkeys(devices, module)
 
     def forward_batch_worker_fn(
         _replica,

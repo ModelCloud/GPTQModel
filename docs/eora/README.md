@@ -6,7 +6,7 @@ For more details, please refer to the paper: https://arxiv.org/abs/2410.21271.
 ## Calibration data
 EoRA’s major advantage is that it can enhance the accuracy of quantized models on various downstream tasks without training, simply by using a small amount of task-specific data as a calibration set. For instance, to improve performance on MMLU, you can employ the MMLU validation set as calibration data when generating EoRA. Additionally, EoRA can boost a quantized model’s overall quality by using the same calibration data as GPTQ.
 
-For examples of how to create these calibration sets, see `construct_c4` in `GPTQModel/examples/eora/eora_calibration_data_construction.py` for a general-purpose setup using the C4 dataset, and `construct_mmlu` in the same file for task-specific calibration data.
+For examples of how to create these calibration sets, see `construct_c4` in `docs/eora/eora_calibration_data_construction.py` for a general-purpose setup using the C4 dataset, and `construct_mmlu` in the same file for task-specific calibration data.
 
 ## EoRA generation
 There are two ways to produce EoRA. The first is to generate it simultaneously with GPTQ during the quantization process. The second is to take an already GPTQ-quantized model and apply EoRA generation on top of it.
@@ -14,32 +14,32 @@ There are two ways to produce EoRA. The first is to generate it simultaneously w
 ### First option: Generate EoRA and the GPTQ model together during quantization.
 Below is an example of using C4 as calibration data for generating EoRA of rank 64 alongside 4-bits GPTQ quantization of meta-llama/Llama-3.2-3B. To further improve the accuracy on MMLU, set mmlu for eora_dataset.
 ```shell
-python GPTQModel/examples/eora/eora_generation.py meta-llama/Llama-3.2-3B --bits 4 \
-    --quant_save_path GPTQModel/examples/eora/Llama-3.2-3B-4bits \
+python docs/eora/eora_generation.py meta-llama/Llama-3.2-3B --bits 4 \
+    --quant_save_path docs/eora/Llama-3.2-3B-4bits \
     --eora_dataset c4 \
-    --eora_save_path GPTQModel/examples/eora/Llama-3.2-3B-4bits-eora_rank64_c4 \
+    --eora_save_path docs/eora/Llama-3.2-3B-4bits-eora_rank64_c4 \
     --eora_rank 64
 ```
 
 ### Second option: If a GPTQ model is already available, run EoRA generation directly on the quantized model.
 Below is an example of using C4 as calibration data for generating EoRA of rank 64 given a 4-bits GPTQ quantized meta-llama/Llama-3.2-3B. To further improve the accuracy on MMLU, set mmlu for eora_dataset.
 ```shell
-python GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B c4 \
+python docs/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B c4 \
     --quantized_model sliuau/Llama-3.2-3B_4bits_128group_size \
-    --eora_save_path GPTQModel/examples/eora/Llama-3.2-3B-4bits-eora_rank64_c4 \
+    --eora_save_path docs/eora/Llama-3.2-3B-4bits-eora_rank64_c4 \
     --eora_rank 64
 ```
 
 ## EoRA Evaluation
 To evaluate the GPTQ quantized model and the corresponding EoRA on ARC-C and MMLU run:
 ```shell
-python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model sliuau/Llama-3.2-3B_4bits_128group_size \
-    --eora_save_path GPTQModel/examples/eora/Llama-3.2-3B-4bits-eora_rank64_c4 \
+python docs/eora/evaluation.py --quantized_model sliuau/Llama-3.2-3B_4bits_128group_size \
+    --eora_save_path docs/eora/Llama-3.2-3B-4bits-eora_rank64_c4 \
     --eora_rank 64
 ```
 
 ## EoRA Inference
-Please refer to for `GPTQModel/examples/eora/eora_load_and_inference.py` how to load EoRA and the corresponding GPTQ quantized model for inference.
+Please refer to `docs/eora/eora_load_and_inference.py` for how to load EoRA and the corresponding GPTQ quantized model for inference.
 A simple example:
 ```python
 
@@ -48,7 +48,7 @@ from gptqmodel.adapter.adapter import Lora
 
 eora = Lora(
     # for eora generation, path is adapter save path; for load, it is loading path
-    path='GPTQModel/examples/eora/Llama-3.2-3B-4bits-eora_rank64_c4 ',
+    path='docs/eora/Llama-3.2-3B-4bits-eora_rank64_c4 ',
     rank=64,
 )
 
