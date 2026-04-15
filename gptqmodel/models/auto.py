@@ -283,13 +283,37 @@ if Qwen3_5_MoeQModel is not None:
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
 
-def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
-    """Return the first activation-quantization field that makes this config unsupported.
+def _supports_gptqmodel_input_activation_checkpoint(quantization_config: dict) -> bool:
+    """Return ``True`` when the config describes GPTQModel-native input activations.
 
-    GPT-QModel can load weight-only quantized checkpoints through the Transformers
-    surface, but it does not currently implement activation-quantized runtime
-    semantics. This helper keeps the rejection logic in one place for both
-    ModelOpt-style grouped configs and flatter HF quantization payloads.
+    GPTQModel stores activation-aware runtime metadata as the top-level
+    ``input_activations`` field on standard GPTQ/AWQ quantization configs.
+    That surface is distinct from ModelOpt's grouped activation schemes and
+    should be treated as a supported quantized checkpoint during config probe.
+    """
+
+    input_activations = quantization_config.get("input_activations")
+    if not isinstance(input_activations, dict) or not input_activations:
+        return False
+
+    method = quantization_config.get("method", quantization_config.get("quant_method"))
+    if isinstance(method, str) and method.strip().lower() in {METHOD.AWQ.value, METHOD.GPTQ.value}:
+        return True
+
+    checkpoint_format = quantization_config.get("checkpoint_format", quantization_config.get("format"))
+    if isinstance(checkpoint_format, str) and checkpoint_format.strip().lower() in {"gemm", "gptq", "gptq_v2"}:
+        return True
+
+    return False
+
+
+def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
+    """Return the first unsupported activation-quantization field in the config.
+
+    GPTQModel-native checkpoints may include top-level ``input_activations``
+    metadata for AWQ/GPTQ runtime loading. ModelOpt grouped activation schemes,
+    KV-cache quantization, and other foreign activation payloads are still
+    rejected here so they do not proceed down an incompatible loader path.
     """
 
     config_groups = quantization_config.get("config_groups")
@@ -305,7 +329,12 @@ def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
     if isinstance(kv_cache_scheme, dict) and kv_cache_scheme:
         return "kv_cache_scheme"
 
-    for key in ("input_activations", "activation_quantization", "activations"):
+    input_activations = quantization_config.get("input_activations")
+    if isinstance(input_activations, dict) and input_activations:
+        if not _supports_gptqmodel_input_activation_checkpoint(quantization_config):
+            return "input_activations"
+
+    for key in ("activation_quantization", "activations"):
         value = quantization_config.get(key)
         if isinstance(value, dict) and value:
             return key

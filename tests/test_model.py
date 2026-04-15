@@ -694,7 +694,26 @@ def test_hide_unsupported_quantization_config_for_eval_leaves_supported_gptq_alo
     assert model.config.quantization_config == quantization_config
 
 
-def test_is_supported_quantization_config_rejects_input_activation_quantization():
+def test_is_supported_quantization_config_accepts_gptqmodel_input_activation_quantization():
+    config = types.SimpleNamespace(
+        quantization_config={
+            "quant_method": "awq",
+            "format": "gemm",
+            "input_activations": {
+                "bits": 8,
+                "type": "float",
+                "format": "float8_e4m3fn",
+                "strategy": "token",
+                "dynamic": True,
+                "symmetric": True,
+            },
+        }
+    )
+
+    assert _is_supported_quantization_config(config) is True
+
+
+def test_is_supported_quantization_config_rejects_modelopt_input_activation_quantization():
     config = types.SimpleNamespace(
         quantization_config={
             "quant_method": "modelopt",

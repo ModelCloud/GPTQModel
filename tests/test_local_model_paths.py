@@ -39,6 +39,46 @@ def test_load_treats_missing_absolute_path_as_local(monkeypatch):
     assert result is sentinel
 
 
+def test_load_dispatches_activation_quantized_checkpoint_to_from_quantized(monkeypatch):
+    quantization_config = {
+        "quant_method": "awq",
+        "format": "gemm",
+        "input_activations": {
+            "bits": 8,
+            "type": "float",
+            "format": "float8_e4m3fn",
+            "strategy": "token",
+            "dynamic": True,
+            "symmetric": True,
+        },
+    }
+    fake_config = SimpleNamespace(quantization_config=quantization_config)
+    sentinel = object()
+    captured = {}
+
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto, "isdir", lambda path: path == "/tmp/fake-model")
+    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_quantized",
+        classmethod(
+            lambda cls, model_id_or_path, **kwargs: captured.update(path=model_id_or_path, kwargs=kwargs) or sentinel
+        ),
+    )
+    monkeypatch.setattr(
+        GPTQModel,
+        "from_pretrained",
+        classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected pretrained load"))),
+    )
+
+    result = GPTQModel.load("/tmp/fake-model")
+
+    assert result is sentinel
+    assert captured["path"] == "/tmp/fake-model"
+    assert captured["kwargs"]["backend"] == BACKEND.AUTO
+
+
 def test_get_model_local_path_skips_snapshot_download_for_absolute_path(monkeypatch):
     model_path = "/monster/data/model/Qwen3.5-35B-A3B"
 
