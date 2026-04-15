@@ -83,10 +83,9 @@ env:
   ref: ${{ github.event.inputs.ref || github.ref }}
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
-# todo, add it back
-#concurrency:
-#  group: ${{ github.event.inputs.ref || github.ref }}-workflow-unit-tests #-${{ github.event.inputs.test_names }}
-#  cancel-in-progress: true
+concurrency:
+  group: ${{ github.event.inputs.ref || github.ref }}-workflow-unit-tests #-${{ github.event.inputs.test_names }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
