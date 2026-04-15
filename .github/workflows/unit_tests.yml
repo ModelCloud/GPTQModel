@@ -488,6 +488,7 @@ jobs:
         run: |
           uv venv pypi_pip_env
           source pypi_pip_env/bin/activate
+          uv pip install pip -U
           pip install gptqmodel torch
 
       - name: Test pypi uv
@@ -500,6 +501,7 @@ jobs:
         run: |
           uv venv local_pip_env
           source local_env/bin/activate
+          uv pip install pip -U
           pip install . torch
 
       - name: test local uv
