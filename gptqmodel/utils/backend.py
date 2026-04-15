@@ -6,8 +6,6 @@
 from enum import Enum
 from typing import Any, Optional, Union
 
-import torch
-
 
 class BACKEND(str, Enum):
     AUTO = "auto"  # choose the optimal local kernel based on quant_config compatibility
@@ -155,17 +153,6 @@ def _activation_field(payload: Any, name: str, default: Any = None) -> Any:
     return getattr(payload, name, default)
 
 
-def _awq_dynamic_fp8_marlin_available(input_activations: Any) -> bool:
-    if not bool(_activation_field(input_activations, "dynamic", False)):
-        return False
-    if str(_activation_field(input_activations, "format", "")).strip().lower() != "float8_e4m3fn":
-        return False
-    if not torch.cuda.is_available() or not hasattr(torch, "float8_e4m3fn"):
-        return False
-    major, minor = torch.cuda.get_device_capability()
-    return major > 8 or (major == 8 and minor >= 9)
-
-
 def resolve_activation_backend(
     backend: Optional[BACKEND],
     *,
@@ -188,10 +175,10 @@ def resolve_activation_backend(
                 "GPTQ activation quantization currently only supports FORMAT.GPTQ and FORMAT.GPTQ_V2."
             )
 
-        if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE, BACKEND.TORCH, BACKEND.GPTQ_TORCH):
-            return BACKEND.GPTQ_TORCH_FP8
-        if backend == BACKEND.GPTQ_TORCH_FP8:
+        if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
             return backend
+        if backend in (BACKEND.TORCH, BACKEND.GPTQ_TORCH, BACKEND.GPTQ_TORCH_FP8):
+            return BACKEND.GPTQ_TORCH
 
         raise ValueError(
             "GPTQ activation quantization currently requires BACKEND.AUTO, BACKEND.AUTO_TRAINABLE, "
@@ -204,10 +191,11 @@ def resolve_activation_backend(
                 "AWQ activation quantization currently only supports FORMAT.GEMM through the dedicated W4A8 lifecycle."
             )
 
-        prefer_marlin = _awq_dynamic_fp8_marlin_available(input_activations)
-        if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE, BACKEND.TORCH, BACKEND.AWQ_TORCH):
-            return BACKEND.AWQ_MARLIN if prefer_marlin else BACKEND.AWQ_TORCH
-        if backend in (BACKEND.AWQ_TORCH, BACKEND.AWQ_MARLIN):
+        if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
+            return backend
+        if backend in (BACKEND.TORCH, BACKEND.AWQ_TORCH):
+            return BACKEND.AWQ_TORCH
+        if backend == BACKEND.AWQ_MARLIN:
             return backend
 
         raise ValueError(

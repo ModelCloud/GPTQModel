@@ -14,6 +14,7 @@ from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.quantization import FORMAT, METHOD
@@ -22,6 +23,17 @@ from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import AUTO_BACKEND_KERNEL_MAPPING, auto_select_device, select_quant_linear
 from gptqmodel.utils.rocm import IS_ROCM
 from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
+
+
+def _dynamic_awq_input_activations():
+    return {
+        "type": "float",
+        "bits": 8,
+        "format": "float8_e4m3fn",
+        "strategy": "token",
+        "dynamic": True,
+        "symmetric": True,
+    }
 
 
 def _iter_kernel_classes():
@@ -387,6 +399,85 @@ def test_explicit_awq_marlin_backend_selects_asymmetric_kernel(monkeypatch):
     )
 
     assert qlinear_cls is AwqMarlinLinear
+
+
+def test_explicit_awq_torch_backend_accepts_input_activations():
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        device=DEVICE.CPU,
+        backend=BACKEND.AWQ_TORCH,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+        input_activations=_dynamic_awq_input_activations(),
+    )
+
+    assert qlinear_cls is AwqTorchLinear
+
+
+def test_awq_auto_backend_with_input_activations_falls_through_kernel_validation_to_torch():
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+        input_activations=_dynamic_awq_input_activations(),
+    )
+
+    assert qlinear_cls is AwqTorchLinear
+
+
+def test_explicit_awq_marlin_backend_rejects_fp8_input_activations_without_sm89(monkeypatch):
+    monkeypatch.setattr(
+        AwqMarlinLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        AwqMarlinLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (8, 0))
+
+    with pytest.raises(ValueError, match="compute capability >= 8.9"):
+        select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=False,
+            device=DEVICE.CUDA,
+            backend=BACKEND.AWQ_MARLIN,
+            format=FORMAT.GEMM,
+            quant_method=METHOD.AWQ,
+            pack_dtype=torch.int32,
+            input_activations=_dynamic_awq_input_activations(),
+        )
+
+
+def test_explicit_gptq_torch_backend_rejects_input_activations():
+    with pytest.raises(ValueError, match="does not support activation quantization"):
+        select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.CPU,
+            backend=BACKEND.GPTQ_TORCH,
+            format=FORMAT.GPTQ,
+            quant_method=METHOD.GPTQ,
+            pack_dtype=torch.int32,
+            input_activations=_dynamic_awq_input_activations(),
+        )
 
 
 def test_explicit_awq_machete_backend_selects_asymmetric_kernel(monkeypatch):

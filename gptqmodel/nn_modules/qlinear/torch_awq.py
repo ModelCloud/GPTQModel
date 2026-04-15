@@ -37,6 +37,7 @@ class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_ADAPTERS = [Lora]
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_INPUT_ACTIVATIONS = True
 
     REQUIRES_FORMAT_V2 = False
 

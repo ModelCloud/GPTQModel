@@ -745,7 +745,9 @@ class BaseQModel(nn.Module):
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):
             if export_quant_method == METHOD.AWQ:
-                if format_code == FORMAT.GEMM:
+                if format_code == FORMAT.GEMM and getattr(self.quantize_config, "input_activations", None) is not None:
+                    preferred_backend = BACKEND.AUTO
+                elif format_code == FORMAT.GEMM:
                     # Weight-only RTN->AWQ export should stay on the portable torch kernel.
                     preferred_backend = (
                         BACKEND.AWQ_TORCH
@@ -806,6 +808,7 @@ class BaseQModel(nn.Module):
                 device=DEVICE(self.quantize_config.device),
                 pack=True,
                 pack_dtype=self.quantize_config.pack_dtype,
+                input_activations=getattr(self.quantize_config, "input_activations", None),
             )
 
         # Use the provided tokenizer if one is passed to quantize()
@@ -846,6 +849,7 @@ class BaseQModel(nn.Module):
                     backend=preferred_backend,
                     format=format_code,
                     quant_method=export_quant_method,
+                    input_activations=getattr(self.quantize_config, "input_activations", None),
                 )
 
         # rotate model

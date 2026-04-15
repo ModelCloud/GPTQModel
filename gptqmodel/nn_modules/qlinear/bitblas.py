@@ -495,6 +495,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
         device: Optional[DEVICE] = None,
         trainable: Optional[bool] = None,
         adapter: Optional[Adapter] = None,
+        input_activations: Optional[dict] = None,
     ) -> Tuple[bool, Optional[Exception]]:
         ok, err = cls._validate_kernel_combo(bits=bits, sym=sym, dtype=dtype, dynamic=dynamic)
         if not ok:
@@ -513,6 +514,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
             device=device,
             trainable=trainable,
             adapter=adapter,
+            input_activations=input_activations,
         )
 
     def _validate_parameters(self, in_features: int, out_features: int) -> None:

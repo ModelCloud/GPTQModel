@@ -2,7 +2,6 @@ import pytest
 
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization.config import METHOD
-import gptqmodel.utils.backend as backend_module
 from gptqmodel.utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile, resolve_activation_backend
 
 
@@ -37,7 +36,7 @@ def test_name_based_lookup_accepts_canonical_member_names():
     assert normalize_backend("GPTQ_TORCH_FP8") == BACKEND.GPTQ_TORCH_FP8
 
 
-def test_activation_backend_resolution_routes_awq_auto_to_dedicated_torch_path():
+def test_activation_backend_resolution_keeps_awq_auto_for_kernel_validation():
     resolved = resolve_activation_backend(
         BACKEND.AUTO,
         quant_method=METHOD.AWQ,
@@ -52,12 +51,28 @@ def test_activation_backend_resolution_routes_awq_auto_to_dedicated_torch_path()
         },
     )
 
-    assert resolved == BACKEND.AWQ_TORCH
+    assert resolved == BACKEND.AUTO
 
 
-def test_activation_backend_resolution_routes_dynamic_awq_fp8_auto_to_marlin(monkeypatch):
-    monkeypatch.setattr(backend_module, "_awq_dynamic_fp8_marlin_available", lambda payload: True)
+def test_activation_backend_resolution_keeps_gptq_auto_for_kernel_validation():
+    resolved = resolve_activation_backend(
+        BACKEND.AUTO,
+        quant_method=METHOD.GPTQ,
+        checkpoint_format=FORMAT.GPTQ,
+        input_activations={
+            "type": "float",
+            "bits": 8,
+            "format": "float8_e4m3fn",
+            "strategy": "tensor",
+            "dynamic": False,
+            "symmetric": True,
+        },
+    )
 
+    assert resolved == BACKEND.AUTO
+
+
+def test_activation_backend_resolution_keeps_dynamic_awq_fp8_auto_for_kernel_validation():
     resolved = resolve_activation_backend(
         BACKEND.AUTO,
         quant_method=METHOD.AWQ,
@@ -72,7 +87,25 @@ def test_activation_backend_resolution_routes_dynamic_awq_fp8_auto_to_marlin(mon
         },
     )
 
-    assert resolved == BACKEND.AWQ_MARLIN
+    assert resolved == BACKEND.AUTO
+
+
+def test_activation_backend_resolution_maps_explicit_gptq_fp8_alias_to_torch_kernel():
+    resolved = resolve_activation_backend(
+        BACKEND.GPTQ_TORCH_FP8,
+        quant_method=METHOD.GPTQ,
+        checkpoint_format=FORMAT.GPTQ,
+        input_activations={
+            "type": "float",
+            "bits": 8,
+            "format": "float8_e4m3fn",
+            "strategy": "tensor",
+            "dynamic": False,
+            "symmetric": True,
+        },
+    )
+
+    assert resolved == BACKEND.GPTQ_TORCH
 
 
 def test_activation_backend_resolution_rejects_non_dedicated_awq_backend():

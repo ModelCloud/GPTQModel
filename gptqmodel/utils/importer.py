@@ -337,6 +337,7 @@ def hf_select_quant_linear(
         dynamic=None,
         pack_dtype=torch.int32,
         adapter=None,
+        input_activations=None,
     )
 
 # public/stable api exposed to transformer/optimum
@@ -386,6 +387,7 @@ def hf_select_quant_linear_v2(
     pack_dtype_override = None
     if meta is not None:
         pack_dtype_override = meta.get("pack_dtype", None)
+    input_activations = meta.get("input_activations") if isinstance(meta, dict) else None
     # GEMV_FAST checkpoints are packed as int16; default to int32 otherwise.
     default_pack_dtype = torch.int16 if method == METHOD.AWQ and fmt == FORMAT.GEMV_FAST else torch.int32
     pack_dtype = _normalize_dtype(pack_dtype_override, "pack_dtype") if pack_dtype_override is not None else default_pack_dtype
@@ -418,6 +420,7 @@ def hf_select_quant_linear_v2(
         pack_dtype=pack_dtype,
         dtype=normalized_dtype,
         adapter=None,
+        input_activations=input_activations,
     )
 
 
@@ -438,6 +441,7 @@ def select_quant_linear(
         dtype: Optional[torch.dtype] = None,
         multi_select: bool = False, # return all valid kernels
         adapter: Optional[Adapter] = None,
+        input_activations=None,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
     if isinstance(format, str):
         format = FORMAT(format.lower())
@@ -479,6 +483,7 @@ def select_quant_linear(
                 device=device,
                 trainable=trainable,
                 adapter=adapter,
+                input_activations=input_activations,
             )
             if os.environ.get("DEBUG") and not validate:
                 log.info(f"skip {k} for {str(err)}")
@@ -526,6 +531,8 @@ def select_quant_linear(
         dynamic=dynamic,
         device=device,
         trainable=trainable,
+        adapter=adapter,
+        input_activations=input_activations,
     )
 
     log.info(f"{'Packing ' if pack else ''}Kernel: selected: `{qlinear.__name__}`")

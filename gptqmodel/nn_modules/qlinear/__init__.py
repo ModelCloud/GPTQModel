@@ -49,6 +49,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
     SUPPORTS_DTYPES: List[t.dtype] = None
+    SUPPORTS_INPUT_ACTIVATIONS: bool = False
 
     REQUIRES_FORMAT_V2: bool = False
     AUTOTUNE: bool = False
@@ -65,6 +66,7 @@ class BaseQuantLinear(nn.Module):
                  register_buffers_in_features: int = None,
                  register_buffers_out_features: int = None,
                  dtype: Optional[t.dtype] = None,
+                 input_activations: Optional[Any] = None,
                  validate_kwargs: Optional[Dict[str, Any]] = None,
                  **kwargs):
         super().__init__()
@@ -90,6 +92,7 @@ class BaseQuantLinear(nn.Module):
             "out_features": out_features,
             "dtype": dtype,
             "adapter": adapter,
+            "input_activations": input_activations,
         }
         if validate_kwargs:
             validate_args.update(validate_kwargs)
@@ -229,6 +232,7 @@ class BaseQuantLinear(nn.Module):
             device:Optional[DEVICE]=None,
             trainable:Optional[bool]=None,
             adapter:Optional[Adapter]=None,
+            input_activations: Optional[Any] = None,
     ) -> Tuple[
         bool, Optional[Exception]]:
         ok_once, exp_once = cls.cached_validate_once()
@@ -237,7 +241,8 @@ class BaseQuantLinear(nn.Module):
 
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
                              in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
-                             dtype=dtype, dynamic=dynamic, device=device, trainable=trainable, adapter=adapter)
+                             dtype=dtype, dynamic=dynamic, device=device, trainable=trainable, adapter=adapter,
+                             input_activations=input_activations)
 
     @classmethod
     # internal method and should not be overriden
@@ -364,8 +369,43 @@ class BaseQuantLinear(nn.Module):
         return True, None
 
     @classmethod
+    def _validate_input_activations(
+        cls,
+        *,
+        input_activations: Optional[Any] = None,
+        **_: Any,
+    ) -> Tuple[bool, Optional[Exception]]:
+        try:
+            config = cls._normalized_input_activation_config(input_activations)
+        except Exception as exc:
+            return False, exc
+
+        if config is None:
+            return True, None
+
+        if not hasattr(t, config.format):
+            return False, NotImplementedError(
+                f"{cls} requires a PyTorch build with activation dtype `{config.format}`."
+            )
+
+        if not cls.SUPPORTS_INPUT_ACTIVATIONS:
+            return False, NotImplementedError(
+                f"{cls} does not support activation quantization via `input_activations`."
+            )
+
+        return True, None
+
+    @classmethod
+    def _normalized_input_activation_config(
+        cls,
+        input_activations: Optional[Any],
+    ):
+        return normalize_input_activations(input_activations)
+
+    @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None,
+                  adapter:Optional[Adapter]=None, input_activations: Optional[Any] = None) -> Tuple[bool, Optional[Exception]]:
         ok, err = cls._validate_shared(
             pack_dtype=pack_dtype,
             dtype=dtype,
@@ -381,6 +421,14 @@ class BaseQuantLinear(nn.Module):
             return False, NotImplementedError(err)
 
         ok, err = cls._validate_dynamic_bits(bits=bits, dynamic=dynamic)
+        if not ok:
+            return ok, err
+
+        ok, err = cls._validate_input_activations(
+            input_activations=input_activations,
+            device=device,
+            dtype=dtype,
+        )
         if not ok:
             return ok, err
 
@@ -507,7 +555,8 @@ class GroupedQuantLinear(BaseQuantLinear):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None,
+                  adapter:Optional[Adapter]=None, input_activations: Optional[Any] = None) -> Tuple[bool, Optional[Exception]]:
         ok, err = super()._validate(
             bits=bits,
             group_size=group_size,
@@ -521,6 +570,7 @@ class GroupedQuantLinear(BaseQuantLinear):
             device=device,
             trainable=trainable,
             adapter=adapter,
+            input_activations=input_activations,
         )
         if not ok:
             return ok, err
@@ -1415,7 +1465,8 @@ class AWQuantLinear(PackedGroupedQuantLinear):
                  **kwargs):
         # AWQ W4A8 carries activation QDQ metadata at runtime so replay/inference can
         # use the same calibrated activation path that calibration/search used.
-        self.input_activations = normalize_input_activations(kwargs.pop("input_activations", None))
+        self.input_activations = normalize_input_activations(kwargs.get("input_activations", None))
+        kwargs["input_activations"] = self.input_activations
         super().__init__(bias=bias, register_buffers=False, **kwargs)
 
         if self.input_activations is not None and not self.input_activations.dynamic:

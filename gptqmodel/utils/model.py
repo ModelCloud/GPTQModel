@@ -370,6 +370,7 @@ def make_quant(
         dtype=dtype,
         multi_select=True,
         adapter=extension,
+        input_activations=getattr(qcfg, "input_activations", None),
     )
 
     log.info(f"Kernel: candidates -> `[{', '.join(cls.__name__ for cls in quant_linear_candidates)}]`")
@@ -551,6 +552,7 @@ def create_quant_module(
         out_features=out_features,
         device=DEVICE(device) if isinstance(device, str) else device,
         adapter=adapter, # TODO FIX ME..need to pass Eora if loaded
+        input_activations=tmp_init_kwargs.get("input_activations"),
     )
     if err is not None:
         raise err

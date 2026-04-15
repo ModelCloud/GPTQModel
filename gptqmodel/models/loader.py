@@ -61,8 +61,6 @@ from ..utils.importer import (
 )
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
-from ..utils.machete import _validate_machete_device_support
-from ..utils.marlin import _marlin_capability_supported, _validate_marlin_device_support
 from ..utils.model import (
     auto_dtype,
     convert_gptq_v1_to_v2_format,
@@ -1350,57 +1348,12 @@ def ModelLoader(cls):
 
                     qcfg.runtime_format = FORMAT.GPTQ_V2
 
-        if backend in (BACKEND.GPTQ_MACHETE, BACKEND.AWQ_MACHETE):
-            if is_sharded:
-                raise ValueError(
-                    "Format: The loading of sharded checkpoints with Machete is currently not supported."
-                )
-            if not _validate_machete_device_support():
-                raise ValueError(
-                    f"Kernel: Machete kernel requires compute capability >= 9.0. Detected capability: {torch.cuda.get_device_capability()}"
-                )
-
         if backend in [BACKEND.GPTQ_MARLIN, BACKEND.AWQ_MARLIN] and (
                 preload_qlinear_kernel == ExllamaV2Linear or format_code == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Marlin is currently not supported."
                 )
-            device_capability = torch.cuda.get_device_capability()
-            if backend == BACKEND.GPTQ_MARLIN:
-                if not _validate_marlin_device_support():
-                    raise ValueError(
-                        "Kernel: Marlin kernel requires compute capability >= 7.5 for the "
-                        f"GPTQ Marlin backend. Detected capability: `{device_capability}`."
-                    )
-                if device_capability == (7, 5) and dtype == torch.bfloat16:
-                    raise ValueError(
-                        "Kernel: GPTQ Marlin on Turing (compute capability 7.5) supports "
-                        "dtype=torch.float16 only."
-                    )
-            elif backend == BACKEND.AWQ_MARLIN:
-                if not _marlin_capability_supported(*device_capability) or device_capability[0] < 8:
-                    raise ValueError(
-                        "Kernel: AWQ Marlin requires compute capability >= 8.0. "
-                        f"Detected capability: `{device_capability}`."
-                    )
-                input_activations = getattr(qcfg, "input_activations", None)
-                if (
-                    input_activations is not None
-                    and input_activations.dynamic
-                    and input_activations.format == "float8_e4m3fn"
-                    and not (device_capability[0] > 8 or (device_capability[0] == 8 and device_capability[1] >= 9))
-                ):
-                    raise ValueError(
-                        "Kernel: AWQ Marlin FP8 input activations require compute capability >= 8.9. "
-                        f"Detected capability: `{device_capability}`."
-                    )
-
-            # GPTQ Marlin and AWQ Marlin support fp16 and bf16 compute on Ampere+.
-            if backend == BACKEND.GPTQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
-                raise ValueError("Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
-            if backend == BACKEND.AWQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
-                raise ValueError("AWQ Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
 
 
         if backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
@@ -1465,6 +1418,7 @@ def ModelLoader(cls):
                 quant_method=export_quant_method,
                 device=device,
                 pack_dtype=qcfg.pack_dtype,
+                input_activations=getattr(qcfg, "input_activations", None),
             )
 
         # == step4: set seqlen == #

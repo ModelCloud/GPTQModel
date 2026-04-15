@@ -6,7 +6,7 @@
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
 import os
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 
@@ -20,6 +20,7 @@ from ...utils.marlin import (
     apply_awq_marlin_linear,
     awq_marlin_repack,
     awq_to_marlin_zero_points,
+    marlin_supports_fp8_input_capability,
     marlin_int4_fp8_preprocess,
     marlin_import_exception,
     marlin_make_empty_g_idx,
@@ -58,6 +59,7 @@ class AwqMarlinLinear(AWQuantLinear):
     SUPPORTS_ADAPTERS = [Lora]
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_INPUT_ACTIVATIONS = True
 
     REQUIRES_FORMAT_V2 = False
 
@@ -186,6 +188,47 @@ class AwqMarlinLinear(AWQuantLinear):
                     torch.cuda.get_device_capability(i)[0] >= 8 for i in range(len(CUDA_VISIBLE_DEVICES.split(","))))
             if not has_cuda_v8:
                 raise NotImplementedError("Marlin kernel only supports compute capability >= 8.0.")
+
+    @classmethod
+    def _validate_input_activations(
+        cls,
+        *,
+        input_activations: Optional[Any] = None,
+        device: Optional[DEVICE] = None,
+        **_: Any,
+    ) -> Tuple[bool, Optional[Exception]]:
+        ok, err = super()._validate_input_activations(input_activations=input_activations)
+        if not ok or input_activations is None:
+            return ok, err
+
+        config = cls._normalized_input_activation_config(input_activations)
+        if config is None:
+            return True, None
+
+        if not config.dynamic or config.format != "float8_e4m3fn":
+            return True, None
+
+        if device is not None and device != DEVICE.CUDA:
+            return False, NotImplementedError(
+                "AWQ Marlin FP8 input activations require a CUDA device with compute capability >= 8.9."
+            )
+        if not torch.cuda.is_available():
+            return False, NotImplementedError(
+                "AWQ Marlin FP8 input activations require CUDA with compute capability >= 8.9."
+            )
+
+        try:
+            major, minor = torch.cuda.get_device_capability()
+        except Exception as exc:
+            return False, RuntimeError(f"Failed to query CUDA device capability for AWQ Marlin FP8 inputs: {exc}")
+
+        if not marlin_supports_fp8_input_capability(major, minor):
+            return False, NotImplementedError(
+                "AWQ Marlin FP8 input activations require compute capability >= 8.9. "
+                f"Detected capability: `{(major, minor)}`."
+            )
+
+        return True, None
 
     def _fused_input_dtype(self) -> Optional[torch.dtype]:
         input_activations = getattr(self, "input_activations", None)
