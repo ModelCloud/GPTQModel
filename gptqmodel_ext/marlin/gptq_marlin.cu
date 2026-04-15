@@ -40,6 +40,8 @@
 #endif
 
 #include <ATen/ATen.h>
+#include <mutex>
+#include <vector>
 
 #ifndef MARLIN_SHARED_MEM_GUARD_BYTES
 #  define MARLIN_SHARED_MEM_GUARD_BYTES 0 // 512
@@ -204,6 +206,39 @@ typedef struct {
 bool marlin_prefers_full_sm80(int major_capability, int minor_capability,
                               int sms) {
   return major_capability == 8 && minor_capability == 0 && sms >= 124;
+}
+
+struct marlin_device_info_t {
+  int sms = 0;
+  int max_shared_mem = 0;
+  int major_capability = 0;
+  int minor_capability = 0;
+};
+
+marlin_device_info_t query_marlin_device_info(int device) {
+  marlin_device_info_t info;
+  cudaDeviceGetAttribute(&info.sms, cudaDevAttrMultiProcessorCount, device);
+  cudaDeviceGetAttribute(&info.max_shared_mem,
+                         cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+  cudaDeviceGetAttribute(&info.major_capability,
+                         cudaDevAttrComputeCapabilityMajor, device);
+  cudaDeviceGetAttribute(&info.minor_capability,
+                         cudaDevAttrComputeCapabilityMinor, device);
+  return info;
+}
+
+marlin_device_info_t get_marlin_device_info(int device) {
+  static std::mutex mutex;
+  static std::vector<marlin_device_info_t> cache;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (device >= static_cast<int>(cache.size())) {
+    cache.resize(device + 1);
+  }
+  marlin_device_info_t& info = cache[device];
+  if (info.sms == 0) {
+    info = query_marlin_device_info(device);
+  }
+  return info;
 }
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
@@ -755,10 +790,11 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
   if (has_act_order) {
     // Permute A columns
-    int block_rows = div_ceil(prob_m, sms);
+    int permute_blocks = min(sms, max(prob_m, 1));
+    int block_rows = div_ceil(prob_m, permute_blocks);
     // avoid ">>>" being formatted to "> > >"
     // clang-format off
-    permute_cols_kernel<<<sms, default_threads, 0, stream>>>(
+    permute_cols_kernel<<<permute_blocks, default_threads, 0, stream>>>(
         A_ptr, perm_ptr, a_tmp_ptr, prob_m, prob_k, lda, block_rows);
     // clang-format on
     A_ptr = a_tmp_ptr;
@@ -770,17 +806,12 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     if (is_k_full) has_act_order = false;
   }
 
-  int max_shared_mem = 0;
-  cudaDeviceGetAttribute(&max_shared_mem,
-                         cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+  marlin_device_info_t device_info = get_marlin_device_info(dev);
+  int max_shared_mem = device_info.max_shared_mem;
   TORCH_CHECK(max_shared_mem > 0);
 
-  int major_capability = 0;
-  int minor_capability = 0;
-  cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor,
-                         dev);
-  cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor,
-                         dev);
+  int major_capability = device_info.major_capability;
+  int minor_capability = device_info.minor_capability;
   TORCH_CHECK(major_capability > 7 ||
                   (major_capability == 7 && minor_capability >= 5),
               "marlin kernel only supports Turing or newer GPUs.");
@@ -967,8 +998,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   // auto -1)
   int thread_n = -1;
   // sms: number of SMs to use for the kernel
-  int sms = -1;
-  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
+  int sms = marlin::get_marlin_device_info(a.get_device()).sms;
 
   // Alloc buffers
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
