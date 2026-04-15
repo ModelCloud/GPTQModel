@@ -1,0 +1,61 @@
+name: Test Compatibility
+
+on:
+  push:
+    paths:
+      - pyproject.toml
+  workflow_dispatch:
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.parser.outputs.versions }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check license line changed
+        id: check
+        run: |
+          if git diff HEAD~1 HEAD -- pyproject.toml | grep -q '^[+-].*license = "Apache-2.0"'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v6
+        if: steps.check.outputs.changed == 'true'
+        with:
+          python-version: "3.14"
+
+      - name: Generate version matrix
+        if: steps.check.outputs.changed == 'true'
+        id: parser
+        run: |
+          versions=$(python ci_loop_versions.py setuptools ">=77.0.1,<83")
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.prepare.outputs.versions) }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install package with selected setuptools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . "setuptools==${{ matrix.version }}"
+
+      - name: Show versions
+        run: |
+          python --version
+          python -m pip show setuptools
