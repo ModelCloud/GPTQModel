@@ -272,8 +272,9 @@ jobs:
       - name: Install package from source
         if: ${{ env.ENV_NAME != 'gptqmodel_unit_tests_common' && env.ENV_NAME != 'gptqmodel_unit_tests_models_common' }}
         run: |
+          safe_ref=$(printf '%s' "${{ env.ref }}" | sed 's/[\\/]/_/g')
           python3 .github/scripts/ci_workflow.py install-package \
-            --env-name "${ENV_NAME}_${{ env.ref }}" \
+            --env-name "${ENV_NAME}_$safe_ref" \
             --install-key "${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}" \
             --test-script "${{ matrix.test_script }}" \
             --job "${{ github.job }}" \
@@ -321,8 +322,10 @@ jobs:
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
         run: |
+          safe_ref=$(printf '%s' "${{ env.ref }}" | sed 's/[\\/]/_/g')
+
           python3 .github/scripts/ci_workflow.py cleanup-install-lock \
-            --env-name "${ENV_NAME:-}_${{ env.ref }}" \
+            --env-name "${ENV_NAME:-}_$safe_ref" \
             --install-key "${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}"
           python3 .github/scripts/ci_gpu.py release \
             --base-url "http://${XEON5}" \
@@ -402,8 +405,10 @@ jobs:
       - name: Install package from source
         if: ${{ env.ENV_NAME != 'gptqmodel_unit_tests_common' && env.ENV_NAME != 'gptqmodel_unit_tests_models_common' }}
         run: |
+          safe_ref=$(printf '%s' "${{ env.ref }}" | sed 's/[\\/]/_/g')
+
           python3 .github/scripts/ci_workflow.py install-package \
-            --env-name "${ENV_NAME}" \
+            --env-name "${ENV_NAME}_$safe_ref" \
             --install-key "${{ needs.check-vm.outputs.run_id }}_${{ needs.check-vm.outputs.install_ts }}" \
             --test-script "${{ matrix.test_script }}" \
             --job "${{ github.job }}" \
