@@ -111,7 +111,7 @@ jobs:
           export UV_PYTHON=3.14
           echo "UV_PYTHON=3.14" >> "$GITHUB_ENV"
 
-          env_name="py314_release_source"
+          env_name="gptqmodel_py314_release_source"
           /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Fetch PR by number
@@ -133,6 +133,12 @@ jobs:
           pkg=$(ls -t dist/*.tar.gz | head -n 1 | xargs basename)
           echo "PKG_NAME=$pkg" >> "$GITHUB_ENV"
           twine check "dist/$pkg"
+
+      - name: test installation
+        run: |
+          uv venv local_uv_env
+          source local_uv_env/bin/activate
+          uv pip install "dist/${{ env.PKG_NAME }}" torch
 
       - name: Upload to local
         continue-on-error: true
