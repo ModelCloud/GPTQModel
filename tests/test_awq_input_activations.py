@@ -8,14 +8,14 @@ import torch
 from torch import nn
 
 import gptqmodel.looper.awq_processor as awq_processor_module
-from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.models.writer import QUANT_ACT_LOG_TYPE
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.input_activations import (
     calibrate_input_scale_inv,
-    quantize_input,
     quantize_dequantize_input,
+    quantize_input,
 )
 from gptqmodel.quantization.input_activations_triton import supports_triton_fp8_input_quant
 

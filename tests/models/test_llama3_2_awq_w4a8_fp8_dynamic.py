@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 import torch
-
 from model_test import ModelTest
 
 from gptqmodel import BACKEND

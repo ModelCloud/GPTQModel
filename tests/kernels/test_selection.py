@@ -14,9 +14,9 @@ from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
-from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND

@@ -20,9 +20,8 @@ from ...utils.marlin import (
     apply_awq_marlin_linear,
     awq_marlin_repack,
     awq_to_marlin_zero_points,
-    marlin_supports_fp8_input_capability,
-    marlin_int4_fp8_preprocess,
     marlin_import_exception,
+    marlin_int4_fp8_preprocess,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_permute_bias,
@@ -30,6 +29,7 @@ from ...utils.marlin import (
     marlin_runtime_available,
     marlin_runtime_error,
     marlin_supports_fp8_input,
+    marlin_supports_fp8_input_capability,
     replace_parameter,
 )
 from ...utils.marlin_scalar_type import scalar_types

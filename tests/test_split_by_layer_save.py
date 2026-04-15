@@ -9,7 +9,6 @@ import torch.nn as nn
 from accelerate import load_checkpoint_in_model
 
 from gptqmodel.models.writer import (
-    ModelWriter,
     PROCESS_LOG_LAYER,
     PROCESS_LOG_MODULE,
     PROCESS_LOG_NAME,
@@ -20,6 +19,7 @@ from gptqmodel.models.writer import (
     QUANT_ACT_LOG_TYPE,
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
+    ModelWriter,
 )
 from gptqmodel.quantization.config import FORMAT, METHOD
 
