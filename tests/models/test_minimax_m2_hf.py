@@ -7,7 +7,7 @@
 MiniMax-M2 Hugging Face checkpoint sanity check with streaming output.
 
 Usage:
-    python test_minimax_m2_hf.py \
+    python tests/models/test_minimax_m2_hf.py \
         --model-path /monster/data/model/MiniMax-M2-bf16 \
         --question "How many letter A are there in the word Alphabet? Reply with the number only."
 """
@@ -109,6 +109,7 @@ def build_prompt(tokenizer: AutoTokenizer, question: str) -> str:
 #                 expert, mlp_types
 #             ), f"Layer {layer_idx} expert {expert_idx}: expected MiniMax(M2)MLP, got {type(expert).__name__}"
 #
+
 
 def main() -> None:
     args = parse_args()

@@ -867,7 +867,7 @@ class GPTQ:
                             f"(started at {recovery_initial_damp:.5f})."
                         )
                     return Hinv_result, used_damp
-                except torch._C._LinAlgError as e:
+                except (torch._C._LinAlgError, RuntimeError) as e:
                     last_error = e
                     diag_view.copy_(current_diag)
                     if self.qcfg.damp_auto_increment != 0:
@@ -966,6 +966,8 @@ class GPTQ:
         # H = self.H.to(device=self.H.device)
 
         if use_hessian:
+            # Replace NaN/Inf in H before processing (can occur with some model architectures)
+            self.H.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
             dead = torch.diag(self.H) == 0
             self.H[dead, dead] = 1
             W[:, dead] = 0

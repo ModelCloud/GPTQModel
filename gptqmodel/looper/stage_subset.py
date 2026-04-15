@@ -1030,11 +1030,17 @@ def _run_single_subset_pass(
         return nm.name, nm
 
     for name, named_module in subset.items():
-        # Launch processing for every module in the subset; tasks may run in
-        # parallel as allowed by the device thread pool.
+        # Use submit_serial for CUDA to avoid glibc pthread priority-inheritance
+        # assertion (Ubuntu 24.04 glibc 2.39) when concurrent CUDA threads run
+        # simultaneous Cholesky decompositions.
         tgt_dev = quant_target_devices.get(name, cur_layer_device)
+        _submitter = (
+            DEVICE_THREAD_POOL.submit_serial
+            if torch.device(tgt_dev).type in ("cuda", "xpu", "mps")
+            else DEVICE_THREAD_POOL.submit
+        )
         futures.append(
-            DEVICE_THREAD_POOL.submit(
+            _submitter(
                 tgt_dev,
                 _process_on_worker,
                 processor,

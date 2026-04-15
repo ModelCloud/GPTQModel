@@ -20,6 +20,7 @@
 </p>
 
 ## Latest News
+* 04/15/2026 [main]: ✅Gemma 4 GPTQ package support completed end-to-end. `gptqmodel.models.definitions` now exports the full supported model-definition surface, and the Ampere CUDA path was revalidated on RTX 3090 / RTX 3060 (`sm_86`) hardware with a local Gemma 4 GPTQ model.
 * 04/08/2026 [main]: ✨ All CUDA kernels are now JIT compiled. The PyPI package is now about 300x smaller. On first use, GPT-QModel compiles only the kernels your workload actually needs. Improved Bonsai kernels now support execution `profile` control for `fast` or `low_memory` inference. Model weight loading during quantization has been optimized for large models like `GLM 5.1`. Added `GLM 5` and `GLM 5.1` model support.
 * 04/03/2026 [6.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.0.3): 🎉 New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`, and `FOEM: First-Order Error Matters`. Added PrismML/Bonsai 1bit model quantization (inference only), faster ParoQuant/AWQ kernels, ParoQuant `optimization scope` control: `module` (Paro Lite) or `layer` (Paro reference), plus `Gemma4`, `MiniCPM-O`, `MiniCPM-V`, and `GLM4 MOE lite` model support.
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
@@ -278,7 +279,7 @@ GPT-QModel is validated for Linux, MacOS, and Windows 11:
 
 | Platform        | Device        |     |  Optimized Arch          | Kernels                                       |
 |-----------------|---------------| --- | ------------ |-----------------------------------------------| 
-| 🐧 Linux           | Nvidia GPU    | ✅       | `Ampere+` | Marlin, Exllama V2, Exllama V1, Triton, Torch |
+| 🐧 Linux           | Nvidia GPU    | ✅       | `Ampere+` (`sm_80`/`sm_86`, incl. RTX 3090 / 3060) | Marlin, Exllama V2, Exllama V1, Triton, Torch |
 | 🐧 Linux | AMD GPU     | ✅             |   `7900XT+`,  `ROCm 6.2+` | Exllama V2, Exllama V1, Torch                 |
 | 🐧 Linux | Intel XPU     | ✅             |   `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, Torch              |
 | 🐧 Linux           | Intel/AMD CPU | ✅          | `avx`, `amx` | TorchFused, TorchFusedAWQ, Torch                           |

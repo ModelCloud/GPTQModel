@@ -4,11 +4,11 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
 # Both DeepSeek-v2 and DeepSeek-v2-lite are supported in this model def
-class OlmoeGPTQ(BaseGPTQModel):
+class OlmoeGPTQ(BaseQModel):
 
     dynamic_expert_index = "num_experts"
 
