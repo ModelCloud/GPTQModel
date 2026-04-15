@@ -857,7 +857,7 @@ def ModelLoader(cls):
             backend,
             quant_method=export_quant_method,
             checkpoint_format=format_code,
-            activation=getattr(qcfg, "activation", None),
+            input_activations=getattr(qcfg, "input_activations", None),
         )
 
         # Prism/Bonsai sign-only GGUF tensors only have a torch runtime today.

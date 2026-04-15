@@ -5,6 +5,7 @@ import torch
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
+from gptqmodel.quantization import METHOD
 
 
 class FakeBatchEncoding(dict):
@@ -189,6 +190,18 @@ def test_mode_specific_baseline_value_supports_gpu_mapping(monkeypatch):
     monkeypatch.setattr(_ModeSpecificHarness, "_detect_gpu_profile", classmethod(lambda cls: "RTX4090"))
 
     assert helper._mode_specific_baseline_value("NATIVE_ARC_CHALLENGE_ACC") == 0.53
+
+
+def test_current_load_backend_resolves_auto_to_torch_backend_for_activation_runtime():
+    class _ActivationHarness(ModelTest):
+        METHOD = METHOD.AWQ
+        LOAD_BACKEND = BACKEND.AUTO
+        INPUT_ACTIVATIONS = {"method": "fp8", "format": "f8_e4m3"}
+
+    helper = _ActivationHarness(methodName="runTest")
+
+    assert helper._uses_activation_aware_runtime() is True
+    assert helper._current_load_backend() == BACKEND.TORCH_AWQ
 
 
 def test_evalution_threads_seed_and_explicit_greedy_gen_kwargs(monkeypatch):

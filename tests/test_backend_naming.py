@@ -41,7 +41,7 @@ def test_activation_backend_resolution_routes_awq_auto_to_dedicated_torch_path()
         BACKEND.AUTO,
         quant_method=METHOD.AWQ,
         checkpoint_format=FORMAT.GEMM,
-        activation={"method": "fp8", "format": "f8_e4m3"},
+        input_activations={"method": "fp8", "format": "f8_e4m3"},
     )
 
     assert resolved == BACKEND.AWQ_TORCH
@@ -53,7 +53,7 @@ def test_activation_backend_resolution_rejects_non_dedicated_awq_backend():
             BACKEND.AWQ_GEMM,
             quant_method=METHOD.AWQ,
             checkpoint_format=FORMAT.GEMM,
-            activation={"method": "fp8", "format": "f8_e4m3"},
+            input_activations={"method": "fp8", "format": "f8_e4m3"},
         )
 
 

@@ -542,8 +542,8 @@ class AWQProcessor(LoopProcessor):
     ) -> Optional[torch.Tensor]:
         """Calibrate and cache the static FP8 input scale shared by one AWQ scaling group."""
 
-        activation = getattr(self.qcfg, "activation", None)
-        if activation is None or activation.dynamic:
+        input_activations = getattr(self.qcfg, "input_activations", None)
+        if input_activations is None or input_activations.dynamic:
             return None
 
         for module_name in module_names:
@@ -551,7 +551,7 @@ class AWQProcessor(LoopProcessor):
             if cached is not None:
                 return cached.to(device=x.device, dtype=torch.float32)
 
-        scale_inv = calibrate_input_scale_inv(x, activation)
+        scale_inv = calibrate_input_scale_inv(x, input_activations)
         if scale_inv is None:
             return None
         cached_scale_inv = scale_inv.detach().to(device="cpu", dtype=torch.float32).reshape(())
@@ -570,7 +570,7 @@ class AWQProcessor(LoopProcessor):
         scale_inv = None
         if module_names:
             scale_inv = self._calibrate_activation_scale_inv(module_names, x)
-        return quantize_dequantize_input(x, getattr(self.qcfg, "activation", None), scale_inv=scale_inv)
+        return quantize_dequantize_input(x, getattr(self.qcfg, "input_activations", None), scale_inv=scale_inv)
 
     def _should_fallback_group(
         self,

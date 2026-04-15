@@ -728,8 +728,8 @@ _BITSANDBYTES_4BIT_FORMATS = {"fp4", "nf4"}
 _BITSANDBYTES_8BIT_FORMATS = {"int8"}
 _BITSANDBYTES_FORMATS = _BITSANDBYTES_4BIT_FORMATS | _BITSANDBYTES_8BIT_FORMATS
 _BITSANDBYTES_BLOCK_SIZES = {32, 64, 128, 256, 512, 1024, 2048, 4096}
-# User-facing activation={} payloads intentionally expose a smaller surface than
-# the canonical input_activations checkpoint schema.
+# User-facing input_activations={} payloads intentionally expose a smaller
+# surface than the canonical checkpoint schema.
 _ACTIVATION_METHOD_ALIASES = {"fp8", "float8"}
 
 
@@ -1541,7 +1541,6 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     # map deprecated aliases to canonical fields
     FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
     QUANT_METHOD_FIELD: METHOD_FIELD_CODE,
-    "activation": "input_activations",
     "bnb_quant_type": FORMAT_FIELD_CODE,
     "bnb_block_size": "block_size",
     "bnb_compress_statistics": "compress_statistics",
@@ -1954,19 +1953,19 @@ def _normalize_input_activations(
 
 
 def _normalize_user_activation_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Translate user-facing activation={} shorthand into canonical input_activations kwargs."""
+    """Translate concise input_activations payloads into canonical runtime kwargs."""
 
     normalized = dict(payload)
     method = normalized.pop("method", normalized.pop("dtype", None))
 
     if "scales" in normalized or "scale_mode" in normalized or "scale" in normalized:
         raise ValueError(
-            "QuantizeConfig: `activation` no longer accepts `scales`; scale handling is implied by the activation method/format."
+            "QuantizeConfig: `input_activations` no longer accepts `scales`; scale handling is implied by the activation method/format."
         )
 
-    # Canonical payloads can continue to use the internal input_activations schema
-    # directly. The alias path is only activated when callers provide the new
-    # user-facing activation method or omit it while specifying a format.
+    # Canonical payloads can continue to use the full input_activations schema
+    # directly. The shorthand path is only activated when callers provide an
+    # activation method or omit it while specifying a format.
     if method is None and "format" not in normalized:
         return normalized
 
@@ -1976,18 +1975,27 @@ def _normalize_user_activation_payload(payload: Dict[str, Any]) -> Dict[str, Any
     if method not in _ACTIVATION_METHOD_ALIASES:
         supported = ", ".join(sorted(_ACTIVATION_METHOD_ALIASES))
         raise ValueError(
-            f"QuantizeConfig: activation `method` must be one of {{{supported}}}, got `{method}`."
+            f"QuantizeConfig: input_activations `method` must be one of {{{supported}}}, got `{method}`."
         )
 
     normalized.setdefault("num_bits", 8)
     normalized.setdefault("type", "float")
     normalized.setdefault("format", "float8_e4m3fn")
     normalized.setdefault("strategy", "tensor")
-    # The user-facing activation surface targets the calibrated static-scale
+    # The concise input_activations surface targets the calibrated static-scale
     # AWQ W4A8 path rather than the older dynamic reference implementation.
     normalized.setdefault("dynamic", False)
     normalized.setdefault("implementation", "reference")
     return normalized
+
+
+def _uses_input_activation_shorthand(payload: Any) -> bool:
+    """Return whether an input_activations payload uses the concise W4A8 shorthand surface."""
+
+    if not isinstance(payload, dict):
+        return False
+    keys = {str(key).strip().lower() for key in payload.keys()}
+    return bool(keys) and keys.issubset({"method", "dtype", "format"})
 
 
 def _normalize_dense_vram_strategy(value: Union[str, VramStrategy]) -> VramStrategy:
@@ -2374,6 +2382,10 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
         return kwargs
 
     normalized = dict(kwargs)
+    if "activation" in normalized:
+        raise ValueError(
+            "QuantizeConfig: `activation` is no longer supported. Use `input_activations`."
+        )
     if FORMAT_FIELD_COMPAT_MARLIN in normalized:
         raise ValueError(
             "QuantizeConfig: `is_marlin_format` has been removed. Use `format=\"marlin\"` only for legacy checkpoint inspection, "
@@ -2386,19 +2398,17 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
     if FORMAT_FIELD_CODE not in normalized and FORMAT_FIELD_CHECKPOINT in normalized:
         normalized[FORMAT_FIELD_CODE] = normalized[FORMAT_FIELD_CHECKPOINT]
     normalized.pop(FORMAT_FIELD_CHECKPOINT, None)
-    if "activation" in normalized:
-        if "input_activations" in normalized:
-            raise ValueError("QuantizeConfig: pass only one of `activation` or `input_activations`.")
-        activation_method = normalized.get(METHOD_FIELD_CODE)
-        if activation_method is None and QUANT_METHOD_FIELD in normalized:
-            activation_method = normalized[QUANT_METHOD_FIELD]
-        if activation_method is not None and str(getattr(activation_method, "value", activation_method)).strip().lower() != METHOD.AWQ.value:
-            raise ValueError(
-                "QuantizeConfig: user-facing `activation` currently selects the dedicated AWQ W4A8 path and requires `method='awq'`."
-            )
-        normalized.setdefault(METHOD_FIELD_CODE, METHOD.AWQ)
-        normalized.setdefault(FORMAT_FIELD_CODE, FORMAT.GEMM)
-        normalized["input_activations"] = normalized.pop("activation")
+
+    if (
+        "input_activations" in normalized
+        and METHOD_FIELD_CODE not in normalized
+        and FORMAT_FIELD_CODE not in normalized
+        and _uses_input_activation_shorthand(normalized["input_activations"])
+    ):
+        # Concise W4A8 configs default to the dedicated AWQ GEMM path unless the
+        # caller explicitly requests another method or format.
+        normalized[METHOD_FIELD_CODE] = METHOD.AWQ
+        normalized[FORMAT_FIELD_CODE] = FORMAT.GEMM
     return normalized
 
 
@@ -2539,22 +2549,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     @checkpoint_format.setter
     def checkpoint_format(self, value) -> None:
         self.format = value
-
-    @property
-    def activation(self) -> Optional[InputActivationQuantConfig]:
-        """Expose the user-facing activation alias through the canonical runtime field."""
-
-        return getattr(self, "input_activations", None)
-
-    @activation.setter
-    def activation(self, value: Optional[Union[InputActivationQuantConfig, Dict[str, Any]]]) -> None:
-        """Normalize writes to cfg.activation so callers can avoid internal field names."""
-
-        if not hasattr(self, "input_activations"):
-            if value is None:
-                return
-            raise AttributeError(f"{self.__class__.__name__} does not support `activation`.")
-        self.input_activations = _normalize_input_activations(value)
 
     @property
     def runtime_bits(self):
@@ -2800,11 +2794,17 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             METHOD_FIELD_CODE: METHOD.GPTQ,
             FORMAT_FIELD_CODE: format if format else FORMAT.GPTQ,
         }
+        method_field_present = False
         format_field_present = format is not None
         legacy_checkpoint_format = None
 
         for key, val in quantize_cfg.items():
             key = key.lower()
+
+            if key == "activation":
+                raise ValueError(
+                    "QuantizeConfig: `activation` is no longer supported. Use `input_activations`."
+                )
 
             if key == FORMAT_FIELD_COMPAT_MARLIN:
                 raise ValueError(
@@ -2834,6 +2834,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                 val = not bool(val)
 
             if key == METHOD_FIELD_CODE:
+                method_field_present = True
                 if isinstance(val, str) and val.lower() == FORMAT.MARLIN:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif isinstance(val, str) and val.lower() == FORMAT.BITBLAS:
@@ -2876,6 +2877,17 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         if not format_field_present and legacy_checkpoint_format is not None:
             normalized[FORMAT_FIELD_CODE] = legacy_checkpoint_format
 
+        if (
+            "input_activations" in normalized
+            and not method_field_present
+            and not format_field_present
+            and _uses_input_activation_shorthand(normalized["input_activations"])
+        ):
+            # Concise W4A8 configs default to the dedicated AWQ GEMM path unless
+            # the caller explicitly requests another method or format.
+            normalized[METHOD_FIELD_CODE] = METHOD.AWQ
+            normalized[FORMAT_FIELD_CODE] = FORMAT.GEMM
+
         if quantize_cfg.get(AWQ_PACKING_BACKEND_FIELD) == "llm-awq":
             normalized[METHOD_FIELD_CODE] = METHOD.AWQ
             normalized[FORMAT_FIELD_CODE] = FORMAT.LLM_AWQ
@@ -2888,7 +2900,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "hessian": "hessian",
             "gptaq": "gptaq",
             "foem": "foem",
-            "input_activations": "input_activations",
             "weight_only": "weight_only",
             "preprocessors": "preprocessors",
             "gc_mode": "gc_mode",
@@ -2939,6 +2950,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_channel_scale_clamp_max": "opt_channel_scale_clamp_max",
         }
         if isinstance(meta_payload, dict):
+            if "input_activations" in meta_payload:
+                raise ValueError(
+                    "QuantizeConfig: `meta.input_activations` is invalid. "
+                    "Activation quantization must be stored as the top-level `input_activations` field."
+                )
             for normalized_key, meta_key in meta_field_map.items():
                 if normalized_key not in normalized and meta_key in meta_payload:
                     normalized[normalized_key] = meta_payload.get(meta_key)
@@ -3246,8 +3262,6 @@ class GPTQConfig(PreProcessorConfig):
         meta_payload["mse"] = self.mse
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
-        if self.input_activations is not None:
-            meta_payload["input_activations"] = self.input_activations.to_dict()
         meta_payload["hessian"] = {
             "chunk_size": self.hessian.chunk_size,
             "chunk_bytes": self.hessian.chunk_bytes,
@@ -3257,6 +3271,10 @@ class GPTQConfig(PreProcessorConfig):
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["sym"] = self.sym
         out[FORMAT_FIELD_CODE] = self.format
+        if self.input_activations is not None:
+            # Activation quantization changes backend selection and the runtime
+            # forward path, so it belongs in the top-level checkpoint payload.
+            out["input_activations"] = self.input_activations.to_dict()
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         if self.input_activations is None:
@@ -3291,16 +3309,14 @@ class AWQConfig(PreProcessorConfig):
             self.format = FORMAT.GEMM
         super().__post_init__()
         self.input_activations = _normalize_input_activations(self.input_activations)
-        if self.activation is not None and self.format != FORMAT.GEMM:
+        if self.input_activations is not None and self.format != FORMAT.GEMM:
             raise ValueError(
-                "AWQConfig: activation quantization currently uses the dedicated AWQ W4A8 GEMM lifecycle, "
+                "AWQConfig: input activation quantization currently uses the dedicated AWQ W4A8 GEMM lifecycle, "
                 "so `format` must be `gemm`."
             )
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)
-        if self.input_activations is not None:
-            meta_payload["input_activations"] = self.input_activations.to_dict()
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         if self.input_activations is None:
@@ -3313,6 +3329,10 @@ class AWQConfig(PreProcessorConfig):
         out["zero_point"] = not self.sym
         out["version"] = self.format
         out[FORMAT_FIELD_CODE] = self.format
+        if self.input_activations is not None:
+            # Activation quantization changes backend selection and the runtime
+            # forward path, so it belongs in the top-level checkpoint payload.
+            out["input_activations"] = self.input_activations.to_dict()
 
 
 @dataclass

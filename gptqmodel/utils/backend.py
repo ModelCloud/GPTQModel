@@ -150,11 +150,11 @@ def resolve_activation_backend(
     *,
     quant_method: Optional[Union[str, Any]],
     checkpoint_format: Optional[Union[str, Any]],
-    activation: Any,
+    input_activations: Any,
 ) -> Optional[BACKEND]:
     """Resolve the dedicated runtime backend used by activation-aware quantization paths."""
 
-    if activation is None:
+    if input_activations is None:
         return backend
 
     method = _normalize_method(quant_method)

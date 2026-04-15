@@ -220,9 +220,9 @@ class ModelTest(unittest.TestCase):
     BNB_FORMAT = None
     BNB_BLOCK_SIZE = None
     BNB_COMPRESS_STATISTICS = None
-    # Optional user-facing activation quantization payload passed through the
+    # Optional input-activation quantization payload passed through the
     # dedicated activation-aware lifecycle under test.
-    ACTIVATION = None
+    INPUT_ACTIVATIONS = None
 
     PAROQUANT_ROTATION_EPOCHS = None
     PAROQUANT_FINETUNE_EPOCHS = None
@@ -962,7 +962,16 @@ class ModelTest(unittest.TestCase):
         effective = getattr(self, "_effective_load_backend", None)
         if effective is not None and self.LOAD_BACKEND == BACKEND.MARLIN:
             return effective
+        if self.LOAD_BACKEND in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE) and self._uses_activation_aware_runtime():
+            # Activation-aware W4A8 tests only support the dedicated torch runtime,
+            # so AUTO needs to resolve to that backend before eval-result reuse.
+            return self._torch_backend()
         return self.LOAD_BACKEND
+
+    def _uses_activation_aware_runtime(self) -> bool:
+        """Return whether the current model test exercises a dedicated activation-QDQ runtime."""
+
+        return bool(getattr(self, "INPUT_ACTIVATIONS", None))
 
     def _torch_backend(self) -> BACKEND:
         if self.METHOD == METHOD.AWQ:
@@ -983,12 +992,17 @@ class ModelTest(unittest.TestCase):
         torch_backend = self._torch_backend()
         torch_fused_backend = self._torch_fused_backend()
         format_family = resolve_quant_format(self.FORMAT, self.METHOD)
+        activation_aware_runtime = self._uses_activation_aware_runtime()
 
         if format_family == FORMAT.GGUF:
             compare_backends = (torch_backend,)
         elif format_family == FORMAT.BITSANDBYTES:
             compare_backends = (BACKEND.BITSANDBYTES,)
         elif format_family == FORMAT.FP8:
+            compare_backends = (torch_backend,)
+        elif activation_aware_runtime:
+            # Activation-aware quantization currently only has a single supported
+            # torch runtime, so skip backend fan-out during post-quant validation.
             compare_backends = (torch_backend,)
         elif format_family == FORMAT.EXL3:
             compare_backends = (self.LOAD_BACKEND,)
@@ -1503,7 +1517,7 @@ class ModelTest(unittest.TestCase):
             hessian=HessianConfig(chunk_size=self.HESSIAN_CHUNK_SIZE),
             moe=self.MOE_CONFIG,
             offload_to_disk=self.OFFLOAD_TO_DISK,
-            activation=copy.deepcopy(self.ACTIVATION),
+            input_activations=copy.deepcopy(self.INPUT_ACTIVATIONS),
         )
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):

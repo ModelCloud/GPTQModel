@@ -736,7 +736,7 @@ class BaseQModel(nn.Module):
             requested_backend,
             quant_method=export_quant_method,
             checkpoint_format=format_code,
-            activation=getattr(self.quantize_config, "activation", None),
+            input_activations=getattr(self.quantize_config, "input_activations", None),
         )
 
         preferred_backend = requested_backend

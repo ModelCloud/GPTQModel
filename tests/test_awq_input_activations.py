@@ -105,7 +105,7 @@ class TestAwqInputActivations:
             bits=4,
             group_size=16,
             sym=False,
-            activation={
+            input_activations={
                 "method": "fp8",
                 "format": "f8_e4m3",
             },
@@ -114,8 +114,8 @@ class TestAwqInputActivations:
 
         first = torch.randn(2, 3, 16, dtype=torch.float16)
         second = torch.randn(2, 3, 16, dtype=torch.float16) * 2.0
-        expected_scale_inv = calibrate_input_scale_inv(first, qcfg.activation)
-        expected_second = quantize_dequantize_input(second, qcfg.activation, scale_inv=expected_scale_inv)
+        expected_scale_inv = calibrate_input_scale_inv(first, qcfg.input_activations)
+        expected_second = quantize_dequantize_input(second, qcfg.input_activations, scale_inv=expected_scale_inv)
 
         observed_calls = {"count": 0}
         original = awq_processor_module.calibrate_input_scale_inv
@@ -227,7 +227,7 @@ class TestAwqInputActivations:
             bits=4,
             group_size=16,
             sym=False,
-            activation={
+            input_activations={
                 "method": "fp8",
                 "format": "f8_e4m3",
             },

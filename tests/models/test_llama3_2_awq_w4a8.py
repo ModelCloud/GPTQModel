@@ -21,10 +21,10 @@ from gptqmodel.quantization import FORMAT, METHOD
 
 @pytest.mark.skipif(
     (not torch.cuda.is_available()) or (not hasattr(torch, "float8_e4m3fn")),
-    reason="CUDA with FP8 dtypes is required for AWQ W4A8 smoke coverage.",
+    reason="CUDA with FP8 dtypes is required for AWQ W4A8 Evalution coverage.",
 )
 class TestLlama3_2_AWQ_W4A8(ModelTest):
-    """Smoke-test the dedicated user-facing AWQ W4A8 lifecycle on Llama 3.2 1B Instruct."""
+    """Quantize and Evalution-test the dedicated AWQ W4A8 lifecycle on Llama 3.2 1B Instruct."""
 
     SAVE_PATH = os.environ.get(
         "GPTQMODEL_LLAMA3_2_AWQ_W4A8_SAVE_PATH",
@@ -33,10 +33,9 @@ class TestLlama3_2_AWQ_W4A8(ModelTest):
     DELETE_QUANTIZED_MODEL = False
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
     TORCH_DTYPE = torch.float16
+    EVAL_BATCH_SIZE = 64
     DATASET_SIZE = 64
     DATASET_CONCAT_SIZE = 512
-    GENERATE_EVAL_SIZE_MIN = 32
-    GENERATE_EVAL_SIZE_MAX = 32
 
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
@@ -49,9 +48,61 @@ class TestLlama3_2_AWQ_W4A8(ModelTest):
     LOAD_BACKEND = BACKEND.AUTO
     KERNEL_QUANT = {AwqTorchLinear}
     KERNEL_INFERENCE = {AwqTorchLinear}
-    ACTIVATION = {
+    INPUT_ACTIVATIONS = {
         "method": "fp8",
         "format": "f8_e4m3",
+    }
+    # GPU 0 on this host reports as the Ampere datacenter board `PG506-230`,
+    # and ModelTest resolves that path through the shared A100-class baseline.
+    EVAL_TASKS_SLOW = {
+        "gsm8k_platinum_cot": {
+            "chat_template": True,
+            "evalution_use_model_path": True,
+            "evalution_batch_size": "auto",
+            "evalution_model_args": {
+                "dtype": "bfloat16",
+                "attn_implementation": "paged|flash_attention_2",
+                "device": "cuda:0",
+            },
+            "evalution_suite_kwargs": {
+                "batch_size": 32,
+                "max_new_tokens": 256,
+                "stream": True,
+            },
+            "acc,num": {
+                "value": {
+                    "A100": 0.3316790736145575,
+                    "RTX4090": 0.3242349048800662,
+                },
+                "floor_pct": 0.04,
+            },
+        },
+    }
+    EVAL_TASKS_FAST = {
+        "gsm8k_platinum_cot": {
+            "chat_template": True,
+            "evalution_use_model_path": True,
+            "evalution_batch_size": "auto",
+            "evalution_model_args": {
+                "dtype": "bfloat16",
+                "attn_implementation": "paged|flash_attention_2",
+                "device": "cuda:0",
+            },
+            "evalution_suite_kwargs": {
+                "batch_size": 32,
+                "max_new_tokens": 256,
+                "stream": True,
+                "max_rows": 128,
+            },
+            "acc,num": {
+                "value": {
+                    "A100": 0.515625,
+                    "RTX4090": 0.5,
+                },
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
     }
 
     def _assert_static_activation_scales(self, model):
@@ -66,17 +117,6 @@ class TestLlama3_2_AWQ_W4A8(ModelTest):
         self.assertTrue(hasattr(first, "input_scale_inv"))
         self.assertGreater(float(first.input_scale_inv.item()), 0.0)
 
-    def test_llama3_2_awq_w4a8_smoke(self):
-        model, tokenizer, _ = self.quantModel(
-            self.NATIVE_MODEL_ID,
-            trust_remote_code=self.TRUST_REMOTE_CODE,
-            dtype=self.TORCH_DTYPE,
-            need_eval=False,
-            call_perform_post_quant_validation=False,
-        )
-        try:
-            self.check_kernel(model, self.KERNEL_INFERENCE)
-            self._assert_static_activation_scales(model)
-            self.assertInference(model, tokenizer)
-        finally:
-            self._cleanup_quantized_model(model, enabled=self.DELETE_QUANTIZED_MODEL)
+    def test_llama3_2_awq_w4a8(self):
+        self.quantize_and_evaluate()
+        self._assert_static_activation_scales(self.model)
