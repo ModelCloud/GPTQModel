@@ -208,6 +208,17 @@ bool marlin_prefers_full_sm80(int major_capability, int minor_capability,
   return major_capability == 8 && minor_capability == 0 && sms >= 124;
 }
 
+int marlin_full_sm80_exact_thread_m_blocks(int prob_m) {
+  switch (prob_m) {
+    case 96:
+      return 2;
+    case 160:
+      return 2;
+    default:
+      return -1;
+  }
+}
+
 struct marlin_device_info_t {
   int sms = 0;
   int max_shared_mem = 0;
@@ -831,23 +842,31 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   int max_thread_m_blocks = 4;
   bool full_sm80 =
       marlin_prefers_full_sm80(major_capability, minor_capability, sms);
+  bool disable_full_sm80_exact_split = false;
   while (rest_m) {
     int thread_k = thread_k_init;
     int thread_n = thread_n_init;
     bool manual_override = thread_k != -1 && thread_n != -1;
     int attempt_thread_m_blocks = max_thread_m_blocks;
-    // On 124-SM A100 boards, an exact M=96 launch maps to 3 M tiles. Running
-    // it as a single tm=2 launch keeps all 129 CTA tiles in one pass and
-    // consistently beats the default 64+32 split.
-    if (!manual_override && full_sm80 && rest_m == 96 &&
-        attempt_thread_m_blocks > 2) {
-      attempt_thread_m_blocks = 2;
+    bool force_exact_split = false;
+    // On the local 124-SM sm_80 boards, a few exact-M shapes consistently beat
+    // the generic split path when we keep all M tiles in one launch. This
+    // avoids tiny remainder launches such as 128+32.
+    if (!manual_override && full_sm80 && !disable_full_sm80_exact_split) {
+      int exact_thread_m_blocks = marlin_full_sm80_exact_thread_m_blocks(rest_m);
+      if (exact_thread_m_blocks > 0 &&
+          rest_m % (exact_thread_m_blocks * 16) == 0 &&
+          attempt_thread_m_blocks > exact_thread_m_blocks) {
+        attempt_thread_m_blocks = exact_thread_m_blocks;
+        force_exact_split = true;
+      }
     }
 
     int par_count = rest_m / (attempt_thread_m_blocks * 16);
     if (par_count > max_par) par_count = max_par;
     int prob_m_split =
         par_count > 0 ? (par_count * (attempt_thread_m_blocks * 16)) : rest_m;
+    if (force_exact_split) prob_m_split = rest_m;
 
     int thread_m_blocks =
         min(div_ceil(prob_m_split, 16), attempt_thread_m_blocks);
@@ -870,6 +889,11 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
           num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
           stages, max_shared_mem, major_capability, minor_capability, sms);
       thread_tfg = exec_cfg.tb_cfg;
+      if (thread_tfg.thread_k == -1 && force_exact_split) {
+        disable_full_sm80_exact_split = true;
+        max_thread_m_blocks = 4;
+        continue;
+      }
       if (thread_tfg.thread_k == -1 && attempt_thread_m_blocks > 1) {
         max_thread_m_blocks = attempt_thread_m_blocks - 1;
         continue;
