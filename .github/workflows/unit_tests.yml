@@ -217,6 +217,19 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
+      - name: uncompress uv cache
+        run: |
+          if [ -f /monster/ci/dist/uv.tar.zst ]; then
+            mkdir -p /opt/uv/cache
+            rm -rf /opt/uv/cache/*
+            tar -I zstd -xf /monster/ci/dist/uv.tar.zst -C /opt/uv/cache
+          fi
+          if [ -f /monster/ci/dist/uv.tar.xz ]; then
+            mkdir -p /opt/uv/cache
+            rm -rf /opt/uv/cache/*
+            tar -xJf /monster/ci/dist/uv.tar.xz -C /opt/uv/cache
+          fi
+
       - name: Activate uv env
         run: |
           echo "-- loading unit test's config --"
@@ -453,11 +466,6 @@ jobs:
           git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
-
-      - name: Clean uv
-        run: |
-          ls
-          # uv cache clean
 
       - name: Activate uv env
         run: |
