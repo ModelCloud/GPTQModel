@@ -496,7 +496,7 @@ jobs:
           source local_uv_env/bin/activate
           uv pip install . torch -U
 
-  prepare-compat:
+  prepare-setuptools:
     runs-on: ubuntu-latest
     outputs:
       versions: ${{ steps.parser.outputs.versions || '[]' }}
@@ -511,8 +511,8 @@ jobs:
           versions=$(python .github/scripts/ci_loop_versions.py setuptools ">=77.0.1,<83")
           echo "versions=$versions" >> "$GITHUB_OUTPUT"
 
-  check-compat:
-    needs: prepare-compat
+  check-setuptools:
+    needs: prepare-setuptools
     if: needs.prepare.outputs.versions != '[]'
     runs-on: ubuntu-latest
     strategy:
