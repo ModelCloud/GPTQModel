@@ -217,25 +217,35 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: uncompress uv cache
+      - name: decompress uv cache
         continue-on-error: true
         run: |
           if [ -f /opt/dist/uv.tar.zst ]; then
+            echo "decompressing uv.tar.zst..."
             mkdir -p /opt/uv/cache/tmp
             rm -rf /opt/uv/cache/tmp/*
             tar -I zstd -xf /opt/dist/uv.tar.zst -C /opt/uv/cache/tmp
           
             rm -rf /opt/uv/cache/uv
             mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
+            echo "done!"
+            ls -ahl /opt/uv/cache
+            echo "=========="
+            ls -ahl /opt/uv/cache/uv
           fi
           
           if [ -f /opt/dist/uv.tar.xz ]; then
+            echo "decompressing uv.tar.xz..."
             mkdir -p /opt/uv/cache/tmp
             rm -rf /opt/uv/cache/tmp/*
             tar -xJf /opt/dist/uv.tar.xz -C /opt/uv/cache/tmp
           
             rm -rf /opt/uv/cache/uv
             mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
+            echo "done!"
+            ls -ahl /opt/uv/cache
+            echo "=========="
+            ls -ahl /opt/uv/cache/uv
           fi
 
       - name: Activate uv env
@@ -475,7 +485,7 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: uncompress uv cache
+      - name: decompress uv cache
         continue-on-error: true
         run: |
           if [ -f /opt/dist/uv.tar.zst ]; then
