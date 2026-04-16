@@ -139,7 +139,7 @@ def main() -> int:
         append_github_env("STEP_TIMESTAMP", str(now_ms()))
         print(f"CUDA_VISIBLE_DEVICES set to {resp}")
 
-        print(subprocess.getoutput(f'nvidia-smi -i {resp} --query-gpu=name,serial --format=csv'))
+        print(subprocess.getoutput(f'nvidia-smi -i {resp} --query-gpu=name --format=csv'))
 
         print_status(args.base_url)
         return 0
