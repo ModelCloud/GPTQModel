@@ -259,14 +259,16 @@ def _replace_module(module, child, name, level: int = 0, debug: bool = False) ->
     if debug:
         log.info(f"{level_indent} Hook: {instance_type.__name__}: {name}")
 
-    # Replace nn.Linear with HookedLinear, except PhimoeTopKRouter which returns a tuple in forward()
-    if isinstance(child, torch.nn.Linear) and child.__class__.__name__ != "PhimoeTopKRouter":
+    # Only replace plain nn.Linear. Subclasses may override forward() and
+    # change return contract (e.g. PhimoeTopKRouter, Llama4Router), which HookedLinear
+    # cannot preserve.
+    if instance_type is torch.nn.Linear:
         setattr(module, name, HookedLinear.from_linear(child))
-    elif isinstance(child, transformers.Conv1D):
+    elif instance_type is transformers.Conv1D:
         setattr(module, name, HookedTransformerConv1D.from_conv1d(child))
-    elif isinstance(child, nn.Conv1d):
+    elif instance_type is nn.Conv1d:
         setattr(module, name, HookedConv1d.from_conv1d(child))
-    elif isinstance(child, nn.Conv2d):
+    elif instance_type is nn.Conv2d:
         setattr(module, name, HookedConv2d.from_conv2d(child))
     else:
         if debug:
