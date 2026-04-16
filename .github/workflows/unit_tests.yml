@@ -280,7 +280,8 @@ jobs:
 
           echo "-- setting up env --"
           safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
-          env_name="gptqmodel_$safe_ref_test_${{ matrix.test_script }}"
+          env_name="gptqmodel_${safe_ref}_test_${{ matrix.test_script }}"
+          echo "env_name: $env_name"
           # will clean later
           mv /opt/uv/venvs/$env_name "/opt/uv/tmp/${env_name}_$(date +%s)" || true
           /opt/uv/setup_uv_venv.sh $env_name
@@ -567,7 +568,8 @@ jobs:
 
           echo "-- setting up env --"
           safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
-          env_name="gptqmodel_$safe_ref_test_${{ matrix.test_script }}"
+          env_name="gptqmodel_${safe_ref}_test_${{ matrix.test_script }}"
+          echo "env_name: $env_name"
           # will clean later
           mv /opt/uv/venvs/$env_name "/opt/uv/tmp/${env_name}_$(date +%s)" || true
           /opt/uv/setup_uv_venv.sh $env_name
