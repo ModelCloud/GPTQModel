@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import copy
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 import torch
 import transformers
@@ -276,7 +276,13 @@ def _replace_module(module, child, name, level: int = 0, debug: bool = False) ->
     return True
 
 
-def replace_module_with_hooked_legacy(module, level: int = 0, quant_lm_head: bool = False):
+def replace_module_with_hooked_legacy(
+    module,
+    level: int = 0,
+    quant_lm_head: bool = False,
+    skip_module_paths: Optional[Set[str]] = None,
+    _prefix: str = "",
+):
     # if level == 0:
     #     log.info("Hooked Modules: Using legacy based config for targeting of modules")
 
@@ -284,8 +290,18 @@ def replace_module_with_hooked_legacy(module, level: int = 0, quant_lm_head: boo
         if not quant_lm_head and hasattr(module, "get_output_embeddings") and child == module.get_output_embeddings():
             continue
 
+        child_path = f"{_prefix}.{name}" if _prefix else name
+        if skip_module_paths and child_path in skip_module_paths:
+            continue
+
         if not _replace_module(module, child, name, level, quant_lm_head):
-            replace_module_with_hooked_legacy(child, level=level+1, quant_lm_head=quant_lm_head)
+            replace_module_with_hooked_legacy(
+                child,
+                level=level + 1,
+                quant_lm_head=quant_lm_head,
+                skip_module_paths=skip_module_paths,
+                _prefix=child_path,
+            )
 
 # deprecated features
 def replace_module_with_hooked_tree(module, tree: Union[List,Dict] = [], level: int = 0, debug: bool = False):

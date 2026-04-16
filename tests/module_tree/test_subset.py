@@ -29,7 +29,7 @@ from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
 from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
 from gptqmodel.models.definitions.qwen3_5_moe import Qwen3_5_MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
-from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
+from gptqmodel.nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig, VramStrategy
 from gptqmodel.utils.model import find_modules, get_module_by_name_prefix
@@ -299,6 +299,28 @@ class _MiniLayer(torch.nn.Module):
         x = self.self_attn.o_proj(x)
         self.after_o_proj_called = True
         return (x,)
+
+
+class _MiniRouterLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.router = torch.nn.Linear(4, 4)
+        self.proj = torch.nn.Linear(4, 4)
+
+    def forward(self, hidden_states, **kwargs):
+        x = self.router(hidden_states)
+        x = self.proj(x)
+        return (x,)
+
+
+def test_replace_module_with_hooked_legacy_skips_not_quantized_paths():
+    layer = _MiniRouterLayer()
+
+    replace_module_with_hooked_legacy(layer, skip_module_paths={"router"})
+
+    assert isinstance(layer.router, torch.nn.Linear)
+    assert not isinstance(layer.router, HookedLinear)
+    assert isinstance(layer.proj, HookedLinear)
 
 
 def test_stage_subset_early_stop_and_callbacks():
