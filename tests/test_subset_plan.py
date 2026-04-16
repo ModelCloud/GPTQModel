@@ -6,7 +6,7 @@ import torch
 
 from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.looper.stage_subset import build_layer_subset_plans, build_subset_plan
+from gptqmodel.looper.stage_subset import SubsetPlan, build_layer_subset_plans, build_subset_plan
 from gptqmodel.quantization.config import VramStrategy
 
 
@@ -82,6 +82,54 @@ def test_build_subset_plan_skips_forward_for_no_forward_processor():
     assert plan.forward_mode == "parallel"
     assert plan.module_chunks == [subset]
     assert plan.calibration_coverage_policy.validate_input_coverage is False
+
+
+def test_subset_plan_for_modules_preserves_parent_ordered_module_names():
+    modules = {
+        "mlp.experts.0.gate_proj": _make_named_module("mlp.experts.0.gate_proj"),
+        "mlp.shared_expert.gate_proj": _make_named_module("mlp.shared_expert.gate_proj"),
+        "mlp.experts.1.gate_proj": _make_named_module("mlp.experts.1.gate_proj"),
+    }
+    plan = SubsetPlan(
+        modules=modules,
+        subset_index=0,
+        subset_total=1,
+        execute_forward=True,
+        replay_after_process=False,
+        forward_mode="parallel",
+        batch_count=1,
+        forward_row_counts=[1],
+        forward_total_rows=1,
+        moe_groups={},
+        forward_device_map={},
+        calibration_coverage_policy=types.SimpleNamespace(
+            validate_input_coverage=False,
+            fallback_enabled=False,
+            prune_uncovered_modules=False,
+            record_dynamic_exclusions=False,
+        ),
+        module_chunks=[modules],
+        ordered_module_names=[
+            "mlp.shared_expert.gate_proj",
+            "mlp.experts.0.gate_proj",
+            "mlp.experts.1.gate_proj",
+        ],
+    )
+
+    chunk_modules = {
+        "mlp.experts.0.gate_proj": modules["mlp.experts.0.gate_proj"],
+        "mlp.shared_expert.gate_proj": modules["mlp.shared_expert.gate_proj"],
+    }
+    chunk_plan = plan.for_modules(chunk_modules)
+
+    assert list(chunk_plan.modules.keys()) == [
+        "mlp.experts.0.gate_proj",
+        "mlp.shared_expert.gate_proj",
+    ]
+    assert chunk_plan.ordered_module_names == [
+        "mlp.shared_expert.gate_proj",
+        "mlp.experts.0.gate_proj",
+    ]
 
 
 def test_build_subset_plan_balanced_moe_uses_serial_forward_and_device_map():

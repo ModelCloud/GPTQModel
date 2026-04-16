@@ -192,27 +192,28 @@ class MoELifecycleHooks:
 
     def get_subset_execution_order(
             self,
-            subset: Dict[str, Any],
+            ordered_module_names: list[str],
             moe_block_prefix: Optional[str],
             experts_attr_name: Optional[str],
             shared_expert_attr_name: Optional[str],
     ) -> list[str]:
         """
-        Infer shared-expert vs routed-expert replay order from the subset keys.
+        Infer shared-expert vs routed-expert replay order from explicit subset names.
 
         The module tree is designed to mirror forward execution order, and
-        subset dictionaries preserve that order from `simple_layer_modules()`.
+        subset planning preserves that ordered module list explicitly.
         Replay should therefore follow the first occurrence of each MoE family
-        in the subset instead of relying on model-specific hardcoded ordering.
+        in `ordered_module_names` instead of relying on dict iteration or
+        model-specific hardcoded ordering.
         """
-        if not subset or moe_block_prefix is None:
+        if not ordered_module_names or moe_block_prefix is None:
             return []
 
         order = []
         expert_prefix = f"{moe_block_prefix}.{experts_attr_name}." if experts_attr_name else None
         shared_prefix = f"{moe_block_prefix}.{shared_expert_attr_name}." if shared_expert_attr_name else None
 
-        for key in subset.keys():
+        for key in ordered_module_names:
             if shared_prefix and key.startswith(shared_prefix):
                 if "shared" not in order:
                     order.append("shared")
@@ -229,6 +230,7 @@ class MoELifecycleHooks:
             hidden_states: torch.Tensor,
             processor: Any,
             subset: Dict[str, Any],
+            ordered_module_names: Optional[list[str]],
             original_forward: callable,
             model_class: type,
             module_looper: Any,
@@ -335,6 +337,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             hidden_states: torch.Tensor,
             processor: Any,
             subset: Dict[str, Any],
+            ordered_module_names: Optional[list[str]],
             original_forward: callable,
             model_class: type,
             module_looper: Any,  # Required for TLS-based hooks pausing
@@ -501,7 +504,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                     del expert_input
 
         execution_order = self.get_subset_execution_order(
-            subset=subset,
+            ordered_module_names=ordered_module_names or [],
             moe_block_prefix=moe_block_prefix,
             experts_attr_name=experts_attr_name,
             shared_expert_attr_name=shared_expert_attr_name,

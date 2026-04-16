@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -69,6 +69,8 @@ class ForwardExecutor:
         *,
         module: torch.nn.Module,
         processor: "LoopProcessor",
+        current_subset: Optional[Dict[str, Any]],
+        ordered_module_names: Optional[List[str]],
         apply_moe_config: bool,
     ):
         """Pick the MoE routing context for a forward pass."""
@@ -89,7 +91,8 @@ class ForwardExecutor:
             self.looper,
             module,
             processor,
-            self.looper._current_subset,
+            current_subset,
+            ordered_module_names,
         )
 
     def run(
@@ -97,6 +100,8 @@ class ForwardExecutor:
         *,
         module: torch.nn.Module,
         processor: "LoopProcessor",
+        current_subset: Optional[Dict[str, Any]] = None,
+        ordered_module_names: Optional[List[str]] = None,
         layer_inputs: List[List[torch.Tensor]],
         layer_input_kwargs: List[Dict[str, torch.Tensor]],
         position_ids: List[torch.Tensor],
@@ -128,6 +133,8 @@ class ForwardExecutor:
             return self.run_single(
                 module=module,
                 processor=processor,
+                current_subset=current_subset,
+                ordered_module_names=ordered_module_names,
                 layer_inputs=layer_inputs,
                 layer_input_kwargs=layer_input_kwargs,
                 position_ids=position_ids,
@@ -152,6 +159,8 @@ class ForwardExecutor:
             return self.run_single(
                 module=module,
                 processor=processor,
+                current_subset=current_subset,
+                ordered_module_names=ordered_module_names,
                 layer_inputs=layer_inputs,
                 layer_input_kwargs=layer_input_kwargs,
                 position_ids=position_ids,
@@ -174,6 +183,8 @@ class ForwardExecutor:
         return self.run_parallel(
             module=module,
             processor=processor,
+            current_subset=current_subset,
+            ordered_module_names=ordered_module_names,
             layer_inputs=layer_inputs,
             layer_input_kwargs=layer_input_kwargs,
             position_ids=position_ids,
@@ -198,6 +209,8 @@ class ForwardExecutor:
         *,
         module: torch.nn.Module,
         processor: "LoopProcessor",
+        current_subset: Optional[Dict[str, Any]] = None,
+        ordered_module_names: Optional[List[str]] = None,
         layer_inputs: List[List[torch.Tensor]],
         layer_input_kwargs: List[Dict[str, torch.Tensor]],
         position_ids: List[torch.Tensor],
@@ -285,6 +298,8 @@ class ForwardExecutor:
                 with self._moe_forward_context(
                     module=module,
                     processor=processor,
+                    current_subset=current_subset,
+                    ordered_module_names=ordered_module_names,
                     apply_moe_config=apply_moe_config,
                 ):
                     module_output = None
@@ -345,6 +360,8 @@ class ForwardExecutor:
         *,
         module: torch.nn.Module,
         processor: "LoopProcessor",
+        current_subset: Optional[Dict[str, Any]] = None,
+        ordered_module_names: Optional[List[str]] = None,
         layer_inputs: List[List[torch.Tensor]],
         layer_input_kwargs: List[Dict[str, torch.Tensor]],
         position_ids: List[torch.Tensor],
@@ -435,6 +452,8 @@ class ForwardExecutor:
                 ctx = self._moe_forward_context(
                     module=replica,
                     processor=processor,
+                    current_subset=current_subset,
+                    ordered_module_names=ordered_module_names,
                     apply_moe_config=apply_moe_config,
                 )
 

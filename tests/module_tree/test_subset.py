@@ -179,15 +179,15 @@ def test_awq_moe_expansion_preserves_non_expert_segments():
     ]]
 
 
-def test_moe_lifecycle_execution_order_follows_subset_key_order():
+def test_moe_lifecycle_execution_order_follows_ordered_module_names():
     hooks = GateUpDownMoELifecycleHooks()
 
     shared_first = hooks.get_subset_execution_order(
-        subset={
-            "mlp.shared_expert.gate_proj": object(),
-            "mlp.shared_expert.up_proj": object(),
-            "mlp.experts.0.gate_proj": object(),
-        },
+        ordered_module_names=[
+            "mlp.shared_expert.gate_proj",
+            "mlp.shared_expert.up_proj",
+            "mlp.experts.0.gate_proj",
+        ],
         moe_block_prefix="mlp",
         experts_attr_name="experts",
         shared_expert_attr_name="shared_expert",
@@ -195,11 +195,11 @@ def test_moe_lifecycle_execution_order_follows_subset_key_order():
     assert shared_first == ["shared", "experts"]
 
     experts_first = hooks.get_subset_execution_order(
-        subset={
-            "mlp.experts.0.gate_proj": object(),
-            "mlp.experts.0.up_proj": object(),
-            "mlp.shared_expert.gate_proj": object(),
-        },
+        ordered_module_names=[
+            "mlp.experts.0.gate_proj",
+            "mlp.experts.0.up_proj",
+            "mlp.shared_expert.gate_proj",
+        ],
         moe_block_prefix="mlp",
         experts_attr_name="experts",
         shared_expert_attr_name="shared_expert",
