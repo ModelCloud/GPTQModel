@@ -23,6 +23,7 @@ from .cpp import (
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
+    local_nvcc_supports_static_global_template_stub,
     resolved_cuda_arch_flags,
 )
 from .logger import setup_logger
@@ -362,7 +363,7 @@ def _machete_hopper_arch_cuda_cflags() -> list[str]:
 
 
 def _machete_extra_cuda_cflags() -> list[str]:
-    return [
+    flags = [
         *_MACHETE_REQUIRED_TORCH_NVCC_UNDEFINES,
         *default_jit_cuda_cflags(
             enable_bf16=True,
@@ -376,6 +377,9 @@ def _machete_extra_cuda_cflags() -> list[str]:
         ),
         *_machete_hopper_arch_cuda_cflags(),
     ]
+    if local_nvcc_supports_static_global_template_stub():
+        flags.insert(0, "-static-global-template-stub=false")
+    return flags
 
 
 def _machete_extra_ldflags() -> list[str]:

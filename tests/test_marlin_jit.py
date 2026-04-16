@@ -194,7 +194,18 @@ def test_nvfp4_global_scale_contract_is_float_in_marlin_sources():
     assert "c1 *= global_scale_f32;" in template_h
 
 
-def test_marlin_extra_cuda_cflags_do_not_override_static_global_template_stub():
+def test_marlin_extra_cuda_cflags_enable_static_global_template_stub_when_local_nvcc_supports_it(monkeypatch):
+    monkeypatch.setattr(marlin_utils, "local_nvcc_supports_static_global_template_stub", lambda: True)
+
+    flags = marlin_utils._marlin_extra_cuda_cflags()
+
+    assert flags[0] == "-static-global-template-stub=false"
+    assert "-static-global-template-stub=true" not in flags
+
+
+def test_marlin_extra_cuda_cflags_skip_static_global_template_stub_when_local_nvcc_lacks_it(monkeypatch):
+    monkeypatch.setattr(marlin_utils, "local_nvcc_supports_static_global_template_stub", lambda: False)
+
     flags = marlin_utils._marlin_extra_cuda_cflags()
 
     assert "-static-global-template-stub=false" not in flags

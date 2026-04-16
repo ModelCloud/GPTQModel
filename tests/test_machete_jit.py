@@ -337,6 +337,7 @@ def test_machete_hopper_arch_cuda_cflags_skip_duplicate_sm90a(monkeypatch):
 
 
 def test_machete_extra_cuda_cflags_keep_only_required_torch_undefines(monkeypatch):
+    monkeypatch.setattr(machete_utils, "local_nvcc_supports_static_global_template_stub", lambda: False)
     monkeypatch.setattr(machete_utils, "_machete_hopper_arch_cuda_cflags", lambda: [])
 
     flags = machete_utils._machete_extra_cuda_cflags()
@@ -350,7 +351,18 @@ def test_machete_extra_cuda_cflags_keep_only_required_torch_undefines(monkeypatc
     assert "-U__CUDA_NO_HALF2_OPERATORS__" not in flags
 
 
-def test_machete_extra_cuda_cflags_do_not_override_static_global_template_stub(monkeypatch):
+def test_machete_extra_cuda_cflags_enable_static_global_template_stub_when_local_nvcc_supports_it(monkeypatch):
+    monkeypatch.setattr(machete_utils, "local_nvcc_supports_static_global_template_stub", lambda: True)
+    monkeypatch.setattr(machete_utils, "_machete_hopper_arch_cuda_cflags", lambda: [])
+
+    flags = machete_utils._machete_extra_cuda_cflags()
+
+    assert flags[0] == "-static-global-template-stub=false"
+    assert flags[1:4] == list(machete_utils._MACHETE_REQUIRED_TORCH_NVCC_UNDEFINES)
+
+
+def test_machete_extra_cuda_cflags_skip_static_global_template_stub_when_local_nvcc_lacks_it(monkeypatch):
+    monkeypatch.setattr(machete_utils, "local_nvcc_supports_static_global_template_stub", lambda: False)
     monkeypatch.setattr(machete_utils, "_machete_hopper_arch_cuda_cflags", lambda: [])
 
     flags = machete_utils._machete_extra_cuda_cflags()

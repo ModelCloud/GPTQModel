@@ -21,6 +21,7 @@ from .cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
     detected_cuda_wheel_include_paths,
+    local_nvcc_supports_static_global_template_stub,
 )
 from .marlin_scalar_type import ScalarType
 from .rocm import IS_ROCM
@@ -174,7 +175,7 @@ def _marlin_extra_cflags() -> list[str]:
 
 
 def _marlin_extra_cuda_cflags() -> list[str]:
-    return default_jit_cuda_cflags(
+    flags = default_jit_cuda_cflags(
         enable_bf16=True,
         include_lineinfo=True,
         include_nvcc_threads=True,
@@ -183,6 +184,10 @@ def _marlin_extra_cuda_cflags() -> list[str]:
         include_fatbin_compression=True,
         include_diag_suppress=True,
     )
+    # This flag is parsed by the local nvcc, not by the Torch wheel metadata.
+    if local_nvcc_supports_static_global_template_stub():
+        flags.insert(0, "-static-global-template-stub=false")
+    return flags
 
 
 _MARLIN_FP16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
