@@ -549,43 +549,29 @@ Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/b
 
 ### Evaluation and Quality Benchmarks
 
-GPT-QModel evaluation is integrated into [Evalution](https://github.com/modelcloud/Evalution).
-We highly recommend using Evalution to validate post-quantization model quality. Regression-only language-model metrics are deprecated in this guide.
+GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a modern benchmarking toolkit with 150+ of the world's most widely used benchmark suites.
+We highly recommend using Evalution to measure post-quant accuracy recovery after quantization instead of relying on narrow regression-only language-model metrics.
 
 ```
 # install Evalution
 pip install Evalution
 ```
 
-Below is a basic sample using Evalution's GPT-QModel engine directly via `engines.GPTQModel`.
+Below is a short example running `gsm8k_platinum` through Evalution's native GPT-QModel engine.
 
 ```py
 import evalution as eval
-import evalution.benchmarks as benchmarks
-import evalution.engines as engines
 
 run = (
-    engines.GPTQModel(
+    eval.GPTQModel(
         backend="marlin",
         device="cuda:0",
-        dtype="auto",
-        batch_size="auto",
     )
-    .model(
-        eval.Model(
-            path="ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1",
-        )
-    )
-    .run(
-        benchmarks.arc_challenge(
-            apply_chat_template=True,
-            batch_size=16,
-        )
-    )
+    .model(eval.Model(path="ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"))
+    .run(eval.benchmarks.gsm8k_platinum(apply_chat_template=True, batch_size=16))
 )
 
-result = run.to_dict()
-print(result["tests"][0]["metrics"])
+print(run.to_dict()["tests"][0]["metrics"])
 
 ```
 ### Dynamic Quantization (Per Module QuantizeConfig Override)
