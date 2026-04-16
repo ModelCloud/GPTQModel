@@ -162,6 +162,19 @@ def _collect_layer_forward_progress(
     return batch_count, forward_row_counts, forward_total_rows
 
 
+def _collect_hook_skip_modules(planning_layer_modules: List[List[str]]) -> set[str]:
+    """Collect module paths flagged as non-quantized in module-tree planning blocks."""
+
+    skip_modules: set[str] = set()
+    for block in planning_layer_modules:
+        for module_name in block:
+            if ":!" in module_name:
+                path = module_name.split(":", 1)[0]
+                if path:
+                    skip_modules.add(path)
+    return skip_modules
+
+
 def _replay_layer_outputs(
     looper: "ModuleLooper",
     *,
@@ -380,6 +393,7 @@ def run_layer_stage(
 
     log = logger or setup_logger()
     durable_progress_logs = live_renderables_suppressed()
+    hook_skip_modules = _collect_hook_skip_modules(planning_layer_modules)
     for layer_index in pb:
         # Iterate over every transformer layer (plus lm_head when enabled) as
         # progress-bar controlled units of work.
@@ -445,7 +459,11 @@ def run_layer_stage(
             if needs_group_pristine:
                 pristine_group_module = copy.deepcopy(module) if needs_pristine_group_clone else None
 
-            replace_module_with_hooked_legacy(module, quant_lm_head=looper.gptq_model.quantize_config.lm_head)
+            replace_module_with_hooked_legacy(
+                module,
+                quant_lm_head=looper.gptq_model.quantize_config.lm_head,
+                skip_module_paths=hook_skip_modules,
+            )
 
             layers[layer_index] = module
 

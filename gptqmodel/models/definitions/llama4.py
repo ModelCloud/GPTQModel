@@ -32,6 +32,7 @@ class Llama4QModel(BaseQModel):
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "feed_forward:moe": {
+                "router": ("router:!",), # Llama4Router.forward() returns two values, skipping its quantization.
                 "experts:0": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
