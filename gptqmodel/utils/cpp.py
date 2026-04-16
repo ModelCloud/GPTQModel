@@ -9,7 +9,6 @@ import hashlib
 import logging
 import math
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -52,7 +51,7 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
     r'^\s*#\s*include\s+"([^"]+)"',
     flags=pcre.Flag.MULTILINE,
 )
-_LOCAL_NVCC_RELEASE_PATTERN = re.compile(r"release\s+(\d+)\.(\d+)")
+_LOCAL_NVCC_RELEASE_PATTERN = pcre.compile(r"release\s+(\d+)\.(\d+)")
 _LOCAL_NVCC_VERSION_LOCK = threading.Lock()
 _LOCAL_NVCC_VERSION_CACHE: tuple[int, int] | None = None
 # Default NVCC internal threading for JIT builds. This is based on clean-build
@@ -106,8 +105,8 @@ def local_nvcc_version_at_least(major: int, minor: int) -> bool:
     return _local_nvcc_version() >= (major, minor)
 
 
-def local_nvcc_supports_static_global_template_stub() -> bool:
-    """Return whether the local nvcc accepts `--static-global-template-stub`."""
+def is_local_nvcc_compatible() -> bool:
+    """Return whether the local nvcc is new enough for required JIT kernel flags."""
 
     return local_nvcc_version_at_least(12, 8)
 
