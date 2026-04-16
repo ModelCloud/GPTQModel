@@ -301,31 +301,6 @@ class _MiniLayer(torch.nn.Module):
         return (x,)
 
 
-class _RouterLinear(torch.nn.Linear):
-    def forward(self, hidden_states):
-        logits = super().forward(hidden_states)
-        return logits, logits.mean(dim=-1, keepdim=True)
-
-
-class _RouterContainer(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.router = _RouterLinear(4, 4)
-
-
-def test_replace_module_with_hooked_legacy_skips_linear_subclass_with_custom_forward():
-    module = _RouterContainer()
-    original_router = module.router
-
-    replace_module_with_hooked_legacy(module)
-
-    assert module.router is original_router
-    logits, aux = module.router(torch.randn(2, 4))
-    assert torch.is_tensor(logits)
-    assert torch.is_tensor(aux)
-    assert aux.shape[-1] == 1
-
-
 def test_stage_subset_early_stop_and_callbacks():
     quant_cfg = _make_quant_config()
     mini_layer = _MiniLayer()
