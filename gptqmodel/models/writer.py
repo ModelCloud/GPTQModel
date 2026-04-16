@@ -42,6 +42,7 @@ from ..quantization.config import (
 from ..utils.backend import BACKEND
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
+    _normalize_legacy_tied_weights_keys,
     prepare_remote_code_compat,
     sanitize_generation_config_file,
     sanitize_model_config,
@@ -609,6 +610,7 @@ def ModelWriter(cls):
             removed_config_attention_attrs = strip_attention_impl_fields(self.model.config)
             if generation_config is not None:
                 removed_generation_attention_attrs = strip_attention_impl_fields(generation_config)
+            _normalize_legacy_tied_weights_keys(self.model)
 
             # Save model config, including generation_config
             # Use empty state_dict hack to bypass saving weights

@@ -179,7 +179,11 @@ class ModelTest(unittest.TestCase):
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
     DATASET_SIZE = 512
+    DATASET_SIZE_FAST = None
+    DATASET_SIZE_SLOW = None
     DATASET_CONCAT_SIZE = None
+    DATASET_CONCAT_SIZE_FAST = None
+    DATASET_CONCAT_SIZE_SLOW = None
     DATASET_CONCAT_SEPARATOR = None
     DATASET_SORT = "desc"
     DELETE_QUANTIZED_MODEL = True
@@ -251,6 +255,8 @@ class ModelTest(unittest.TestCase):
     STOP_AFTER_LAYER: Optional[int] = None
     MOE_CONFIG: Optional[MoEConfig] = None
     OFFLOAD_TO_DISK: bool = True
+    OFFLOAD_TO_DISK_FAST = None
+    OFFLOAD_TO_DISK_SLOW = None
 
     GENERIC_TEST_PROMPTS = [
         {"prompt": "Which city is the capital city of France?", "keywords": ["paris"]},
@@ -338,6 +344,14 @@ class ModelTest(unittest.TestCase):
                 return self._resolve_metric_baseline_value(getattr(self, fallback))
 
         return self._resolve_metric_baseline_value(getattr(self, attr_name, None))
+
+    def _mode_specific_test_setting(self, attr_name: str):
+        mode_suffix = "FAST" if self._is_fast_model_test_mode() else "SLOW"
+        preferred = f"{attr_name}_{mode_suffix}"
+        value = getattr(self, preferred, None)
+        if value is not None:
+            return value
+        return getattr(self, attr_name, None)
 
     def _legacy_metric_ceil_pct(self) -> float:
         if self._is_fast_model_test_mode():
@@ -1499,7 +1513,7 @@ class ModelTest(unittest.TestCase):
             dynamic=self.DYNAMIC,
             hessian=HessianConfig(chunk_size=self.HESSIAN_CHUNK_SIZE),
             moe=self.MOE_CONFIG,
-            offload_to_disk=self.OFFLOAD_TO_DISK,
+            offload_to_disk=self._mode_specific_test_setting("OFFLOAD_TO_DISK"),
         )
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):
@@ -1551,9 +1565,21 @@ class ModelTest(unittest.TestCase):
 
         self._apply_model_compat_quant_overrides(model)
 
+        dataset_size = self._mode_specific_test_setting("DATASET_SIZE")
+        dataset_concat_size = self._mode_specific_test_setting("DATASET_CONCAT_SIZE")
+        log.info(
+            "Calibration dataset config: size=%s, concat_size=%s",
+            dataset_size,
+            dataset_concat_size,
+        )
+
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         if quantize_config.requires_calibration_dataset():
-            calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
+            calibration_dataset = (
+                get_calib_dataset(model)
+                if is_image_to_text_model
+                else self.load_dataset(tokenizer, dataset_size)
+            )
         else:
             calibration_dataset = None
 
@@ -1577,7 +1603,7 @@ class ModelTest(unittest.TestCase):
                 log.info(f"Quantized model artifacts will be saved to: {planned_save_path}")
                 model.quantize(
                     calibration_dataset,
-                    calibration_concat_size=self.DATASET_CONCAT_SIZE,
+                    calibration_concat_size=dataset_concat_size,
                     calibration_concat_separator=self.DATASET_CONCAT_SEPARATOR,
                     calibration_sort=self.DATASET_SORT,
                     backend=self.QUANT_BACKEND,

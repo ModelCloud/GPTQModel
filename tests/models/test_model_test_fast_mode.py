@@ -15,6 +15,19 @@ class _DummyCompatCase(ModelTest):
         return None
 
 
+class _DatasetCompatCase(ModelTest):
+    __test__ = False
+    DATASET_SIZE = 512
+    DATASET_SIZE_FAST = 128
+    DATASET_CONCAT_SIZE = 2048
+    DATASET_CONCAT_SIZE_FAST = 1024
+    OFFLOAD_TO_DISK = True
+    OFFLOAD_TO_DISK_FAST = False
+
+    def runTest(self):
+        return None
+
+
 class _FakeQuantModel:
     def __init__(self, layer_count: int):
         self.model = SimpleNamespace(layers=nn.ModuleList([nn.Linear(1, 1) for _ in range(layer_count)]))
@@ -55,3 +68,21 @@ def test_model_test_fast_mode_first_layers_remain_configurable(monkeypatch):
         "-:^layers\\.4\\.",
         "-:^layers\\.5\\.",
     ]
+
+
+def test_model_test_fast_mode_uses_fast_dataset_overrides(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_MODEL_TEST_MODE", "fast")
+    case = _DatasetCompatCase(methodName="runTest")
+
+    assert case._mode_specific_test_setting("DATASET_SIZE") == 128
+    assert case._mode_specific_test_setting("DATASET_CONCAT_SIZE") == 1024
+    assert case._mode_specific_test_setting("OFFLOAD_TO_DISK") is False
+
+
+def test_model_test_slow_mode_uses_default_dataset_settings(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_MODEL_TEST_MODE", "slow")
+    case = _DatasetCompatCase(methodName="runTest")
+
+    assert case._mode_specific_test_setting("DATASET_SIZE") == 512
+    assert case._mode_specific_test_setting("DATASET_CONCAT_SIZE") == 2048
+    assert case._mode_specific_test_setting("OFFLOAD_TO_DISK") is True
