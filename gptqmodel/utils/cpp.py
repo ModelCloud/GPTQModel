@@ -52,7 +52,7 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
     flags=pcre.Flag.MULTILINE,
 )
 _LOCAL_NVCC_RELEASE_PATTERN = pcre.compile(r"release\s+(\d+)\.(\d+)")
-_LOCAL_NVCC_VERSION_LOCK = threading.Lock()
+_NVCC_VERSION_LOCK = threading.Lock()
 _LOCAL_NVCC_VERSION_CACHE: tuple[int, int] | None = None
 # Default NVCC internal threading for JIT builds. This is based on clean-build
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
@@ -85,7 +85,7 @@ def _local_nvcc_text(*args: str) -> str:
 def _local_nvcc_version() -> tuple[int, int]:
     global _LOCAL_NVCC_VERSION_CACHE
 
-    with _LOCAL_NVCC_VERSION_LOCK:
+    with _NVCC_VERSION_LOCK:
         if _LOCAL_NVCC_VERSION_CACHE is not None:
             return _LOCAL_NVCC_VERSION_CACHE
 
