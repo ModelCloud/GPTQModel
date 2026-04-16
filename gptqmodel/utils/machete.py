@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import os
-import pcre
 import shutil
 import subprocess
 import sys
@@ -16,6 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import List, Optional
 
+import pcre
 import torch
 
 from .cpp import (
