@@ -1,5 +1,6 @@
 import argparse
 import os
+import subprocess
 import sys
 import time
 import urllib.error
@@ -137,6 +138,11 @@ def main() -> int:
         append_github_env("CUDA_VISIBLE_DEVICES", resp)
         append_github_env("STEP_TIMESTAMP", str(now_ms()))
         print(f"CUDA_VISIBLE_DEVICES set to {resp}")
+
+        print(subprocess.getoutput(
+            f"nvidia-smi -i {resp} --query-gpu=name,serial --format=csv,noheader"
+        ))
+
         print_status(args.base_url)
         return 0
 
