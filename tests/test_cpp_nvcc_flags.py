@@ -10,12 +10,12 @@ import time
 import gptqmodel.utils.cpp as cpp_utils
 
 
-def _reset_local_nvcc_caches() -> None:
-    cpp_utils._LOCAL_NVCC_VERSION_CACHE = None
+def _reset_nvcc_caches() -> None:
+    cpp_utils._NVCC_VERSION_CACHE = None
 
 
 def test_is_nvcc_compatible_uses_version_boundary(monkeypatch):
-    _reset_local_nvcc_caches()
+    _reset_nvcc_caches()
     monkeypatch.setattr(cpp_utils.shutil, "which", lambda cmd: "/usr/local/cuda/bin/nvcc" if cmd == "nvcc" else None)
 
     calls: list[tuple[str, ...]] = []
@@ -33,7 +33,7 @@ def test_is_nvcc_compatible_uses_version_boundary(monkeypatch):
 
 
 def test_is_nvcc_compatible_rejects_older_nvcc(monkeypatch):
-    _reset_local_nvcc_caches()
+    _reset_nvcc_caches()
     monkeypatch.setattr(cpp_utils.shutil, "which", lambda cmd: "/usr/local/cuda/bin/nvcc" if cmd == "nvcc" else None)
 
     def fake_run(args, capture_output, text, check):
@@ -46,15 +46,15 @@ def test_is_nvcc_compatible_rejects_older_nvcc(monkeypatch):
 
 
 def test_is_nvcc_compatible_rejects_missing_nvcc(monkeypatch):
-    _reset_local_nvcc_caches()
+    _reset_nvcc_caches()
     monkeypatch.setattr(cpp_utils.shutil, "which", lambda _cmd: None)
 
     assert cpp_utils.is_nvcc_compatible() is False
-    assert cpp_utils._LOCAL_NVCC_VERSION_CACHE == (0, 0)
+    assert cpp_utils._NVCC_VERSION_CACHE == (0, 0)
 
 
 def test_is_nvcc_compatible_probes_nvcc_once_with_concurrent_callers(monkeypatch):
-    _reset_local_nvcc_caches()
+    _reset_nvcc_caches()
     monkeypatch.setattr(cpp_utils.shutil, "which", lambda cmd: "/usr/local/cuda/bin/nvcc" if cmd == "nvcc" else None)
 
     call_count = 0
