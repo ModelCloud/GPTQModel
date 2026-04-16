@@ -85,9 +85,6 @@ def _local_nvcc_text(*args: str) -> str:
 def _local_nvcc_version() -> tuple[int, int]:
     global _LOCAL_NVCC_VERSION_CACHE
 
-    if _LOCAL_NVCC_VERSION_CACHE is not None:
-        return _LOCAL_NVCC_VERSION_CACHE
-
     with _LOCAL_NVCC_VERSION_LOCK:
         if _LOCAL_NVCC_VERSION_CACHE is not None:
             return _LOCAL_NVCC_VERSION_CACHE
