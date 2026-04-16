@@ -565,16 +565,38 @@ class BaseQModel(nn.Module):
                     continue
 
                 if is_awq_quantize:
-                    # AWQ Required
-                    # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.1.up_proj', ...]
-                    for index in range(num_experts):
-                        for n in names:
-                            if EXPERT_INDEX_PLACEHOLDER in n:
-                                moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
-                    # added 'mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj'
+                    # AWQ expands expert placeholders into concrete expert paths while
+                    # preserving the non-expert segments exactly where the model
+                    # definition placed them. This keeps the expanded block aligned
+                    # with forward execution order instead of forcing shared-expert
+                    # modules to the tail of every mixed MoE block.
+                    segments = []
+                    current_segment = []
+                    current_is_expert_segment = None
                     for n in names:
-                        if EXPERT_INDEX_PLACEHOLDER not in n:
-                            moe_simple[-1].append(n)
+                        is_expert_entry = EXPERT_INDEX_PLACEHOLDER in n
+                        if current_is_expert_segment is None:
+                            current_is_expert_segment = is_expert_entry
+                        if is_expert_entry != current_is_expert_segment:
+                            segments.append((current_is_expert_segment, current_segment))
+                            current_segment = []
+                            current_is_expert_segment = is_expert_entry
+                        current_segment.append(n)
+
+                    if current_segment:
+                        segments.append((current_is_expert_segment, current_segment))
+
+                    # Example:
+                    # ['shared_expert.gate_proj', 'shared_expert.up_proj', 'experts.#.gate_proj', 'experts.#.up_proj']
+                    # becomes
+                    # ['shared_expert.gate_proj', 'shared_expert.up_proj', 'experts.0.gate_proj', 'experts.0.up_proj', ...]
+                    for is_expert_segment, segment_names in segments:
+                        if not is_expert_segment:
+                            moe_simple[-1].extend(segment_names)
+                            continue
+                        for index in range(num_experts):
+                            for n in segment_names:
+                                moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
                     # Currently, only need to add `capture_only_modules` to `['mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']`
                     # or ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
                     # or ['mlp.shared_experts.gate_proj', 'mlp.shared_experts.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
@@ -2362,9 +2384,10 @@ class BaseQModel(nn.Module):
 
             # Update tracker to the LAST item of this block
             if is_moe_gate_up_block:
-                # The block content is [...,  mlp.experts.{last_index}.up_proj, shared_expert.gate_proj, shared_expert.up_proj, mlp]
-                # mlp.experts.{last_index}.up_proj should be selected as last_module
-                # Find all indices that contain both ".experts" and "gate_proj"/"up_proj"
+                # Mixed MoE blocks can legitimately place shared-expert projections
+                # before or after routed experts depending on real forward order.
+                # For AWQ scaling, we still want the last routed expert gate/up proj
+                # as the effective boundary for the expert segment in this block.
                 gate_up_proj_indices = [
                     i for i, name in enumerate(block)
                     if any(k in name for k in self.moe_expert_module_name_prefixes) and ("gate" in name or "up" in name)
