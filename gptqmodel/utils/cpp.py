@@ -53,9 +53,6 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
     flags=pcre.Flag.MULTILINE,
 )
 _LOCAL_NVCC_RELEASE_PATTERN = re.compile(r"release\s+(\d+)\.(\d+)")
-_LOCAL_NVCC_FLAG_SUPPORT_CACHE: dict[str, bool] = {}
-_LOCAL_NVCC_HELP_TEXT: Optional[str] = None
-_LOCAL_NVCC_HELP_TEXT_INITIALISED = False
 _LOCAL_NVCC_VERSION_CACHE: Optional[tuple[int, int]] = None
 _LOCAL_NVCC_VERSION_INITIALISED = False
 # Default NVCC internal threading for JIT builds. This is based on clean-build
@@ -86,17 +83,6 @@ def _local_nvcc_text(*args: str) -> str:
     return ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
 
 
-def _local_nvcc_help_text() -> str:
-    global _LOCAL_NVCC_HELP_TEXT, _LOCAL_NVCC_HELP_TEXT_INITIALISED
-
-    if _LOCAL_NVCC_HELP_TEXT_INITIALISED:
-        return _LOCAL_NVCC_HELP_TEXT or ""
-
-    _LOCAL_NVCC_HELP_TEXT = _local_nvcc_text("--help")
-    _LOCAL_NVCC_HELP_TEXT_INITIALISED = True
-    return _LOCAL_NVCC_HELP_TEXT or ""
-
-
 def _local_nvcc_version() -> Optional[tuple[int, int]]:
     global _LOCAL_NVCC_VERSION_CACHE, _LOCAL_NVCC_VERSION_INITIALISED
 
@@ -118,30 +104,10 @@ def local_nvcc_version_at_least(major: int, minor: int) -> bool:
     return version is not None and version >= (major, minor)
 
 
-def local_nvcc_supports_flag(flag_name: str, *, min_version: Optional[tuple[int, int]] = None) -> bool:
-    normalized = str(flag_name).strip().lstrip("-")
-    if "=" in normalized:
-        normalized = normalized.split("=", maxsplit=1)[0]
-    if not normalized:
-        return False
-
-    cached = _LOCAL_NVCC_FLAG_SUPPORT_CACHE.get(normalized)
-    if cached is not None:
-        return cached
-
-    help_text = _local_nvcc_help_text()
-    supported = normalized in help_text
-    if not supported and min_version is not None:
-        supported = local_nvcc_version_at_least(*min_version)
-
-    _LOCAL_NVCC_FLAG_SUPPORT_CACHE[normalized] = supported
-    return supported
-
-
 def local_nvcc_supports_static_global_template_stub() -> bool:
     """Return whether the local nvcc accepts `--static-global-template-stub`."""
 
-    return local_nvcc_supports_flag("static-global-template-stub", min_version=(12, 8))
+    return local_nvcc_version_at_least(12, 8)
 
 
 def _format_compile_duration_seconds(seconds: float) -> str:
