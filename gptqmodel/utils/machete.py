@@ -23,7 +23,7 @@ from .cpp import (
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
-    is_local_nvcc_compatible,
+    is_nvcc_compatible,
     resolved_cuda_arch_flags,
 )
 from .logger import setup_logger
@@ -380,7 +380,7 @@ def _machete_extra_cuda_cflags() -> list[str]:
         ),
         *_machete_hopper_arch_cuda_cflags(),
     ]
-    if is_local_nvcc_compatible():
+    if is_nvcc_compatible():
         flags.insert(0, "-static-global-template-stub=false")
     return flags
 

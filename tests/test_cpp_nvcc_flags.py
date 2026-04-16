@@ -14,7 +14,7 @@ def _reset_local_nvcc_caches() -> None:
     cpp_utils._LOCAL_NVCC_VERSION_CACHE = None
 
 
-def test_is_local_nvcc_compatible_uses_version_boundary(monkeypatch):
+def test_is_nvcc_compatible_uses_version_boundary(monkeypatch):
     _reset_local_nvcc_caches()
     monkeypatch.setattr(cpp_utils.shutil, "which", lambda cmd: "/usr/local/cuda/bin/nvcc" if cmd == "nvcc" else None)
 
@@ -27,12 +27,12 @@ def test_is_local_nvcc_compatible_uses_version_boundary(monkeypatch):
 
     monkeypatch.setattr(cpp_utils.subprocess, "run", fake_run)
 
-    assert cpp_utils.is_local_nvcc_compatible() is True
-    assert cpp_utils.is_local_nvcc_compatible() is True
+    assert cpp_utils.is_nvcc_compatible() is True
+    assert cpp_utils.is_nvcc_compatible() is True
     assert calls == [("/usr/local/cuda/bin/nvcc", "--version")]
 
 
-def test_is_local_nvcc_compatible_rejects_older_nvcc(monkeypatch):
+def test_is_nvcc_compatible_rejects_older_nvcc(monkeypatch):
     _reset_local_nvcc_caches()
     monkeypatch.setattr(cpp_utils.shutil, "which", lambda cmd: "/usr/local/cuda/bin/nvcc" if cmd == "nvcc" else None)
 
@@ -42,18 +42,18 @@ def test_is_local_nvcc_compatible_rejects_older_nvcc(monkeypatch):
 
     monkeypatch.setattr(cpp_utils.subprocess, "run", fake_run)
 
-    assert cpp_utils.is_local_nvcc_compatible() is False
+    assert cpp_utils.is_nvcc_compatible() is False
 
 
-def test_is_local_nvcc_compatible_rejects_missing_nvcc(monkeypatch):
+def test_is_nvcc_compatible_rejects_missing_nvcc(monkeypatch):
     _reset_local_nvcc_caches()
     monkeypatch.setattr(cpp_utils.shutil, "which", lambda _cmd: None)
 
-    assert cpp_utils.is_local_nvcc_compatible() is False
+    assert cpp_utils.is_nvcc_compatible() is False
     assert cpp_utils._LOCAL_NVCC_VERSION_CACHE == (0, 0)
 
 
-def test_is_local_nvcc_compatible_probes_nvcc_once_with_concurrent_callers(monkeypatch):
+def test_is_nvcc_compatible_probes_nvcc_once_with_concurrent_callers(monkeypatch):
     _reset_local_nvcc_caches()
     monkeypatch.setattr(cpp_utils.shutil, "which", lambda cmd: "/usr/local/cuda/bin/nvcc" if cmd == "nvcc" else None)
 
@@ -75,7 +75,7 @@ def test_is_local_nvcc_compatible_probes_nvcc_once_with_concurrent_callers(monke
 
     def worker(index: int):
         start_barrier.wait()
-        results[index] = cpp_utils.is_local_nvcc_compatible()
+        results[index] = cpp_utils.is_nvcc_compatible()
 
     threads = [threading.Thread(target=worker, args=(index,)) for index in range(len(results))]
     for thread in threads:

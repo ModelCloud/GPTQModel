@@ -21,7 +21,7 @@ from .cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
     detected_cuda_wheel_include_paths,
-    is_local_nvcc_compatible,
+    is_nvcc_compatible,
 )
 from .marlin_scalar_type import ScalarType
 from .rocm import IS_ROCM
@@ -185,7 +185,7 @@ def _marlin_extra_cuda_cflags() -> list[str]:
         include_diag_suppress=True,
     )
     # This flag is parsed by the local nvcc, not by the Torch wheel metadata.
-    if is_local_nvcc_compatible():
+    if is_nvcc_compatible():
         flags.insert(0, "-static-global-template-stub=false")
     return flags
 

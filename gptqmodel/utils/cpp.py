@@ -105,7 +105,7 @@ def local_nvcc_version_at_least(major: int, minor: int) -> bool:
     return _local_nvcc_version() >= (major, minor)
 
 
-def is_local_nvcc_compatible() -> bool:
+def is_nvcc_compatible() -> bool:
     """Return whether the local nvcc is new enough for required JIT kernel flags."""
 
     return local_nvcc_version_at_least(12, 8)
