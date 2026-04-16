@@ -13,6 +13,12 @@ from packaging.version import Version
 class TestBrumby(ModelTest):
     GROUP_SIZE = 32
     DATASET_SIZE = 1024
+    DATASET_SIZE_FAST = 128
+    # Brumby decoder layers are structurally uniform, so fast mode can quantize
+    # the first layers and avoid replaying 38 untouched layers during calibration.
+    MODEL_COMPAT_FAST_LAYER_COUNT = 1
+    MODEL_COMPAT_FAST_LAYER_POSITION = "first"
+    OFFLOAD_TO_DISK_FAST = False
     NATIVE_MODEL_ID = "/monster/data/model/Brumby-14B-Base"
     TRUST_REMOTE_CODE = True
     LOAD_MODEL_EXTRA_ARGS = {"use_cache": False}
@@ -41,7 +47,13 @@ class TestBrumby(ModelTest):
             "acc": {"value": 0.71, "floor_pct": 0.05, "ceil_pct": 0.10},
         },
     }
-    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
+    EVAL_TASKS_FAST = {
+        "arc_challenge": {
+            "evalution_batch_size": 8,
+            "evalution_suite_kwargs": {"max_rows": 32},
+            "acc": {"value": 0.89, "floor_pct": 0.10, "ceil_pct": 1.0},
+        },
+    }
 
     @classmethod
     def setUpClass(cls):

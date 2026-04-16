@@ -268,7 +268,7 @@ def test_sm75_turing_contract_is_present_in_marlin_sources():
 
 
 def test_stage2_dense_four_bit_tiles_stay_in_sync_between_selector_and_codegen():
-    marlin_root = marlin_utils._marlin_root()
+    marlin_root = marlin_utils._ensure_generated_marlin_kernels()
     gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
     generator_py = (marlin_root / "generate_kernels.py").read_text(encoding="utf-8")
     kernel_u4 = (marlin_root / "kernel_fp16_ku4.cu").read_text(encoding="utf-8")
