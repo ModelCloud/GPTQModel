@@ -206,16 +206,6 @@ Canonical backend names are shown below. Legacy aliases such as `BACKEND.TORCH`,
 
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
 
-### ParoQuant Activation Checkpointing
-
-`ParoConfig.opt_gradient_checkpointing` controls activation checkpointing during ParoQuant's train-style optimization stages.
-
-- `opt_scope="layer"` defaults to `opt_gradient_checkpointing=True`
-- `opt_scope="module"` defaults to `opt_gradient_checkpointing=False`
-- `opt_scope="compute_block"` defaults to `opt_gradient_checkpointing=False`
-
-Current internal benchmarks have only shown a clear resource-usage benefit for `layer` scope. `module` and `compute_block` support the toggle, but they are not enabled by default because we have not yet measured a consistent memory win there.
-
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
@@ -547,7 +537,7 @@ print(f"Result: {result}")
 
 Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as a guide for PRs to add new models. Most models follow the same pattern.
 
-### Evaluation and Quality Benchmarks
+### Pair with Evaluation for post-quantization LLM Benchmarks
 
 GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a modern benchmarking toolkit with 150+ of the world's most widely used benchmark suites.
 We highly recommend using Evalution to measure post-quant accuracy recovery after quantization instead of relying on narrow regression-only language-model metrics.
