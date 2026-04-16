@@ -293,6 +293,7 @@ class _DeviceWorker:
         inference_mode: bool = False,
         cpu_core: Optional[int] = None,
         warmup_fn: Optional[Callable[[torch.device], None]] = None,
+        warmup_event: Optional[threading.Event] = None,
         *,
         key_override: Optional[str] = None,
     ):
@@ -301,6 +302,7 @@ class _DeviceWorker:
         self._on_task_finished = on_task_finished
         self._on_worker_exit = on_worker_exit
         self._warmup_fn = warmup_fn
+        self._warmup_event = warmup_event
 
         if key_override is not None:
             self.key = key_override
@@ -376,13 +378,18 @@ class _DeviceWorker:
 
     def _run_warmup(self) -> None:
         warmup_fn = self._warmup_fn
+        warmup_event = self._warmup_event
         if warmup_fn is None:
+            if warmup_event is not None and not warmup_event.is_set():
+                warmup_event.wait()
             return
         try:
             with ctx(self.rwlock.reader(), _device_ctx(self.device)):
                 warmup_fn(self.device)
         finally:
             self._warmup_fn = None
+            if warmup_event is not None:
+                warmup_event.set()
 
     def _run(self):
         """
@@ -637,6 +644,7 @@ class DeviceThreadPool:
         )
         self._warmup_lock = threading.Lock()
         self._warmup_ran_keys: Set[str] = set()
+        self._warmup_events: Dict[str, threading.Event] = {}
 
         workers_cfg = workers or {}
         base_workers: Dict[str, int] = {}
@@ -890,10 +898,14 @@ class DeviceThreadPool:
 
         return plan
 
-    def _resolve_worker_warmup(self, dev: torch.device, key: str) -> Optional[Callable[[torch.device], None]]:
+    def _resolve_worker_warmup(
+        self,
+        dev: torch.device,
+        key: str,
+    ) -> Tuple[Optional[Callable[[torch.device], None]], Optional[threading.Event]]:
         mapping = self._worker_warmups
         if not mapping:
-            return None
+            return None, None
         family = dev.type.lower()
         warmup = mapping.get(family)
         primary_key = key.split(":", 1)[0].lower()
@@ -902,15 +914,19 @@ class DeviceThreadPool:
         if warmup is None:
             warmup = mapping.get("default")
         if warmup is None:
-            return None
+            return None, None
 
         # Map virtual workers back to their parent key so warmup runs once per physical device.
         physical_key = self._virtual_to_parent.get(key, key)
         with self._warmup_lock:
+            event = self._warmup_events.get(physical_key)
+            if event is None:
+                event = threading.Event()
+                self._warmup_events[physical_key] = event
             if physical_key in self._warmup_ran_keys:
-                return None
+                return None, event
             self._warmup_ran_keys.add(physical_key)
-        return warmup
+        return warmup, event
 
     def _spawn_worker(
         self,
@@ -922,7 +938,7 @@ class DeviceThreadPool:
         """
         Create and start a worker bound to the provided device.
         """
-        warmup_fn = self._resolve_worker_warmup(dev, key)
+        warmup_fn, warmup_event = self._resolve_worker_warmup(dev, key)
         w = _DeviceWorker(
             device=dev,
             rwlock=self._locks[key],
@@ -932,6 +948,7 @@ class DeviceThreadPool:
             inference_mode=self._inference_mode,
             cpu_core=cpu_core,
             warmup_fn=warmup_fn,
+            warmup_event=warmup_event,
             key_override=key,
         )
         return w
