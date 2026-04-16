@@ -12,7 +12,6 @@ import gptqmodel.utils.cpp as cpp_utils
 
 def _reset_local_nvcc_caches() -> None:
     cpp_utils._LOCAL_NVCC_VERSION_CACHE = None
-    cpp_utils._LOCAL_NVCC_VERSION_INITIALISED = False
 
 
 def test_local_nvcc_supports_static_global_template_stub_uses_version_boundary(monkeypatch):
@@ -51,6 +50,7 @@ def test_local_nvcc_supports_static_global_template_stub_rejects_missing_nvcc(mo
     monkeypatch.setattr(cpp_utils.shutil, "which", lambda _cmd: None)
 
     assert cpp_utils.local_nvcc_supports_static_global_template_stub() is False
+    assert cpp_utils._LOCAL_NVCC_VERSION_CACHE == (0, 0)
 
 
 def test_local_nvcc_supports_static_global_template_stub_probes_nvcc_once_with_concurrent_callers(monkeypatch):

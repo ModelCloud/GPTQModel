@@ -54,8 +54,7 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
 )
 _LOCAL_NVCC_RELEASE_PATTERN = re.compile(r"release\s+(\d+)\.(\d+)")
 _LOCAL_NVCC_VERSION_LOCK = threading.Lock()
-_LOCAL_NVCC_VERSION_CACHE: Optional[tuple[int, int]] = None
-_LOCAL_NVCC_VERSION_INITIALISED = False
+_LOCAL_NVCC_VERSION_CACHE: tuple[int, int] | None = None
 # Default NVCC internal threading for JIT builds. This is based on clean-build
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
 # the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
@@ -84,14 +83,14 @@ def _local_nvcc_text(*args: str) -> str:
     return ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
 
 
-def _local_nvcc_version() -> Optional[tuple[int, int]]:
-    global _LOCAL_NVCC_VERSION_CACHE, _LOCAL_NVCC_VERSION_INITIALISED
+def _local_nvcc_version() -> tuple[int, int]:
+    global _LOCAL_NVCC_VERSION_CACHE
 
-    if _LOCAL_NVCC_VERSION_INITIALISED:
+    if _LOCAL_NVCC_VERSION_CACHE is not None:
         return _LOCAL_NVCC_VERSION_CACHE
 
     with _LOCAL_NVCC_VERSION_LOCK:
-        if _LOCAL_NVCC_VERSION_INITIALISED:
+        if _LOCAL_NVCC_VERSION_CACHE is not None:
             return _LOCAL_NVCC_VERSION_CACHE
 
         version_text = _local_nvcc_text("--version")
@@ -99,14 +98,12 @@ def _local_nvcc_version() -> Optional[tuple[int, int]]:
         if match:
             _LOCAL_NVCC_VERSION_CACHE = (int(match.group(1)), int(match.group(2)))
         else:
-            _LOCAL_NVCC_VERSION_CACHE = None
-        _LOCAL_NVCC_VERSION_INITIALISED = True
+            _LOCAL_NVCC_VERSION_CACHE = (0, 0)
         return _LOCAL_NVCC_VERSION_CACHE
 
 
 def local_nvcc_version_at_least(major: int, minor: int) -> bool:
-    version = _local_nvcc_version()
-    return version is not None and version >= (major, minor)
+    return _local_nvcc_version() >= (major, minor)
 
 
 def local_nvcc_supports_static_global_template_stub() -> bool:
