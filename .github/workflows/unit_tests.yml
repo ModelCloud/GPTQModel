@@ -183,8 +183,8 @@ jobs:
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        # - /monster/ci/uv:/opt/uv
         - /github/workspace/uv:/opt/uv
+        - /github/workspace/tmp:/opt/uv/tmp
         - /monster/ci/uv/python:/opt/uv/python
         - /monster/ci/uv/cache/python:/opt/uv/cache/python
         - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
@@ -279,7 +279,11 @@ jobs:
           echo "-- loaded --"
 
           echo "-- setting up env --"
-          env_name="gptqmodel_test_cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${py}_${{ matrix.test_script }}"
+          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
+          env_name="gptqmodel_${safe_ref}_test_${{ matrix.test_script }}"
+          echo "env_name: $env_name"
+          # will clean later
+          mv /opt/uv/venvs/$env_name "/opt/uv/tmp/${env_name}_$(date +%s)" || true
           /opt/uv/setup_uv_venv.sh $env_name
           echo "-- set --"
 
@@ -467,8 +471,8 @@ jobs:
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        # - /monster/ci/uv:/opt/uv
         - /github/workspace/uv:/opt/uv
+        - /github/workspace/tmp:/opt/uv/tmp
         - /monster/ci/uv/python:/opt/uv/python
         - /monster/ci/uv/cache/python:/opt/uv/cache/python
         - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
@@ -546,8 +550,30 @@ jobs:
 
       - name: Activate uv env
         run: |
-          env_name="gptqmodel_test_cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_${{ matrix.test_script }}"
+          echo "-- loading unit test's config --"
+          source /opt/uv/setup_uv_venv.sh unit_test_env
+
+          config_json="$(python3 .github/scripts/parse_test_config.py \
+            --group tests \
+            --test-name "${{ matrix.test_script }}")"
+
+          py="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["py"])')"
+          gpu="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["gpu"])')"
+
+          echo "PYTHON_VERSION=$py" >> "$GITHUB_ENV"
+          echo "GPU_COUNT=$gpu" >> "$GITHUB_ENV"
+          
+          echo "using py=$py gpu=$gpu for test ${{ matrix.test_script }}"
+          echo "-- loaded --"
+
+          echo "-- setting up env --"
+          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
+          env_name="gptqmodel_${safe_ref}_test_${{ matrix.test_script }}"
+          echo "env_name: $env_name"
+          # will clean later
+          mv /opt/uv/venvs/$env_name "/opt/uv/tmp/${env_name}_$(date +%s)" || true
           /opt/uv/setup_uv_venv.sh $env_name
+          echo "-- set --"
 
       - name: Setup uv env
         run: |
