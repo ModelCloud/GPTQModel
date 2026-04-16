@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 
 import gptqmodel.utils.cpp as cpp_utils
 
@@ -49,3 +51,37 @@ def test_local_nvcc_supports_static_global_template_stub_rejects_missing_nvcc(mo
     monkeypatch.setattr(cpp_utils.shutil, "which", lambda _cmd: None)
 
     assert cpp_utils.local_nvcc_supports_static_global_template_stub() is False
+
+
+def test_local_nvcc_supports_static_global_template_stub_probes_nvcc_once_with_concurrent_callers(monkeypatch):
+    _reset_local_nvcc_caches()
+    monkeypatch.setattr(cpp_utils.shutil, "which", lambda cmd: "/usr/local/cuda/bin/nvcc" if cmd == "nvcc" else None)
+
+    call_count = 0
+    call_count_lock = threading.Lock()
+    start_barrier = threading.Barrier(8)
+
+    def fake_run(args, capture_output, text, check):
+        nonlocal call_count
+        del capture_output, text, check
+        time.sleep(0.05)
+        with call_count_lock:
+            call_count += 1
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="Cuda compilation tools, release 12.8, V12.8.89", stderr="")
+
+    monkeypatch.setattr(cpp_utils.subprocess, "run", fake_run)
+
+    results = [None] * 8
+
+    def worker(index: int):
+        start_barrier.wait()
+        results[index] = cpp_utils.local_nvcc_supports_static_global_template_stub()
+
+    threads = [threading.Thread(target=worker, args=(index,)) for index in range(len(results))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert results == [True] * len(results)
+    assert call_count == 1

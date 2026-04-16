@@ -53,6 +53,7 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
     flags=pcre.Flag.MULTILINE,
 )
 _LOCAL_NVCC_RELEASE_PATTERN = re.compile(r"release\s+(\d+)\.(\d+)")
+_LOCAL_NVCC_VERSION_LOCK = threading.Lock()
 _LOCAL_NVCC_VERSION_CACHE: Optional[tuple[int, int]] = None
 _LOCAL_NVCC_VERSION_INITIALISED = False
 # Default NVCC internal threading for JIT builds. This is based on clean-build
@@ -89,14 +90,18 @@ def _local_nvcc_version() -> Optional[tuple[int, int]]:
     if _LOCAL_NVCC_VERSION_INITIALISED:
         return _LOCAL_NVCC_VERSION_CACHE
 
-    version_text = _local_nvcc_text("--version")
-    match = _LOCAL_NVCC_RELEASE_PATTERN.search(version_text)
-    if match:
-        _LOCAL_NVCC_VERSION_CACHE = (int(match.group(1)), int(match.group(2)))
-    else:
-        _LOCAL_NVCC_VERSION_CACHE = None
-    _LOCAL_NVCC_VERSION_INITIALISED = True
-    return _LOCAL_NVCC_VERSION_CACHE
+    with _LOCAL_NVCC_VERSION_LOCK:
+        if _LOCAL_NVCC_VERSION_INITIALISED:
+            return _LOCAL_NVCC_VERSION_CACHE
+
+        version_text = _local_nvcc_text("--version")
+        match = _LOCAL_NVCC_RELEASE_PATTERN.search(version_text)
+        if match:
+            _LOCAL_NVCC_VERSION_CACHE = (int(match.group(1)), int(match.group(2)))
+        else:
+            _LOCAL_NVCC_VERSION_CACHE = None
+        _LOCAL_NVCC_VERSION_INITIALISED = True
+        return _LOCAL_NVCC_VERSION_CACHE
 
 
 def local_nvcc_version_at_least(major: int, minor: int) -> bool:
