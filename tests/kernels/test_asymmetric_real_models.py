@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import gc
-import re
 from dataclasses import dataclass
 from typing import Iterable
 
+import pcre
 import pytest
 import torch
 from tests.models.model_test import ModelTest
@@ -165,13 +165,13 @@ def _forward_module(module: torch.nn.Module, inputs: Iterable[torch.Tensor]) -> 
 
 
 def _normalized_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().lower()
+    return pcre.compile(r"\s+").sub(" ", text).strip().lower()
 
 
 def _content_tokens(text: str) -> set[str]:
     return {
         token
-        for token in re.findall(r"[a-z0-9]+", _normalized_text(text))
+        for token in pcre.compile(r"[a-z0-9]+").findall(_normalized_text(text))
         if token not in _STOPWORDS
     }
 
@@ -184,7 +184,7 @@ def _assert_solar_answer_not_garbled(text: str) -> None:
     assert any(term in normalized for term in ("surface", "square", "kilometer", "kilometers", "km", "solar", "sun")), (
         f"expected a surface-area style answer, got: {text}"
     )
-    assert re.search(r"\d", normalized) or any(
+    assert pcre.compile(r"\d").search(normalized) or any(
         term in normalized for term in ("sphere", "formula", "radius")
     ), f"expected a numeric or formula-based answer, got: {text}"
 

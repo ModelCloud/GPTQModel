@@ -7,12 +7,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import pcre
 import torch
 from tabulate import tabulate
 
@@ -119,7 +119,7 @@ def _expand_desc_act_cases(cases: list[BenchCase], mode: str) -> list[BenchCase]
 def _filter_cases(cases: list[BenchCase], pattern: str | None) -> list[BenchCase]:
     if pattern is None:
         return cases
-    regex = re.compile(pattern)
+    regex = pcre.compile(pattern)
     return [case for case in cases if regex.search(case.case_id)]
 
 

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import List, Optional
 
+import pcre
 import torch
 
 from .cpp import (
@@ -23,6 +23,7 @@ from .cpp import (
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
+    is_nvcc_compatible,
     resolved_cuda_arch_flags,
 )
 from .logger import setup_logger
@@ -38,7 +39,10 @@ _MACHETE_OPS_NAMESPACE = "gptqmodel_machete"
 _CUTLASS_VERSION = "4.4.2"
 _CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{_CUTLASS_VERSION}.tar.gz"
 _CUTLASS_VERSION_MARKER = ".gptqmodel_cutlass_version"
-_CUTLASS_VERSION_DEFINE_PATTERN = re.compile(r"^\s*#define\s+CUTLASS_(MAJOR|MINOR|PATCH)\s+(\d+)\s*$", re.MULTILINE)
+_CUTLASS_VERSION_DEFINE_PATTERN = pcre.compile(
+    r"^\s*#define\s+CUTLASS_(MAJOR|MINOR|PATCH)\s+(\d+)\s*$",
+    flags=pcre.Flag.MULTILINE,
+)
 _MACHETE_REQUIRED_COMPUTE_CAPABILITY = (9, 0)
 _MACHETE_MIN_SHARED_MEMORY_PER_BLOCK_OPTIN = 204800
 _MACHETE_SM90A_ARCH_FLAGS = (
@@ -61,18 +65,6 @@ def _machete_project_root() -> Path:
 
 def _machete_source_root() -> Path:
     return _machete_project_root() / "gptqmodel_ext" / "machete"
-
-
-def _machete_cuda_version_at_least(major: int, minor: int) -> bool:
-    raw = getattr(torch.version, "cuda", None)
-    if not raw:
-        return False
-    try:
-        parts = raw.split(".")
-        current = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-    except (TypeError, ValueError):  # pragma: no cover - depends on torch build metadata
-        return False
-    return current >= (major, minor)
 
 
 def _repo_local_cutlass_root() -> Path:
@@ -388,7 +380,7 @@ def _machete_extra_cuda_cflags() -> list[str]:
         ),
         *_machete_hopper_arch_cuda_cflags(),
     ]
-    if _machete_cuda_version_at_least(12, 8):
+    if is_nvcc_compatible():
         flags.insert(0, "-static-global-template-stub=false")
     return flags
 

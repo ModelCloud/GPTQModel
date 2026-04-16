@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -50,10 +51,61 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
     r'^\s*#\s*include\s+"([^"]+)"',
     flags=pcre.Flag.MULTILINE,
 )
+_NVCC_RELEASE_PATTERN = pcre.compile(r"release\s+(\d+)\.(\d+)")
+_NVCC_VERSION_LOCK = threading.Lock()
+_NVCC_VERSION_CACHE: tuple[int, int] | None = None
 # Default NVCC internal threading for JIT builds. This is based on clean-build
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
 # the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
 _DEFAULT_NVCC_THREADS = "8"
+
+
+def _nvcc_path() -> Optional[str]:
+    return shutil.which("nvcc")
+
+
+def _nvcc_text(*args: str) -> str:
+    nvcc_path = _nvcc_path()
+    if not nvcc_path:
+        return ""
+
+    try:
+        result = subprocess.run(
+            [nvcc_path, *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+
+    return ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+
+
+def _nvcc_version() -> tuple[int, int]:
+    global _NVCC_VERSION_CACHE
+
+    with _NVCC_VERSION_LOCK:
+        if _NVCC_VERSION_CACHE is not None:
+            return _NVCC_VERSION_CACHE
+
+        version_text = _nvcc_text("--version")
+        match = _NVCC_RELEASE_PATTERN.search(version_text)
+        if match:
+            _NVCC_VERSION_CACHE = (int(match.group(1)), int(match.group(2)))
+        else:
+            _NVCC_VERSION_CACHE = (0, 0)
+        return _NVCC_VERSION_CACHE
+
+
+def nvcc_version_at_least(major: int, minor: int) -> bool:
+    return _nvcc_version() >= (major, minor)
+
+
+def is_nvcc_compatible() -> bool:
+    """Return whether nvcc is new enough for required JIT kernel flags."""
+
+    return nvcc_version_at_least(12, 8)
 
 
 def _format_compile_duration_seconds(seconds: float) -> str:
