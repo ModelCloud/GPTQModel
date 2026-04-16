@@ -428,8 +428,7 @@ class TestThreadxJanitor():
         pool._family_keys = {}
         pool._dispatch_lock = threading.Lock()
         pool._warmup_lock = threading.Lock()
-        pool._warmup_ran_keys = set()
-        pool._warmup_events = {}
+        pool._warmup_states = {}
         pool._worker_warmups = {}
         pool._serial_workers = {}
         pool._ordered_keys = []
@@ -620,6 +619,31 @@ def test_device_warmup_blocks_secondary_workers_until_ready():
         assert second_started.wait(timeout=1.0)
     finally:
         release_warmup.set()
+        pool.shutdown(wait=True)
+
+
+def test_virtual_pool_warmup_can_start_from_alias_worker():
+    warmup_calls = []
+
+    def warmup(device: torch.device):
+        warmup_calls.append(device)
+
+    pool = DeviceThreadPool(
+        devices=[torch.device("cpu")],
+        inference_mode=False,
+        warmups={"cpu": warmup},
+        workers={
+            "cpu": 1,
+            "turtle:cpu": 1,
+        },
+        empty_cache_every_n=0,
+    )
+
+    try:
+        future = pool.submit("turtle:cpu", lambda: "alias-ok")
+        assert future.result(timeout=1.0) == "alias-ok"
+        assert warmup_calls == [torch.device("cpu")]
+    finally:
         pool.shutdown(wait=True)
 
 
