@@ -63,18 +63,6 @@ def _machete_source_root() -> Path:
     return _machete_project_root() / "gptqmodel_ext" / "machete"
 
 
-def _machete_cuda_version_at_least(major: int, minor: int) -> bool:
-    raw = getattr(torch.version, "cuda", None)
-    if not raw:
-        return False
-    try:
-        parts = raw.split(".")
-        current = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-    except (TypeError, ValueError):  # pragma: no cover - depends on torch build metadata
-        return False
-    return current >= (major, minor)
-
-
 def _repo_local_cutlass_root() -> Path:
     return _machete_project_root() / "cutlass"
 
@@ -374,7 +362,7 @@ def _machete_hopper_arch_cuda_cflags() -> list[str]:
 
 
 def _machete_extra_cuda_cflags() -> list[str]:
-    flags = [
+    return [
         *_MACHETE_REQUIRED_TORCH_NVCC_UNDEFINES,
         *default_jit_cuda_cflags(
             enable_bf16=True,
@@ -388,9 +376,6 @@ def _machete_extra_cuda_cflags() -> list[str]:
         ),
         *_machete_hopper_arch_cuda_cflags(),
     ]
-    if _machete_cuda_version_at_least(12, 8):
-        flags.insert(0, "-static-global-template-stub=false")
-    return flags
 
 
 def _machete_extra_ldflags() -> list[str]:

@@ -66,18 +66,6 @@ def _marlin_root() -> Path:
     return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "marlin"
 
 
-def _marlin_cuda_version_at_least(major: int, minor: int) -> bool:
-    raw = getattr(torch.version, "cuda", None)
-    if not raw:
-        return False
-    try:
-        parts = raw.split(".")
-        current = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-    except (TypeError, ValueError):  # pragma: no cover - depends on torch build metadata
-        return False
-    return current >= (major, minor)
-
-
 def _marlin_cuda_extra_name() -> str | None:
     raw = getattr(torch.version, "cuda", None)
     if not raw:
@@ -186,7 +174,7 @@ def _marlin_extra_cflags() -> list[str]:
 
 
 def _marlin_extra_cuda_cflags() -> list[str]:
-    flags = default_jit_cuda_cflags(
+    return default_jit_cuda_cflags(
         enable_bf16=True,
         include_lineinfo=True,
         include_nvcc_threads=True,
@@ -195,9 +183,6 @@ def _marlin_extra_cuda_cflags() -> list[str]:
         include_fatbin_compression=True,
         include_diag_suppress=True,
     )
-    if _marlin_cuda_version_at_least(12, 8):
-        flags.insert(0, "-static-global-template-stub=false")
-    return flags
 
 
 _MARLIN_FP16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
