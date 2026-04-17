@@ -11,6 +11,8 @@ from typing import Callable, Dict, List, Optional
 
 import torch
 from defuser import convert_model
+from defuser.modeling.unfused_moe.qwen2_moe import LinearQwen2MoeSparseMoeBlock
+from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeConfig, Qwen2MoeForCausalLM
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
@@ -34,10 +36,10 @@ from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
 from gptqmodel.models.definitions.qwen3_5_moe import Qwen3_5_MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
-from gptqmodel.nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
+from gptqmodel.nn_modules.hooked_linear import HookedLinear, StopForward, replace_module_with_hooked_legacy
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig, VramStrategy
-from gptqmodel.utils.model import find_modules, get_module_by_name_prefix
+from gptqmodel.utils.model import find_modules, get_module_by_name_prefix, restore_moe_topk, set_moe_topk
 
 
 # honour the request to bind the test harness to GPU index 5 when CUDA is available
@@ -107,17 +109,20 @@ def test_qwen2_moe_shared_expert_merges_with_experts():
     blocks = Qwen2MoeQModel.build_layer_modules(Qwen2MoeQModel.module_tree)
 
     gate_block = next(block for block in blocks if "mlp.shared_expert.gate_proj" in block)
+    assert gate_block.index("mlp.experts.{expert_index}.gate_proj") < gate_block.index("mlp.shared_expert.gate_proj")
+    assert gate_block.index("mlp.experts.{expert_index}.up_proj") < gate_block.index("mlp.shared_expert.up_proj")
     assert "mlp.experts.{expert_index}.gate_proj" in gate_block
     assert "mlp.experts.{expert_index}.up_proj" in gate_block
 
     down_block = next(block for block in blocks if "mlp.shared_expert.down_proj" in block)
+    assert down_block.index("mlp.experts.{expert_index}.down_proj") < down_block.index("mlp.shared_expert.down_proj")
     assert "mlp.experts.{expert_index}.down_proj" in down_block
 
     expert_gate_blocks = [block for block in blocks if "mlp.experts.{expert_index}.gate_proj" in block]
     assert len(expert_gate_blocks) == 1
 
 
-def test_qwen2_moe_awq_expansion_keeps_shared_expert_before_experts():
+def test_qwen2_moe_awq_expansion_keeps_experts_before_shared_expert():
     blocks = Qwen2MoeQModel.simple_layer_modules(
         model_config=SimpleNamespace(num_experts=2),
         quantize_config=SimpleNamespace(dynamic=None),
@@ -126,12 +131,19 @@ def test_qwen2_moe_awq_expansion_keeps_shared_expert_before_experts():
 
     gate_block = next(block for block in blocks if "mlp.shared_expert.gate_proj" in block)
     assert gate_block == [
-        "mlp.shared_expert.gate_proj",
-        "mlp.shared_expert.up_proj",
         "mlp.experts.0.gate_proj",
         "mlp.experts.0.up_proj",
         "mlp.experts.1.gate_proj",
         "mlp.experts.1.up_proj",
+        "mlp.shared_expert.gate_proj",
+        "mlp.shared_expert.up_proj",
+    ]
+
+    down_block = next(block for block in blocks if "mlp.shared_expert.down_proj" in block)
+    assert down_block == [
+        "mlp.experts.0.down_proj",
+        "mlp.experts.1.down_proj",
+        "mlp.shared_expert.down_proj",
     ]
 
 
@@ -623,3 +635,71 @@ def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
     ]
     assert any(name.startswith("mlp.experts.") for name in processor.hook_calls)
     assert processor.hook_calls[-1] == "mlp.experts.3.up_proj"
+
+
+def test_qwen2_moe_routing_override_all_keeps_shared_expert_down_proj_last():
+    """Regression for Qwen2 MoE: routing override must not early-stop before shared expert runs."""
+
+    cfg = Qwen2MoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        shared_expert_intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        moe_intermediate_size=32,
+        num_experts=4,
+        num_experts_per_tok=2,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    model = Qwen2MoeForCausalLM(cfg)
+    layer = model.model.layers[0]
+    # Quantization patches Qwen2 to defuser's explicit-expert block, so the
+    # regression must exercise that execution path instead of the raw fused HF block.
+    layer.mlp = LinearQwen2MoeSparseMoeBlock(cfg)
+    replace_module_with_hooked_legacy(layer)
+
+    down_block = next(
+        block
+        for block in Qwen2MoeQModel.simple_layer_modules(
+            model_config=cfg,
+            quantize_config=SimpleNamespace(dynamic=None),
+            is_awq_quantize=True,
+        )
+        if "mlp.shared_expert.down_proj" in block
+    )
+    assert down_block == [
+        "mlp.experts.0.down_proj",
+        "mlp.experts.1.down_proj",
+        "mlp.experts.2.down_proj",
+        "mlp.experts.3.down_proj",
+        "mlp.shared_expert.down_proj",
+    ]
+
+    hook_calls: List[str] = []
+    hooked_modules: List[HookedLinear] = []
+    for idx, name in enumerate(down_block):
+        hooked_module, _ = get_module_by_name_prefix(layer, name)
+        assert isinstance(hooked_module, HookedLinear)
+        hooked_module.forward_hook = lambda _module, _inp, _out, module_name=name: hook_calls.append(module_name)
+        hooked_module.forward_hook_last = idx == (len(down_block) - 1)
+        hooked_modules.append(hooked_module)
+
+    routing_state = set_moe_topk(layer, cfg.num_experts)
+    stopped = False
+    try:
+        with torch.inference_mode():
+            layer.mlp(torch.randn(1, 4, cfg.hidden_size))
+    except StopForward:
+        stopped = True
+    finally:
+        restore_moe_topk(routing_state)
+        for hooked_module in hooked_modules:
+            hooked_module.forward_hook = None
+            hooked_module.forward_hook_last = False
+
+    assert stopped is True
+    assert hook_calls == down_block
