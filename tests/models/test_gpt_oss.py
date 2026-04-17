@@ -20,6 +20,7 @@ class TestGPTOSS(ModelTest):
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
     USE_VLLM = False
+    ACT_GROUP_AWARE = False
 
     def test_gpt_oss(self):
         self.quantize_and_evaluate()
