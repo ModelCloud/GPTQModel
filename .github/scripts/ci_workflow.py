@@ -70,8 +70,24 @@ def parse_test_config(
     return result
 
 
-def sort_key(path: str) -> tuple[bool, bool, str]:
-    return ("moe" in path, "/" in path, path)
+def has_no_gpu_marker(file_path: Path) -> bool:
+    try:
+        with file_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped == "# GPU=-1":
+                    return True
+                if stripped.startswith("import ") or stripped.startswith("from "):
+                    return False
+    except OSError:
+        return False
+    return False
+
+
+def sort_key(path: str, file_path: Path) -> tuple[bool, bool, bool, str]:
+    return ("moe" in path, not has_no_gpu_marker(file_path), "/" in path, path)
 
 
 def is_model_compat_test(rel_path: str, file_path: Path) -> bool:
@@ -129,9 +145,9 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
     }
 
     return (
-        sorted(torch_tests, key=sort_key),
-        sorted(model_tests, key=sort_key),
-        sorted(mlx_tests, key=sort_key),
+        sorted(torch_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
+        sorted(model_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
+        sorted(mlx_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
     )
 
 
