@@ -33,7 +33,8 @@ def kill_process_group(proc: subprocess.Popen[str]) -> None:
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
-        pass
+        # Process group may already have exited; nothing to kill.
+        return
 
 
 def start_keepalive_monitor(
