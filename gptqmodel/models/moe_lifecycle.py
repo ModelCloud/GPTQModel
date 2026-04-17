@@ -190,12 +190,47 @@ class MoELifecycleHooks:
         # This is normal - not all MoE models have shared experts
         return None
 
+    def get_subset_execution_order(
+            self,
+            ordered_module_names: list[str],
+            moe_block_prefix: Optional[str],
+            experts_attr_name: Optional[str],
+            shared_expert_attr_name: Optional[str],
+    ) -> list[str]:
+        """
+        Infer shared-expert vs routed-expert replay order from explicit subset names.
+
+        The module tree is designed to mirror forward execution order, and
+        subset planning preserves that ordered module list explicitly.
+        Replay should therefore follow the first occurrence of each MoE family
+        in `ordered_module_names` instead of relying on dict iteration or
+        model-specific hardcoded ordering.
+        """
+        if not ordered_module_names or moe_block_prefix is None:
+            return []
+
+        order = []
+        expert_prefix = f"{moe_block_prefix}.{experts_attr_name}." if experts_attr_name else None
+        shared_prefix = f"{moe_block_prefix}.{shared_expert_attr_name}." if shared_expert_attr_name else None
+
+        for key in ordered_module_names:
+            if shared_prefix and key.startswith(shared_prefix):
+                if "shared" not in order:
+                    order.append("shared")
+                continue
+            if expert_prefix and key.startswith(expert_prefix):
+                if "experts" not in order:
+                    order.append("experts")
+
+        return order
+
     def forward_to_all_experts(
             self,
             moe_block: nn.Module,
             hidden_states: torch.Tensor,
             processor: Any,
             subset: Dict[str, Any],
+            ordered_module_names: Optional[list[str]],
             original_forward: callable,
             model_class: type,
             module_looper: Any,
@@ -302,6 +337,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             hidden_states: torch.Tensor,
             processor: Any,
             subset: Dict[str, Any],
+            ordered_module_names: Optional[list[str]],
             original_forward: callable,
             model_class: type,
             module_looper: Any,  # Required for TLS-based hooks pausing
@@ -325,10 +361,9 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                            is on a different device than the original modules in subset.
             **kwargs: Additional arguments (attention_mask, etc.)
 
-        This implementation:
-        1. Forwards to shared_experts (if present and in subset)
-        2. Forwards to all individual experts (only those with modules in subset)
-        3. Returns normal routed forward output (not averaged)
+        This implementation replays shared-expert and routed-expert paths in the
+        order they appear in the subset/module tree, then calls the original
+        routed forward for the final output.
         """
         import torch.nn.functional as F
 
@@ -402,83 +437,57 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                         has_expert_projs = True
                         break
 
-        # Forward to shared experts if they exist AND if any of their modules are in subset
-        # Simply call the shared expert module's forward - hooks will fire for projections in subset
-        if has_shared_experts and shared_expert_attr_name:
+        def run_shared_experts():
+            nonlocal expert_count, stop_forward_raised
+            if not has_shared_experts or not shared_expert_attr_name:
+                return
             try:
-                # Get the shared expert module and call its forward
                 shared_expert_module = getattr(moe_block, shared_expert_attr_name)
-                # Ensure input is on correct device
                 shared_expert_device = get_device(shared_expert_module)
                 shared_expert_module(move_to(hidden_states, shared_expert_device))
                 expert_count += 1
             except StopForward:
                 stop_forward_raised = True
 
-        # Forward to all individual experts
-        if has_expert_projs and experts_module is not None and hasattr(experts_module,
-                                                                       '__iter__') and experts_attr_name:
-            # Reshape hidden_states from [B, S, H] to [B*S, H] for expert modules
+        def run_routed_experts():
+            nonlocal expert_count, stop_forward_raised
+            if not has_expert_projs or experts_module is None or not hasattr(experts_module, '__iter__') or not experts_attr_name:
+                return
+
             if hidden_states.dim() == 3:
                 hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
             else:
                 hidden_states_2d = hidden_states
 
             for expert_idx, expert in enumerate(experts_module):
-                # Construct keys for this expert's projections using the detected attribute name
                 gate_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.gate_proj_name}"
                 up_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.up_proj_name}"
                 down_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.down_proj_name}"
 
-                # Skip if none of this expert's projections are in subset
                 if gate_key not in subset and up_key not in subset and down_key not in subset:
                     continue
 
-                # Determine device for this expert
-                # Use gate_proj as reference since it's typically present
-                expert_device = None
                 gate_module_ref = getattr(expert, self.gate_proj_name, None)
-                if gate_module_ref is not None:
-                    expert_device = get_device(gate_module_ref)
-                else:
-                    expert_device = get_device(expert)
-
-                # Move input to expert device
+                expert_device = get_device(gate_module_ref) if gate_module_ref is not None else get_device(expert)
                 expert_input = move_to(hidden_states_2d, expert_device)
 
                 try:
-                    # Strategy: If down_proj is in subset, compute intermediate on-the-fly
-                    # Note: When down is in subset, gate/up are NOT in subset (separate subset groups)
-                    # We need to compute gate/up outputs to create the intermediate for down
                     if down_key in subset:
-                        # Get gate/up modules directly from expert via getattr
-                        # This returns the UNWRAPPED modules (not NamedModule wrappers)
-                        # Hooks are only registered on NamedModule wrappers in subset,
-                        # so calling unwrapped modules means NO hooks fire automatically.
                         gate_module = getattr(expert, self.gate_proj_name)
                         up_module = getattr(expert, self.up_proj_name)
-
-                        # Compute intermediate (no hooks fire since modules are unwrapped)
-                        # Ensure modules are called with input on correct device
-                        # gate_module/up_module are submodules of expert, so they are on expert_device
                         gate_out = gate_module(expert_input)
                         up_out = up_module(expert_input)
 
-                        # Compute intermediate using expert's activation function
                         if hasattr(expert, 'act_fn'):
                             intermediate = expert.act_fn(gate_out) * up_out
                         else:
                             intermediate = F.silu(gate_out) * up_out
                         del gate_out, up_out
 
-                        # Call down_proj via wrapper (or replica module) with hooks enabled for activation collection
-                        # Module returned by get_callable_module IS on expert_device (if replica is correct)
-                        # Intermediate is on expert_device
                         get_callable_module(down_key)(intermediate)
                         del intermediate
                         expert_count += 1
                     else:
-                        # For gate_proj/up_proj in subset, just call them directly via wrappers (or replica modules)
                         called_any = False
                         if gate_key in subset:
                             get_callable_module(gate_key)(expert_input)
@@ -492,8 +501,24 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                 except StopForward:
                     stop_forward_raised = True
                 finally:
-                    # Promptly release tensor copy to free VRAM
                     del expert_input
+
+        execution_order = self.get_subset_execution_order(
+            ordered_module_names=ordered_module_names or [],
+            moe_block_prefix=moe_block_prefix,
+            experts_attr_name=experts_attr_name,
+            shared_expert_attr_name=shared_expert_attr_name,
+        )
+        if has_shared_experts and "shared" not in execution_order:
+            execution_order.append("shared")
+        if has_expert_projs and "experts" not in execution_order:
+            execution_order.append("experts")
+
+        for group_name in execution_order:
+            if group_name == "shared":
+                run_shared_experts()
+            elif group_name == "experts":
+                run_routed_experts()
 
         if stop_forward_raised:
             # Re-raise StopForward if it was caught

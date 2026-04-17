@@ -10,9 +10,13 @@ from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional
 
 import torch
+from defuser import convert_model
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
+from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
 from gptqmodel.models import BaseQModel
 
 
@@ -26,6 +30,7 @@ from gptqmodel.looper.loop_processor import ExecutionConfig, LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
+from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
 from gptqmodel.models.definitions.qwen3_5_moe import Qwen3_5_MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
@@ -112,18 +117,94 @@ def test_qwen2_moe_shared_expert_merges_with_experts():
     assert len(expert_gate_blocks) == 1
 
 
+def test_qwen2_moe_awq_expansion_keeps_shared_expert_before_experts():
+    blocks = Qwen2MoeQModel.simple_layer_modules(
+        model_config=SimpleNamespace(num_experts=2),
+        quantize_config=SimpleNamespace(dynamic=None),
+        is_awq_quantize=True,
+    )
+
+    gate_block = next(block for block in blocks if "mlp.shared_expert.gate_proj" in block)
+    assert gate_block == [
+        "mlp.shared_expert.gate_proj",
+        "mlp.shared_expert.up_proj",
+        "mlp.experts.0.gate_proj",
+        "mlp.experts.0.up_proj",
+        "mlp.experts.1.gate_proj",
+        "mlp.experts.1.up_proj",
+    ]
+
+
 def test_qwen3_5_moe_shared_expert_merges_with_experts():
     blocks = Qwen3_5_MoeQModel.build_layer_modules(Qwen3_5_MoeQModel.module_tree)
-    print("blocks",blocks)
+
     gate_block = next(block for block in blocks if "mlp.shared_expert.gate_proj" in block)
+    assert gate_block.index("mlp.shared_expert.gate_proj") < gate_block.index("mlp.experts.{expert_index}.gate_proj")
+    assert gate_block.index("mlp.shared_expert.up_proj") < gate_block.index("mlp.experts.{expert_index}.up_proj")
     assert "mlp.experts.{expert_index}.gate_proj" in gate_block
     assert "mlp.experts.{expert_index}.up_proj" in gate_block
 
     down_block = next(block for block in blocks if "mlp.shared_expert.down_proj" in block)
+    assert down_block.index("mlp.shared_expert.down_proj") < down_block.index("mlp.experts.{expert_index}.down_proj")
     assert "mlp.experts.{expert_index}.down_proj" in down_block
 
     expert_gate_blocks = [block for block in blocks if "mlp.experts.{expert_index}.gate_proj" in block]
     assert len(expert_gate_blocks) == 1
+
+
+def test_awq_moe_expansion_preserves_non_expert_segments():
+    class _MockOrderedMoEModel(BaseQModel):
+        dynamic_expert_index = "num_experts"
+
+    expanded = _MockOrderedMoEModel.build_moe_modules_if_need(
+        SimpleNamespace(num_experts=2),
+        [[
+            "mlp.shared_expert.gate_proj",
+            "mlp.shared_expert.up_proj",
+            f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj",
+            f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj",
+            "mlp.shared_expert.down_proj",
+        ]],
+        is_awq_quantize=True,
+    )
+
+    assert expanded == [[
+        "mlp.shared_expert.gate_proj",
+        "mlp.shared_expert.up_proj",
+        "mlp.experts.0.gate_proj",
+        "mlp.experts.0.up_proj",
+        "mlp.experts.1.gate_proj",
+        "mlp.experts.1.up_proj",
+        "mlp.shared_expert.down_proj",
+    ]]
+
+
+def test_moe_lifecycle_execution_order_follows_ordered_module_names():
+    hooks = GateUpDownMoELifecycleHooks()
+
+    shared_first = hooks.get_subset_execution_order(
+        ordered_module_names=[
+            "mlp.shared_expert.gate_proj",
+            "mlp.shared_expert.up_proj",
+            "mlp.experts.0.gate_proj",
+        ],
+        moe_block_prefix="mlp",
+        experts_attr_name="experts",
+        shared_expert_attr_name="shared_expert",
+    )
+    assert shared_first == ["shared", "experts"]
+
+    experts_first = hooks.get_subset_execution_order(
+        ordered_module_names=[
+            "mlp.experts.0.gate_proj",
+            "mlp.experts.0.up_proj",
+            "mlp.shared_expert.gate_proj",
+        ],
+        moe_block_prefix="mlp",
+        experts_attr_name="experts",
+        shared_expert_attr_name="shared_expert",
+    )
+    assert experts_first == ["experts", "shared"]
 
 
 def test_awq_processor_enables_subset_early_stop():
@@ -414,3 +495,131 @@ def test_stage_subset_early_stop_and_callbacks():
     assert processor.hook_calls and processor.hook_calls[-1] == subset_names[-1]
     assert set(processor.process_calls) == set(subset_names)
     assert len(processor.process_calls) == len(subset_names)
+
+
+def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
+    """Regression for Qwen 3.5/3.6 shared-expert ordering inside merged MoE subsets."""
+
+    cfg = Qwen3_5MoeTextConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        moe_intermediate_size=32,
+        shared_expert_intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        vocab_size=128,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    model = Qwen3_5MoeForCausalLM(cfg)
+    convert_model(model, cleanup_original=False)
+    layer = model.model.layers[0]
+    replace_module_with_hooked_legacy(layer)
+
+    quant_cfg = _make_quant_config()
+
+    class _DummyQwen3_5Model:
+        moe_lifecycle_hooks = Qwen3_5_MoeQModel.moe_lifecycle_hooks
+        layer_modules_strict = True
+        lm_head = "lm_head"
+        supported_dense_vram_strategies = [VramStrategy.EXCLUSIVE, VramStrategy.BALANCED]
+
+        def __init__(self, qcfg: QuantizeConfig):
+            self.support_batch_quantize = False
+            self.quantize_config = qcfg
+            self.layer_callback = None
+            self.subset_callback = None
+
+        @classmethod
+        def get_moe_module_name(cls):
+            return Qwen3_5_MoeQModel.get_moe_module_name()
+
+        def shell_module_materialize(self, target_submodule, device, role=None, named_module=None):
+            return target_submodule
+
+        def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+            del layer, target_device
+            hidden_states = layer_input[0]
+            position_ids = additional_inputs.get("position_ids")
+            if position_ids is None:
+                position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
+                additional_inputs["position_ids"] = position_ids
+            additional_inputs["position_embeddings"] = model.model.rotary_emb(hidden_states, position_ids)
+            return additional_inputs
+
+    processor = _StubAWQProcessor(quant_cfg)
+    looper = ModuleLooper(model=_DummyQwen3_5Model(quant_cfg), processors=[processor])
+
+    subset_names = next(
+        block
+        for block in Qwen3_5_MoeQModel.simple_layer_modules(
+            model_config=cfg,
+            quantize_config=SimpleNamespace(dynamic=None),
+            is_awq_quantize=True,
+        )
+        if "mlp.shared_expert.gate_proj" in block
+    )
+    assert subset_names[:2] == [
+        "mlp.shared_expert.gate_proj",
+        "mlp.shared_expert.up_proj",
+    ]
+    assert subset_names[-1] == "mlp.experts.3.up_proj"
+
+    layer_inputs = [[torch.randn(1, 4, cfg.hidden_size)]]
+    full_modules = find_modules(layer)
+    subset = looper.create_named_modules(
+        module=layer,
+        full=full_modules,
+        is_lm_head_module=False,
+        layer_index=0,
+        layers_prefix="layers",
+        names=subset_names,
+        processor=processor,
+        fallback=False,
+        layer_module=layer,
+    )
+    subset_plan = build_subset_plan(
+        looper,
+        processor=processor,
+        subset=subset,
+        subset_index=0,
+        subset_total=1,
+        full=full_modules,
+        fallback=False,
+        layer_inputs=layer_inputs,
+    )
+
+    run_subset_stage(
+        looper=looper,
+        plan=subset_plan,
+        processor=processor,
+        module=layer,
+        layer_inputs=layer_inputs,
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        layer_descriptor="layers.0",
+        layer_title="subset-check",
+        layer_index=0,
+        full=full_modules,
+        fallback=False,
+        shared_kv_cache_dict={},
+        pb=_DummyProgress(),
+        log=None,
+        region_timer=None,
+        previous_processed_subset=None,
+        subset_event_cb=None,
+    )
+
+    assert processor.hook_calls[:2] == [
+        "mlp.shared_expert.gate_proj",
+        "mlp.shared_expert.up_proj",
+    ]
+    assert any(name.startswith("mlp.experts.") for name in processor.hook_calls)
+    assert processor.hook_calls[-1] == "mlp.experts.3.up_proj"

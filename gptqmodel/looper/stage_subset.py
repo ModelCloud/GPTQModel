@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
 
 import pcre
@@ -93,7 +93,14 @@ class SubsetPlan:
     forward_device_map: Dict[str, torch.device]
     calibration_coverage_policy: CalibrationCoveragePolicy
     module_chunks: List[Dict[str, NamedModule]]
+    ordered_module_names: List[str] = field(default_factory=list)
     restore_forward_device_overrides: bool = True
+
+    def __post_init__(self) -> None:
+        """Freeze an explicit ordered module list for forward replay decisions."""
+
+        if not self.ordered_module_names:
+            self.ordered_module_names = list(self.modules.keys())
 
     @property
     def subset_forward_serial(self) -> bool:
@@ -122,7 +129,13 @@ class SubsetPlan:
     def for_modules(self, modules: Dict[str, NamedModule]) -> "SubsetPlan":
         """Reuse the same execution policy for one chunk or replay-only subset."""
 
-        return replace(self, modules=modules, module_chunks=[modules])
+        ordered_names = [name for name in self.ordered_module_names if name in modules]
+        return replace(
+            self,
+            modules=modules,
+            ordered_module_names=ordered_names,
+            module_chunks=[modules],
+        )
 
 
 @dataclass
@@ -516,6 +529,7 @@ def build_subset_plan(
 
     return SubsetPlan(
         modules=subset,
+        ordered_module_names=list(subset.keys()),
         subset_index=subset_index,
         subset_total=subset_total,
         execute_forward=execute_forward,
@@ -686,6 +700,7 @@ def _run_single_subset_pass(
     # Pull frequently used plan fields into locals so the execution flow below
     # reads linearly without re-deriving policy from processor state.
     subset = plan.modules
+    subset_names = plan.ordered_module_names or list(subset.keys())
     subset_index = plan.subset_index
     subset_total = plan.subset_total
     execution_config = processor.execution_config
@@ -696,7 +711,7 @@ def _run_single_subset_pass(
     execute_forward = plan.execute_forward if execute_forward is None else execute_forward
 
     handle = []
-    subset_size = len(subset)
+    subset_size = len(subset_names)
 
     if execute_forward:
         for named_module in subset.values():
@@ -720,7 +735,8 @@ def _run_single_subset_pass(
                         break
 
     if execute_forward:
-        for idx, (name, m) in enumerate(subset.items()):
+        for idx, name in enumerate(subset_names):
+            m = subset[name]
             # Register the forward hook that captures activations for quantization.
             # The final module optionally flips a flag so processors can trigger
             # once-per-subset logic after the forward pass.
@@ -788,7 +804,7 @@ def _run_single_subset_pass(
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
     if execute_forward:
         if subset_event_cb:
-            subset_event_cb(stage="forward_start", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=list(subset.keys()), processor=getattr(processor, "name", type(processor).__name__))
+            subset_event_cb(stage="forward_start", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=subset_names, processor=getattr(processor, "name", type(processor).__name__))
 
         fwd_start = time.perf_counter()
         reuse_kv = bool(getattr(module, "reuse_kv", False))
@@ -827,6 +843,8 @@ def _run_single_subset_pass(
             forward_outputs = looper._run_forward_batches(
                 module=module,
                 processor=processor,
+                current_subset=None if disable_moe_hooks else subset,
+                ordered_module_names=subset_names,
                 layer_inputs=layer_inputs,
                 layer_input_kwargs=layer_input_kwargs,
                 position_ids=position_ids,
@@ -875,7 +893,7 @@ def _run_single_subset_pass(
         del forward_outputs
 
     if execute_forward and subset_event_cb:
-        subset_event_cb(stage="forward_end", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=list(subset.keys()), processor=getattr(processor, "name", type(processor).__name__))
+        subset_event_cb(stage="forward_end", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=subset_names, processor=getattr(processor, "name", type(processor).__name__))
 
     fwd_time = (time.perf_counter() - fwd_start) if fwd_start is not None else 0.0
     processor.set_fwd_time(fwd_time)
@@ -891,7 +909,7 @@ def _run_single_subset_pass(
         h.remove()
 
     if execute_forward:
-        for name in subset:
+        for name in subset_names:
             # Reset inline hook attributes on NamedModule wrappers so future passes
             # do not reuse state from this subset run.
             if hasattr(subset[name], 'forward_hook'):
@@ -906,7 +924,7 @@ def _run_single_subset_pass(
         # Coverage validation is a policy decision captured by the plan.
         # The executor only applies that policy; it does not decide when the
         # processor should tolerate or prune never-invoked modules.
-        for name in subset:
+        for name in subset_names:
             # Skip MoE experts that never fired; they likely lacked calibration
             # traffic and would produce invalid statistics.
             if not processor.has_captured_input_ids(name):
@@ -935,7 +953,9 @@ def _run_single_subset_pass(
                     ] = {}
 
     quant_target_devices: Dict[str, torch.device] = {}
-    for name, named_module in subset.items():
+    active_subset_names = [name for name in subset_names if name in subset]
+    for name in active_subset_names:
+        named_module = subset[name]
         # Ensure each module has a matching processor task before sending it to
         # the worker pool; otherwise freeze it on the current device.
         task_map = getattr(processor, "tasks", None)
@@ -962,7 +982,7 @@ def _run_single_subset_pass(
     futures = []
 
     if subset_event_cb:
-        subset_event_cb(stage="quant_start", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=list(subset.keys()), processor=getattr(processor, "name", type(processor).__name__))
+        subset_event_cb(stage="quant_start", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=active_subset_names, processor=getattr(processor, "name", type(processor).__name__))
 
 
     @torch.inference_mode()
@@ -1029,7 +1049,8 @@ def _run_single_subset_pass(
                 )
         return nm.name, nm
 
-    for name, named_module in subset.items():
+    for name in active_subset_names:
+        named_module = subset[name]
         # Launch processing for every module in the subset; tasks may run in
         # parallel as allowed by the device thread pool.
         tgt_dev = quant_target_devices.get(name, cur_layer_device)
@@ -1068,7 +1089,7 @@ def _run_single_subset_pass(
         torch_sync()
 
     if subset_event_cb:
-        subset_event_cb(stage="quant_complete", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=list(subset.keys()), processor=getattr(processor, "name", type(processor).__name__))
+        subset_event_cb(stage="quant_complete", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=active_subset_names, processor=getattr(processor, "name", type(processor).__name__))
 
     used_data_parallel = False
     if execute_forward and forward_flush_device is None:
@@ -1126,7 +1147,7 @@ def run_subset_stage(
             layer_idx=layer_index,
             subset_index=plan.subset_index,
             subset_total=plan.subset_total,
-            module_names=list(plan.modules.keys()),
+            module_names=plan.ordered_module_names,
             processor=processor_name,
         )
 
@@ -1138,7 +1159,7 @@ def run_subset_stage(
                 plan.subset_index + 1,
                 plan.subset_total,
                 len(plan.modules),
-                list(plan.modules.keys())[:8],
+                plan.ordered_module_names[:8],
             )
         else:
             logger.debug(
@@ -1148,7 +1169,7 @@ def run_subset_stage(
                 plan.subset_total,
                 processor_name,
                 len(plan.modules),
-                list(plan.modules.keys())[:8],
+                plan.ordered_module_names[:8],
             )
     processed_results = {}
 

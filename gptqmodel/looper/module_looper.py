@@ -410,13 +410,14 @@ class ModuleLooper():
     class MoELifecycleContext:
         """Context manager for MoE lifecycle hooks integration."""
 
-        def __init__(self, module_looper, module, processor, current_subset):
+        def __init__(self, module_looper, module, processor, current_subset, ordered_module_names):
             """Capture the replica state needed to patch the MoE block."""
 
             self.module_looper = module_looper
             self.module = module
             self.processor = processor
             self.current_subset = current_subset
+            self.ordered_module_names = ordered_module_names
             self.moe_hooks_active = False
             self.moe_block = None
             self.moe_forward_original = None
@@ -442,6 +443,7 @@ class ModuleLooper():
                             hidden_states=hidden_states,
                             processor=self.processor,
                             subset=self.current_subset,
+                            ordered_module_names=self.ordered_module_names,
                             original_forward=self.moe_forward_original,
                             model_class=self.module_looper.gptq_model.__class__,
                             module_looper=self.module_looper,  # Pass for TLS-based hooks pausing
@@ -1117,6 +1119,8 @@ class ModuleLooper():
         *,
         module: torch.nn.Module,
         processor: LoopProcessor,
+        current_subset: Optional[Dict[str, Any]] = None,
+        ordered_module_names: Optional[List[str]] = None,
         layer_inputs: List[List[torch.Tensor]],
         layer_input_kwargs: List[Dict[str, torch.Tensor]],
         position_ids: List[torch.Tensor],
@@ -1141,6 +1145,8 @@ class ModuleLooper():
         return self._forward_executor.run(
             module=module,
             processor=processor,
+            current_subset=current_subset,
+            ordered_module_names=ordered_module_names,
             layer_inputs=layer_inputs,
             layer_input_kwargs=layer_input_kwargs,
             position_ids=position_ids,
