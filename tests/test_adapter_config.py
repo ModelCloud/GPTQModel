@@ -14,6 +14,7 @@
 # limitations under the License.
 
 # -- do not touch
+# GPU=-1
 import os
 
 from gptqmodel import QuantizeConfig
@@ -88,6 +89,5 @@ class TestExtensionConfig(unittest.TestCase):
         assert qconfig.bits == bits
         assert qconfig.adapter == eora_config
         assert qconfig.adapter.rank == rank
-
 
 

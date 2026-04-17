@@ -29,9 +29,10 @@ class PhiMoEGPTQForCausalLM(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp:moe:?": {
+            "mlp|block_sparse_moe:moe:?": {
+                "router": ("router:!",),  # PhimoeTopKRouter.forward() returns two values, skipping its quantization.
                 "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                    "#": ("gate_proj|w1:0", "up_proj|w3:0", "down_proj|w2:1"),
                 },
             },
         }

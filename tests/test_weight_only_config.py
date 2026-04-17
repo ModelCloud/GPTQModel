@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-
+# GPU=-1
 from dataclasses import fields
 from inspect import signature
 

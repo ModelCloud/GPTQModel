@@ -21,8 +21,10 @@
 - `ci_workflow.py activate-test-env` resolves `GPU_COUNT`, `HAS_SPECIFIC_DEPS`, `ENV_NAME`, and `UV_CACHE_DIR`.
 - `ci_workflow.py setup-specific-env` applies per-test compiler/python settings and test-specific install/uninstall package rules from `deps.yaml` and `blacklist.yaml`.
 - `ci_workflow.py install-package` serializes source installs with lock files so only one job populates a dedicated env at a time.
-- `ci_gpu.py allocate` and `ci_gpu.py release` talk to the shared GPU allocator service.
-- `ci_tests.py run` executes pytest, streams logs, keeps GPU leases alive, and logs VRAM usage.
+- `.github/scripts/ci_workflow.py` owns workflow-oriented commands: test discovery, per-test env resolution, and package-version matrix generation.
+- `.github/scripts/ci_deps.py` owns dependency install/uninstall commands and their shared YAML/package logic.
+- `.github/scripts/ci_gpu.py` owns allocator lease commands and the shared allocator client logic.
+- `.github/scripts/ci_tests.py` owns pytest execution and failure-log extraction.
 - `ci_tests.py check-log` prints the same failure excerpts the old shell step grepped from the test log.
 
 ## Config files

@@ -12,14 +12,14 @@ from typing import Callable, Dict, List, Optional
 import torch
 from defuser import convert_model
 from defuser.modeling.unfused_moe.qwen2_moe import LinearQwen2MoeSparseMoeBlock
-from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeConfig, Qwen2MoeForCausalLM
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeConfig, Qwen2MoeForCausalLM
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
-from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
 from gptqmodel.models import BaseQModel
+from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
 
 
 repo_root = Path(__file__).resolve().parents[2]
@@ -32,10 +32,10 @@ from gptqmodel.looper.loop_processor import ExecutionConfig, LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
-from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
 from gptqmodel.models.definitions.qwen3_5_moe import Qwen3_5_MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
+from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 from gptqmodel.nn_modules.hooked_linear import HookedLinear, StopForward, replace_module_with_hooked_legacy
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig, VramStrategy
@@ -138,14 +138,12 @@ def test_qwen2_moe_awq_expansion_keeps_shared_expert_before_experts():
         "mlp.experts.1.gate_proj",
         "mlp.experts.1.up_proj",
     ]
-
     down_block = next(block for block in blocks if "mlp.shared_expert.down_proj" in block)
     assert down_block == [
         "mlp.shared_expert.down_proj",
         "mlp.experts.0.down_proj",
         "mlp.experts.1.down_proj",
     ]
-
 
 def test_qwen3_5_moe_shared_expert_merges_with_experts():
     blocks = Qwen3_5_MoeQModel.build_layer_modules(Qwen3_5_MoeQModel.module_tree)

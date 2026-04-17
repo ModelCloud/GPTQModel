@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+# GPU=-1
 from gptqmodel.quantization.config import Fallback, QuantizeConfig, SmoothMAD
 
 

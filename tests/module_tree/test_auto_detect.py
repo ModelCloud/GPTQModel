@@ -1,3 +1,4 @@
+# GPU=-1
 import unittest
 
 import torch.nn as nn

@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+# GPU=-1
 import pytest
 
 from gptqmodel.quantization import METHOD, QuantizeConfig

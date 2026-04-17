@@ -4,8 +4,7 @@
 """
 Unit tests for :moe flag parsing and MoE module detection.
 """
-
-
+# GPU=-1
 from gptqmodel.models.base import MOE_FLAG, BaseQModel
 
 
