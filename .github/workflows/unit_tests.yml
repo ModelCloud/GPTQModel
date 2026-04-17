@@ -63,6 +63,7 @@ env:
   PYTORCH_ALLOC_CONF: 'expandable_segments:True'
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.249
+  GPU_ALLOCATOR_URL: http://10.0.13.31/gpu
   LOGBAR_ANIMATION: '0'
   CUDA_VERSION: 130
   UV_TORCH_BACKEND: cu130
@@ -152,7 +153,7 @@ jobs:
       - name: List files
         id: files
         run: |
-          test_files=$(python3 .github/scripts/list_test_files.py \
+          test_files=$(python3 .github/scripts/ci_workflow.py list-tests \
           --ignored-test-files "$IGNORED_TEST_FILES" \
           --test-regex "${{ github.event.inputs.test_regex }}")
 
@@ -264,27 +265,18 @@ jobs:
         run: |
           echo "-- loading unit test's config --"
           source /opt/uv/setup_uv_venv.sh unit_test_env
-
-          config_json="$(python3 .github/scripts/parse_test_config.py \
+          eval "$(python3 .github/scripts/ci_workflow.py resolve-env \
             --group tests \
-            --test-name "${{ matrix.test_script }}")"
-
-          py="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["py"])')"
-          gpu="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["gpu"])')"
-
-          echo "PYTHON_VERSION=$py" >> "$GITHUB_ENV"
-          echo "GPU_COUNT=$gpu" >> "$GITHUB_ENV"
-          
-          echo "using py=$py gpu=$gpu for test ${{ matrix.test_script }}"
-          echo "-- loaded --"
+            --test-name "${{ matrix.test_script }}" \
+            --cuda-version "${{ needs.check-vm.outputs.cuda_version }}" \
+            --torch-version "${{ env.TORCH_VERSION }}" \
+            --shell)"
 
           echo "-- setting up env --"
-          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
-          env_name="gptqmodel_${safe_ref}_test_${{ matrix.test_script }}"
-          echo "env_name: $env_name"
+          echo "env_name: $ENV_NAME"
           # will clean later
-          mv /opt/uv/venvs/$env_name "/opt/uv/tmp/${env_name}_$(date +%s)" || true
-          /opt/uv/setup_uv_venv.sh $env_name
+          mv "/opt/uv/venvs/$ENV_NAME" "/opt/uv/tmp/${ENV_NAME}_$(date +%s)" || true
+          /opt/uv/setup_uv_venv.sh "$ENV_NAME"
           echo "-- set --"
 
       - name: Setup uv env
@@ -300,13 +292,13 @@ jobs:
           echo ""
 
           echo "--- installing required deps..."
-          python .github/scripts/install_deps.py ${{ matrix.test_script }}
+          python .github/scripts/ci_deps.py install ${{ matrix.test_script }}
 
           echo ""
           echo ""
 
           echo "--- uninstalling required deps..."
-          python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
+          python .github/scripts/ci_deps.py uninstall ${{ matrix.test_script }}
 
       # - name: Install Evalution
       #   run: |
@@ -400,8 +392,8 @@ jobs:
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
         run: |
-          python .github/scripts/allocate_gpu.py \
-            --base-url "http://${XEON5}" \
+          python .github/scripts/ci_gpu.py allocate \
+            --base-url "${GPU_ALLOCATOR_URL}" \
             --run-id "${{ github.run_id }}" \
             --test "${{ matrix.test_script }}" \
             --runner "${RUNNER_NAME:-unknown}" \
@@ -417,8 +409,8 @@ jobs:
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             extra_args+=(--clear-cuda --xpu-mode)
           fi
-          python .github/scripts/run_tests.py \
-            --base-url "http://${XEON5}" \
+          python .github/scripts/ci_tests.py run \
+            --base-url "${GPU_ALLOCATOR_URL}" \
             --run-id "${{ github.run_id }}" \
             --test-script "${{ matrix.test_script }}" \
             --runner "${RUNNER_NAME}" \
@@ -429,22 +421,17 @@ jobs:
         if: ${{ !cancelled() &&  failure() }}
         continue-on-error: true
         run: |
-          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
-          log_file=$log_dir/${{ matrix.test_script }}.log
-
-          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
-          
-          tail -n 200 $log_file
-          exit 1
+          python .github/scripts/ci_tests.py check-log \
+            --run-id "${{ github.run_id }}" \
+            --test-script "${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
         run: |
-          python .github/scripts/release_gpu.py \
-            --base-url "http://${XEON5}" \
+          python .github/scripts/ci_gpu.py release \
+            --base-url "${GPU_ALLOCATOR_URL}" \
             --run-id "${{ github.run_id }}" \
             --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
-            --timestamp "${{ env.STEP_TIMESTAMP }}" \
             --test "${{ matrix.test_script }}" \
             --runner "${RUNNER_NAME}"
 
@@ -552,27 +539,18 @@ jobs:
         run: |
           echo "-- loading unit test's config --"
           source /opt/uv/setup_uv_venv.sh unit_test_env
-
-          config_json="$(python3 .github/scripts/parse_test_config.py \
+          eval "$(python3 .github/scripts/ci_workflow.py resolve-env \
             --group tests \
-            --test-name "${{ matrix.test_script }}")"
-
-          py="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["py"])')"
-          gpu="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["gpu"])')"
-
-          echo "PYTHON_VERSION=$py" >> "$GITHUB_ENV"
-          echo "GPU_COUNT=$gpu" >> "$GITHUB_ENV"
-          
-          echo "using py=$py gpu=$gpu for test ${{ matrix.test_script }}"
-          echo "-- loaded --"
+            --test-name "${{ matrix.test_script }}" \
+            --cuda-version "${{ needs.check-vm.outputs.cuda_version }}" \
+            --torch-version "${{ env.TORCH_VERSION }}" \
+            --shell)"
 
           echo "-- setting up env --"
-          safe_ref=$(printf '%s' "${{ env.ref }}" | sed -e 's/[\\/]/_/g' -e 's/^refs_heads_//')
-          env_name="gptqmodel_${safe_ref}_test_${{ matrix.test_script }}"
-          echo "env_name: $env_name"
+          echo "env_name: $ENV_NAME"
           # will clean later
-          mv /opt/uv/venvs/$env_name "/opt/uv/tmp/${env_name}_$(date +%s)" || true
-          /opt/uv/setup_uv_venv.sh $env_name
+          mv "/opt/uv/venvs/$ENV_NAME" "/opt/uv/tmp/${ENV_NAME}_$(date +%s)" || true
+          /opt/uv/setup_uv_venv.sh "$ENV_NAME"
           echo "-- set --"
 
       - name: Setup uv env
@@ -584,8 +562,8 @@ jobs:
 
           echo "setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=${{ env.PYTHON_VERSION }}"
           bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
-          python .github/scripts/install_deps.py ${{ matrix.test_script }}
-          python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
+          python .github/scripts/ci_deps.py install ${{ matrix.test_script }}
+          python .github/scripts/ci_deps.py uninstall ${{ matrix.test_script }}
 
       - name: Install package from source
         run: |
@@ -638,8 +616,8 @@ jobs:
       - name: Find suitable GPU
         if: ${{ !cancelled() }}
         run: |
-          python .github/scripts/allocate_gpu.py \
-            --base-url "http://${XEON5}" \
+          python .github/scripts/ci_gpu.py allocate \
+            --base-url "${GPU_ALLOCATOR_URL}" \
             --run-id "${{ github.run_id }}" \
             --test "${{ matrix.test_script }}" \
             --runner "${RUNNER_NAME:-unknown}" \
@@ -648,8 +626,8 @@ jobs:
 
       - name: Run tests
         run: |
-          python .github/scripts/run_tests.py \
-            --base-url "http://${XEON5}" \
+          python .github/scripts/ci_tests.py run \
+            --base-url "${GPU_ALLOCATOR_URL}" \
             --run-id "${{ github.run_id }}" \
             --test-script "${{ matrix.test_script }}" \
             --runner "${RUNNER_NAME}" \
@@ -660,21 +638,17 @@ jobs:
         if: ${{ !cancelled() && failure() }}
         continue-on-error: true
         run: |
-          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
-          log_file=$log_dir/${{ matrix.test_script }}.log
-
-          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
-          tail -n 200 $log_file
-          exit 1
+          python .github/scripts/ci_tests.py check-log \
+            --run-id "${{ github.run_id }}" \
+            --test-script "${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always()
         run: |
-          python .github/scripts/release_gpu.py \
-            --base-url "http://${XEON5}" \
+          python .github/scripts/ci_gpu.py release \
+            --base-url "${GPU_ALLOCATOR_URL}" \
             --run-id "${{ github.run_id }}" \
             --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
-            --timestamp "${{ env.STEP_TIMESTAMP }}" \
             --test "${{ matrix.test_script }}" \
             --runner "${RUNNER_NAME}"
 
@@ -745,7 +719,7 @@ jobs:
         id: parser
         run: |
           python -m pip install --upgrade requests packaging
-          versions=$(python .github/scripts/ci_loop_versions.py setuptools ">=77.0.1,<83")
+          versions=$(python .github/scripts/ci_workflow.py loop-versions setuptools ">=77.0.1,<83")
           echo "versions=$versions" >> "$GITHUB_OUTPUT"
 
   check-setuptools:
