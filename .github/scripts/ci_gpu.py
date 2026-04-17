@@ -139,7 +139,7 @@ def build_get_request(
         count: str,
 ) -> dict[str, object]:
     return {
-        "server": build_server_info(runner_name),
+        "server": build_server_info(),
         "job": {
             "jobId": int(run_id),
             "count": int(count),
@@ -153,7 +153,7 @@ def build_get_request(
 
 def build_job_request(*, runner_name: str, run_id: str, test_name: str) -> dict[str, object]:
     return {
-        "server": build_server_info(runner_name),
+        "server": build_server_info(),
         "job": {
             "jobId": int(run_id),
             "test": test_name,
@@ -175,7 +175,7 @@ def append_github_env(name: str, value: str) -> None:
 
 
 def print_status(base_url: str, runner_name: str) -> None:
-    server = build_server_info(runner_name)
+    server = build_server_info()
     try:
         status = request_json(
             format_info_url(base_url, server["platform"]),
