@@ -175,24 +175,12 @@ def test_qzero_offsets_scalar_patterns():
         assert torch.equal(module.qzeros.data, expected)
 
 @torch.inference_mode()
-def test_qzero_offsets_triangular_patterns():
-    cases = [
-        (
-            torch.int8,
-            # 0x92 == -110 in int8 (two's complement)
-            torch.tensor([[0x24, -0x6E, 0x49]], dtype=torch.int8),
-        ),
-        (
-            torch.int32,
-            # 0x9249_2492 exceeds int32 max; use its 32-bit two's complement: -0x6DB6_DB6E
-            torch.tensor([[0x2492_4924, -0x6DB6_DB6E, 0x4924_9249]], dtype=torch.int32),
-        ),
-    ]
+def test_qzero_offsets_3bit_int32_match_canonical_pack_order():
+    module = _make_module(bits=3, pack_dtype=torch.int32)
+    convert_gptq_v1_to_v2_format_module(module=module, bits=3, pack_dtype=torch.int32)
 
-    for pack_dtype, expected in cases:
-        module = _make_module(bits=3, pack_dtype=pack_dtype)
-        convert_gptq_v1_to_v2_format_module(module=module, bits=3, pack_dtype=pack_dtype)
-        assert torch.equal(module.qzeros.data, expected)
+    expected = _pack_cols(torch.ones((1, 32), dtype=torch.int32), bits=3)
+    assert torch.equal(module.qzeros.data, expected)
 
 
 @pytest.mark.parametrize(

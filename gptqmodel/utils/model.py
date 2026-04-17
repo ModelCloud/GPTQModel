@@ -68,6 +68,7 @@ from .hf import get_hf_config_dtype
 from .hub import hf_hub_download, model_info
 from .importer import select_quant_linear
 from .logger import log_time_block, setup_logger
+from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
 from .torch import HAS_CUDA, torch_empty_cache
 
 
@@ -661,47 +662,49 @@ def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack
         elif pack_dtype == torch.int8:
             module.qzeros.data += 0b01010101
     elif bits == 3:
-        # range 0 offset
-        if pack_dtype == torch.int64:
-            offset = 0b0010010010010010010010010010010000100100100100100100100100100100
-        elif pack_dtype == torch.int32:
-            offset = 0b00100100100100100100100100100100
-        elif pack_dtype == torch.int16:
-            offset = 0b0010010010010010
-        elif pack_dtype == torch.int8:
-            offset = 0b00100100
+        if pack_dtype == torch.int32:
+            # GPTQ INT3 spills some zero-point bits across adjacent packed words.
+            # Reuse the logical field shift so module conversion matches the
+            # safetensor dequant path and the canonical INT3 pack layout.
+            module.qzeros.data.copy_(_correct_gptq_v1_qzeros(module.qzeros.data, bits))
+        else:
+            # Only int32 packing words are used for GPTQ INT3 in actual checkpoints.
+            # Keep the legacy constant-offset path for synthetic smaller word sizes.
+            # range 0 offset
+            if pack_dtype == torch.int64:
+                offset = 0b0010010010010010010010010010010000100100100100100100100100100100
+            elif pack_dtype == torch.int16:
+                offset = 0b0010010010010010
+            elif pack_dtype == torch.int8:
+                offset = 0b00100100
 
-        module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] += (
-            offset
-        )
+            module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] += (
+                offset
+            )
 
-        # range 1 offset
-        if pack_dtype == torch.int64:
-            offset = 0b1001001001001001001001001001001010010010010010010010010010010010
-        elif pack_dtype == torch.int32:
-            offset = 0b10010010010010010010010010010010
-        elif pack_dtype == torch.int16:
-            offset = 0b1001001001001001
-        elif pack_dtype == torch.int8:
-            offset = 0b10010010
+            # range 1 offset
+            if pack_dtype == torch.int64:
+                offset = 0b1001001001001001001001001001001010010010010010010010010010010010
+            elif pack_dtype == torch.int16:
+                offset = 0b1001001001001001
+            elif pack_dtype == torch.int8:
+                offset = 0b10010010
 
-        module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] += (
-            offset
-        )
+            module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] += (
+                offset
+            )
 
-        # range 2 offset
-        if pack_dtype == torch.int64:
-            offset = 0b0100100100100100100100100100100101001001001001001001001001001001
-        elif pack_dtype == torch.int32:
-            offset = 0b01001001001001001001001001001001
-        elif pack_dtype == torch.int16:
-            offset = 0b0100100100100100
-        elif pack_dtype == torch.int8:
-            offset = 0b01001001
+            # range 2 offset
+            if pack_dtype == torch.int64:
+                offset = 0b0100100100100100100100100100100101001001001001001001001001001001
+            elif pack_dtype == torch.int16:
+                offset = 0b0100100100100100
+            elif pack_dtype == torch.int8:
+                offset = 0b01001001
 
-        module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] += (
-            offset
-        )
+            module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] += (
+                offset
+            )
     elif bits == 4:
         if pack_dtype == torch.int64:
             module.qzeros.data += 0b0001000100010001000100010001000100010001000100010001000100010001
@@ -784,15 +787,21 @@ def convert_gptq_v2_to_v1_format_module(
     if quantize_config.bits == 2:
         module.qzeros.data -= 0b01010101010101010101010101010101
     elif quantize_config.bits == 3:
-        module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] -= (
-            0b00100100100100100100100100100100
-        )
-        module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] -= (
-            0b10010010010010010010010010010010
-        )
-        module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] -= (
-            0b01001001001001001001001001001001
-        )
+        if quantize_config.pack_dtype == torch.int32:
+            # Keep INT3 export symmetric with the load-side logical correction.
+            module.qzeros.data.copy_(
+                _revert_gptq_v1_qzeros_correction(module.qzeros.data, quantize_config.bits)
+            )
+        else:
+            module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] -= (
+                0b00100100100100100100100100100100
+            )
+            module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] -= (
+                0b10010010010010010010010010010010
+            )
+            module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] -= (
+                0b01001001001001001001001001001001
+            )
     elif quantize_config.bits == 4:
         module.qzeros.data -= 0b00010001000100010001000100010001
     elif quantize_config.bits == 8:

@@ -595,10 +595,22 @@ def _uses_gptq_v1_qzeros(config: dict) -> bool:
     return checkpoint_format in {"gptq", "gemm"}
 
 
-def _correct_gptq_v1_qzeros(qzeros: torch.Tensor, bits: int) -> torch.Tensor:
+def _shift_gptq_qzeros(qzeros: torch.Tensor, bits: int, *, delta: int) -> torch.Tensor:
+    # GPTQ v1 stores qzeros with a per-field -1 offset. For 3-bit checkpoints,
+    # some logical values straddle adjacent packed words, so a packed-word add/sub
+    # is not equivalent to shifting each decoded zero-point. Decode the fields,
+    # shift them in logical space, then repack into the original storage dtype.
     zeros = unpack_cols(qzeros, bits)
-    corrected = (zeros + 1) & ((1 << bits) - 1)
-    return pack_cols(corrected, bits, pack_dtype=qzeros.dtype)
+    shifted = (zeros + delta) & ((1 << bits) - 1)
+    return pack_cols(shifted, bits, pack_dtype=qzeros.dtype)
+
+
+def _correct_gptq_v1_qzeros(qzeros: torch.Tensor, bits: int) -> torch.Tensor:
+    return _shift_gptq_qzeros(qzeros, bits, delta=1)
+
+
+def _revert_gptq_v1_qzeros_correction(qzeros: torch.Tensor, bits: int) -> torch.Tensor:
+    return _shift_gptq_qzeros(qzeros, bits, delta=-1)
 
 
 def convert_fp8_shard(
