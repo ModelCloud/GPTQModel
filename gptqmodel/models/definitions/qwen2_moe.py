@@ -8,6 +8,8 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Qwen2MoeQModel(BaseQModel):
+    """Qwen2 MoE definition aligned to the upstream HF forward execution order."""
+
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "num_experts"
@@ -17,6 +19,10 @@ class Qwen2MoeQModel(BaseQModel):
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
+    # The module tree is the forward-order ground truth for subset replay and
+    # early-stop. Qwen2 executes the shared expert path before routed experts
+    # in upstream HF modeling code, and Defuser should preserve that same
+    # execution order when it unfuses the experts.
     module_tree = [
         "model",
         "layers",
