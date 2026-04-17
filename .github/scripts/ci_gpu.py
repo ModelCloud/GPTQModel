@@ -1,13 +1,14 @@
 import argparse
 import json
 import os
-import platform as py_platform
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from device_smi import Device
 
 
 def now_ms() -> int:
@@ -18,20 +19,17 @@ def normalize_base_url(base_url: str) -> str:
     return base_url.rstrip("/")
 
 
-def build_server_info(runner_name: str | None) -> dict[str, str]:
-    machine = py_platform.machine().lower() or "unknown"
-    system = py_platform.system().lower() or "unknown"
+def build_server_info() -> dict[str, str]:
+    os_info = Device("os")
+    cpu_model = Device("cpu").model
     platform_name = (
-            os.environ.get("GPU_ALLOCATOR_PLATFORM")
-            or runner_name
-            or os.environ.get("RUNNER_NAME")
-            or os.environ.get("HOSTNAME")
-            or f"{system}-{machine}"
+            os.environ.get("GPU_PLATFORM")
+            or cpu_model
     )
     return {
         "platform": platform_name,
-        "arch": machine,
-        "system": system,
+        "arch": os_info.arch,
+        "system": os_info.name,
     }
 
 
