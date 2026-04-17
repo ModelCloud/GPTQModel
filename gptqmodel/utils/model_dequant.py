@@ -425,6 +425,9 @@ def detect_format(model_path: Path, config: dict) -> str:
 
 
 def unpack_cols(packed: torch.Tensor, bits: int) -> torch.Tensor:
+    if bits == 3:
+        return _unpack_cols_3bit(packed)
+
     pack_bits = packed.element_size() * 8
     pack_factor = pack_bits // bits
     mask = (1 << bits) - 1
@@ -436,7 +439,33 @@ def unpack_cols(packed: torch.Tensor, bits: int) -> torch.Tensor:
     return result
 
 
+def pack_cols(values: torch.Tensor, bits: int, *, pack_dtype: torch.dtype) -> torch.Tensor:
+    if bits == 3:
+        return _pack_cols_3bit(values, pack_dtype=pack_dtype)
+
+    pack_bits = torch.empty((), dtype=pack_dtype).element_size() * 8
+    pack_factor = pack_bits // bits
+    if pack_factor <= 0:
+        raise ValueError(f"Unsupported pack width {pack_bits} for {bits}-bit values")
+
+    rows, cols = values.shape
+    if cols % pack_factor != 0:
+        raise ValueError(
+            f"Column count {cols} is not divisible by the {bits}-bit pack factor {pack_factor}"
+        )
+
+    mask = (1 << bits) - 1
+    packed = torch.zeros(rows, cols // pack_factor, dtype=pack_dtype, device=values.device)
+    values_uint = values.to(torch.int64) & mask
+    for i in range(pack_factor):
+        packed |= (values_uint[:, i::pack_factor] << (i * bits)).to(pack_dtype)
+    return packed
+
+
 def unpack_rows(packed: torch.Tensor, bits: int) -> torch.Tensor:
+    if bits == 3:
+        return _unpack_rows_3bit(packed)
+
     pack_bits = packed.element_size() * 8
     pack_factor = pack_bits // bits
     mask = (1 << bits) - 1
@@ -446,6 +475,130 @@ def unpack_rows(packed: torch.Tensor, bits: int) -> torch.Tensor:
     for i in range(pack_factor):
         result[i::pack_factor, :] = ((packed_uint >> (i * bits)) & mask).to(torch.int32)
     return result
+
+
+def _require_int32_words_for_3bit(tensor: torch.Tensor) -> None:
+    pack_bits = tensor.element_size() * 8
+    if pack_bits != 32:
+        raise NotImplementedError(
+            f"3-bit GPTQ safetensor dequantization expects 32-bit packed words, got {pack_bits}-bit words."
+        )
+
+
+def _unpack_cols_3bit(packed: torch.Tensor) -> torch.Tensor:
+    _require_int32_words_for_3bit(packed)
+
+    rows, cols = packed.shape
+    if cols % 3 != 0:
+        raise ValueError(f"3-bit GPTQ qzeros expects columns divisible by 3, got shape {tuple(packed.shape)}")
+
+    blocks = cols // 3
+    words = packed.to(torch.int64).reshape(rows, blocks, 3)
+    word0 = words[:, :, 0]
+    word1 = words[:, :, 1]
+    word2 = words[:, :, 2]
+
+    result = torch.empty((rows, blocks * 32), dtype=torch.int32, device=packed.device)
+    unpacked = result.view(rows, blocks, 32)
+
+    for idx in range(10):
+        unpacked[:, :, idx] = ((word0 >> (3 * idx)) & 0x7).to(torch.int32)
+
+    unpacked[:, :, 10] = (
+        ((word0 >> 30) & 0x3) | (((word1 >> 0) << 2) & 0x4)
+    ).to(torch.int32)
+
+    for idx in range(10):
+        unpacked[:, :, 11 + idx] = ((word1 >> (1 + 3 * idx)) & 0x7).to(torch.int32)
+
+    unpacked[:, :, 21] = (
+        ((word1 >> 31) & 0x1) | (((word2 >> 0) << 1) & 0x6)
+    ).to(torch.int32)
+
+    for idx in range(10):
+        unpacked[:, :, 22 + idx] = ((word2 >> (2 + 3 * idx)) & 0x7).to(torch.int32)
+
+    return result
+
+
+def _pack_cols_3bit(values: torch.Tensor, *, pack_dtype: torch.dtype) -> torch.Tensor:
+    pack_bits = torch.empty((), dtype=pack_dtype).element_size() * 8
+    if pack_bits != 32:
+        raise NotImplementedError(
+            f"3-bit GPTQ safetensor dequantization expects 32-bit packed words, got {pack_bits}-bit words."
+        )
+
+    rows, cols = values.shape
+    if cols % 32 != 0:
+        raise ValueError(f"3-bit GPTQ qzeros expects columns divisible by 32, got shape {tuple(values.shape)}")
+
+    blocks = cols // 32
+    values_i64 = (values.to(torch.int64) & 0x7).reshape(rows, blocks, 32)
+    mask32 = (1 << 32) - 1
+
+    word0 = torch.zeros((rows, blocks), dtype=torch.int64, device=values.device)
+    for idx in range(10):
+        word0 |= values_i64[:, :, idx] << (3 * idx)
+    word0 |= values_i64[:, :, 10] << 30
+
+    word1 = (values_i64[:, :, 10] >> 2) & 0x1
+    for idx in range(10):
+        word1 |= values_i64[:, :, 11 + idx] << (1 + 3 * idx)
+    word1 |= values_i64[:, :, 21] << 31
+
+    word2 = (values_i64[:, :, 21] >> 1) & 0x3
+    for idx in range(10):
+        word2 |= values_i64[:, :, 22 + idx] << (2 + 3 * idx)
+
+    packed = torch.stack((word0, word1, word2), dim=2).reshape(rows, blocks * 3)
+    return (packed & mask32).to(pack_dtype)
+
+
+def _unpack_rows_3bit(packed: torch.Tensor) -> torch.Tensor:
+    _require_int32_words_for_3bit(packed)
+
+    rows, cols = packed.shape
+    if rows % 3 != 0:
+        raise ValueError(f"3-bit GPTQ qweight expects rows divisible by 3, got shape {tuple(packed.shape)}")
+
+    blocks = rows // 3
+    words = packed.to(torch.int64).reshape(blocks, 3, cols)
+    word0 = words[:, 0, :]
+    word1 = words[:, 1, :]
+    word2 = words[:, 2, :]
+
+    result = torch.empty((blocks * 32, cols), dtype=torch.int32, device=packed.device)
+    unpacked = result.view(blocks, 32, cols)
+
+    for idx in range(10):
+        unpacked[:, idx, :] = ((word0 >> (3 * idx)) & 0x7).to(torch.int32)
+
+    unpacked[:, 10, :] = (
+        ((word0 >> 30) & 0x3) | (((word1 >> 0) << 2) & 0x4)
+    ).to(torch.int32)
+
+    for idx in range(10):
+        unpacked[:, 11 + idx, :] = ((word1 >> (1 + 3 * idx)) & 0x7).to(torch.int32)
+
+    unpacked[:, 21, :] = (
+        ((word1 >> 31) & 0x1) | (((word2 >> 0) << 1) & 0x6)
+    ).to(torch.int32)
+
+    for idx in range(10):
+        unpacked[:, 22 + idx, :] = ((word2 >> (2 + 3 * idx)) & 0x7).to(torch.int32)
+
+    return result
+
+
+def _uses_gptq_v1_qzeros(config: dict) -> bool:
+    checkpoint_format = str(config.get("checkpoint_format") or "gptq").strip().lower()
+    return checkpoint_format in {"gptq", "gemm"}
+
+
+def _correct_gptq_v1_qzeros(qzeros: torch.Tensor, bits: int) -> torch.Tensor:
+    zeros = unpack_cols(qzeros, bits)
+    corrected = (zeros + 1) & ((1 << bits) - 1)
+    return pack_cols(corrected, bits, pack_dtype=qzeros.dtype)
 
 
 def convert_fp8_shard(
@@ -690,6 +843,8 @@ def convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, devic
         g_idx = buf["g_idx"].to(torch.long)
 
         bits = config.get("bits", 4)
+        if _uses_gptq_v1_qzeros(config):
+            qzeros = _correct_gptq_v1_qzeros(qzeros, bits)
         weight_int = unpack_rows(qweight, bits)
         zeros = unpack_cols(qzeros, bits)
 

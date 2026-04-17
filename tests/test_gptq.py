@@ -132,12 +132,12 @@ def test_gptq_cpu_hessian_fallback_returns_quantized_weights_to_original_cuda_de
     assert "moving final quantized weights back" in joined_logs
 
 
-def test_gptq_act_group_aware_requires_effective_columns_divisible_by_group_size():
+def test_gptq_act_group_aware_accepts_effective_columns_with_tail_group():
     layer = nn.Linear(10, 6, bias=False, dtype=torch.float32).eval()
     qcfg = QuantizeConfig(bits=4, group_size=4, act_group_aware=True)
 
-    with pytest.raises(ValueError, match="effective input columns"):
-        GPTQ(layer, qcfg=qcfg)
+    gptq = GPTQ(layer, qcfg=qcfg)
+    assert gptq.columns == 10
 
 
 def test_gptq_act_group_aware_rejects_non_positive_group_size():

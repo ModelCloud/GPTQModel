@@ -145,6 +145,21 @@ def compose_final_perm(local_perms, global_perm, groupsize: int) -> torch.Tensor
     perm2d = (local + base)[global_perm.to(device=local.device, dtype=torch.long)]  # (G,S)
     return perm2d.reshape(-1)  # (G*S,)
 
+def extend_perm_with_tail(perm: torch.Tensor, total_columns: int) -> torch.Tensor:
+    """Append identity-mapped tail columns left outside the full GAR groups."""
+
+    covered = int(perm.numel())
+    if covered >= total_columns:
+        return perm
+
+    tail = torch.arange(
+        covered,
+        total_columns,
+        dtype=perm.dtype,
+        device=perm.device,
+    )
+    return torch.cat((perm, tail), dim=0)
+
 def invert_perm(perm):
     """
     Compute the inverse of a permutation vector.

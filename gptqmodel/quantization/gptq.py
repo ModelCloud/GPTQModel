@@ -26,7 +26,13 @@ from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .fallback_smooth import mse_optimal_quant, smooth_block
-from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
+from .gar import (
+    compose_final_perm,
+    compute_global_perm,
+    compute_local_perms,
+    extend_perm_with_tail,
+    invert_perm,
+)
 from .quantizer import HF_OPTIMUM, Quantizer
 
 
@@ -252,14 +258,6 @@ class GPTQ:
             raise ValueError(
                 f"Quantization: Module `{self.name}` -> `act_group_aware=True` requires `group_size > 0`, "
                 f"got `{group_size}`."
-            )
-
-        if self.columns % group_size != 0:
-            raise ValueError(
-                f"Quantization: Module `{self.name}` -> `act_group_aware=True` requires the effective input "
-                f"columns to be divisible by `group_size`. effective_columns={self.columns}, "
-                f"group_size={group_size}. Disable `act_group_aware` or pad the module inputs "
-                f"(for example with `QuantizeConfig(preprocessors=[TensorParallelPadderConfig()])`)."
             )
 
     @staticmethod
@@ -1037,6 +1035,7 @@ class GPTQ:
             )
             del local_values
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
+            final_perm = extend_perm_with_tail(final_perm, self.columns)
             try:
                 W = W[:, final_perm]
                 self.H = self.H[final_perm][:, final_perm]
@@ -1279,9 +1278,12 @@ class GPTQ:
             Q = Q[:, inv_final]
             inv_global_perm = invert_perm(global_perm)
             inv_global_perm_list = inv_global_perm.tolist()
+            reordered_group_count = len(inv_global_perm_list)
             temp_scale = [scale[i] for i in inv_global_perm_list]
+            temp_scale.extend(scale[reordered_group_count:])
             scale = temp_scale
             temp_zero = [zero[i] for i in inv_global_perm_list]
+            temp_zero.extend(zero[reordered_group_count:])
             zero = temp_zero
             del final_perm, inv_final, global_perm, inv_global_perm, inv_global_perm_list, local_perms
 
