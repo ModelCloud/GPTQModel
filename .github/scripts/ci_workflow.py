@@ -171,11 +171,12 @@ def cmd_resolve_env(args: argparse.Namespace) -> int:
     append_github_env("GPU_COUNT", gpu)
     append_github_env("ENV_NAME", env_name)
 
-    print(f"using py={py} gpu={gpu} env={env_name} for test {args.test_name}")
     if args.shell:
         print(f"PYTHON_VERSION={shlex.quote(py)}")
         print(f"GPU_COUNT={shlex.quote(gpu)}")
         print(f"ENV_NAME={shlex.quote(env_name)}")
+    else:
+        print(f"using py={py} gpu={gpu} env={env_name} for test {args.test_name}")
     return 0
 
 
