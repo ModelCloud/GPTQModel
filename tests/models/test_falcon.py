@@ -21,6 +21,7 @@ class TestFalcon(ModelTest):
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     EVAL_BATCH_SIZE = 6
     USE_VLLM = False
+    ACT_GROUP_AWARE = False
 
     def test_falcon(self):
         self.quantize_and_evaluate()

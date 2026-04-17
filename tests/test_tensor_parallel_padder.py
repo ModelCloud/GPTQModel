@@ -149,3 +149,21 @@ def test_tensor_parallel_padder_does_not_change_quantized_matmul_output():
     padded_output = F.linear(eval_inputs, padded_weight)
 
     torch.testing.assert_close(padded_output, baseline_output, rtol=0.0, atol=0.0)
+
+
+def test_tensor_parallel_padder_makes_act_group_aware_shape_valid():
+    linear = torch.nn.Linear(10, 7, bias=False)
+    named = NamedModule(linear, name="proj", full_name="layer.0.proj", layer_index=0)
+
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=12,
+        preprocessors=[TensorParallelPadderConfig()],
+    )
+    qcfg.desc_act = False
+    qcfg.act_group_aware = True
+
+    _build_preprocessor(qcfg).preprocess(named)
+
+    gptq = GPTQ(named, qcfg)
+    assert gptq.columns == 24

@@ -200,6 +200,7 @@ class GPTQ:
         self.validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
+        self._validate_act_group_aware_shape()
 
         self.module_copy = None
 
@@ -241,6 +242,25 @@ class GPTQ:
         self._borrow_workspace_last_summary: Optional[Dict[str, object]] = None
         self._borrow_workspace_stage_dtype: Optional[torch.dtype] = None
         self._borrow_workspace_last_chunk_rows: Optional[int] = None
+
+    def _validate_act_group_aware_shape(self) -> None:
+        if not getattr(self.qcfg, "act_group_aware", False):
+            return
+
+        group_size = int(getattr(self.qcfg, "group_size", -1) or -1)
+        if group_size <= 0:
+            raise ValueError(
+                f"Quantization: Module `{self.name}` -> `act_group_aware=True` requires `group_size > 0`, "
+                f"got `{group_size}`."
+            )
+
+        if self.columns % group_size != 0:
+            raise ValueError(
+                f"Quantization: Module `{self.name}` -> `act_group_aware=True` requires the effective input "
+                f"columns to be divisible by `group_size`. effective_columns={self.columns}, "
+                f"group_size={group_size}. Disable `act_group_aware` or pad the module inputs "
+                f"(for example with `QuantizeConfig(preprocessors=[TensorParallelPadderConfig()])`)."
+            )
 
     @staticmethod
     def validate_module(module):
