@@ -14,11 +14,11 @@
 # limitations under the License.
 
 # -- do not touch
+# GPU=-1
 import os
 
 from gptqmodel import QuantizeConfig
 from gptqmodel.adapter.adapter import Lora, normalize_adapter
-
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -88,6 +88,5 @@ class TestExtensionConfig(unittest.TestCase):
         assert qconfig.bits == bits
         assert qconfig.adapter == eora_config
         assert qconfig.adapter.rank == rank
-
 
 

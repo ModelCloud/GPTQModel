@@ -1,4 +1,4 @@
-
+# GPU=-1
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 
 
