@@ -1,3 +1,4 @@
+# GPU=-1
 import random
 import string
 

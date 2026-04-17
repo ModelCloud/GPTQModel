@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-
+# GPU=-1
 import time
 from typing import Dict, List
 
@@ -76,4 +76,3 @@ def test_threadpool_limits_inside_device_threadpool():
             )
     finally:
         pool.shutdown(wait=True)
-

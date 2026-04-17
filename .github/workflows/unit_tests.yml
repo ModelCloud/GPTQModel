@@ -390,8 +390,16 @@ jobs:
           uv pip list
           echo "::endgroup::"
 
+      - name: Detect GPU marker
+        run: |
+          if grep -q '^# GPU=-1$' "${{ matrix.test_script }}"; then
+            echo "SKIP_GPU_ALLOCATION=true" >> "$GITHUB_ENV"
+          else
+            echo "SKIP_GPU_ALLOCATION=false" >> "$GITHUB_ENV"
+          fi
+
       - name: Find suitable GPU
-        if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
+        if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() && env.SKIP_GPU_ALLOCATION != 'true' }}
         run: |
           python .github/scripts/ci_gpu.py allocate \
             --base-url "${GPU_ALLOCATOR_URL}" \
@@ -427,7 +435,7 @@ jobs:
             --test-script "${{ matrix.test_script }}"
 
       - name: Release GPU
-        if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
+        if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && env.SKIP_GPU_ALLOCATION != 'true'
         run: |
           python .github/scripts/ci_gpu.py release \
             --base-url "${GPU_ALLOCATOR_URL}" \
@@ -615,8 +623,16 @@ jobs:
           uv pip list
           echo "::endgroup::"
 
+      - name: Detect GPU marker
+        run: |
+          if grep -q '^# GPU=-1$' "${{ matrix.test_script }}"; then
+            echo "SKIP_GPU_ALLOCATION=true" >> "$GITHUB_ENV"
+          else
+            echo "SKIP_GPU_ALLOCATION=false" >> "$GITHUB_ENV"
+          fi
+
       - name: Find suitable GPU
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.SKIP_GPU_ALLOCATION != 'true' }}
         run: |
           python .github/scripts/ci_gpu.py allocate \
             --base-url "${GPU_ALLOCATOR_URL}" \
@@ -645,7 +661,7 @@ jobs:
             --test-script "${{ matrix.test_script }}"
 
       - name: Release GPU
-        if: always()
+        if: always() && env.SKIP_GPU_ALLOCATION != 'true'
         run: |
           python .github/scripts/ci_gpu.py release \
             --base-url "${GPU_ALLOCATOR_URL}" \

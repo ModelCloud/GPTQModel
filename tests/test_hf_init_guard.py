@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-
+# GPU=-1
 import pytest
 import torch
 import torch.nn as nn
