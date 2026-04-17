@@ -109,20 +109,20 @@ def test_qwen2_moe_shared_expert_merges_with_experts():
     blocks = Qwen2MoeQModel.build_layer_modules(Qwen2MoeQModel.module_tree)
 
     gate_block = next(block for block in blocks if "mlp.shared_expert.gate_proj" in block)
-    assert gate_block.index("mlp.experts.{expert_index}.gate_proj") < gate_block.index("mlp.shared_expert.gate_proj")
-    assert gate_block.index("mlp.experts.{expert_index}.up_proj") < gate_block.index("mlp.shared_expert.up_proj")
+    assert gate_block.index("mlp.shared_expert.gate_proj") < gate_block.index("mlp.experts.{expert_index}.gate_proj")
+    assert gate_block.index("mlp.shared_expert.up_proj") < gate_block.index("mlp.experts.{expert_index}.up_proj")
     assert "mlp.experts.{expert_index}.gate_proj" in gate_block
     assert "mlp.experts.{expert_index}.up_proj" in gate_block
 
     down_block = next(block for block in blocks if "mlp.shared_expert.down_proj" in block)
-    assert down_block.index("mlp.experts.{expert_index}.down_proj") < down_block.index("mlp.shared_expert.down_proj")
+    assert down_block.index("mlp.shared_expert.down_proj") < down_block.index("mlp.experts.{expert_index}.down_proj")
     assert "mlp.experts.{expert_index}.down_proj" in down_block
 
     expert_gate_blocks = [block for block in blocks if "mlp.experts.{expert_index}.gate_proj" in block]
     assert len(expert_gate_blocks) == 1
 
 
-def test_qwen2_moe_awq_expansion_keeps_experts_before_shared_expert():
+def test_qwen2_moe_awq_expansion_keeps_shared_expert_before_experts():
     blocks = Qwen2MoeQModel.simple_layer_modules(
         model_config=SimpleNamespace(num_experts=2),
         quantize_config=SimpleNamespace(dynamic=None),
@@ -131,19 +131,19 @@ def test_qwen2_moe_awq_expansion_keeps_experts_before_shared_expert():
 
     gate_block = next(block for block in blocks if "mlp.shared_expert.gate_proj" in block)
     assert gate_block == [
+        "mlp.shared_expert.gate_proj",
+        "mlp.shared_expert.up_proj",
         "mlp.experts.0.gate_proj",
         "mlp.experts.0.up_proj",
         "mlp.experts.1.gate_proj",
         "mlp.experts.1.up_proj",
-        "mlp.shared_expert.gate_proj",
-        "mlp.shared_expert.up_proj",
     ]
 
     down_block = next(block for block in blocks if "mlp.shared_expert.down_proj" in block)
     assert down_block == [
+        "mlp.shared_expert.down_proj",
         "mlp.experts.0.down_proj",
         "mlp.experts.1.down_proj",
-        "mlp.shared_expert.down_proj",
     ]
 
 
@@ -637,7 +637,7 @@ def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
     assert processor.hook_calls[-1] == "mlp.experts.3.up_proj"
 
 
-def test_qwen2_moe_routing_override_all_keeps_shared_expert_down_proj_last():
+def test_qwen2_moe_routing_override_all_runs_shared_expert_before_last_expert():
     """Regression for Qwen2 MoE: routing override must not early-stop before shared expert runs."""
 
     cfg = Qwen2MoeConfig(
@@ -672,11 +672,11 @@ def test_qwen2_moe_routing_override_all_keeps_shared_expert_down_proj_last():
         if "mlp.shared_expert.down_proj" in block
     )
     assert down_block == [
+        "mlp.shared_expert.down_proj",
         "mlp.experts.0.down_proj",
         "mlp.experts.1.down_proj",
         "mlp.experts.2.down_proj",
         "mlp.experts.3.down_proj",
-        "mlp.shared_expert.down_proj",
     ]
 
     hook_calls: List[str] = []
