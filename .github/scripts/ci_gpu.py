@@ -8,8 +8,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from device_smi import Device
-
 
 def now_ms() -> int:
     return time.time_ns() // 1_000_000
@@ -20,6 +18,7 @@ def normalize_base_url(base_url: str) -> str:
 
 
 def build_server_info() -> dict[str, str]:
+    from device_smi import Device
     os_info = Device("os")
     cpu_model = Device("cpu").model
     platform_name = (
