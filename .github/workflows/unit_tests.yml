@@ -663,16 +663,7 @@ jobs:
           rm -rf "${{ env.VIRTUAL_ENV }}"
 
   check-torch:
-    runs-on: [ self-hosted, xeon5 ]
-    container:
-      image: 10.0.13.31:5000/nvidia/cuda:130-ubuntu24.04_0325
-      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
-      volumes:
-        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
-        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
-        - /dev/dri/by-path:/dev/dri/by-path
-        - /monster/ci/uv:/opt/uv
-        - /monster/ci/env:/opt/env
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
@@ -680,31 +671,35 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install package with selected setuptools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . "setuptools==${{ matrix.version }}"
+
       - name: Test pypi pip
         run: |
-          uv venv pypi_pip_env
-          source pypi_pip_env/bin/activate
-          uv pip install pip -U
-          pip install gptqmodel torch -U
+          python -m pip install --upgrade pip
+          python -m pip install gptqmodel torch
 
       - name: Test pypi uv
         run: |
-          uv venv pypi_uv_env
-          source pypi_uv_env/bin/activate
-          uv pip install gptqmodel torch -U
+          python -m pip install --upgrade uv
+          uv pip install gptqmodel torch
 
       - name: test local pip
         run: |
-          uv venv local_pip_env
-          source local_pip_env/bin/activate
-          uv pip install pip -U
-          pip install . torch -U
+          python -m pip install --upgrade pip
+          pip install . torch
 
       - name: test local uv
         run: |
-          uv venv local_uv_env
-          source local_uv_env/bin/activate
-          uv pip install . torch -U
+          python -m pip install --upgrade uv
+          uv pip install . torch
 
 
   prepare-setuptools:
