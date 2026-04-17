@@ -540,6 +540,7 @@ jobs:
         run: |
           echo "-- loading unit test's config --"
           source /opt/uv/setup_uv_venv.sh unit_test_env
+          uv pip install requests packaging -U
           eval "$(python3 .github/scripts/ci_workflow.py resolve-env \
             --group tests \
             --test-name "${{ matrix.test_script }}" \
