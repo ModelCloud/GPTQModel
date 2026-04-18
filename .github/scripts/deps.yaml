@@ -2,6 +2,7 @@ common:
   - tokenicer
   - transformers
   - tabulate
+  - rouge-score
   - swig # for models/tests
 
 tests:
