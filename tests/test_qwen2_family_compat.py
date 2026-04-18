@@ -36,6 +36,10 @@ def test_qwen2_vl_image_only_process_vision_info_returns_image_list():
     assert image_inputs == [image]
 
 
+def test_qwen2_vl_disables_offload_to_disk_shell_loading():
+    assert base_qwen2_vl.BaseQwen2VLGPTQ.support_offload_to_disk is False
+
+
 def test_qwen2_vl_pre_quantize_hooks_use_inner_model_layout():
     instance = object.__new__(base_qwen2_vl.BaseQwen2VLGPTQ)
     instance.model = types.SimpleNamespace(

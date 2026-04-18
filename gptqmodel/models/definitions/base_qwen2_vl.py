@@ -18,6 +18,10 @@ from ..base import BaseQModel
 
 class BaseQwen2VLGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
+    # Qwen2-VL placeholder-mask validation currently hits torch.nonzero() on
+    # fake/meta tensors during LazyTurtle shell execution, so use direct CPU
+    # loading instead of checkpoint-backed meta shells for quantization.
+    support_offload_to_disk = False
 
     pre_lm_head_norm_module = ["model.language_model.norm", "language_model.norm"]
 
