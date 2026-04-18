@@ -13,6 +13,7 @@ import torch
 from defuser import convert_model
 from defuser.modeling.unfused_moe.qwen2_moe import LinearQwen2MoeSparseMoeBlock
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+from transformers.models.phi3.modeling_phi3 import Phi3Config, Phi3ForCausalLM
 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeConfig, Qwen2MoeForCausalLM
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
@@ -32,6 +33,7 @@ from gptqmodel.looper.loop_processor import ExecutionConfig, LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
+from gptqmodel.models.definitions.phi3 import Phi3QModel
 from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
 from gptqmodel.models.definitions.qwen3_5_moe import Qwen3_5_MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
@@ -120,6 +122,57 @@ def test_qwen2_moe_shared_expert_merges_with_experts():
 
     expert_gate_blocks = [block for block in blocks if "mlp.experts.{expert_index}.gate_proj" in block]
     assert len(expert_gate_blocks) == 1
+
+
+def test_phi3_defused_mlp_modules_match_strict_subset_builder():
+    cfg = Phi3Config(
+        hidden_size=16,
+        intermediate_size=32,
+        num_attention_heads=2,
+        num_hidden_layers=1,
+        num_key_value_heads=2,
+    )
+    model = Phi3ForCausalLM(cfg)
+    convert_model(model, cleanup_original=False)
+
+    layer = model.model.layers[0]
+    full = find_modules(layer)
+    assert "mlp.gate_up_proj" not in full
+    assert {"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"}.issubset(full)
+
+    gate_block = next(
+        block for block in Phi3QModel.full_layer_modules(model_config=cfg)
+        if "mlp.gate_proj" in block
+    )
+    assert gate_block == ["mlp.gate_proj", "mlp.up_proj"]
+
+    class _NoOpProcessor:
+        def preprocess(self, named_module):
+            return None
+
+        def is_skipped(self, named_module):
+            return False
+
+    looper = ModuleLooper.__new__(ModuleLooper)
+    looper.gptq_model = SimpleNamespace(
+        support_batch_quantize=True,
+        quantize_config=SimpleNamespace(device="cpu", compute_device_filter=None, method=None),
+        layer_modules_strict=True,
+        lm_head="lm_head",
+    )
+    subset = looper.create_named_modules(
+        layer,
+        full,
+        False,
+        0,
+        "model.layers",
+        gate_block,
+        _NoOpProcessor(),
+        fallback=None,
+        layer_module=layer,
+    )
+
+    assert set(subset) == {"mlp.gate_proj", "mlp.up_proj"}
 
 
 def test_qwen2_moe_awq_expansion_keeps_shared_expert_before_experts():
