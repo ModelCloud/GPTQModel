@@ -2464,6 +2464,27 @@ class BaseQModel(nn.Module):
                 return module
 
             turtle_model = self.turtle_model
+            if role == "forward" and named_module is not None and isinstance(turtle_model, LazyTurtle):
+                checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
+                    target_model=self.model,
+                    target_submodule=target_submodule,
+                    recurse=False,
+                )
+                weight = checkpoint_tensors.get("weight")
+                if isinstance(weight, torch.Tensor):
+                    decoder_kind = self._decoder_weight_format(
+                        weight=weight,
+                        checkpoint_tensors=checkpoint_tensors,
+                    )
+                    if decoder_kind is not None:
+                        # Packed floatx checkpoints can require decoder-specific
+                        # materialization before any dense shell weight exists.
+                        return self._prepare_auto_decoder_forward_module(
+                            target_submodule=target_submodule,
+                            device=torch.device(device),
+                            named_module=named_module,
+                        )
+
             if turtle_model is None:
                 if get_device(target_submodule) != device:
                     target_submodule.to(device)
