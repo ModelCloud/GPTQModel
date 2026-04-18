@@ -14,7 +14,7 @@ class Phi3QModel(BaseQModel):
         "#",
         {
             "self_attn": ("qkv_proj:0", "o_proj:1"),
-            "mlp": ("gate_up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
 
