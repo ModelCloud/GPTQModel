@@ -1060,12 +1060,24 @@ class ModelTest(unittest.TestCase):
                 and backend != torch_fused_backend
             )
             if use_cuda_map:
-                model = self.loadQuantModel(
-                    model_path,
-                    trust_remote_code=trust_remote_code,
-                    backend=backend,
-                    device_map={"": "cuda:0"},
-                )
+                try:
+                    model = self.loadQuantModel(
+                        model_path,
+                        trust_remote_code=trust_remote_code,
+                        backend=backend,
+                        device_map={"": "cuda:0"},
+                    )
+                except torch.OutOfMemoryError:
+                    log.warn(
+                        "Post-quant load with device_map={'': 'cuda:0'} OOMed for backend `%s`; retrying with loader defaults.",
+                        backend.name,
+                    )
+                    torch_empty_cache()
+                    model = self.loadQuantModel(
+                        model_path,
+                        trust_remote_code=trust_remote_code,
+                        backend=backend,
+                    )
             else:
                 model = self.loadQuantModel(
                     model_path,
