@@ -63,6 +63,31 @@ class _TransformerPrefixedHybridWrapper(nn.Module):
         self.transformer = _HybridWrapper(width)
 
 
+class _FlatLanguageCheckpointModel(nn.Module):
+    """Checkpoint layout that stores the language model directly under `model.*`."""
+
+    def __init__(self, vocab_size: int, width: int):
+        super().__init__()
+        self.embed_tokens = nn.Embedding(vocab_size, width)
+        self.layers = nn.ModuleList([nn.Linear(width, width, bias=False)])
+        self.norm = nn.LayerNorm(width)
+
+
+class _FlatLanguageCheckpointWrapper(nn.Module):
+    def __init__(self, vocab_size: int, width: int):
+        super().__init__()
+        self.model = _FlatLanguageCheckpointModel(vocab_size=vocab_size, width=width)
+
+
+class _NestedLanguageShellWrapper(nn.Module):
+    """Shell layout that nests the language model under `model.language_model.*`."""
+
+    def __init__(self, vocab_size: int, width: int):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.language_model = _FlatLanguageCheckpointModel(vocab_size=vocab_size, width=width)
+
+
 class _SharedDirectBlock(nn.Module):
     def __init__(self, width: int, shared_bias: nn.Parameter):
         super().__init__()
@@ -572,6 +597,74 @@ def test_alias_all_from_lazy_turtle_handles_shell_root_prefix_mismatch(tmp_path)
 
     torch.testing.assert_close(shell_model.transformer.block.dt_bias, source_model.block.dt_bias)
     torch.testing.assert_close(shell_model.transformer.block.dt_scale, source_model.block.dt_scale)
+
+
+def test_lazy_turtle_checkpoint_path_aliases_resolve_nested_language_model_prefix(tmp_path):
+    source_model = _FlatLanguageCheckpointWrapper(vocab_size=32, width=16)
+    shell_model = _NestedLanguageShellWrapper(vocab_size=32, width=16)
+
+    shell_model.model.language_model.embed_tokens.weight = nn.Parameter(
+        torch.empty_like(shell_model.model.language_model.embed_tokens.weight, device="meta"),
+        requires_grad=shell_model.model.language_model.embed_tokens.weight.requires_grad,
+    )
+    shell_model.model.language_model.layers[0].weight = nn.Parameter(
+        torch.empty_like(shell_model.model.language_model.layers[0].weight, device="meta"),
+        requires_grad=shell_model.model.language_model.layers[0].weight.requires_grad,
+    )
+
+    checkpoint_tensors = {name: tensor.detach().clone() for name, tensor in source_model.state_dict().items()}
+    model_dir = tmp_path / "source_model"
+    model_dir.mkdir()
+    shard_name = "model.safetensors"
+    save_file(checkpoint_tensors, str(model_dir / shard_name))
+    _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
+
+    source = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+        checkpoint_path_aliases=(
+            ("model.language_model", "model"),
+            ("language_model", "model"),
+        ),
+    )
+    assert source is not None
+
+    embed_tensors = source.checkpoint_tensors_for_submodule(
+        target_model=shell_model,
+        target_submodule=shell_model.model.language_model.embed_tokens,
+        recurse=True,
+    )
+    layer_tensors = source.checkpoint_tensors_for_submodule(
+        target_model=shell_model,
+        target_submodule=shell_model.model.language_model.layers[0],
+        recurse=True,
+    )
+
+    assert tuple(embed_tensors) == ("weight",)
+    assert tuple(layer_tensors) == ("weight",)
+
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.model.language_model.embed_tokens,
+        device=torch.device("cpu"),
+    )
+    alias_from_turtle_for_submodule(
+        target_model=shell_model,
+        turtle_model=source,
+        target_submodule=shell_model.model.language_model.layers[0],
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(
+        shell_model.model.language_model.embed_tokens.weight,
+        source_model.model.embed_tokens.weight,
+    )
+    torch.testing.assert_close(
+        shell_model.model.language_model.layers[0].weight,
+        source_model.model.layers[0].weight,
+    )
 
 
 def test_lazy_turtle_restores_nonpersistent_buffers_from_module_init(tmp_path):

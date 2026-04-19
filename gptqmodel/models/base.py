@@ -247,6 +247,7 @@ class BaseQModel(nn.Module):
     server = None
 
     support_offload_to_disk = True
+    checkpoint_path_aliases: tuple[tuple[str, str], ...] = ()
 
     moe_expert_module_name_prefixes = [".expert"]
 
