@@ -368,6 +368,39 @@ def test_torch_ops_jit_extension_appends_detected_cuda_include_paths(monkeypatch
     ]
 
 
+def test_torch_ops_jit_extension_merges_visible_capability_into_compile_override(monkeypatch, tmp_path):
+    """Guard CUDA JIT builds so manual arch overrides still compile for the visible GPU."""
+
+    loader = _make_loader(
+        tmp_path,
+        requires_cuda=True,
+    )
+
+    state = {"ready": False}
+    compile_arch_lists = []
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.9+PTX")
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_device_capability", lambda device_index=0: (8, 0))
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_arch_list", lambda: ["sm_80", "sm_89"])
+    monkeypatch.setattr(cpp_module, "_get_cuda_arch_flags", lambda: [os.environ["TORCH_CUDA_ARCH_LIST"]])
+
+    def fake_compile(**kwargs):
+        del kwargs
+        compile_arch_lists.append(os.environ["TORCH_CUDA_ARCH_LIST"])
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert compile_arch_lists == ["8.9+PTX;8.0"]
+    assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9+PTX"
+
+
 def test_torch_ops_jit_extension_uses_original_compile_paths(monkeypatch, tmp_path):
     local_root = tmp_path / "repo"
     (local_root / "src").mkdir(parents=True)

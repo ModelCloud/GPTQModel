@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import logging
 import math
@@ -445,6 +446,27 @@ def resolved_cuda_arch_flags() -> list[str]:
         return []
 
 
+@contextmanager
+def _temporary_merged_cuda_arch_override():
+    """Temporarily include the visible CUDA capability in manual arch overrides."""
+
+    override = os.getenv("TORCH_CUDA_ARCH_LIST")
+    if not override:
+        yield
+        return
+
+    merged_override = _merge_cuda_arch_override_with_visible_caps(override)
+    if merged_override == override:
+        yield
+        return
+
+    os.environ["TORCH_CUDA_ARCH_LIST"] = merged_override
+    try:
+        yield
+    finally:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = override
+
+
 def torch_cxx11_abi_flag() -> int:
     """Return the ABI mode local JIT extensions must match for this torch build."""
 
@@ -881,7 +903,8 @@ class TorchOpsJitExtension:
                 extra_ldflags = self._resolve_sequence(self.extra_ldflags)
                 if extra_ldflags:
                     kwargs["extra_ldflags"] = extra_ldflags
-                load(**kwargs)
+                with _temporary_merged_cuda_arch_override():
+                    load(**kwargs)
                 build_invocation_succeeded = True
             except Exception as exc:  # pragma: no cover - build depends on host toolchain
                 elapsed = time.perf_counter() - started
