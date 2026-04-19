@@ -428,12 +428,12 @@ def _merge_cuda_arch_override_with_visible_caps(raw_override: str) -> str:
     return ";".join(requested_tokens)
 
 
-def resolved_cuda_arch_flags() -> list[str]:
+def _effective_cuda_arch_flags(*, merge_visible_caps: bool) -> list[str]:
     """Return the effective NVCC arch flags Torch will emit for this host."""
 
     override = os.getenv("TORCH_CUDA_ARCH_LIST")
     try:
-        if override:
+        if override and merge_visible_caps:
             merged_override = _merge_cuda_arch_override_with_visible_caps(override)
             if merged_override != override:
                 os.environ["TORCH_CUDA_ARCH_LIST"] = merged_override
@@ -447,11 +447,11 @@ def resolved_cuda_arch_flags() -> list[str]:
 
 
 @contextmanager
-def _temporary_merged_cuda_arch_override():
+def _temporary_merged_cuda_arch_override(*, enabled: bool = True):
     """Temporarily include the visible CUDA capability in manual arch overrides."""
 
     override = os.getenv("TORCH_CUDA_ARCH_LIST")
-    if not override:
+    if not enabled or not override:
         yield
         return
 
@@ -465,6 +465,12 @@ def _temporary_merged_cuda_arch_override():
         yield
     finally:
         os.environ["TORCH_CUDA_ARCH_LIST"] = override
+
+
+def resolved_cuda_arch_flags() -> list[str]:
+    """Return the effective NVCC arch flags Torch will emit for this host."""
+
+    return _effective_cuda_arch_flags(merge_visible_caps=True)
 
 
 def torch_cxx11_abi_flag() -> int:
@@ -587,6 +593,7 @@ class TorchOpsJitExtension:
         force_rebuild_env: Optional[str] = None,
         verbose_env: Optional[str] = None,
         requires_cuda: bool = False,
+        merge_visible_cuda_arch_override: bool = True,
         binary_names: Optional[Sequence[str]] = None,
     ) -> None:
         self.name = name
@@ -603,6 +610,7 @@ class TorchOpsJitExtension:
         self.force_rebuild_env = force_rebuild_env
         self.verbose_env = verbose_env
         self.requires_cuda = bool(requires_cuda)
+        self.merge_visible_cuda_arch_override = bool(merge_visible_cuda_arch_override)
         self.binary_names = tuple(binary_names or (name,))
         self.compile_baseline_seconds = get_jit_compile_baseline_seconds(name)
         self._load_attempted = False
@@ -716,7 +724,9 @@ class TorchOpsJitExtension:
         override = os.getenv("TORCH_CUDA_ARCH_LIST")
         if override:
             payload.append(f"arch_list={override}")
-            arch_flags = resolved_cuda_arch_flags()
+            arch_flags = _effective_cuda_arch_flags(
+                merge_visible_caps=self.merge_visible_cuda_arch_override
+            )
             if arch_flags:
                 payload.append(f"resolved_arch_flags={','.join(arch_flags)}")
             return payload
@@ -903,7 +913,9 @@ class TorchOpsJitExtension:
                 extra_ldflags = self._resolve_sequence(self.extra_ldflags)
                 if extra_ldflags:
                     kwargs["extra_ldflags"] = extra_ldflags
-                with _temporary_merged_cuda_arch_override():
+                with _temporary_merged_cuda_arch_override(
+                    enabled=self.merge_visible_cuda_arch_override
+                ):
                     load(**kwargs)
                 build_invocation_succeeded = True
             except Exception as exc:  # pragma: no cover - build depends on host toolchain

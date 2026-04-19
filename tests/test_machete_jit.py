@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -573,10 +574,39 @@ def test_machete_ldflags_link_cuda_driver():
     assert "-lcuda" in machete_utils._machete_extra_ldflags()
 
 
-def test_vllm_cutlass_library_extension_imports_cleanly_in_subprocess():
+def test_vllm_cutlass_library_extension_imports_cleanly_in_subprocess(tmp_path):
     root = Path(__file__).resolve().parents[1]
-    cutlass_python_dir = root / "cutlass" / "python"
     cutlass_ext_dir = root / "gptqmodel_ext" / "cutlass_extensions"
+    cutlass_python_dir = tmp_path / "cutlass_python"
+    cutlass_python_dir.mkdir(parents=True, exist_ok=True)
+    (cutlass_python_dir / "cutlass_library.py").write_text(
+        textwrap.dedent(
+            """
+            import enum
+
+            class DataType(enum.Enum):
+                u4 = enum.auto()
+                u8 = enum.auto()
+                s4 = enum.auto()
+                s8 = enum.auto()
+                f16 = enum.auto()
+                bf16 = enum.auto()
+                e4m3 = enum.auto()
+                s32 = enum.auto()
+                f32 = enum.auto()
+
+            class KernelScheduleType(enum.Enum):
+                Default = enum.auto()
+
+            DataTypeNames = {}
+            DataTypeTag = {}
+            DataTypeSize = {}
+            KernelScheduleTag = {}
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
 
     result = subprocess.run(
         [
@@ -627,6 +657,53 @@ def _dense_asymmetric_gptq_reference(
     ).to(dtype=scales.dtype)
     dense_weight = scales[g_idx.long()] * (int_weight - int_zeros[g_idx.long()])
     return x @ dense_weight
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_machete_cuda_smoke_build_only_with_forced_arch_override(tmp_path):
+    if shutil.which("nvcc") is None:
+        pytest.skip("nvcc required")
+
+    scratch_root = _jit_scratch_root(tmp_path, "machete-build-only")
+    env = os.environ.copy()
+    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    env.setdefault("CUDA_VISIBLE_DEVICES", "0")
+    env["TORCH_CUDA_ARCH_LIST"] = "9.0a"
+    env["GPTQMODEL_MACHETE_BUILD_ROOT"] = str(scratch_root / "machete")
+    env["GPTQMODEL_MACHETE_FORCE_REBUILD"] = "1"
+    env.pop("GPTQMODEL_CUTLASS_DIR", None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(
+                """
+                import torch
+                from gptqmodel.utils import machete as machete_utils
+
+                ok = machete_utils._MACHETE_TORCH_OPS_EXTENSION.load()
+                if not ok:
+                    raise RuntimeError(machete_utils._MACHETE_TORCH_OPS_EXTENSION.last_error_message())
+
+                namespace = getattr(torch.ops, "gptqmodel_machete", None)
+                assert namespace is not None
+                assert hasattr(namespace, "machete_prepack_B")
+                assert hasattr(namespace, "machete_mm")
+                assert hasattr(namespace, "machete_supported_schedules")
+                print("compiled")
+                """
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "compiled" in result.stdout
 
 
 @pytest.mark.cuda
