@@ -67,7 +67,6 @@ hf = [
 ]
 eval = [
     "Evalution",
-    "rouge-score",
 ]
 triton = [
     "triton>=3.4.0",
