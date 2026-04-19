@@ -59,3 +59,10 @@ def test_legacy_list_tied_weights_allow_save_pretrained():
         model._tied_weights_keys = ["lm_head.weight"]
         _hf_utils._normalize_legacy_tied_weights_keys(model)
         model.save_pretrained(tmp_dir, state_dict={}, is_main_process=True)
+
+
+def test_normalize_legacy_tied_weights_keys_ignores_non_module_stubs():
+    class _NoModulesDummy:
+        pass
+
+    _hf_utils._normalize_legacy_tied_weights_keys(_NoModulesDummy())

@@ -303,6 +303,8 @@ def normalize_adapter(adapter:  Union[Dict, Adapter]):
     if not isinstance(adapter, Dict):
         raise ValueError("Adapter: Invalid adapter config: `adapter`.")
 
+    # Callers may reuse serialized adapter payloads across retries.
+    adapter = dict(adapter)
     adapter_type = adapter.pop("name", None)
     if adapter_type is None:
         raise ValueError(f"Adapter: Invalid adapter class `{adapter_type}`: expected = `{ADAPTER_MAPPING}`.")

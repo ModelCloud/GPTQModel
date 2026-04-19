@@ -20,6 +20,7 @@ import torch
 
 from .cpp import (
     TorchOpsJitExtension,
+    cuda_include_paths_with_fallback,
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
@@ -54,6 +55,13 @@ _MACHETE_REQUIRED_TORCH_NVCC_UNDEFINES = (
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
     "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+)
+_MACHETE_REQUIRED_CUDA_HEADERS = (
+    "cuda_runtime_api.h",
+    "cusparse.h",
+    "cublas_v2.h",
+    "cublasLt.h",
+    "cusolverDn.h",
 )
 
 MACHETE_PREPACKED_BLOCK_SHAPE = (64, 128)
@@ -346,7 +354,10 @@ def _machete_include_paths() -> list[str]:
         include_paths.append(str(common_include_dir.resolve()))
     if util_include_dir.is_dir():
         include_paths.append(str(util_include_dir.resolve()))
-    return include_paths
+    return cuda_include_paths_with_fallback(
+        include_paths,
+        required_header_names=_MACHETE_REQUIRED_CUDA_HEADERS,
+    )
 
 
 def _machete_extra_cflags() -> list[str]:
@@ -407,6 +418,9 @@ _MACHETE_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     force_rebuild_env="GPTQMODEL_MACHETE_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
+    # Machete kernels are Hopper-only, so compile-only workflows may need to
+    # force a non-local target such as `TORCH_CUDA_ARCH_LIST=9.0a`.
+    merge_visible_cuda_arch_override=False,
 )
 
 

@@ -533,7 +533,16 @@ def _resolve_legacy_tied_weights_mapping(model: PreTrainedModel, tied_mapping) -
 # save/load code stops crashing on older trust_remote_code models that still use
 # the pre-5.x list format.
 def _normalize_legacy_tied_weights_keys(model: PreTrainedModel) -> None:
-    for _name, submodule in model.named_modules(remove_duplicate=False):
+    named_modules = getattr(model, "named_modules", None)
+    if not callable(named_modules):
+        return
+
+    try:
+        modules_iter = named_modules(remove_duplicate=False)
+    except TypeError:
+        modules_iter = named_modules()
+
+    for _name, submodule in modules_iter:
         tied_mapping = getattr(submodule, "_tied_weights_keys", None)
         if not isinstance(tied_mapping, (list, tuple, set)):
             continue

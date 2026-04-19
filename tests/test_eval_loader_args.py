@@ -232,3 +232,81 @@ def test_build_evalution_runtime_supports_gptqmodel_seed():
     assert captured["engine_kwargs"]["device"] == "cuda:0"
     assert captured["engine_kwargs"]["batch_size"] == 4
     assert captured["engine_kwargs"]["seed"] == 898
+
+
+def test_build_evalution_runtime_drops_removed_gptqmodel_path_for_strict_engine_signature():
+    captured = {}
+
+    class FakeGPTQModel:
+        def __init__(
+            self,
+            *,
+            dtype=None,
+            attn_implementation=None,
+            device=None,
+            device_map=None,
+            seed=None,
+            batch_size=None,
+            trust_remote_code=None,
+            padding_side=None,
+            backend=None,
+        ):
+            captured["engine_kwargs"] = {
+                "dtype": dtype,
+                "attn_implementation": attn_implementation,
+                "device": device,
+                "device_map": device_map,
+                "seed": seed,
+                "batch_size": batch_size,
+                "trust_remote_code": trust_remote_code,
+                "padding_side": padding_side,
+                "backend": backend,
+            }
+
+        def build(self, model_config):
+            captured["model_config"] = model_config
+            return "session"
+
+    class FakeModel:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def to_dict(self):
+            return dict(self.kwargs)
+
+    fake_evalution = SimpleNamespace(
+        GPTQModel=FakeGPTQModel,
+        Model=FakeModel,
+    )
+
+    engine, model_config, session = eval_module._build_evalution_runtime(
+        evalution=fake_evalution,
+        model_or_id_or_path="/tmp/model",
+        llm_backend="gptqmodel",
+        backend=BACKEND.AUTO,
+        batch_size=2,
+        trust_remote_code=False,
+        model_args={
+            "dtype": "float16",
+            "seed": 7,
+            "device": "cuda:0",
+            "foo": "bar",
+        },
+        tokenizer=None,
+    )
+
+    assert session == "session"
+    assert engine is not None
+    assert model_config.kwargs["path"] == "/tmp/model"
+    assert model_config.kwargs["model_kwargs"] == {"foo": "bar"}
+    assert captured["engine_kwargs"] == {
+        "dtype": "float16",
+        "attn_implementation": None,
+        "device": "cuda:0",
+        "device_map": None,
+        "seed": 7,
+        "batch_size": 2,
+        "trust_remote_code": False,
+        "padding_side": "left",
+        "backend": "auto",
+    }
