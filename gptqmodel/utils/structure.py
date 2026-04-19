@@ -585,6 +585,7 @@ class LazyTurtle:
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
         module_tree: Optional[Any] = None,
+        checkpoint_path_aliases: Optional[Any] = None,
     ) -> None:
         self.model_local_path = model_local_path
         self.config = copy.deepcopy(config)
@@ -593,6 +594,20 @@ class LazyTurtle:
         # Lazy checkpoint name resolution must come from model-definition truth.
         self._module_tree = copy.deepcopy(module_tree)
         self._module_tree_layer_prefix, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
+        alias_items: list[tuple[str, str]] = []
+        raw_aliases = checkpoint_path_aliases or ()
+        if isinstance(raw_aliases, dict):
+            raw_aliases = raw_aliases.items()
+        for runtime_prefix, checkpoint_prefix in raw_aliases:
+            if not isinstance(runtime_prefix, str) or not isinstance(checkpoint_prefix, str):
+                continue
+            runtime_prefix = runtime_prefix.strip(".")
+            checkpoint_prefix = checkpoint_prefix.strip(".")
+            if not runtime_prefix:
+                continue
+            alias_items.append((runtime_prefix, checkpoint_prefix))
+        alias_items.sort(key=lambda item: len(item[0]), reverse=True)
+        self._checkpoint_path_aliases = tuple(alias_items)
         self._lock = threading.RLock()
 
     @classmethod
@@ -603,6 +618,7 @@ class LazyTurtle:
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
         module_tree: Optional[Any] = None,
+        checkpoint_path_aliases: Optional[Any] = None,
     ) -> Optional["LazyTurtle"]:
         if not model_local_path or not os.path.isdir(model_local_path):
             return None
@@ -613,6 +629,7 @@ class LazyTurtle:
                 config=config,
                 model_init_kwargs=model_init_kwargs,
                 module_tree=module_tree,
+                checkpoint_path_aliases=checkpoint_path_aliases,
             )
         except Exception as exc:
             log.debug(
@@ -940,12 +957,55 @@ class LazyTurtle:
             candidates.append(candidate)
         return candidates
 
+    def _checkpoint_path_alias_candidates(self, name: str) -> list[str]:
+        """Return `name` plus any runtime->checkpoint prefix rewrites declared by the model.
+
+        This handles model families whose execution shell layout does not match
+        the serialized checkpoint layout. For example, Qwen2-VL runs with
+        `model.language_model.layers.0...` in memory while the checkpoint stores
+        the same tensors as `model.layers.0...`.
+        """
+
+        if not name:
+            return [name]
+
+        candidates: list[str] = []
+        queue = [name]
+        seen: set[str] = set()
+
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            candidates.append(current)
+
+            for runtime_prefix, checkpoint_prefix in self._checkpoint_path_aliases:
+                if current == runtime_prefix:
+                    suffix = ""
+                elif current.startswith(f"{runtime_prefix}."):
+                    suffix = current[len(runtime_prefix):]
+                else:
+                    continue
+
+                aliased = f"{checkpoint_prefix}{suffix}" if checkpoint_prefix else suffix.lstrip(".")
+                if aliased and aliased not in seen:
+                    queue.append(aliased)
+
+        return candidates
+
     def _resolve_checkpoint_module_path(self, module_path: str) -> str:
         """Resolve a shell module path to the checkpoint path when wrappers add extra roots."""
 
-        candidates = [module_path]
-        candidates.extend(self._module_tree_name_aliases(module_path))
-        candidates.extend(self._candidate_module_paths(module_path))
+        candidates = self._checkpoint_path_alias_candidates(module_path)
+        for aliased in tuple(candidates):
+            # Apply declared runtime->checkpoint aliases before the generic
+            # prefix-stripping fallback so nested shell paths such as
+            # `model.language_model.layers.0` can correctly resolve to
+            # checkpoint paths like `model.layers.0`.
+            candidates.extend(self._module_tree_name_aliases(aliased))
+            for candidate_path in self._candidate_module_paths(aliased):
+                candidates.extend(self._checkpoint_path_alias_candidates(candidate_path))
 
         seen: set[str] = set()
         for candidate in candidates:
@@ -964,15 +1024,16 @@ class LazyTurtle:
         candidates: list[str] = []
         seen: set[str] = set()
         for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
-            candidate_name = self._join_tensor_name(candidate_path, rel_name)
-            if candidate_name not in seen:
-                seen.add(candidate_name)
-                candidates.append(candidate_name)
-            for alias in self._module_tree_name_aliases(candidate_name):
-                if alias in seen:
-                    continue
-                seen.add(alias)
-                candidates.append(alias)
+            for aliased_path in self._checkpoint_path_alias_candidates(candidate_path):
+                candidate_name = self._join_tensor_name(aliased_path, rel_name)
+                if candidate_name not in seen:
+                    seen.add(candidate_name)
+                    candidates.append(candidate_name)
+                for alias in self._module_tree_name_aliases(candidate_name):
+                    if alias in seen:
+                        continue
+                    seen.add(alias)
+                    candidates.append(alias)
 
         for candidate in candidates:
             if candidate in self._weight_map:

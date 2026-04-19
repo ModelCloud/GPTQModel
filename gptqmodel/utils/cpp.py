@@ -9,6 +9,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -370,10 +371,75 @@ def cuda_include_paths_with_fallback(
     return _dedupe_path_strings(resolved_include_paths)
 
 
+_CUDA_ARCH_TOKEN_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\+PTX)?$")
+
+
+def _supported_cuda_arch_pairs() -> list[tuple[int, int]]:
+    pairs: set[tuple[int, int]] = set()
+    for arch in getattr(torch.cuda, "get_arch_list", lambda: [])():
+        if not isinstance(arch, str) or not arch.startswith("sm_"):
+            continue
+        sm = arch.split("_", 1)[1].rstrip("af")
+        if not sm.isdigit() or len(sm) < 2:
+            continue
+        pairs.add((int(sm[:-1]), int(sm[-1])))
+    return sorted(pairs)
+
+
+def _clamp_visible_cuda_capability(capability: tuple[int, int]) -> tuple[int, int]:
+    supported = _supported_cuda_arch_pairs()
+    if not supported:
+        return capability
+    return min(max(supported), capability)
+
+
+def _visible_cuda_arch_tokens() -> list[str]:
+    if not torch.cuda.is_available():
+        return []
+
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for device_index in range(torch.cuda.device_count()):
+        major, minor = _clamp_visible_cuda_capability(torch.cuda.get_device_capability(device_index))
+        token = f"{major}.{minor}"
+        if token not in seen:
+            seen.add(token)
+            tokens.append(token)
+    return tokens
+
+
+def _merge_cuda_arch_override_with_visible_caps(raw_override: str) -> str:
+    requested_tokens: list[str] = []
+    requested_bases: set[str] = set()
+    for token in re.split(r"[;\s,]+", raw_override.strip()):
+        if not token:
+            continue
+        requested_tokens.append(token)
+        match = _CUDA_ARCH_TOKEN_RE.match(token)
+        if match:
+            requested_bases.add(f"{int(match.group('major'))}.{int(match.group('minor'))}")
+
+    for token in _visible_cuda_arch_tokens():
+        if token not in requested_bases:
+            requested_tokens.append(token)
+            requested_bases.add(token)
+
+    return ";".join(requested_tokens)
+
+
 def resolved_cuda_arch_flags() -> list[str]:
     """Return the effective NVCC arch flags Torch will emit for this host."""
 
+    override = os.getenv("TORCH_CUDA_ARCH_LIST")
     try:
+        if override:
+            merged_override = _merge_cuda_arch_override_with_visible_caps(override)
+            if merged_override != override:
+                os.environ["TORCH_CUDA_ARCH_LIST"] = merged_override
+                try:
+                    return list(_get_cuda_arch_flags())
+                finally:
+                    os.environ["TORCH_CUDA_ARCH_LIST"] = override
         return list(_get_cuda_arch_flags())
     except Exception:
         return []

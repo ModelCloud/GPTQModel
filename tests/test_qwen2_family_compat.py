@@ -36,6 +36,14 @@ def test_qwen2_vl_image_only_process_vision_info_returns_image_list():
     assert image_inputs == [image]
 
 
+def test_qwen2_vl_declares_checkpoint_path_aliases_for_language_model_shell():
+    assert base_qwen2_vl.BaseQwen2VLGPTQ.support_offload_to_disk is True
+    assert base_qwen2_vl.BaseQwen2VLGPTQ.checkpoint_path_aliases == (
+        ("model.language_model", "model"),
+        ("language_model", "model"),
+    )
+
+
 def test_qwen2_vl_pre_quantize_hooks_use_inner_model_layout():
     instance = object.__new__(base_qwen2_vl.BaseQwen2VLGPTQ)
     instance.model = types.SimpleNamespace(

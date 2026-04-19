@@ -267,3 +267,37 @@ def test_quantize_and_evaluate_runs_evalution_for_prequantized_model_without_cac
             "accuracy,loglikelihood_norm": 0.31,
         }
     }
+
+
+def test_perform_post_quant_validation_retries_without_forced_cuda_map_after_oom(monkeypatch):
+    class _LoadedModel:
+        def __init__(self):
+            self.tokenizer = object()
+
+    class _Harness(ModelTest):
+        LOAD_BACKEND = BACKEND.AUTO
+
+    helper = _Harness(methodName="runTest")
+    load_calls = []
+
+    def _fake_load_quant_model(*args, **kwargs):
+        load_calls.append(kwargs.copy())
+        if kwargs.get("device_map") == {"": "cuda:0"}:
+            raise torch.OutOfMemoryError("simulated OOM")
+        return _LoadedModel()
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(helper, "loadQuantModel", _fake_load_quant_model)
+    monkeypatch.setattr(helper, "run_eval_tasks", lambda model, backend, trust_remote_code=False: {"ok": 1.0})
+    monkeypatch.setattr(helper, "render_inference_summary", lambda records: None)
+    monkeypatch.setattr(helper, "render_eval_summary", lambda records: None)
+    monkeypatch.setattr(model_test_module, "torch_empty_cache", lambda: None)
+
+    reuse_candidates, eval_records = helper.perform_post_quant_validation("/tmp/model", trust_remote_code=False)
+
+    assert load_calls == [
+        {"trust_remote_code": False, "backend": BACKEND.AUTO, "device_map": {"": "cuda:0"}},
+        {"trust_remote_code": False, "backend": BACKEND.AUTO},
+    ]
+    assert reuse_candidates == {}
+    assert eval_records == {BACKEND.AUTO: {"ok": 1.0}}

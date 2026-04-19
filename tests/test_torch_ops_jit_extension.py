@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -558,6 +559,48 @@ def test_torch_ops_jit_extension_cuda_fingerprint_prefers_arch_override(monkeypa
     first_build_root = loader.build_root()
 
     monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.9+PTX")
+    second_build_root = loader.build_root()
+
+    assert first_build_root != second_build_root
+
+
+def test_resolved_cuda_arch_flags_appends_visible_capability_missing_from_override(monkeypatch):
+    """Guard JIT arch resolution so manual overrides still build for the currently visible GPU."""
+
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.0 8.6")
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_device_capability", lambda device_index=0: (7, 5))
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_arch_list", lambda: ["sm_75", "sm_80", "sm_86"])
+
+    seen = {}
+
+    def fake_get_cuda_arch_flags():
+        seen["arch_list"] = os.environ["TORCH_CUDA_ARCH_LIST"]
+        return [seen["arch_list"]]
+
+    monkeypatch.setattr(cpp_module, "_get_cuda_arch_flags", fake_get_cuda_arch_flags)
+
+    assert cpp_module.resolved_cuda_arch_flags() == ["8.0;8.6;7.5"]
+    assert seen["arch_list"] == "8.0;8.6;7.5"
+    assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.0 8.6"
+
+
+def test_torch_ops_jit_extension_cuda_fingerprint_tracks_visible_capabilities_even_with_override(monkeypatch, tmp_path):
+    """Guard cache keys so fixed arch overrides cannot reuse binaries across omitted visible GPU targets."""
+
+    loader = _make_loader(tmp_path, requires_cuda=True)
+
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.0")
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_arch_list", lambda: ["sm_75", "sm_80", "sm_89"])
+    monkeypatch.setattr(cpp_module, "_get_cuda_arch_flags", lambda: [os.environ["TORCH_CUDA_ARCH_LIST"]])
+
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_device_capability", lambda device_index=0: (7, 5))
+    first_build_root = loader.build_root()
+
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_device_capability", lambda device_index=0: (8, 9))
     second_build_root = loader.build_root()
 
     assert first_build_root != second_build_root
