@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .cpp import (
     TorchOpsJitExtension,
+    cuda_include_paths_with_fallback,
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
@@ -17,17 +18,27 @@ _QQQ_OPS_NAME = "gptqmodel_qqq_ops"
 _QQQ_OPS_NAMESPACE = "gptqmodel_qqq"
 
 
+def _qqq_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "qqq"
+
+
 def _qqq_sources() -> list[str]:
-    root = Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "qqq"
+    root = _qqq_root()
     return [
         str(root / "qqq.cpp"),
         str(root / "qqq_gemm.cu"),
     ]
 
 
+def _qqq_required_cuda_headers() -> tuple[str, ...]:
+    return ("cusparse.h",)
+
+
 def _qqq_include_paths() -> list[str]:
-    root = Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "qqq"
-    return [str(root)]
+    return cuda_include_paths_with_fallback(
+        [str(_qqq_root())],
+        required_header_names=_qqq_required_cuda_headers(),
+    )
 
 
 def _qqq_extra_cflags() -> list[str]:
