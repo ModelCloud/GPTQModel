@@ -958,7 +958,13 @@ class LazyTurtle:
         return candidates
 
     def _checkpoint_path_alias_candidates(self, name: str) -> list[str]:
-        """Return `name` plus any runtime->checkpoint prefix rewrites declared by the model."""
+        """Return `name` plus any runtime->checkpoint prefix rewrites declared by the model.
+
+        This handles model families whose execution shell layout does not match
+        the serialized checkpoint layout. For example, Qwen2-VL runs with
+        `model.language_model.layers.0...` in memory while the checkpoint stores
+        the same tensors as `model.layers.0...`.
+        """
 
         if not name:
             return [name]
@@ -993,6 +999,10 @@ class LazyTurtle:
 
         candidates = self._checkpoint_path_alias_candidates(module_path)
         for aliased in tuple(candidates):
+            # Apply declared runtime->checkpoint aliases before the generic
+            # prefix-stripping fallback so nested shell paths such as
+            # `model.language_model.layers.0` can correctly resolve to
+            # checkpoint paths like `model.layers.0`.
             candidates.extend(self._module_tree_name_aliases(aliased))
             for candidate_path in self._candidate_module_paths(aliased):
                 candidates.extend(self._checkpoint_path_alias_candidates(candidate_path))

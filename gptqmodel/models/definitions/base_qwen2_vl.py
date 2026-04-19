@@ -18,8 +18,19 @@ from ..base import BaseQModel
 
 class BaseQwen2VLGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
-    # Qwen2-VL checkpoints flatten the language model under `model.*` while the
-    # runtime shell exposes it as `model.language_model.*`.
+    # Qwen2-VL and Qwen2.5-VL expose the text tower at runtime as
+    # `model.language_model.*`, but the original safetensors checkpoints flatten
+    # those same tensors under `model.*`.
+    #
+    # Example:
+    #   runtime shell      -> model.language_model.embed_tokens.weight
+    #   checkpoint tensor  -> model.embed_tokens.weight
+    #   runtime shell      -> model.language_model.layers.0.self_attn.q_proj.weight
+    #   checkpoint tensor  -> model.layers.0.self_attn.q_proj.weight
+    #
+    # Without this alias mapping LazyTurtle fails to find the checkpoint source,
+    # leaves embed/layer tensors on `meta`, and Qwen2-VL later crashes during
+    # multimodal placeholder validation because `inputs_embeds` never materialized.
     checkpoint_path_aliases = (
         ("model.language_model", "model"),
         ("language_model", "model"),
