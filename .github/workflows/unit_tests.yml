@@ -244,8 +244,19 @@ jobs:
             --shell)"
           eval "$runtime_output"
 
+          test_cache_key="${{ matrix.test_script }}"
+          test_cache_key="${test_cache_key//\//_}"
+          test_cache_key="${test_cache_key//./_}"
+          test_cache_key="${test_cache_key//-/_}"
+          export GPTQMODEL_TORCH_EXTENSIONS_DIR="/tmp/gptqmodel/torch_extensions/${{ github.run_id }}/${{ github.run_attempt }}/${ENV_NAME}/${test_cache_key}"
+          export TORCH_EXTENSIONS_DIR="$GPTQMODEL_TORCH_EXTENSIONS_DIR"
+          mkdir -p "$GPTQMODEL_TORCH_EXTENSIONS_DIR"
+          echo "GPTQMODEL_TORCH_EXTENSIONS_DIR=$GPTQMODEL_TORCH_EXTENSIONS_DIR" >> "$GITHUB_ENV"
+          echo "TORCH_EXTENSIONS_DIR=$TORCH_EXTENSIONS_DIR" >> "$GITHUB_ENV"
+
           echo "-- setting up env --"
           echo "env_name: $ENV_NAME"
+          echo "torch extensions dir: $GPTQMODEL_TORCH_EXTENSIONS_DIR"
           # will clean later
 
           echo "-- ls -ahl /opt/uv/venvs before --"

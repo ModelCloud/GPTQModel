@@ -60,6 +60,7 @@ _NVCC_VERSION_CACHE: tuple[int, int] | None = None
 # the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
 _DEFAULT_NVCC_THREADS = "8"
 _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
+_TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
 
 
 def _nvcc_path() -> Optional[str]:
@@ -271,6 +272,9 @@ class _CompileProgressDisplay:
 def default_torch_ops_build_root(subdir: str) -> Path:
     """Return the default on-disk cache root for torch.ops JIT extensions."""
 
+    override_root = os.getenv(_TORCH_OPS_BUILD_ROOT_ENV)
+    if override_root:
+        return Path(override_root).expanduser() / subdir
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
 
 

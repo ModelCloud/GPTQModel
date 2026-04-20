@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 import torch
 
@@ -112,20 +111,6 @@ def _exllamav3_include_paths() -> list[str]:
     )
 
 
-def _legacy_build_root() -> Optional[Path]:
-    build_root = os.environ.get("GPTQMODEL_EXT_BUILD")
-    if not build_root:
-        return None
-    return Path(build_root) / extension_name
-
-
-def _default_build_root() -> Path:
-    legacy_root = _legacy_build_root()
-    if legacy_root is not None:
-        return legacy_root
-    return default_torch_ops_build_root("exllamav3")
-
-
 def _extra_cflags() -> list[str]:
     if windows:
         flags = ["/O2", "/std:c++17"]
@@ -184,7 +169,7 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     ),
     sources=_source_files,
     build_root_env="GPTQMODEL_EXLLAMAV3_BUILD_ROOT",
-    default_build_root=_default_build_root,
+    default_build_root=lambda: default_torch_ops_build_root("exllamav3"),
     display_name="ExLlamaV3",
     extra_cflags=_extra_cflags,
     extra_cuda_cflags=_extra_cuda_cflags,
