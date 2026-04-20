@@ -15,7 +15,8 @@ from pathlib import Path
 
 import torch
 from safetensors import safe_open
-from tabulate import tabulate
+
+from gptqmodel.utils.logger import render_table
 
 
 DEFAULT_MODEL_DIR = Path("/root/GLM-4.6")
@@ -334,11 +335,11 @@ def main() -> int:
     ]
 
     print("Configuration")
-    print(tabulate(config_rows, headers=["field", "value"], tablefmt="grid"))
+    print(render_table(config_rows, headers=["field", "value"], tablefmt="grid"))
     print()
     print("Results")
     print(
-        tabulate(
+        render_table(
             results_rows,
             headers=[
                 "backend",

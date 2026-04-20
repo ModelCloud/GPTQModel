@@ -10,10 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-from tabulate import tabulate
-
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.inspect import safe_kwargs_call
+from gptqmodel.utils.logger import render_table
 
 
 _MMLU_LOCAL_DATASET = Path("/monster/data/model/dataset/hails-mmlu_no_train")
@@ -113,7 +112,7 @@ def format_eval_result_table(result: Mapping[str, Any]) -> str:
 
     if not rows:
         rows.append(["-", "-", "-"])
-    return tabulate(rows, headers=["Task", "Metric", "Value"], tablefmt="github")
+    return render_table(rows, headers=["Task", "Metric", "Value"], tablefmt="github")
 
 
 def get_eval_task_results(result: Mapping[str, Any]) -> dict[str, dict[str, float]]:

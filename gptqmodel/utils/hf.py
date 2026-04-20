@@ -16,7 +16,13 @@ import numpy as np
 import torch
 import transformers
 from accelerate import init_empty_weights
-from transformers import AutoConfig, AutoModelForCausalLM, GenerationConfig, PreTrainedModel
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    GenerationConfig,
+    PreTrainedConfig,
+    PreTrainedModel,
+)
 
 from ..nn_modules.qlinear.gguf import (
     PRISM_Q1_0_G128_BLOCK_SIZE,

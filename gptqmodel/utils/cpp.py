@@ -9,7 +9,6 @@ import hashlib
 import logging
 import math
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -373,7 +372,7 @@ def cuda_include_paths_with_fallback(
     return _dedupe_path_strings(resolved_include_paths)
 
 
-_CUDA_ARCH_TOKEN_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\+PTX)?$")
+_CUDA_ARCH_TOKEN_RE = pcre.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\+PTX)?$")
 
 
 def _supported_cuda_arch_pairs() -> list[tuple[int, int]]:
@@ -413,7 +412,7 @@ def _visible_cuda_arch_tokens() -> list[str]:
 def _merge_cuda_arch_override_with_visible_caps(raw_override: str) -> str:
     requested_tokens: list[str] = []
     requested_bases: set[str] = set()
-    for token in re.split(r"[;\s,]+", raw_override.strip()):
+    for token in pcre.split(r"[;\s,]+", raw_override.strip()):
         if not token:
             continue
         requested_tokens.append(token)

@@ -15,12 +15,12 @@ from typing import Callable, Dict, Iterable, List, Tuple
 import pytest
 import torch
 import torch.nn as nn
-from tabulate import tabulate
 
 from gptqmodel.quantization import gptq as gptq_impl
 from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
+from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.safe import THREADPOOLCTL
 
 
@@ -479,7 +479,7 @@ def _print_benchmark_table(rows: Iterable[Dict[str, float]]) -> None:
         "mean_mem_mb",
     ]
 
-    print(tabulate(table_rows, headers=headers, tablefmt="github"))
+    print(render_table(table_rows, headers=headers, tablefmt="github"))
 
 
 def test_hessian_chunk_benchmark_table():
@@ -814,4 +814,3 @@ def test_hessian_merge_multi_gpu_with_attention_mask():
 
     assert gptq_multi.nsamples == total_kept_tokens
     torch.testing.assert_close(merged_hessian, serial_hessian, atol=5e-7, rtol=5e-7)
-

@@ -17,7 +17,6 @@ import unittest  # noqa: E402
 
 import threadpoolctl  # noqa: E402
 from parameterized import parameterized  # noqa: E402
-from tabulate import tabulate  # noqa: E402
 
 
 # isort: off
@@ -28,6 +27,7 @@ import torch.nn as nn  # noqa: E402
 import pytest  # noqa: E402
 
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
+from gptqmodel.utils.logger import render_table  # noqa: E402
 
 
 pytestmark = [pytest.mark.cpu, pytest.mark.gpu]
@@ -224,7 +224,7 @@ class TestPackingSpeed(unittest.TestCase):
             speedup = reference_time / elapsed if elapsed else float("inf")
             rows.append((threads, elapsed, speedup))
 
-        print(tabulate(rows, headers=["threads", "time (s)", "speedup vs 1"], tablefmt="simple"))
+        print(render_table(rows, headers=["threads", "time (s)", "speedup vs 1"], tablefmt="simple"))
 
         # Expect at least non-regression: best timing must be <= 1-thread timing.
         best_time = min(r[1] for r in rows)
@@ -319,7 +319,13 @@ class TestPackingSpeed(unittest.TestCase):
             speedup = base_cpu / time_usage if time_usage else float("inf")
             rows.append([label, f"{time_usage:.4f}", f"{speedup:.2f}x", repeats])
 
-        print(tabulate(rows, headers=["impl", "time (s)", "speedup vs pack_block", "repeats"], tablefmt="simple"))
+        print(
+            render_table(
+                rows,
+                headers=["impl", "time (s)", "speedup vs pack_block", "repeats"],
+                tablefmt="simple",
+            )
+        )
 
         self.assertLess(
             timings["pack_block"],

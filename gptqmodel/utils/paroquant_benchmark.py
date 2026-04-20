@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import torch
-from tabulate import tabulate
 
 from gptqmodel import GPTQModel
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
@@ -19,6 +18,7 @@ from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
+from gptqmodel.utils.logger import render_table
 
 
 _NM_CALIBRATION_PATH = "/monster/data/model/dataset/nm-calibration"
@@ -868,22 +868,22 @@ def comparison_rows(*cases: dict[str, Any]) -> list[list[str]]:
 
 def render_case_tables(case: dict[str, Any]) -> dict[str, str]:
     return {
-        "comparison": tabulate(
+        "comparison": render_table(
             comparison_rows(case),
             headers=["case", "opt_scope", "sym", "fused_opt", "gsm8k_platinum_cot", "quant_wall_s", "eval_wall_s"],
             tablefmt="grid",
         ),
-        "module_times": tabulate(
+        "module_times": render_table(
             case.get("module_time_rows", []),
             headers=["layer", "module", "feat", "samples", "loss", "time_s"],
             tablefmt="grid",
         ),
-        "regions": tabulate(
+        "regions": render_table(
             case.get("region_rows", []),
             headers=["region", "count", "last_s", "avg_s", "total_s", "pct", "source"],
             tablefmt="grid",
         ),
-        "kernels": tabulate(
+        "kernels": render_table(
             case.get("kernel_rows", []),
             headers=[
                 "module",
