@@ -89,7 +89,10 @@ def parse_test_config_for_path(
         scoped_test_name = None
         if index == len(candidate_groups) - 1:
             scoped_test_name = leaf_name
-        scoped = parse_test_config(yaml_file, candidate_group, scoped_test_name)
+        try:
+            scoped = parse_test_config(yaml_file, candidate_group, scoped_test_name)
+        except KeyError:
+            continue
         result.update(scoped)
     return result
 
