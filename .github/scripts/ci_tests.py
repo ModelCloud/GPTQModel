@@ -15,10 +15,7 @@ from ci_gpu import (
     request_json,
 )
 
-try:
-    import pcre as regex
-except ModuleNotFoundError:
-    import re as regex
+import pcre as regex
 
 ERROR_PATTERN = regex.compile(
     r"nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in"

@@ -114,8 +114,7 @@ jobs:
         id: get_ip
         run: |
           echo "ip=$RUNNER" >> "$GITHUB_OUTPUT"
-
-          echo "ip: $ip"
+          echo "ip: $RUNNER"
 
           if [ -n "${{ github.event.inputs.artifact_id }}" ]; then
             run_id="${{ github.event.inputs.artifact_id }}"
@@ -144,14 +143,9 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - name: Fetch PR by number
-        if: ${{ github.event.inputs.pr_number != 0 }}
+      - name: Prepare checkout
         run: |
-          PR_NUMBER=${{ github.event.inputs.pr_number }}
-          echo "pr number $PR_NUMBER"
-          git config --global --add safe.directory $(pwd)
-          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
-          git checkout pr-${PR_NUMBER}
+          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
 
       - name: List files
         id: files
@@ -211,58 +205,14 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - name: Fetch PR by number
-        if: ${{ github.event.inputs.pr_number != 0 }}
+      - name: Prepare checkout
         run: |
-          PR_NUMBER=${{ github.event.inputs.pr_number }}
-          echo "pr number $PR_NUMBER"
-          git config --global --add safe.directory $(pwd)
-          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
-          git checkout pr-${PR_NUMBER}
+          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
 
-      - name: decompress uv cache
+      - name: Restore uv cache
         continue-on-error: true
         run: |
-          if [ -f /opt/dist/uv.tar.xz ]; then
-            TAR_FILE="/opt/dist/uv.tar.xz"
-            LAST_FILE="/opt/uv/cache/lastmodified"
-          
-            # Get modification time of tar.xz file (epoch seconds)
-            TAR_MTIME=$(stat -c %Y "$TAR_FILE")
-          
-            # Read last recorded modification time if file exists
-            if [ -f "$LAST_FILE" ]; then
-              LAST_MTIME=$(cat "$LAST_FILE")
-            else
-              LAST_MTIME=0
-            fi
-          
-            # Compare timestamps to decide whether to decompress
-            if [ "$TAR_MTIME" = "$LAST_MTIME" ]; then
-              echo "uv.tar.xz unchanged, skip decompress"
-            else
-              echo "decompressing uv.tar.xz..."
-          
-              # Prepare temporary directory
-              mkdir -p /opt/uv/cache/tmp
-              rm -rf /opt/uv/cache/tmp/*
-          
-              # Extract archive
-              tar -xJf "$TAR_FILE" -C /opt/uv/cache/tmp
-          
-              # Replace existing uv directory
-              rm -rf /opt/uv/cache/uv
-              mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
-          
-              # Record latest modification time
-              echo "$TAR_MTIME" > "$LAST_FILE"
-          
-              echo "done!"
-              ls -ahl /opt/uv/cache
-              echo "=========="
-              ls -ahl /opt/uv/cache/uv
-            fi
-          fi
+          .github/scripts/ci_restore_uv_cache.sh
 
       - name: Activate uv env
         run: |
@@ -276,6 +226,10 @@ jobs:
             --torch-version "${{ env.TORCH_VERSION }}" \
             --shell)"
           eval "$env_output"
+          runtime_output="$(python3 .github/scripts/ci_workflow.py resolve-test-runtime \
+            --test-name "${{ matrix.test_script }}" \
+            --shell)"
+          eval "$runtime_output"
 
           echo "-- setting up env --"
           echo "env_name: $ENV_NAME"
@@ -328,19 +282,7 @@ jobs:
           echo "===== install package from checkout ====="
           uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
-          echo "===== install ModelCloud git deps ====="
-          for pkg in defuser pypcre tokenicer logbar evalution; do
-            uv pip uninstall "$pkg" || true
-          done
-          for url in \
-            "$DEFUSER_GIT_URL" \
-            "$PYPCRE_GIT_URL" \
-            "$TOKENICER_GIT_URL" \
-            "$LOGBAR_GIT_URL" \
-            "$EVALUTION_GIT_URL"
-          do
-            uv pip install "$url"
-          done
+          .github/scripts/ci_install_modelcloud_git_deps.sh
 
           # deps may reinstalled torch
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
@@ -376,16 +318,6 @@ jobs:
           uv pip list
           echo "::endgroup::"
 
-      - name: Detect GPU marker
-        run: |
-          if grep -q '^# GPU=-1$' "${{ matrix.test_script }}"; then
-            echo "SKIP_GPU_ALLOCATION=true" >> "$GITHUB_ENV"
-          elif [[ "${{ matrix.test_script }}" == *xpu* ]]; then
-            echo "SKIP_GPU_ALLOCATION=true" >> "$GITHUB_ENV"
-          else
-            echo "SKIP_GPU_ALLOCATION=false" >> "$GITHUB_ENV"
-          fi
-
       - name: Find suitable GPU
         if: ${{ !cancelled() && env.SKIP_GPU_ALLOCATION != 'true' }}
         run: |
@@ -401,7 +333,7 @@ jobs:
       - name: Run tests
         run: |
           extra_args=()
-          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
+          if [[ "${XPU_MODE}" == "true" ]]; then
             extra_args+=(--clear-cuda --xpu-mode)
           fi
           python .github/scripts/ci_tests.py run \
@@ -477,58 +409,14 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - name: Fetch PR by number
-        if: ${{ github.event.inputs.pr_number != 0 }}
+      - name: Prepare checkout
         run: |
-          PR_NUMBER=${{ github.event.inputs.pr_number }}
-          echo "pr number $PR_NUMBER"
-          git config --global --add safe.directory $(pwd)
-          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
-          git checkout pr-${PR_NUMBER}
+          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
 
-      - name: decompress uv cache
+      - name: Restore uv cache
         continue-on-error: true
         run: |
-          if [ -f /opt/dist/uv.tar.xz ]; then
-            TAR_FILE="/opt/dist/uv.tar.xz"
-            LAST_FILE="/opt/uv/cache/lastmodified"
-          
-            # Get modification time of tar.xz file (epoch seconds)
-            TAR_MTIME=$(stat -c %Y "$TAR_FILE")
-          
-            # Read last recorded modification time if file exists
-            if [ -f "$LAST_FILE" ]; then
-              LAST_MTIME=$(cat "$LAST_FILE")
-            else
-              LAST_MTIME=0
-            fi
-          
-            # Compare timestamps to decide whether to decompress
-            if [ "$TAR_MTIME" = "$LAST_MTIME" ]; then
-              echo "uv.tar.xz unchanged, skip decompress"
-            else
-              echo "decompressing uv.tar.xz..."
-          
-              # Prepare temporary directory
-              mkdir -p /opt/uv/cache/tmp
-              rm -rf /opt/uv/cache/tmp/*
-          
-              # Extract archive
-              tar -xJf "$TAR_FILE" -C /opt/uv/cache/tmp
-          
-              # Replace existing uv directory
-              rm -rf /opt/uv/cache/uv
-              mv /opt/uv/cache/tmp/uv /opt/uv/cache/uv
-          
-              # Record latest modification time
-              echo "$TAR_MTIME" > "$LAST_FILE"
-          
-              echo "done!"
-              ls -ahl /opt/uv/cache
-              echo "=========="
-              ls -ahl /opt/uv/cache/uv
-            fi
-          fi
+          .github/scripts/ci_restore_uv_cache.sh
 
       - name: Activate uv env
         run: |
@@ -542,6 +430,10 @@ jobs:
             --torch-version "${{ env.TORCH_VERSION }}" \
             --shell)"
           eval "$env_output"
+          runtime_output="$(python3 .github/scripts/ci_workflow.py resolve-test-runtime \
+            --test-name "${{ matrix.test_script }}" \
+            --shell)"
+          eval "$runtime_output"
 
           echo "-- setting up env --"
           echo "env_name: $ENV_NAME"
@@ -580,18 +472,7 @@ jobs:
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
           uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          for pkg in defuser pypcre tokenicer logbar evalution; do
-            uv pip uninstall "$pkg" || true
-          done
-          for url in \
-            "$DEFUSER_GIT_URL" \
-            "$PYPCRE_GIT_URL" \
-            "$TOKENICER_GIT_URL" \
-            "$LOGBAR_GIT_URL" \
-            "$EVALUTION_GIT_URL"
-          do
-            uv pip install "$url"
-          done
+          .github/scripts/ci_install_modelcloud_git_deps.sh
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
 
       - name: Print uv env
@@ -622,16 +503,6 @@ jobs:
           uv pip list
           echo "::endgroup::"
 
-      - name: Detect GPU marker
-        run: |
-          if grep -q '^# GPU=-1$' "${{ matrix.test_script }}"; then
-            echo "SKIP_GPU_ALLOCATION=true" >> "$GITHUB_ENV"
-          elif [[ "${{ matrix.test_script }}" == *xpu* ]]; then
-            echo "SKIP_GPU_ALLOCATION=true" >> "$GITHUB_ENV"
-          else
-            echo "SKIP_GPU_ALLOCATION=false" >> "$GITHUB_ENV"
-          fi
-
       - name: Find suitable GPU
         if: ${{ !cancelled() && env.SKIP_GPU_ALLOCATION != 'true' }}
         run: |
@@ -646,13 +517,18 @@ jobs:
 
       - name: Run tests
         run: |
+          extra_args=()
+          if [[ "${XPU_MODE}" == "true" ]]; then
+            extra_args+=(--clear-cuda --xpu-mode)
+          fi
           python .github/scripts/ci_tests.py run \
             --base-url "${GPU_ALLOCATOR_URL}" \
             --run-id "${{ github.run_id }}" \
             --test-script "${{ matrix.test_script }}" \
             --runner "${RUNNER_NAME}" \
             --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
-            --model-test-mode "${MODEL_TEST_MODE}"
+            --model-test-mode "${MODEL_TEST_MODE}" \
+            "${extra_args[@]}"
 
       - name: Check log
         if: ${{ !cancelled() && failure() }}
@@ -698,6 +574,10 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
+      - name: Prepare checkout
+        run: |
+          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
+
       - name: Test pypi pip
         run: |
           uv venv pypi_pip_env
@@ -731,6 +611,9 @@ jobs:
       versions: ${{ steps.parser.outputs.versions || '[]' }}
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare checkout
+        run: |
+          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
@@ -753,6 +636,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare checkout
+        run: |
+          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"

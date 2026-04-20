@@ -102,9 +102,9 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - name: Trust workspace for git
+      - name: Prepare checkout
         run: |
-          git config --global --add safe.directory "$(pwd)"
+          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
 
       - name: Print env
         run: |
@@ -113,14 +113,6 @@ jobs:
 
           env_name="gptqmodel_py314_release_source"
           /opt/uv/setup_uv_venv.sh $env_name
-
-      - name: Fetch PR by number
-        if: ${{ github.event.inputs.pr_number != 0 }}
-        run: |
-          PR_NUMBER=${{ github.event.inputs.pr_number }}
-          git config --global --add safe.directory "$(pwd)"
-          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
-          git checkout pr-${PR_NUMBER}
 
       - name: Build sdist
         run: |
@@ -203,17 +195,9 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - name: Trust workspace for git
+      - name: Prepare checkout
         run: |
-          git config --global --add safe.directory "$(pwd)"
-
-      - name: Fetch PR by number
-        if: ${{ github.event.inputs.pr_number != 0 }}
-        run: |
-          PR_NUMBER=${{ github.event.inputs.pr_number }}
-          git config --global --add safe.directory "$(pwd)"
-          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
-          git checkout pr-${PR_NUMBER}
+          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
 
       - uses: actions/setup-python@v6
         with:

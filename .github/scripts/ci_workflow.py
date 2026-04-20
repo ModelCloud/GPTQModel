@@ -3,14 +3,13 @@ import json
 import os
 import shlex
 import sys
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
-try:
-    import pcre as regex
-except ModuleNotFoundError:
-    import re as regex
+import pcre as regex
 
 
 def split_csv(raw: str | None) -> list[str]:
@@ -31,17 +30,34 @@ def append_github_env(name: str, value: str) -> None:
         fh.write(f"{name}={value}\n")
 
 
-def parse_test_config(
-        yaml_file: str | Path,
+@dataclass(frozen=True)
+class TestRuntime:
+    test_name: str
+    test_path: str
+    skip_gpu_allocation: bool
+    xpu_mode: bool
+
+
+@lru_cache(maxsize=None)
+def _load_yaml_cached(yaml_path: str) -> dict[str, Any]:
+    import yaml
+
+    with Path(yaml_path).open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"yaml file must contain a mapping: {yaml_path}")
+    return data
+
+
+def load_yaml(yaml_file: str | Path) -> dict[str, Any]:
+    return _load_yaml_cached(str(Path(yaml_file).resolve()))
+
+
+def parse_test_config_data(
+        data: dict[str, Any],
         group: str,
         test_name: str | None = None,
 ) -> dict[str, Any]:
-    import yaml
-
-    yaml_path = Path(yaml_file)
-    with yaml_path.open("r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
-
     result: dict[str, Any] = {}
     common_data = data.get("common") or {}
     if not isinstance(common_data, dict):
@@ -72,8 +88,34 @@ def parse_test_config(
     return result
 
 
+def parse_test_config(
+        yaml_file: str | Path,
+        group: str,
+        test_name: str | None = None,
+) -> dict[str, Any]:
+    return parse_test_config_data(load_yaml(yaml_file), group, test_name)
+
+
+def normalize_test_name(name: str) -> str:
+    return strip_py_suffix(name.removeprefix("tests/"))
+
+
+def test_path_from_name(test_name: str, tests_root: str | Path = "tests") -> Path:
+    normalized = normalize_test_name(test_name)
+    return Path(tests_root) / f"{normalized}.py"
+
+
 def parse_test_config_for_path(
         yaml_file: str | Path,
+        group: str,
+        test_name: str,
+) -> dict[str, Any]:
+    data = load_yaml(yaml_file)
+    return parse_test_config_data_for_path(data, group, test_name)
+
+
+def parse_test_config_data_for_path(
+        data: dict[str, Any],
         group: str,
         test_name: str,
 ) -> dict[str, Any]:
@@ -91,26 +133,33 @@ def parse_test_config_for_path(
         if index == len(candidate_groups) - 1:
             scoped_test_name = leaf_name
         try:
-            scoped = parse_test_config(yaml_file, candidate_group, scoped_test_name)
+            scoped = parse_test_config_data(data, candidate_group, scoped_test_name)
         except KeyError:
             continue
         result.update(scoped)
     return result
 
 
-def has_no_gpu_marker(file_path: Path) -> bool:
+@lru_cache(maxsize=None)
+def _read_text_cached(file_path: str) -> str | None:
     try:
-        with file_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                if stripped == "# GPU=-1":
-                    return True
-                if stripped.startswith("import ") or stripped.startswith("from "):
-                    return False
+        return Path(file_path).read_text(encoding="utf-8")
     except OSError:
+        return None
+
+
+def has_no_gpu_marker(file_path: Path) -> bool:
+    contents = _read_text_cached(str(file_path.resolve()))
+    if contents is None:
         return False
+    for line in contents.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped == "# GPU=-1":
+            return True
+        if stripped.startswith("import ") or stripped.startswith("from "):
+            return False
     return False
 
 
@@ -121,23 +170,22 @@ def sort_key(path: str, file_path: Path) -> tuple[bool, bool, bool, str]:
 def is_model_compat_test(rel_path: str, file_path: Path) -> bool:
     if not rel_path.startswith("models/"):
         return False
-    try:
-        contents = file_path.read_text(encoding="utf-8")
-    except OSError:
+    contents = _read_text_cached(str(file_path.resolve()))
+    if contents is None:
         return False
     markers = ("quantize_and_evaluate(", "self.evaluate_model(", "check_results(")
     return any(marker in contents for marker in markers)
 
 
-def matches_test_regex(test_regex: str, rel_path: str) -> bool:
-    if regex.match(test_regex, rel_path):
+def matches_test_regex(test_regex: Any, rel_path: str) -> bool:
+    if test_regex.match(rel_path):
         return True
-    return regex.match(test_regex, PurePosixPath(rel_path).name) is not None
+    return test_regex.match(PurePosixPath(rel_path).name) is not None
 
 
-def should_skip_test(yaml_file: str | Path, rel_path: str) -> bool:
+def should_skip_test(config_data: dict[str, Any], rel_path: str) -> bool:
     try:
-        config = parse_test_config_for_path(yaml_file, "tests", rel_path)
+        config = parse_test_config_data_for_path(config_data, "tests", rel_path)
     except KeyError:
         return False
     return bool(config.get("skip", False))
@@ -148,14 +196,15 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
     input_tests = [strip_py_suffix(name) for name in split_csv(test_names)]
     ignored_raw = ignored_test_files if isinstance(ignored_test_files, list) else split_csv(ignored_test_files)
     ignored_set = {strip_py_suffix(name) for name in ignored_raw}
-    yaml_file = Path(__file__).with_name("test.yaml")
+    config_data = load_yaml(Path(__file__).with_name("test.yaml"))
+    compiled_test_regex = regex.compile(test_regex)
 
     all_tests = {
         rel: path
         for path in tests_root.rglob("test_*.py")
         for rel in [str(path.relative_to(tests_root).with_suffix(""))]
         if rel not in ignored_set and path.stem not in ignored_set
-        if not should_skip_test(yaml_file, rel)
+        if not should_skip_test(config_data, rel)
     }
 
     model_tests = {
@@ -165,7 +214,7 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
            and "mlx" not in rel
            and "ipex" not in rel
            and "xpu" not in rel
-           and matches_test_regex(test_regex, rel)
+           and matches_test_regex(compiled_test_regex, rel)
            and is_model_compat_test(rel, path)
     }
 
@@ -177,7 +226,7 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
            and "mlx" not in rel
            and "ipex" not in rel
            and "xpu" not in rel
-           and matches_test_regex(test_regex, rel)
+           and matches_test_regex(compiled_test_regex, rel)
     }
 
     mlx_tests = {
@@ -185,13 +234,26 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
         for rel in all_tests
         if ("mlx" in rel or "apple" in rel)
            and ((rel in input_tests) if input_tests else True)
-           and matches_test_regex(test_regex, rel)
+           and matches_test_regex(compiled_test_regex, rel)
     }
 
     return (
         sorted(torch_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
         sorted(model_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
         sorted(mlx_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
+    )
+
+
+def resolve_test_runtime(test_name: str, tests_root: str | Path = "tests") -> TestRuntime:
+    normalized = normalize_test_name(test_name)
+    test_path = test_path_from_name(normalized, tests_root=tests_root)
+    xpu_mode = "xpu" in normalized
+    skip_gpu_allocation = xpu_mode or has_no_gpu_marker(test_path)
+    return TestRuntime(
+        test_name=normalized,
+        test_path=str(test_path),
+        skip_gpu_allocation=skip_gpu_allocation,
+        xpu_mode=xpu_mode,
     )
 
 
@@ -248,6 +310,27 @@ def cmd_resolve_env(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_resolve_test_runtime(args: argparse.Namespace) -> int:
+    runtime = resolve_test_runtime(args.test_name, tests_root=args.tests_root)
+    skip_gpu = str(runtime.skip_gpu_allocation).lower()
+    xpu_mode = str(runtime.xpu_mode).lower()
+
+    append_github_env("TEST_FILE", runtime.test_path)
+    append_github_env("SKIP_GPU_ALLOCATION", skip_gpu)
+    append_github_env("XPU_MODE", xpu_mode)
+
+    if args.shell:
+        print(f"TEST_FILE={shlex.quote(runtime.test_path)}")
+        print(f"SKIP_GPU_ALLOCATION={shlex.quote(skip_gpu)}")
+        print(f"XPU_MODE={shlex.quote(xpu_mode)}")
+    else:
+        print(
+            f"using test_file={runtime.test_path} skip_gpu_allocation={skip_gpu} "
+            f"xpu_mode={xpu_mode} for test {runtime.test_name}"
+        )
+    return 0
+
+
 def cmd_loop_versions(args: argparse.Namespace) -> int:
     print(json.dumps(list_matching_versions(args.package, args.version)))
     return 0
@@ -272,6 +355,11 @@ def main() -> int:
     resolve_parser.add_argument("--env-prefix", default="gptqmodel_test")
     resolve_parser.add_argument("--shell", action="store_true")
 
+    runtime_parser = subparsers.add_parser("resolve-test-runtime")
+    runtime_parser.add_argument("--test-name", required=True)
+    runtime_parser.add_argument("--tests-root", default="tests")
+    runtime_parser.add_argument("--shell", action="store_true")
+
     versions_parser = subparsers.add_parser("loop-versions")
     versions_parser.add_argument("package")
     versions_parser.add_argument("version")
@@ -281,6 +369,8 @@ def main() -> int:
         return cmd_list_tests(args)
     if args.command == "resolve-env":
         return cmd_resolve_env(args)
+    if args.command == "resolve-test-runtime":
+        return cmd_resolve_test_runtime(args)
     if args.command == "loop-versions":
         return cmd_loop_versions(args)
     raise AssertionError(f"Unhandled command: {args.command}")
