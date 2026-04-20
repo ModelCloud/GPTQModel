@@ -106,7 +106,7 @@ from .utils.modelscope import ensure_modelscope_available
 DEBUG_ON = env_flag("DEBUG")
 
 from .utils.linalg_warmup import run_torch_linalg_warmup
-from .utils.threadx import DeviceThreadPool
+from .utils.threadx import DeviceThreadPool, WarmUpCtx, WarmupTask
 
 
 _DEVICE_THREAD_POOL = None
@@ -116,10 +116,10 @@ def _build_device_thread_pool():
     return DeviceThreadPool(
         inference_mode=True,
         warmups={
-            "cuda": run_torch_linalg_warmup,
-            "xpu": run_torch_linalg_warmup,
-            "mps": run_torch_linalg_warmup,
-            "cpu": run_torch_linalg_warmup,
+            "cuda": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD),
+            "xpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.DEVICE),
+            "mps": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.DEVICE),
+            "cpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.DEVICE),
         },
         workers={
             "cuda:per": 4,

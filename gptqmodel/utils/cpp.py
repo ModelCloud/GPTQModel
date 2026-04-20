@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import logging
 import math
@@ -16,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 

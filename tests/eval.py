@@ -505,18 +505,18 @@ def _build_evalution_runtime(
         return engine, model_config, session
 
     if isinstance(model_or_id_or_path, str):
-        engine_kwargs = dict(
-            dtype=engine_dtype,
-            attn_implementation=engine_attn,
-            device=engine_device,
-            device_map=engine_device_map,
-            seed=engine_options.get("seed"),
-            batch_size=batch_size,
-            trust_remote_code=trust_remote_code,
-            padding_side=engine_padding_side,
-            backend=_normalize_backend_name(backend),
-            gptqmodel_path=str(Path(__file__).resolve().parents[2]),
-        )
+        engine_kwargs = {
+            "dtype": engine_dtype,
+            "attn_implementation": engine_attn,
+            "device": engine_device,
+            "device_map": engine_device_map,
+            "seed": engine_options.get("seed"),
+            "batch_size": batch_size,
+            "trust_remote_code": trust_remote_code,
+            "padding_side": engine_padding_side,
+            "backend": _normalize_backend_name(backend),
+            "gptqmodel_path": str(Path(__file__).resolve().parents[2]),
+        }
         engine = safe_kwargs_call(evalution.GPTQModel, kwargs=engine_kwargs)
         model_config = evalution.Model(
             path=model_or_id_or_path,

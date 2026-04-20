@@ -31,8 +31,8 @@ import json
 import os
 import re
 import threading
-from importlib import import_module
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
 import pcre
