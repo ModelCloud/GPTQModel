@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -77,6 +79,11 @@ def test_build_test_matrix_marks_model_entries():
     "script_name",
     [
         "ci_prepare_checkout.sh",
+        "ci_release_build_sdist.sh",
+        "ci_release_check_dist.sh",
+        "ci_release_test_install.sh",
+        "ci_release_upload_local.sh",
+        "ci_release_wait_for_confirmation.sh",
         "ci_restore_uv_cache.sh",
         "ci_install_modelcloud_git_deps.sh",
     ],
@@ -109,3 +116,38 @@ def test_ci_restore_uv_cache_script_skips_unchanged_archive(tmp_path: Path):
         check=True,
     )
     assert restored_file.read_text(encoding="utf-8") == "mutated-cache"
+
+
+def test_ci_release_check_dist_script_sets_latest_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    older = dist_dir / "pkg-old.tar.gz"
+    newer = dist_dir / "pkg-new.tar.gz"
+    older.write_text("old", encoding="utf-8")
+    time.sleep(0.01)
+    newer.write_text("new", encoding="utf-8")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_twine = fake_bin / "twine"
+    fake_twine.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "echo \"$@\" > \"$TWINE_LOG\"\n",
+        encoding="utf-8",
+    )
+    fake_twine.chmod(0o755)
+
+    github_env = tmp_path / "github_env"
+    twine_log = tmp_path / "twine.log"
+    monkeypatch.setenv("GITHUB_ENV", str(github_env))
+    monkeypatch.setenv("TWINE_LOG", str(twine_log))
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+
+    subprocess.run(
+        ["bash", str(SCRIPT_DIR / "ci_release_check_dist.sh"), str(dist_dir)],
+        check=True,
+    )
+
+    assert "PKG_NAME=pkg-new.tar.gz" in github_env.read_text(encoding="utf-8")
+    assert twine_log.read_text(encoding="utf-8").strip() == f"check {newer}"

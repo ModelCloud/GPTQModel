@@ -116,30 +116,20 @@ jobs:
 
       - name: Build sdist
         run: |
-          python -m pip install -U build twine setuptools
-          python -m build --sdist
+          .github/scripts/ci_release_build_sdist.sh
 
       - name: Check dist
         run: |
-          ls -ahl dist
-          pkg=$(ls -t dist/*.tar.gz | head -n 1 | xargs basename)
-          echo "PKG_NAME=$pkg" >> "$GITHUB_ENV"
-          twine check "dist/$pkg"
+          .github/scripts/ci_release_check_dist.sh
 
       - name: test installation
         run: |
-          uv venv local_uv_env
-          source local_uv_env/bin/activate
-          uv pip install "dist/${{ env.PKG_NAME }}" torch
+          .github/scripts/ci_release_test_install.sh "${{ env.PKG_NAME }}"
 
       - name: Upload to local
         continue-on-error: true
         run: |
-          sha256sum "dist/${{ env.PKG_NAME }}"
-          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
-          [ -d "$DIR" ] || mkdir -p "$DIR"
-          cp "dist/${{ env.PKG_NAME }}" "$DIR/"
-          echo "UPLOADED=1" >> "$GITHUB_ENV"
+          .github/scripts/ci_release_upload_local.sh "${{ env.PKG_NAME }}" "${{ needs.check-vm.outputs.run_id }}"
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v7
@@ -160,22 +150,7 @@ jobs:
       - name: Waiting for confirmation
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         run: |
-          timestamp=$(date +%s%3N)
-          echo "open http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
-          for i in {1..5}; do echo "."; done
-          echo "click http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&denied=1 to DENY"
-          status=-1
-          while [ "$status" -lt 0 ]; do
-            status=$(curl -s "http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp")
-            if [ "$status" == "2" ]; then
-              echo "PYPI_RELEASE_CONFIRMATION=$status" >> "$GITHUB_ENV"
-            elif [ "$status" -lt 0 ]; then
-              sleep 5
-            else
-              echo "release has been confirmed"
-              echo "PYPI_RELEASE_CONFIRMATION=$status" >> "$GITHUB_ENV"
-            fi
-          done
+          .github/scripts/ci_release_wait_for_confirmation.sh manual
 
       - name: Upload sdist to pypi
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && env.PYPI_RELEASE_CONFIRMATION == '1' && !cancelled()
@@ -204,20 +179,13 @@ jobs:
           python-version: '3.14'
           cache: 'pip'
 
-      - name: Install requirements
-        run: |
-          python -m pip install -U build twine setuptools
-
       - name: Build sdist
         run: |
-          python -m build --sdist
+          .github/scripts/ci_release_build_sdist.sh
 
       - name: Check dist
         run: |
-          ls -ahl dist
-          pkg=$(ls -t dist/*.tar.gz | head -n 1 | xargs basename)
-          echo "PKG_NAME=$pkg" >> "$GITHUB_ENV"
-          twine check "dist/$pkg"
+          .github/scripts/ci_release_check_dist.sh
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v7
@@ -237,7 +205,7 @@ jobs:
       - name: Waiting for confirmation
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         run: |
-          for i in {1..5}; do sleep 5; done
+          .github/scripts/ci_release_wait_for_confirmation.sh sleep
 
       - name: Upload sdist to pypi
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
