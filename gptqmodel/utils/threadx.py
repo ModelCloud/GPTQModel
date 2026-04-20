@@ -13,7 +13,9 @@ import threading
 import time
 import traceback
 from concurrent.futures import Future
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
@@ -45,6 +47,24 @@ def _best_effort_stderr_write(message: str) -> None:
 
 # DeviceLike allows ergonomic call sites: 'cuda:0', 0, torch.device('cuda', 0), etc.
 DeviceLike = Union[str, int, torch.device]
+WarmupFn = Callable[[torch.device, "WarmUpCtx"], None]
+
+
+class WarmUpCtx(str, Enum):
+    THREAD = "thread"
+    DEVICE = "device"
+    THREAD_AND_DEVICE = "thread_and_device"
+
+    def invocation_order(self) -> Tuple["WarmUpCtx", ...]:
+        if self is WarmUpCtx.THREAD_AND_DEVICE:
+            return (WarmUpCtx.DEVICE, WarmUpCtx.THREAD)
+        return (self,)
+
+
+@dataclass(frozen=True)
+class WarmupTask:
+    fn: WarmupFn
+    scope: WarmUpCtx = WarmUpCtx.DEVICE
 
 
 # --------------------------- Backend availability helpers ---------------------------
@@ -271,14 +291,15 @@ class _WaitAndLock(contextlib.AbstractContextManager):
 
 class _WorkerWarmupState:
     """
-    Shared once-per-physical-device warmup coordination.
+    Coordinate a single warmup invocation.
 
-    The first worker that reaches this state performs the warmup. Other workers
-    wait on the completion event without holding the pool registry lock.
+    Device-scoped states may be shared across workers for the same physical
+    device. Thread-scoped states are owned by a single worker.
     """
 
-    def __init__(self, warmup_fn: Callable[[torch.device], None]):
-        self._warmup_fn = warmup_fn
+    def __init__(self, warmup_task: WarmupTask, warmup_ctx: WarmUpCtx):
+        self._warmup_task = warmup_task
+        self._warmup_ctx = warmup_ctx
         self._claim_lock = threading.Lock()
         self._started = False
         self._done = threading.Event()
@@ -300,7 +321,7 @@ class _WorkerWarmupState:
         if should_run:
             try:
                 with ctx(rwlock.reader(), _device_ctx(device)):
-                    self._warmup_fn(device)
+                    self._warmup_task.fn(device, self._warmup_ctx)
             except BaseException as exc:
                 with self._claim_lock:
                     self._error = exc
@@ -342,7 +363,7 @@ class _DeviceWorker:
         name: Optional[str] = None,
         inference_mode: bool = False,
         cpu_core: Optional[int] = None,
-        warmup_state: Optional[_WorkerWarmupState] = None,
+        warmup_plan: Optional[Tuple[_WorkerWarmupState, ...]] = None,
         *,
         key_override: Optional[str] = None,
     ):
@@ -350,7 +371,7 @@ class _DeviceWorker:
         self.rwlock = rwlock
         self._on_task_finished = on_task_finished
         self._on_worker_exit = on_worker_exit
-        self._warmup_state = warmup_state
+        self._pending_warmups = warmup_plan or ()
 
         if key_override is not None:
             self.key = key_override
@@ -425,11 +446,12 @@ class _DeviceWorker:
             self._affinity_applied = True
 
     def _run_warmup(self) -> None:
-        warmup_state = self._warmup_state
-        if warmup_state is None:
+        pending_warmups = self._pending_warmups
+        if not pending_warmups:
             return
-        warmup_state.run(device=self.device, rwlock=self.rwlock)
-        self._warmup_state = None
+        for warmup_state in pending_warmups:
+            warmup_state.run(device=self.device, rwlock=self.rwlock)
+        self._pending_warmups = ()
 
     def _run(self):
         """
@@ -585,7 +607,7 @@ class DeviceThreadPool:
         include_mps: bool = True,
         include_cpu: bool = True,
         inference_mode: bool = False,
-        warmups: Optional[Dict[str, Callable[[torch.device], None]]] = None,
+        warmups: Optional[Dict[str, WarmupTask]] = None,
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
@@ -607,11 +629,13 @@ class DeviceThreadPool:
                   (CUDA parents must include an explicit index, e.g. 'alias:cuda:0')
               Unspecified devices default to 1 worker each.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
-            warmups: optional mapping from device family (e.g. 'cuda') to a callable
-                run once after the worker activates its device. A special key
-                'default' applies when no family-specific warmup is found.
-                Callables may set `_threadx_warmup_scope = "per_worker"` to run
-                once per worker thread instead of once per physical device.
+            warmups: optional mapping from device family (e.g. 'cuda') to a
+                `WarmupTask`. Each warmup callable receives `(device, ctx)`,
+                where `ctx` is `WarmUpCtx.DEVICE` or `WarmUpCtx.THREAD`.
+                A task scoped to `WarmUpCtx.THREAD_AND_DEVICE` runs once per
+                physical device with `ctx=DEVICE`, then once per worker thread
+                with `ctx=THREAD`. A special key 'default' applies when no
+                family-specific warmup is found.
             gc_min_interval_seconds: minimum interval between GC passes. Values <= 0 disable throttling.
             pin_cpu_workers: bind CPU device workers to individual CPU cores when
                 affinity APIs are available. Defaults to False so CPU tasks may
@@ -681,11 +705,9 @@ class DeviceThreadPool:
         self._device_smi_failures: Set[str] = set()
 
         self._inference_mode = bool(inference_mode)
-        self._worker_warmups = (
-            {str(k).lower(): fn for k, fn in warmups.items()} if warmups else None
-        )
-        self._warmup_lock = threading.Lock()
-        self._warmup_states: Dict[str, _WorkerWarmupState] = {}
+        self._worker_warmups = self._normalize_worker_warmups(warmups)
+        self._device_warmup_lock = threading.Lock()
+        self._device_warmup_states: Dict[str, _WorkerWarmupState] = {}
 
         workers_cfg = workers or {}
         base_workers: Dict[str, int] = {}
@@ -939,36 +961,55 @@ class DeviceThreadPool:
 
         return plan
 
+    @staticmethod
+    def _normalize_worker_warmups(
+        warmups: Optional[Dict[str, WarmupTask]],
+    ) -> Optional[Dict[str, WarmupTask]]:
+        if not warmups:
+            return None
+
+        normalized: Dict[str, WarmupTask] = {}
+        for raw_key, raw_task in warmups.items():
+            if not isinstance(raw_task, WarmupTask):
+                raise TypeError(
+                    "warmups entries must be WarmupTask instances; "
+                    f"got {type(raw_task).__name__!s} for key '{raw_key}'"
+                )
+            normalized[str(raw_key).lower()] = raw_task
+        return normalized
+
     def _resolve_worker_warmup(
         self,
         dev: torch.device,
         key: str,
-    ) -> Optional[_WorkerWarmupState]:
+    ) -> Tuple[_WorkerWarmupState, ...]:
         mapping = self._worker_warmups
         if not mapping:
-            return None
+            return ()
         family = dev.type.lower()
-        warmup = mapping.get(family)
+        warmup_task = mapping.get(family)
         primary_key = key.split(":", 1)[0].lower()
-        if warmup is None and primary_key in mapping:
-            warmup = mapping[primary_key]
-        if warmup is None:
-            warmup = mapping.get("default")
-        if warmup is None:
-            return None
+        if warmup_task is None and primary_key in mapping:
+            warmup_task = mapping[primary_key]
+        if warmup_task is None:
+            warmup_task = mapping.get("default")
+        if warmup_task is None:
+            return ()
 
-        warmup_scope = getattr(warmup, "_threadx_warmup_scope", None)
-        if warmup_scope == "per_worker":
-            return _WorkerWarmupState(warmup)
-
-        # Virtual workers share the same physical-device warmup state as their parent.
+        states: List[_WorkerWarmupState] = []
         physical_key = self._virtual_to_parent.get(key, key)
-        with self._warmup_lock:
-            state = self._warmup_states.get(physical_key)
-            if state is None:
-                state = _WorkerWarmupState(warmup)
-                self._warmup_states[physical_key] = state
-        return state
+        for warmup_ctx in warmup_task.scope.invocation_order():
+            if warmup_ctx is WarmUpCtx.THREAD:
+                states.append(_WorkerWarmupState(warmup_task, warmup_ctx))
+                continue
+
+            with self._device_warmup_lock:
+                state = self._device_warmup_states.get(physical_key)
+                if state is None:
+                    state = _WorkerWarmupState(warmup_task, warmup_ctx)
+                    self._device_warmup_states[physical_key] = state
+            states.append(state)
+        return tuple(states)
 
     def _spawn_worker(
         self,
@@ -980,7 +1021,7 @@ class DeviceThreadPool:
         """
         Create and start a worker bound to the provided device.
         """
-        warmup_state = self._resolve_worker_warmup(dev, key)
+        warmup_plan = self._resolve_worker_warmup(dev, key)
         w = _DeviceWorker(
             device=dev,
             rwlock=self._locks[key],
@@ -989,7 +1030,7 @@ class DeviceThreadPool:
             name=name,
             inference_mode=self._inference_mode,
             cpu_core=cpu_core,
-            warmup_state=warmup_state,
+            warmup_plan=warmup_plan,
             key_override=key,
         )
         return w
