@@ -29,7 +29,9 @@ import copy
 import inspect
 import json
 import os
+import re
 import threading
+from importlib import import_module
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
@@ -578,6 +580,9 @@ class LazyTurtle:
 
     supports_reload = False
     is_lazy_checkpoint_source = True
+    _HF_SIMPLE_SOURCE_PREFIX_RE = re.compile(r"^\^?([A-Za-z0-9_.]+)\$?$")
+    _HF_SIMPLE_TARGET_PREFIX_RE = re.compile(r"^([A-Za-z0-9_.]+)$")
+
     def __init__(
         self,
         *,
@@ -585,7 +590,8 @@ class LazyTurtle:
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
         module_tree: Optional[Any] = None,
-        checkpoint_path_aliases: Optional[Any] = None,
+        hf_conversion_map_reversed: Optional[Any] = None,
+        target_model: Optional[nn.Module] = None,
     ) -> None:
         self.model_local_path = model_local_path
         self.config = copy.deepcopy(config)
@@ -594,20 +600,14 @@ class LazyTurtle:
         # Lazy checkpoint name resolution must come from model-definition truth.
         self._module_tree = copy.deepcopy(module_tree)
         self._module_tree_layer_prefix, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
-        alias_items: list[tuple[str, str]] = []
-        raw_aliases = checkpoint_path_aliases or ()
-        if isinstance(raw_aliases, dict):
-            raw_aliases = raw_aliases.items()
-        for runtime_prefix, checkpoint_prefix in raw_aliases:
-            if not isinstance(runtime_prefix, str) or not isinstance(checkpoint_prefix, str):
-                continue
-            runtime_prefix = runtime_prefix.strip(".")
-            checkpoint_prefix = checkpoint_prefix.strip(".")
-            if not runtime_prefix:
-                continue
-            alias_items.append((runtime_prefix, checkpoint_prefix))
-        alias_items.sort(key=lambda item: len(item[0]), reverse=True)
-        self._checkpoint_path_aliases = tuple(alias_items)
+        # Resolve runtime->checkpoint aliases once up front so per-tensor lookups
+        # only need cheap prefix rewrites.
+        alias_items = self._normalize_runtime_to_checkpoint_aliases(
+            hf_conversion_map_reversed
+            if hf_conversion_map_reversed is not None
+            else self.infer_hf_conversion_map_reversed(target_model=target_model)
+        )
+        self._runtime_to_checkpoint_aliases = tuple(alias_items)
         self._lock = threading.RLock()
 
     @classmethod
@@ -618,7 +618,8 @@ class LazyTurtle:
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
         module_tree: Optional[Any] = None,
-        checkpoint_path_aliases: Optional[Any] = None,
+        hf_conversion_map_reversed: Optional[Any] = None,
+        target_model: Optional[nn.Module] = None,
     ) -> Optional["LazyTurtle"]:
         if not model_local_path or not os.path.isdir(model_local_path):
             return None
@@ -629,7 +630,8 @@ class LazyTurtle:
                 config=config,
                 model_init_kwargs=model_init_kwargs,
                 module_tree=module_tree,
-                checkpoint_path_aliases=checkpoint_path_aliases,
+                hf_conversion_map_reversed=hf_conversion_map_reversed,
+                target_model=target_model,
             )
         except Exception as exc:
             log.debug(
@@ -744,6 +746,110 @@ class LazyTurtle:
         if not rel_name:
             return module_path
         return f"{module_path}.{rel_name}"
+
+    @staticmethod
+    def _normalize_runtime_to_checkpoint_aliases(raw_aliases: Optional[Any]) -> tuple[tuple[str, str], ...]:
+        alias_items: list[tuple[str, str]] = []
+        if raw_aliases is None:
+            return ()
+        if isinstance(raw_aliases, dict):
+            raw_aliases = raw_aliases.items()
+        for runtime_prefix, checkpoint_prefix in raw_aliases:
+            if not isinstance(runtime_prefix, str) or not isinstance(checkpoint_prefix, str):
+                continue
+            runtime_prefix = runtime_prefix.strip(".")
+            checkpoint_prefix = checkpoint_prefix.strip(".")
+            if not runtime_prefix:
+                continue
+            alias_items.append((runtime_prefix, checkpoint_prefix))
+        alias_items.sort(key=lambda item: len(item[0]), reverse=True)
+        return tuple(alias_items)
+
+    @classmethod
+    def _extract_hf_source_prefix(cls, pattern: Any) -> Optional[str]:
+        if not isinstance(pattern, str):
+            return None
+        match = cls._HF_SIMPLE_SOURCE_PREFIX_RE.fullmatch(pattern.strip())
+        if match is None:
+            return None
+        return match.group(1).strip(".") or None
+
+    @classmethod
+    def _extract_hf_target_prefix(cls, prefix: Any) -> Optional[str]:
+        if not isinstance(prefix, str):
+            return None
+        match = cls._HF_SIMPLE_TARGET_PREFIX_RE.fullmatch(prefix.strip())
+        if match is None:
+            return None
+        return match.group(1).strip(".") or None
+
+    @classmethod
+    def _iter_hf_conversion_pairs(cls, conversion_mapping: Optional[Any]) -> Iterable[tuple[str, str]]:
+        if isinstance(conversion_mapping, dict):
+            for checkpoint_pattern, runtime_prefix in conversion_mapping.items():
+                if isinstance(checkpoint_pattern, str) and isinstance(runtime_prefix, str):
+                    yield checkpoint_pattern, runtime_prefix
+            return
+
+        if not isinstance(conversion_mapping, (list, tuple)):
+            return
+
+        for entry in conversion_mapping:
+            source_patterns = getattr(entry, "source_patterns", None)
+            target_patterns = getattr(entry, "target_patterns", None)
+            operations = getattr(entry, "operations", None)
+            if operations:
+                continue
+            if not isinstance(source_patterns, (list, tuple)) or not isinstance(target_patterns, (list, tuple)):
+                continue
+            if len(source_patterns) != 1 or len(target_patterns) != 1:
+                continue
+            checkpoint_pattern = source_patterns[0]
+            runtime_prefix = target_patterns[0]
+            if isinstance(checkpoint_pattern, str) and isinstance(runtime_prefix, str):
+                yield checkpoint_pattern, runtime_prefix
+
+    @classmethod
+    def reverse_hf_conversion_map(cls, conversion_mapping: Optional[Any]) -> Optional[Dict[str, str]]:
+        """Invert simple HF checkpoint renames into runtime->checkpoint aliases."""
+        reversed_map: Dict[str, str] = {}
+        for checkpoint_pattern, runtime_prefix in cls._iter_hf_conversion_pairs(conversion_mapping):
+            checkpoint_prefix = cls._extract_hf_source_prefix(checkpoint_pattern)
+            runtime_prefix = cls._extract_hf_target_prefix(runtime_prefix)
+            if checkpoint_prefix is None or runtime_prefix is None:
+                continue
+
+            if runtime_prefix in reversed_map:
+                continue
+            reversed_map[runtime_prefix] = checkpoint_prefix
+
+        return reversed_map or None
+
+    @classmethod
+    def infer_hf_conversion_map_reversed(cls, *, target_model: Optional[nn.Module] = None) -> Optional[Dict[str, str]]:
+        if target_model is None:
+            return None
+
+        model_type = getattr(getattr(target_model, "config", None), "model_type", None)
+        if isinstance(model_type, str):
+            # Prefer the public transformers conversion registry and fall back to
+            # older per-model mappings when needed.
+            try:
+                conversion_mapping_module = import_module("transformers.conversion_mapping")
+            except Exception:
+                conversion_mapping_module = None
+            if conversion_mapping_module is not None:
+                get_checkpoint_conversion_mapping = getattr(
+                    conversion_mapping_module,
+                    "get_checkpoint_conversion_mapping",
+                    None,
+                )
+                if callable(get_checkpoint_conversion_mapping):
+                    reversed_map = cls.reverse_hf_conversion_map(get_checkpoint_conversion_mapping(model_type))
+                    if reversed_map is not None:
+                        return reversed_map
+
+        return cls.reverse_hf_conversion_map(getattr(target_model, "_checkpoint_conversion_mapping", None))
 
     @staticmethod
     def _parse_module_spec(module_spec: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -957,7 +1063,7 @@ class LazyTurtle:
             candidates.append(candidate)
         return candidates
 
-    def _checkpoint_path_alias_candidates(self, name: str) -> list[str]:
+    def _runtime_to_checkpoint_alias_candidates(self, name: str) -> list[str]:
         """Return `name` plus any runtime->checkpoint prefix rewrites declared by the model.
 
         This handles model families whose execution shell layout does not match
@@ -980,12 +1086,25 @@ class LazyTurtle:
             seen.add(current)
             candidates.append(current)
 
-            for runtime_prefix, checkpoint_prefix in self._checkpoint_path_aliases:
+            for runtime_prefix, checkpoint_prefix in self._runtime_to_checkpoint_aliases:
                 if current == runtime_prefix:
                     suffix = ""
                 elif current.startswith(f"{runtime_prefix}."):
                     suffix = current[len(runtime_prefix):]
                 else:
+                    continue
+
+                # Avoid repeatedly re-applying aliases that expand a prefix into
+                # one that still begins with the original runtime prefix, e.g.
+                # `language_model -> language_model.model`, which would otherwise
+                # generate:
+                #   language_model.layers.0
+                #   language_model.model.layers.0
+                #   language_model.model.model.layers.0
+                #   ...
+                if checkpoint_prefix and (
+                    current == checkpoint_prefix or current.startswith(f"{checkpoint_prefix}.")
+                ):
                     continue
 
                 aliased = f"{checkpoint_prefix}{suffix}" if checkpoint_prefix else suffix.lstrip(".")
@@ -997,7 +1116,7 @@ class LazyTurtle:
     def _resolve_checkpoint_module_path(self, module_path: str) -> str:
         """Resolve a shell module path to the checkpoint path when wrappers add extra roots."""
 
-        candidates = self._checkpoint_path_alias_candidates(module_path)
+        candidates = self._runtime_to_checkpoint_alias_candidates(module_path)
         for aliased in tuple(candidates):
             # Apply declared runtime->checkpoint aliases before the generic
             # prefix-stripping fallback so nested shell paths such as
@@ -1005,7 +1124,7 @@ class LazyTurtle:
             # checkpoint paths like `model.layers.0`.
             candidates.extend(self._module_tree_name_aliases(aliased))
             for candidate_path in self._candidate_module_paths(aliased):
-                candidates.extend(self._checkpoint_path_alias_candidates(candidate_path))
+                candidates.extend(self._runtime_to_checkpoint_alias_candidates(candidate_path))
 
         seen: set[str] = set()
         for candidate in candidates:
@@ -1024,7 +1143,7 @@ class LazyTurtle:
         candidates: list[str] = []
         seen: set[str] = set()
         for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
-            for aliased_path in self._checkpoint_path_alias_candidates(candidate_path):
+            for aliased_path in self._runtime_to_checkpoint_alias_candidates(candidate_path):
                 candidate_name = self._join_tensor_name(aliased_path, rel_name)
                 if candidate_name not in seen:
                     seen.add(candidate_name)

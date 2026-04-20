@@ -657,7 +657,10 @@ def ModelLoader(cls):
                     config=model.config,
                     model_init_kwargs=shell_model_init_kwargs,
                     module_tree=copy.deepcopy(getattr(cls, "module_tree", None)),
-                    checkpoint_path_aliases=copy.deepcopy(getattr(cls, "checkpoint_path_aliases", ())),
+                    hf_conversion_map_reversed=copy.deepcopy(
+                        cls.resolve_hf_conversion_map_reversed(target_model=model)
+                    ),
+                    target_model=model,
                 )
 
                 if turtle_model is None:

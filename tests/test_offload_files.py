@@ -599,7 +599,7 @@ def test_alias_all_from_lazy_turtle_handles_shell_root_prefix_mismatch(tmp_path)
     torch.testing.assert_close(shell_model.transformer.block.dt_scale, source_model.block.dt_scale)
 
 
-def test_lazy_turtle_checkpoint_path_aliases_resolve_nested_language_model_prefix(tmp_path):
+def test_lazy_turtle_hf_conversion_map_reversed_resolves_nested_language_model_prefix(tmp_path):
     source_model = _FlatLanguageCheckpointWrapper(vocab_size=32, width=16)
     shell_model = _NestedLanguageShellWrapper(vocab_size=32, width=16)
 
