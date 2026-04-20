@@ -222,9 +222,10 @@ def cmd_resolve_env(args: argparse.Namespace) -> int:
     py = str(config["py"])
     gpu = str(config["gpu"])
     sm = str(config.get("sm", 0))
+    test_name_for_env = args.test_name.replace("/", "_")
     env_name = (
         f"{args.env_prefix}_cu{args.cuda_version}_torch{args.torch_version}"
-        f"_py{py}_{args.test_name}"
+        f"_py{py}_{test_name_for_env}"
     )
 
     append_github_env("PYTHON_VERSION", py)
