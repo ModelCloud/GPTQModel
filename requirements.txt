@@ -20,3 +20,4 @@ pyarrow>=21.0
 dill>=0.3.8
 torchao>=0.16.0
 defuser>=0.0.20
+backoff>=2.2.1
