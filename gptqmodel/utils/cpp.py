@@ -60,6 +60,7 @@ _NVCC_VERSION_CACHE: tuple[int, int] | None = None
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
 # the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
 _DEFAULT_NVCC_THREADS = "8"
+_GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 
 
 def _nvcc_path() -> Optional[str]:
@@ -758,6 +759,8 @@ class TorchOpsJitExtension:
     def force_rebuild_enabled(self) -> bool:
         """Check whether this extension should ignore and replace cached binaries."""
 
+        if env_flag(_GLOBAL_KERNEL_REBUILD_ENV, default=False):
+            return True
         if not self.force_rebuild_env:
             return False
         return env_flag(self.force_rebuild_env, default=False)

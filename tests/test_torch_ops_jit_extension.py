@@ -290,6 +290,43 @@ def test_torch_ops_jit_extension_force_rebuild_clears_cache(monkeypatch, tmp_pat
     assert any("clearing cached JIT extension" in message for message in logger.info_messages)
 
 
+def test_torch_ops_jit_extension_global_kernel_rebuild_clears_cache(monkeypatch, tmp_path):
+    """Guard the umbrella rebuild flag so every torch.ops extension gets cold-build behavior."""
+
+    loader = _make_loader(tmp_path)
+    build_root = loader.build_root()
+    build_root.mkdir(parents=True)
+    stale_library = build_root / "unit_test_ops.so"
+    stale_library.write_bytes(b"stale")
+
+    state = {"ready": False}
+    compile_calls = []
+    logger = _FakeLogger()
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setenv("GPTQMODEL_KERNEL_REBUILD", "1")
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.setattr(cpp_module, "setup_logger", lambda: logger)
+    monkeypatch.setattr(
+        cpp_module.torch.ops,
+        "load_library",
+        lambda path: (_ for _ in ()).throw(AssertionError(f"unexpected cached load: {path}")),
+        raising=False,
+    )
+
+    def fake_compile(**kwargs):
+        compile_calls.append(kwargs)
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert len(compile_calls) == 1
+    assert stale_library.exists() is False
+    assert any("clearing cached JIT extension" in message for message in logger.info_messages)
+
+
 def test_torch_ops_jit_extension_emits_spinner_logs_around_compile(monkeypatch, tmp_path):
     """Guard compile UX so users get explicit progress feedback before and after JIT build stalls."""
 
