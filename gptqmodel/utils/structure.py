@@ -590,6 +590,7 @@ class LazyTurtle:
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
         module_tree: Optional[Any] = None,
+        checkpoint_path_aliases: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
     ) -> None:
@@ -602,10 +603,11 @@ class LazyTurtle:
         self._module_tree_layer_prefix, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
         # Resolve runtime->checkpoint aliases once up front so per-tensor lookups
         # only need cheap prefix rewrites.
-        alias_items = self._normalize_runtime_to_checkpoint_aliases(
+        alias_items = self._merge_runtime_to_checkpoint_aliases(
+            checkpoint_path_aliases,
             hf_conversion_map_reversed
             if hf_conversion_map_reversed is not None
-            else self.infer_hf_conversion_map_reversed(target_model=target_model)
+            else self.infer_hf_conversion_map_reversed(target_model=target_model),
         )
         self._runtime_to_checkpoint_aliases = tuple(alias_items)
         self._lock = threading.RLock()
@@ -618,6 +620,7 @@ class LazyTurtle:
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
         module_tree: Optional[Any] = None,
+        checkpoint_path_aliases: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
     ) -> Optional["LazyTurtle"]:
@@ -630,6 +633,7 @@ class LazyTurtle:
                 config=config,
                 model_init_kwargs=model_init_kwargs,
                 module_tree=module_tree,
+                checkpoint_path_aliases=checkpoint_path_aliases,
                 hf_conversion_map_reversed=hf_conversion_map_reversed,
                 target_model=target_model,
             )
@@ -764,6 +768,19 @@ class LazyTurtle:
             alias_items.append((runtime_prefix, checkpoint_prefix))
         alias_items.sort(key=lambda item: len(item[0]), reverse=True)
         return tuple(alias_items)
+
+    @classmethod
+    def _merge_runtime_to_checkpoint_aliases(cls, *raw_alias_sets: Optional[Any]) -> tuple[tuple[str, str], ...]:
+        merged: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for raw_aliases in raw_alias_sets:
+            for alias_item in cls._normalize_runtime_to_checkpoint_aliases(raw_aliases):
+                if alias_item in seen:
+                    continue
+                seen.add(alias_item)
+                merged.append(alias_item)
+        merged.sort(key=lambda item: len(item[0]), reverse=True)
+        return tuple(merged)
 
     @classmethod
     def _extract_hf_source_prefix(cls, pattern: Any) -> Optional[str]:
