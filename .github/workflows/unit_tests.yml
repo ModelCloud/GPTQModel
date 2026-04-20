@@ -103,6 +103,12 @@ jobs:
       max-parallel: ${{ steps.get_ip.outputs['max-parallel'] }}
       cuda_version: ${{ env.CUDA_VERSION }}
     steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
       - name: Print env
         run: |
           echo "repo: ${{ env.repo }}"
@@ -113,21 +119,11 @@ jobs:
       - name: Set server
         id: get_ip
         run: |
-          echo "ip=$RUNNER" >> "$GITHUB_OUTPUT"
-          echo "ip: $RUNNER"
-
-          if [ -n "${{ github.event.inputs.artifact_id }}" ]; then
-            run_id="${{ github.event.inputs.artifact_id }}"
-          else
-            run_id="${{ github.run_id }}"
-          fi
-          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-          echo "artifact_id=$run_id"
-
-          max_p=${{ github.event.inputs['max-parallel'] }}
-          max_p="{\"size\": ${max_p:-20}}"
-          echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
-          echo "max-parallel=$max_p"
+          bash .github/scripts/ci_write_runner_outputs.sh \
+            "$RUNNER" \
+            "${{ github.run_id }}" \
+            "${{ github.event.inputs.artifact_id }}" \
+            "${{ github.event.inputs['max-parallel'] }}"
 
   list-test-files:
     runs-on: ubuntu-latest
@@ -229,63 +225,21 @@ jobs:
 
       - name: Activate uv env
         run: |
-          echo "-- loading unit test's config --"
-          source /opt/uv/setup_uv_venv.sh unit_test_env
-          uv pip install requests packaging -U
-          env_output="$(python3 .github/scripts/ci_workflow.py resolve-env \
-            --group tests \
-            --test-name "${{ matrix.test_script }}" \
-            --cuda-version "${{ needs.check-vm.outputs.cuda_version }}" \
-            --torch-version "${{ env.TORCH_VERSION }}" \
-            --shell)"
-          eval "$env_output"
-          runtime_output="$(python3 .github/scripts/ci_workflow.py resolve-test-runtime \
-            --test-name "${{ matrix.test_script }}" \
-            --shell)"
-          eval "$runtime_output"
-
-          test_cache_key="${{ matrix.test_script }}"
-          test_cache_key="${test_cache_key//\//_}"
-          test_cache_key="${test_cache_key//./_}"
-          test_cache_key="${test_cache_key//-/_}"
-          export GPTQMODEL_TORCH_EXTENSIONS_DIR="/tmp/gptqmodel/torch_extensions/${{ github.run_id }}/${{ github.run_attempt }}/${ENV_NAME}/${test_cache_key}"
-          export TORCH_EXTENSIONS_DIR="$GPTQMODEL_TORCH_EXTENSIONS_DIR"
-          mkdir -p "$GPTQMODEL_TORCH_EXTENSIONS_DIR"
-          echo "GPTQMODEL_TORCH_EXTENSIONS_DIR=$GPTQMODEL_TORCH_EXTENSIONS_DIR" >> "$GITHUB_ENV"
-          echo "TORCH_EXTENSIONS_DIR=$TORCH_EXTENSIONS_DIR" >> "$GITHUB_ENV"
-
-          echo "-- setting up env --"
-          echo "env_name: $ENV_NAME"
-          echo "torch extensions dir: $GPTQMODEL_TORCH_EXTENSIONS_DIR"
-          # will clean later
-
-          echo "-- ls -ahl /opt/uv/venvs before --"
-          ls -ahl /opt/uv/venvs
-
-          target="/opt/uv/tmp/${ENV_NAME}_$(date +%s)"
-          mkdir -p "$target"
-          mv /opt/uv/venvs/* "$target"/ || true
-
-          echo "-- ls -ahl /opt/uv/venvs after --"
-          ls -ahl /opt/uv/venvs
-
-          /opt/uv/setup_uv_venv.sh "$ENV_NAME"
-
-          echo "-- ls -ahl /opt/uv/venvs new --"
-          ls -ahl /opt/uv/venvs
-          echo "-- set --"
+          bash .github/scripts/ci_unit_activate_uv_env.sh \
+            "${{ matrix.test_script }}" \
+            "${{ needs.check-vm.outputs.cuda_version }}" \
+            "${{ env.TORCH_VERSION }}" \
+            "${{ github.run_id }}" \
+            "${{ github.run_attempt }}"
 
       - name: Setup uv env
         run: |
-          python -V
-          which python
-          which pip || true
-          echo "uv cache dir: $(uv cache dir)"
-
-          echo "setting env... group=${{ matrix.test_group }} cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=${{ env.PYTHON_VERSION }}"
-          bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
-          python .github/scripts/ci_deps.py install ${{ matrix.test_script }}
-          python .github/scripts/ci_deps.py uninstall ${{ matrix.test_script }}
+          bash .github/scripts/ci_unit_setup_uv_env.sh \
+            "${{ matrix.test_group }}" \
+            "${{ matrix.test_script }}" \
+            "${{ needs.check-vm.outputs.cuda_version }}" \
+            "${{ env.TORCH_VERSION }}" \
+            "${{ env.PYTHON_VERSION }}"
 
       - name: Install package from source
         run: |
@@ -443,6 +397,6 @@ jobs:
   setuptools-compatibility:
     uses: ./.github/workflows/setuptools_compatibility_reusable.yml
     with:
-      repo: ${{ env.repo }}
-      ref: ${{ env.ref }}
-      pr_number: ${{ github.event.inputs.pr_number || 0 }}
+      repo: ${{ github.event.inputs.repo || github.repository }}
+      ref: ${{ github.event.inputs.ref || github.ref }}
+      pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}

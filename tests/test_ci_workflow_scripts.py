@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / ".github" / "scripts"
@@ -86,10 +87,46 @@ def test_build_test_matrix_marks_model_entries():
         "ci_release_wait_for_confirmation.sh",
         "ci_restore_uv_cache.sh",
         "ci_install_modelcloud_git_deps.sh",
+        "ci_write_runner_outputs.sh",
+        "ci_unit_activate_uv_env.sh",
+        "ci_unit_setup_uv_env.sh",
     ],
 )
 def test_ci_shell_scripts_have_valid_bash_syntax(script_name: str):
     subprocess.run(["bash", "-n", str(SCRIPT_DIR / script_name)], check=True)
+
+
+def test_ci_write_runner_outputs_script_sets_outputs(tmp_path: Path):
+    github_output = tmp_path / "github_output"
+    env = os.environ.copy()
+    env["GITHUB_OUTPUT"] = str(github_output)
+
+    subprocess.run(
+        [
+            "bash",
+            str(SCRIPT_DIR / "ci_write_runner_outputs.sh"),
+            "10.0.0.1",
+            "12345",
+            "99999",
+            "7",
+        ],
+        check=True,
+        env=env,
+    )
+
+    output = github_output.read_text(encoding="utf-8")
+    assert "ip=10.0.0.1" in output
+    assert "run_id=99999" in output
+    assert 'max-parallel={"size": 7}' in output
+
+
+def test_release_source_common_action_yaml_loads():
+    action_path = SCRIPT_DIR.parent / "actions" / "release-source-common" / "action.yml"
+
+    with action_path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+
+    assert data["runs"]["using"] == "composite"
 
 
 def test_ci_restore_uv_cache_script_skips_unchanged_archive(tmp_path: Path):

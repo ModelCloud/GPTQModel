@@ -55,7 +55,7 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [ self-hosted, linux ]
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     outputs:
@@ -80,8 +80,7 @@ jobs:
       - name: Select server
         id: get_ip
         run: |
-          echo "ip=${RUNNER}" >> "$GITHUB_OUTPUT"
-          echo "run_id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          bash .github/scripts/ci_write_runner_outputs.sh "$RUNNER" "${{ github.run_id }}"
 
   release-source:
     permissions:
@@ -102,11 +101,7 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - name: Prepare checkout
-        run: |
-          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
-
-      - name: Print env
+      - name: Setup release env
         run: |
           export UV_PYTHON=3.14
           echo "UV_PYTHON=3.14" >> "$GITHUB_ENV"
@@ -114,53 +109,21 @@ jobs:
           env_name="gptqmodel_py314_release_source"
           /opt/uv/setup_uv_venv.sh $env_name
 
-      - name: Build sdist
-        run: |
-          .github/scripts/ci_release_build_sdist.sh
-
-      - name: Check dist
-        run: |
-          .github/scripts/ci_release_check_dist.sh
-
-      - name: test installation
-        run: |
-          .github/scripts/ci_release_test_install.sh "${{ env.PKG_NAME }}"
-
-      - name: Upload to local
-        continue-on-error: true
-        run: |
-          .github/scripts/ci_release_upload_local.sh "${{ env.PKG_NAME }}" "${{ needs.check-vm.outputs.run_id }}"
-
-      - name: Upload to artifact
-        uses: actions/upload-artifact@v7
-        continue-on-error: ${{ env.UPLOADED == '1' }}
+      - name: Run shared release source flow
+        uses: ./.github/actions/release-source-common
         with:
-          name: ${{ env.PKG_NAME }}
-          path: dist/${{ env.PKG_NAME }}
-
-      - name: Upload package to release
-        uses: svenstaro/upload-release-action@v2
-        if: (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled()
-        with:
-          file: dist/${{ env.PKG_NAME }}
-          tag: ${{ env.ref }}
-          file_glob: true
-          overwrite: true
-
-      - name: Waiting for confirmation
-        if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
-        run: |
-          .github/scripts/ci_release_wait_for_confirmation.sh manual
-
-      - name: Upload sdist to pypi
-        if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && env.PYPI_RELEASE_CONFIRMATION == '1' && !cancelled()
-        env:
-          TWINE_USERNAME: "__token__"
-          TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
-        run: |
-          python -m twine upload dist/*.tar.gz
+          pr-number: ${{ github.event.inputs.pr_number || 0 }}
+          run-id: ${{ needs.check-vm.outputs.run_id }}
+          confirmation-mode: manual
+          test-install: 'true'
+          upload-local: 'true'
+          artifact-continue-on-error: 'true'
+          require-pypi-confirmation: 'true'
+          pypi-token: ${{ secrets.PYPI_KEY }}
 
   release-source-github:
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04
     if: ${{ inputs.github_vm == true }}
     steps:
@@ -170,47 +133,18 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - name: Prepare checkout
-        run: |
-          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
-
       - uses: actions/setup-python@v6
         with:
           python-version: '3.14'
           cache: 'pip'
 
-      - name: Build sdist
-        run: |
-          .github/scripts/ci_release_build_sdist.sh
-
-      - name: Check dist
-        run: |
-          .github/scripts/ci_release_check_dist.sh
-
-      - name: Upload to artifact
-        uses: actions/upload-artifact@v7
+      - name: Run shared release source flow
+        uses: ./.github/actions/release-source-common
         with:
-          name: ${{ env.PKG_NAME }}
-          path: dist/${{ env.PKG_NAME }}
-
-      - name: Upload package to release
-        uses: svenstaro/upload-release-action@v2
-        if: (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled()
-        with:
-          file: dist/${{ env.PKG_NAME }}
-          tag: ${{ env.ref }}
-          file_glob: true
-          overwrite: true
-
-      - name: Waiting for confirmation
-        if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
-        run: |
-          .github/scripts/ci_release_wait_for_confirmation.sh sleep
-
-      - name: Upload sdist to pypi
-        if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
-        env:
-          TWINE_USERNAME: "__token__"
-          TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
-        run: |
-          python -m twine upload dist/*.tar.gz
+          pr-number: ${{ github.event.inputs.pr_number || 0 }}
+          confirmation-mode: sleep
+          test-install: 'false'
+          upload-local: 'false'
+          artifact-continue-on-error: 'false'
+          require-pypi-confirmation: 'false'
+          pypi-token: ${{ secrets.PYPI_KEY }}
