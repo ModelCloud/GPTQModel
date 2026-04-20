@@ -52,8 +52,8 @@ def start_keepalive_monitor(
         print(f"start to keep alive... {keepalive_endpoint}")
         while not stop_event.wait(interval_sec):
             response = None
-            count = 0
-            while True:
+            retry_started_at = time.monotonic()
+            while not stop_event.is_set():
                 try:
                     response = request_json(
                         keepalive_endpoint,
@@ -63,18 +63,18 @@ def start_keepalive_monitor(
                     )
                     break
                 except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-                    if count == 40:  # max 2 minutes, since gpu server will deallocate the gpu id
+                    if time.monotonic() - retry_started_at >= 130:  # max 2 minutes
                         break
-                    count += 1
                     print(f"Keepalive request failed: {exc}")
-                    time.sleep(3)
+                    if stop_event.wait(3):
+                        return
                     continue
 
-            if not response:
-                raise RuntimeError("Keepalive request failed, response is None")
-
-            resp = extract_gpu_ids(response)
-            if resp == "-1":
+            if response is None:
+                resp = None
+            else:
+                resp = extract_gpu_ids(response)
+            if response is None or resp == "-1":
                 print(f"Server returned {resp}, terminating job...")
                 state["forced_exit_code"] = 3
                 kill_process_group(proc)
