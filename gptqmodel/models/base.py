@@ -247,6 +247,9 @@ class BaseQModel(nn.Module):
     server = None
 
     support_offload_to_disk = True
+    # Optional runtime->checkpoint prefix overrides used by LazyTurtle when the
+    # execution shell inserts wrapper modules that are absent from the checkpoint.
+    checkpoint_path_aliases: Optional[tuple[tuple[str, str], ...]] = None
     # Optional runtime->checkpoint prefix overrides for LazyTurtle. When unset,
     # the loader derives them from Hugging Face conversion mappings.
     HF_CONVERSION_MAP_REVERSED: Optional[Dict[str, str]] = None

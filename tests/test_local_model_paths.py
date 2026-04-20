@@ -496,6 +496,7 @@ def test_model_loader_uses_lazy_turtle_for_local_safetensors(monkeypatch, tmp_pa
         require_pkgs = []
         supports_desc_act = [True, False]
         support_offload_to_disk = True
+        checkpoint_path_aliases = (("shell_model", "model"),)
         config_class = None
 
         @staticmethod
@@ -530,6 +531,7 @@ def test_model_loader_uses_lazy_turtle_for_local_safetensors(monkeypatch, tmp_pa
     assert shell_configs
     assert load_calls == []
     assert isinstance(instance.turtle_model, LazyTurtle)
+    assert instance.turtle_model._runtime_to_checkpoint_aliases == DummyQModel.checkpoint_path_aliases
     assert instance.turtle_model.config._experts_implementation == "linear_loop"
     assert instance.turtle_model.config is not instance.model.config
 
