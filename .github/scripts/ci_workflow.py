@@ -5,6 +5,7 @@ import re
 import shlex
 import sys
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 import requests
@@ -67,6 +68,29 @@ def parse_test_config(
                 raise ValueError(f"test config must be a mapping: {test_name}")
             result.update(test_config)
 
+    return result
+
+
+def parse_test_config_for_path(
+        yaml_file: str | Path,
+        group: str,
+        test_name: str,
+) -> dict[str, Any]:
+    test_path = PurePosixPath(test_name)
+    candidate_groups = [group]
+    if len(test_path.parts) > 1:
+        prefix = PurePosixPath(group)
+        for depth in range(1, len(test_path.parts)):
+            candidate_groups.append(str(prefix.joinpath(*test_path.parts[:depth])))
+
+    result: dict[str, Any] = {}
+    leaf_name = test_path.name
+    for index, candidate_group in enumerate(candidate_groups):
+        scoped_test_name = None
+        if index == len(candidate_groups) - 1:
+            scoped_test_name = leaf_name
+        scoped = parse_test_config(yaml_file, candidate_group, scoped_test_name)
+        result.update(scoped)
     return result
 
 
@@ -175,9 +199,10 @@ def cmd_list_tests(args: argparse.Namespace) -> int:
 
 
 def cmd_resolve_env(args: argparse.Namespace) -> int:
-    config = parse_test_config(args.yaml_file, args.group, args.test_name)
+    config = parse_test_config_for_path(args.yaml_file, args.group, args.test_name)
     py = str(config["py"])
     gpu = str(config["gpu"])
+    sm = str(config.get("sm", 0))
     env_name = (
         f"{args.env_prefix}_cu{args.cuda_version}_torch{args.torch_version}"
         f"_py{py}_{args.test_name}"
@@ -185,14 +210,16 @@ def cmd_resolve_env(args: argparse.Namespace) -> int:
 
     append_github_env("PYTHON_VERSION", py)
     append_github_env("GPU_COUNT", gpu)
+    append_github_env("SM", sm)
     append_github_env("ENV_NAME", env_name)
 
     if args.shell:
         print(f"PYTHON_VERSION={shlex.quote(py)}")
         print(f"GPU_COUNT={shlex.quote(gpu)}")
+        print(f"SM={shlex.quote(sm)}")
         print(f"ENV_NAME={shlex.quote(env_name)}")
     else:
-        print(f"using py={py} gpu={gpu} env={env_name} for test {args.test_name}")
+        print(f"using py={py} gpu={gpu} sm={sm} env={env_name} for test {args.test_name}")
     return 0
 
 

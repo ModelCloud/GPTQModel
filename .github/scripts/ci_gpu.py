@@ -136,16 +136,22 @@ def build_get_request(
         run_id: str,
         test_name: str,
         count: str,
+        sm: str = "0",
 ) -> dict[str, object]:
+    job: dict[str, object] = {
+        "jobId": int(run_id),
+        "count": int(count),
+        "test": test_name,
+        "exclusive": True,
+        "timestamp": now_ms(),
+    }
+    sm_value = sm.strip()
+    if sm_value and sm_value != "0":
+        job["sm"] = sm_value
+
     return {
         "server": build_server_info(),
-        "job": {
-            "jobId": int(run_id),
-            "count": int(count),
-            "test": test_name,
-            "exclusive": True,
-            "timestamp": now_ms(),
-        },
+        "job": job,
         "gpu": query_gpu_inventory(),
     }
 
@@ -202,6 +208,7 @@ def allocate_gpu(args: argparse.Namespace) -> int:
             run_id=args.run_id,
             test_name=args.test,
             count=args.count,
+            sm=args.sm,
         )
         print(f"requesting GPU with: {endpoint}")
 
@@ -285,6 +292,7 @@ def main() -> int:
     allocate_parser.add_argument("--test", required=True)
     allocate_parser.add_argument("--runner", required=True)
     allocate_parser.add_argument("--count", required=True)
+    allocate_parser.add_argument("--sm", default="0")
     allocate_parser.add_argument("--sleep-sec", type=float, default=5)
     allocate_parser.add_argument("--timeout-sec", type=int, default=18000)
     allocate_parser.add_argument("--request-timeout", type=float, default=10)
