@@ -123,6 +123,7 @@ tests/models:
   test_hymba.py:
     - http://10.0.13.31/files/causal_conv1d-1.6.0-cp313-cp313-linux_x86_64.whl
     - mamba_ssm
+    - tiktoken
 
   test_internlm.py:
     - transformers<=4.44.2
@@ -132,6 +133,9 @@ tests/models:
 
   test_phi_3_moe.py:
     - transformers<=4.44.2
+
+  test_llama3_2_exllamav3.py:
+    - pydantic
 
 tests/models/awq:
   test_qwen3_8b_base_awq.py:
