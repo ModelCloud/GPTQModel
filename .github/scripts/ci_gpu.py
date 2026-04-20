@@ -99,7 +99,7 @@ def is_valid_gpu_response(value: str) -> bool:
 def query_gpu_inventory() -> list[dict[str, object]]:
     command = [
         "nvidia-smi",
-        "--query-gpu=index,uuid,utilization.gpu,memory.used,memory.free,memory.total,driver_version,name,gpu_serial,display_active,display_mode,temperature.gpu",
+        "--query-gpu=index,uuid,utilization.gpu,memory.used,memory.free,memory.total,driver_version,name,gpu_serial,display_active,display_mode,temperature.gpu,compute_cap",
         "--format=csv,noheader,nounits",
     ]
     result = subprocess.run(command, check=True, capture_output=True, text=True)
@@ -109,7 +109,7 @@ def query_gpu_inventory() -> list[dict[str, object]]:
         if not line.strip():
             continue
         fields = [field.strip() for field in line.split(",")]
-        if len(fields) != 12:
+        if len(fields) != 13:
             raise ValueError(f"Unexpected nvidia-smi output line: {line}")
         gpus.append(
             {
@@ -125,6 +125,7 @@ def query_gpu_inventory() -> list[dict[str, object]]:
                 "displayActive": fields[9].lower() == "enabled",
                 "displayMode": fields[10].lower() == "enabled",
                 "temperature": int(fields[11]),
+                "sm": fields[12],
             }
         )
     return gpus
@@ -214,6 +215,10 @@ def allocate_gpu(args: argparse.Namespace) -> int:
         )
         print(f"requesting GPU with: {endpoint}")
         print(f"request job payload: {request_body['job']}")
+        print(
+            "request gpu payload: "
+            f"{[{key: gpu.get(key) for key in ('index', 'name', 'sm')} for gpu in request_body['gpu']]}"
+        )
 
         response = request_json_with_retry(
             endpoint,
