@@ -9,7 +9,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
-import pcre as regex
+import pcre
 
 
 def split_csv(raw: str | None) -> list[str]:
@@ -215,7 +215,7 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
     ignored_raw = ignored_test_files if isinstance(ignored_test_files, list) else split_csv(ignored_test_files)
     ignored_set = {strip_py_suffix(name) for name in ignored_raw}
     config_data = load_yaml(Path(__file__).with_name("test.yaml"))
-    compiled_test_regex = regex.compile(test_regex)
+    compiled_test_regex = pcre.compile(test_regex)
 
     all_tests = {
         rel: path

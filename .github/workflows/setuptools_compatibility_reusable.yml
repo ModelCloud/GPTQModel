@@ -1,0 +1,83 @@
+name: Setuptools Compatibility Reusable
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: "GitHub repo {owner}/{repo}"
+        required: false
+        default: ""
+        type: string
+      ref:
+        description: "GitHub ref: Branch, Tag or Commit SHA"
+        required: false
+        default: ""
+        type: string
+      pr_number:
+        description: "PR Number"
+        required: false
+        default: 0
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-setuptools:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.parser.outputs.versions || '[]' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.repo || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Prepare checkout
+        run: |
+          .github/scripts/ci_prepare_checkout.sh "${{ inputs.pr_number }}"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Generate version matrix
+        id: parser
+        run: |
+          python -m pip install --upgrade requests packaging pyyaml
+          versions=$(python .github/scripts/ci_workflow.py loop-versions setuptools ">=77.0.1,<83")
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
+  check-setuptools:
+    needs: prepare-setuptools
+    if: needs.prepare-setuptools.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.prepare-setuptools.outputs.versions) }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.repo || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Prepare checkout
+        run: |
+          .github/scripts/ci_prepare_checkout.sh "${{ inputs.pr_number }}"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install package with selected setuptools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . "setuptools==${{ matrix.version }}"
+
+      - name: Show versions
+        run: |
+          python --version
+          python -m pip show setuptools

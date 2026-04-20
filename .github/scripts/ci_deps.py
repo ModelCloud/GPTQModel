@@ -6,10 +6,10 @@ from typing import Any
 
 import yaml
 
-import pcre as regex
+import pcre
 
 BASE_DIR = Path(__file__).resolve().parent
-_PKG_NAME_RE = regex.compile(r"^[A-Za-z0-9_.-]+")
+_PKG_NAME_RE = pcre.compile(r"^[A-Za-z0-9_.-]+")
 
 
 def resolve_test_path(raw_name: str) -> Path:
