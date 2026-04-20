@@ -99,7 +99,7 @@ def is_valid_gpu_response(value: str) -> bool:
 def query_gpu_inventory() -> list[dict[str, object]]:
     command = [
         "nvidia-smi",
-        "--query-gpu=index,uuid,utilization.gpu,memory.used,memory.free,memory.total,driver_version,name,gpu_serial,display_active,display_mode,temperature.gpu",
+        "--query-gpu=index,uuid,utilization.gpu,memory.used,memory.free,memory.total,driver_version,name,gpu_serial,display_active,display_mode,temperature.gpu,compute_cap",
         "--format=csv,noheader,nounits",
     ]
     result = subprocess.run(command, check=True, capture_output=True, text=True)
@@ -109,7 +109,7 @@ def query_gpu_inventory() -> list[dict[str, object]]:
         if not line.strip():
             continue
         fields = [field.strip() for field in line.split(",")]
-        if len(fields) != 12:
+        if len(fields) != 13:
             raise ValueError(f"Unexpected nvidia-smi output line: {line}")
         gpus.append(
             {
@@ -125,6 +125,7 @@ def query_gpu_inventory() -> list[dict[str, object]]:
                 "displayActive": fields[9].lower() == "enabled",
                 "displayMode": fields[10].lower() == "enabled",
                 "temperature": int(fields[11]),
+                "sm": fields[12],
             }
         )
     return gpus
@@ -136,16 +137,22 @@ def build_get_request(
         run_id: str,
         test_name: str,
         count: str,
+        sm: str = "0",
 ) -> dict[str, object]:
+    job: dict[str, object] = {
+        "jobId": int(run_id),
+        "count": int(count),
+        "test": test_name,
+        "exclusive": True,
+        "timestamp": now_ms(),
+    }
+    sm_value = sm.strip()
+    if sm_value and sm_value != "0":
+        job["sm"] = sm_value
+
     return {
         "server": build_server_info(),
-        "job": {
-            "jobId": int(run_id),
-            "count": int(count),
-            "test": test_name,
-            "exclusive": True,
-            "timestamp": now_ms(),
-        },
+        "job": job,
         "gpu": query_gpu_inventory(),
     }
 
@@ -190,10 +197,12 @@ def print_status(base_url: str, runner_name: str) -> None:
 def allocate_gpu(args: argparse.Namespace) -> int:
     start_s = time.time()
     endpoint = f"{normalize_base_url(args.base_url)}/get"
+    sm_value = args.sm.strip()
 
     print("Requesting GPU from allocator")
     print(
-        f"run_id={args.run_id} test={args.test} runner={args.runner} count={args.count}"
+        f"run_id={args.run_id} test={args.test} runner={args.runner} count={args.count} "
+        f"sm={(sm_value if sm_value and sm_value != '0' else '<not-sent>')}"
     )
 
     while True:
@@ -202,8 +211,14 @@ def allocate_gpu(args: argparse.Namespace) -> int:
             run_id=args.run_id,
             test_name=args.test,
             count=args.count,
+            sm=args.sm,
         )
         print(f"requesting GPU with: {endpoint}")
+        print(f"request job payload: {request_body['job']}")
+        print(
+            "request gpu payload: "
+            f"{[{key: gpu.get(key) for key in ('index', 'name', 'sm')} for gpu in request_body['gpu']]}"
+        )
 
         response = request_json_with_retry(
             endpoint,
@@ -285,6 +300,7 @@ def main() -> int:
     allocate_parser.add_argument("--test", required=True)
     allocate_parser.add_argument("--runner", required=True)
     allocate_parser.add_argument("--count", required=True)
+    allocate_parser.add_argument("--sm", default="0")
     allocate_parser.add_argument("--sleep-sec", type=float, default=5)
     allocate_parser.add_argument("--timeout-sec", type=int, default=18000)
     allocate_parser.add_argument("--request-timeout", type=float, default=10)

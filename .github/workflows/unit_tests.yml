@@ -406,7 +406,8 @@ jobs:
             --run-id "${{ github.run_id }}" \
             --test "${{ matrix.test_script }}" \
             --runner "${RUNNER_NAME:-unknown}" \
-            --count "${{ env.GPU_COUNT }}"
+            --count "${{ env.GPU_COUNT }}" \
+            --sm "${{ env.SM }}"
 
 
       - name: Run tests
@@ -640,6 +641,7 @@ jobs:
             --test "${{ matrix.test_script }}" \
             --runner "${RUNNER_NAME:-unknown}" \
             --count "1" \
+            --sm "${{ env.SM }}" \
             --require-single
 
       - name: Run tests
