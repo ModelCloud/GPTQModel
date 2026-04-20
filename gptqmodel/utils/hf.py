@@ -926,7 +926,7 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
     if not isinstance(rope_scaling, dict):
         return
 
-    if rope_scaling.get("rope_type") == "default" and set(rope_scaling).issubset({"rope_type", "rope_theta"}):
+    if model_type != "instella" and rope_scaling.get("rope_type") == "default" and set(rope_scaling).issubset({"rope_type", "rope_theta"}):
         # transformers 5.x materializes default RoPE metadata into
         # `rope_scaling`, but older remote MiniCPM code treats any dict here
         # as a scaled-RoPE config and expects an explicit `factor`.
@@ -941,6 +941,10 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
         return
 
     rope_scaling = dict(rope_scaling)
+    if model_type == "instella":
+        if rope_type == "default":
+            rope_type = "linear"
+        rope_scaling["factor"] = 1.0
     rope_scaling["type"] = rope_type
     config.rope_scaling = rope_scaling
 
@@ -1015,15 +1019,8 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
     input_mode_enum = getattr(remote_module, "InputMode", None) if remote_module is not None else None
 
     with _MONKEY_PATCH_LOCK:
-        if config.model_type == "minicpm":
+        if config.model_type == "minicpm" or config.model_type == "instella":
             try_patch_legacy_flash_attn_flag(outer_model_cls)
-            base_model_cls = getattr(
-                remote_module,
-                "MiniCPMModel",
-                None,
-            )
-            if base_model_cls:
-                try_patch_legacy_flash_attn_flag(base_model_cls)
 
         if config.model_type == "minicpmv" or config.model_type == "minicpmo":
             vision_model_cls = getattr(
@@ -1203,15 +1200,21 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
 
 def try_patch_legacy_flash_attn_flag(model_cls):
     with _MONKEY_PATCH_LOCK:
-        if (
-                model_cls is not None
-                and getattr(model_cls, "_supports_flash_attn_2", None) is not None
-                and not bool(getattr(model_cls, "_supports_flash_attn", False))
-        ):
-            # transformers 5.x checks `_supports_flash_attn`, while older
-            # trust_remote_code classes such as MiniCPM still expose only the
-            # legacy `_supports_flash_attn_2` capability flag.
-            model_cls._supports_flash_attn = bool(getattr(model_cls, "_supports_flash_attn_2"))
+        if model_cls is None or not isinstance(model_cls, type):
+            return
+
+        # Find the "source class" that defines _supports_flash_attn_2.
+        base_with_flag = None
+        for cls in model_cls.__mro__:
+            if "_supports_flash_attn_2" in cls.__dict__:
+                base_with_flag = cls
+                break
+
+        if base_with_flag is None:
+            return
+
+        flash_attn_2_val = base_with_flag.__dict__["_supports_flash_attn_2"]
+        setattr(cls, "_supports_flash_attn", bool(flash_attn_2_val))
 
 
 def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
