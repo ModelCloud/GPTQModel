@@ -2795,6 +2795,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_quantizer_impl": "opt_quantizer_impl",
             "opt_channel_scale_clamp_min": "opt_channel_scale_clamp_min",
             "opt_channel_scale_clamp_max": "opt_channel_scale_clamp_max",
+            "scale_search_chunked_activations": "scale_search_chunked_activations",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -3117,6 +3118,12 @@ class GPTQConfig(PreProcessorConfig):
 class AWQConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.AWQ)
     format: FORMAT = field(default=FORMAT.GEMM)
+    scale_search_chunked_activations: bool = field(
+        default=True,
+        metadata={
+            "help": "Stream and chunk AWQ scale-search activations to reduce peak memory during reference and reconstruction forwards."
+        },
+    )
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.AWQ,)
@@ -3141,6 +3148,10 @@ class AWQConfig(PreProcessorConfig):
         out["zero_point"] = not self.sym
         out["version"] = self.format
         out[FORMAT_FIELD_CODE] = self.format
+
+    def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
+        super()._update_meta_payload(meta_payload)
+        meta_payload["scale_search_chunked_activations"] = self.scale_search_chunked_activations
 
 
 @dataclass
