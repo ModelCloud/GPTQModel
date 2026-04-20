@@ -26,6 +26,7 @@ from gptqmodel.quantization import (  # noqa: E402
     QuantizeConfig,
 )
 from gptqmodel.quantization.config import (  # noqa: E402  # noqa: E402
+    AWQConfig,
     METHOD,
     GGUFConfig,
     GPTAQConfig,
@@ -145,3 +146,16 @@ class TestSerialization(unittest.TestCase):
         self.assertIsInstance(meta, dict)
         self.assertIn("gptaq", meta)
         self.assertIsNone(meta["gptaq"])
+
+    def test_awq_scale_search_chunked_activations_roundtrip(self):
+        cfg = AWQConfig(scale_search_chunked_activations=False)
+
+        payload = cfg.to_dict()
+        meta = payload.get("meta")
+        self.assertIsInstance(meta, dict)
+        self.assertIn("scale_search_chunked_activations", meta)
+        self.assertFalse(meta["scale_search_chunked_activations"])
+
+        loaded = QuantizeConfig.from_quant_config(payload)
+        self.assertIsInstance(loaded, AWQConfig)
+        self.assertFalse(loaded.scale_search_chunked_activations)

@@ -19,7 +19,7 @@ from gptqmodel.looper.awq_processor import (
     _AWQLayerState,
     _compute_awq_weight_mean,
 )
-from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+from gptqmodel.quantization.config import AWQConfig, FORMAT, METHOD, QuantizeConfig
 
 
 QWEN3_HIDDEN_SIZE = 3584
@@ -178,6 +178,68 @@ def test_awq_search_best_scale_keeps_cpu_activations_off_device_until_forward_ch
     assert captured["inp_device"] == "cpu"
     assert captured["fp16_output_devices"] == ["cpu", "cpu", "cpu", "cpu"]
     assert captured["fp16_output_shapes"] == [(1, 8, 16)] * 4
+
+
+def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available for this test run.")
+
+    processor = AWQProcessor(
+        tokenizer=None,
+        qcfg=AWQConfig(format=FORMAT.GEMM, group_size=16, scale_search_chunked_activations=False),
+        calibration=None,
+        prepare_dataset_func=None,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        batch_size=1,
+        gptq_model=types.SimpleNamespace(rotary_embedding=None),
+        model=None,
+        require_fwd=True,
+        calculate_w_wq_diff=False,
+        calibration_concat_separator=None,
+    )
+    processor._quant_batch_size = 1
+
+    module = nn.Linear(16, 16, bias=False, device="cuda:0", dtype=torch.float16)
+    inp = torch.randn(4, 8, 16, device="cpu", dtype=torch.float16)
+
+    captured = {}
+
+    def fake_compute_best_scale(
+        self,
+        _inp,
+        w_mean,
+        x_mean,
+        module2inspect,
+        layers_arg,
+        fp16_output,
+        module_kwargs,
+    ):
+        captured["inp_device"] = _inp.device.type
+        captured["fp16_output_type"] = type(fp16_output).__name__
+        captured["fp16_output_device"] = fp16_output.device.type
+        captured["fp16_output_shape"] = tuple(fp16_output.shape)
+        return torch.ones_like(w_mean, dtype=w_mean.dtype).detach().cpu(), 0.0
+
+    monkey_patcher = MonkeyPatch()
+    monkey_patcher.setattr(AWQProcessor, "_compute_best_scale", fake_compute_best_scale)
+
+    try:
+        processor._search_best_scale(
+            module,
+            module,
+            [module],
+            inp,
+            module2inspect=module,
+            kwargs={},
+        )
+    finally:
+        monkey_patcher.undo()
+
+    assert captured["inp_device"] == "cuda"
+    assert captured["fp16_output_type"] == "Tensor"
+    assert captured["fp16_output_device"] == "cuda"
+    assert captured["fp16_output_shape"] == (4, 8, 16)
 
 
 @parameterized.expand([

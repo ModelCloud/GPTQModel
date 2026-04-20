@@ -849,6 +849,8 @@ class AWQProcessor(LoopProcessor):
         if "use_cache" in kwargs:
             kwargs.pop("use_cache")
 
+        use_chunked_scale_search = getattr(self.qcfg, "scale_search_chunked_activations", True)
+
         # [STEP 1]: Compute per-channel mean of normalised weights
         # Stream across each Linear instead of concatenating all weights at once. This mirrors the
         # previous cat()+view pipeline while keeping peak memory low: for every group we normalise
@@ -890,11 +892,17 @@ class AWQProcessor(LoopProcessor):
         for key, value in global_allowed_kwargs.items():
             module_kwargs.setdefault(key, value)
 
-        with ctx(torch.inference_mode()):
-            fp16_output = [
-                output.clip(torch.finfo(output.dtype).min, torch.finfo(output.dtype).max).detach().cpu()
-                for output in self._iter_module_forward_outputs(inp, module2inspect, module_kwargs)
-            ]
+        if use_chunked_scale_search:
+            with ctx(torch.inference_mode()):
+                fp16_output = [
+                    output.clip(torch.finfo(output.dtype).min, torch.finfo(output.dtype).max).detach().cpu()
+                    for output in self._iter_module_forward_outputs(inp, module2inspect, module_kwargs)
+                ]
+        else:
+            inp = inp.to(next(module2inspect.parameters()).device)
+            with ctx(torch.inference_mode()):
+                fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
+            fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
 
         # [STEP 4]: Compute loss
         best_scales, loss = self._compute_best_scale(
@@ -1130,6 +1138,8 @@ class AWQProcessor(LoopProcessor):
         if prev_scale_hint is not None:
             w_mean = w_mean * float(prev_scale_hint)
 
+        use_chunked_scale_search = getattr(self.qcfg, "scale_search_chunked_activations", True)
+
         for ratio in range(n_grid):
             # create new scales
             ratio = ratio / n_grid
@@ -1155,19 +1165,24 @@ class AWQProcessor(LoopProcessor):
                 fc.weight.div_(scales_view)
 
             # W * X
-            total_loss = 0.0
-            total_elements = 0
-            for ref_chunk, int_w_output in zip(
-                self._iter_reference_output_chunks(x, fp16_output),
-                self._iter_module_forward_outputs(x, module2inspect, kwargs),
-            ):
-                int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
-                ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
-                diff = (ref_chunk - int_w_output).float()
-                total_loss += diff.pow(2).sum().item()
-                total_elements += diff.numel()
+            if use_chunked_scale_search:
+                total_loss = 0.0
+                total_elements = 0
+                for ref_chunk, int_w_output in zip(
+                    self._iter_reference_output_chunks(x, fp16_output),
+                    self._iter_module_forward_outputs(x, module2inspect, kwargs),
+                ):
+                    int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
+                    ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
+                    diff = (ref_chunk - int_w_output).float()
+                    total_loss += diff.pow(2).sum().item()
+                    total_elements += diff.numel()
 
-            loss = total_loss / max(total_elements, 1)
+                loss = total_loss / max(total_elements, 1)
+            else:
+                int_w_output = self._module_forward(x, module2inspect, kwargs)
+                int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
+                loss = self._compute_loss(fp16_output, int_w_output, device)
 
             history.append(loss)
             if loss < best_error:
