@@ -36,9 +36,15 @@ class _DummyQuantMamba(torch.nn.Module):
             register_buffers=True,
         )
         self.path = None
+        self.torch_call = None
 
-    def torch_forward(self, *args, **kwargs):
+    def torch_forward(self, input_states, cache_params=None, attention_mask=None):
         self.path = "torch"
+        self.torch_call = {
+            "input_states": input_states,
+            "cache_params": cache_params,
+            "attention_mask": attention_mask,
+        }
         return "torch"
 
     def forward(self, *args, **kwargs):
@@ -63,7 +69,21 @@ def test_granitemoehybrid_quantized_mamba_uses_torch_path():
     qmodel.monkey_patch()
     mamba = qmodel.model.model.layers[0].mamba
 
-    result = mamba(torch.zeros(1, 2, 64))
+    hidden_states = torch.zeros(1, 2, 64)
+    cache_params = object()
+    attention_mask = torch.ones(1, 2)
+
+    result = mamba(
+        hidden_states,
+        cache_params=cache_params,
+        cache_position=torch.arange(2),
+        attention_mask=attention_mask,
+    )
 
     assert result == "torch"
     assert mamba.path == "torch"
+    assert mamba.torch_call == {
+        "input_states": hidden_states,
+        "cache_params": cache_params,
+        "attention_mask": attention_mask,
+    }
