@@ -286,6 +286,8 @@ jobs:
           ls -ahl /opt/uv/venvs
 
           echo "-- ls -ahl /opt/uv/venvs new --"
+          ls -ahl /opt/uv/venvs
+
           /opt/uv/setup_uv_venv.sh "$ENV_NAME"
           echo "-- set --"
 
@@ -537,7 +539,16 @@ jobs:
           echo "-- setting up env --"
           echo "env_name: $ENV_NAME"
           # will clean later
+          echo "-- ls -ahl /opt/uv/venvs before --"
+          ls -ahl /opt/uv/venvs
+
           mv "/opt/uv/venvs/$ENV_NAME" "/opt/uv/tmp/${ENV_NAME}_$(date +%s)" || true
+
+          echo "-- ls -ahl /opt/uv/venvs after --"
+          ls -ahl /opt/uv/venvs
+
+          echo "-- ls -ahl /opt/uv/venvs new --"
+          ls -ahl /opt/uv/venvs
           /opt/uv/setup_uv_venv.sh "$ENV_NAME"
           echo "-- set --"
 
