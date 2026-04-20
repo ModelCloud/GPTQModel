@@ -610,6 +610,8 @@ class DeviceThreadPool:
             warmups: optional mapping from device family (e.g. 'cuda') to a callable
                 run once after the worker activates its device. A special key
                 'default' applies when no family-specific warmup is found.
+                Callables may set `_threadx_warmup_scope = "per_worker"` to run
+                once per worker thread instead of once per physical device.
             gc_min_interval_seconds: minimum interval between GC passes. Values <= 0 disable throttling.
             pin_cpu_workers: bind CPU device workers to individual CPU cores when
                 affinity APIs are available. Defaults to False so CPU tasks may
@@ -954,6 +956,10 @@ class DeviceThreadPool:
             warmup = mapping.get("default")
         if warmup is None:
             return None
+
+        warmup_scope = getattr(warmup, "_threadx_warmup_scope", None)
+        if warmup_scope == "per_worker":
+            return _WorkerWarmupState(warmup)
 
         # Virtual workers share the same physical-device warmup state as their parent.
         physical_key = self._virtual_to_parent.get(key, key)

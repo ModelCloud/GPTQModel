@@ -647,6 +647,114 @@ def test_virtual_pool_warmup_can_start_from_alias_worker():
         pool.shutdown(wait=True)
 
 
+def test_resolve_worker_warmup_defaults_to_shared_physical_state():
+    def warmup(device: torch.device):
+        return None
+
+    pool = DeviceThreadPool.__new__(DeviceThreadPool)
+    pool._worker_warmups = {"cpu": warmup}
+    pool._warmup_lock = threading.Lock()
+    pool._warmup_states = {}
+    pool._virtual_to_parent = {"turtle:cpu": "cpu"}
+
+    first = pool._resolve_worker_warmup(torch.device("cpu"), "cpu")
+    second = pool._resolve_worker_warmup(torch.device("cpu"), "cpu")
+    alias = pool._resolve_worker_warmup(torch.device("cpu"), "turtle:cpu")
+
+    assert first is second
+    assert alias is first
+    assert set(pool._warmup_states.keys()) == {"cpu"}
+
+
+def test_resolve_worker_warmup_supports_per_worker_scope():
+    def warmup(device: torch.device):
+        return None
+
+    warmup._threadx_warmup_scope = "per_worker"
+
+    pool = DeviceThreadPool.__new__(DeviceThreadPool)
+    pool._worker_warmups = {"cuda": warmup}
+    pool._warmup_lock = threading.Lock()
+    pool._warmup_states = {}
+    pool._virtual_to_parent = {"gryphon:cuda:0": "cuda:0"}
+
+    first = pool._resolve_worker_warmup(torch.device("cuda", 0), "cuda:0")
+    second = pool._resolve_worker_warmup(torch.device("cuda", 0), "cuda:0")
+    alias = pool._resolve_worker_warmup(torch.device("cuda", 0), "gryphon:cuda:0")
+
+    assert first is not second
+    assert alias is not first
+    assert alias is not second
+    assert pool._warmup_states == {}
+
+
+def _exercise_thread_local_worker_warmup(*, per_worker: bool):
+    tls = threading.local()
+    warmup_threads = []
+    task_threads = []
+    first_task_started = threading.Event()
+    release_first_task = threading.Event()
+
+    def warmup(device: torch.device):
+        tls.ready = True
+        warmup_threads.append(threading.get_ident())
+
+    if per_worker:
+        warmup._threadx_warmup_scope = "per_worker"
+
+    pool = DeviceThreadPool(
+        devices=[torch.device("cpu")],
+        inference_mode=False,
+        warmups={"cpu": warmup},
+        workers={"cpu": 2},
+        empty_cache_every_n=0,
+    )
+
+    def task(block: bool):
+        if not getattr(tls, "ready", False):
+            raise RuntimeError("thread-local warmup missing")
+        task_threads.append(threading.get_ident())
+        if block:
+            first_task_started.set()
+            release_first_task.wait(timeout=1.0)
+        return threading.get_ident()
+
+    try:
+        first = pool.submit("cpu", task, True)
+        assert first_task_started.wait(timeout=1.0)
+
+        second = pool.submit("cpu", task, False)
+        second_result = second.result(timeout=1.0)
+
+        release_first_task.set()
+        first_tid = first.result(timeout=1.0)
+    finally:
+        release_first_task.set()
+        pool.shutdown(wait=True)
+
+    return {
+        "first_tid": first_tid,
+        "second_tid": second_result,
+        "task_threads": set(task_threads),
+        "warmup_threads": set(warmup_threads),
+    }
+
+
+def test_shared_warmup_reproduces_thread_local_initialization_bug(monkeypatch):
+    monkeypatch.setattr(threadx_mod._DeviceWorker, "_abort_process", lambda self, exc: None)
+
+    with pytest.raises(RuntimeError, match="thread-local warmup missing"):
+        _exercise_thread_local_worker_warmup(per_worker=False)
+
+
+def test_per_worker_warmup_initializes_thread_local_state_on_each_worker():
+    result = _exercise_thread_local_worker_warmup(per_worker=True)
+
+    assert result["first_tid"] != result["second_tid"]
+    assert result["task_threads"] == {result["first_tid"], result["second_tid"]}
+    assert result["warmup_threads"] == {result["first_tid"], result["second_tid"]}
+
+
 def test_virtual_pool_respects_concurrency_limit(virtual_pool):
     running = 0
     max_seen = 0
