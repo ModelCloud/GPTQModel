@@ -404,6 +404,10 @@ def test_model_loader_requires_lazy_turtle_for_offload_to_disk(monkeypatch):
         def before_model_load(*_args, **_kwargs):
             return None
 
+        @staticmethod
+        def resolve_hf_conversion_map_reversed(*_args, **_kwargs):
+            return None
+
         def __init__(self, model, **kwargs):
             self.model = model
             self.turtle_model = kwargs.get("turtle_model")
@@ -496,6 +500,10 @@ def test_model_loader_uses_lazy_turtle_for_local_safetensors(monkeypatch, tmp_pa
 
         @staticmethod
         def before_model_load(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        def resolve_hf_conversion_map_reversed(*_args, **_kwargs):
             return None
 
         def __init__(self, model, **kwargs):
