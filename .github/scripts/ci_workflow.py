@@ -89,7 +89,10 @@ def parse_test_config_for_path(
         scoped_test_name = None
         if index == len(candidate_groups) - 1:
             scoped_test_name = leaf_name
-        scoped = parse_test_config(yaml_file, candidate_group, scoped_test_name)
+        try:
+            scoped = parse_test_config(yaml_file, candidate_group, scoped_test_name)
+        except KeyError:
+            continue
         result.update(scoped)
     return result
 
@@ -125,17 +128,33 @@ def is_model_compat_test(rel_path: str, file_path: Path) -> bool:
     return any(marker in contents for marker in markers)
 
 
+def matches_test_regex(test_regex: str, rel_path: str) -> bool:
+    if re.match(test_regex, rel_path):
+        return True
+    return re.match(test_regex, PurePosixPath(rel_path).name) is not None
+
+
+def should_skip_test(yaml_file: str | Path, rel_path: str) -> bool:
+    try:
+        config = parse_test_config_for_path(yaml_file, "tests", rel_path)
+    except KeyError:
+        return False
+    return bool(config.get("skip", False))
+
+
 def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex: str, tests_root: str | Path) -> tuple[list[str], list[str], list[str]]:
     tests_root = Path(tests_root)
     input_tests = [strip_py_suffix(name) for name in split_csv(test_names)]
     ignored_raw = ignored_test_files if isinstance(ignored_test_files, list) else split_csv(ignored_test_files)
     ignored_set = {strip_py_suffix(name) for name in ignored_raw}
+    yaml_file = Path(__file__).with_name("test.yaml")
 
     all_tests = {
         rel: path
         for path in tests_root.rglob("test_*.py")
         for rel in [str(path.relative_to(tests_root).with_suffix(""))]
         if rel not in ignored_set and path.stem not in ignored_set
+        if not should_skip_test(yaml_file, rel)
     }
 
     model_tests = {
@@ -145,7 +164,7 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
            and "mlx" not in rel
            and "ipex" not in rel
            and "xpu" not in rel
-           and re.match(test_regex, rel)
+           and matches_test_regex(test_regex, rel)
            and is_model_compat_test(rel, path)
     }
 
@@ -157,7 +176,7 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
            and "mlx" not in rel
            and "ipex" not in rel
            and "xpu" not in rel
-           and re.match(test_regex, rel)
+           and matches_test_regex(test_regex, rel)
     }
 
     mlx_tests = {
@@ -165,7 +184,7 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
         for rel in all_tests
         if ("mlx" in rel or "apple" in rel)
            and ((rel in input_tests) if input_tests else True)
-           and re.match(test_regex, rel)
+           and matches_test_regex(test_regex, rel)
     }
 
     return (

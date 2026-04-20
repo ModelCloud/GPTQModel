@@ -2,6 +2,7 @@ common:
   py: 3.14t # common config
   gpu: 1
   sm: 0
+  skip: false
 
 tests:
   test_multi_gpu_inference: # per-test config
@@ -19,3 +20,4 @@ tests/models:
 tests/kernels:
   test_asymmetric_real_models:
     sm: '9.0'
+    skip: true # no SM90 card

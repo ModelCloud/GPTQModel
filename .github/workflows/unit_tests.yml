@@ -301,37 +301,6 @@ jobs:
           echo "--- uninstalling required deps..."
           python .github/scripts/ci_deps.py uninstall ${{ matrix.test_script }}
 
-      # - name: Install Evalution
-      #   run: |
-      #     uv pip install git+https://x-access-token:${{ secrets.REPO_TOKEN }}@github.com/ModelCloud/Evalution.git
-      #      - name: Install requirements
-      #        run: |
-      #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version${{ env.PYTHON_VERSION }}
-
-      #      - name: Download source from local
-      #        continue-on-error: true
-      #        run: |
-      #          curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
-      #          ls -ahl .
-      #          sha256=$(sha256sum $file_name)
-      #          echo "sha256=$sha256"
-      #          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
-
-      # - name: Download source from github
-      #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
-      #   uses: actions/download-artifact@v8
-      #   with:
-      #     name: source
-      #     path: dist
-      #     run-id: ${{ github.run_id }}
-
-      #     - name: Uncompress source
-      #      continue-on-error: true
-      #     run: |
-      #      find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
-      #     ls -ahl .
-      #    tar -zxf gptqmodel_source.tar.gz
-
       - name: Install package from source
         run: |
           uv pip uninstall gptqmodel || true
@@ -394,12 +363,14 @@ jobs:
         run: |
           if grep -q '^# GPU=-1$' "${{ matrix.test_script }}"; then
             echo "SKIP_GPU_ALLOCATION=true" >> "$GITHUB_ENV"
+          elif [[ "${{ matrix.test_script }}" == *xpu* ]]; then
+            echo "SKIP_GPU_ALLOCATION=true" >> "$GITHUB_ENV"
           else
             echo "SKIP_GPU_ALLOCATION=false" >> "$GITHUB_ENV"
           fi
 
       - name: Find suitable GPU
-        if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() && env.SKIP_GPU_ALLOCATION != 'true' }}
+        if: ${{ !cancelled() && env.SKIP_GPU_ALLOCATION != 'true' }}
         run: |
           python .github/scripts/ci_gpu.py allocate \
             --base-url "${GPU_ALLOCATOR_URL}" \
@@ -413,9 +384,6 @@ jobs:
       - name: Run tests
         run: |
           extra_args=()
-          if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
-            extra_args+=(--clear-cuda)
-          fi
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             extra_args+=(--clear-cuda --xpu-mode)
           fi
@@ -436,7 +404,7 @@ jobs:
             --test-script "${{ matrix.test_script }}"
 
       - name: Release GPU
-        if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && env.SKIP_GPU_ALLOCATION != 'true'
+        if: always() && env.SKIP_GPU_ALLOCATION != 'true'
         run: |
           python .github/scripts/ci_gpu.py release \
             --base-url "${GPU_ALLOCATOR_URL}" \
@@ -627,6 +595,8 @@ jobs:
       - name: Detect GPU marker
         run: |
           if grep -q '^# GPU=-1$' "${{ matrix.test_script }}"; then
+            echo "SKIP_GPU_ALLOCATION=true" >> "$GITHUB_ENV"
+          elif [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "SKIP_GPU_ALLOCATION=true" >> "$GITHUB_ENV"
           else
             echo "SKIP_GPU_ALLOCATION=false" >> "$GITHUB_ENV"
