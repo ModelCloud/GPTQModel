@@ -1028,7 +1028,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
     input_mode_enum = getattr(remote_module, "InputMode", None) if remote_module is not None else None
 
     with _MONKEY_PATCH_LOCK:
-        if config.model_type == "minicpm" or config.model_type == "instella":
+        if outer_model_cls is not None:
             try_patch_legacy_flash_attn_flag(outer_model_cls)
 
         if config.model_type == "minicpmv" or config.model_type == "minicpmo":
@@ -1212,7 +1212,8 @@ def try_patch_legacy_flash_attn_flag(model_cls):
         if model_cls is None or not isinstance(model_cls, type):
             return
 
-        # Find the "source class" that defines _supports_flash_attn_2.
+        # Find the most specific class that explicitly declares the newer
+        # `_supports_flash_attn_2` flag used by newer transformers releases.
         base_with_flag = None
         for cls in model_cls.__mro__:
             if "_supports_flash_attn_2" in cls.__dict__:
@@ -1222,8 +1223,15 @@ def try_patch_legacy_flash_attn_flag(model_cls):
         if base_with_flag is None:
             return
 
+        # Respect remote models that already define the legacy flag themselves.
+        for cls in model_cls.__mro__:
+            if cls is base_with_flag:
+                break
+            if "_supports_flash_attn" in cls.__dict__:
+                return
+
         flash_attn_2_val = base_with_flag.__dict__["_supports_flash_attn_2"]
-        setattr(cls, "_supports_flash_attn", bool(flash_attn_2_val))
+        setattr(base_with_flag, "_supports_flash_attn", bool(flash_attn_2_val))
 
 
 def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
