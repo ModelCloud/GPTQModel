@@ -22,6 +22,7 @@ class TestStablelm(ModelTest):
     }
     TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 6
+    OFFLOAD_TO_DISK = False
 
     def test_stablelm(self):
         self.quantize_and_evaluate()
