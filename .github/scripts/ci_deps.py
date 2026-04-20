@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
 import pcre
 
 BASE_DIR = Path(__file__).resolve().parent

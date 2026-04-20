@@ -26,6 +26,8 @@ def split_csv(raw: str | None) -> list[str]:
 
 def strip_py_suffix(name: str) -> str:
     return name.removesuffix(".py")
+
+
 @dataclass(frozen=True)
 class TestRuntime:
     test_name: str
