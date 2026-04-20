@@ -18,4 +18,4 @@ tests/models:
 
 tests/kernels:
   test_asymmetric_real_models:
-    sm: '>=9.0'
+    sm: '9.0'
