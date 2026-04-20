@@ -51,16 +51,27 @@ def start_keepalive_monitor(
     def worker() -> None:
         print(f"start to keep alive... {keepalive_endpoint}")
         while not stop_event.wait(interval_sec):
-            try:
-                response = request_json(
-                    keepalive_endpoint,
-                    method="POST",
-                    body=keepalive_payload,
-                    timeout=10,
-                )
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-                print(f"Keepalive request failed: {exc}")
-                continue
+            response = None
+            count = 0
+            while True:
+                try:
+                    response = request_json(
+                        keepalive_endpoint,
+                        method="POST",
+                        body=keepalive_payload,
+                        timeout=10,
+                    )
+                    break
+                except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                    if count == 40:  # max 2 minutes, since gpu server will deallocate the gpu id
+                        break
+                    count += 1
+                    print(f"Keepalive request failed: {exc}")
+                    time.sleep(3)
+                    continue
+
+            if not response:
+                raise RuntimeError("Keepalive request failed, response is None")
 
             resp = extract_gpu_ids(response)
             if resp == "-1":
