@@ -120,6 +120,66 @@ def test_awq_module_forward_splits_accumulated_batches_even_when_quant_batch_siz
     assert module.calls == [1, 1, 1, 1]
 
 
+def test_awq_search_best_scale_keeps_cpu_activations_off_device_until_forward_chunks():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available for this test run.")
+
+    processor = AWQProcessor(
+        tokenizer=None,
+        qcfg=QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=16),
+        calibration=None,
+        prepare_dataset_func=None,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        batch_size=1,
+        gptq_model=types.SimpleNamespace(rotary_embedding=None),
+        model=None,
+        require_fwd=True,
+        calculate_w_wq_diff=False,
+        calibration_concat_separator=None,
+    )
+    processor._quant_batch_size = 1
+
+    module = nn.Linear(16, 16, bias=False, device="cuda:0", dtype=torch.float16)
+    inp = torch.randn(4, 8, 16, device="cpu", dtype=torch.float16)
+
+    captured = {}
+
+    def fake_compute_best_scale(
+        self,
+        _inp,
+        w_mean,
+        x_mean,
+        module2inspect,
+        layers_arg,
+        fp16_output,
+        module_kwargs,
+    ):
+        captured["inp_device"] = _inp.device.type
+        captured["fp16_output_devices"] = [chunk.device.type for chunk in fp16_output]
+        captured["fp16_output_shapes"] = [tuple(chunk.shape) for chunk in fp16_output]
+        return torch.ones_like(w_mean, dtype=w_mean.dtype).detach().cpu(), 0.0
+
+    monkey_patcher = MonkeyPatch()
+    monkey_patcher.setattr(AWQProcessor, "_compute_best_scale", fake_compute_best_scale)
+
+    try:
+        processor._search_best_scale(
+            module,
+            module,
+            [module],
+            inp,
+            module2inspect=module,
+            kwargs={},
+        )
+    finally:
+        monkey_patcher.undo()
+
+    assert captured["inp_device"] == "cpu"
+    assert captured["fp16_output_devices"] == ["cpu", "cpu", "cpu", "cpu"]
+    assert captured["fp16_output_shapes"] == [(1, 8, 16)] * 4
+
+
 @parameterized.expand([
     ("cpu_gs32", "cpu", 32),
     ("cpu_gs64", "cpu", 64),

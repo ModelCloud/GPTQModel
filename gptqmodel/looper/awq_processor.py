@@ -849,9 +849,6 @@ class AWQProcessor(LoopProcessor):
         if "use_cache" in kwargs:
             kwargs.pop("use_cache")
 
-        # Put x on the right device
-        inp = inp.to(next(module2inspect.parameters()).device)
-
         # [STEP 1]: Compute per-channel mean of normalised weights
         # Stream across each Linear instead of concatenating all weights at once. This mirrors the
         # previous cat()+view pipeline while keeping peak memory low: for every group we normalise
@@ -894,9 +891,10 @@ class AWQProcessor(LoopProcessor):
             module_kwargs.setdefault(key, value)
 
         with ctx(torch.inference_mode()):
-            fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
-
-        fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
+            fp16_output = [
+                output.clip(torch.finfo(output.dtype).min, torch.finfo(output.dtype).max).detach().cpu()
+                for output in self._iter_module_forward_outputs(inp, module2inspect, module_kwargs)
+            ]
 
         # [STEP 4]: Compute loss
         best_scales, loss = self._compute_best_scale(
@@ -1119,7 +1117,12 @@ class AWQProcessor(LoopProcessor):
             for fc in linears2scale
         }
 
-        device = x.device
+        try:
+            device = next(module2inspect.parameters()).device
+        except StopIteration:
+            device = x.device
+        except Exception:
+            device = x.device
         x_mean = x_mean.view(-1).to(device)
         w_mean = w_mean.view(-1).to(device)
 
@@ -1152,11 +1155,19 @@ class AWQProcessor(LoopProcessor):
                 fc.weight.div_(scales_view)
 
             # W * X
-            int_w_output = self._module_forward(x, module2inspect, kwargs)
-            int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
+            total_loss = 0.0
+            total_elements = 0
+            for ref_chunk, int_w_output in zip(
+                self._iter_reference_output_chunks(x, fp16_output),
+                self._iter_module_forward_outputs(x, module2inspect, kwargs),
+            ):
+                int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
+                ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
+                diff = (ref_chunk - int_w_output).float()
+                total_loss += diff.pow(2).sum().item()
+                total_elements += diff.numel()
 
-            # compute mean squared error (L2 norm)
-            loss = self._compute_loss(fp16_output, int_w_output, device)
+            loss = total_loss / max(total_elements, 1)
 
             history.append(loss)
             if loss < best_error:
@@ -1218,6 +1229,21 @@ class AWQProcessor(LoopProcessor):
             self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
     ) -> torch.Tensor:
         """Runs a module forward with sanitized kwargs and optional micro-batching."""
+
+        outputs = list(self._iter_module_forward_outputs(x, module, module_kwargs))
+        if not outputs:
+            return torch.empty_like(x)
+        if len(outputs) == 1:
+            return outputs[0]
+        return torch.cat(outputs, dim=0)
+
+    @torch.inference_mode()
+    def _iter_module_forward_outputs(
+            self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
+    ):
+        """Yields forward outputs chunk-by-chunk to reduce peak activation memory."""
+
+        module_kwargs = dict(module_kwargs)
 
         target_device = None
         try:
@@ -1298,10 +1324,12 @@ class AWQProcessor(LoopProcessor):
             or x.dim() == 0
             or x.shape[0] <= effective_quant_batch_size
         ):
-            module_output = module(x, **module_kwargs)
+            x_forward = x.to(target_device) if target_device is not None and x.device != target_device else x
+            module_output = module(x_forward, **module_kwargs)
             if isinstance(module_output, tuple):
                 module_output = module_output[0]
-            return module_output
+            yield module_output
+            return
 
         def _slice_value(val, length):
             """Slices batch-shaped kwargs to match a micro-batched forward chunk."""
@@ -1317,20 +1345,36 @@ class AWQProcessor(LoopProcessor):
                 return type(val)(sliced)
             return val
 
-        outputs = []
         for x_partial in torch.split(x, effective_quant_batch_size, dim=0):
+            x_forward = x_partial.to(target_device) if target_device is not None and x_partial.device != target_device else x_partial
             partial_kwargs = {
-                key: _slice_value(value, x_partial.shape[0])
+                key: _slice_value(value, x_forward.shape[0])
                 for key, value in module_kwargs.items()
             }
-            partial_output = module(x_partial, **partial_kwargs)
+            partial_output = module(x_forward, **partial_kwargs)
             if isinstance(partial_output, tuple):
                 partial_output = partial_output[0]
-            outputs.append(partial_output)
+            yield partial_output
 
-        module_output = torch.cat(outputs, dim=0)
+    def _iter_reference_output_chunks(self, x: torch.Tensor, reference_output):
+        """Normalizes reference outputs to the same chunking contract as forward outputs."""
 
-        return module_output
+        if isinstance(reference_output, torch.Tensor):
+            effective_quant_batch_size = self._quant_batch_size if self._quant_batch_size and self._quant_batch_size > 0 else None
+            if (
+                effective_quant_batch_size is None
+                or x.dim() == 0
+                or x.shape[0] <= effective_quant_batch_size
+            ):
+                yield reference_output
+                return
+
+            for ref_chunk in torch.split(reference_output, effective_quant_batch_size, dim=0):
+                yield ref_chunk
+            return
+
+        for ref_chunk in reference_output:
+            yield ref_chunk
 
     def apply_quant(self, named_linears: Dict[str, NamedModule], scales_list):
         """Pseudo-quantizes selected linears and stages AWQ tensors for packing."""
