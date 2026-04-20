@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -20,9 +21,7 @@ from ci_gpu import (
     request_json,
 )
 
-import pcre
-
-ERROR_PATTERN = pcre.compile(
+ERROR_PATTERN = re.compile(
     r"nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in"
 )
 
