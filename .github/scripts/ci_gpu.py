@@ -196,10 +196,12 @@ def print_status(base_url: str, runner_name: str) -> None:
 def allocate_gpu(args: argparse.Namespace) -> int:
     start_s = time.time()
     endpoint = f"{normalize_base_url(args.base_url)}/get"
+    sm_value = args.sm.strip()
 
     print("Requesting GPU from allocator")
     print(
-        f"run_id={args.run_id} test={args.test} runner={args.runner} count={args.count}"
+        f"run_id={args.run_id} test={args.test} runner={args.runner} count={args.count} "
+        f"sm={(sm_value if sm_value and sm_value != '0' else '<not-sent>')}"
     )
 
     while True:
@@ -211,6 +213,7 @@ def allocate_gpu(args: argparse.Namespace) -> int:
             sm=args.sm,
         )
         print(f"requesting GPU with: {endpoint}")
+        print(f"request job payload: {request_body['job']}")
 
         response = request_json_with_retry(
             endpoint,
