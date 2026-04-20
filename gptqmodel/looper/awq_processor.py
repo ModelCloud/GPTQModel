@@ -849,6 +849,9 @@ class AWQProcessor(LoopProcessor):
         if "use_cache" in kwargs:
             kwargs.pop("use_cache")
 
+        # Keep AWQ scale search on the low-memory path by default. Disabling this
+        # restores the legacy eager behavior that materializes full activations on
+        # the module device before loss evaluation.
         use_chunked_scale_search = getattr(self.qcfg, "scale_search_chunked_activations", True)
 
         # [STEP 1]: Compute per-channel mean of normalised weights
@@ -893,12 +896,17 @@ class AWQProcessor(LoopProcessor):
             module_kwargs.setdefault(key, value)
 
         if use_chunked_scale_search:
+            # Build the FP reference output one micro-batch at a time and move each
+            # chunk back to CPU immediately so scale search does not keep the full
+            # activation tensor resident on GPU.
             with ctx(torch.inference_mode()):
                 fp16_output = [
                     output.clip(torch.finfo(output.dtype).min, torch.finfo(output.dtype).max).detach().cpu()
                     for output in self._iter_module_forward_outputs(inp, module2inspect, module_kwargs)
                 ]
         else:
+            # Legacy path: run the full forward eagerly on the module device and keep
+            # the dense activation tensor for the later reconstruction-loss pass.
             inp = inp.to(next(module2inspect.parameters()).device)
             with ctx(torch.inference_mode()):
                 fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
@@ -1138,6 +1146,9 @@ class AWQProcessor(LoopProcessor):
         if prev_scale_hint is not None:
             w_mean = w_mean * float(prev_scale_hint)
 
+        # This flag also controls how each candidate scale is scored: either stream
+        # ref/int outputs chunk-by-chunk for lower memory, or reuse the legacy eager
+        # tensor-vs-tensor loss computation.
         use_chunked_scale_search = getattr(self.qcfg, "scale_search_chunked_activations", True)
 
         for ratio in range(n_grid):
@@ -1166,6 +1177,9 @@ class AWQProcessor(LoopProcessor):
 
             # W * X
             if use_chunked_scale_search:
+                # Compare chunked reference outputs against chunked quantized outputs
+                # so reconstruction loss is accumulated without assembling the full
+                # output activation on GPU.
                 total_loss = 0.0
                 total_elements = 0
                 for ref_chunk, int_w_output in zip(
@@ -1180,6 +1194,8 @@ class AWQProcessor(LoopProcessor):
 
                 loss = total_loss / max(total_elements, 1)
             else:
+                # Legacy eager scoring path: compute one dense quantized output tensor
+                # and evaluate loss against the dense FP reference tensor.
                 int_w_output = self._module_forward(x, module2inspect, kwargs)
                 int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
                 loss = self._compute_loss(fp16_output, int_w_output, device)
