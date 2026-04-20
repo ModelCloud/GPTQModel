@@ -287,10 +287,10 @@ jobs:
           echo "-- ls -ahl /opt/uv/venvs after --"
           ls -ahl /opt/uv/venvs
 
+          /opt/uv/setup_uv_venv.sh "$ENV_NAME"
+
           echo "-- ls -ahl /opt/uv/venvs new --"
           ls -ahl /opt/uv/venvs
-
-          /opt/uv/setup_uv_venv.sh "$ENV_NAME"
           echo "-- set --"
 
       - name: Setup uv env
@@ -551,9 +551,10 @@ jobs:
           echo "-- ls -ahl /opt/uv/venvs after --"
           ls -ahl /opt/uv/venvs
 
+          /opt/uv/setup_uv_venv.sh "$ENV_NAME"
+
           echo "-- ls -ahl /opt/uv/venvs new --"
           ls -ahl /opt/uv/venvs
-          /opt/uv/setup_uv_venv.sh "$ENV_NAME"
           echo "-- set --"
 
       - name: Setup uv env
