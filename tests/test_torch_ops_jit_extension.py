@@ -226,6 +226,24 @@ def test_default_torch_ops_build_root_ignores_removed_global_override(monkeypatc
     )
 
 
+def test_default_torch_ops_build_root_respects_ci_override(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_TORCH_EXTENSIONS_DIR", "/tmp/gptqmodel-ci")
+
+    assert cpp_module.default_torch_ops_build_root("marlin") == Path("/tmp/gptqmodel-ci") / "marlin"
+
+
+def test_torch_ops_jit_extension_prefers_explicit_build_root_over_global_default(monkeypatch, tmp_path):
+    loader = _make_loader(
+        tmp_path,
+        default_build_root=lambda: cpp_module.default_torch_ops_build_root("unit_test_ops"),
+    )
+
+    monkeypatch.setenv("GPTQMODEL_TORCH_EXTENSIONS_DIR", "/tmp/gptqmodel-ci")
+    monkeypatch.setenv("UNIT_TEST_BUILD_ROOT", "/tmp/unit-test-override")
+
+    assert loader.base_build_root() == Path("/tmp/unit-test-override")
+
+
 def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
     """Guard cache reuse so startup skips expensive JIT rebuilds when ops are already built."""
 

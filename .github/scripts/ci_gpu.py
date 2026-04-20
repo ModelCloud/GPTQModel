@@ -8,6 +8,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+from ci_common import append_github_env
+
 
 def now_ms() -> int:
     return time.time_ns() // 1_000_000
@@ -170,14 +176,6 @@ def build_job_request(*, runner_name: str, run_id: str, test_name: str) -> dict[
 def format_info_url(base_url: str, platform_name: str) -> str:
     query = urllib.parse.urlencode({"platform": platform_name, "plain": "true"})
     return f"{normalize_base_url(base_url)}/info?{query}"
-
-
-def append_github_env(name: str, value: str) -> None:
-    github_env = os.environ.get("GITHUB_ENV")
-    if not github_env:
-        return
-    with open(github_env, "a", encoding="utf-8") as fh:
-        fh.write(f"{name}={value}\n")
 
 
 def print_status(base_url: str, runner_name: str) -> None:
