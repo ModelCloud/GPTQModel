@@ -57,6 +57,9 @@ on:
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
+  # Force fresh torch.ops JIT builds in CI so heterogeneous GPUs never reuse
+  # cached kernels compiled by earlier jobs/tests.
+  GPTQMODEL_KERNEL_REBUILD: '1'
   # CI can allocate A100-class devices (sm_80), so the shared JIT arch list
   # must include 8.0 in addition to the newer targets.
   TORCH_CUDA_ARCH_LIST: '8.0 8.6 8.9 9.0 12.0'
