@@ -28,8 +28,8 @@ from gptqmodel.nn_modules.qlinear.marlin_awq import (
 )
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
-from gptqmodel.utils.marlin import marlin_make_workspace_new
 from gptqmodel.utils.logger import render_table
+from gptqmodel.utils.marlin import marlin_make_workspace_new
 
 
 try:

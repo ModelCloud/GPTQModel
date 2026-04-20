@@ -21,11 +21,11 @@ from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
+from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.machete import (
     machete_runtime_available,
     machete_runtime_error,
 )
-from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.model import find_modules
 
 

@@ -6,7 +6,6 @@ from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
 import pcre
-
 import pytest
 
 from gptqmodel.models import loader

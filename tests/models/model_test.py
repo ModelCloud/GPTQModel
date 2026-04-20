@@ -148,8 +148,8 @@ from gptqmodel.quantization.config import (  # noqa: E402
     WeightOnlyConfig,
     resolve_quant_format,
 )
-from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.logger import render_table  # noqa: E402
+from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
