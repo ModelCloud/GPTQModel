@@ -23,10 +23,10 @@ class TestMMLUPRO(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             result = evaluate(
                 self.MODEL_ID,
-                tasks="mmlu_pro:math",
+                tasks="mmlu_pro:humanities",
                 output_path=f"{tmp_dir}/result.json",
                 batch_size=2,
                 suite_kwargs={"num_fewshot": 1, "max_rows": 2},
             )
-            metrics = get_eval_task_metrics(result, "mmlu_pro:math")
+            metrics = get_eval_task_metrics(result, "mmlu_pro:humanities")
             self.assertTrue(metrics)
