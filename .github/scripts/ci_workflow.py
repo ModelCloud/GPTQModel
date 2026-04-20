@@ -7,11 +7,10 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
-import pcre
-import requests
-import yaml
-from packaging.specifiers import SpecifierSet
-from packaging.version import Version
+try:
+    import pcre as regex
+except ModuleNotFoundError:
+    import re as regex
 
 
 def split_csv(raw: str | None) -> list[str]:
@@ -37,6 +36,8 @@ def parse_test_config(
         group: str,
         test_name: str | None = None,
 ) -> dict[str, Any]:
+    import yaml
+
     yaml_path = Path(yaml_file)
     with yaml_path.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
@@ -129,9 +130,9 @@ def is_model_compat_test(rel_path: str, file_path: Path) -> bool:
 
 
 def matches_test_regex(test_regex: str, rel_path: str) -> bool:
-    if pcre.match(test_regex, rel_path):
+    if regex.match(test_regex, rel_path):
         return True
-    return pcre.match(test_regex, PurePosixPath(rel_path).name) is not None
+    return regex.match(test_regex, PurePosixPath(rel_path).name) is not None
 
 
 def should_skip_test(yaml_file: str | Path, rel_path: str) -> bool:
@@ -195,6 +196,10 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
 
 
 def list_matching_versions(package: str, version_spec: str) -> list[str]:
+    import requests
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
     specifier = SpecifierSet(version_spec)
     response = requests.get(f"https://pypi.org/pypi/{package}/json", timeout=30)
     response.raise_for_status()
