@@ -4,7 +4,8 @@
 # GPU=-1
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
-import re
+
+import pcre
 
 import pytest
 
@@ -19,7 +20,7 @@ class DummyModel:
 def _deps_yaml_block_for(test_name: str) -> set[str]:
     deps_yaml = Path(__file__).resolve().parents[1] / ".github" / "scripts" / "deps.yaml"
     text = deps_yaml.read_text(encoding="utf-8")
-    match = re.search(rf"(?ms)^  {re.escape(test_name)}:\n((?:    - .*\n)+)", text)
+    match = pcre.search(rf"(?ms)^  {pcre.escape(test_name)}:\n((?:    - .*\n)+)", text)
     assert match is not None, f"Missing deps.yaml entry for {test_name}"
     return {
         line.strip()[2:].strip()

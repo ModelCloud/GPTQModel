@@ -16,7 +16,6 @@ import torch
 from logbar import LogBar
 from parameterized import parameterized
 from safetensors.torch import safe_open
-from tabulate import tabulate
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
@@ -30,6 +29,7 @@ from gptqmodel.nn_modules.qlinear.marlin_awq import (
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
 from gptqmodel.utils.marlin import marlin_make_workspace_new
+from gptqmodel.utils.logger import render_table
 
 
 try:
@@ -656,7 +656,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         details = "\n\n".join(str(detail) for detail in failures) if failures else "-"
         device_label = str(device) if device is not None else "-"
 
-        table = tabulate(
+        table = render_table(
             [
                 [
                     backend.name,

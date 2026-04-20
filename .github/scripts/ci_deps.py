@@ -1,14 +1,14 @@
 import argparse
-import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+import pcre
 import yaml
 
 BASE_DIR = Path(__file__).resolve().parent
-_PKG_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+")
+_PKG_NAME_RE = pcre.compile(r"^[A-Za-z0-9_.-]+")
 
 
 def resolve_test_path(raw_name: str) -> Path:

@@ -12,7 +12,6 @@ from typing import List, Tuple
 import torch
 from logbar import LogBar
 from parameterized import parameterized
-from tabulate import tabulate
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Adapter, AdapterCache, Lora
@@ -26,6 +25,7 @@ from gptqmodel.utils.machete import (
     machete_runtime_available,
     machete_runtime_error,
 )
+from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.model import find_modules
 
 
@@ -264,7 +264,7 @@ class TestKernelOutput(unittest.TestCase):
         speedup = reference_mean_ms / actual_mean_ms if actual_mean_ms else 0.0
         details = "\n\n".join(str(detail) for detail in failures) if failures else "-"
 
-        table = tabulate(
+        table = render_table(
             [
                 [
                     backend.name,

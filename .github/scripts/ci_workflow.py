@@ -1,13 +1,13 @@
 import argparse
 import json
 import os
-import re
 import shlex
 import sys
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
+import pcre
 import requests
 import yaml
 from packaging.specifiers import SpecifierSet
@@ -129,9 +129,9 @@ def is_model_compat_test(rel_path: str, file_path: Path) -> bool:
 
 
 def matches_test_regex(test_regex: str, rel_path: str) -> bool:
-    if re.match(test_regex, rel_path):
+    if pcre.match(test_regex, rel_path):
         return True
-    return re.match(test_regex, PurePosixPath(rel_path).name) is not None
+    return pcre.match(test_regex, PurePosixPath(rel_path).name) is not None
 
 
 def should_skip_test(yaml_file: str | Path, rel_path: str) -> bool:

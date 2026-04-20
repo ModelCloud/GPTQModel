@@ -29,7 +29,6 @@ import copy
 import inspect
 import json
 import os
-import re
 import threading
 from dataclasses import dataclass
 from importlib import import_module
@@ -580,8 +579,8 @@ class LazyTurtle:
 
     supports_reload = False
     is_lazy_checkpoint_source = True
-    _HF_SIMPLE_SOURCE_PREFIX_RE = re.compile(r"^\^?([A-Za-z0-9_.]+)\$?$")
-    _HF_SIMPLE_TARGET_PREFIX_RE = re.compile(r"^([A-Za-z0-9_.]+)$")
+    _HF_SIMPLE_SOURCE_PREFIX_RE = pcre.compile(r"^\^?([A-Za-z0-9_.]+)\$?$")
+    _HF_SIMPLE_TARGET_PREFIX_RE = pcre.compile(r"^([A-Za-z0-9_.]+)$")
 
     def __init__(
         self,

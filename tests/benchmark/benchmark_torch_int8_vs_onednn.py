@@ -15,7 +15,8 @@ from pathlib import Path
 
 import torch
 from safetensors import safe_open
-from tabulate import tabulate
+
+from gptqmodel.utils.logger import render_table
 
 
 # Keep this CPU benchmark isolated from optional GPU backend import side effects.
@@ -376,11 +377,11 @@ def main() -> int:
         del onednn_weight, reference, out_torch_int8, out_onednn
 
     print("Configuration")
-    print(tabulate(config_rows, headers=["field", "value"], tablefmt="grid"))
+    print(render_table(config_rows, headers=["field", "value"], tablefmt="grid"))
     print()
     print("Performance")
     print(
-        tabulate(
+        render_table(
             perf_rows,
             headers=[
                 "batch",
@@ -401,7 +402,7 @@ def main() -> int:
     print()
     print("Accuracy")
     print(
-        tabulate(
+        render_table(
             acc_rows,
             headers=[
                 "batch",
@@ -419,7 +420,7 @@ def main() -> int:
     )
     print()
     print("oneDNN ISA Probe")
-    print(tabulate(isa_rows, headers=["batch", "isa"], tablefmt="grid"))
+    print(render_table(isa_rows, headers=["batch", "isa"], tablefmt="grid"))
 
     return 0
 
