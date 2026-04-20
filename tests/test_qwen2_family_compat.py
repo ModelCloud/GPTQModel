@@ -5,6 +5,7 @@
 import types
 import warnings
 
+import pytest
 import torch
 from PIL import Image
 from tokenicer import Tokenicer
@@ -118,6 +119,144 @@ def test_qwen2_vl_pre_quantize_hooks_materialize_meta_modules():
     assert instance.model.language_model.embed_tokens.weight.device == torch.device("cpu")
     assert instance.model.language_model.rotary_emb.weight.device == torch.device("cpu")
     assert len(materialized) == 3
+
+
+def test_qwen2_vl_run_input_capture_merges_image_features_before_language_model():
+    sentinel = object()
+    image_features = torch.tensor([[10.0, 11.0, 12.0, 13.0]])
+    expected_position_ids = torch.arange(9, dtype=torch.long).reshape(3, 1, 3)
+    calls = {}
+
+    class _FirstLayer:
+        def __call__(self, hidden_states, **kwargs):
+            calls["first_layer"] = {"hidden_states": hidden_states, **kwargs}
+            return sentinel
+
+    class _LanguageModel:
+        def __init__(self):
+            self.layers = [_FirstLayer()]
+
+        def rotary_emb(self, hidden_states, position_ids):
+            calls["rotary_hidden_states"] = hidden_states
+            calls["rotary_position_ids"] = position_ids
+            return ("cos", "sin")
+
+    class _CoreModel:
+        def __init__(self):
+            self.language_model = _LanguageModel()
+            self.visual = nn.Identity()
+            self._embed = nn.Embedding(16, 4)
+            with torch.no_grad():
+                self._embed.weight.copy_(torch.arange(64, dtype=torch.float32).reshape(16, 4))
+
+        def get_input_embeddings(self):
+            return self._embed
+
+        def get_image_features(self, *, pixel_values, image_grid_thw):
+            calls["image_pixel_values"] = pixel_values
+            calls["image_grid_thw"] = image_grid_thw
+            return types.SimpleNamespace(pooler_output=[image_features])
+
+        def compute_3d_position_ids(
+            self,
+            *,
+            input_ids,
+            inputs_embeds,
+            image_grid_thw,
+            video_grid_thw,
+            attention_mask,
+            past_key_values,
+            mm_token_type_ids,
+        ):
+            calls["position_inputs_embeds"] = inputs_embeds.clone()
+            calls["position_mm_token_type_ids"] = mm_token_type_ids
+            calls["position_input_ids"] = input_ids
+            calls["position_attention_mask"] = attention_mask
+            calls["position_image_grid_thw"] = image_grid_thw
+            calls["position_video_grid_thw"] = video_grid_thw
+            calls["position_past_key_values"] = past_key_values
+            return expected_position_ids
+
+    instance = object.__new__(base_qwen2_vl.BaseQwen2VLGPTQ)
+    core_model = _CoreModel()
+    instance.model = types.SimpleNamespace(
+        config=types.SimpleNamespace(image_token_id=7, video_token_id=8),
+        model=core_model,
+    )
+
+    example = {
+        "input_ids": torch.tensor([[1, 7, 3]], dtype=torch.long),
+        "attention_mask": torch.tensor([[1, 1, 1]], dtype=torch.long),
+        "mm_token_type_ids": torch.tensor([[0, 1, 0]], dtype=torch.int64),
+        "pixel_values": torch.randn(4, 4),
+        "image_grid_thw": torch.tensor([[1, 1, 1]], dtype=torch.long),
+        "cache_position": torch.tensor([0, 1, 2], dtype=torch.long),
+    }
+
+    result = instance.run_input_capture(example, use_cache=False, data_device=torch.device("cpu"))
+
+    assert result is sentinel
+    expected_inputs = core_model.get_input_embeddings()(example["input_ids"])
+    expected_inputs[0, 1] = image_features[0]
+    assert torch.equal(calls["position_inputs_embeds"], expected_inputs)
+    assert torch.equal(calls["position_mm_token_type_ids"], example["mm_token_type_ids"])
+    assert torch.equal(calls["position_input_ids"], example["input_ids"])
+    assert torch.equal(calls["position_attention_mask"], example["attention_mask"])
+    assert torch.equal(calls["position_image_grid_thw"], example["image_grid_thw"])
+    assert calls["position_video_grid_thw"] is None
+    assert calls["position_past_key_values"] is None
+
+    assert torch.equal(calls["rotary_hidden_states"], expected_inputs)
+    assert torch.equal(calls["rotary_position_ids"], expected_position_ids)
+
+    forwarded = calls["first_layer"]
+    assert forwarded["use_cache"] is False
+    assert torch.equal(forwarded["hidden_states"], expected_inputs)
+    assert forwarded["position_ids"] is None
+    assert forwarded["attention_mask"] is None
+    assert forwarded["position_embeddings"] == ("cos", "sin")
+    assert torch.equal(forwarded["cache_position"], example["cache_position"])
+
+
+def test_qwen2_vl_run_input_capture_rejects_placeholder_feature_mismatch():
+    class _LanguageModel:
+        def __init__(self):
+            self.layers = [nn.Identity()]
+
+        def rotary_emb(self, hidden_states, position_ids):
+            return hidden_states, position_ids
+
+    class _CoreModel:
+        def __init__(self):
+            self.language_model = _LanguageModel()
+            self.visual = nn.Identity()
+            self._embed = nn.Embedding(16, 4)
+
+        def get_input_embeddings(self):
+            return self._embed
+
+        def get_image_features(self, *, pixel_values, image_grid_thw):
+            return types.SimpleNamespace(pooler_output=[torch.ones(2, 4)])
+
+        def compute_3d_position_ids(self, **kwargs):
+            raise AssertionError("position ids should not be computed on a placeholder mismatch")
+
+    instance = object.__new__(base_qwen2_vl.BaseQwen2VLGPTQ)
+    instance.model = types.SimpleNamespace(
+        config=types.SimpleNamespace(image_token_id=7, video_token_id=8),
+        model=_CoreModel(),
+    )
+
+    example = {
+        "input_ids": torch.tensor([[1, 7, 3]], dtype=torch.long),
+        "attention_mask": torch.tensor([[1, 1, 1]], dtype=torch.long),
+        "mm_token_type_ids": torch.tensor([[0, 1, 0]], dtype=torch.int64),
+        "pixel_values": torch.randn(4, 4),
+        "image_grid_thw": torch.tensor([[1, 1, 1]], dtype=torch.long),
+    }
+
+    with pytest.raises(ValueError, match="Image features and image tokens do not match"):
+        instance.run_input_capture(example, use_cache=False, data_device=torch.device("cpu"))
 
 
 def test_qwen2_5_omni_image_only_process_vision_info_returns_image_list():
