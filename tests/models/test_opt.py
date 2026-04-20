@@ -16,6 +16,7 @@ class TestOpt(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_FAST = 0.18430034129692832
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = 0.2226962457337884
     INPUTS_MAX_LENGTH = 2048 # opt embedding is max 2048
+    OFFLOAD_TO_DISK = False  # Local OPT checkpoints are typically legacy .bin weights, so LazyTurtle offload is unavailable.
 
     def test_opt(self):
         self.quantize_and_evaluate()

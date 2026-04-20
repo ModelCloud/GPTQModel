@@ -25,6 +25,7 @@ class TestMpt(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
+    OFFLOAD_TO_DISK = False
 
     def test_mpt(self):
         self.quantize_and_evaluate()

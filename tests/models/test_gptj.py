@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch  # noqa: E402
+
 from model_test import ModelTest
 
 
@@ -18,6 +19,7 @@ class TestGptJ(ModelTest):
     TORCH_DTYPE = torch.float16
     INPUTS_MAX_LENGTH = 1024
     USE_FLASH_ATTN = False
+    OFFLOAD_TO_DISK = False
 
     def test_gptj(self):
         self.quantize_and_evaluate()

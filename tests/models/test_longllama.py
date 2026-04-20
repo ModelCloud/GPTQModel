@@ -3,9 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from model_test import ModelTest
-
 from gptqmodel.utils.backend import BACKEND
+from model_test import ModelTest
 
 
 class TestLongLlama(ModelTest):
@@ -21,6 +20,7 @@ class TestLongLlama(ModelTest):
     USE_VLLM = False
     USE_FLASH_ATTN = False
     LOAD_BACKEND = BACKEND.TORCH
+    OFFLOAD_TO_DISK = False
 
     def test_longllama(self):
         self.quantize_and_evaluate()

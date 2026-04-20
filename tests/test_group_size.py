@@ -58,7 +58,7 @@ class TestGroupSize(unittest.TestCase):
             group_sizes = self.QLINEAR_DICT[quant_backend].SUPPORTS_GROUP_SIZE
             for group_size in group_sizes:
                 print("-----------------------quant-----------------------")
-                quantize_config = QuantizeConfig(bits=4, group_size=group_size, sym=True, desc_act=False)
+                quantize_config = QuantizeConfig(bits=4, group_size=group_size, sym=True, desc_act=False, offload_to_disk=False)
                 print(f"group_size: {quantize_config.group_size}, quant_backend: {quant_backend} start quant")
                 try:
                     self.quant_and_eval(calibration_dataset, model_id, quant_backend, quantize_config, tokenizer)
