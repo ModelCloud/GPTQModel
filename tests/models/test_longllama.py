@@ -21,6 +21,7 @@ class TestLongLlama(ModelTest):
     USE_VLLM = False
     USE_FLASH_ATTN = False
     LOAD_BACKEND = BACKEND.TORCH
+    OFFLOAD_TO_DISK = False  # Local checkpoint is a monolithic .bin, so LazyTurtle offload is unavailable.
 
     def test_longllama(self):
         self.quantize_and_evaluate()
