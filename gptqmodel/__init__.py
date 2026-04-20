@@ -116,10 +116,10 @@ def _build_device_thread_pool():
     return DeviceThreadPool(
         inference_mode=True,
         warmups={
-            "cuda": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD),
-            "xpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.DEVICE),
-            "mps": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.DEVICE),
-            "cpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.DEVICE),
+            "cuda": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
+            "xpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
+            "mps": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
+            "cpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
         },
         workers={
             "cuda:per": 4,

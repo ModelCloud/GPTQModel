@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import torch
 
+import gptqmodel as gptqmodel_module
 from gptqmodel.utils import linalg_warmup
 from gptqmodel.utils.threadx import WarmUpCtx
 
@@ -54,3 +55,24 @@ def test_run_torch_linalg_warmup_always_runs_cholesky_and_eigh(monkeypatch):
         linalg_warmup.run_torch_linalg_warmup(torch.device("cpu"), WarmUpCtx.DEVICE)
 
         assert calls == [torch.float32, torch.float64]
+
+
+def test_build_device_thread_pool_uses_thread_and_device_linalg_warmup(monkeypatch):
+    captured = {}
+
+    class DummyPool:
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(gptqmodel_module, "DeviceThreadPool", DummyPool)
+
+    pool = gptqmodel_module._build_device_thread_pool()
+    warmups = captured["kwargs"]["warmups"]
+
+    assert isinstance(pool, DummyPool)
+    assert {key: task.scope for key, task in warmups.items()} == {
+        "cuda": WarmUpCtx.THREAD_AND_DEVICE,
+        "xpu": WarmUpCtx.THREAD_AND_DEVICE,
+        "mps": WarmUpCtx.THREAD_AND_DEVICE,
+        "cpu": WarmUpCtx.THREAD_AND_DEVICE,
+    }
