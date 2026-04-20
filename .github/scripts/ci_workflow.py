@@ -9,6 +9,12 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from ci_common import append_github_env
+
 import pcre
 
 
@@ -20,16 +26,6 @@ def split_csv(raw: str | None) -> list[str]:
 
 def strip_py_suffix(name: str) -> str:
     return name.removesuffix(".py")
-
-
-def append_github_env(name: str, value: str) -> None:
-    github_env = os.environ.get("GITHUB_ENV")
-    if not github_env:
-        return
-    with open(github_env, "a", encoding="utf-8") as fh:
-        fh.write(f"{name}={value}\n")
-
-
 @dataclass(frozen=True)
 class TestRuntime:
     test_name: str
