@@ -38,6 +38,24 @@ class TestRuntime:
     xpu_mode: bool
 
 
+@dataclass(frozen=True)
+class TestMatrixEntry:
+    test_script: str
+    test_group: str
+    alloc_gpu_count: str
+    require_single_gpu: str
+    include_model_test_mode: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "test_script": self.test_script,
+            "test_group": self.test_group,
+            "alloc_gpu_count": self.alloc_gpu_count,
+            "require_single_gpu": self.require_single_gpu,
+            "include_model_test_mode": self.include_model_test_mode,
+        }
+
+
 @lru_cache(maxsize=None)
 def _load_yaml_cached(yaml_path: str) -> dict[str, Any]:
     import yaml
@@ -244,6 +262,51 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
     )
 
 
+def build_test_matrix(torch_tests: list[str], model_tests: list[str]) -> list[dict[str, str]]:
+    entries = [
+        TestMatrixEntry(
+            test_script=test_script,
+            test_group="torch",
+            alloc_gpu_count="resolved",
+            require_single_gpu="false",
+            include_model_test_mode="false",
+        )
+        for test_script in torch_tests
+    ]
+    entries.extend(
+        TestMatrixEntry(
+            test_script=test_script,
+            test_group="model",
+            alloc_gpu_count="1",
+            require_single_gpu="true",
+            include_model_test_mode="true",
+        )
+        for test_script in model_tests
+    )
+    return [entry.as_dict() for entry in entries]
+
+
+def build_test_plan(
+        *,
+        ignored_test_files: str | list[str],
+        test_names: str,
+        test_regex: str,
+        tests_root: str | Path,
+) -> dict[str, list[dict[str, str]] | list[str]]:
+    torch_tests, model_tests, mlx_tests = list_tests(
+        ignored_test_files=ignored_test_files,
+        test_names=test_names,
+        test_regex=test_regex,
+        tests_root=tests_root,
+    )
+    return {
+        "torch_files": torch_tests,
+        "model_files": model_tests,
+        "mlx_files": mlx_tests,
+        "test_matrix": build_test_matrix(torch_tests, model_tests),
+    }
+
+
 def resolve_test_runtime(test_name: str, tests_root: str | Path = "tests") -> TestRuntime:
     normalized = normalize_test_name(test_name)
     test_path = test_path_from_name(normalized, tests_root=tests_root)
@@ -274,13 +337,13 @@ def list_matching_versions(package: str, version_spec: str) -> list[str]:
 
 
 def cmd_list_tests(args: argparse.Namespace) -> int:
-    torch_files, model_files, mlx_files = list_tests(
+    test_plan = build_test_plan(
         ignored_test_files=args.ignored_test_files,
         test_names=args.test_names,
         test_regex=args.test_regex,
         tests_root=args.tests_root,
     )
-    print(f"{json.dumps(torch_files)}|{json.dumps(model_files)}|{json.dumps(mlx_files)}")
+    print(json.dumps(test_plan))
     return 0
 
 

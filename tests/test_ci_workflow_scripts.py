@@ -47,6 +47,32 @@ def test_resolve_test_runtime_marks_xpu_tests():
     assert runtime.xpu_mode is True
 
 
+def test_build_test_matrix_marks_model_entries():
+    ci_workflow = _load_script_module("ci_workflow")
+
+    matrix = ci_workflow.build_test_matrix(
+        torch_tests=["test_require_pkgs"],
+        model_tests=["models/test_opt"],
+    )
+
+    assert matrix == [
+        {
+            "test_script": "test_require_pkgs",
+            "test_group": "torch",
+            "alloc_gpu_count": "resolved",
+            "require_single_gpu": "false",
+            "include_model_test_mode": "false",
+        },
+        {
+            "test_script": "models/test_opt",
+            "test_group": "model",
+            "alloc_gpu_count": "1",
+            "require_single_gpu": "true",
+            "include_model_test_mode": "true",
+        },
+    ]
+
+
 @pytest.mark.parametrize(
     "script_name",
     [
