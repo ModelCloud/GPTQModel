@@ -134,6 +134,9 @@ tests/models:
   test_phi_3_moe.py:
     - transformers<=4.44.2
 
+  test_phi_4.py:
+    - scipy
+
   test_llama3_2_exllamav3.py:
     - pydantic
 
