@@ -280,7 +280,9 @@ jobs:
           echo "-- ls -ahl /opt/uv/venvs before --"
           ls -ahl /opt/uv/venvs
 
-          mv /opt/uv/venvs/* "/opt/uv/tmp/${ENV_NAME}_$(date +%s)" || true
+          target="/opt/uv/tmp/${ENV_NAME}_$(date +%s)"
+          mkdir -p "$target"
+          mv /opt/uv/venvs/* "$target"/ || true
 
           echo "-- ls -ahl /opt/uv/venvs after --"
           ls -ahl /opt/uv/venvs
@@ -542,7 +544,9 @@ jobs:
           echo "-- ls -ahl /opt/uv/venvs before --"
           ls -ahl /opt/uv/venvs
 
-          mv /opt/uv/venvs/* "/opt/uv/tmp/${ENV_NAME}_$(date +%s)" || true
+          target="/opt/uv/tmp/${ENV_NAME}_$(date +%s)"
+          mkdir -p "$target"
+          mv /opt/uv/venvs/* "$target"/ || true
 
           echo "-- ls -ahl /opt/uv/venvs after --"
           ls -ahl /opt/uv/venvs
