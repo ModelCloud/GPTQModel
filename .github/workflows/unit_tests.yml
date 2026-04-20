@@ -269,12 +269,13 @@ jobs:
           echo "-- loading unit test's config --"
           source /opt/uv/setup_uv_venv.sh unit_test_env
           uv pip install requests packaging -U
-          eval "$(python3 .github/scripts/ci_workflow.py resolve-env \
+          env_output="$(python3 .github/scripts/ci_workflow.py resolve-env \
             --group tests \
             --test-name "${{ matrix.test_script }}" \
             --cuda-version "${{ needs.check-vm.outputs.cuda_version }}" \
             --torch-version "${{ env.TORCH_VERSION }}" \
             --shell)"
+          eval "$env_output"
 
           echo "-- setting up env --"
           echo "env_name: $ENV_NAME"
@@ -534,12 +535,13 @@ jobs:
           echo "-- loading unit test's config --"
           source /opt/uv/setup_uv_venv.sh unit_test_env
           uv pip install requests packaging -U
-          eval "$(python3 .github/scripts/ci_workflow.py resolve-env \
+          env_output="$(python3 .github/scripts/ci_workflow.py resolve-env \
             --group tests \
             --test-name "${{ matrix.test_script }}" \
             --cuda-version "${{ needs.check-vm.outputs.cuda_version }}" \
             --torch-version "${{ env.TORCH_VERSION }}" \
             --shell)"
+          eval "$env_output"
 
           echo "-- setting up env --"
           echo "env_name: $ENV_NAME"

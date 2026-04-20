@@ -8,7 +8,6 @@ import time
 import urllib.error
 from pathlib import Path
 
-import pcre
 from ci_gpu import (
     build_job_request,
     extract_gpu_ids,
@@ -16,7 +15,12 @@ from ci_gpu import (
     request_json,
 )
 
-ERROR_PATTERN = pcre.compile(
+try:
+    import pcre as regex
+except ModuleNotFoundError:
+    import re as regex
+
+ERROR_PATTERN = regex.compile(
     r"nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in"
 )
 

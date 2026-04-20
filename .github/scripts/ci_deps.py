@@ -4,11 +4,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import pcre
 import yaml
 
+try:
+    import pcre as regex
+except ModuleNotFoundError:
+    import re as regex
+
 BASE_DIR = Path(__file__).resolve().parent
-_PKG_NAME_RE = pcre.compile(r"^[A-Za-z0-9_.-]+")
+_PKG_NAME_RE = regex.compile(r"^[A-Za-z0-9_.-]+")
 
 
 def resolve_test_path(raw_name: str) -> Path:
