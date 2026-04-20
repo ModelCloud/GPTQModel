@@ -3,14 +3,29 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # GPU=-1
 from importlib.metadata import PackageNotFoundError
+from pathlib import Path
+import re
 
 import pytest
 
 from gptqmodel.models import loader
+from gptqmodel.models.definitions.phi4 import Phi4MMGPTQ
 
 
 class DummyModel:
     pass
+
+
+def _deps_yaml_block_for(test_name: str) -> set[str]:
+    deps_yaml = Path(__file__).resolve().parents[1] / ".github" / "scripts" / "deps.yaml"
+    text = deps_yaml.read_text(encoding="utf-8")
+    match = re.search(rf"(?ms)^  {re.escape(test_name)}:\n((?:    - .*\n)+)", text)
+    assert match is not None, f"Missing deps.yaml entry for {test_name}"
+    return {
+        line.strip()[2:].strip()
+        for line in match.group(1).splitlines()
+        if line.strip().startswith("- ")
+    }
 
 
 def test_check_versions_accepts_satisfied_requirements(monkeypatch):
@@ -47,3 +62,11 @@ def test_check_versions_handles_multiple_requirements(monkeypatch):
     monkeypatch.setattr(loader, "version", fake_version)
 
     loader.check_versions(DummyModel, ["transformers<=4.38.2", "tokenizers<=0.15.2"])
+
+
+def test_phi4_ci_deps_cover_required_packages():
+    pkgs = _deps_yaml_block_for("test_phi_4.py")
+
+    assert "scipy" in pkgs
+    for requirement in Phi4MMGPTQ.require_pkgs:
+        assert requirement in pkgs
