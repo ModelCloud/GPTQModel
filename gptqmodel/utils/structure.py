@@ -29,6 +29,7 @@ import copy
 import inspect
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass
 from importlib import import_module
@@ -565,6 +566,109 @@ class _MoEAliasSpec:
     leaf_alias_groups: tuple[tuple[tuple[str, ...], ...], ...]
 
 
+@dataclass
+class _LazyWeightRenaming:
+    """Lightweight 1:1 renaming rule that mirrors `transformers.WeightRenaming` matching semantics."""
+
+    source_patterns: list[str] | str
+    target_patterns: list[str] | str
+
+    def __post_init__(self) -> None:
+        self.source_patterns = self._coerce_patterns(self.source_patterns)
+        self.target_patterns = self._coerce_patterns(self.target_patterns)
+        if len(self.source_patterns) != 1 or len(self.target_patterns) != 1:
+            raise ValueError("_LazyWeightRenaming expects exactly one source and one target pattern.")
+
+    @staticmethod
+    def _coerce_patterns(patterns: list[str] | tuple[str, ...] | str | None) -> list[str]:
+        if isinstance(patterns, str):
+            return [patterns]
+        if isinstance(patterns, (list, tuple)):
+            return [pattern for pattern in patterns if isinstance(pattern, str)]
+        return []
+
+    @staticmethod
+    def _process_target_pattern(pattern: str) -> tuple[str, str | None]:
+        # Mirror HF reverse-mapping prep: strip anchors/lookarounds, then turn
+        # the first capturing group into a reusable `\1` placeholder.
+        pattern = pattern.removeprefix("^")
+        pattern = pattern.removesuffix("$")
+        pattern = re.sub(r"\(\?.+?\)?\)", "", pattern)
+        pattern = pattern.replace(r"\.", ".")
+
+        capturing_group_match = re.search(r"\(.+?\)", pattern)
+        captured_group = None
+        if capturing_group_match:
+            captured_group = capturing_group_match.group(0)
+            pattern = pattern.replace(captured_group, r"\1", 1)
+
+        return pattern, captured_group
+
+    @staticmethod
+    def _process_source_pattern(source_pattern: str, target_pattern: str) -> str:
+        if target_pattern.startswith("^"):
+            source_pattern = f"^{source_pattern}" if not source_pattern.startswith("^") else source_pattern
+        if target_pattern.endswith("$"):
+            source_pattern = f"{source_pattern}$" if not source_pattern.endswith("$") else source_pattern
+        return source_pattern
+
+    def _prepared_patterns(self) -> tuple[list[str], list[str], re.Pattern]:
+        # Derive the regex lazily so the object only stores the original
+        # source/target patterns, not cached match state.
+        processed_targets: list[str] = []
+        target_capturing_groups: list[str] = []
+        for pattern in self.target_patterns:
+            processed_pattern, captured_group = self._process_target_pattern(pattern)
+            processed_targets.append(processed_pattern)
+            if captured_group is not None:
+                target_capturing_groups.append(captured_group)
+
+        unique_capturing_groups = set(target_capturing_groups)
+        if len(unique_capturing_groups) > 1:
+            raise ValueError(
+                f"Multiple different capturing groups found in target_patterns: {unique_capturing_groups}. "
+                f"All target patterns must use the same capturing group pattern."
+            )
+        unique_capturing_group = unique_capturing_groups.pop() if unique_capturing_groups else None
+
+        processed_sources: list[str] = []
+        for i, pattern in enumerate(self.source_patterns):
+            processed_pattern = pattern
+            if r"\1" in processed_pattern:
+                if unique_capturing_group is None:
+                    raise ValueError(
+                        f"Source pattern '{pattern}' contains \\1 backreference, but no capturing groups "
+                        f"found in target_patterns."
+                    )
+                processed_pattern = processed_pattern.replace(r"\1", unique_capturing_group, 1)
+            processed_pattern = self._process_source_pattern(processed_pattern, self.target_patterns[i])
+            processed_sources.append(processed_pattern)
+
+        branches = []
+        for i, source_pattern in enumerate(processed_sources):
+            group_name = f"g{i}"
+            pattern = source_pattern.replace(".*.", r"\..*\.")
+            branches.append(f"(?P<{group_name}>{pattern})")
+        compiled_sources = re.compile("|".join(branches))
+
+        return processed_sources, processed_targets, compiled_sources
+
+    def rename_source_key(self, source_key: str) -> tuple[str, str | None]:
+        _, processed_targets, compiled_sources = self._prepared_patterns()
+        match_object = compiled_sources.search(source_key)
+        if match_object is None:
+            return source_key, None
+
+        matching_group_name = next(name for name, val in match_object.groupdict().items() if val is not None)
+        source_pattern_that_matched = self.source_patterns[int(matching_group_name[1:])]
+        replacement = processed_targets[0]
+        if r"\1" in replacement:
+            replaced_group_idx = compiled_sources.groupindex[matching_group_name] + 1
+            replacement = replacement.replace(r"\1", match_object.group(replaced_group_idx))
+        renamed_key = source_key.replace(match_object.group(0), replacement, 1)
+        return renamed_key, source_pattern_that_matched
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local safetensors models.
 
@@ -579,8 +683,6 @@ class LazyTurtle:
 
     supports_reload = False
     is_lazy_checkpoint_source = True
-    _HF_SIMPLE_SOURCE_PREFIX_RE = pcre.compile(r"^\^?([A-Za-z0-9_.]+)\$?$")
-    _HF_SIMPLE_TARGET_PREFIX_RE = pcre.compile(r"^([A-Za-z0-9_.]+)$")
 
     def __init__(
         self,
@@ -589,7 +691,6 @@ class LazyTurtle:
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
         module_tree: Optional[Any] = None,
-        checkpoint_path_aliases: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
     ) -> None:
@@ -600,15 +701,14 @@ class LazyTurtle:
         # Lazy checkpoint name resolution must come from model-definition truth.
         self._module_tree = copy.deepcopy(module_tree)
         self._module_tree_layer_prefix, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
-        # Resolve runtime->checkpoint aliases once up front so per-tensor lookups
-        # only need cheap prefix rewrites.
-        alias_items = self._merge_runtime_to_checkpoint_aliases(
-            checkpoint_path_aliases,
+        # Resolve runtime->checkpoint renamings once up front so per-tensor
+        # lookups can apply the same renaming order as HF loading.
+        alias_items = self._normalize_runtime_to_checkpoint_renamings(
             hf_conversion_map_reversed
             if hf_conversion_map_reversed is not None
             else self.infer_hf_conversion_map_reversed(target_model=target_model),
         )
-        self._runtime_to_checkpoint_aliases = tuple(alias_items)
+        self._runtime_to_checkpoint_renamings = tuple(alias_items)
         self._lock = threading.RLock()
 
     @classmethod
@@ -619,7 +719,6 @@ class LazyTurtle:
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
         module_tree: Optional[Any] = None,
-        checkpoint_path_aliases: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
     ) -> Optional["LazyTurtle"]:
@@ -632,7 +731,6 @@ class LazyTurtle:
                 config=config,
                 model_init_kwargs=model_init_kwargs,
                 module_tree=module_tree,
-                checkpoint_path_aliases=checkpoint_path_aliases,
                 hf_conversion_map_reversed=hf_conversion_map_reversed,
                 target_model=target_model,
             )
@@ -751,53 +849,58 @@ class LazyTurtle:
         return f"{module_path}.{rel_name}"
 
     @staticmethod
-    def _normalize_runtime_to_checkpoint_aliases(raw_aliases: Optional[Any]) -> tuple[tuple[str, str], ...]:
-        alias_items: list[tuple[str, str]] = []
+    def _coerce_patterns(patterns: Any) -> list[str]:
+        if isinstance(patterns, str):
+            return [patterns]
+        if isinstance(patterns, (list, tuple)):
+            return [pattern for pattern in patterns if isinstance(pattern, str)]
+        return []
+
+    @classmethod
+    def _extract_weight_renaming_patterns(cls, entry: Any) -> Optional[tuple[str, str]]:
+        operations = getattr(entry, "operations", None)
+        if operations:
+            # LazyTurtle only needs reversible key renames here, not tensor ops.
+            return None
+
+        source_patterns = getattr(entry, "_original_source_patterns", getattr(entry, "source_patterns", None))
+        target_patterns = getattr(entry, "_original_target_patterns", getattr(entry, "target_patterns", None))
+        source_patterns = cls._coerce_patterns(source_patterns)
+        target_patterns = cls._coerce_patterns(target_patterns)
+        if len(source_patterns) != 1 or len(target_patterns) != 1:
+            return None
+        return source_patterns[0], target_patterns[0]
+
+    @classmethod
+    def _normalize_runtime_to_checkpoint_renamings(cls, raw_aliases: Optional[Any]) -> tuple[_LazyWeightRenaming, ...]:
+        renamings: list[_LazyWeightRenaming] = []
         if raw_aliases is None:
             return ()
+
         if isinstance(raw_aliases, dict):
-            raw_aliases = raw_aliases.items()
-        for runtime_prefix, checkpoint_prefix in raw_aliases:
-            if not isinstance(runtime_prefix, str) or not isinstance(checkpoint_prefix, str):
-                continue
-            runtime_prefix = runtime_prefix.strip(".")
-            checkpoint_prefix = checkpoint_prefix.strip(".")
-            if not runtime_prefix:
-                continue
-            alias_items.append((runtime_prefix, checkpoint_prefix))
-        alias_items.sort(key=lambda item: len(item[0]), reverse=True)
-        return tuple(alias_items)
-
-    @classmethod
-    def _merge_runtime_to_checkpoint_aliases(cls, *raw_alias_sets: Optional[Any]) -> tuple[tuple[str, str], ...]:
-        merged: list[tuple[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for raw_aliases in raw_alias_sets:
-            for alias_item in cls._normalize_runtime_to_checkpoint_aliases(raw_aliases):
-                if alias_item in seen:
+            # Backward compatibility for older runtime->checkpoint prefix maps.
+            for runtime_prefix, checkpoint_prefix in raw_aliases.items():
+                if not isinstance(runtime_prefix, str) or not isinstance(checkpoint_prefix, str):
                     continue
-                seen.add(alias_item)
-                merged.append(alias_item)
-        merged.sort(key=lambda item: len(item[0]), reverse=True)
-        return tuple(merged)
+                runtime_prefix = runtime_prefix.strip(".")
+                checkpoint_prefix = checkpoint_prefix.strip(".")
+                if not runtime_prefix:
+                    continue
+                renamings.append(_LazyWeightRenaming(runtime_prefix, checkpoint_prefix))
+            return tuple(renamings)
 
-    @classmethod
-    def _extract_hf_source_prefix(cls, pattern: Any) -> Optional[str]:
-        if not isinstance(pattern, str):
-            return None
-        match = cls._HF_SIMPLE_SOURCE_PREFIX_RE.fullmatch(pattern.strip())
-        if match is None:
-            return None
-        return match.group(1).strip(".") or None
+        if not isinstance(raw_aliases, (list, tuple)):
+            return ()
 
-    @classmethod
-    def _extract_hf_target_prefix(cls, prefix: Any) -> Optional[str]:
-        if not isinstance(prefix, str):
-            return None
-        match = cls._HF_SIMPLE_TARGET_PREFIX_RE.fullmatch(prefix.strip())
-        if match is None:
-            return None
-        return match.group(1).strip(".") or None
+        for entry in raw_aliases:
+            patterns = cls._extract_weight_renaming_patterns(entry)
+            if patterns is None:
+                continue
+            # New path: consume reversed WeightRenaming-style entries directly.
+            runtime_pattern, checkpoint_pattern = patterns
+            renamings.append(_LazyWeightRenaming(runtime_pattern, checkpoint_pattern))
+
+        return tuple(renamings)
 
     @classmethod
     def _iter_hf_conversion_pairs(cls, conversion_mapping: Optional[Any]) -> Iterable[tuple[str, str]]:
@@ -811,38 +914,21 @@ class LazyTurtle:
             return
 
         for entry in conversion_mapping:
-            source_patterns = getattr(entry, "source_patterns", None)
-            target_patterns = getattr(entry, "target_patterns", None)
-            operations = getattr(entry, "operations", None)
-            if operations:
-                continue
-            if not isinstance(source_patterns, (list, tuple)) or not isinstance(target_patterns, (list, tuple)):
-                continue
-            if len(source_patterns) != 1 or len(target_patterns) != 1:
-                continue
-            checkpoint_pattern = source_patterns[0]
-            runtime_prefix = target_patterns[0]
-            if isinstance(checkpoint_pattern, str) and isinstance(runtime_prefix, str):
-                yield checkpoint_pattern, runtime_prefix
+            patterns = cls._extract_weight_renaming_patterns(entry)
+            if patterns is not None:
+                yield patterns
 
     @classmethod
-    def reverse_hf_conversion_map(cls, conversion_mapping: Optional[Any]) -> Optional[Dict[str, str]]:
-        """Invert simple HF checkpoint renames into runtime->checkpoint aliases."""
-        reversed_map: Dict[str, str] = {}
+    def reverse_hf_conversion_map(cls, conversion_mapping: Optional[Any]) -> Optional[list[_LazyWeightRenaming]]:
+        """Invert simple HF checkpoint renames into reversed `WeightRenaming`-style rules."""
+        reversed_map: list[_LazyWeightRenaming] = []
         for checkpoint_pattern, runtime_prefix in cls._iter_hf_conversion_pairs(conversion_mapping):
-            checkpoint_prefix = cls._extract_hf_source_prefix(checkpoint_pattern)
-            runtime_prefix = cls._extract_hf_target_prefix(runtime_prefix)
-            if checkpoint_prefix is None or runtime_prefix is None:
-                continue
-
-            if runtime_prefix in reversed_map:
-                continue
-            reversed_map[runtime_prefix] = checkpoint_prefix
+            reversed_map.append(_LazyWeightRenaming(runtime_prefix, checkpoint_pattern))
 
         return reversed_map or None
 
     @classmethod
-    def infer_hf_conversion_map_reversed(cls, *, target_model: Optional[nn.Module] = None) -> Optional[Dict[str, str]]:
+    def infer_hf_conversion_map_reversed(cls, *, target_model: Optional[nn.Module] = None) -> Optional[Any]:
         if target_model is None:
             return None
 
@@ -1080,7 +1166,7 @@ class LazyTurtle:
         return candidates
 
     def _runtime_to_checkpoint_alias_candidates(self, name: str) -> list[str]:
-        """Return `name` plus any runtime->checkpoint prefix rewrites declared by the model.
+        """Return `name` plus the result of applying runtime->checkpoint renamings once.
 
         This handles model families whose execution shell layout does not match
         the serialized checkpoint layout. For example, Qwen2-VL runs with
@@ -1091,42 +1177,14 @@ class LazyTurtle:
         if not name:
             return [name]
 
-        candidates: list[str] = []
-        queue = [name]
-        seen: set[str] = set()
-
-        while queue:
-            current = queue.pop(0)
-            if current in seen:
-                continue
-            seen.add(current)
-            candidates.append(current)
-
-            for runtime_prefix, checkpoint_prefix in self._runtime_to_checkpoint_aliases:
-                if current == runtime_prefix:
-                    suffix = ""
-                elif current.startswith(f"{runtime_prefix}."):
-                    suffix = current[len(runtime_prefix):]
-                else:
-                    continue
-
-                # Avoid repeatedly re-applying aliases that expand a prefix into
-                # one that still begins with the original runtime prefix, e.g.
-                # `language_model -> language_model.model`, which would otherwise
-                # generate:
-                #   language_model.layers.0
-                #   language_model.model.layers.0
-                #   language_model.model.model.layers.0
-                #   ...
-                if checkpoint_prefix and (
-                    current == checkpoint_prefix or current.startswith(f"{checkpoint_prefix}.")
-                ):
-                    continue
-
-                aliased = f"{checkpoint_prefix}{suffix}" if checkpoint_prefix else suffix.lstrip(".")
-                if aliased and aliased not in seen:
-                    queue.append(aliased)
-
+        candidates: list[str] = [name]
+        renamed = name
+        # Apply the reversed HF renaming chain once, in order, just like
+        # `transformers.rename_source_key()` walks WeightRenaming rules.
+        for renaming in self._runtime_to_checkpoint_renamings:
+            renamed, _ = renaming.rename_source_key(renamed)
+        if renamed and renamed not in candidates:
+            candidates.append(renamed)
         return candidates
 
     def _resolve_checkpoint_module_path(self, module_path: str) -> str:

@@ -1,3 +1,4 @@
+import copy
 import json
 from types import SimpleNamespace
 
@@ -496,16 +497,18 @@ def test_model_loader_uses_lazy_turtle_for_local_safetensors(monkeypatch, tmp_pa
         require_pkgs = []
         supports_desc_act = [True, False]
         support_offload_to_disk = True
-        checkpoint_path_aliases = (("shell_model", "model"),)
+        HF_CONVERSION_MAP_REVERSED = (
+            SimpleNamespace(source_patterns=["shell_model"], target_patterns=["model"]),
+        )
         config_class = None
 
         @staticmethod
         def before_model_load(*_args, **_kwargs):
             return None
 
-        @staticmethod
-        def resolve_hf_conversion_map_reversed(*_args, **_kwargs):
-            return None
+        @classmethod
+        def resolve_hf_conversion_map_reversed(cls, *_args, **_kwargs):
+            return copy.deepcopy(cls.HF_CONVERSION_MAP_REVERSED)
 
         def __init__(self, model, **kwargs):
             self.model = model
@@ -531,7 +534,13 @@ def test_model_loader_uses_lazy_turtle_for_local_safetensors(monkeypatch, tmp_pa
     assert shell_configs
     assert load_calls == []
     assert isinstance(instance.turtle_model, LazyTurtle)
-    assert instance.turtle_model._runtime_to_checkpoint_aliases == DummyQModel.checkpoint_path_aliases
+    assert [
+        (entry.source_patterns[0], entry.target_patterns[0])
+        for entry in instance.turtle_model._runtime_to_checkpoint_renamings
+    ] == [
+        (entry.source_patterns[0], entry.target_patterns[0])
+        for entry in DummyQModel.HF_CONVERSION_MAP_REVERSED
+    ]
     assert instance.turtle_model.config._experts_implementation == "linear_loop"
     assert instance.turtle_model.config is not instance.model.config
 
