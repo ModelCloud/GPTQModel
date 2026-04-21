@@ -10,7 +10,8 @@ from paroquant_first_layer_case_helper import (
     resolve_paroquant_first_layer_case_env,
     run_paroquant_first_layer_case_from_resolved,
 )
-from tabulate import tabulate
+
+from gptqmodel.utils.logger import render_table
 
 
 @pytest.mark.cuda
@@ -44,8 +45,8 @@ def test_llama3_2_paroquant_optimize_group_first_2_layers(capsys: pytest.Capture
         ["eval_wall_s", f"{float(result['eval_wall_s']):.3f}"],
         ["gsm8k_platinum_cot acc,num", f"{float(gsm8k_metrics['acc,num']):.6f}"],
     ]
-    summary_table = tabulate(summary_rows, headers=["metric", "value"], tablefmt="grid")
-    module_times = tabulate(
+    summary_table = render_table(summary_rows, headers=["metric", "value"], tablefmt="grid")
+    module_times = render_table(
         result["module_time_rows"],
         headers=["layer", "module", "feat", "samples", "loss", "time_s"],
         tablefmt="grid",

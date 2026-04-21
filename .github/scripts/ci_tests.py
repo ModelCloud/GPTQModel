@@ -9,6 +9,11 @@ import time
 import urllib.error
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from ci_common import append_github_env
 from ci_gpu import (
     build_job_request,
     extract_gpu_ids,
@@ -19,14 +24,6 @@ from ci_gpu import (
 ERROR_PATTERN = re.compile(
     r"nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in"
 )
-
-
-def append_github_env(name: str, value: str) -> None:
-    github_env = os.environ.get("GITHUB_ENV")
-    if not github_env:
-        return
-    with open(github_env, "a", encoding="utf-8") as fh:
-        fh.write(f"{name}={value}\n")
 
 
 def kill_process_group(proc: subprocess.Popen[str]) -> None:
@@ -51,19 +48,30 @@ def start_keepalive_monitor(
     def worker() -> None:
         print(f"start to keep alive... {keepalive_endpoint}")
         while not stop_event.wait(interval_sec):
-            try:
-                response = request_json(
-                    keepalive_endpoint,
-                    method="POST",
-                    body=keepalive_payload,
-                    timeout=10,
-                )
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-                print(f"Keepalive request failed: {exc}")
-                continue
+            response = None
+            retry_started_at = time.monotonic()
+            while not stop_event.is_set():
+                try:
+                    response = request_json(
+                        keepalive_endpoint,
+                        method="POST",
+                        body=keepalive_payload,
+                        timeout=10,
+                    )
+                    break
+                except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                    if time.monotonic() - retry_started_at >= 130:  # max 2 minutes
+                        break
+                    print(f"Keepalive request failed: {exc}")
+                    if stop_event.wait(3):
+                        return
+                    continue
 
-            resp = extract_gpu_ids(response)
-            if resp == "-1":
+            if response is None:
+                resp = None
+            else:
+                resp = extract_gpu_ids(response)
+            if response is None or resp == "-1":
                 print(f"Server returned {resp}, terminating job...")
                 state["forced_exit_code"] = 3
                 kill_process_group(proc)

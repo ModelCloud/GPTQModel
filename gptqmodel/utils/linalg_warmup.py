@@ -6,10 +6,15 @@ from __future__ import annotations
 
 import contextlib
 import threading
+from typing import TYPE_CHECKING
 
 import torch
 
 from .torch import TORCH_GTE_210
+
+
+if TYPE_CHECKING:
+    from .threadx import WarmUpCtx
 
 
 _GLOBAL_WARMUP_LOCK = threading.Lock()
@@ -67,12 +72,13 @@ def _run_qr(device: torch.device, dtype: torch.dtype) -> None:
     torch.linalg.qr(square)
 
 
-def run_torch_linalg_warmup(device: torch.device) -> None:
+def run_torch_linalg_warmup(device: torch.device, warmup_ctx: "WarmUpCtx") -> None:
     """
     Execute the torch.linalg operators used across the project once on the worker thread.
 
-    Serialized under a global lock to avoid races inside PyTorch's lazy wrappers. The warmup
-    still runs once per physical device so backend-specific handles are initialized where needed.
+    Serialized under a global lock to avoid races inside PyTorch's lazy wrappers.
+    The caller decides whether this invocation is running in device-wide or
+    thread-local warmup context via `warmup_ctx`.
     """
     with _GLOBAL_WARMUP_LOCK:
         if device.type == "mps":

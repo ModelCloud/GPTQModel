@@ -3,10 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import atexit
 import copy
 import json
 import math
 import os.path
+import shutil
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
@@ -20,10 +23,15 @@ from packaging import version
 
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
-from ..utils.random_str import get_random_string
 
 
 log = setup_logger()
+
+
+def _create_temp_offload_dir() -> str:
+    path = tempfile.mkdtemp(prefix="gptqmodel_")
+    atexit.register(shutil.rmtree, path, ignore_errors=True)
+    return path
 
 _DECODER_TARGET_DTYPE_MAP = {
     "float16": torch.float16,
@@ -2526,9 +2534,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         self.adapter = normalize_adapter(self.adapter)
 
         if self.offload_to_disk and not self.offload_to_disk_path:
-            path_key = f"{get_random_string()}-{get_random_string()}"
-            self.offload_to_disk_path = f"./gptqmodel_offload/{path_key}/"
-            log.info(f"QuantizeConfig: offload_to_disk_path auto set to `{self.offload_to_disk_path}`")
+            self.offload_to_disk_path = _create_temp_offload_dir()
+            log.info(f"QuantizeConfig: offload_to_disk_path auto set to temporary dir `{self.offload_to_disk_path}`")
 
         self.dense_vram_strategy = _normalize_dense_vram_strategy(self.dense_vram_strategy)
         self.dense_vram_strategy_devices = _normalize_strategy_devices(
@@ -3706,9 +3713,8 @@ class EXL3Config(BaseQuantizeConfig):
         self.adapter = normalize_adapter(self.adapter)
 
         if self.offload_to_disk and not self.offload_to_disk_path:
-            path_key = f"{get_random_string()}-{get_random_string()}"
-            self.offload_to_disk_path = f"./gptqmodel_offload/{path_key}/"
-            log.info(f"QuantizeConfig: offload_to_disk_path auto set to `{self.offload_to_disk_path}`")
+            self.offload_to_disk_path = _create_temp_offload_dir()
+            log.info(f"QuantizeConfig: offload_to_disk_path auto set to temporary dir `{self.offload_to_disk_path}`")
 
         self.dense_vram_strategy = _normalize_dense_vram_strategy(self.dense_vram_strategy)
         self.dense_vram_strategy_devices = _normalize_strategy_devices(

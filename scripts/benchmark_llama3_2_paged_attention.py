@@ -428,41 +428,38 @@ def benchmark_paged_mode_subprocess(
     max_new_tokens: int,
     gpu: int,
 ) -> BenchmarkResult:
-    with tempfile.NamedTemporaryFile(prefix="paged_benchmark_", suffix=".json", delete=False) as handle:
-        result_path = Path(handle.name)
+    with tempfile.TemporaryDirectory(prefix="paged_benchmark_") as temp_dir:
+        result_path = Path(temp_dir) / "result.json"
 
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "--gpu",
-        str(gpu),
-        "--internal-paged-result-path",
-        str(result_path),
-        "--artifact-dir",
-        str(artifact_dir),
-        "--internal-prompts-json",
-        json.dumps(prompts),
-        "--internal-mode-name",
-        mode_name,
-        "--internal-attn-implementation",
-        attn_implementation,
-        "--internal-warmup-tokens",
-        str(warmup_tokens),
-        "--internal-max-new-tokens",
-        str(max_new_tokens),
-    ]
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
-    if completed.returncode != 0:
-        raise RuntimeError(
-            "Paged benchmark subprocess failed.\n"
-            f"STDOUT:\n{completed.stdout}\n"
-            f"STDERR:\n{completed.stderr}"
-        )
-    try:
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--gpu",
+            str(gpu),
+            "--internal-paged-result-path",
+            str(result_path),
+            "--artifact-dir",
+            str(artifact_dir),
+            "--internal-prompts-json",
+            json.dumps(prompts),
+            "--internal-mode-name",
+            mode_name,
+            "--internal-attn-implementation",
+            attn_implementation,
+            "--internal-warmup-tokens",
+            str(warmup_tokens),
+            "--internal-max-new-tokens",
+            str(max_new_tokens),
+        ]
+        completed = subprocess.run(command, check=False, capture_output=True, text=True)
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "Paged benchmark subprocess failed.\n"
+                f"STDOUT:\n{completed.stdout}\n"
+                f"STDERR:\n{completed.stderr}"
+            )
         payload = json.loads(result_path.read_text(encoding="utf-8"))
         return BenchmarkResult(**payload)
-    finally:
-        result_path.unlink(missing_ok=True)
 
 
 def benchmark_mode(
@@ -827,42 +824,41 @@ def benchmark_stream_paged_mode_subprocess(
     use_async_batching: bool,
     gpu: int,
 ) -> StreamBenchmarkResult:
-    with tempfile.NamedTemporaryFile(prefix="stream_workload_", suffix=".json", delete=False) as workload_handle:
-        workload_path = Path(workload_handle.name)
-    with tempfile.NamedTemporaryFile(prefix="stream_result_", suffix=".json", delete=False) as result_handle:
-        result_path = Path(result_handle.name)
+    with tempfile.TemporaryDirectory(prefix="stream_benchmark_") as temp_dir:
+        temp_root = Path(temp_dir)
+        workload_path = temp_root / "workload.json"
+        result_path = temp_root / "result.json"
 
-    workload_payload = {
-        "arrival_gap_ms": arrival_gap_ms,
-        "prompt_targets": prompt_targets,
-        "scheduler_name": scheduler_name,
-        "use_async_batching": use_async_batching,
-        "requests": [asdict(item) for item in workload],
-    }
-    workload_path.write_text(json.dumps(workload_payload), encoding="utf-8")
+        workload_payload = {
+            "arrival_gap_ms": arrival_gap_ms,
+            "prompt_targets": prompt_targets,
+            "scheduler_name": scheduler_name,
+            "use_async_batching": use_async_batching,
+            "requests": [asdict(item) for item in workload],
+        }
+        workload_path.write_text(json.dumps(workload_payload), encoding="utf-8")
 
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "--gpu",
-        str(gpu),
-        "--artifact-dir",
-        str(artifact_dir),
-        "--internal-stream-result-path",
-        str(result_path),
-        "--internal-stream-workload-path",
-        str(workload_path),
-        "--internal-mode-name",
-        mode_name,
-        "--internal-attn-implementation",
-        attn_implementation,
-        "--internal-warmup-tokens",
-        str(warmup_tokens),
-        "--internal-max-new-tokens",
-        str(max_new_tokens),
-    ]
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
-    try:
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--gpu",
+            str(gpu),
+            "--artifact-dir",
+            str(artifact_dir),
+            "--internal-stream-result-path",
+            str(result_path),
+            "--internal-stream-workload-path",
+            str(workload_path),
+            "--internal-mode-name",
+            mode_name,
+            "--internal-attn-implementation",
+            attn_implementation,
+            "--internal-warmup-tokens",
+            str(warmup_tokens),
+            "--internal-max-new-tokens",
+            str(max_new_tokens),
+        ]
+        completed = subprocess.run(command, check=False, capture_output=True, text=True)
         if completed.returncode != 0:
             raise RuntimeError(
                 "Stream paged benchmark subprocess failed.\n"
@@ -871,9 +867,6 @@ def benchmark_stream_paged_mode_subprocess(
             )
         payload = json.loads(result_path.read_text(encoding="utf-8"))
         return StreamBenchmarkResult(**payload)
-    finally:
-        workload_path.unlink(missing_ok=True)
-        result_path.unlink(missing_ok=True)
 
 
 def benchmark_stream_mode(

@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import math
 import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -63,6 +65,17 @@ QUICK_CASES: tuple[BenchCase, ...] = (
     BenchCase("batch_h4096_r512", rows=512, hidden=4096),
     BenchCase("batch_h8192_r1024", rows=1024, hidden=8192),
 )
+
+_TEMP_BUILD_DIRS: list[tempfile.TemporaryDirectory[str]] = []
+
+
+def _register_temp_build_dir(prefix: str) -> Path:
+    temp_dir = tempfile.TemporaryDirectory(prefix=prefix)
+    _TEMP_BUILD_DIRS.append(temp_dir)
+    return Path(temp_dir.name)
+
+
+atexit.register(lambda: [temp_dir.cleanup() for temp_dir in reversed(_TEMP_BUILD_DIRS)])
 
 
 def parse_args() -> argparse.Namespace:
@@ -292,8 +305,8 @@ def main() -> int:
 
     device = torch.device(f"cuda:{args.device}")
     if args.force_rebuild_extension:
-        build_root = Path("/tmp") / (
-            f"paroquant_ext_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
+        build_root = _register_temp_build_dir(
+            f"paroquant_ext_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}_"
         )
         os.environ["GPTQMODEL_PAROQUANT_BUILD_ROOT"] = str(build_root)
         os.environ["GPTQMODEL_PAROQUANT_FORCE_REBUILD"] = "1"

@@ -113,9 +113,9 @@ class TestEoraPostQuant(ModelTest):
             #
             #     print('--------Quant/EoRA Config ---------')
             #
-            #     # Convert the dictionary to a list of lists for tabulate
+            #     # Render the config dictionary as a two-column table
             #     table_data = [[key, value] for key, value in config_dict.items()]
-            #     print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
+            #     print(render_table(table_data, headers=["Key", "Value"], tablefmt="grid"))
             #
             #     print('--------Eval Base Result---------')
             #     print(make_table(base_bench))

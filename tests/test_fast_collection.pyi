@@ -7,11 +7,11 @@ from typing import Callable
 
 import pytest
 import torch
-from tabulate import tabulate
 from torch.nn.parallel import replicate as torch_replicate
 
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.torch import timed_gc_collect
 
 ######### test_gptq_queue.py ##########
@@ -271,7 +271,7 @@ def test_torch_replicate_benchmark():
         "mem_max_MB",
     ]
 
-    print(tabulate(table, headers=headers, floatfmt=".4f"))
+    print(render_table(table, headers=headers, floatfmt=".4f"))
 
     assert replicate_summary["time_avg"] <= deepcopy_summary["time_avg"], (
         "replicate slower than deepcopy: "

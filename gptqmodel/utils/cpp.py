@@ -5,17 +5,16 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import logging
 import math
 import os
-import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -60,6 +59,8 @@ _NVCC_VERSION_CACHE: tuple[int, int] | None = None
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
 # the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
 _DEFAULT_NVCC_THREADS = "8"
+_GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
+_TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
 
 
 def _nvcc_path() -> Optional[str]:
@@ -271,6 +272,9 @@ class _CompileProgressDisplay:
 def default_torch_ops_build_root(subdir: str) -> Path:
     """Return the default on-disk cache root for torch.ops JIT extensions."""
 
+    override_root = os.getenv(_TORCH_OPS_BUILD_ROOT_ENV)
+    if override_root:
+        return Path(override_root).expanduser() / subdir
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
 
 
@@ -372,7 +376,7 @@ def cuda_include_paths_with_fallback(
     return _dedupe_path_strings(resolved_include_paths)
 
 
-_CUDA_ARCH_TOKEN_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\+PTX)?$")
+_CUDA_ARCH_TOKEN_RE = pcre.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\+PTX)?$")
 
 
 def _supported_cuda_arch_pairs() -> list[tuple[int, int]]:
@@ -412,7 +416,7 @@ def _visible_cuda_arch_tokens() -> list[str]:
 def _merge_cuda_arch_override_with_visible_caps(raw_override: str) -> str:
     requested_tokens: list[str] = []
     requested_bases: set[str] = set()
-    for token in re.split(r"[;\s,]+", raw_override.strip()):
+    for token in pcre.split(r"[;\s,]+", raw_override.strip()):
         if not token:
             continue
         requested_tokens.append(token)
@@ -758,6 +762,8 @@ class TorchOpsJitExtension:
     def force_rebuild_enabled(self) -> bool:
         """Check whether this extension should ignore and replace cached binaries."""
 
+        if env_flag(_GLOBAL_KERNEL_REBUILD_ENV, default=False):
+            return True
         if not self.force_rebuild_env:
             return False
         return env_flag(self.force_rebuild_env, default=False)
