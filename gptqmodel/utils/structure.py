@@ -25,11 +25,15 @@ Notes:
 - Large layer stacks are capped to the first 4 children by default.
 """
 
+import atexit
 import copy
+import gc
 import inspect
 import json
 import os
 import re
+import shutil
+import tempfile
 import threading
 from dataclasses import dataclass
 from importlib import import_module
@@ -670,7 +674,7 @@ class _LazyWeightRenaming:
 
 
 class LazyTurtle:
-    """Checkpoint-backed shell materializer for local safetensors models.
+    """Checkpoint-backed shell materializer for local dense checkpoints.
 
     The traditional offload path builds a meta shell model and then instantiates
     a full CPU "turtle" model from `from_pretrained()` so submodules can be
@@ -678,11 +682,16 @@ class LazyTurtle:
     load is dominated by walking every shard.
 
     This source keeps only the checkpoint index in memory and materializes the
-    requested shell submodule directly from the relevant safetensors shards.
+    requested shell submodule directly from the relevant safetensors shards. If
+    a local checkpoint only provides PyTorch pickle weights (`.bin`, `.pt`,
+    `.pth`, `.ckpt`), LazyTurtle converts them into temporary safetensors once
+    and then reads from that converted directory.
     """
 
     supports_reload = False
     is_lazy_checkpoint_source = True
+    _FALLBACK_CHECKPOINT_EXTENSIONS = (".bin", ".pt", ".pth", ".ckpt")
+    _TEMPDIR_PREFIX = "lazyturtle-"
 
     def __init__(
         self,
@@ -694,10 +703,12 @@ class LazyTurtle:
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
     ) -> None:
-        self.model_local_path = model_local_path
         self.config = copy.deepcopy(config)
         self._model_init_kwargs = dict(model_init_kwargs or {})
-        self._weight_map = self._load_weight_map(model_local_path)
+        self.model_local_path, self._weight_map = self._resolve_checkpoint_source(
+            model_local_path=model_local_path,
+            target_model=target_model,
+        )
         # Lazy checkpoint name resolution must come from model-definition truth.
         self._module_tree = copy.deepcopy(module_tree)
         self._module_tree_layer_prefix, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
@@ -766,6 +777,91 @@ class LazyTurtle:
         if hasattr(target_model, "tie_weights"):
             target_model.tie_weights()
         return target_submodule
+
+    def _convert_checkpoint_source_to_safetensors(
+        self,
+        *,
+        model_local_path: str,
+        target_model: Optional[nn.Module],
+    ) -> str:
+        from .model import get_checkpoints
+
+        _, resolved_archive_file, _ = get_checkpoints(
+            model_local_path,
+            extensions=list(self._FALLBACK_CHECKPOINT_EXTENSIONS),
+            possible_model_basenames=["model", "pytorch_model"],
+        )
+        tempdir = tempfile.mkdtemp(prefix=self._TEMPDIR_PREFIX)
+        # CI jobs only guarantee writes under a temp root, so register best-effort
+        # cleanup for the converted checkpoint directory at interpreter exit.
+        atexit.register(shutil.rmtree, tempdir, ignore_errors=True)
+
+        log.info(
+            "LazyTurtle: no safetensors found under `%s`; converting `%s` into temporary safetensors at `%s`.",
+            model_local_path,
+            resolved_archive_file,
+            tempdir,
+        )
+
+        model_cls = type(target_model) if target_model is not None else None
+        if model_cls is None or not callable(getattr(model_cls, "from_pretrained", None)):
+            raise TypeError("LazyTurtle: transformers-based fallback requires a target model class with from_pretrained().")
+
+        load_kwargs = dict(self._model_init_kwargs)
+        load_kwargs.pop("device_map", None)
+        # The temporary safetensors export needs a full CPU materialization pass,
+        # not the shell/offload settings used by the lazy runtime itself.
+        load_kwargs["low_cpu_mem_usage"] = False
+
+        loaded_model = None
+        try:
+            try:
+                loaded_model = model_cls.from_pretrained(
+                    model_local_path,
+                    config=copy.deepcopy(self.config),
+                    **load_kwargs,
+                )
+            except TypeError:
+                loaded_model = model_cls.from_pretrained(
+                    model_local_path,
+                    **load_kwargs,
+                )
+
+            if not callable(getattr(loaded_model, "save_pretrained", None)):
+                raise TypeError(
+                    f"LazyTurtle: `{model_cls.__name__}` does not provide save_pretrained(), "
+                    "cannot convert checkpoint via transformers full-model load."
+                )
+            loaded_model.save_pretrained(tempdir, safe_serialization=True)
+            return tempdir
+        except Exception:
+            # If transformers reload/export fails, do not leave behind a partial
+            # temp directory because LazyTurtle will be disabled for this model.
+            shutil.rmtree(tempdir, ignore_errors=True)
+            raise
+        finally:
+            if loaded_model is not None:
+                del loaded_model
+            gc.collect()
+
+    def _resolve_checkpoint_source(
+        self,
+        *,
+        model_local_path: str,
+        target_model: Optional[nn.Module],
+    ) -> tuple[str, Dict[str, str]]:
+        try:
+            weight_map = self._load_weight_map(model_local_path)
+            return model_local_path, weight_map
+        except FileNotFoundError:
+            # Keep the fast path untouched for native safetensors models and only
+            # pay the conversion cost when the local checkpoint is pickle-based.
+            tempdir = self._convert_checkpoint_source_to_safetensors(
+                model_local_path=model_local_path,
+                target_model=target_model,
+            )
+            weight_map = self._load_weight_map(tempdir)
+            return tempdir, weight_map
 
     def checkpoint_tensors_for_submodule(
         self,
