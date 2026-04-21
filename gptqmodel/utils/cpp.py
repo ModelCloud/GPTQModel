@@ -53,8 +53,11 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
     flags=pcre.Flag.MULTILINE,
 )
 _NVCC_RELEASE_PATTERN = pcre.compile(r"release\s+(\d+)\.(\d+)")
+_NVCC_ARCH_PATTERN = pcre.compile(r"compute_(?P<major>\d+)(?P<minor>\d+)(?P<suffix>[a-z]?)")
 _NVCC_VERSION_LOCK = threading.Lock()
 _NVCC_VERSION_CACHE: tuple[int, int] | None = None
+_NVCC_SUPPORTED_ARCHS_LOCK = threading.Lock()
+_NVCC_SUPPORTED_ARCHS_CACHE: tuple[tuple[str, ...], tuple[str, ...]] | None = None
 # Default NVCC internal threading for JIT builds. This is based on clean-build
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
 # the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
@@ -63,26 +66,46 @@ _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 _TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
 
 
+def _nvcc_candidate_paths() -> list[str]:
+    """Return the nvcc locations we are willing to probe, in priority order."""
+
+    candidates: list[str] = []
+
+    path_nvcc = shutil.which("nvcc")
+    if path_nvcc:
+        candidates.append(path_nvcc)
+
+    if CUDA_HOME:
+        candidates.append(str(Path(CUDA_HOME).expanduser() / "bin" / "nvcc"))
+
+    cuda_path = os.getenv("CUDA_PATH")
+    if cuda_path:
+        candidates.append(str(Path(cuda_path).expanduser() / "bin" / "nvcc"))
+
+    candidates.append("/usr/local/cuda/bin/nvcc")
+    return _dedupe_path_strings(candidates)
+
+
 def _nvcc_path() -> Optional[str]:
-    return shutil.which("nvcc")
+    candidates = _nvcc_candidate_paths()
+    return candidates[0] if candidates else None
 
 
 def _nvcc_text(*args: str) -> str:
-    nvcc_path = _nvcc_path()
-    if not nvcc_path:
-        return ""
+    """Run one nvcc subcommand, falling back across common toolkit locations."""
 
-    try:
-        result = subprocess.run(
-            [nvcc_path, *args],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
-        return ""
-
-    return ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    for nvcc_path in _nvcc_candidate_paths():
+        try:
+            result = subprocess.run(
+                [nvcc_path, *args],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            continue
+        return ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    return ""
 
 
 def _nvcc_version() -> tuple[int, int]:
@@ -376,7 +399,182 @@ def cuda_include_paths_with_fallback(
     return _dedupe_path_strings(resolved_include_paths)
 
 
-_CUDA_ARCH_TOKEN_RE = pcre.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\+PTX)?$")
+_CUDA_ARCH_TOKEN_RE = pcre.compile(
+    r"^(?P<major>\d+)\.(?P<minor>\d+)(?P<suffix>[a-z]?)(?P<ptx>\+PTX)?$"
+)
+
+
+def _parse_cuda_arch_token(token: str) -> tuple[int, int, str, bool] | None:
+    """Parse one `TORCH_CUDA_ARCH_LIST` token into comparable pieces."""
+
+    match = _CUDA_ARCH_TOKEN_RE.match(str(token).strip())
+    if match is None:
+        return None
+    return (
+        int(match.group("major")),
+        int(match.group("minor")),
+        match.group("suffix") or "",
+        bool(match.group("ptx")),
+    )
+
+
+def _cuda_arch_base(token: str) -> str | None:
+    """Normalize one arch token down to its base SM identifier."""
+
+    parsed = _parse_cuda_arch_token(token)
+    if parsed is None:
+        return None
+    major, minor, suffix, _has_ptx = parsed
+    return f"{major}.{minor}{suffix}"
+
+
+def _cuda_arch_sort_key(token: str) -> tuple[int, int, int, str]:
+    """Sort arch tokens by capability first, then by specialized suffix."""
+
+    parsed = _parse_cuda_arch_token(token)
+    if parsed is None:
+        return (-1, -1, -1, str(token))
+    major, minor, suffix, _has_ptx = parsed
+    return (major, minor, 1 if suffix else 0, suffix)
+
+
+def _sorted_cuda_arch_tokens(tokens: Sequence[str]) -> list[str]:
+    """Deduplicate arch tokens and return them in capability order."""
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        normalized = str(token).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return sorted(deduped, key=_cuda_arch_sort_key)
+
+
+def _ordered_cuda_arch_tokens(tokens: Sequence[str]) -> list[str]:
+    """Deduplicate arch tokens while preserving caller-specified priority."""
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        normalized = str(token).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _default_visible_cuda_arch_list() -> str | None:
+    """Build Torch's implicit arch list from the currently visible CUDA devices."""
+
+    tokens = _sorted_cuda_arch_tokens(_visible_cuda_arch_tokens())
+    if not tokens:
+        return None
+
+    tokens[-1] = f"{tokens[-1]}+PTX"
+    return ";".join(tokens)
+
+
+def _nvcc_supported_arch_tokens() -> tuple[str, ...]:
+    """Query the local nvcc for the concrete SM targets it can compile."""
+
+    global _NVCC_SUPPORTED_ARCHS_CACHE
+
+    candidates = tuple(_nvcc_candidate_paths())
+    with _NVCC_SUPPORTED_ARCHS_LOCK:
+        if _NVCC_SUPPORTED_ARCHS_CACHE is not None and _NVCC_SUPPORTED_ARCHS_CACHE[0] == candidates:
+            return _NVCC_SUPPORTED_ARCHS_CACHE[1]
+
+        supported_tokens: tuple[str, ...] = ()
+        for nvcc_path in candidates:
+            try:
+                result = subprocess.run(
+                    [nvcc_path, "--list-gpu-arch"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except OSError:
+                continue
+
+            tokens: list[str] = []
+            for match in _NVCC_ARCH_PATTERN.finditer((result.stdout or "") + "\n" + (result.stderr or "")):
+                tokens.append(
+                    f"{int(match.group('major'))}.{int(match.group('minor'))}{match.group('suffix') or ''}"
+                )
+            if tokens:
+                supported_tokens = tuple(_sorted_cuda_arch_tokens(tokens))
+                break
+
+        _NVCC_SUPPORTED_ARCHS_CACHE = (candidates, supported_tokens)
+        return supported_tokens
+
+
+def _highest_forward_compatible_nvcc_arch(supported_tokens: Sequence[str]) -> str | None:
+    """Pick the newest non-specialized SM target suitable for PTX fallback."""
+
+    if not supported_tokens:
+        return None
+
+    non_specialized = [
+        token for token in supported_tokens if not (_parse_cuda_arch_token(token) or (0, 0, "", False))[2]
+    ]
+    candidates = non_specialized or list(supported_tokens)
+    return max(candidates, key=_cuda_arch_sort_key, default=None)
+
+
+def _sanitize_cuda_arch_list_for_local_nvcc(raw_arch_list: str | None) -> str | None:
+    """Drop nvcc-unsupported SMs while keeping the caller's target ordering intact."""
+
+    if not raw_arch_list:
+        return raw_arch_list
+
+    supported_tokens = _nvcc_supported_arch_tokens()
+    if not supported_tokens:
+        return raw_arch_list
+
+    supported_bases = set(supported_tokens)
+    requested_tokens = [token for token in pcre.split(r"[;\s,]+", raw_arch_list.strip()) if token]
+    if not requested_tokens:
+        return raw_arch_list
+
+    kept_tokens: list[str] = []
+    kept_bases: set[str] = set()
+    dropped_highest_ptx = False
+    highest_requested = max(
+        (token for token in requested_tokens if _parse_cuda_arch_token(token) is not None),
+        key=_cuda_arch_sort_key,
+        default=None,
+    )
+
+    for token in requested_tokens:
+        base = _cuda_arch_base(token)
+        if base is None:
+            kept_tokens.append(token)
+            continue
+        if base in supported_bases:
+            kept_tokens.append(token)
+            kept_bases.add(base)
+            continue
+        if token == highest_requested and token.endswith("+PTX"):
+            dropped_highest_ptx = True
+
+    if dropped_highest_ptx or not any(_parse_cuda_arch_token(token) is not None for token in kept_tokens):
+        fallback = _highest_forward_compatible_nvcc_arch(supported_tokens)
+        if fallback is not None:
+            fallback_ptx = f"{fallback}+PTX"
+            if fallback in kept_bases:
+                for index in range(len(kept_tokens) - 1, -1, -1):
+                    if _cuda_arch_base(kept_tokens[index]) == fallback:
+                        kept_tokens[index] = fallback_ptx
+                        break
+            else:
+                kept_tokens.append(fallback_ptx)
+
+    sanitized_tokens = _ordered_cuda_arch_tokens(token for token in kept_tokens if token)
+    return ";".join(sanitized_tokens) or raw_arch_list
 
 
 def _supported_cuda_arch_pairs() -> list[tuple[int, int]]:
@@ -414,15 +612,17 @@ def _visible_cuda_arch_tokens() -> list[str]:
 
 
 def _merge_cuda_arch_override_with_visible_caps(raw_override: str) -> str:
+    """Append any visible GPU capability omitted by a manual arch override."""
+
     requested_tokens: list[str] = []
     requested_bases: set[str] = set()
     for token in pcre.split(r"[;\s,]+", raw_override.strip()):
         if not token:
             continue
         requested_tokens.append(token)
-        match = _CUDA_ARCH_TOKEN_RE.match(token)
-        if match:
-            requested_bases.add(f"{int(match.group('major'))}.{int(match.group('minor'))}")
+        base = _cuda_arch_base(token)
+        if base:
+            requested_bases.add(base)
 
     for token in _visible_cuda_arch_tokens():
         if token not in requested_bases:
@@ -432,18 +632,33 @@ def _merge_cuda_arch_override_with_visible_caps(raw_override: str) -> str:
     return ";".join(requested_tokens)
 
 
+def _effective_cuda_arch_list(*, merge_visible_caps: bool) -> str | None:
+    """Resolve the final arch list Torch should expose to the local nvcc."""
+
+    override = os.getenv("TORCH_CUDA_ARCH_LIST")
+    if override:
+        if not merge_visible_caps:
+            return override
+        raw_arch_list = _merge_cuda_arch_override_with_visible_caps(override)
+    else:
+        raw_arch_list = _default_visible_cuda_arch_list()
+    return _sanitize_cuda_arch_list_for_local_nvcc(raw_arch_list)
+
+
 def _effective_cuda_arch_flags(*, merge_visible_caps: bool) -> list[str]:
     """Return the effective NVCC arch flags Torch will emit for this host."""
 
     override = os.getenv("TORCH_CUDA_ARCH_LIST")
+    effective_arch_list = _effective_cuda_arch_list(merge_visible_caps=merge_visible_caps)
     try:
-        if override and merge_visible_caps:
-            merged_override = _merge_cuda_arch_override_with_visible_caps(override)
-            if merged_override != override:
-                os.environ["TORCH_CUDA_ARCH_LIST"] = merged_override
-                try:
-                    return list(_get_cuda_arch_flags())
-                finally:
+        if effective_arch_list and effective_arch_list != override:
+            os.environ["TORCH_CUDA_ARCH_LIST"] = effective_arch_list
+            try:
+                return list(_get_cuda_arch_flags())
+            finally:
+                if override is None:
+                    os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
+                else:
                     os.environ["TORCH_CUDA_ARCH_LIST"] = override
         return list(_get_cuda_arch_flags())
     except Exception:
@@ -451,24 +666,23 @@ def _effective_cuda_arch_flags(*, merge_visible_caps: bool) -> list[str]:
 
 
 @contextmanager
-def _temporary_merged_cuda_arch_override(*, enabled: bool = True):
-    """Temporarily include the visible CUDA capability in manual arch overrides."""
+def _temporary_effective_cuda_arch_list(*, merge_visible_caps: bool = True):
+    """Temporarily expose the compile arch list that the local nvcc can accept."""
 
     override = os.getenv("TORCH_CUDA_ARCH_LIST")
-    if not enabled or not override:
+    effective_arch_list = _effective_cuda_arch_list(merge_visible_caps=merge_visible_caps)
+    if not effective_arch_list or effective_arch_list == override:
         yield
         return
 
-    merged_override = _merge_cuda_arch_override_with_visible_caps(override)
-    if merged_override == override:
-        yield
-        return
-
-    os.environ["TORCH_CUDA_ARCH_LIST"] = merged_override
+    os.environ["TORCH_CUDA_ARCH_LIST"] = effective_arch_list
     try:
         yield
     finally:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = override
+        if override is None:
+            os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
+        else:
+            os.environ["TORCH_CUDA_ARCH_LIST"] = override
 
 
 def resolved_cuda_arch_flags() -> list[str]:
@@ -919,8 +1133,8 @@ class TorchOpsJitExtension:
                 extra_ldflags = self._resolve_sequence(self.extra_ldflags)
                 if extra_ldflags:
                     kwargs["extra_ldflags"] = extra_ldflags
-                with _temporary_merged_cuda_arch_override(
-                    enabled=self.merge_visible_cuda_arch_override
+                with _temporary_effective_cuda_arch_list(
+                    merge_visible_caps=self.merge_visible_cuda_arch_override
                 ):
                     load(**kwargs)
                 build_invocation_succeeded = True

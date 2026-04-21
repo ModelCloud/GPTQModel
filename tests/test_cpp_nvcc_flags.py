@@ -12,6 +12,7 @@ import gptqmodel.utils.cpp as cpp_utils
 
 def _reset_nvcc_caches() -> None:
     cpp_utils._NVCC_VERSION_CACHE = None
+    cpp_utils._NVCC_SUPPORTED_ARCHS_CACHE = None
 
 
 def test_is_nvcc_compatible_uses_version_boundary(monkeypatch):
@@ -48,9 +49,34 @@ def test_is_nvcc_compatible_rejects_older_nvcc(monkeypatch):
 def test_is_nvcc_compatible_rejects_missing_nvcc(monkeypatch):
     _reset_nvcc_caches()
     monkeypatch.setattr(cpp_utils.shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(cpp_utils, "CUDA_HOME", None)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+
+    def fake_run(*_args, **_kwargs):
+        raise OSError("nvcc missing")
+
+    monkeypatch.setattr(cpp_utils.subprocess, "run", fake_run)
 
     assert cpp_utils.is_nvcc_compatible() is False
     assert cpp_utils._NVCC_VERSION_CACHE == (0, 0)
+
+
+def test_nvcc_text_falls_back_to_cuda_home_when_nvcc_not_on_path(monkeypatch):
+    _reset_nvcc_caches()
+    monkeypatch.setattr(cpp_utils.shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(cpp_utils, "CUDA_HOME", "/usr/local/cuda")
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(args, capture_output, text, check):
+        del capture_output, text, check
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="Cuda compilation tools, release 12.8, V12.8.89", stderr="")
+
+    monkeypatch.setattr(cpp_utils.subprocess, "run", fake_run)
+
+    assert "release 12.8" in cpp_utils._nvcc_text("--version")
+    assert calls == [("/usr/local/cuda/bin/nvcc", "--version")]
 
 
 def test_is_nvcc_compatible_probes_nvcc_once_with_concurrent_callers(monkeypatch):

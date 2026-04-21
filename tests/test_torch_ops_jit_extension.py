@@ -708,6 +708,29 @@ def test_resolved_cuda_arch_flags_appends_visible_capability_missing_from_overri
     assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.0 8.6"
 
 
+def test_resolved_cuda_arch_flags_downgrades_unsupported_visible_capability_for_local_nvcc(monkeypatch):
+    """Guard JIT arch resolution so newer visible GPUs do not emit nvcc-incompatible SM targets."""
+
+    monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_device_capability", lambda device_index=0: (12, 0))
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_arch_list", lambda: ["sm_80", "sm_86", "sm_89", "sm_120"])
+    monkeypatch.setattr(cpp_module, "_nvcc_supported_arch_tokens", lambda: ("8.0", "8.6", "8.9"))
+
+    seen = {}
+
+    def fake_get_cuda_arch_flags():
+        seen["arch_list"] = os.environ["TORCH_CUDA_ARCH_LIST"]
+        return [seen["arch_list"]]
+
+    monkeypatch.setattr(cpp_module, "_get_cuda_arch_flags", fake_get_cuda_arch_flags)
+
+    assert cpp_module.resolved_cuda_arch_flags() == ["8.9+PTX"]
+    assert seen["arch_list"] == "8.9+PTX"
+    assert "TORCH_CUDA_ARCH_LIST" not in os.environ
+
+
 def test_torch_ops_jit_extension_cuda_fingerprint_tracks_visible_capabilities_even_with_override(monkeypatch, tmp_path):
     """Guard cache keys so fixed arch overrides cannot reuse binaries across omitted visible GPU targets."""
 
@@ -726,6 +749,39 @@ def test_torch_ops_jit_extension_cuda_fingerprint_tracks_visible_capabilities_ev
     second_build_root = loader.build_root()
 
     assert first_build_root != second_build_root
+
+
+def test_torch_ops_jit_extension_downgrades_unsupported_visible_capability_during_compile(monkeypatch, tmp_path):
+    """Guard CUDA JIT builds so local nvcc never receives unsupported `sm_120` targets from Torch."""
+
+    loader = _make_loader(
+        tmp_path,
+        requires_cuda=True,
+    )
+
+    state = {"ready": False}
+    compile_arch_lists = []
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_device_capability", lambda device_index=0: (12, 0))
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_arch_list", lambda: ["sm_80", "sm_86", "sm_89", "sm_120"])
+    monkeypatch.setattr(cpp_module, "_nvcc_supported_arch_tokens", lambda: ("8.0", "8.6", "8.9"))
+
+    def fake_compile(**kwargs):
+        del kwargs
+        compile_arch_lists.append(os.environ["TORCH_CUDA_ARCH_LIST"])
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert compile_arch_lists == ["8.9+PTX"]
+    assert "TORCH_CUDA_ARCH_LIST" not in os.environ
 
 
 def test_torch_ops_jit_extension_cuda_fingerprint_tracks_detected_include_paths(monkeypatch, tmp_path):
