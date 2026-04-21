@@ -1184,8 +1184,8 @@ class ModelTest(unittest.TestCase):
             return contextlib.nullcontext(self.SAVE_PATH), self.SAVE_PATH, None
 
         if need_eval:
-            tmp_dir = tempfile.mkdtemp()
-            return contextlib.nullcontext(tmp_dir), tmp_dir, lambda: shutil.rmtree(tmp_dir, ignore_errors=True)
+            tmp_context = tempfile.TemporaryDirectory()
+            return contextlib.nullcontext(tmp_context.name), tmp_context.name, tmp_context.cleanup
 
         tmp_context = tempfile.TemporaryDirectory()
         return tmp_context, tmp_context.name, tmp_context.cleanup

@@ -12,7 +12,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import atexit  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
-import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import threading  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
@@ -44,18 +43,19 @@ AWQ_GROUP_SIZE = 128
 class QuantizedAwqArtifact:
     model_path: str
     quantize_config_dict: dict
+    temp_dir: tempfile.TemporaryDirectory[str]
 
 
 _TOKENIZER = None
 _CALIBRATION_DATASETS: dict[int, object] = {}
 _ARTIFACTS: dict[tuple[object, int, int], QuantizedAwqArtifact] = {}
-_ARTIFACT_ROOTS: list[str] = []
+_ARTIFACT_TEMPDIRS: list[tempfile.TemporaryDirectory[str]] = []
 _ARTIFACT_LOCK = threading.Lock()
 
 
 def _cleanup_artifacts() -> None:
-    for artifact_root in reversed(_ARTIFACT_ROOTS):
-        shutil.rmtree(artifact_root, ignore_errors=True)
+    for temp_dir in reversed(_ARTIFACT_TEMPDIRS):
+        temp_dir.cleanup()
 
 
 atexit.register(_cleanup_artifacts)
@@ -127,7 +127,8 @@ def get_quantized_awq_artifact(checkpoint_format: FORMAT, group_size: int = AWQ_
         model.quantize(get_awq_calibration_dataset(), batch_size=1, calibration_concat_size=0)
 
         format_name = getattr(checkpoint_format, "value", str(checkpoint_format)).lower()
-        artifact_root = tempfile.mkdtemp(prefix=f"awq_{format_name}_")
+        temp_dir = tempfile.TemporaryDirectory(prefix=f"awq_{format_name}_")
+        artifact_root = temp_dir.name
         model.save(artifact_root)
 
         with open(Path(artifact_root) / QUANT_CONFIG_FILENAME, "r", encoding="utf-8") as config_file:
@@ -139,10 +140,11 @@ def get_quantized_awq_artifact(checkpoint_format: FORMAT, group_size: int = AWQ_
 
         del model
 
-        _ARTIFACT_ROOTS.append(artifact_root)
+        _ARTIFACT_TEMPDIRS.append(temp_dir)
         cached_artifact = QuantizedAwqArtifact(
             model_path=artifact_root,
             quantize_config_dict=file_dict,
+            temp_dir=temp_dir,
         )
         _ARTIFACTS[artifact_key] = cached_artifact
         return cached_artifact

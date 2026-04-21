@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +31,17 @@ CASES = {
     "prefill_q_proj": BenchCase("prefill_q_proj", batch=1, seq=128, in_features=2048, out_features=2048),
     "batched_down_proj": BenchCase("batched_down_proj", batch=4, seq=128, in_features=8192, out_features=2048),
 }
+
+_TEMP_BUILD_DIRS: list[tempfile.TemporaryDirectory[str]] = []
+
+
+def _register_temp_build_dir(prefix: str) -> Path:
+    temp_dir = tempfile.TemporaryDirectory(prefix=prefix)
+    _TEMP_BUILD_DIRS.append(temp_dir)
+    return Path(temp_dir.name)
+
+
+atexit.register(lambda: [temp_dir.cleanup() for temp_dir in reversed(_TEMP_BUILD_DIRS)])
 
 
 def _resolve_dtype(name: str) -> torch.dtype:
@@ -82,9 +95,9 @@ def _make_quant_buffers(case: BenchCase, dtype: torch.dtype, bits: int = 4) -> d
 
 def _configure_runtime(args: argparse.Namespace, device: torch.device) -> None:
     if args.force_rebuild_awq:
-        awq_build_root = Path("/tmp") / (
-            f"awq_jit_profile_{os.getpid()}_{args.case_id}_{args.dtype}_"
-            f"rt{int(args.cache_runtime_dtype)}_rot{int(args.cache_rotation_dtype)}"
+        awq_build_root = _register_temp_build_dir(
+            f"awq_jit_profile_{args.case_id}_{args.dtype}_"
+            f"rt{int(args.cache_runtime_dtype)}_rot{int(args.cache_rotation_dtype)}_"
         )
         os.environ["GPTQMODEL_AWQ_BUILD_ROOT"] = str(awq_build_root)
         os.environ["GPTQMODEL_AWQ_FORCE_REBUILD"] = "1"
@@ -93,9 +106,9 @@ def _configure_runtime(args: argparse.Namespace, device: torch.device) -> None:
         os.environ.pop("GPTQMODEL_AWQ_FORCE_REBUILD", None)
 
     if args.force_rebuild_paroquant:
-        paro_build_root = Path("/tmp") / (
-            f"paroquant_ext_profile_{os.getpid()}_{args.case_id}_{args.dtype}_"
-            f"rt{int(args.cache_runtime_dtype)}_rot{int(args.cache_rotation_dtype)}"
+        paro_build_root = _register_temp_build_dir(
+            f"paroquant_ext_profile_{args.case_id}_{args.dtype}_"
+            f"rt{int(args.cache_runtime_dtype)}_rot{int(args.cache_rotation_dtype)}_"
         )
         os.environ["GPTQMODEL_PAROQUANT_BUILD_ROOT"] = str(paro_build_root)
         os.environ["GPTQMODEL_PAROQUANT_FORCE_REBUILD"] = "1"

@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import math
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +44,17 @@ QUICK_CASES = [
     BenchCase("prefill_q_proj", batch=1, seq=128, in_features=2048, out_features=2048),
     BenchCase("batched_down_proj", batch=4, seq=128, in_features=8192, out_features=2048),
 ]
+
+_TEMP_BUILD_DIRS: list[tempfile.TemporaryDirectory[str]] = []
+
+
+def _register_temp_build_dir(prefix: str) -> Path:
+    temp_dir = tempfile.TemporaryDirectory(prefix=prefix)
+    _TEMP_BUILD_DIRS.append(temp_dir)
+    return Path(temp_dir.name)
+
+
+atexit.register(lambda: [temp_dir.cleanup() for temp_dir in reversed(_TEMP_BUILD_DIRS)])
 
 
 def _resolve_dtype(name: str) -> torch.dtype:
@@ -391,8 +404,8 @@ def _print_suite(name: str, results: dict[str, Any]) -> None:
 
 def _configure_awq_runtime(args: argparse.Namespace) -> None:
     if args.force_rebuild_awq:
-        build_root = Path("/tmp") / (
-            f"awq_jit_fusedreduce_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
+        build_root = _register_temp_build_dir(
+            f"awq_jit_fusedreduce_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}_"
         )
         os.environ["GPTQMODEL_AWQ_BUILD_ROOT"] = str(build_root)
         os.environ["GPTQMODEL_AWQ_FORCE_REBUILD"] = "1"
@@ -411,8 +424,8 @@ def _configure_awq_runtime(args: argparse.Namespace) -> None:
 
 def _configure_paroquant_runtime(args: argparse.Namespace, device: torch.device) -> None:
     if args.force_rebuild_paroquant:
-        build_root = Path("/tmp") / (
-            f"paroquant_ext_fusedreduce_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
+        build_root = _register_temp_build_dir(
+            f"paroquant_ext_fusedreduce_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}_"
         )
         os.environ["GPTQMODEL_PAROQUANT_BUILD_ROOT"] = str(build_root)
         os.environ["GPTQMODEL_PAROQUANT_FORCE_REBUILD"] = "1"
