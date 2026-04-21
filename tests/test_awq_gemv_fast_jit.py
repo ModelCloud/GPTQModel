@@ -105,27 +105,6 @@ def test_awq_gemv_fast_raises_runtime_error_when_jit_ops_missing(monkeypatch):
         module(torch.randn((1, 1, module.in_features), dtype=torch.float16))
 
 
-def test_awq_gemv_fast_uses_reference_path_before_jit_probe_when_fast_kernel_is_unsupported(monkeypatch):
-    module = _build_module()
-    calls = {"reference": 0}
-
-    monkeypatch.setattr(gemv_fast_awq.AwqGEMVFastLinear, "_should_use_reference_path", lambda self, device: True)
-    monkeypatch.setattr(gemv_fast_awq, "awq_runtime_available", lambda: False)
-    monkeypatch.setattr(gemv_fast_awq, "awq_runtime_error", lambda: "missing awq jit ops")
-
-    def fake_reference(self, x):
-        calls["reference"] += 1
-        return torch.ones((x.shape[0], x.shape[1], self.out_features), dtype=x.dtype)
-
-    monkeypatch.setattr(gemv_fast_awq.AwqGEMVFastLinear, "_reference_forward", fake_reference)
-
-    x = torch.randn((1, 1, module.in_features), dtype=torch.float16)
-    out = module(x)
-
-    assert calls["reference"] == 1
-    assert out.shape == (1, 1, module.out_features)
-
-
 def test_awq_gemv_fast_decode_normalizes_noncontiguous_inputs_and_buffers(monkeypatch):
     module = _build_module()
     module.qweight = module.qweight.t().contiguous().t()

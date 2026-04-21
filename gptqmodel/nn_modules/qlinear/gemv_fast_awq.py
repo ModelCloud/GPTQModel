@@ -17,7 +17,6 @@ from ...utils.awq import (
     awq_runtime_error,
 )
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
 from ...utils.gemv import calculate_zeros_width
 
 
@@ -155,11 +154,6 @@ class AwqGEMVFastLinear(AWQuantLinear):
                 self.bias = None
 
     def forward(self, x: torch.Tensor):
-        # On hosts where the fused CUDA kernels are unreliable, fall back to a
-        # reference matmul path instead of touching the custom torch.ops stack.
-        if self._should_use_reference_path(x.device):
-            return self._reference_forward(x)
-
         if not awq_runtime_available():
             raise ModuleNotFoundError("AWQ torch.ops kernels are not properly installed. Error: " + awq_runtime_error())
 
@@ -207,75 +201,6 @@ class AwqGEMVFastLinear(AWQuantLinear):
             out = self.adapter.apply(x=x, out=out)
 
         return out
-
-    def _should_use_reference_path(self, device: torch.device) -> bool:
-        """Prefer the reference path unless the fast kernels are explicitly forced on."""
-
-        if device.type != "cuda":
-            return False
-
-        return not env_flag("GPTQMODEL_AWQ_GEMV_FAST_FORCE_KERNEL", default=False)
-
-    def _reference_forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Materialize one dense reference matmul for stable CUDA fallback execution."""
-
-        out_shape = x.shape[:-1] + (self.out_features,)
-        inputs = x.reshape(-1, x.shape[-1])
-
-        input_dtype = inputs.dtype
-        compute_dtype = torch.float16 if input_dtype != torch.float16 else input_dtype
-        if input_dtype != compute_dtype:
-            inputs = inputs.to(dtype=compute_dtype)
-        elif not inputs.is_contiguous():
-            inputs = inputs.contiguous()
-
-        weight = self._dequantized_reference_weight(device=inputs.device, dtype=compute_dtype)
-        out = inputs.matmul(weight).reshape(out_shape)
-
-        if out.dtype != input_dtype:
-            out = out.to(dtype=input_dtype)
-
-        out = out + self.bias if self.bias is not None else out
-
-        if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
-
-        return out
-
-    def _dequantized_reference_weight(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        """Rebuild the dense AWQ weight matrix expected by the reference matmul path."""
-
-        intweight = self._unpack_reference_intweight(device=device)
-
-        num_groups = max(1, (self.in_features + self.group_size - 1) // self.group_size)
-        scales = self.scales.transpose(0, 1)[:, :num_groups].to(device=device, dtype=dtype)
-        zeros = self._runtime_zeros().transpose(0, 1)[:, :num_groups].to(device=device, dtype=dtype)
-
-        scales = scales.repeat_interleave(self.group_size, dim=1)[:, : self.in_features]
-        zeros = zeros.repeat_interleave(self.group_size, dim=1)[:, : self.in_features]
-
-        return (intweight.to(dtype=dtype) * scales + zeros).transpose(0, 1).contiguous()
-
-    def _unpack_reference_intweight(self, *, device: torch.device) -> torch.Tensor:
-        """Invert the GEMV_FAST int16 packing so reference execution can dequantize it."""
-
-        packed = self.qweight.to(device=device, dtype=torch.int32)
-        unpacked = torch.stack(
-            [
-                torch.bitwise_and(torch.bitwise_right_shift(packed, shift), 0xF)
-                for shift in (0, 4, 8, 12)
-            ],
-            dim=-1,
-        )
-        unpacked = unpacked.view(packed.shape[0], packed.shape[1] // 64, 4, 64)
-        unpacked = unpacked.permute(0, 2, 1, 3).contiguous()
-        unpacked = unpacked.view(packed.shape[0] * 4, self.in_features)
-        unpacked = unpacked.view(packed.shape[0] * 4, self.in_features // 32, 4, 2, 4)
-        unpacked = unpacked.permute(0, 1, 2, 4, 3).contiguous()
-        unpacked = unpacked.view(packed.shape[0] * 4, self.in_features // 32, 32)
-        unpacked = unpacked.view(packed.shape[0] * 4, self.in_features // 32, 4, 4, 2)
-        unpacked = unpacked.permute(0, 1, 3, 2, 4).contiguous()
-        return unpacked.view(self.out_features, self.in_features)
 
     def _ensure_runtime_buffers(self, *, device: torch.device, dtype: torch.dtype):
         if self.qweight.device != device or not self.qweight.is_contiguous():
