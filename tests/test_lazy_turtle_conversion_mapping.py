@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
@@ -71,6 +72,83 @@ class _WeightRenamingStub:
         self.source_patterns = [source_pattern]
         self.target_patterns = [target_pattern]
         self.operations = []
+
+
+class _ConvertibleCheckpointModel(nn.Module):
+    from_pretrained_calls = []
+    save_pretrained_calls = []
+
+    def __init__(self, checkpoint_tensors: dict[str, torch.Tensor] | None = None):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="dummy")
+        self._checkpoint_tensors = {
+            name: tensor.clone()
+            for name, tensor in (checkpoint_tensors or {}).items()
+        }
+
+    @classmethod
+    def reset_tracking(cls) -> None:
+        cls.from_pretrained_calls = []
+        cls.save_pretrained_calls = []
+
+    @classmethod
+    def from_pretrained(cls, model_local_path: str, config=None, **kwargs):
+        cls.from_pretrained_calls.append(
+            {
+                "model_local_path": str(model_local_path),
+                "config": config,
+                "kwargs": dict(kwargs),
+            }
+        )
+        model_dir = Path(model_local_path)
+        for filename in (
+            "model.bin",
+            "pytorch_model.bin",
+            "model.pt",
+            "pytorch_model.pt",
+            "model.pth",
+            "pytorch_model.pth",
+            "model.ckpt",
+            "pytorch_model.ckpt",
+        ):
+            checkpoint_path = model_dir / filename
+            if not checkpoint_path.is_file():
+                continue
+            payload = torch.load(checkpoint_path, map_location="cpu")
+            if isinstance(payload, dict) and "state_dict" in payload:
+                payload = payload["state_dict"]
+            model = cls(payload)
+            if config is not None:
+                model.config = config
+            return model
+        raise FileNotFoundError(f"No supported checkpoint file found in {model_local_path}")
+
+    def save_pretrained(self, save_dir: str, safe_serialization: bool = False, **kwargs) -> None:
+        type(self).save_pretrained_calls.append(
+            {
+                "save_dir": str(save_dir),
+                "safe_serialization": safe_serialization,
+                "kwargs": dict(kwargs),
+            }
+        )
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        shard_name = "model.safetensors"
+        save_file(self._checkpoint_tensors, str(save_path / shard_name))
+        _write_checkpoint_index(save_path, shard_name, self._checkpoint_tensors)
+
+
+class _FailingConvertibleCheckpointModel(_ConvertibleCheckpointModel):
+    @classmethod
+    def from_pretrained(cls, model_local_path: str, config=None, **kwargs):
+        cls.from_pretrained_calls.append(
+            {
+                "model_local_path": str(model_local_path),
+                "config": config,
+                "kwargs": dict(kwargs),
+            }
+        )
+        raise RuntimeError("full model reload is unavailable in this test")
 
 
 def _gemma3_weight_renamings():
@@ -206,3 +284,101 @@ def test_lazy_turtle_keeps_module_tree_alias_resolution_for_mixtral(tmp_path):
         )
         == "model.layers.0.block_sparse_moe.experts.0.w1.weight"
     )
+
+
+@pytest.mark.parametrize(
+    ("extension", "payload"),
+    [
+        (".bin", lambda tensors: tensors),
+        (".pt", lambda tensors: {"state_dict": tensors}),
+    ],
+)
+def test_lazy_turtle_converts_non_safetensors_checkpoints_via_full_model_reload(tmp_path, extension, payload):
+    checkpoint_tensors = {
+        "model.layers.0.self_attn.q_proj.weight": torch.arange(4, dtype=torch.float32).reshape(2, 2),
+    }
+    model_dir = tmp_path / f"source_model_{extension[1:]}"
+    model_dir.mkdir()
+    torch.save(payload(checkpoint_tensors), model_dir / f"pytorch_model{extension}")
+
+    _ConvertibleCheckpointModel.reset_tracking()
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None, model_type="dummy"),
+        model_init_kwargs={"device_map": {"": "cpu"}, "trust_remote_code": False},
+        hf_conversion_map_reversed={},
+        target_model=_ConvertibleCheckpointModel(),
+    )
+
+    assert turtle is not None
+    assert Path(turtle.model_local_path) != model_dir
+    assert (Path(turtle.model_local_path) / "model.safetensors").is_file()
+    assert len(_ConvertibleCheckpointModel.from_pretrained_calls) == 1
+    assert len(_ConvertibleCheckpointModel.save_pretrained_calls) == 1
+    assert _ConvertibleCheckpointModel.save_pretrained_calls[0]["safe_serialization"] is True
+    assert "device_map" not in _ConvertibleCheckpointModel.from_pretrained_calls[0]["kwargs"]
+    assert _ConvertibleCheckpointModel.from_pretrained_calls[0]["kwargs"]["low_cpu_mem_usage"] is False
+
+    tensors = turtle._load_checkpoint_tensors_for_module_path(
+        module_path="model.layers.0.self_attn",
+        recurse=True,
+    )
+    assert torch.equal(
+        tensors["q_proj.weight"],
+        checkpoint_tensors["model.layers.0.self_attn.q_proj.weight"],
+    )
+
+
+def test_lazy_turtle_disables_itself_when_transformers_full_reload_fails(tmp_path):
+    checkpoint_tensors = {
+        "model.layers.0.self_attn.q_proj.weight": torch.arange(4, dtype=torch.float32).reshape(2, 2),
+    }
+    model_dir = tmp_path / "source_model_pt_fallback"
+    model_dir.mkdir()
+    torch.save({"state_dict": checkpoint_tensors}, model_dir / "pytorch_model.pt")
+
+    _FailingConvertibleCheckpointModel.reset_tracking()
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None, model_type="dummy"),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+        hf_conversion_map_reversed={},
+        target_model=_FailingConvertibleCheckpointModel(),
+    )
+
+    assert turtle is None
+    assert len(_FailingConvertibleCheckpointModel.from_pretrained_calls) == 1
+    assert _FailingConvertibleCheckpointModel.save_pretrained_calls == []
+
+
+def test_lazy_turtle_registers_atexit_cleanup_for_temporary_checkpoint_dir(tmp_path, monkeypatch):
+    checkpoint_tensors = {
+        "model.layers.0.self_attn.q_proj.weight": torch.arange(4, dtype=torch.float32).reshape(2, 2),
+    }
+    model_dir = tmp_path / "source_model_close"
+    model_dir.mkdir()
+    torch.save(checkpoint_tensors, model_dir / "pytorch_model.bin")
+
+    registered = []
+
+    def _register(func, *args, **kwargs):
+        registered.append((func, args, kwargs))
+        return (func, args, kwargs)
+
+    monkeypatch.setattr(structure_module.atexit, "register", _register)
+
+    _ConvertibleCheckpointModel.reset_tracking()
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None, model_type="dummy"),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+        hf_conversion_map_reversed={},
+        target_model=_ConvertibleCheckpointModel(),
+    )
+
+    assert turtle is not None
+    temp_path = Path(turtle.model_local_path)
+    assert temp_path.exists()
+    assert registered == [
+        (structure_module.shutil.rmtree, (str(temp_path),), {"ignore_errors": True}),
+    ]
