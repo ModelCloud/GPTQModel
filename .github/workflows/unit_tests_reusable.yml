@@ -1,5 +1,9 @@
 name: Unit Tests Reusable
 
+defaults:
+  run:
+    shell: bash -le {0}
+
 on:
   workflow_call:
     inputs:
