@@ -15,7 +15,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-
 DEFAULT_MODEL_PATH = "/monster/data/model/Qwen3.5-35B-A3B"
 DEFAULT_BASELINE_ROOT = "/root/gptqmodel-main"
 FAST_LAYER_COUNT_ENV = "GPTQMODEL_FAST_LAYER_COUNT"
@@ -559,7 +558,12 @@ def _single_case_main(args: argparse.Namespace) -> int:
 
 def _ab_main(args: argparse.Namespace) -> int:
     script_path = Path(__file__).resolve()
-    output_dir = args.output_dir or Path(tempfile.mkdtemp(prefix="qwen35_moe_ab_"))
+    temp_output_dir = None
+    if args.output_dir is None:
+        temp_output_dir = tempfile.TemporaryDirectory(prefix="qwen35_moe_ab_")
+        output_dir = Path(temp_output_dir.name)
+    else:
+        output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     current_vram_strategy = args.current_vram_strategy or args.vram_strategy
     baseline_vram_strategy = args.baseline_vram_strategy or args.vram_strategy
@@ -647,63 +651,70 @@ def _ab_main(args: argparse.Namespace) -> int:
         )
         return proc, log_handle, json_out, log_out
 
-    current_proc, current_log_handle, current_json_out, _ = _start_case(
-        repo_root=args.current_root.resolve(),
-        label="current",
-        vram_strategy=current_vram_strategy,
-        cuda_visible_devices=current_cuda_visible_devices,
-        dense_vram_strategy=current_dense_vram_strategy,
-        dense_vram_strategy_devices=current_dense_vram_strategy_devices,
-        moe_vram_strategy=current_moe_vram_strategy,
-        moe_vram_strategy_devices=current_moe_vram_strategy_devices,
-    )
-    baseline_proc, baseline_log_handle, baseline_json_out, _ = _start_case(
-        repo_root=args.baseline_root.resolve(),
-        label="baseline",
-        vram_strategy=baseline_vram_strategy,
-        cuda_visible_devices=baseline_cuda_visible_devices,
-        dense_vram_strategy=baseline_dense_vram_strategy,
-        dense_vram_strategy_devices=baseline_dense_vram_strategy_devices,
-        moe_vram_strategy=baseline_moe_vram_strategy,
-        moe_vram_strategy_devices=baseline_moe_vram_strategy_devices,
-    )
-
     try:
-        current_returncode = current_proc.wait()
-        baseline_returncode = baseline_proc.wait()
-    finally:
-        current_log_handle.close()
-        baseline_log_handle.close()
-
-    if current_returncode != 0:
-        raise subprocess.CalledProcessError(current_returncode, current_proc.args)
-    if baseline_returncode != 0:
-        raise subprocess.CalledProcessError(baseline_returncode, baseline_proc.args)
-
-    with current_json_out.open("r", encoding="utf-8") as handle:
-        current = json.load(handle)
-    with baseline_json_out.open("r", encoding="utf-8") as handle:
-        baseline = json.load(handle)
-
-    compare = _compare_cases(current=current, baseline=baseline)
-    compare_path = output_dir / "compare.json"
-    with compare_path.open("w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "current": current,
-                "baseline": baseline,
-                "compare": compare,
-            },
-            handle,
-            indent=2,
-            sort_keys=True,
+        current_proc, current_log_handle, current_json_out, _ = _start_case(
+            repo_root=args.current_root.resolve(),
+            label="current",
+            vram_strategy=current_vram_strategy,
+            cuda_visible_devices=current_cuda_visible_devices,
+            dense_vram_strategy=current_dense_vram_strategy,
+            dense_vram_strategy_devices=current_dense_vram_strategy_devices,
+            moe_vram_strategy=current_moe_vram_strategy,
+            moe_vram_strategy_devices=current_moe_vram_strategy_devices,
+        )
+        baseline_proc, baseline_log_handle, baseline_json_out, _ = _start_case(
+            repo_root=args.baseline_root.resolve(),
+            label="baseline",
+            vram_strategy=baseline_vram_strategy,
+            cuda_visible_devices=baseline_cuda_visible_devices,
+            dense_vram_strategy=baseline_dense_vram_strategy,
+            dense_vram_strategy_devices=baseline_dense_vram_strategy_devices,
+            moe_vram_strategy=baseline_moe_vram_strategy,
+            moe_vram_strategy_devices=baseline_moe_vram_strategy_devices,
         )
 
-    print(f"Results written to {output_dir}")
-    _print_case_summary(current)
-    _print_case_summary(baseline)
-    _print_compare(compare)
-    return 0
+        try:
+            current_returncode = current_proc.wait()
+            baseline_returncode = baseline_proc.wait()
+        finally:
+            current_log_handle.close()
+            baseline_log_handle.close()
+
+        if current_returncode != 0:
+            raise subprocess.CalledProcessError(current_returncode, current_proc.args)
+        if baseline_returncode != 0:
+            raise subprocess.CalledProcessError(baseline_returncode, baseline_proc.args)
+
+        with current_json_out.open("r", encoding="utf-8") as handle:
+            current = json.load(handle)
+        with baseline_json_out.open("r", encoding="utf-8") as handle:
+            baseline = json.load(handle)
+
+        compare = _compare_cases(current=current, baseline=baseline)
+        compare_path = output_dir / "compare.json"
+        with compare_path.open("w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "current": current,
+                    "baseline": baseline,
+                    "compare": compare,
+                },
+                handle,
+                indent=2,
+                sort_keys=True,
+            )
+
+        if temp_output_dir is None:
+            print(f"Results written to {output_dir}")
+        else:
+            print("Results were written to a temporary directory and cleaned up automatically.")
+        _print_case_summary(current)
+        _print_case_summary(baseline)
+        _print_compare(compare)
+        return 0
+    finally:
+        if temp_output_dir is not None:
+            temp_output_dir.cleanup()
 
 
 def main() -> int:

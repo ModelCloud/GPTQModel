@@ -6,6 +6,7 @@ import argparse
 import os
 import site
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,6 @@ from llama_cpp import llama_cpp as llama_low
 from transformers import AutoTokenizer
 
 from gptqmodel import BACKEND, GGUFConfig, GPTQModel
-
 
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:256")
@@ -312,7 +312,7 @@ def parse_args() -> argparse.Namespace:
         description="Benchmark llama-cpp-python monolithic GGUF vs gptqmodel GGUF on the same model."
     )
     parser.add_argument("--model", default=DEFAULT_MODEL, help="HF model directory to convert/quantize.")
-    parser.add_argument("--work-dir", default="/tmp/llama_cpp_vs_gptqmodel_gguf", help="Artifact cache directory.")
+    parser.add_argument("--work-dir", default=None, help="Artifact cache directory. Defaults to a temporary directory.")
     parser.add_argument("--prompt-tokens", type=int, default=512, help="Approximate prompt token length.")
     parser.add_argument("--decode-tokens", type=int, default=64, help="Number of autoregressive decode steps.")
     parser.add_argument("--warmup", type=int, default=1, help="Warmup iterations per benchmark.")
@@ -331,94 +331,104 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     source_model = Path(args.model)
-    work_dir = Path(args.work_dir)
-    gptq_dir = work_dir / "gptqmodel_q4_k_m"
-    offload_dir = work_dir / "gptqmodel_offload"
-    llama_f16_path = work_dir / "llama3_2_1b_f16.gguf"
-    llama_q4_path = work_dir / "llama3_2_1b_q4_k_m.gguf"
+    temp_work_dir = None
+    if args.work_dir is None:
+        temp_work_dir = tempfile.TemporaryDirectory(prefix="llama_cpp_vs_gptqmodel_gguf_")
+        work_dir = Path(temp_work_dir.name)
+    else:
+        work_dir = Path(args.work_dir)
 
-    if not args.skip_prepare:
-        _prepare_llama_cpp_monolithic(source_model, llama_f16_path, llama_q4_path, args.threads)
-        _prepare_gptqmodel_quantized(source_model, gptq_dir, offload_dir)
+    try:
+        gptq_dir = work_dir / "gptqmodel_q4_k_m"
+        offload_dir = work_dir / "gptqmodel_offload"
+        llama_f16_path = work_dir / "llama3_2_1b_f16.gguf"
+        llama_q4_path = work_dir / "llama3_2_1b_q4_k_m.gguf"
 
-    tokenizer = AutoTokenizer.from_pretrained(str(source_model), use_fast=True)
-    prompt, hf_token_count = _build_prompt(tokenizer, args.prompt_tokens)
-    n_ctx = hf_token_count + args.decode_tokens + 64
-    n_batch = max(hf_token_count + 8, 512)
+        if not args.skip_prepare:
+            _prepare_llama_cpp_monolithic(source_model, llama_f16_path, llama_q4_path, args.threads)
+            _prepare_gptqmodel_quantized(source_model, gptq_dir, offload_dir)
 
-    devices = ["cpu", "cuda"] if args.device == "both" else [args.device]
-    if "cuda" in devices and not torch.cuda.is_available():
-        raise RuntimeError("CUDA benchmarking requested but no CUDA device is available.")
+        tokenizer = AutoTokenizer.from_pretrained(str(source_model), use_fast=True)
+        prompt, hf_token_count = _build_prompt(tokenizer, args.prompt_tokens)
+        n_ctx = hf_token_count + args.decode_tokens + 64
+        n_batch = max(hf_token_count + 8, 512)
 
-    print(f"source_model={source_model}")
-    print(f"gptqmodel_dir={gptq_dir}")
-    print(f"llama_cpp_gguf={llama_q4_path}")
-    print(f"prompt_tokens_hf={hf_token_count} decode_tokens={args.decode_tokens} warmup={args.warmup} trials={args.trials}")
+        devices = ["cpu", "cuda"] if args.device == "both" else [args.device]
+        if "cuda" in devices and not torch.cuda.is_available():
+            raise RuntimeError("CUDA benchmarking requested but no CUDA device is available.")
 
-    for device in devices:
-        print()
-        print(f"DEVICE {device}")
+        print(f"source_model={source_model}")
+        print(f"gptqmodel_dir={gptq_dir}")
+        print(f"llama_cpp_gguf={llama_q4_path}")
+        print(f"prompt_tokens_hf={hf_token_count} decode_tokens={args.decode_tokens} warmup={args.warmup} trials={args.trials}")
 
-        gptq_model, gptq_tokenizer = _load_gptqmodel(gptq_dir, device=device)
-        llama_model = _load_llama_cpp(
-            llama_q4_path,
-            device=device,
-            n_ctx=n_ctx,
-            n_batch=n_batch,
-            threads=args.threads,
-        )
+        for device in devices:
+            print()
+            print(f"DEVICE {device}")
 
-        device_results: list[TrialSummary] = []
-
-        gptq_prefill_fn, gptq_prefill_tokens = _gptq_prefill(gptq_model, gptq_tokenizer, prompt, device)
-        gptq_decode_fn, gptq_decode_tokens = _gptq_decode(gptq_model, gptq_tokenizer, prompt, args.decode_tokens, device)
-        llama_prefill_fn, llama_prefill_tokens = _llama_prefill(llama_model, prompt)
-        llama_decode_fn, llama_decode_tokens = _llama_decode(llama_model, prompt, args.decode_tokens)
-
-        device_results.append(
-            _summarize_trials(
-                "gptqmodel",
-                device,
-                "prefill",
-                gptq_prefill_tokens,
-                _bench(gptq_prefill_fn, device=device, warmup=args.warmup, trials=args.trials),
+            gptq_model, gptq_tokenizer = _load_gptqmodel(gptq_dir, device=device)
+            llama_model = _load_llama_cpp(
+                llama_q4_path,
+                device=device,
+                n_ctx=n_ctx,
+                n_batch=n_batch,
+                threads=args.threads,
             )
-        )
-        device_results.append(
-            _summarize_trials(
-                "gptqmodel",
-                device,
-                "decode",
-                gptq_decode_tokens,
-                _bench(gptq_decode_fn, device=device, warmup=args.warmup, trials=args.trials),
-            )
-        )
-        device_results.append(
-            _summarize_trials(
-                "llama-cpp-python",
-                device,
-                "prefill",
-                llama_prefill_tokens,
-                _bench(llama_prefill_fn, device="cpu", warmup=args.warmup, trials=args.trials),
-            )
-        )
-        device_results.append(
-            _summarize_trials(
-                "llama-cpp-python",
-                device,
-                "decode",
-                llama_decode_tokens,
-                _bench(llama_decode_fn, device="cpu", warmup=args.warmup, trials=args.trials),
-            )
-        )
 
-        _print_trial_table(device_results)
-        _print_summary_table(device_results)
+            device_results: list[TrialSummary] = []
 
-        del llama_model
-        del gptq_model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            gptq_prefill_fn, gptq_prefill_tokens = _gptq_prefill(gptq_model, gptq_tokenizer, prompt, device)
+            gptq_decode_fn, gptq_decode_tokens = _gptq_decode(gptq_model, gptq_tokenizer, prompt, args.decode_tokens, device)
+            llama_prefill_fn, llama_prefill_tokens = _llama_prefill(llama_model, prompt)
+            llama_decode_fn, llama_decode_tokens = _llama_decode(llama_model, prompt, args.decode_tokens)
+
+            device_results.append(
+                _summarize_trials(
+                    "gptqmodel",
+                    device,
+                    "prefill",
+                    gptq_prefill_tokens,
+                    _bench(gptq_prefill_fn, device=device, warmup=args.warmup, trials=args.trials),
+                )
+            )
+            device_results.append(
+                _summarize_trials(
+                    "gptqmodel",
+                    device,
+                    "decode",
+                    gptq_decode_tokens,
+                    _bench(gptq_decode_fn, device=device, warmup=args.warmup, trials=args.trials),
+                )
+            )
+            device_results.append(
+                _summarize_trials(
+                    "llama-cpp-python",
+                    device,
+                    "prefill",
+                    llama_prefill_tokens,
+                    _bench(llama_prefill_fn, device="cpu", warmup=args.warmup, trials=args.trials),
+                )
+            )
+            device_results.append(
+                _summarize_trials(
+                    "llama-cpp-python",
+                    device,
+                    "decode",
+                    llama_decode_tokens,
+                    _bench(llama_decode_fn, device="cpu", warmup=args.warmup, trials=args.trials),
+                )
+            )
+
+            _print_trial_table(device_results)
+            _print_summary_table(device_results)
+
+            del llama_model
+            del gptq_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    finally:
+        if temp_work_dir is not None:
+            temp_work_dir.cleanup()
 
 
 if __name__ == "__main__":
