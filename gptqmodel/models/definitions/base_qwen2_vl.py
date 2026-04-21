@@ -21,14 +21,6 @@ class BaseQwen2VLGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
 
     pre_lm_head_norm_module = ["model.language_model.norm", "language_model.norm"]
-    HF_CONVERSION_MAP_REVERSED = {
-        "model.language_model": "model",
-        "language_model": "model",
-    }
-    checkpoint_path_aliases = (
-        ("model.language_model", "model"),
-        ("language_model", "model"),
-    )
 
     module_tree = [
         "model",
