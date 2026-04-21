@@ -247,9 +247,9 @@ class BaseQModel(nn.Module):
     server = None
 
     support_offload_to_disk = True
-    # Optional runtime->checkpoint prefix overrides for LazyTurtle. When unset,
-    # the loader derives them from Hugging Face conversion mappings.
-    HF_CONVERSION_MAP_REVERSED: Optional[Dict[str, str]] = None
+    # Optional runtime->checkpoint overrides for LazyTurtle. Prefer reversed
+    # `WeightRenaming` entries; legacy runtime->checkpoint dicts are still accepted.
+    HF_CONVERSION_MAP_REVERSED: Optional[Any] = None
 
     moe_expert_module_name_prefixes = [".expert"]
 
@@ -420,7 +420,7 @@ class BaseQModel(nn.Module):
         return MOE_FLAG.lstrip(":") in flags
 
     @classmethod
-    def resolve_hf_conversion_map_reversed(cls, target_model: Optional[nn.Module] = None) -> Optional[Dict[str, str]]:
+    def resolve_hf_conversion_map_reversed(cls, target_model: Optional[nn.Module] = None) -> Optional[Any]:
         configured_map = getattr(cls, "HF_CONVERSION_MAP_REVERSED", None)
         if configured_map is not None:
             return copy.deepcopy(configured_map)
