@@ -29,10 +29,9 @@ import copy
 import inspect
 import json
 import os
-import re
 import threading
-from importlib import import_module
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
 import pcre
@@ -683,6 +682,7 @@ class LazyTurtle:
 
     supports_reload = False
     is_lazy_checkpoint_source = True
+
     def __init__(
         self,
         *,
@@ -705,7 +705,7 @@ class LazyTurtle:
         alias_items = self._normalize_runtime_to_checkpoint_renamings(
             hf_conversion_map_reversed
             if hf_conversion_map_reversed is not None
-            else self.infer_hf_conversion_map_reversed(target_model=target_model)
+            else self.infer_hf_conversion_map_reversed(target_model=target_model),
         )
         self._runtime_to_checkpoint_renamings = tuple(alias_items)
         self._lock = threading.RLock()
@@ -718,6 +718,7 @@ class LazyTurtle:
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
         module_tree: Optional[Any] = None,
+        checkpoint_path_aliases: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
     ) -> Optional["LazyTurtle"]:
@@ -730,6 +731,7 @@ class LazyTurtle:
                 config=config,
                 model_init_kwargs=model_init_kwargs,
                 module_tree=module_tree,
+                checkpoint_path_aliases=checkpoint_path_aliases,
                 hf_conversion_map_reversed=hf_conversion_map_reversed,
                 target_model=target_model,
             )

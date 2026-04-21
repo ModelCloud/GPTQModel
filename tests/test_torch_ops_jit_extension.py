@@ -226,6 +226,24 @@ def test_default_torch_ops_build_root_ignores_removed_global_override(monkeypatc
     )
 
 
+def test_default_torch_ops_build_root_respects_ci_override(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_TORCH_EXTENSIONS_DIR", "/tmp/gptqmodel-ci")
+
+    assert cpp_module.default_torch_ops_build_root("marlin") == Path("/tmp/gptqmodel-ci") / "marlin"
+
+
+def test_torch_ops_jit_extension_prefers_explicit_build_root_over_global_default(monkeypatch, tmp_path):
+    loader = _make_loader(
+        tmp_path,
+        default_build_root=lambda: cpp_module.default_torch_ops_build_root("unit_test_ops"),
+    )
+
+    monkeypatch.setenv("GPTQMODEL_TORCH_EXTENSIONS_DIR", "/tmp/gptqmodel-ci")
+    monkeypatch.setenv("UNIT_TEST_BUILD_ROOT", "/tmp/unit-test-override")
+
+    assert loader.base_build_root() == Path("/tmp/unit-test-override")
+
+
 def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
     """Guard cache reuse so startup skips expensive JIT rebuilds when ops are already built."""
 
@@ -268,6 +286,43 @@ def test_torch_ops_jit_extension_force_rebuild_clears_cache(monkeypatch, tmp_pat
     runtime = type("RuntimeNamespace", (), {"kernel": object()})()
 
     monkeypatch.setenv("UNIT_TEST_FORCE_REBUILD", "1")
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.setattr(cpp_module, "setup_logger", lambda: logger)
+    monkeypatch.setattr(
+        cpp_module.torch.ops,
+        "load_library",
+        lambda path: (_ for _ in ()).throw(AssertionError(f"unexpected cached load: {path}")),
+        raising=False,
+    )
+
+    def fake_compile(**kwargs):
+        compile_calls.append(kwargs)
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert len(compile_calls) == 1
+    assert stale_library.exists() is False
+    assert any("clearing cached JIT extension" in message for message in logger.info_messages)
+
+
+def test_torch_ops_jit_extension_global_kernel_rebuild_clears_cache(monkeypatch, tmp_path):
+    """Guard the umbrella rebuild flag so every torch.ops extension gets cold-build behavior."""
+
+    loader = _make_loader(tmp_path)
+    build_root = loader.build_root()
+    build_root.mkdir(parents=True)
+    stale_library = build_root / "unit_test_ops.so"
+    stale_library.write_bytes(b"stale")
+
+    state = {"ready": False}
+    compile_calls = []
+    logger = _FakeLogger()
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setenv("GPTQMODEL_KERNEL_REBUILD", "1")
     monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
     monkeypatch.setattr(cpp_module, "setup_logger", lambda: logger)
     monkeypatch.setattr(

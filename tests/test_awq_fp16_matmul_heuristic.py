@@ -7,6 +7,7 @@ import torch
 
 import gptqmodel.nn_modules.qlinear.gemm_awq as gemm_awq
 import gptqmodel.nn_modules.qlinear.gemm_awq_triton as gemm_awq_triton
+from gptqmodel.utils.logger import render_table
 
 
 def _fake_quant_tensors(in_features: int = 32, out_features: int = 8, group_size: int = 32):
@@ -181,8 +182,6 @@ def test_fp16_matmul_heuristic_benchmark(case_name, batch, seq, in_features, out
     if os.getenv("RUN_AWQ_FP16_HEURISTIC_BENCH") != "1":
         pytest.skip("Set RUN_AWQ_FP16_HEURISTIC_BENCH=1 to enable this benchmark")
 
-    tabulate = pytest.importorskip("tabulate").tabulate
-
     if backend not in {"awq_jit", "triton"}:
         pytest.skip("No AWQ backend available for benchmark")
 
@@ -237,4 +236,9 @@ def test_fp16_matmul_heuristic_benchmark(case_name, batch, seq, in_features, out
         [case_name, backend, batch, seq, meets_condition, f"{in_features}->{out_features}", "condition=True (dequant+matmul)", f"{dequant_ms:.3f} ms"],
         [case_name, backend, batch, seq, meets_condition, f"{in_features}->{out_features}", "condition=False (fused gemm)", f"{fused_ms:.3f} ms"],
     ]
-    print(tabulate(rows, headers=["case", "backend", "batch", "seq", "meets >=1024", "matmul (in->out)", "path", "avg latency"]))
+    print(
+        render_table(
+            rows,
+            headers=["case", "backend", "batch", "seq", "meets >=1024", "matmul (in->out)", "path", "avg latency"],
+        )
+    )

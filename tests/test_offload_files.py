@@ -12,11 +12,11 @@ import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
-from tabulate import tabulate
 from torch import nn
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
+from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
 from gptqmodel.utils.structure import (
@@ -344,7 +344,7 @@ def test_offload_to_disk_writes_single_dat_file(tmp_path):
 
     files = sorted(module_dir.iterdir(), key=lambda p: p.name)
     rows = [(path.name, path.stat().st_size) for path in files]
-    print(tabulate(rows, headers=["file", "bytes"], tablefmt="github"))
+    print(render_table(rows, headers=["file", "bytes"], tablefmt="github"))
 
     safetensor_files = [path for path in files if path.suffix == ".safetensors"]
     assert len(safetensor_files) == 1, "offload_to_disk should produce exactly one safetensors file per module"

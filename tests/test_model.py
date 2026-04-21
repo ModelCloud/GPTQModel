@@ -32,6 +32,7 @@ from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.looper.module_looper import ModuleLooper, StopMainLoop
 from gptqmodel.models import loader
 from gptqmodel.models.auto import _hide_unsupported_quantization_config_for_eval, _is_supported_quantization_config
+from gptqmodel.models.definitions.phi4 import Phi4MMGPTQ
 
 
 ############ test_model_dequant.py ############
@@ -430,6 +431,11 @@ def test_dequantize_model_compressed_tensors_pack(tmp_path):
 
 class DummyRequirePkgModel:
     require_pkgs = ["fakepkg>=1.0.0"]
+
+
+def test_phi4_model_definition_requires_required_packages():
+    assert "backoff>=2.2.1" in Phi4MMGPTQ.require_pkgs
+    assert "optimum>=1.24.0" in Phi4MMGPTQ.require_pkgs
 
 
 def test_check_versions_passes_when_version_matches(monkeypatch):

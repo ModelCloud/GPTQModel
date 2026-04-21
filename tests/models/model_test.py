@@ -27,7 +27,6 @@ from pathlib import Path  # noqa: E402
 from typing import Any, Dict, List, Optional  # noqa: E402
 
 from logbar import LogBar  # noqa: E402
-from tabulate import tabulate  # noqa: E402
 
 
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402
@@ -149,6 +148,7 @@ from gptqmodel.quantization.config import (  # noqa: E402
     WeightOnlyConfig,
     resolve_quant_format,
 )
+from gptqmodel.utils.logger import render_table  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
@@ -1184,8 +1184,8 @@ class ModelTest(unittest.TestCase):
             return contextlib.nullcontext(self.SAVE_PATH), self.SAVE_PATH, None
 
         if need_eval:
-            tmp_dir = tempfile.mkdtemp()
-            return contextlib.nullcontext(tmp_dir), tmp_dir, lambda: shutil.rmtree(tmp_dir, ignore_errors=True)
+            tmp_context = tempfile.TemporaryDirectory()
+            return contextlib.nullcontext(tmp_context.name), tmp_context.name, tmp_context.cleanup
 
         tmp_context = tempfile.TemporaryDirectory()
         return tmp_context, tmp_context.name, tmp_context.cleanup
@@ -1326,7 +1326,10 @@ class ModelTest(unittest.TestCase):
             table_rows.append(row)
 
         headers = ["Metric"] + [backend.name for backend in ordered_backends]
-        log.info("Evaluation comparison:\n%s", tabulate(table_rows, headers=headers, tablefmt="github"))
+        log.info(
+            "Evaluation comparison:\n%s",
+            render_table(table_rows, headers=headers, tablefmt="github"),
+        )
 
     @classmethod
     def load_tokenizer(cls, model_id_or_path, trust_remote_code=False):

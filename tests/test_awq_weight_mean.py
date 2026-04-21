@@ -19,7 +19,7 @@ from gptqmodel.looper.awq_processor import (
     _AWQLayerState,
     _compute_awq_weight_mean,
 )
-from gptqmodel.quantization.config import AWQConfig, FORMAT, METHOD, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, AWQConfig, QuantizeConfig
 
 
 QWEN3_HIDDEN_SIZE = 3584

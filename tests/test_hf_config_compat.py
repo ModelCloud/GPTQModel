@@ -185,6 +185,27 @@ def test_normalize_hf_config_compat_restores_flash_attn_legacy_version_probe(mon
     assert transformers.utils.is_flash_attn_greater_or_equal_2_10() is True
 
 
+def test_normalize_hf_config_compat_restores_default_rope_init_alias(monkeypatch):
+    import transformers.modeling_rope_utils as rope_utils
+
+    monkeypatch.delitem(rope_utils.ROPE_INIT_FUNCTIONS, "default", raising=False)
+
+    config = SimpleNamespace(
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        rope_theta=10000.0,
+        hidden_size=64,
+        num_attention_heads=8,
+        head_dim=8,
+    )
+
+    normalize_hf_config_compat(config, trust_remote_code=True)
+
+    inv_freq, attention_factor = rope_utils.ROPE_INIT_FUNCTIONS["default"](config, None)
+
+    torch.testing.assert_close(inv_freq, torch.tensor([1.0, 0.1, 0.01, 0.001]))
+    assert attention_factor == 1.0
+
+
 def test_normalize_hf_config_compat_restores_legacy_cache_length_helpers(monkeypatch):
     monkeypatch.delattr(cache_utils.Cache, "get_max_length", raising=False)
     monkeypatch.delattr(cache_utils.Cache, "get_usable_length", raising=False)
@@ -375,6 +396,31 @@ def test_prepare_remote_model_init_compat_wraps_legacy_tie_weights_signature(mon
 
     assert calls == ["tied"]
     assert getattr(DummyRemoteModel, "_gptqmodel_tie_weights_kwargs_patch", False) is True
+
+
+def test_prepare_remote_model_init_compat_backfills_legacy_flash_attn_flag(monkeypatch):
+    class DummyRemoteBase:
+        _supports_flash_attn_2 = True
+
+    class DummyRemoteModel(DummyRemoteBase):
+        __module__ = "transformers_modules.fake_bailing.modeling_bailing_moe_v2"
+
+    monkeypatch.setattr(
+        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+        lambda class_ref, model_id_or_path, **kwargs: DummyRemoteModel,
+    )
+
+    config = SimpleNamespace(
+        model_type="bailing_moe",
+        auto_map={"AutoModelForCausalLM": "modeling_bailing_moe_v2.BailingMoeV2ForCausalLM"},
+    )
+
+    assert "_supports_flash_attn" not in DummyRemoteBase.__dict__
+
+    prepare_remote_model_init_compat("/tmp/ling", config)
+
+    assert DummyRemoteBase._supports_flash_attn is True
+    assert DummyRemoteModel._supports_flash_attn is True
 
 
 def test_prepare_remote_model_init_compat_accepts_tokenizers_backend_for_ovis(monkeypatch):

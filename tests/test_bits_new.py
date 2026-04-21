@@ -25,10 +25,10 @@ from typing import Optional  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
-from tabulate import tabulate  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
+from gptqmodel.utils.logger import render_table  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from tests.eval import evaluate, format_eval_result_table  # noqa: E402
 
@@ -171,9 +171,8 @@ class Test(ModelTest):
 
                 print('--------GPT-QModel + EoRA Config ---------')
 
-                # Convert the dictionary to a list of lists for tabulate
                 table_data = [[key, value] for key, value in config_dict.items()]
-                print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
+                print(render_table(table_data, headers=["Key", "Value"], tablefmt="grid"))
 
                 print('--------Eval GPTQ Result---------')
                 print(format_eval_result_table(base_bench))

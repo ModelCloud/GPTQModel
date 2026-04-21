@@ -87,33 +87,55 @@ def collect_pkgs(test_path: Path, deps: dict[str, Any], *, dedupe_common: bool) 
     return sorted(specific_pkgs), sorted(common_pkgs)
 
 
-def run_uv_pip(action: str, pkgs: list[str], *, extra_args: list[str] | None = None) -> None:
+def dedupe_pkg_specs(pkgs: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for pkg in pkgs:
+        normalized = normalize_pkg_spec(pkg)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def run_uv_pip(
+        action: str,
+        pkgs: list[str],
+        *,
+        extra_args: list[str] | None = None,
+        ignore_errors: bool = False,
+) -> None:
     if not pkgs:
         return
 
-    normalized = [normalize_pkg_spec(pkg) for pkg in pkgs]
+    normalized = dedupe_pkg_specs(pkgs)
     print(f"--- {action.title()} deps with uv:")
     for pkg in normalized:
         print("  -", pkg)
 
-    for pkg in normalized:
-        cmd = ["uv", "pip", action]
-        if extra_args:
-            cmd.extend(extra_args)
-        cmd.append(pkg)
-        print("+", " ".join(cmd))
-        try:
-            subprocess.check_call(cmd, shell=False)
-        except Exception as exc:
-            print(f"{action.title()} failed for {pkg}: {exc}")
+    cmd = ["uv", "pip", action]
+    if action == "uninstall":
+        cmd.append("-y")
+    if extra_args:
+        cmd.extend(extra_args)
+    cmd.extend(normalized)
+    print("+", " ".join(cmd))
+
+    if ignore_errors:
+        completed = subprocess.run(cmd, shell=False, check=False)
+        if completed.returncode != 0:
+            print(f"{action.title()} failed with exit code {completed.returncode}")
+        return
+
+    subprocess.check_call(cmd, shell=False)
 
 
 def install_deps(raw_name: str) -> int:
     test_path = resolve_test_path(raw_name.removeprefix("tests/").removesuffix(".py"))
     deps = load_yaml("deps.yaml")
     specific_pkgs, common_pkgs = collect_pkgs(test_path, deps, dedupe_common=True)
-    run_uv_pip("install", specific_pkgs, extra_args=["--no-cache"])
-    run_uv_pip("install", common_pkgs, extra_args=["--no-cache"])
+    run_uv_pip("install", specific_pkgs + common_pkgs, extra_args=["--no-cache"])
     return 0
 
 
@@ -121,8 +143,7 @@ def uninstall_deps(raw_name: str) -> int:
     test_path = resolve_test_path(raw_name.removeprefix("tests/").removesuffix(".py"))
     deps = load_yaml("blacklist.yaml")
     specific_pkgs, common_pkgs = collect_pkgs(test_path, deps, dedupe_common=False)
-    run_uv_pip("uninstall", specific_pkgs)
-    run_uv_pip("uninstall", common_pkgs)
+    run_uv_pip("uninstall", specific_pkgs + common_pkgs, ignore_errors=True)
     return 0
 
 

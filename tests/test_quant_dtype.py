@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 import torch
 from safetensors import safe_open
-from tabulate import tabulate
 
 from gptqmodel.quantization.dtype import (
     _DTYPE_SUPPORT_CACHE,
@@ -26,6 +25,7 @@ from gptqmodel.quantization.dtype import (
     device_supports_native_fp8,
     get_device_dtype_support,
 )
+from gptqmodel.utils.logger import render_table
 
 
 # Default to the preferred GLM FP8 checkpoint, but fall back to a real local FP8 model
@@ -44,12 +44,12 @@ FLOATX_BENCH_MODEL_ROOT = next(
 
 
 def _print_accuracy(title: str, rows, headers) -> None:
-    table = tabulate(rows, headers=headers, floatfmt=".6f", tablefmt="grid")
+    table = render_table(rows, headers=headers, floatfmt=".6f", tablefmt="grid")
     print(f"\n{title}\n{table}\n")
 
 
 def _print_benchmark(title: str, rows, headers, note: str | None = None) -> None:
-    table = tabulate(rows, headers=headers, floatfmt=".4f", tablefmt="grid")
+    table = render_table(rows, headers=headers, floatfmt=".4f", tablefmt="grid")
     note_block = f"{note}\n" if note else ""
     print(f"\n{title}\n{note_block}{table}\n")
 

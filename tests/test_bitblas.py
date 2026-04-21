@@ -7,7 +7,6 @@ import pytest
 import torch
 import torch.nn as nn
 from parameterized import parameterized
-from tabulate import tabulate
 
 import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
 import gptqmodel.utils.bitblas as bitblas_utils
@@ -18,6 +17,7 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.utils.importer import get_kernel_for_backend
+from gptqmodel.utils.logger import render_table
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
@@ -911,6 +911,6 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
         "Max Rel d",
         "Accuracy",
     ]
-    print(tabulate(results, headers=headers, tablefmt="github"))
+    print(render_table(results, headers=headers, tablefmt="github"))
 
     # Table highlights failing kernels in red; no hard assertion to keep report informative.

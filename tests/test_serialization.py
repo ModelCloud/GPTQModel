@@ -26,8 +26,8 @@ from gptqmodel.quantization import (  # noqa: E402
     QuantizeConfig,
 )
 from gptqmodel.quantization.config import (  # noqa: E402  # noqa: E402
-    AWQConfig,
     METHOD,
+    AWQConfig,
     GGUFConfig,
     GPTAQConfig,
     HessianConfig,

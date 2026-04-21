@@ -1,7 +1,6 @@
 common:
   - tokenicer
   - transformers
-  - tabulate
   - swig # for models/tests
 
 tests:
@@ -135,6 +134,8 @@ tests/models:
     - transformers<=4.44.2
 
   test_phi_4.py:
+    - backoff>=2.2.1
+    - optimum>=1.24.0
     - scipy
 
   test_llama3_2_exllamav3.py:

@@ -72,7 +72,7 @@ def list_gpu_tensors(min_size: int = 1, cuda_only: bool = True):
 
     import threading
     import warnings
-    from tabulate import tabulate
+    from ...utils.logger import render_table
 
     # Suppress FutureWarning from Torch every time we try to access certain objects
     warnings.simplefilter(action = 'ignore', category = FutureWarning)
@@ -225,4 +225,4 @@ def list_gpu_tensors(min_size: int = 1, cuda_only: bool = True):
         print("--------------")
         print()
         headers = ["size // MB", "path", "shape", "dtype"]
-        print(tabulate(devices[k], headers = headers, tablefmt = "github", intfmt=","))
+        print(render_table(devices[k], headers=headers, tablefmt="github"))
