@@ -153,6 +153,11 @@ class AwqGEMVFastLinear(AWQuantLinear):
             else:
                 self.bias = None
 
+        # Blackwell/SM120 currently misbehaves with the fused AWQ kernels, so
+        # those devices rebuild one dense compatibility weight per module.
+        self._sm120_compat_weight: torch.Tensor | None = None
+        self._sm120_compat_weight_device: tuple[torch.device, torch.dtype] | None = None
+
     def forward(self, x: torch.Tensor):
         if not awq_runtime_available():
             raise ModuleNotFoundError("AWQ torch.ops kernels are not properly installed. Error: " + awq_runtime_error())
@@ -174,6 +179,11 @@ class AwqGEMVFastLinear(AWQuantLinear):
             inputs = inputs.contiguous()
 
         self._ensure_runtime_buffers(device=inputs.device, dtype=inputs.dtype)
+
+        # Route SM120 devices through a compatibility implementation until the
+        # fused decode/prefill kernels are fixed for Blackwell.
+        if self._use_sm120_compat_path(inputs.device):
+            return self._sm120_compat_forward(x=x, inputs=inputs, input_dtype=input_dtype)
 
         zeros = self._runtime_zeros()
         if inputs_dim == 3 and batch_size < 8 and n_tokens == 1:
@@ -202,9 +212,84 @@ class AwqGEMVFastLinear(AWQuantLinear):
 
         return out
 
+    def _use_sm120_compat_path(self, device: torch.device) -> bool:
+        """Enable the SM120 compatibility path on Blackwell-class CUDA devices."""
+
+        if device.type != "cuda":
+            return False
+        major, _minor = torch.cuda.get_device_capability(device)
+        return major >= 12
+
+    def _sm120_compat_forward(
+            self,
+            *,
+            x: torch.Tensor,
+            inputs: torch.Tensor,
+            input_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Run a dense compatibility matmul for SM120 until fused kernels are stable."""
+
+        out_shape = inputs.shape[:-1] + (self.out_features,)
+        weight = self._sm120_compat_dense_weight(device=inputs.device, dtype=inputs.dtype)
+        out = inputs.reshape(-1, inputs.shape[-1]).matmul(weight).reshape(out_shape)
+
+        if input_dtype != torch.float16:
+            out = out.to(dtype=input_dtype)
+
+        out = out + self.bias if self.bias is not None else out
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
+        return out
+
+    def _sm120_compat_dense_weight(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """Cache one dense AWQ weight matrix per device/dtype for the SM120 path."""
+
+        cache_key = (device, dtype)
+        if self._sm120_compat_weight is not None and self._sm120_compat_weight_device == cache_key:
+            return self._sm120_compat_weight
+
+        intweight = self._unpack_reference_intweight(device=device)
+
+        num_groups = max(1, (self.in_features + self.group_size - 1) // self.group_size)
+        scales = self.scales.transpose(0, 1)[:, :num_groups].to(device=device, dtype=dtype)
+        zeros = self._runtime_zeros().transpose(0, 1)[:, :num_groups].to(device=device, dtype=dtype)
+
+        scales = scales.repeat_interleave(self.group_size, dim=1)[:, : self.in_features]
+        zeros = zeros.repeat_interleave(self.group_size, dim=1)[:, : self.in_features]
+
+        weight = (intweight.to(dtype=dtype) * scales + zeros).transpose(0, 1).contiguous()
+        self._sm120_compat_weight = weight
+        self._sm120_compat_weight_device = cache_key
+        return weight
+
+    def _unpack_reference_intweight(self, *, device: torch.device) -> torch.Tensor:
+        """Invert the GEMV_FAST int16 packing so SM120 can rebuild dense weights."""
+
+        packed = self.qweight.to(device=device, dtype=torch.int32)
+        unpacked = torch.stack(
+            [
+                torch.bitwise_and(torch.bitwise_right_shift(packed, shift), 0xF)
+                for shift in (0, 4, 8, 12)
+            ],
+            dim=-1,
+        )
+        unpacked = unpacked.view(packed.shape[0], packed.shape[1] // 64, 4, 64)
+        unpacked = unpacked.permute(0, 2, 1, 3).contiguous()
+        unpacked = unpacked.view(packed.shape[0] * 4, self.in_features)
+        unpacked = unpacked.view(packed.shape[0] * 4, self.in_features // 32, 4, 2, 4)
+        unpacked = unpacked.permute(0, 1, 2, 4, 3).contiguous()
+        unpacked = unpacked.view(packed.shape[0] * 4, self.in_features // 32, 32)
+        unpacked = unpacked.view(packed.shape[0] * 4, self.in_features // 32, 4, 4, 2)
+        unpacked = unpacked.permute(0, 1, 3, 2, 4).contiguous()
+        return unpacked.view(self.out_features, self.in_features)
+
     def _ensure_runtime_buffers(self, *, device: torch.device, dtype: torch.dtype):
         if self.qweight.device != device or not self.qweight.is_contiguous():
             self.qweight = self.qweight.to(device=device).contiguous()
+            self._sm120_compat_weight = None
+            self._sm120_compat_weight_device = None
 
         zeros = self._runtime_zeros()
         if zeros.device != device or zeros.dtype != dtype or not zeros.is_contiguous():
@@ -215,9 +300,13 @@ class AwqGEMVFastLinear(AWQuantLinear):
                 self.scaled_zeros = zeros
             else:
                 raise ValueError(f"Unsupported zeros buffer: {self.zeros_name}")
+            self._sm120_compat_weight = None
+            self._sm120_compat_weight_device = None
 
         if self.scales.device != device or self.scales.dtype != dtype or not self.scales.is_contiguous():
             self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
+            self._sm120_compat_weight = None
+            self._sm120_compat_weight_device = None
 
         if self.bias is not None and (
             self.bias.device != device or self.bias.dtype != dtype or not self.bias.is_contiguous()
