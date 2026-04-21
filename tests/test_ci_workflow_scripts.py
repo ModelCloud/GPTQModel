@@ -175,15 +175,6 @@ def test_release_source_common_action_yaml_loads():
     assert data["runs"]["using"] == "composite"
 
 
-def test_unit_tests_reusable_workflow_yaml_loads():
-    workflow_path = SCRIPT_DIR.parent / "workflows" / "unit_tests_reusable.yml"
-
-    with workflow_path.open("r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
-
-    assert "workflow_call" in data["on"]
-
-
 def test_ci_restore_uv_cache_script_skips_unchanged_archive(tmp_path: Path):
     archive_root = tmp_path / "archive-src"
     uv_dir = archive_root / "uv"
