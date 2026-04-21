@@ -623,9 +623,9 @@ def test_lazy_turtle_hf_conversion_map_reversed_resolves_nested_language_model_p
         model_local_path=str(model_dir),
         config=SimpleNamespace(_experts_implementation=None),
         model_init_kwargs={"device_map": {"": "cpu"}},
-        checkpoint_path_aliases=(
-            ("model.language_model", "model"),
-            ("language_model", "model"),
+        hf_conversion_map_reversed=(
+            SimpleNamespace(source_patterns=["model.language_model"], target_patterns=["model"]),
+            SimpleNamespace(source_patterns=["language_model"], target_patterns=["model"]),
         ),
     )
     assert source is not None

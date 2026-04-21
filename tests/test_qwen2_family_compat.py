@@ -16,6 +16,7 @@ from torch import nn
 from transformers import PreTrainedTokenizerFast
 
 from gptqmodel.models.definitions import base_qwen2_5_omni, base_qwen2_vl
+from gptqmodel.utils import structure as structure_module
 from gptqmodel.utils.hf import load_tokenizer
 
 
@@ -37,12 +38,26 @@ def test_qwen2_vl_image_only_process_vision_info_returns_image_list():
     assert image_inputs == [image]
 
 
-def test_qwen2_vl_declares_checkpoint_path_aliases_for_language_model_shell():
-    assert base_qwen2_vl.BaseQwen2VLGPTQ.support_offload_to_disk is True
-    assert base_qwen2_vl.BaseQwen2VLGPTQ.checkpoint_path_aliases == (
-        ("model.language_model", "model"),
-        ("language_model", "model"),
+def test_qwen2_vl_resolves_hf_conversion_map_reversed_for_language_model_shell(monkeypatch):
+    conversion_mapping_module = types.SimpleNamespace(
+        get_checkpoint_conversion_mapping=lambda model_type: [
+            types.SimpleNamespace(
+                source_patterns=[r"(?<!_)model(?!\.(language_model|visual))"],
+                target_patterns=["model.language_model"],
+            ),
+        ]
+        if model_type == "qwen2_vl"
+        else None
     )
+    monkeypatch.setattr(structure_module, "import_module", lambda name: conversion_mapping_module)
+
+    target_model = types.SimpleNamespace(config=types.SimpleNamespace(model_type="qwen2_vl"))
+    resolved = base_qwen2_vl.BaseQwen2VLGPTQ.resolve_hf_conversion_map_reversed(target_model=target_model)
+
+    assert base_qwen2_vl.BaseQwen2VLGPTQ.support_offload_to_disk is True
+    assert [(entry.source_patterns[0], entry.target_patterns[0]) for entry in resolved] == [
+        ("model.language_model", r"(?<!_)model(?!\.(language_model|visual))"),
+    ]
 
 
 def test_qwen2_vl_pre_quantize_hooks_use_inner_model_layout():

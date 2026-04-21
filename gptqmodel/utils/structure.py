@@ -719,7 +719,6 @@ class LazyTurtle:
         config: Any,
         model_init_kwargs: Optional[Dict[str, Any]] = None,
         module_tree: Optional[Any] = None,
-        checkpoint_path_aliases: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
     ) -> Optional["LazyTurtle"]:
@@ -732,7 +731,6 @@ class LazyTurtle:
                 config=config,
                 model_init_kwargs=model_init_kwargs,
                 module_tree=module_tree,
-                checkpoint_path_aliases=checkpoint_path_aliases,
                 hf_conversion_map_reversed=hf_conversion_map_reversed,
                 target_model=target_model,
             )
