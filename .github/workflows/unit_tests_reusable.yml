@@ -116,6 +116,8 @@ jobs:
 
       - name: Activate uv env
         run: |
+          printenv | grep UV
+          
           bash .github/scripts/ci_unit_activate_uv_env.sh \
             "${{ matrix.test_script }}" \
             "${{ inputs.check_vm_cuda_version }}" \
