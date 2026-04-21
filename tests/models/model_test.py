@@ -587,13 +587,7 @@ class ModelTest(unittest.TestCase):
         model,
         tokenizer,
         processor,
-        cleanup_callback,
     ):
-        if cleanup_callback is not None:
-            try:
-                cleanup_callback()
-            except Exception:
-                pass
         return model, tokenizer, processor
 
     def _normalize_task_identifier(self, task):
@@ -1179,17 +1173,6 @@ class ModelTest(unittest.TestCase):
             print(f"\n{colorize(f'Index file: {rel_name}', 0, False)}")
             print(json.dumps(content, indent=2, sort_keys=True))
 
-    def _prepare_quant_save_destination(self, need_eval):
-        if self.SAVE_PATH:
-            return contextlib.nullcontext(self.SAVE_PATH), self.SAVE_PATH, None
-
-        if need_eval:
-            tmp_context = tempfile.TemporaryDirectory()
-            return contextlib.nullcontext(tmp_context.name), tmp_context.name, tmp_context.cleanup
-
-        tmp_context = tempfile.TemporaryDirectory()
-        return tmp_context, tmp_context.name, tmp_context.cleanup
-
     def _resolve_quantized_model_path(self, model_candidate):
         if model_candidate is None:
             return None
@@ -1202,6 +1185,23 @@ class ModelTest(unittest.TestCase):
     def _cleanup_quantized_model(self, model_candidate, enabled=True):
         if not enabled:
             return False
+
+        temp_dir_context = getattr(model_candidate, "_temp_dir_context", None)
+        if temp_dir_context is not None:
+            try:
+                temp_dir_context.cleanup()
+            except OSError as exc:
+                log.warn(f"Failed to delete temp model `{temp_dir_context.name}`: {exc}")
+                return False
+
+            try:
+                delattr(model_candidate, "_temp_dir_context")
+            except AttributeError:
+                pass
+
+            log.info(f"Deleting temp model: {temp_dir_context.name}")
+            return True
+
         target_path = self._resolve_quantized_model_path(model_candidate)
         if not target_path or not isinstance(target_path, str):
             return False
@@ -1612,10 +1612,8 @@ class ModelTest(unittest.TestCase):
         need_create_processor = is_image_to_text_model and not is_ovis_model
 
         if not is_quantized:
-            cleanup_callback = None
+            temp_dir_context = None
             try:
-                save_context, planned_save_path, cleanup_callback = self._prepare_quant_save_destination(need_eval)
-                log.info(f"Quantized model artifacts will be saved to: {planned_save_path}")
                 model.quantize(
                     calibration_dataset,
                     calibration_concat_size=dataset_concat_size,
@@ -1637,12 +1635,23 @@ class ModelTest(unittest.TestCase):
                         model=model,
                         tokenizer=tokenizer,
                         processor=None,
-                        cleanup_callback=cleanup_callback,
                     )
+
+                if self.SAVE_PATH:
+                    planned_save_path = self.SAVE_PATH
+                    save_context = contextlib.nullcontext(planned_save_path)
+                elif need_eval:
+                    temp_dir_context = tempfile.TemporaryDirectory()
+                    planned_save_path = temp_dir_context.name
+                    save_context = contextlib.nullcontext(planned_save_path)
+                else:
+                    save_context = tempfile.TemporaryDirectory()
+                    planned_save_path = save_context.name
+
+                log.info(f"Quantized model artifacts will be saved to: {planned_save_path}")
 
                 # TODO: make into shared method
                 with save_context as path:
-                    cleanup_callback = None
                     os.makedirs(path, exist_ok=True)
                     self.clear_directory(path)
 
@@ -1680,10 +1689,13 @@ class ModelTest(unittest.TestCase):
                     q_tokenizer = q_model.tokenizer or self.load_tokenizer(path, trust_remote_code=trust_remote_code)
                     if need_create_processor:
                         processor = AutoProcessor.from_pretrained(path, trust_remote_code=trust_remote_code)
+                    if temp_dir_context is not None:
+                        setattr(q_model, "_temp_dir_context", temp_dir_context)
+                        temp_dir_context = None
             except Exception:
-                if cleanup_callback is not None:
+                if temp_dir_context is not None:
                     try:
-                        cleanup_callback()
+                        temp_dir_context.cleanup()
                     except Exception:
                         pass
                 raise

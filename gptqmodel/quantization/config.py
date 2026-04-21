@@ -3,12 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import atexit
 import copy
 import json
 import math
 import os.path
-import shutil
 import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field, fields
@@ -24,14 +22,32 @@ from packaging import version
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
 
-
 log = setup_logger()
 
 
-def _create_temp_offload_dir() -> str:
-    path = tempfile.mkdtemp(prefix="gptqmodel_")
-    atexit.register(shutil.rmtree, path, ignore_errors=True)
-    return path
+class _SharedTemporaryDirectory:
+    """Share one TemporaryDirectory handle across copied config objects."""
+
+    def __init__(self, *, prefix: str):
+        self._temp_dir = tempfile.TemporaryDirectory(prefix=prefix)
+
+    @property
+    def name(self) -> str:
+        return self._temp_dir.name
+
+    def cleanup(self) -> None:
+        self._temp_dir.cleanup()
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        memo[id(self)] = self
+        return self
+
+
+def _create_temp_offload_dir() -> _SharedTemporaryDirectory:
+    return _SharedTemporaryDirectory(prefix="gptqmodel_")
 
 _DECODER_TARGET_DTYPE_MAP = {
     "float16": torch.float16,
@@ -2334,6 +2350,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         default=None,
         metadata={"help": "Offload disk path. Only applicable if Offload to disk is enabled"},
     )
+    _offload_temp_dir: Optional[_SharedTemporaryDirectory] = field(default=None, init=False, repr=False, compare=False)
 
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
@@ -2468,6 +2485,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     def default_desc_act(self) -> bool:
         return True
 
+    def _ensure_offload_temp_dir(self) -> None:
+        if self.offload_to_disk and not self.offload_to_disk_path:
+            self._offload_temp_dir = _create_temp_offload_dir()
+            self.offload_to_disk_path = self._offload_temp_dir.name
+            log.info(f"QuantizeConfig: offload_to_disk_path auto set to temporary dir `{self.offload_to_disk_path}`")
+
     def __post_init__(self):
         fields_info = fields(self)
 
@@ -2532,10 +2555,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.meta = {}
 
         self.adapter = normalize_adapter(self.adapter)
-
-        if self.offload_to_disk and not self.offload_to_disk_path:
-            self.offload_to_disk_path = _create_temp_offload_dir()
-            log.info(f"QuantizeConfig: offload_to_disk_path auto set to temporary dir `{self.offload_to_disk_path}`")
+        self._ensure_offload_temp_dir()
 
         self.dense_vram_strategy = _normalize_dense_vram_strategy(self.dense_vram_strategy)
         self.dense_vram_strategy_devices = _normalize_strategy_devices(
@@ -3711,10 +3731,7 @@ class EXL3Config(BaseQuantizeConfig):
             self.meta = {}
 
         self.adapter = normalize_adapter(self.adapter)
-
-        if self.offload_to_disk and not self.offload_to_disk_path:
-            self.offload_to_disk_path = _create_temp_offload_dir()
-            log.info(f"QuantizeConfig: offload_to_disk_path auto set to temporary dir `{self.offload_to_disk_path}`")
+        self._ensure_offload_temp_dir()
 
         self.dense_vram_strategy = _normalize_dense_vram_strategy(self.dense_vram_strategy)
         self.dense_vram_strategy_devices = _normalize_strategy_devices(
