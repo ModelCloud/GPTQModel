@@ -13,10 +13,6 @@ tests:
     gpu: 2
     py: 3.14t
 
-  test_awq_inference_llm_awq:
-    sm: '<120'
-
-
 tests/models:
   py: 3.13
 
