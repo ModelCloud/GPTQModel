@@ -128,10 +128,13 @@ jobs:
   list-test-files:
     runs-on: ubuntu-latest
     outputs:
+      cpu-files: ${{ steps.files.outputs.cpu-files }}
       torch-files: ${{ steps.files.outputs.torch-files }}
       model-files: ${{ steps.files.outputs.model-files }}
       m4-files: ${{ steps.files.outputs.m4-files }}
-      test-matrix: ${{ steps.files.outputs.test-matrix }}
+      cpu-matrix: ${{ steps.files.outputs.cpu-matrix }}
+      torch-matrix: ${{ steps.files.outputs.torch-matrix }}
+      model-matrix: ${{ steps.files.outputs.model-matrix }}
 
     steps:
       - name: Checkout Codes
@@ -157,10 +160,13 @@ jobs:
           import os
 
           plan = json.loads(os.environ["TEST_PLAN"])
+          print(f"cpu-files={json.dumps(plan['cpu_files'])}")
           print(f"torch-files={json.dumps(plan['torch_files'])}")
           print(f"model-files={json.dumps(plan['model_files'])}")
           print(f"m4-files={json.dumps(plan['mlx_files'])}")
-          print(f"test-matrix={json.dumps(plan['test_matrix'])}")
+          print(f"cpu-matrix={json.dumps(plan['cpu_matrix'])}")
+          print(f"torch-matrix={json.dumps(plan['torch_matrix'])}")
+          print(f"model-matrix={json.dumps(plan['model_matrix'])}")
           PY
 
           TEST_PLAN="$test_plan" python3 - <<'PY'
@@ -168,18 +174,21 @@ jobs:
           import os
 
           plan = json.loads(os.environ["TEST_PLAN"])
+          print(f"CPU Test files: {json.dumps(plan['cpu_files'])}")
           print(f"Torch Test files: {json.dumps(plan['torch_files'])}")
           print(f"Model Compat Test files: {json.dumps(plan['model_files'])}")
           print(f"MLX Test files: {json.dumps(plan['mlx_files'])}")
-          print(f"Combined Test Matrix: {json.dumps(plan['test_matrix'])}")
+          print(f"CPU Matrix: {json.dumps(plan['cpu_matrix'])}")
+          print(f"Torch Matrix: {json.dumps(plan['torch_matrix'])}")
+          print(f"Model Matrix: {json.dumps(plan['model_matrix'])}")
           PY
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
-  test:
+  cpu:
     needs:
       - list-test-files
       - check-vm
-    if: always() && !cancelled() && needs.list-test-files.outputs.test-matrix != '[]' #  || github.event.inputs.artifact_id != ''
+    if: always() && !cancelled() && needs.list-test-files.outputs.cpu-matrix != '[]'
     uses: ./.github/workflows/unit_tests_reusable.yml
     secrets: inherit
     with:
@@ -189,7 +198,41 @@ jobs:
       check_vm_ip: ${{ needs.check-vm.outputs.ip }}
       check_vm_max_parallel: ${{ needs.check-vm.outputs['max-parallel'] }}
       check_vm_cuda_version: ${{ needs.check-vm.outputs.cuda_version }}
-      test_matrix: ${{ needs.list-test-files.outputs.test-matrix || '[]' }}
+      matrix_json: ${{ needs.list-test-files.outputs.cpu-matrix || '[]' }}
+      model_test_mode: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
+
+  torch:
+    needs:
+      - list-test-files
+      - check-vm
+    if: always() && !cancelled() && needs.list-test-files.outputs.torch-matrix != '[]'
+    uses: ./.github/workflows/unit_tests_reusable.yml
+    secrets: inherit
+    with:
+      repo: ${{ github.event.inputs.repo || github.repository }}
+      ref: ${{ github.event.inputs.ref || github.ref }}
+      pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
+      check_vm_ip: ${{ needs.check-vm.outputs.ip }}
+      check_vm_max_parallel: ${{ needs.check-vm.outputs['max-parallel'] }}
+      check_vm_cuda_version: ${{ needs.check-vm.outputs.cuda_version }}
+      matrix_json: ${{ needs.list-test-files.outputs.torch-matrix || '[]' }}
+      model_test_mode: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
+
+  models:
+    needs:
+      - list-test-files
+      - check-vm
+    if: always() && !cancelled() && needs.list-test-files.outputs.model-matrix != '[]'
+    uses: ./.github/workflows/unit_tests_reusable.yml
+    secrets: inherit
+    with:
+      repo: ${{ github.event.inputs.repo || github.repository }}
+      ref: ${{ github.event.inputs.ref || github.ref }}
+      pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
+      check_vm_ip: ${{ needs.check-vm.outputs.ip }}
+      check_vm_max_parallel: ${{ needs.check-vm.outputs['max-parallel'] }}
+      check_vm_cuda_version: ${{ needs.check-vm.outputs.cuda_version }}
+      matrix_json: ${{ needs.list-test-files.outputs.model-matrix || '[]' }}
       model_test_mode: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
 
   check-torch:

@@ -206,7 +206,12 @@ def should_skip_test(config_data: dict[str, Any], rel_path: str) -> bool:
     return bool(config.get("skip", False))
 
 
-def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex: str, tests_root: str | Path) -> tuple[list[str], list[str], list[str]]:
+def list_tests(
+        ignored_test_files: str | list[str],
+        test_names: str,
+        test_regex: str,
+        tests_root: str | Path,
+) -> tuple[list[str], list[str], list[str], list[str]]:
     tests_root = Path(tests_root)
     input_tests = [strip_py_suffix(name) for name in split_csv(test_names)]
     ignored_raw = ignored_test_files if isinstance(ignored_test_files, list) else split_csv(ignored_test_files)
@@ -233,11 +238,24 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
            and is_model_compat_test(rel, path)
     }
 
+    cpu_tests = {
+        rel
+        for rel, path in all_tests.items()
+        if (not input_tests or rel in input_tests)
+           and rel not in model_tests
+           and "mlx" not in rel
+           and "ipex" not in rel
+           and "xpu" not in rel
+           and matches_test_regex(compiled_test_regex, rel)
+           and has_no_gpu_marker(path)
+    }
+
     torch_tests = {
         rel
         for rel in all_tests
         if (not input_tests or rel in input_tests)
            and rel not in model_tests
+           and rel not in cpu_tests
            and "mlx" not in rel
            and "ipex" not in rel
            and "xpu" not in rel
@@ -253,34 +271,61 @@ def list_tests(ignored_test_files: str | list[str], test_names: str, test_regex:
     }
 
     return (
+        sorted(cpu_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
         sorted(torch_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
         sorted(model_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
         sorted(mlx_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
     )
 
 
-def build_test_matrix(torch_tests: list[str], model_tests: list[str]) -> list[dict[str, str]]:
-    entries = [
-        TestMatrixEntry(
-            test_script=test_script,
-            test_group="torch",
-            alloc_gpu_count="resolved",
-            require_single_gpu="false",
-            include_model_test_mode="false",
-        )
-        for test_script in torch_tests
-    ]
-    entries.extend(
-        TestMatrixEntry(
-            test_script=test_script,
-            test_group="model",
-            alloc_gpu_count="1",
-            require_single_gpu="true",
-            include_model_test_mode="true",
-        )
-        for test_script in model_tests
-    )
-    return [entry.as_dict() for entry in entries]
+def build_group_matrix(group: str, tests: list[str]) -> list[dict[str, str]]:
+    if group == "cpu":
+        return [
+            TestMatrixEntry(
+                test_script=test_script,
+                test_group="cpu",
+                alloc_gpu_count="0",
+                require_single_gpu="false",
+                include_model_test_mode="false",
+            ).as_dict()
+            for test_script in tests
+        ]
+    if group == "torch":
+        return [
+            TestMatrixEntry(
+                test_script=test_script,
+                test_group="torch",
+                alloc_gpu_count="resolved",
+                require_single_gpu="false",
+                include_model_test_mode="false",
+            ).as_dict()
+            for test_script in tests
+        ]
+    if group == "model":
+        return [
+            TestMatrixEntry(
+                test_script=test_script,
+                test_group="model",
+                alloc_gpu_count="1",
+                require_single_gpu="true",
+                include_model_test_mode="true",
+            ).as_dict()
+            for test_script in tests
+        ]
+    raise ValueError(f"unsupported test group: {group}")
+
+
+def build_test_matrices(
+        *,
+        cpu_tests: list[str],
+        torch_tests: list[str],
+        model_tests: list[str],
+) -> dict[str, list[dict[str, str]]]:
+    return {
+        "cpu_matrix": build_group_matrix("cpu", cpu_tests),
+        "torch_matrix": build_group_matrix("torch", torch_tests),
+        "model_matrix": build_group_matrix("model", model_tests),
+    }
 
 
 def build_test_plan(
@@ -290,17 +335,23 @@ def build_test_plan(
         test_regex: str,
         tests_root: str | Path,
 ) -> dict[str, list[dict[str, str]] | list[str]]:
-    torch_tests, model_tests, mlx_tests = list_tests(
+    cpu_tests, torch_tests, model_tests, mlx_tests = list_tests(
         ignored_test_files=ignored_test_files,
         test_names=test_names,
         test_regex=test_regex,
         tests_root=tests_root,
     )
+    matrices = build_test_matrices(
+        cpu_tests=cpu_tests,
+        torch_tests=torch_tests,
+        model_tests=model_tests,
+    )
     return {
+        "cpu_files": cpu_tests,
         "torch_files": torch_tests,
         "model_files": model_tests,
         "mlx_files": mlx_tests,
-        "test_matrix": build_test_matrix(torch_tests, model_tests),
+        **matrices,
     }
 
 

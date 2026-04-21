@@ -30,8 +30,8 @@ on:
         description: "CUDA version selected by the caller"
         required: true
         type: string
-      test_matrix:
-        description: "Serialized unit test matrix"
+      matrix_json:
+        description: "Serialized unit test matrix for this reusable job"
         required: true
         type: string
       model_test_mode:
@@ -96,8 +96,8 @@ jobs:
       fail-fast: false
       max-parallel: ${{ fromJson(inputs.check_vm_max_parallel).size || 20 }}
       matrix:
-        include: ${{ fromJSON(inputs.test_matrix || '[]') }}
-    if: ${{ !cancelled() && inputs.test_matrix != '[]' }}
+        include: ${{ fromJSON(inputs.matrix_json || '[]') }}
+    if: ${{ !cancelled() && inputs.matrix_json != '[]' }}
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
