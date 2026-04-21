@@ -9,12 +9,9 @@ import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
-import atexit  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
 import tempfile  # noqa: E402
-import threading  # noqa: E402
-from dataclasses import dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import torch  # noqa: E402
@@ -39,26 +36,8 @@ CALIBRATION_DATASET_PATH = "/monster/data/model/dataset/c4-train.00000-of-01024.
 AWQ_GROUP_SIZE = 128
 
 
-@dataclass(frozen=True)
-class QuantizedAwqArtifact:
-    model_path: str
-    quantize_config_dict: dict
-    temp_dir: tempfile.TemporaryDirectory[str]
-
-
 _TOKENIZER = None
 _CALIBRATION_DATASETS: dict[int, object] = {}
-_ARTIFACTS: dict[tuple[object, int, int], QuantizedAwqArtifact] = {}
-_ARTIFACT_TEMPDIRS: list[tempfile.TemporaryDirectory[str]] = []
-_ARTIFACT_LOCK = threading.Lock()
-
-
-def _cleanup_artifacts() -> None:
-    for temp_dir in reversed(_ARTIFACT_TEMPDIRS):
-        temp_dir.cleanup()
-
-
-atexit.register(_cleanup_artifacts)
 
 
 def awq_sample_count() -> int:
@@ -98,56 +77,35 @@ def get_awq_calibration_dataset():
     return dataset
 
 
-def _quantized_artifact_key(checkpoint_format: FORMAT, group_size: int) -> tuple[object, int, int]:
-    return checkpoint_format, group_size, awq_sample_count()
+def save_quantized_awq_artifact(
+        checkpoint_format: FORMAT,
+        artifact_root: str,
+        *,
+        group_size: int = AWQ_GROUP_SIZE,
+) -> dict:
+    quantize_config = QuantizeConfig(
+        bits=4,
+        group_size=group_size,
+        quant_method=METHOD.AWQ,
+        format=checkpoint_format,
+    )
 
+    model = GPTQModel.load(
+        PRETRAINED_MODEL_ID,
+        quantize_config=quantize_config,
+    )
+    model.quantize(get_awq_calibration_dataset(), batch_size=1, calibration_concat_size=0)
+    model.save(artifact_root)
 
-def get_quantized_awq_artifact(checkpoint_format: FORMAT, group_size: int = AWQ_GROUP_SIZE) -> QuantizedAwqArtifact:
-    artifact_key = _quantized_artifact_key(checkpoint_format, group_size)
-    cached_artifact = _ARTIFACTS.get(artifact_key)
-    if cached_artifact is not None:
-        return cached_artifact
+    with open(Path(artifact_root) / QUANT_CONFIG_FILENAME, "r", encoding="utf-8") as config_file:
+        file_dict = json.loads(config_file.read())
+        assert model.quantize_config.to_dict() == file_dict
+        # Exclude `offload_to_disk_path`, which is a random value.
+        file_dict["meta"].pop("offload_to_disk_path")
+        logging.info("Saved config file: %s", file_dict)
 
-    with _ARTIFACT_LOCK:
-        cached_artifact = _ARTIFACTS.get(artifact_key)
-        if cached_artifact is not None:
-            return cached_artifact
-
-        quantize_config = QuantizeConfig(
-            bits=4,
-            group_size=group_size,
-            quant_method=METHOD.AWQ,
-            format=checkpoint_format,
-        )
-
-        model = GPTQModel.load(
-            PRETRAINED_MODEL_ID,
-            quantize_config=quantize_config,
-        )
-        model.quantize(get_awq_calibration_dataset(), batch_size=1, calibration_concat_size=0)
-
-        format_name = getattr(checkpoint_format, "value", str(checkpoint_format)).lower()
-        temp_dir = tempfile.TemporaryDirectory(prefix=f"awq_{format_name}_")
-        artifact_root = temp_dir.name
-        model.save(artifact_root)
-
-        with open(Path(artifact_root) / QUANT_CONFIG_FILENAME, "r", encoding="utf-8") as config_file:
-            file_dict = json.loads(config_file.read())
-            assert model.quantize_config.to_dict() == file_dict
-            # Exclude `offload_to_disk_path`, which is a random value.
-            file_dict["meta"].pop("offload_to_disk_path")
-            logging.info("Saved config file: %s", file_dict)
-
-        del model
-
-        _ARTIFACT_TEMPDIRS.append(temp_dir)
-        cached_artifact = QuantizedAwqArtifact(
-            model_path=artifact_root,
-            quantize_config_dict=file_dict,
-            temp_dir=temp_dir,
-        )
-        _ARTIFACTS[artifact_key] = cached_artifact
-        return cached_artifact
+    del model
+    return file_dict
 
 
 def assert_awq_linear_backend(model, backend: BACKEND) -> None:
@@ -180,26 +138,32 @@ def assert_generation_mentions_paris_or_city(result: str, *, extra_terms: tuple[
 
 
 def run_quantized_awq_generation_test(checkpoint_format: FORMAT, backend: BACKEND, *, group_size: int = AWQ_GROUP_SIZE):
-    artifact = get_quantized_awq_artifact(checkpoint_format, group_size)
-    model = GPTQModel.load(
-        artifact.model_path,
-        backend=backend,
-        device="cuda",
-    )
+    format_name = getattr(checkpoint_format, "value", str(checkpoint_format)).lower()
+    with tempfile.TemporaryDirectory(prefix=f"awq_{format_name}_") as artifact_root:
+        quantize_config_dict = save_quantized_awq_artifact(
+            checkpoint_format,
+            artifact_root,
+            group_size=group_size,
+        )
+        model = GPTQModel.load(
+            artifact_root,
+            backend=backend,
+            device="cuda",
+        )
 
-    assert_loaded_quantize_config_matches(model, artifact.quantize_config_dict)
-    assert_awq_linear_backend(model, backend)
+        assert_loaded_quantize_config_matches(model, quantize_config_dict)
+        assert_awq_linear_backend(model, backend)
 
-    result = ModelTest.generate_stable_with_limit(
-        model,
-        get_awq_tokenizer(),
-        PROMPT,
-        max_new_tokens=100,
-    )
-    print(f"BACKEND: {backend}, Result: {result}")
-    assert_generation_mentions_paris_or_city(result)
+        result = ModelTest.generate_stable_with_limit(
+            model,
+            get_awq_tokenizer(),
+            PROMPT,
+            max_new_tokens=100,
+        )
+        print(f"BACKEND: {backend}, Result: {result}")
+        assert_generation_mentions_paris_or_city(result)
 
-    del model
+        del model
 
 
 def run_inference_only_generation_test(
