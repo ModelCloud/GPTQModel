@@ -4,14 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import pytest
+
 from awq_test_utils import run_inference_only_generation_test
-
 from gptqmodel import BACKEND
-
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
+# TODO: 4090 works after ModelCloud/GPTQModel/pull/2798. 5090 still crash with illegal memory access
 def test_inference_quantized_by_llm_awq():
     run_inference_only_generation_test(
         "ModelCloud/opt-125m-llm-awq",  # this quantized by llm-awq
