@@ -49,22 +49,12 @@ def test_resolve_test_runtime_marks_xpu_tests():
     assert runtime.xpu_mode is True
 
 
-def test_build_test_matrix_marks_model_entries():
+def test_build_group_matrix_marks_model_entries():
     ci_workflow = _load_script_module("ci_workflow")
 
-    matrix = ci_workflow.build_test_matrix(
-        torch_tests=["test_require_pkgs"],
-        model_tests=["models/test_opt"],
-    )
+    matrix = ci_workflow.build_group_matrix("model", ["models/test_opt"])
 
     assert matrix == [
-        {
-            "test_script": "test_require_pkgs",
-            "test_group": "torch",
-            "alloc_gpu_count": "resolved",
-            "require_single_gpu": "false",
-            "include_model_test_mode": "false",
-        },
         {
             "test_script": "models/test_opt",
             "test_group": "model",
@@ -73,6 +63,63 @@ def test_build_test_matrix_marks_model_entries():
             "include_model_test_mode": "true",
         },
     ]
+
+
+def test_build_test_matrices_splits_cpu_torch_and_model():
+    ci_workflow = _load_script_module("ci_workflow")
+
+    matrices = ci_workflow.build_test_matrices(
+        cpu_tests=["test_require_pkgs"],
+        torch_tests=["test_adapter_config"],
+        model_tests=["models/test_opt"],
+    )
+
+    assert matrices == {
+        "cpu_matrix": [
+            {
+                "test_script": "test_require_pkgs",
+                "test_group": "cpu",
+                "alloc_gpu_count": "0",
+                "require_single_gpu": "false",
+                "include_model_test_mode": "false",
+            },
+        ],
+        "torch_matrix": [
+            {
+                "test_script": "test_adapter_config",
+                "test_group": "torch",
+                "alloc_gpu_count": "resolved",
+                "require_single_gpu": "false",
+                "include_model_test_mode": "false",
+            },
+        ],
+        "model_matrix": [
+            {
+                "test_script": "models/test_opt",
+                "test_group": "model",
+                "alloc_gpu_count": "1",
+                "require_single_gpu": "true",
+                "include_model_test_mode": "true",
+            },
+        ],
+    }
+
+
+def test_list_tests_moves_gpu_minus_one_tests_to_cpu():
+    ci_workflow = _load_script_module("ci_workflow")
+
+    cpu_tests, torch_tests, model_tests, mlx_tests = ci_workflow.list_tests(
+        ignored_test_files=[],
+        test_names="test_require_pkgs,test_adapter_config,models/test_opt",
+        test_regex="",
+        tests_root="tests",
+    )
+
+    assert "test_require_pkgs" in cpu_tests
+    assert "test_require_pkgs" not in torch_tests
+    assert "test_adapter_config" in torch_tests
+    assert "models/test_opt" in model_tests
+    assert mlx_tests == []
 
 
 @pytest.mark.parametrize(
