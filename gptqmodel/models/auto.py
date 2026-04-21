@@ -68,7 +68,7 @@ from ..utils.hf import (  # noqa: E402
 )
 from ..utils.hub import list_repo_files  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
-from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
+from ..utils.torch import torch_empty_cache  # noqa: E402
 from .base import BaseQModel  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
 from .definitions.apertus import ApertusQModel  # noqa: E402
@@ -686,6 +686,7 @@ class GPTQModel:
             # pass-through vars for load()
             trust_remote_code: bool = False,
             dtype: Optional[Union[str, torch.dtype]] = None,
+            device: Optional[Union[str, torch.device]] = None,
         ):
             if not adapter or not isinstance(adapter, Lora):
                 raise ValueError(f"Adapter: expected `adapter` type to be `Lora`: actual = `{adapter}`.")
@@ -696,7 +697,7 @@ class GPTQModel:
             quantized_model = GPTQModel.load(
                 model_id_or_path=quantized_model_id_or_path,
                 backend=BACKEND.GPTQ_TORCH,
-                device=CPU,
+                device=device,
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
             )
@@ -715,7 +716,7 @@ class GPTQModel:
                 backend=BACKEND.GPTQ_TORCH,
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
-                device=CPU,
+                device=device,
             )
 
             log.info("Model: Adapter generation started")
