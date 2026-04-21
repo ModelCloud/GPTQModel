@@ -95,65 +95,6 @@ permissions:
   contents: read
 
 jobs:
-  check-torch:
-    runs-on: [ self-hosted, xeon5 ]
-    container:
-      image: 10.0.13.31:5000/nvidia/cuda:130-ubuntu24.04_0325
-      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
-      volumes:
-        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
-        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
-        - /dev/dri/by-path:/dev/dri/by-path
-        - /monster/ci/uv:/opt/uv
-        - /monster/ci/env:/opt/env
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Test pypi pip
-            env_name: pypi_pip_env
-            use_pip: 'true'
-            install_cmd: pip install gptqmodel torch -U
-          - name: Test pypi uv
-            env_name: pypi_uv_env
-            use_pip: 'false'
-            install_cmd: uv pip install gptqmodel torch -U
-          - name: Test local pip
-            env_name: local_pip_env
-            use_pip: 'true'
-            install_cmd: pip install . torch -U
-          - name: Test local uv
-            env_name: local_uv_env
-            use_pip: 'false'
-            install_cmd: uv pip install . torch -U
-    steps:
-      - name: Checkout Codes
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
-
-      - name: Prepare checkout
-        run: |
-          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
-
-      - name: ${{ matrix.name }}
-        run: |
-          uv venv "${{ matrix.env_name }}"
-          source "${{ matrix.env_name }}/bin/activate"
-          if [[ "${{ matrix.use_pip }}" == "true" ]]; then
-            uv pip install pip -U
-          fi
-          ${{ matrix.install_cmd }}
-
-
-  setuptools-compatibility:
-    uses: ./.github/workflows/setuptools_compatibility_reusable.yml
-    with:
-      repo: ${{ github.event.inputs.repo || github.repository }}
-      ref: ${{ github.event.inputs.ref || github.ref }}
-      pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
-
   check-vm:
     runs-on: ubuntu-latest
     outputs:
@@ -293,3 +234,62 @@ jobs:
       check_vm_cuda_version: ${{ needs.check-vm.outputs.cuda_version }}
       matrix_json: ${{ needs.list-test-files.outputs.model-matrix || '[]' }}
       model_test_mode: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
+
+  check-torch:
+    runs-on: [ self-hosted, xeon5 ]
+    container:
+      image: 10.0.13.31:5000/nvidia/cuda:130-ubuntu24.04_0325
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
+      volumes:
+        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
+        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
+        - /dev/dri/by-path:/dev/dri/by-path
+        - /monster/ci/uv:/opt/uv
+        - /monster/ci/env:/opt/env
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Test pypi pip
+            env_name: pypi_pip_env
+            use_pip: 'true'
+            install_cmd: pip install gptqmodel torch -U
+          - name: Test pypi uv
+            env_name: pypi_uv_env
+            use_pip: 'false'
+            install_cmd: uv pip install gptqmodel torch -U
+          - name: Test local pip
+            env_name: local_pip_env
+            use_pip: 'true'
+            install_cmd: pip install . torch -U
+          - name: Test local uv
+            env_name: local_uv_env
+            use_pip: 'false'
+            install_cmd: uv pip install . torch -U
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
+      - name: Prepare checkout
+        run: |
+          .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
+
+      - name: ${{ matrix.name }}
+        run: |
+          uv venv "${{ matrix.env_name }}"
+          source "${{ matrix.env_name }}/bin/activate"
+          if [[ "${{ matrix.use_pip }}" == "true" ]]; then
+            uv pip install pip -U
+          fi
+          ${{ matrix.install_cmd }}
+
+
+  setuptools-compatibility:
+    uses: ./.github/workflows/setuptools_compatibility_reusable.yml
+    with:
+      repo: ${{ github.event.inputs.repo || github.repository }}
+      ref: ${{ github.event.inputs.ref || github.ref }}
+      pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
