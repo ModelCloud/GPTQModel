@@ -89,10 +89,26 @@ def _should_drain_finalize_futures_synchronously(
     than the weight-only paths. Letting its finalizers overlap the next layer
     can visibly ratchet active VRAM upward from layer N to N+1, so ParoQuant
     always drains per-layer finalizers synchronously.
+
+    GPTQ's multi-device path also leaves device-resident quantized weights live
+    until `submodule_finalize()` replaces and packs the module. If the next
+    layer starts before those finalizers drain, layer N and N+1 can overlap on
+    different accelerators and steadily ratchet allocator pressure upward.
     """
     if looper.gptq_model.quantize_config.wait_for_submodule_finalizers:
         return True
-    return any(isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks)
+    if any(isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks):
+        return True
+    if not any(isinstance(process, GPTQProcessor) for process, *_ in finalize_tasks):
+        return False
+
+    quant_devices = getattr(looper, "_quant_devices", None) or []
+    active_accelerators = {
+        (device.type, device.index)
+        for device_like in quant_devices
+        if (device := normalize_device_like(device_like)) is not None and device.type != "cpu"
+    }
+    return len(active_accelerators) > 1
 
 
 def _should_empty_cache_after_sync_finalize(
