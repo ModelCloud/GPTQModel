@@ -40,6 +40,10 @@
 #endif
 
 #include <ATen/ATen.h>
+#include <ATen/DeviceGuard.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <torch/types.h>
 #include <mutex>
 #include <vector>
 
@@ -1025,7 +1029,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   int sms = marlin::get_marlin_device_info(a.get_device()).sms;
 
   // Alloc buffers
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+  const c10::cuda::OptionalCUDAGuard device_guard(at::device_of(a));
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   torch::Tensor c;
   if (c_or_none.has_value()) {

@@ -193,9 +193,16 @@ def is_model_compat_test(rel_path: str, file_path: Path) -> bool:
 
 
 def matches_test_regex(test_regex: Any, rel_path: str) -> bool:
-    if test_regex.match(rel_path):
-        return True
-    return test_regex.match(PurePosixPath(rel_path).name) is not None
+    rel_posix = PurePosixPath(rel_path)
+    candidates = (
+        rel_path,
+        f"{rel_path}.py",
+        str(PurePosixPath("tests") / rel_posix),
+        str(PurePosixPath("tests") / rel_posix.with_suffix(".py")),
+        rel_posix.name,
+        rel_posix.with_suffix(".py").name,
+    )
+    return any(test_regex.match(candidate) for candidate in candidates)
 
 
 def should_skip_test(config_data: dict[str, Any], rel_path: str) -> bool:
