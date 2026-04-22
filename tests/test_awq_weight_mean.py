@@ -19,6 +19,7 @@ from gptqmodel.looper.awq_processor import (
     _AWQLayerState,
     _compute_awq_weight_mean,
 )
+from gptqmodel.models.base import generate_node_for_awq_scaling
 from gptqmodel.quantization.config import FORMAT, METHOD, AWQConfig, QuantizeConfig
 
 
@@ -97,6 +98,87 @@ def test_awq_record_input_feature_preserves_sample_axis_for_2d_inputs():
     assert features["self_attn.q_proj"].shape == (2, 16, QWEN3_HIDDEN_SIZE)
 
 
+def test_awq_layer_input_features_aligns_variable_length_fallback_with_cached_kwargs():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    state = _AWQLayerState(modules={"self_attn.q_proj": object()})
+
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[
+            torch.ones(1, 1, 423, 423),
+            torch.ones(1, 1, 36, 36),
+        ],
+        position_ids=[
+            torch.arange(423).unsqueeze(0),
+            torch.arange(36).unsqueeze(0),
+        ],
+        layer_input_kwargs=[{}, {}],
+    )
+    processor._module_forward_kwargs = {"attention_mask": processor.inputs_cache.attention_masks[-1]}
+    processor.tasks["self_attn.q_proj"] = {
+        "inputs": [
+            torch.randn(1, 423, QWEN3_HIDDEN_SIZE),
+            torch.randn(1, 36, QWEN3_HIDDEN_SIZE),
+        ],
+        "batch_indices": [0, 1],
+    }
+
+    features = processor._layer_input_features(state)
+
+    assert features["self_attn.q_proj"].shape == (1, 36, QWEN3_HIDDEN_SIZE)
+    assert processor._awq_feature_kwargs["self_attn.q_proj"]["attention_mask"].shape == (1, 1, 36, 36)
+    assert processor._awq_feature_kwargs["self_attn.q_proj"]["position_ids"].shape == (1, 36)
+
+
+def test_awq_module_forward_slices_batch_aligned_kwargs_with_chunk_offset():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    processor._quant_batch_size = 1
+
+    class _Recorder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(1))
+            self.attention_masks = []
+            self.position_ids = []
+
+        def forward(self, x, attention_mask=None, position_ids=None):
+            self.attention_masks.append(attention_mask.clone())
+            self.position_ids.append(position_ids.clone())
+            return x
+
+    module = _Recorder()
+    x = torch.randn(2, 8, 16)
+    attention_mask = torch.stack(
+        (
+            torch.full((1, 8, 8), 1.0),
+            torch.full((1, 8, 8), 2.0),
+        ),
+        dim=0,
+    )
+    position_ids = torch.tensor(
+        [
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            [10, 11, 12, 13, 14, 15, 16, 17],
+        ]
+    )
+
+    out = AWQProcessor._module_forward(
+        processor,
+        x,
+        module,
+        {
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+        },
+    )
+
+    assert out.shape == x.shape
+    assert len(module.attention_masks) == 2
+    assert float(module.attention_masks[0][0, 0, 0, 0]) == 1.0
+    assert float(module.attention_masks[1][0, 0, 0, 0]) == 2.0
+    assert module.position_ids[0].tolist() == [[0, 1, 2, 3, 4, 5, 6, 7]]
+    assert module.position_ids[1].tolist() == [[10, 11, 12, 13, 14, 15, 16, 17]]
+
+
 def test_awq_module_forward_splits_accumulated_batches_even_when_quant_batch_size_is_one():
     processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
     processor._quant_batch_size = 1
@@ -118,6 +200,78 @@ def test_awq_module_forward_splits_accumulated_batches_even_when_quant_batch_siz
 
     assert out.shape == x.shape
     assert module.calls == [1, 1, 1, 1]
+
+
+def test_generate_node_for_awq_scaling_keeps_kwargs_for_later_nodes():
+    kwargs = {
+        "attention_mask": torch.ones(1, 1, 36, 36),
+        "position_ids": torch.arange(36).unsqueeze(0),
+    }
+
+    first_node, _ = generate_node_for_awq_scaling(
+        inp=torch.randn(1, 36, 16),
+        prev_op=object(),
+        module_kwargs=kwargs,
+        nodes_size=0,
+        subset=[nn.Linear(16, 16, bias=False)],
+        module2inspect=None,
+    )
+    later_node, _ = generate_node_for_awq_scaling(
+        inp=torch.randn(1, 36, 16),
+        prev_op=object(),
+        module_kwargs=kwargs,
+        nodes_size=1,
+        subset=[nn.Linear(16, 16, bias=False)],
+        module2inspect=None,
+    )
+
+    assert first_node["kwargs"] is kwargs
+    assert later_node["kwargs"] is kwargs
+
+
+def test_awq_align_module_kwargs_packs_mask_for_packed_feature_tensor():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    inp = torch.randn(1, 5, 16)
+    attention_mask = torch.tensor(
+        [
+            [
+                [
+                    [0.0, torch.finfo(torch.float32).min, torch.finfo(torch.float32).min],
+                    [0.0, 0.0, torch.finfo(torch.float32).min],
+                    [0.0, 0.0, 0.0],
+                ]
+            ],
+            [
+                [
+                    [0.0, torch.finfo(torch.float32).min, torch.finfo(torch.float32).min],
+                    [0.0, 0.0, torch.finfo(torch.float32).min],
+                    [torch.finfo(torch.float32).min, torch.finfo(torch.float32).min, torch.finfo(torch.float32).min],
+                ]
+            ],
+        ],
+        dtype=torch.float32,
+    )
+    position_ids = torch.tensor(
+        [
+            [0, 1, 2],
+            [10, 11, 12],
+        ]
+    )
+
+    aligned = processor._align_module_kwargs_to_input(
+        inp,
+        {
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+        },
+    )
+
+    packed_mask = aligned["attention_mask"]
+    assert packed_mask.shape == (1, 1, 5, 5)
+    assert aligned["position_ids"].tolist() == [[0, 1, 2, 10, 11]]
+    assert torch.isfinite(packed_mask[0, 0, 2, 0])
+    assert packed_mask[0, 0, 0, 3] == torch.finfo(torch.float32).min
+    assert packed_mask[0, 0, 3, 4] == torch.finfo(torch.float32).min
 
 
 def test_awq_search_best_scale_keeps_cpu_activations_off_device_until_forward_chunks():

@@ -122,8 +122,11 @@ def generate_node_for_awq_scaling(inp, prev_op, module_kwargs, nodes_size, subse
         "layers": subset,
         "inp": inp,
     }
-    if nodes_size == 0:
-        # Only the first node needs kwargs
+    if module_kwargs is not None:
+        # Preserve per-node kwargs for every scaling group. In multi-batch AWQ
+        # replays these can differ by feature bucket, so falling back to a
+        # layer-global "latest batch" mask on later nodes can reintroduce
+        # sequence-length mismatches during scale search.
         n["kwargs"] = module_kwargs
 
     if module2inspect is not None:
@@ -2252,6 +2255,16 @@ class BaseQModel(nn.Module):
         last_module = None  # most recent norm obj (from a '!...' block)
         last_module_name = None
         last_module_root = None  # self_attn.* has root == self_attn, mlp.* has root == mlp
+        if isinstance(module_kwargs, dict):
+            per_feature_kwargs = module_kwargs.get("_awq_feature_kwargs", {})
+            base_module_kwargs = {
+                key: value
+                for key, value in module_kwargs.items()
+                if key != "_awq_feature_kwargs"
+            }
+        else:
+            per_feature_kwargs = {}
+            base_module_kwargs = module_kwargs
 
         if self.model.config is not None and self.dynamic_expert_index is not None:
             self.get_num_experts(self.model.config)
@@ -2287,6 +2300,14 @@ class BaseQModel(nn.Module):
             if "." in candidate_name:
                 last_module_root = candidate_name.split(".", 1)[0]
             return True
+
+        def _module_kwargs_for_feature(feature_name: str | None):
+            kwargs_for_feature = dict(base_module_kwargs)
+            if feature_name and isinstance(per_feature_kwargs, dict):
+                feature_specific_kwargs = per_feature_kwargs.get(feature_name)
+                if isinstance(feature_specific_kwargs, dict):
+                    kwargs_for_feature.update(feature_specific_kwargs)
+            return kwargs_for_feature
 
         full_layer_modules = self.full_layer_modules(
             self.model.config,
@@ -2325,8 +2346,9 @@ class BaseQModel(nn.Module):
                         log.debug("awq_get_modules_for_scaling: skipping missing expert module `%s`", name)
                         continue
                     subset = [m]
+                    feature_name = name
                     n, root = generate_node_for_awq_scaling(inp=input_feat[name], prev_op=prev_op,
-                                                            module_kwargs=module_kwargs, nodes_size=len(nodes),
+                                                            module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                             subset=subset, module2inspect=None)
                     if root is not None and last_module_root != root:
                         last_module_root = root
@@ -2380,16 +2402,18 @@ class BaseQModel(nn.Module):
                             last_module_root,
                             len(block),
                         )
+                    feature_name = last_module_root if last_module_root in input_feat else _select_feature_name(block)
                     inp = input_feat.get(last_module_root, input_feat.get(_select_feature_name(block)))
                 else:
-                    inp = input_feat.get(_select_feature_name(block))
+                    feature_name = _select_feature_name(block)
+                    inp = input_feat.get(feature_name)
 
                 if inp is None:
                     log.debug("awq_get_modules_for_scaling: skipping block %s due to missing input features", block)
                     continue
 
                 n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
-                                                        module_kwargs=module_kwargs, nodes_size=len(nodes),
+                                                        module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                         subset=subset, module2inspect=module2inspect)
 
                 nodes.append(n)
