@@ -120,14 +120,10 @@ jobs:
 
       - name: Activate uv env
         run: |
-          echo "::group::-- dust uv cache dir before --"
+          echo "::group::-- dust uv cache dir --"
             dust $(uv cache dir)
           echo "::endgroup::"
-          echo "Cleaning uv cache. uv cache dir: $(uv cache dir)"
-          uv cache prune --ci
-          echo "::group::-- dust uv cache dir after --"
-            dust $(uv cache dir)
-          echo "::endgroup::"
+
           bash .github/scripts/ci_unit_activate_uv_env.sh \
             "${{ matrix.test_script }}" \
             "${{ inputs.check_vm_cuda_version }}" \
@@ -249,15 +245,6 @@ jobs:
           echo "cleaning venv: ${{ env.VIRTUAL_ENV }}"
           rm -rf "${{ env.VIRTUAL_ENV }}"
           
-          echo "::group::-- dust uv cache dir before --"
-            dust $(uv cache dir)
-          echo "::endgroup::"
-          
-          ps aux | grep uv
-          lsof +D $(uv cache dir)
-          echo "Cleaning uv cache. uv cache dir: $(uv cache dir)"
-          uv cache prune --ci
-          
-          echo "::group::-- dust uv cache dir after --"
+          echo "::group::-- dust uv cache dir --"
             dust $(uv cache dir)
           echo "::endgroup::"
