@@ -94,6 +94,7 @@ from .definitions.gemma2 import Gemma2QModel  # noqa: E402
 from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel  # noqa: E402
 from .definitions.gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel  # noqa: E402
 from .definitions.glm import GlmQModel  # noqa: E402
+from .definitions.glm_ocr import GlmOcrGPTQ  # noqa: E402
 from .definitions.glm4_moe import GLM4MoEGPTQ  # noqa: E402
 from .definitions.glm4_moe_lite import Glm4MoeLiteQModel  # noqa: E402
 from .definitions.glm4v import Glm4vGPTQ  # noqa: E402
@@ -183,6 +184,7 @@ MODEL_MAP = {
     "glm": GlmQModel,
     "glm4": GlmQModel,
     "glm4v": Glm4vGPTQ,
+    "glm_ocr": GlmOcrGPTQ,
     "glm4_moe": GLM4MoEGPTQ,
     "glm4_moe_lite": Glm4MoeLiteQModel,
     "glm_moe_dsa": GlmMoeDsaQModel,
