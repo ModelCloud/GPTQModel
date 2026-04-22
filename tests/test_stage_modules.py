@@ -6,6 +6,7 @@ from typing import Dict
 import torch
 
 import gptqmodel.looper.stage_subset as stage_subset_module
+from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.forward_executor import ForwardExecutor
 from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.loop_processor import ExecutionConfig
@@ -413,6 +414,44 @@ def test_stage_layer_keeps_async_finalizers_for_single_device_gptq():
     assert _should_drain_finalize_futures_synchronously(
         looper,
         finalize_tasks=[(gptq_processor, None, None, None, None)],
+    ) is False
+
+
+def test_stage_layer_forces_sync_finalizers_for_multi_device_awq():
+    looper = types.SimpleNamespace(
+        gptq_model=types.SimpleNamespace(
+            quantize_config=QuantizeConfig(
+                bits=4,
+                group_size=128,
+                wait_for_submodule_finalizers=False,
+            )
+        ),
+        _quant_devices=[torch.device("cuda:0"), torch.device("cuda:1")],
+    )
+    awq_processor = object.__new__(AWQProcessor)
+
+    assert _should_drain_finalize_futures_synchronously(
+        looper,
+        finalize_tasks=[(awq_processor, None, None, None, None)],
+    ) is True
+
+
+def test_stage_layer_keeps_async_finalizers_for_single_device_awq():
+    looper = types.SimpleNamespace(
+        gptq_model=types.SimpleNamespace(
+            quantize_config=QuantizeConfig(
+                bits=4,
+                group_size=128,
+                wait_for_submodule_finalizers=False,
+            )
+        ),
+        _quant_devices=[torch.device("cuda:0")],
+    )
+    awq_processor = object.__new__(AWQProcessor)
+
+    assert _should_drain_finalize_futures_synchronously(
+        looper,
+        finalize_tasks=[(awq_processor, None, None, None, None)],
     ) is False
 
 
