@@ -3,22 +3,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForImageTextToText
-
+from transformers import AutoModel
 from ..base import BaseQModel
 
 
-class GlmOCRGPTQ(BaseQModel):
-    loader = AutoModelForImageTextToText
+class GlmASRGPTQ(BaseQModel):
+    loader = AutoModel
 
     require_load_processor = True
 
-    pre_lm_head_norm_module = "model.language_model.norm"
-    rotary_embedding = "model.language_model.rotary_emb"
+    # GLM-ASR keeps the speech encoder and projector at the top level while the
+    # text decoder stays under `language_model.model`.
+    lm_head = "language_model.lm_head"
+    pre_lm_head_norm_module = "language_model.model.norm"
+    rotary_embedding = "language_model.model.rotary_emb"
 
     module_tree = [
-        "model",
         "language_model",
+        "model",
         "layers",
         "#",
         {
@@ -29,5 +31,4 @@ class GlmOCRGPTQ(BaseQModel):
         },
     ]
 
-
-__all__ = ["GlmOCRGPTQ"]
+__all__ = ["GlmASRGPTQ"]
