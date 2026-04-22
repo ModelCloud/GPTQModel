@@ -28,6 +28,8 @@ from .gemma2 import Gemma2QModel
 from .gemma3 import Gemma3QModel
 from .gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel
 from .glm import GlmQModel
+from .glmasr import GlmASRGPTQ
+from .glm_ocr import GlmOCRGPTQ
 from .glm_moe_dsa import GlmMoeDsaQModel
 from .gpt2 import GPT2QModel
 from .gpt_bigcode import GptBigCodeQModel
