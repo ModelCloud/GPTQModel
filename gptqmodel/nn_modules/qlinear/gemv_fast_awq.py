@@ -175,22 +175,29 @@ class AwqGEMVFastLinear(AWQuantLinear):
 
         self._ensure_runtime_buffers(device=inputs.device, dtype=inputs.dtype)
 
-        zeros = self._runtime_zeros()
-        if inputs_dim == 3 and batch_size < 8 and n_tokens == 1:
-            out = awq_fast_gemv_forward_decode(
-                inputs,
-                self.qweight,
-                self.scales,
-                zeros,
-                inputs.numel() // inputs.shape[-1],
-                self.out_features,
-                self.in_features,
-                self.group_size,
+        if self._use_sm120_compat_path(inputs.device):
+            out = self._sm120_compat_forward(
+                x=x,
+                inputs=inputs,
+                input_dtype=input_dtype,
             )
         else:
-            out = awq_fast_gemm_forward_prefill(
-                inputs, self.qweight, self.scales, zeros
-            )
+            zeros = self._runtime_zeros()
+            if inputs_dim == 3 and batch_size < 8 and n_tokens == 1:
+                out = awq_fast_gemv_forward_decode(
+                    inputs,
+                    self.qweight,
+                    self.scales,
+                    zeros,
+                    inputs.numel() // inputs.shape[-1],
+                    self.out_features,
+                    self.in_features,
+                    self.group_size,
+                )
+            else:
+                out = awq_fast_gemm_forward_prefill(
+                    inputs, self.qweight, self.scales, zeros
+                )
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)
@@ -230,6 +237,42 @@ class AwqGEMVFastLinear(AWQuantLinear):
         if self.zeros_name == "scaled_zeros":
             return self.scaled_zeros
         raise ValueError(f"Unsupported zeros buffer: {self.zeros_name}")
+
+    def _use_sm120_compat_path(self, device: torch.device) -> bool:
+        if device.type != "cuda":
+            return False
+        major, _minor = torch.cuda.get_device_capability(device)
+        return major >= 12
+
+    def _sm120_compat_forward(
+            self,
+            *,
+            x: torch.Tensor,
+            inputs: torch.Tensor,
+            input_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        del x
+
+        zeros = self._runtime_zeros()
+        if inputs.dim() == 3 and inputs.shape[0] < 8 and inputs.shape[1] == 1:
+            out = awq_fast_gemv_forward_decode(
+                inputs,
+                self.qweight,
+                self.scales,
+                zeros,
+                inputs.numel() // inputs.shape[-1],
+                self.out_features,
+                self.in_features,
+                self.group_size,
+            )
+        else:
+            out = awq_fast_gemm_forward_prefill(
+                inputs, self.qweight, self.scales, zeros
+            )
+
+        if input_dtype != torch.float16:
+            out = out.to(dtype=input_dtype)
+        return out
 
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
         # need scales and zeros info for real quantization
