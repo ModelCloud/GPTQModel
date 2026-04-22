@@ -181,10 +181,13 @@ def test_gptq_marlin_gemm_passes_float_global_scale_to_torch_ops(monkeypatch):
 
 def test_nvfp4_global_scale_contract_is_float_in_marlin_sources():
     marlin_root = marlin_utils._marlin_root()
+    marlin_cuh = (marlin_root / "marlin.cuh").read_text(encoding="utf-8")
     kernel_h = (marlin_root / "kernel.h").read_text(encoding="utf-8")
     gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
     template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
 
+    assert "#include <torch/all.h>" not in marlin_cuh
+    assert "#include <torch/extension.h>" not in marlin_cuh
     assert "const float *__restrict__ global_scale_ptr" in kernel_h
     assert 'global_scale = torch::empty({0}, options_fp32);' in gemm_cu
     assert 'global_scale.scalar_type() == at::ScalarType::Float' in gemm_cu

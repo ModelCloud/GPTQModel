@@ -1,4 +1,7 @@
-#include <torch/extension.h>
+#include <ATen/DeviceGuard.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <torch/types.h>
 #include "core/scalar_type.hpp"
 
 torch::Tensor gptq_marlin_gemm(
