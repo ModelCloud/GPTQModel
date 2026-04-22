@@ -123,6 +123,7 @@ jobs:
           echo "::group::-- dust uv cache dir before --"
             dust $(uv cache dir)
           echo "::endgroup::"
+          echo "Cleaning uv cache. uv cache dir: $(uv cache dir)"
           uv cache prune --ci
           echo "::group::-- dust uv cache dir after --"
             dust $(uv cache dir)
@@ -252,7 +253,7 @@ jobs:
             dust $(uv cache dir)
           echo "::endgroup::"
           
-          echo "Cleaning uv cache"
+          echo "Cleaning uv cache. uv cache dir: $(uv cache dir)"
           uv cache prune --ci
           
           echo "::group::-- dust uv cache dir after --"
