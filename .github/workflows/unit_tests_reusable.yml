@@ -253,6 +253,8 @@ jobs:
             dust $(uv cache dir)
           echo "::endgroup::"
           
+          ps aux | grep uv
+          lsof +D $(uv cache dir)
           echo "Cleaning uv cache. uv cache dir: $(uv cache dir)"
           uv cache prune --ci
           
