@@ -120,9 +120,6 @@ jobs:
 
       - name: Activate uv env
         run: |
-          
-          uv cache prune --ci
-          
           bash .github/scripts/ci_unit_activate_uv_env.sh \
             "${{ matrix.test_script }}" \
             "${{ inputs.check_vm_cuda_version }}" \
@@ -239,5 +236,3 @@ jobs:
           rm -rf ./* .[^.] .??* || true
           echo "cleaning venv: ${{ env.VIRTUAL_ENV }}"
           rm -rf "${{ env.VIRTUAL_ENV }}"
-          echo "Cleaning uv cache"
-          uv cache prune --ci
