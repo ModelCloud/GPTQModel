@@ -488,7 +488,6 @@ class AWQProcessor(LoopProcessor):
     def _pack_square_token_blocks(batch_tensor: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
         """Pack per-batch square token tensors into one block-diagonal tensor."""
 
-        batch = keep_mask.shape[0]
         lengths = [int(row.sum().item()) for row in keep_mask]
         total_kept = sum(lengths)
         fill_value = torch.finfo(batch_tensor.dtype).min if batch_tensor.is_floating_point() else 0
