@@ -123,6 +123,7 @@ tests/models:
     - http://10.0.13.31/files/causal_conv1d-1.6.0-cp313-cp313-linux_x86_64.whl
     - mamba_ssm
     - tiktoken
+    - attn_gym
 
   test_internlm.py:
     - transformers<=4.44.2
