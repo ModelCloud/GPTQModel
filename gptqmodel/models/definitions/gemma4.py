@@ -71,6 +71,10 @@ def _prepare_gemma4_replay_kwargs(model_def, layer, layer_input, additional_inpu
         return additional_inputs
 
     hidden_states = layer_input[0]
+    # Gemma 4 replay keeps the standard decoder layout [batch, seq, hidden], so
+    # batch/sequence can be read from the leading dimensions directly. This is
+    # intentionally simpler than Gemma 3n, whose AltUp path can replay 4D
+    # hidden states.
     seq_len = hidden_states.shape[1] if hidden_states.dim() >= 2 else hidden_states.shape[0]
     batch_dim = hidden_states.shape[0] if hidden_states.dim() >= 2 else 1
 
@@ -91,6 +95,10 @@ def _prepare_gemma4_replay_kwargs(model_def, layer, layer_input, additional_inpu
         device=target_device,
     )
 
+    # Gemma 4 replay usually only caches hidden_states positionally. In that
+    # case we reconstruct the layer-local per_layer_input from the cached
+    # projected tensor; if replay already preserved a positional per_layer_input,
+    # leave it alone.
     if len(layer_input) == 1:
         all_per_layer_inputs = additional_inputs.pop(_GEMMA4_ALL_PER_LAYER_INPUTS, None)
         layer_index = getattr(getattr(layer, "self_attn", None), "layer_idx", None)
