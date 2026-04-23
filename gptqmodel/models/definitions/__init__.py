@@ -26,6 +26,7 @@ from .ernie4_5 import Ernie4_5QModel
 from .ernie4_5_moe import Ernie4_5_MoeQModel
 from .gemma2 import Gemma2QModel
 from .gemma3 import Gemma3QModel
+from .gemma3n import Gemma3nForConditionalGenerationGPTQ, Gemma3nTextQModel
 from .gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel
 from .glm import GlmQModel
 from .glmasr import GlmASRGPTQ

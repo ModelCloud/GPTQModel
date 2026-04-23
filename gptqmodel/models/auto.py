@@ -92,6 +92,7 @@ from .definitions.exaone4 import Exaone4QModel  # noqa: E402
 from .definitions.falcon_h1 import FalconH1QModel  # noqa: E402
 from .definitions.gemma2 import Gemma2QModel  # noqa: E402
 from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel  # noqa: E402
+from .definitions.gemma3n import Gemma3nForConditionalGenerationGPTQ, Gemma3nTextQModel  # noqa: E402
 from .definitions.gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel  # noqa: E402
 from .definitions.glm import GlmQModel  # noqa: E402
 from .definitions.glmasr import GlmASRGPTQ  # noqa: E402
@@ -217,6 +218,8 @@ MODEL_MAP = {
     "gemma2": Gemma2QModel,
     "gemma3_text": Gemma3QModel,
     "gemma3": Gemma3ForConditionalGenerationGPTQ,
+    "gemma3n_text": Gemma3nTextQModel,
+    "gemma3n": Gemma3nForConditionalGenerationGPTQ,
     "gemma4_text": Gemma4TextQModel,
     "gemma4": Gemma4ForConditionalGenerationGPTQ,
     "phi": PhiQModel,
