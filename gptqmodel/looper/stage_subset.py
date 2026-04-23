@@ -33,8 +33,8 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
 from ..quantization.config import GcMode, ExpertsRoutingBypass, VramStrategy
-from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.device import get_device
+from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.python import has_gil_control, has_gil_disabled
@@ -213,6 +213,38 @@ def _resolve_subset_calibration_coverage_policy(
         prune_uncovered_modules=prune_uncovered_modules,
         record_dynamic_exclusions=prune_uncovered_modules,
     )
+
+
+def _subset_requires_serial_gptq_replay(
+        processor: LoopProcessor,
+        subset: Dict[str, NamedModule],
+) -> bool:
+    """Force single-device replay for FOEM/GPTAQ Hessian accumulation."""
+
+    if not isinstance(processor, GPTQProcessor):
+        return False
+
+    qcfg = getattr(processor, "qcfg", None)
+    if qcfg is None:
+        return False
+
+    if getattr(qcfg, "gptaq", None) is not None or getattr(qcfg, "foem", None) is not None:
+        return True
+
+    dynamic = getattr(qcfg, "dynamic", None)
+    if not dynamic:
+        return False
+
+    for named_module in subset.values():
+        module_name = getattr(named_module, "full_name", None)
+        if not module_name:
+            continue
+        if qcfg.dynamic_get(module_name, "gptaq", None) is not None:
+            return True
+        if qcfg.dynamic_get(module_name, "foem", None) is not None:
+            return True
+
+    return False
 
 
 def _collect_subset_forward_progress(
@@ -500,7 +532,11 @@ def build_subset_plan(
         "auto_forward_data_parallel",
         True,
     )
-    subset_forward_serial = subset_forward_serial or not auto_forward_data_parallel
+    subset_forward_serial = (
+            subset_forward_serial
+            or not auto_forward_data_parallel
+            or _subset_requires_serial_gptq_replay(processor, subset)
+    )
 
     # Forward progress is normalized here so the executor and any later replay
     # reuse the same batch and row accounting instead of recomputing it.
