@@ -30,10 +30,6 @@ on:
         description: 'Regex to filter test files'
         required: false
         default: ''
-      artifact_id:
-        description: 'Run id for artifact to be downloaded'
-        required: false
-        default: ''
       max-parallel:
         description: 'Parallel jobs'
         required: false
@@ -113,7 +109,6 @@ jobs:
         run: |
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
-          echo "artifact_id: ${{ github.event.inputs.artifact_id }}"
           echo "selected server: ${{ github.event.inputs.server }}"
 
       - name: Set server
@@ -122,7 +117,6 @@ jobs:
           bash .github/scripts/ci_write_runner_outputs.sh \
             "$RUNNER" \
             "${{ github.run_id }}" \
-            "${{ github.event.inputs.artifact_id }}" \
             "${{ github.event.inputs['max-parallel'] }}"
 
   list-test-files:
