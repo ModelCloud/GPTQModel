@@ -13,6 +13,7 @@ if sys.platform == "darwin":
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7" #"expandable_segments:True"
+os.environ.setdefault("DISABLE_ADDMM_CUDA_LT", "1")
 
 # Following makes test results more deterministic but much slower
 # # the CUBLAS env is required for use_deterministic_algorithms

@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import inference_speed as inference_speed_module
 import torch
+
+import inference_speed as inference_speed_module
 from inference_speed import InferenceSpeed
 
 
@@ -114,3 +115,43 @@ def test_inference_speed_pins_bare_cuda_to_current_device(monkeypatch):
     )
 
     assert captured["device"] == "cuda:3"
+
+
+def test_inference_speed_ignores_non_tensor_batch_values_when_moving_to_device(monkeypatch):
+    class _Harness(InferenceSpeed):
+        NUM_RUNS = 1
+        MAX_NEW_TOKENS = 1
+        PROMPTS = ["a"]
+
+    class _BatchWithOptional(dict):
+        def __init__(self):
+            super().__init__({
+                "input_ids": torch.zeros((1, 3), dtype=torch.long),
+                "attention_mask": torch.ones((1, 3), dtype=torch.long),
+                "token_type_ids": None,
+            })
+
+        def to(self, _device):
+            raise AssertionError("BatchEncoding.to() should not be used for optional None fields")
+
+    class _TokenizerWithOptional(_FakeTokenizer):
+        def __call__(self, prompts, **_kwargs):
+            return _BatchWithOptional()
+
+    timestamps = iter([0.0, 1.0])
+
+    monkeypatch.setattr(inference_speed_module, "logger", _FakeLogger())
+    monkeypatch.setattr(inference_speed_module, "GPTQModel", _FakeModel)
+    monkeypatch.setattr(inference_speed_module, "AutoTokenizer", _TokenizerWithOptional)
+    monkeypatch.setattr(inference_speed_module, "torch_empty_cache", lambda: None)
+    monkeypatch.setattr(inference_speed_module.time, "time", lambda: next(timestamps))
+
+    measured_tps = _Harness().inference(
+        model_path="unused",
+        backend="fake-backend",
+        tokens_per_second=1.0,
+        warmup_runs=0,
+        device="cpu",
+    )
+
+    assert measured_tps == 1.0

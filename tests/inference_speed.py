@@ -10,7 +10,6 @@ import torch
 
 from gptqmodel.utils.torch import torch_empty_cache
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 
@@ -44,6 +43,25 @@ class InferenceSpeed(unittest.TestCase):
     MAX_DELTA_FLOOR_PERCENT = 0.25
     MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.25
 
+    @staticmethod
+    def _move_batch_to_device(batch, device):
+        if device is None:
+            return batch
+
+        if hasattr(batch, "items"):
+            for key, value in list(batch.items()):
+                if torch.is_tensor(value):
+                    batch[key] = value.to(device)
+            return batch
+
+        if torch.is_tensor(batch):
+            return batch.to(device)
+
+        if hasattr(batch, "to"):
+            return batch.to(device)
+
+        return batch
+
     def inference(self, model_path, backend, tokens_per_second, assert_result=True, optimize=False, fullgraph=False, warmup_runs=0, device=None):
         if device == "cuda" and torch.cuda.is_available():
             device = f"cuda:{torch.cuda.current_device()}"
@@ -59,8 +77,8 @@ class InferenceSpeed(unittest.TestCase):
 
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         tokenizer.pad_token_id = tokenizer.eos_token_id
-        inp = tokenizer(self.PROMPTS, padding=True, truncation=True, return_tensors="pt", padding_side='left').to(
-            model.device)
+        inp = tokenizer(self.PROMPTS, padding=True, truncation=True, return_tensors="pt", padding_side='left')
+        inp = self._move_batch_to_device(inp, model.device)
 
         # compile kernels need JIT compile (Bitblas, IPEX, Triton) so we should do some warmup before actual speed run
         if warmup_runs > 0:
