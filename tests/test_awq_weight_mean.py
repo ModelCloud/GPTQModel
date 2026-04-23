@@ -129,6 +129,20 @@ def test_awq_layer_input_features_aligns_variable_length_fallback_with_cached_kw
     assert processor._awq_feature_kwargs["self_attn.q_proj"]["position_ids"].shape == (1, 36)
 
 
+def test_awq_can_concat_batch_tensors_requires_matching_trailing_shapes():
+    compatible = [
+        torch.randn(1, 36, QWEN3_HIDDEN_SIZE),
+        torch.randn(2, 36, QWEN3_HIDDEN_SIZE),
+    ]
+    incompatible = [
+        torch.randn(1, 423, QWEN3_HIDDEN_SIZE),
+        torch.randn(1, 36, QWEN3_HIDDEN_SIZE),
+    ]
+
+    assert AWQProcessor._can_concat_batch_tensors(compatible) is True
+    assert AWQProcessor._can_concat_batch_tensors(incompatible) is False
+
+
 def test_awq_module_forward_slices_batch_aligned_kwargs_with_chunk_offset():
     processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
     processor._quant_batch_size = 1

@@ -365,10 +365,32 @@ class AWQProcessor(LoopProcessor):
             entry.setdefault("batch_indices", []).append(self.current_batch_index())
 
     @staticmethod
-    def _concat_batch_metadata(values: List[Any]) -> Any:
-        """Concatenate batch-aligned tensors when shapes are compatible.
+    def _can_concat_batch_tensors(tensors: List[torch.Tensor]) -> bool:
+        """Return whether cached tensors share the same non-batch shape."""
 
-        Returns the most recent non-None value when concatenation is not safe.
+        if not tensors:
+            return False
+
+        first = tensors[0]
+        return all(
+            tensor.dim() == first.dim() and tensor.shape[1:] == first.shape[1:]
+            for tensor in tensors
+        )
+
+    @staticmethod
+    def _concat_batch_metadata(values: List[Any]) -> Any:
+        """Merge cached per-batch metadata while preserving feature alignment.
+
+        When every tensor has the same trailing shape, we concatenate on dim 0
+        so the metadata still lines up with a concatenated feature tensor.
+
+        When sequence lengths differ across batches, the cached metadata no
+        longer shares a common shape. Real AWQ repros hit cases like
+        `attention_mask` `[1, 1, 423, 423]` plus `[1, 1, 36, 36]` and
+        `position_ids` `[1, 423]` plus `[1, 36]`. Those values cannot be
+        concatenated into one batch-aligned tensor, so we return the most
+        recent non-None value. `_layer_input_features()` makes the same choice
+        for the corresponding feature tensor by keeping `tensors[-1]`.
         """
 
         non_none = [value for value in values if value is not None]
@@ -380,17 +402,21 @@ class AWQProcessor(LoopProcessor):
             tensors = [value for value in values if torch.is_tensor(value)]
             if len(tensors) != len(non_none):
                 return non_none[-1]
-            if all(
-                tensor.dim() == first.dim() and tensor.shape[1:] == first.shape[1:]
-                for tensor in tensors
-            ):
+            if AWQProcessor._can_concat_batch_tensors(tensors):
                 return torch.cat(tensors, dim=0)
             return non_none[-1]
 
         return non_none[-1]
 
     def _feature_kwargs_from_batch_indices(self, batch_indices: List[Optional[int]]) -> Dict[str, Any]:
-        """Build kwargs aligned to the captured feature batches."""
+        """Build kwargs aligned to the captured feature batches.
+
+        This helper mirrors how `_layer_input_features()` collapses cached
+        activations. If all selected metadata tensors share the same trailing
+        dimensions we concatenate them. If sequence lengths differ across
+        batches, we keep the most recent metadata entry so it stays aligned
+        with the most recent feature tensor fallback.
+        """
 
         feature_kwargs: Dict[str, Any] = dict(getattr(self, "_module_forward_kwargs", {}))
         cache = getattr(self, "inputs_cache", None)
@@ -530,7 +556,21 @@ class AWQProcessor(LoopProcessor):
         inp: torch.Tensor,
         module_kwargs: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Align structured kwargs to packed feature tensors used during AWQ replay."""
+        """Align masks and positions to packed feature tensors used during AWQ replay.
+
+        AWQ capture hooks can flatten kept tokens from multiple batch rows into
+        one replay tensor shaped like `[1, kept_tokens, hidden]`. The original
+        cached kwargs still describe the pre-packed batch layout, for example an
+        attention mask shaped `[B, 1, S, S]` or position ids shaped `[B, S]`.
+        Passing those batched kwargs to replay produces shape mismatches in
+        attention because the replay activations no longer have the original
+        batch and sequence structure.
+
+        When the packed token count matches the keep-mask derived from the
+        cached attention mask, we rebuild `attention_mask` and `position_ids`
+        to match the packed layout. If the counts do not match, we drop those
+        kwargs rather than pass incompatible shapes into attention replay.
+        """
 
         aligned_kwargs = dict(module_kwargs)
         attention_mask = aligned_kwargs.get("attention_mask")
@@ -582,7 +622,14 @@ class AWQProcessor(LoopProcessor):
         return float(sum(values) / len(values))
 
     def _layer_input_features(self, state: _AWQLayerState) -> Dict[str, torch.Tensor]:
-        """Collapses per-batch cached inputs into one feature tensor per module."""
+        """Collapse cached per-batch inputs into one replay tensor per module.
+
+        Most batches can be concatenated on dim 0. Variable-length calibration
+        batches cannot: for example `[1, 423, H]` and `[1, 36, H]` represent
+        different sequence lengths after masking or packing. In that case we
+        keep the most recent feature tensor and rebuild kwargs from the same
+        batch index so activations, masks, and position ids remain aligned.
+        """
 
         features: Dict[str, torch.Tensor] = {}
         feature_kwargs: Dict[str, Dict[str, Any]] = {}
@@ -596,12 +643,15 @@ class AWQProcessor(LoopProcessor):
                 features[name] = torch.empty(0)
                 feature_kwargs[name] = {}
                 continue
-            try:
+            if self._can_concat_batch_tensors(tensors):
                 features[name] = torch.cat(tensors, dim=0)
                 feature_kwargs[name] = self._feature_kwargs_from_batch_indices(batch_indices)
                 entry["inputs"] = [features[name]]
                 entry["batch_indices"] = [None]
-            except RuntimeError:
+            else:
+                # Variable-length captures such as `[1, 423, H]` and `[1, 36, H]`
+                # cannot be concatenated on dim 0. Keep the latest capture and
+                # reuse metadata from the same batch index so replay stays aligned.
                 features[name] = tensors[-1]
                 last_batch_index = batch_indices[-1] if batch_indices else None
                 feature_kwargs[name] = self._feature_kwargs_from_batch_indices([last_batch_index])
