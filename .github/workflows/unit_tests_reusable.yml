@@ -244,7 +244,7 @@ jobs:
           rm -rf ./* .[^.] .??* || true
           echo "cleaning venv: ${{ env.VIRTUAL_ENV }}"
           rm -rf "${{ env.VIRTUAL_ENV }}"
-          
+
           echo "::group::-- dust uv cache dir --"
             dust $(uv cache dir)
           echo "::endgroup::"
