@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-
+import math
 from types import MethodType
 
 import torch
@@ -36,6 +36,59 @@ def _gemma3n_decoder_block():
         "post_per_layer_input_norm": ("post_per_layer_input_norm:!",),
         "per_layer_projection": ("per_layer_projection:1",),
     }
+
+
+def _set_non_persistent_buffer(module, name, tensor):
+    """Replace a non-persistent buffer while preserving its registration semantics."""
+
+    if not isinstance(tensor, torch.Tensor):
+        return
+
+    if name not in getattr(module, "_buffers", {}) and hasattr(module, name):
+        delattr(module, name)
+
+    if name in getattr(module, "_buffers", {}):
+        module._buffers[name] = tensor
+        non_persistent = getattr(module, "_non_persistent_buffers_set", None)
+        if isinstance(non_persistent, set):
+            non_persistent.add(name)
+        return
+
+    module.register_buffer(name, tensor, persistent=False)
+
+
+def _resolve_gemma3n_language_model_from_model(model):
+    """Return the text stack regardless of whether the checkpoint is text-only or multimodal."""
+
+    if hasattr(model, "model") and hasattr(model.model, "language_model"):
+        return model.model.language_model
+    if hasattr(model, "model"):
+        return model.model
+    return model
+
+
+def _restore_gemma3n_root_scale_buffers(model):
+    """Materialize tiny root-level Gemma 3n scale buffers that are not covered by base-module loading."""
+
+    language_model = _resolve_gemma3n_language_model_from_model(model)
+    hidden_size = getattr(language_model, "hidden_size", None)
+    if hidden_size is None:
+        hidden_size = getattr(getattr(language_model, "config", None), "hidden_size", None)
+    if hidden_size is None:
+        return
+
+    scale_specs = {
+        "per_layer_projection_scale": hidden_size**-0.5,
+        "per_layer_input_scale": 1 / math.sqrt(2.0),
+    }
+
+    for name, value in scale_specs.items():
+        current = getattr(language_model, name, None)
+        if not isinstance(current, torch.Tensor) or current.device.type != "meta":
+            continue
+
+        restored = torch.tensor(value, dtype=current.dtype, device="cpu")
+        _set_non_persistent_buffer(language_model, name, restored)
 
 
 def _capture_gemma3n_positional_inputs(model_def, args, kwargs, batch_device):
@@ -132,9 +185,7 @@ def _prepare_gemma3n_replay_kwargs(model_def, layer, layer_input, additional_inp
 def _resolve_gemma3n_language_model(model_def):
     """Return the Gemma 3n text stack that owns per-layer input projection state."""
 
-    if hasattr(model_def.model, "model") and hasattr(model_def.model.model, "language_model"):
-        return model_def.model.model.language_model
-    return model_def.model.model
+    return _resolve_gemma3n_language_model_from_model(model_def.model)
 
 
 def _patch_gemma3n_per_layer_input_capture(model_def):
@@ -182,6 +233,11 @@ class Gemma3nTextQModel(LlamaQModel):
         _gemma3n_decoder_block(),
     ]
 
+    def after_model_load(self, model, load_quantized_model=False):
+        model = super().after_model_load(model, load_quantized_model=load_quantized_model)
+        _restore_gemma3n_root_scale_buffers(model)
+        return model
+
     def capture_first_layer_positional_inputs(self, args, kwargs, batch_device):
         """Keep Gemma 3n decoder positional inputs available for first-layer replay."""
 
@@ -203,6 +259,7 @@ class Gemma3nTextQModel(LlamaQModel):
         return _prepare_gemma3n_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
 
     def pre_quantize_generate_hook_start(self):
+        _restore_gemma3n_root_scale_buffers(self.model)
         _patch_gemma3n_per_layer_input_capture(self)
 
     def pre_quantize_generate_hook_end(self):
@@ -225,6 +282,11 @@ class Gemma3nForConditionalGenerationGPTQ(BaseQModel):
         _gemma3n_decoder_block(),
     ]
 
+    def after_model_load(self, model, load_quantized_model=False):
+        model = super().after_model_load(model, load_quantized_model=load_quantized_model)
+        _restore_gemma3n_root_scale_buffers(model)
+        return model
+
     def capture_first_layer_positional_inputs(self, args, kwargs, batch_device):
         """Keep Gemma 3n decoder positional inputs available for first-layer replay."""
 
@@ -246,6 +308,7 @@ class Gemma3nForConditionalGenerationGPTQ(BaseQModel):
         return _prepare_gemma3n_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
 
     def pre_quantize_generate_hook_start(self):
+        _restore_gemma3n_root_scale_buffers(self.model)
         _patch_gemma3n_per_layer_input_capture(self)
 
     def pre_quantize_generate_hook_end(self):
