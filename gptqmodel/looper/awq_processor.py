@@ -474,6 +474,42 @@ class AWQProcessor(LoopProcessor):
         return feature_kwargs
 
     @staticmethod
+    def _pack_kept_token_rows(batch_tensor: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
+        """Pack per-batch row tensors into one kept-token row tensor."""
+
+        batch = keep_mask.shape[0]
+        source = batch_tensor
+        if source.shape[0] == 1 and batch > 1:
+            source = source.expand(batch, *source.shape[1:])
+        packed_rows = [source[batch_index, keep_mask[batch_index]] for batch_index in range(batch)]
+        return torch.cat(packed_rows, dim=0).unsqueeze(0)
+
+    @staticmethod
+    def _pack_square_token_blocks(batch_tensor: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
+        """Pack per-batch square token tensors into one block-diagonal tensor."""
+
+        batch = keep_mask.shape[0]
+        lengths = [int(row.sum().item()) for row in keep_mask]
+        total_kept = sum(lengths)
+        fill_value = torch.finfo(batch_tensor.dtype).min if batch_tensor.is_floating_point() else 0
+        packed = torch.full(
+            (1, *batch_tensor.shape[1:-2], total_kept, total_kept),
+            fill_value=fill_value,
+            dtype=batch_tensor.dtype,
+            device=batch_tensor.device,
+        )
+        offset = 0
+        for batch_index, length in enumerate(lengths):
+            if length <= 0:
+                continue
+            keep = keep_mask[batch_index].to(device=batch_tensor.device, dtype=torch.bool)
+            block = batch_tensor[batch_index:batch_index + 1][..., keep, :]
+            block = block[..., keep]
+            packed[..., offset:offset + length, offset:offset + length] = block
+            offset += length
+        return packed
+
+    @staticmethod
     def _pack_attention_mask_for_feature(
         attention_mask: torch.Tensor,
         keep_mask: torch.Tensor,
@@ -481,53 +517,12 @@ class AWQProcessor(LoopProcessor):
         """Pack a per-sample mask to match a flattened kept-token feature tensor."""
 
         batch = keep_mask.shape[0]
-        lengths = [int(row.sum().item()) for row in keep_mask]
-        total_kept = sum(lengths)
 
-        if attention_mask.ndim == 4 and attention_mask.shape[0] == batch:
-            fill_value = torch.finfo(attention_mask.dtype).min if attention_mask.is_floating_point() else 0
-            packed = torch.full(
-                (1, attention_mask.shape[1], total_kept, total_kept),
-                fill_value=fill_value,
-                dtype=attention_mask.dtype,
-                device=attention_mask.device,
-            )
-            offset = 0
-            for batch_index, length in enumerate(lengths):
-                if length <= 0:
-                    continue
-                keep = keep_mask[batch_index].to(device=attention_mask.device, dtype=torch.bool)
-                block = attention_mask[batch_index:batch_index + 1, :, keep, :]
-                block = block[..., keep]
-                packed[..., offset:offset + length, offset:offset + length] = block
-                offset += length
-            return packed
-
-        if attention_mask.ndim == 3 and attention_mask.shape[0] == batch:
-            fill_value = torch.finfo(attention_mask.dtype).min if attention_mask.is_floating_point() else 0
-            packed = torch.full(
-                (1, total_kept, total_kept),
-                fill_value=fill_value,
-                dtype=attention_mask.dtype,
-                device=attention_mask.device,
-            )
-            offset = 0
-            for batch_index, length in enumerate(lengths):
-                if length <= 0:
-                    continue
-                keep = keep_mask[batch_index].to(device=attention_mask.device, dtype=torch.bool)
-                block = attention_mask[batch_index:batch_index + 1, keep, :]
-                block = block[..., keep]
-                packed[..., offset:offset + length, offset:offset + length] = block
-                offset += length
-            return packed
+        if attention_mask.ndim in (3, 4) and attention_mask.shape[0] == batch:
+            return AWQProcessor._pack_square_token_blocks(attention_mask, keep_mask)
 
         if attention_mask.ndim == 2 and attention_mask.shape[1] == keep_mask.shape[1]:
-            source = attention_mask
-            if source.shape[0] == 1 and batch > 1:
-                source = source.expand(batch, -1)
-            packed_rows = [source[batch_index, keep_mask[batch_index]] for batch_index in range(batch)]
-            return torch.cat(packed_rows, dim=0).unsqueeze(0)
+            return AWQProcessor._pack_kept_token_rows(attention_mask, keep_mask)
 
         return attention_mask
 
@@ -542,14 +537,10 @@ class AWQProcessor(LoopProcessor):
         if position_ids.ndim != 2 or position_ids.shape[1] != keep_mask.shape[1]:
             return position_ids
 
-        source = position_ids
-        if source.shape[0] == 1 and batch > 1:
-            source = source.expand(batch, -1)
-        if source.shape[0] != batch:
+        if position_ids.shape[0] not in (1, batch):
             return position_ids
 
-        packed_rows = [source[batch_index, keep_mask[batch_index]] for batch_index in range(batch)]
-        return torch.cat(packed_rows, dim=0).unsqueeze(0)
+        return AWQProcessor._pack_kept_token_rows(position_ids, keep_mask)
 
     def _align_module_kwargs_to_input(
         self,
