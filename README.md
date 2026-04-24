@@ -20,8 +20,7 @@
 </p>
 
 ## Latest News
-* 04/23/2026 `main`: ✨ Added `Gemma3n` support for both `gemma3n_text` and multimodal `gemma3n`.
-* 04/22/2026 6.1.0-dev `main`: ✨ Added `GLM-OCR` and `GLM-ASR` model support.
+* 04/23/2026 6.1.0-dev `main`: ✨ Added `gemma3n`、`GLM-OCR`、`GLM-ASR` and `falcon_mamba` model support.
 * 04/16/2026 [6.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.1.0): 🚀🔥⚡ CUDA kernels are now fully JIT-compiled, shrinking the wheel by about 300x and building only what you use; Marlin now supports NVIDIA `Turing+` GPUs, Machete kernel validation now covers supported GPUs, `GLM 5/5.1` joins the lineup, and LazyTurtle plus AWQ / multi-GPU MoE fixes make large-model quantization easier, lighter, and smoother.
 * 04/03/2026 [6.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.0.3): 🎉 New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`, and `FOEM: First-Order Error Matters`. Added PrismML/Bonsai 1bit model quantization (inference only), faster ParoQuant/AWQ kernels, ParoQuant `optimization scope` control: `module` (Paro Lite) or `layer` (Paro reference), plus `Gemma4`, `MiniCPM-O`, `MiniCPM-V`, and `GLM4 MoE Lite` model support.
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
@@ -244,7 +243,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | Model             |   |               |   |                        |   |                |   |                     |   |
 |-------------------|---|---------------|---|------------------------|---|----------------|---|---------------------|---|
 | Apertus           | ✅ | EXAONE 3/4    | ✅ | Dots1                  | ✅ | Mistral3       | ✅ | Qwen 2/3/3.5 (Next/MoE) | ✅ |
-| Baichuan          | ✅ | Falcon (H1)   | ✅ | InternLM 1/2/2.5       | ✅ | Mixtral        | ✅ | Qwen 2/2.5/3 VL     | ✅ |
+| Baichuan          | ✅ | Falcon (H1 / Mamba) | ✅ | InternLM 1/2/2.5 | ✅ | Mixtral        | ✅ | Qwen 2/2.5/3 VL     | ✅ |
 | Bloom             | ✅ | FastVLM       | ✅ | Kimi K2                | ✅ | MobileLLM      | ✅ | Qwen 2.5/3 Omni     | ✅ |
 | ChatGLM           | ✅ | Gemma 1-4 / 3n | ✅ | Klear                 | ✅ | MOSS           | ✅ | RefinedWeb          | ✅ |
 | CodeGen           | ✅ | GPTBigCode    | ✅ | LING/RING              | ✅ | MPT            | ✅ | StableLM            | ✅ |
