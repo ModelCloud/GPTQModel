@@ -107,6 +107,9 @@ tests:
     - gguf
 
 tests/models:
+  test_chatglm:
+    - sentencepiece
+
   test_cohere2:
     - jieba
 
@@ -138,6 +141,7 @@ tests/models:
     - backoff>=2.2.1
     - optimum>=1.24.0
     - scipy
+    - backoff
 
   test_llama3_2_exllamav3.py:
     - pydantic
