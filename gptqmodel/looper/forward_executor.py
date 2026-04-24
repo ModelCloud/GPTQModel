@@ -254,7 +254,7 @@ class ForwardExecutor:
                 # Capture input device before moving - used for output placement
                 input_device = layer_inputs[batch_idx][0].device if layer_inputs[batch_idx] else cur_layer_device
 
-                layer_input = [move_to(inp, device=exec_device) for inp in layer_inputs[batch_idx]]
+                layer_input = [nested_move_to(inp, device=exec_device) for inp in layer_inputs[batch_idx]]
 
                 raw_mask = attention_masks[batch_idx]
                 attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=exec_device)

@@ -16,6 +16,9 @@ tests:
 tests/models:
   py: 3.13
 
+  test_llama3_2_fp8:
+    sm: '12.0'
+
 tests/kernels:
   test_asymmetric_real_models:
     sm: '9.0'
