@@ -90,6 +90,7 @@ from .definitions.ernie4_5_moe import Ernie4_5_MoeQModel  # noqa: E402
 from .definitions.exaone import ExaOneQModel  # noqa: E402
 from .definitions.exaone4 import Exaone4QModel  # noqa: E402
 from .definitions.falcon_h1 import FalconH1QModel  # noqa: E402
+from .definitions.falcon_mamba import FalconMambaQModel  # noqa: E402
 from .definitions.gemma2 import Gemma2QModel  # noqa: E402
 from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel  # noqa: E402
 from .definitions.gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel  # noqa: E402
@@ -197,6 +198,7 @@ MODEL_MAP = {
     "refinedWebModel": RwgQModel,
     "refinedWeb": RwgQModel,
     "falcon": RwgQModel,
+    "falcon_mamba": FalconMambaQModel,
     "baichuan": BaiChuanQModel,
     "internlm": InternLMQModel,
     "internlm2": InternLM2QModel,

@@ -243,7 +243,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | Model             |   |               |   |                        |   |                |   |                     |   |
 |-------------------|---|---------------|---|------------------------|---|----------------|---|---------------------|---|
 | Apertus           | ✅ | EXAONE 3/4    | ✅ | Dots1                  | ✅ | Mistral3       | ✅ | Qwen 2/3/3.5 (Next/MoE) | ✅ |
-| Baichuan          | ✅ | Falcon (H1)   | ✅ | InternLM 1/2/2.5       | ✅ | Mixtral        | ✅ | Qwen 2/2.5/3 VL     | ✅ |
+| Baichuan          | ✅ | Falcon (H1 / Mamba) | ✅ | InternLM 1/2/2.5 | ✅ | Mixtral        | ✅ | Qwen 2/2.5/3 VL     | ✅ |
 | Bloom             | ✅ | FastVLM       | ✅ | Kimi K2                | ✅ | MobileLLM      | ✅ | Qwen 2.5/3 Omni     | ✅ |
 | ChatGLM           | ✅ | Gemma 1-4     | ✅ | Klear                  | ✅ | MOSS           | ✅ | RefinedWeb          | ✅ |
 | CodeGen           | ✅ | GPTBigCode    | ✅ | LING/RING              | ✅ | MPT            | ✅ | StableLM            | ✅ |

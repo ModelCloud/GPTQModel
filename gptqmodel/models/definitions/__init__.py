@@ -69,6 +69,7 @@ from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel
 from .xverse import XverseQModel
 from .falcon_h1 import FalconH1QModel
+from .falcon_mamba import FalconMambaQModel
 from .pangu_alpha import PanguAlphaQModel
 from .longcat_flash import LongCatFlashQModel
 from .apertus import ApertusQModel
