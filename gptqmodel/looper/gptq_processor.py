@@ -127,6 +127,10 @@ class GPTQProcessor(LoopProcessor):
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
+        # Preserve per-sample keep-mask semantics when batch quantization uses
+        # padded calibration rows. GPTQ then consumes the original [B, S, H]
+        # activations and applies the current batch mask itself.
+        self.preserve_batch_keep_mask = True
 
     def set_calibration_dataset(self, calibration_dataset):
         """Rejects dataset replacement because GPTQ capture is fixed at construction."""
@@ -179,7 +183,31 @@ class GPTQProcessor(LoopProcessor):
 
             g = self.tasks[name]  # noqa: F821
             batch_idx = self.current_batch_index()
-            g.add_batch(inp[0].data, out.data, batch_index=batch_idx)  # noqa: F821
+            inp_tensor = inp[0]
+            keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+
+            if (
+                torch.is_tensor(inp_tensor)
+                and torch.is_tensor(keep_mask)
+                and inp_tensor.dim() >= 3
+                and keep_mask.ndim == 2
+                and keep_mask.shape[:2] == inp_tensor.shape[:2]
+            ):
+                out_tensor = out if torch.is_tensor(out) else None
+                # Keep per-sample boundaries here so batched calibration
+                # accumulates GPTQ stats with the same semantics as batch_size=1.
+                for sample_index, sample_keep in enumerate(keep_mask):
+                    if not bool(sample_keep.any().item()):
+                        continue
+
+                    sample_inp = inp_tensor[sample_index : sample_index + 1, sample_keep, :].contiguous()
+                    if out_tensor is not None and out_tensor.dim() >= 3 and out_tensor.shape[:2] == inp_tensor.shape[:2]:
+                        sample_out = out_tensor[sample_index : sample_index + 1, sample_keep, :].contiguous()
+                    else:
+                        sample_out = out
+                    g.add_batch(sample_inp.data, sample_out.data, batch_index=batch_idx)  # noqa: F821
+            else:
+                g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
             del inp, out
         return tmp
 
