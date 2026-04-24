@@ -14,7 +14,6 @@ from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.inspect import safe_kwargs_call
 from gptqmodel.utils.logger import render_table
 
-
 _MMLU_LOCAL_DATASET = Path("/monster/data/model/dataset/hails-mmlu_no_train")
 _GSM8K_LOCAL_DATASET = Path("/monster/data/model/dataset/gsm8k")
 _ENGINE_OPTION_KEYS = {
@@ -125,8 +124,25 @@ def get_eval_task_results(result: Mapping[str, Any]) -> dict[str, dict[str, floa
     }
 
 
+def _eval_task_lookup_candidates(task: Any) -> tuple[str, ...]:
+    normalized = normalize_eval_task_name(task)
+    candidates = [normalized]
+
+    if normalized.startswith("mmlu_pro:"):
+        subset = normalized.split(":", 1)[1].strip()
+        if subset:
+            candidates.append(f"mmlu_pro_{subset.replace('.', '_')}")
+
+    return tuple(dict.fromkeys(candidates))
+
+
 def get_eval_task_metrics(result: Mapping[str, Any], task: Any) -> dict[str, float]:
-    return get_eval_task_results(result).get(normalize_eval_task_name(task), {})
+    task_results = get_eval_task_results(result)
+    for candidate in _eval_task_lookup_candidates(task):
+        metrics = task_results.get(candidate)
+        if metrics:
+            return metrics
+    return {}
 
 
 def resolve_eval_metric_alias(metric_name: str, metrics: Mapping[str, Any]) -> str | None:
