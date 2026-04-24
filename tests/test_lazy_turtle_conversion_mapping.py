@@ -227,6 +227,20 @@ def _assert_gemma3_alias_resolution(turtle: LazyTurtle) -> None:
     assert turtle._resolve_checkpoint_tensor_name("lm_head", "weight") == "language_model.lm_head.weight"
 
 
+def _assert_gemma3_shell_vision_alias_resolution(turtle: LazyTurtle) -> None:
+    assert (
+        turtle._resolve_checkpoint_module_path("model.vision_tower.embeddings")
+        == "vision_tower.vision_model.embeddings"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "model.vision_tower.embeddings",
+            "patch_embedding.weight",
+        )
+        == "vision_tower.vision_model.embeddings.patch_embedding.weight"
+    )
+
+
 def _assert_qwen2_vl_alias_resolution(turtle: LazyTurtle) -> None:
     assert turtle._resolve_checkpoint_module_path("model.language_model") == "model"
     assert turtle._resolve_checkpoint_module_path("model.visual") == "visual"
@@ -429,6 +443,33 @@ def test_base_qmodel_prefers_manual_hf_conversion_map_reversed(tmp_path, monkeyp
     )
 
     _assert_gemma3_alias_resolution(turtle)
+
+
+def test_gemma3_definition_hf_conversion_map_reversed_fixes_shell_vision_paths(tmp_path):
+    resolved_hf = Gemma3ForConditionalGenerationGPTQ.resolve_hf_conversion_map_reversed(
+        target_model=_Gemma3DummyModel()
+    )
+
+    assert resolved_hf is not None
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "vision_tower.vision_model.embeddings.patch_embedding.weight": torch.zeros(2, 2),
+        },
+        module_tree=Gemma3ForConditionalGenerationGPTQ.module_tree,
+        hf_conversion_map_reversed=resolved_hf,
+        target_model=_Gemma3DummyModel(),
+    )
+
+    _assert_gemma3_shell_vision_alias_resolution(turtle)
+
+    resolved_hf[0].source_patterns[0] = r"^mutated\.runtime\.(.+)$"
+    resolved_hf_again = Gemma3ForConditionalGenerationGPTQ.resolve_hf_conversion_map_reversed(
+        target_model=_Gemma3DummyModel()
+    )
+    assert resolved_hf_again is not None
+    assert resolved_hf_again[0].source_patterns[0] == r"^model\.vision_tower\.(?!vision_model\.)(.+)$"
 
 
 def test_lazy_turtle_keeps_module_tree_alias_resolution_for_mixtral(tmp_path):
