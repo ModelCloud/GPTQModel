@@ -621,20 +621,35 @@ def convert_fp8_shard(
     scale_semantics: str = "heuristic",
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
+    reader_keys = set(reader.keys())
     for key in reader.keys():
         tensor = reader.get_tensor(key)
         if key.endswith(".weight") and tensor.dtype in _FLOAT8_DTYPES:
             scale_key = key + "_scale_inv"
-            if scale_key not in reader.keys():
-                raise KeyError(f"Missing scale inverse tensor for {key}")
-            scale_inv = reader.get_tensor(scale_key)
-            LOG.debug("Using scale_inv tensor '%s' for FP8 weight '%s'", scale_key, key)
+            scale_tensor = None
+            scale_inv = None
+            if scale_key in reader_keys:
+                # GPTQModel-native FP8 checkpoints persist inverse scales under
+                # the historical `weight_scale_inv` suffix.
+                scale_inv = reader.get_tensor(scale_key)
+                LOG.debug("Using scale_inv tensor '%s' for FP8 weight '%s'", scale_key, key)
+            else:
+                # Some native FP8 checkpoints (for example DeepSeek V4) store
+                # direct scales as `<module>.scale` instead of `weight_scale_inv`.
+                scale_key = key[:-len(".weight")] + ".scale"
+                if scale_key not in reader_keys:
+                    raise KeyError(f"Missing FP8 scale tensor for {key}")
+                scale_tensor = reader.get_tensor(scale_key)
+                LOG.debug("Using scale tensor '%s' for FP8 weight '%s'", scale_key, key)
 
             rows, cols = tensor.shape
             effective_block = block_shape
             if effective_block is None:
                 try:
-                    effective_block = infer_block_shape((rows, cols), scale_inv)
+                    # Infer the block layout from whichever FP8 scale variant
+                    # the checkpoint actually stores.
+                    block_source = scale_inv if scale_inv is not None else scale_tensor
+                    effective_block = infer_block_shape((rows, cols), block_source)
                     LOG.debug("Inferred block size %s for weight '%s'", effective_block, key)
                 except ValueError as exc:
                     LOG.debug(
@@ -654,9 +669,9 @@ def convert_fp8_shard(
                     f"Tensor {key} shape {tensor.shape} incompatible with block size {effective_block}"
                 )
 
-            scale_arg = None
+            scale_arg = scale_tensor
             scale_inv_arg = scale_inv
-            if scale_semantics == "inverse":
+            if scale_semantics == "inverse" and scale_inv is not None:
                 scale_arg = torch.reciprocal(scale_inv.to(torch.float32))
                 scale_inv_arg = None
             deq = dequantize_fp8(
@@ -670,6 +685,14 @@ def convert_fp8_shard(
         elif key.endswith("_scale_inv"):
             LOG.debug("Dropping auxiliary FP8 tensor '%s' after dequantization", key)
             continue
+        elif key.endswith(".scale"):
+            weight_key = key[:-len(".scale")] + ".weight"
+            if weight_key in reader_keys and reader.get_tensor(weight_key).dtype in _FLOAT8_DTYPES:
+                # Mirror the `_scale_inv` handling so exported BF16 checkpoints
+                # keep only dense weights, not FP8 reconstruction metadata.
+                LOG.debug("Dropping auxiliary FP8 tensor '%s' after dequantization", key)
+                continue
+            tensors[key] = finalize_for_save(tensor, target_dtype)
         else:
             tensors[key] = finalize_for_save(tensor, target_dtype)
     return tensors
