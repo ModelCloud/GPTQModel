@@ -1412,8 +1412,6 @@ def ModelLoader(cls):
         if load_checkpoint_in_model and backend not in [
             BACKEND.GPTQ_MACHETE,
             BACKEND.AWQ_MACHETE,
-            BACKEND.GPTQ_MARLIN,
-            BACKEND.AWQ_MARLIN,
             BACKEND.GPTQ_BITBLAS,
             BACKEND.AWQ_BITBLAS,
         ]:
