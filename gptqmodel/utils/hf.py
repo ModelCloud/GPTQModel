@@ -1080,12 +1080,49 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
     speech_module = sys.modules.get(f"{module_root}.speech_conformer_encoder")
     remote_module = sys.modules.get(model_cls.__module__)
     ovis_config_module = sys.modules.get(f"{module_root}.configuration_ovis")
+    intern_vit_module = sys.modules.get(f"{module_root}.modeling_intern_vit")
     outer_model_cls = model_cls if isinstance(model_cls, type) else None
     input_mode_enum = getattr(remote_module, "InputMode", None) if remote_module is not None else None
 
     with _MONKEY_PATCH_LOCK:
         if outer_model_cls is not None:
             try_patch_legacy_flash_attn_flag(outer_model_cls)
+
+        if getattr(config, "model_type", None) == "internvl_chat" and intern_vit_module is not None:
+            encoder_cls = getattr(intern_vit_module, "InternVisionEncoder", None)
+            layer_cls = getattr(intern_vit_module, "InternVisionEncoderLayer", None)
+            module_nn = getattr(intern_vit_module, "nn", None)
+            if (
+                encoder_cls is not None
+                and layer_cls is not None
+                and module_nn is not None
+                and not getattr(encoder_cls, "_gptqmodel_meta_dpr_patch", False)
+            ):
+                def encoder_init_compat(self, encoder_config):
+                    module_nn.Module.__init__(self)
+                    self.config = encoder_config
+
+                    num_hidden_layers = int(getattr(encoder_config, "num_hidden_layers", 0) or 0)
+                    drop_path_rate = float(getattr(encoder_config, "drop_path_rate", 0.0) or 0.0)
+                    dpr = (
+                        torch.linspace(
+                            0,
+                            drop_path_rate,
+                            num_hidden_layers,
+                            device="cpu",
+                            dtype=torch.float32,
+                        ).tolist()
+                        if num_hidden_layers > 0
+                        else []
+                    )
+
+                    self.layers = module_nn.ModuleList(
+                        [layer_cls(encoder_config, dpr[idx]) for idx in range(num_hidden_layers)]
+                    )
+                    self.gradient_checkpointing = True
+
+                encoder_cls.__init__ = encoder_init_compat
+                encoder_cls._gptqmodel_meta_dpr_patch = True
 
         if config.model_type == "minicpmv" or config.model_type == "minicpmo":
             vision_model_cls = getattr(
