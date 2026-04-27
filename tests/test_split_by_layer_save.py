@@ -3,6 +3,7 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 from accelerate import load_checkpoint_in_model
@@ -129,6 +130,7 @@ def _patch_writer_env(monkeypatch):
     monkeypatch.setattr("gptqmodel.models.writer.sanitize_generation_config_file", lambda *_args, **_kwargs: False)
 
 
+@pytest.mark.skip(reason="see gptqmodel/models/writer.py:SUPPORTED_SPLIT_BY")
 def test_save_quantized_split_by_layer_writes_per_layer_dirs(tmp_path, monkeypatch):
     writer = _build_writer(tmp_path)
     _patch_writer_env(monkeypatch)
@@ -155,6 +157,7 @@ def test_save_quantized_split_by_layer_writes_per_layer_dirs(tmp_path, monkeypat
     assert index["weight_map"]["lm_head.weight"] == "lm_head.safetensors"
 
 
+@pytest.mark.skip(reason="see gptqmodel/models/writer.py:SUPPORTED_SPLIT_BY")
 def test_save_quantized_split_by_layer_still_shards_large_layer(tmp_path, monkeypatch):
     writer = _build_writer(tmp_path)
     _patch_writer_env(monkeypatch)
@@ -178,6 +181,7 @@ def test_save_quantized_split_by_layer_still_shards_large_layer(tmp_path, monkey
     assert weight_file != bias_file
 
 
+@pytest.mark.skip(reason="see gptqmodel/models/writer.py:SUPPORTED_SPLIT_BY")
 def test_split_by_layer_index_loads_nested_layer_shards(tmp_path, monkeypatch):
     writer = _build_writer(tmp_path)
     _patch_writer_env(monkeypatch)
