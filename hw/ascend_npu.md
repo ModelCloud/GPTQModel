@@ -99,4 +99,3 @@ equivalent forms for these APIs.
 | `torch.cuda.CUDAPluggableAllocator` | `torch_npu.npu.NPUPluggableAllocator` | High-risk allocator API; see Huawei's custom NPU allocator API docs before use. |
 | `torch.cuda.change_current_allocator` | `torch_npu.npu.change_current_allocator` | High-risk allocator API; see Huawei's custom current-allocator API docs before use. |
 | `torch.cuda._sanitizer.enable_cuda_sanitizer` | `torch_npu.npu._sanitizer.enable_npu_sanitizer` | - |
-

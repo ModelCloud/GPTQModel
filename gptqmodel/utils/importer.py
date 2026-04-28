@@ -429,7 +429,7 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        device: DEVICE,
+        device: Optional[Union[DEVICE, str, int, torch.device]],
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         quant_method: METHOD = METHOD.GPTQ,
@@ -446,6 +446,10 @@ def select_quant_linear(
     if isinstance(quant_method, str):
         quant_method = METHOD(quant_method.lower())
     backend = normalize_backend(backend, quant_method=quant_method)
+    if device is not None:
+        device = normalize_device(device)
+        if device == DEVICE.CUDA and IS_ROCM:
+            device = DEVICE.ROCM
 
     bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
 
