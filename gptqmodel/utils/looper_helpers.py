@@ -96,6 +96,10 @@ def device_ctx(dev: Optional[torch.device | "DEVICE"]):
         with torch.xpu.device(dev.index):  # type: ignore[attr-defined]
             yield
         return
+    if dev.type == "npu" and hasattr(torch, "npu"):
+        with torch.npu.device(dev.index):  # type: ignore[attr-defined]
+            yield
+        return
 
     # cpu/mps/meta -> nothing special needed
     yield

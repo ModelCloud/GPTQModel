@@ -94,8 +94,10 @@ def get_best_device():
         return "mps"
     elif torch.cuda.is_available():
         return "cuda:0"
-    elif torch.xpu.is_available():
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
         return "xpu:0"
+    elif hasattr(torch, "npu") and torch.npu.is_available():
+        return "npu:0"
     else:
         return "cpu"
 

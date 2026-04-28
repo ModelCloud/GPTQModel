@@ -524,6 +524,15 @@ class LoopProcessor:
             except Exception:  # pragma: no cover - defensive, XPU runtime differences
                 pass
 
+        npu = getattr(torch, "npu", None)
+        if npu is not None:
+            try:
+                if torch.npu.is_available():
+                    for idx in range(torch.npu.device_count()):
+                        devices.append(f"npu:{idx}")
+            except Exception:  # pragma: no cover - defensive, NPU runtime differences
+                pass
+
         return devices
 
     def _safe_query_metric(self, device_key: str, handle: Device):

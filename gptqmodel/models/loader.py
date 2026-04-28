@@ -1161,6 +1161,11 @@ def ModelLoader(cls):
                     device_strs = [f"xpu:{i}" for i in range(num_gpus)]
                 else:
                     raise RuntimeError("XPU is not available")
+            elif device == DEVICE.NPU:
+                if hasattr(torch, "npu") and torch.npu.is_available():
+                    device_strs = [f"npu:{i}" for i in range(num_gpus)]
+                else:
+                    raise RuntimeError("NPU is not available")
             else:
                 device_strs = ["cpu"] * num_gpus
 
@@ -1311,6 +1316,8 @@ def ModelLoader(cls):
                 num_gpus = torch.cuda.device_count()
             elif device is DEVICE.XPU:
                 num_gpus = torch.xpu.device_count()
+            elif device is DEVICE.NPU:
+                num_gpus = torch.npu.device_count()
             device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
         else:
             device_map = dict(explicit_device_map)

@@ -10,21 +10,31 @@ AWQ_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]
 AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 
 
-def unpack_awq(qweight: torch.Tensor, qzeros: torch.Tensor, bits: int):
-    shifts = torch.arange(0, 32, bits, device=qweight.device)
+def _unpack_columnwise(qtensor: torch.Tensor, bits: int) -> torch.Tensor:
+    device = qtensor.device
+    if device.type == "npu":
+        # torch-npu 2.9 currently mishandles broadcasted bitwise shifts for
+        # qweight[:, :, None] >> shifts, returning a pack dimension of 1.
+        qtensor = qtensor.to("cpu")
 
-    # unpacking columnwise
-    iweights = torch.bitwise_right_shift(qweight[:, :, None], shifts[None, None, :]).to(
+    shifts = torch.arange(0, 32, bits, device=qtensor.device)
+    unpacked = torch.bitwise_right_shift(qtensor[:, :, None], shifts[None, None, :]).to(
         torch.int8  # smallest dtype available
     )
-    iweights = iweights.view(iweights.shape[0], -1)
+    unpacked = unpacked.view(unpacked.shape[0], -1)
+
+    if device.type == "npu":
+        unpacked = unpacked.to(device)
+    return unpacked
+
+
+def unpack_awq(qweight: torch.Tensor, qzeros: torch.Tensor, bits: int):
+    # unpacking columnwise
+    iweights = _unpack_columnwise(qweight, bits)
 
     # unpacking columnwise
     if qzeros is not None:
-        izeros = torch.bitwise_right_shift(qzeros[:, :, None], shifts[None, None, :]).to(
-            torch.int8  # smallest dtype available
-        )
-        izeros = izeros.view(izeros.shape[0], -1)
+        izeros = _unpack_columnwise(qzeros, bits)
     else:
         izeros = qzeros
 
@@ -49,6 +59,11 @@ def reverse_awq_order(iweights: torch.Tensor, izeros: torch.Tensor, bits: int):
 
 
 def pack_exllama(iweights: torch.Tensor, izeros: torch.Tensor, bits: int):
+    device = iweights.device
+    if device.type == "npu":
+        qweight, qzeros = pack_exllama(iweights.to("cpu"), izeros.to("cpu"), bits)
+        return qweight.to(device), qzeros.to(device)
+
     shifts = torch.arange(0, 32, bits, device=iweights.device)
 
     # packing rowwise

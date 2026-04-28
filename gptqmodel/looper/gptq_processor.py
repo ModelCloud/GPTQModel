@@ -276,6 +276,12 @@ class GPTQProcessor(LoopProcessor):
                     f"CUDA thread context {current_cuda_device} does not match expected device {expected_device} "
                     f"while processing '{module.full_name}'."
                 )
+            if expected_device.type == "npu" and hasattr(torch, "npu") and torch.npu.is_available():
+                current_npu_device = torch.device("npu", torch.npu.current_device())
+                assert current_npu_device == expected_device, (
+                    f"NPU thread context {current_npu_device} does not match expected device {expected_device} "
+                    f"while processing '{module.full_name}'."
+                )
 
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 

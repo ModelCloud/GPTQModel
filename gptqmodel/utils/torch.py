@@ -161,7 +161,7 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
 
 def torch_new_stream():
     global STREAM
-    if STREAM is None:
+    if STREAM is not None:
         return STREAM
 
     if HAS_CUDA:
@@ -170,13 +170,18 @@ def torch_new_stream():
     if HAS_XPU:
         STREAM = torch.xpu.Stream()
         return STREAM
+    if HAS_NPU:
+        STREAM = torch.npu.Stream()
+        return STREAM
     return None
 
 def torch_new_stream_ctx():
     if HAS_CUDA:
         return torch.cuda.stream(torch_new_stream())
     if HAS_XPU:
-        return torch.xpu.Stream(torch_new_stream())
+        return torch.xpu.stream(torch_new_stream())
+    if HAS_NPU:
+        return torch.npu.stream(torch_new_stream())
     return contextlib.nullcontext()
 
 def torch_sync(device: torch.device = None):
@@ -373,6 +378,11 @@ def auto_select_torch_device(index: int = 0):
         if index > 0 and torch.xpu.device_count() <= index:
             index = 0
         device = torch.device(f"xpu:{index}")
+    elif HAS_NPU:
+        # defensive check
+        if index > 0 and torch.npu.device_count() <= index:
+            index = 0
+        device = torch.device(f"npu:{index}")
     elif HAS_MPS:
         device = torch.device("mps") # mps has no index
     else:
@@ -386,6 +396,8 @@ def torch_devices() -> List[torch.device]:
         return [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
     elif HAS_XPU:
         return [torch.device(f"xpu:{i}") for i in range(torch.xpu.device_count())]
+    elif HAS_NPU:
+        return [torch.device(f"npu:{i}") for i in range(torch.npu.device_count())]
     elif HAS_MPS:
         return [torch.device("mps")]
     else:
@@ -397,6 +409,8 @@ if HAS_CUDA:
     ALL_STREAMS = [torch.cuda.Stream(device=device) for device in ALL_DEVICES]
 elif HAS_XPU:
     ALL_STREAMS = [torch.xpu.Stream(device=device) for device in ALL_DEVICES]
+elif HAS_NPU:
+    ALL_STREAMS = [torch.npu.Stream(device=device) for device in ALL_DEVICES]
 else:
     ALL_STREAMS = [contextlib.nullcontext()]
 
@@ -429,8 +443,14 @@ NEXT_DEVICE_INDEX = 0
 #
 #     return device
 
-def torch_streamCtx(stream: Union[torch.cuda.Stream, torch.xpu.Stream]) -> StreamContext:
-    return torch.cuda.stream(stream) if HAS_CUDA else torch.xpu.stream(stream)
+def torch_streamCtx(stream) -> StreamContext:
+    if HAS_CUDA:
+        return torch.cuda.stream(stream)
+    if HAS_XPU:
+        return torch.xpu.stream(stream)
+    if HAS_NPU:
+        return torch.npu.stream(stream)
+    return contextlib.nullcontext()
 
 
 @contextmanager

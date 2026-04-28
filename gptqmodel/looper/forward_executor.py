@@ -531,7 +531,7 @@ class ForwardExecutor:
                     replica = module_replicas[device]
                     submitter = (
                         device_thread_pool.submit_serial
-                        if device.type in ("cuda", "xpu", "mps")
+                        if device.type in ("cuda", "xpu", "npu", "mps")
                         else device_thread_pool.submit
                     )
 

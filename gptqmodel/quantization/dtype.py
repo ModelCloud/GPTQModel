@@ -371,6 +371,10 @@ def _normalize_device(device: Optional[torch.device]) -> torch.device:
     if device is None:
         if torch.cuda.is_available():
             return torch.device("cuda", torch.cuda.current_device())
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return torch.device("xpu", torch.xpu.current_device())
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            return torch.device("npu", torch.npu.current_device())
         return torch.device("cpu")
     return torch.device(device)
 
