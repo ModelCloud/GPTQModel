@@ -1312,17 +1312,22 @@ class LazyTurtle:
         full_name = self._join_tensor_name(module_path, rel_name)
         candidates: list[str] = []
         seen: set[str] = set()
+
+        def add_candidate(candidate_name: str) -> None:
+            if candidate_name not in seen:
+                seen.add(candidate_name)
+                candidates.append(candidate_name)
+            for alias in self._module_tree_name_aliases(candidate_name):
+                if alias in seen:
+                    continue
+                seen.add(alias)
+                candidates.append(alias)
+
         for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
             for aliased_path in self._runtime_to_checkpoint_alias_candidates(candidate_path):
                 candidate_name = self._join_tensor_name(aliased_path, rel_name)
-                if candidate_name not in seen:
-                    seen.add(candidate_name)
-                    candidates.append(candidate_name)
-                for alias in self._module_tree_name_aliases(candidate_name):
-                    if alias in seen:
-                        continue
-                    seen.add(alias)
-                    candidates.append(alias)
+                for aliased_name in self._runtime_to_checkpoint_alias_candidates(candidate_name):
+                    add_candidate(aliased_name)
 
         for candidate in candidates:
             if candidate in self._weight_map:
