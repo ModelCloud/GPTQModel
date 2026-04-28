@@ -50,6 +50,7 @@ class TestInternvlChat(ModelTest):
 
         inputs = model.prepare_inputs_for_conversation(messages)
         inputs = model.move_input_capture_example(inputs, model.device)
+        model.model.img_context_token_id = inputs.pop("img_context_token_id")
         inputs.pop("eos_token_id")
 
         output_text = self.generate_stable_with_limit(
