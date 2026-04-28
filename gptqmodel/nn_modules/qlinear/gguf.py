@@ -214,9 +214,32 @@ def _unpack_q4_k_scale_min_torch(scales: torch.Tensor) -> tuple[torch.Tensor, to
     m = packed[..., 1, :]
     md = packed[..., 2, :]
 
-    sc = torch.cat((d & 0x3F, (md & 0x0F) | ((d >> 2) & 0x30)), dim=-1)
-    mins = torch.cat((m & 0x3F, (md >> 4) | ((m >> 2) & 0x30)), dim=-1)
+    sc = torch.cat((d & 0x3F, (md & 0x0F) | (_torch_right_shift(d, 2) & 0x30)), dim=-1)
+    mins = torch.cat((m & 0x3F, _torch_right_shift(md, 4) | (_torch_right_shift(m, 2) & 0x30)), dim=-1)
     return sc, mins
+
+
+def _torch_shift_factor(shifts: int | torch.Tensor, device: torch.device) -> int | torch.Tensor:
+    if torch.is_tensor(shifts):
+        shifts_i64 = shifts.to(device=device, dtype=torch.int64)
+        return torch.pow(torch.full_like(shifts_i64, 2), shifts_i64)
+    return 1 << int(shifts)
+
+
+def _torch_right_shift(values: torch.Tensor, shifts: int | torch.Tensor) -> torch.Tensor:
+    if values.device.type != "npu":
+        return torch.bitwise_right_shift(values, shifts)
+
+    shifted = torch.floor_divide(values.to(torch.int64), _torch_shift_factor(shifts, values.device))
+    return shifted.to(values.dtype)
+
+
+def _torch_left_shift(values: torch.Tensor, shifts: int | torch.Tensor) -> torch.Tensor:
+    if values.device.type != "npu":
+        return torch.bitwise_left_shift(values, shifts)
+
+    shifted = values.to(torch.int64) * _torch_shift_factor(shifts, values.device)
+    return shifted.to(values.dtype)
 
 
 def _quantize_k_subblocks(
@@ -901,7 +924,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
 
         qs = blocks[..., 2:]
         low = torch.bitwise_and(qs, 0x0F)
-        high = torch.bitwise_right_shift(qs, 4)
+        high = _torch_right_shift(qs, 4)
         values = torch.cat((low, high), dim=-1).to(torch.int16) - 8
 
         weight = d.unsqueeze(-1) * values.to(target_dtype)
@@ -969,7 +992,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         dm = dmin.unsqueeze(-1) * mins.to(target_dtype)
 
         q = qs.reshape(rows, num_blocks, 4, 1, 32)
-        q = torch.bitwise_right_shift(
+        q = _torch_right_shift(
             q,
             self._u8_shift((0, 4), device=blocks.device).view(1, 1, 1, 2, 1),
         )
@@ -991,18 +1014,18 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         dm = dmin.unsqueeze(-1) * mins.to(target_dtype)
 
         ql = qs.reshape(rows, num_blocks, 4, 1, 32)
-        ql = torch.bitwise_right_shift(
+        ql = _torch_right_shift(
             ql,
             self._u8_shift((0, 4), device=blocks.device).view(1, 1, 1, 2, 1),
         )
         ql = torch.bitwise_and(ql, 0x0F).reshape(rows, num_blocks, 8, 32)
 
-        qh = torch.bitwise_right_shift(
+        qh = _torch_right_shift(
             qh.unsqueeze(-2),
             self._u8_shift(tuple(range(8)), device=blocks.device).view(1, 1, 8, 1),
         )
         qh = torch.bitwise_and(qh, 0x01).reshape(rows, num_blocks, 8, 32)
-        q = torch.bitwise_or(ql, torch.bitwise_left_shift(qh, 4))
+        q = torch.bitwise_or(ql, _torch_left_shift(qh, 4))
 
         return (d.unsqueeze(-1) * q.to(target_dtype) - dm.unsqueeze(-1)).reshape(rows, num_blocks * 256)
 
@@ -1016,20 +1039,20 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         d = (d.unsqueeze(-1) * scales).reshape(rows, num_blocks, 16, 1)
 
         ql = ql.reshape(rows, num_blocks, 2, 1, 64)
-        ql = torch.bitwise_right_shift(
+        ql = _torch_right_shift(
             ql,
             self._u8_shift((0, 4), device=blocks.device).view(1, 1, 1, 2, 1),
         )
         ql = torch.bitwise_and(ql, 0x0F).reshape(rows, num_blocks, 8, 32)
 
         qh = qh.reshape(rows, num_blocks, 2, 1, 32)
-        qh = torch.bitwise_right_shift(
+        qh = _torch_right_shift(
             qh,
             self._u8_shift((0, 2, 4, 6), device=blocks.device).view(1, 1, 1, 4, 1),
         )
         qh = torch.bitwise_and(qh, 0x03).reshape(rows, num_blocks, 8, 32)
 
-        q = torch.bitwise_or(ql, torch.bitwise_left_shift(qh, 4)).to(torch.int16) - 32
+        q = torch.bitwise_or(ql, _torch_left_shift(qh, 4)).to(torch.int16) - 32
         q = q.reshape(rows, num_blocks, 16, 16).to(target_dtype)
 
         return (d * q).reshape(rows, num_blocks * 256)

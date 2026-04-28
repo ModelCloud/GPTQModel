@@ -122,7 +122,9 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_DEVICES = [DEVICE.ALL]
+    # torch-npu 2.9 exposes FP8 dtypes on CPU, but CANN rejects float8 tensors
+    # on Ascend devices, so FP8 is not an NPU-capable torch backend yet.
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.MPS]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32, torch.int64]
     SUPPORTS_ADAPTERS = [Lora]

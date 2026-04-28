@@ -26,7 +26,7 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
 from ..quantization.config import QuantizeConfig
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
-from ..utils.torch import CPU, DEVICE_0, DEVICE_1
+from ..utils.torch import CPU, DEVICE_0, DEVICE_1, HAS_NPU
 
 log = setup_logger()
 
@@ -522,6 +522,13 @@ class LoopProcessor:
                     for idx in range(torch.xpu.device_count()):
                         devices.append(f"xpu:{idx}")
             except Exception:  # pragma: no cover - defensive, XPU runtime differences
+                pass
+
+        if HAS_NPU:
+            try:
+                for idx in range(torch.npu.device_count()):
+                    devices.append(f"npu:{idx}")
+            except Exception:  # pragma: no cover - defensive, NPU runtime differences
                 pass
 
         return devices

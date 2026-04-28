@@ -26,6 +26,33 @@ _EXL3_LOP3_MASK = 0x8FFF8FFF
 _EXL3_LOP3_BIAS = 0x3B603B60
 
 
+def _tensor_core_perm_values() -> list[int]:
+    perm = [0] * 256
+    for t in range(32):
+        r0 = (t % 4) * 2
+        r1 = r0 + 1
+        r2 = r0 + 8
+        r3 = r0 + 9
+        c0 = t // 4
+        c1 = c0 + 8
+        perm[t * 8 + 0] = r0 * 16 + c0
+        perm[t * 8 + 1] = r1 * 16 + c0
+        perm[t * 8 + 2] = r2 * 16 + c0
+        perm[t * 8 + 3] = r3 * 16 + c0
+        perm[t * 8 + 4] = r0 * 16 + c1
+        perm[t * 8 + 5] = r1 * 16 + c1
+        perm[t * 8 + 6] = r2 * 16 + c1
+        perm[t * 8 + 7] = r3 * 16 + c1
+    return perm
+
+
+def _inverse_perm_values(perm: list[int]) -> list[int]:
+    inv = [0] * len(perm)
+    for index, value in enumerate(perm):
+        inv[value] = index
+    return inv
+
+
 def _half_scalar_from_bits(bits: int) -> float:
     # Convert a uint16 bit pattern to its IEEE-754 binary16 (float16) value
     # without allocating a torch tensor. The previous implementation used
@@ -50,29 +77,13 @@ _EXL3_MUL1_BIAS = _half_scalar_from_bits(0xC931)
 @lru_cache(maxsize=None)
 def _tensor_core_perm(device_type: str, device_index: int | None) -> torch.Tensor:
     device = torch.device(device_type, device_index)
-    perm = [0] * 256
-    for t in range(32):
-        r0 = (t % 4) * 2
-        r1 = r0 + 1
-        r2 = r0 + 8
-        r3 = r0 + 9
-        c0 = t // 4
-        c1 = c0 + 8
-        perm[t * 8 + 0] = r0 * 16 + c0
-        perm[t * 8 + 1] = r1 * 16 + c0
-        perm[t * 8 + 2] = r2 * 16 + c0
-        perm[t * 8 + 3] = r3 * 16 + c0
-        perm[t * 8 + 4] = r0 * 16 + c1
-        perm[t * 8 + 5] = r1 * 16 + c1
-        perm[t * 8 + 6] = r2 * 16 + c1
-        perm[t * 8 + 7] = r3 * 16 + c1
-    return torch.tensor(perm, dtype=torch.long, device=device)
+    return torch.tensor(_tensor_core_perm_values(), dtype=torch.long, device=device)
 
 
 @lru_cache(maxsize=None)
 def _tensor_core_perm_i(device_type: str, device_index: int | None) -> torch.Tensor:
-    perm = _tensor_core_perm(device_type, device_index)
-    return torch.argsort(perm)
+    device = torch.device(device_type, device_index)
+    return torch.tensor(_inverse_perm_values(_tensor_core_perm_values()), dtype=torch.long, device=device)
 
 
 @lru_cache(maxsize=None)

@@ -33,6 +33,7 @@ from .gar import (
     extend_perm_with_tail,
     invert_perm,
 )
+from .npu_linalg import npu_inverse_cholesky_factor
 from .quantizer import HF_OPTIMUM, Quantizer
 
 
@@ -874,10 +875,13 @@ class GPTQ:
             while 0 < damp < 1:
                 try:
                     diag_view.add_(damp * mean)
-                    H2 = torch.linalg.cholesky(H)
-                    Hinv_result = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
+                    if H.device.type == "npu":
+                        Hinv_result = npu_inverse_cholesky_factor(H)
+                    else:
+                        H2 = torch.linalg.cholesky(H)
+                        Hinv_result = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
+                        del H2
                     diag_view.copy_(current_diag)
-                    del H2
                     used_damp = damp
                     if damp_recovery_started:
                         log.warn(

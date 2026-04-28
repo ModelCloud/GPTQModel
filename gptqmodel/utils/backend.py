@@ -25,6 +25,7 @@ class BACKEND(str, Enum):
 
     # QQQ kernels
     QQQ = "qqq"  # marlin-based qqq kernel
+    QQQ_TORCH = "qqq_torch"
 
     # AWQ kernels
     AWQ_GEMM = "awq_gemm"

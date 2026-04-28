@@ -14,6 +14,7 @@ import torch
 
 from .logger import setup_logger
 from .threadx import DeviceThreadPool
+from .torch import HAS_NPU
 
 
 log = setup_logger()
@@ -21,11 +22,11 @@ log = setup_logger()
 
 @dataclass
 class StreamCopyTicket:
-    event: Optional[torch.cuda.Event]
+    event: Optional[Any]
     device: Optional[torch.device]
     keys: Tuple[str, ...]
     sources: Optional[List[torch.Tensor]]
-    stream: Optional[torch.cuda.Stream]
+    stream: Optional[Any]
     future: Optional[Future] = None
     finalized: bool = False
     background_done: bool = False
@@ -39,6 +40,9 @@ def _discover_accelerator_aliases() -> Dict[str, str]:
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         for idx in range(torch.xpu.device_count()):
             aliases[f"xpu:{idx}"] = f"stream-sync-xpu{idx}"
+    if HAS_NPU:
+        for idx in range(torch.npu.device_count()):
+            aliases[f"npu:{idx}"] = f"stream-sync-npu{idx}"
     return aliases
 
 
@@ -56,6 +60,7 @@ def _build_stream_pool() -> Tuple[DeviceThreadPool, Dict[str, str]]:
         devices=[torch.device("cpu")],
         include_cuda=False,
         include_xpu=False,
+        include_npu=False,
         include_mps=False,
         include_cpu=True,
         inference_mode=True,
@@ -67,24 +72,56 @@ def _build_stream_pool() -> Tuple[DeviceThreadPool, Dict[str, str]]:
 STREAM_DEVICE_POOL, _ACCELERATOR_ALIAS_MAP = _build_stream_pool()
 
 _STREAM_CACHE_LOCK = threading.RLock()
-_CUDA_COPY_STREAMS: Dict[int, torch.cuda.Stream] = {}
+_COPY_STREAMS: Dict[Tuple[str, int], Any] = {}
+
+
+def _stream_backend(device_type: str):
+    if device_type == "cuda":
+        return torch.cuda
+    if device_type == "npu":
+        return torch.npu
+    return None
+
+
+def _stream_backend_available(device_type: str) -> bool:
+    backend = _stream_backend(device_type)
+    if backend is None:
+        return False
+    return bool(backend.is_available())
 
 
 def _resolve_device_index(device: torch.device) -> int:
     index = device.index
     if index is not None:
         return index
-    return torch.cuda.current_device()
+    backend = _stream_backend(device.type)
+    if backend is not None:
+        return backend.current_device()
+    return 0
 
 # reuse streams instead of creating tons of new streams
-def _get_cached_copy_stream(device: torch.device) -> torch.cuda.Stream:
+def _get_cached_copy_stream(device: torch.device) -> Any:
     idx = _resolve_device_index(device)
     with _STREAM_CACHE_LOCK:
-        stream = _CUDA_COPY_STREAMS.get(idx)
+        key = (device.type, idx)
+        stream = _COPY_STREAMS.get(key)
         if stream is None:
-            stream = torch.cuda.Stream(device=torch.device("cuda", idx))
-            _CUDA_COPY_STREAMS[idx] = stream
+            backend = _stream_backend(device.type)
+            if backend is None:
+                raise RuntimeError(f"Unsupported stream copy device: {device}")
+            stream = backend.Stream(device=torch.device(device.type, idx))
+            _COPY_STREAMS[key] = stream
         return stream
+
+
+def _new_event(device_type: str) -> Any:
+    backend = _stream_backend(device_type)
+    if backend is None:
+        return None
+    try:
+        return backend.Event(enable_timing=False, blocking=False)
+    except TypeError:
+        return backend.Event(enable_timing=False)
 
 
 def _queue_key_for_device(device: Optional[torch.device]) -> str:
@@ -107,6 +144,14 @@ def _queue_key_for_device(device: Optional[torch.device]) -> str:
             except Exception:
                 index = 0
         return _ACCELERATOR_ALIAS_MAP.get(f"xpu:{index}", "cpu")
+    if dev_type == "npu" and HAS_NPU:
+        index = device.index
+        if index is None:
+            try:
+                index = torch.npu.current_device()
+            except Exception:
+                index = 0
+        return _ACCELERATOR_ALIAS_MAP.get(f"npu:{index}", "cpu")
     return "cpu"
 
 
@@ -195,9 +240,16 @@ def stream_tensor_dict_to_cpu(
     #     store_callback(host_map)
     # return host_map
 
-    first_cuda = next((tensor for tensor in filtered.values() if tensor.device.type == "cuda"), None)
+    first_accelerator = next(
+        (
+            tensor
+            for tensor in filtered.values()
+            if tensor.device.type in {"cuda", "npu"} and _stream_backend_available(tensor.device.type)
+        ),
+        None,
+    )
 
-    if first_cuda is None or not torch.cuda.is_available():
+    if first_accelerator is None:
         host_map = {name: tensor.detach().to("cpu") for name, tensor in filtered.items()}
         with state_lock:
             store_callback(host_map)
@@ -205,17 +257,18 @@ def stream_tensor_dict_to_cpu(
 
     host_map: Dict[str, torch.Tensor] = {}
 
-    copy_device = first_cuda.device
-    compute_stream = torch.cuda.current_stream(device=copy_device)
+    copy_device = first_accelerator.device
+    backend = _stream_backend(copy_device.type)
+    compute_stream = backend.current_stream(device=copy_device)
     copy_stream = _get_cached_copy_stream(copy_device)
 
     pending_sources: List[torch.Tensor] = []
     pending_keys: List[str] = []
-    with torch.cuda.stream(copy_stream):
+    with backend.stream(copy_stream):
         copy_stream.wait_stream(compute_stream)
         for name, tensor in filtered.items():
             src = tensor.detach()
-            if src.device.type != "cuda":
+            if src.device.type != copy_device.type:
                 host_map[name] = src.to("cpu")
                 continue
             if src.device != copy_device:
@@ -239,7 +292,7 @@ def stream_tensor_dict_to_cpu(
             store_callback(host_map)
         return host_map
 
-    done_event = torch.cuda.Event(enable_timing=False, blocking=False)
+    done_event = _new_event(copy_device.type)
     done_event.record(copy_stream)
 
     ticket = StreamCopyTicket(

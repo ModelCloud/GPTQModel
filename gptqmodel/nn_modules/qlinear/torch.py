@@ -33,6 +33,18 @@ except Exception:  # pragma: no cover - optional dependency
 log = setup_logger()
 
 
+def _right_shift_unpack(values: torch.Tensor, shifts: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    if values.device.type != "npu":
+        return torch.bitwise_right_shift(values, shifts).to(dtype)
+
+    # CANN does not implement bitwise_right_shift. Use int64 arithmetic shift
+    # equivalents on NPU so GPTQ unpacking avoids torch-npu's CPU fallback path.
+    values_i64 = values.to(torch.int64)
+    shifts_i64 = shifts.to(device=values.device, dtype=torch.int64)
+    divisors = torch.pow(torch.full_like(shifts_i64, 2), shifts_i64)
+    return torch.floor_divide(values_i64, divisors).to(dtype)
+
+
 class _LinearWeightMetadata:
     """Tensor-like metadata shim for integrations that only inspect `weight` attrs."""
 
@@ -227,9 +239,17 @@ class TorchLinear(PackableQuantLinear):
         if self.optimized:
             return
 
+        device_type = self.list_buffers()[0].device.type
+        if device_type == "npu":
+            # torch.compile/inductor is not reliable on torch-npu in supported
+            # deployments; the eager Torch path is the portable NPU backend.
+            self.optimized = True
+            log.info.once("Optimize: `TorchLinear` torch.compile skipped on NPU.")
+            return
+
         if backend is None:
             # MPS doesn't support inductor.
-            backend = "inductor" if self.list_buffers()[0].device.type != "mps" else "aot_eager"
+            backend = "inductor" if device_type != "mps" else "aot_eager"
 
         # compile dequantize
         self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
@@ -422,10 +442,11 @@ class TorchLinear(PackableQuantLinear):
     ) -> int:
         width = end - start
         qweight_tile = self.qweight.narrow(1, start, width)
-        weight = torch.bitwise_right_shift(
+        weight = _right_shift_unpack(
             qweight_tile.unsqueeze(1).expand(-1, self.pack_factor, -1),
             self.wf_unsqueeze_neg_one,
-        ).to(self.dequant_dtype)
+            self.dequant_dtype,
+        )
         weight = torch.bitwise_and(weight, self.maxq)
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
@@ -441,10 +462,11 @@ class TorchLinear(PackableQuantLinear):
         if self._zeros_cache is not None and self._zeros_cache_state == cache_state:
             return self._zeros_cache
 
-        zeros = torch.bitwise_right_shift(
+        zeros = _right_shift_unpack(
             self.qzeros.unsqueeze(2).expand(-1, -1, self.pack_factor),
             self.wf_unsqueeze_zero,
-        ).to(self.dequant_dtype)
+            self.dequant_dtype,
+        )
         zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
         self._zeros_cache = zeros
         self._zeros_cache_state = cache_state
@@ -463,7 +485,7 @@ class TorchLinear(PackableQuantLinear):
         if self.g_idx.device == target_device:
             self._g_idx_long_cache = self.g_idx.long()
         else:
-            non_blocking = self.g_idx.device.type == "cpu" and target_device.type in {"cuda", "xpu"}
+            non_blocking = self.g_idx.device.type == "cpu" and target_device.type in {"cuda", "xpu", "npu"}
             self._g_idx_long_cache = self.g_idx.to(
                 device=target_device,
                 dtype=torch.long,
@@ -483,7 +505,7 @@ class TorchLinear(PackableQuantLinear):
     def _maybe_offload_g_idx_to_cpu(self):
         if self.training or self.g_idx is None:
             return
-        if self.g_idx.device.type not in {"cuda", "xpu"}:
+        if self.g_idx.device.type not in {"cuda", "xpu", "npu"}:
             return
         # Keep original device g_idx when Triton dequant is active/usable.
         if self._triton_dequant_enabled and self._can_use_triton_dequant():
@@ -669,10 +691,11 @@ class TorchLinear(PackableQuantLinear):
         self._maybe_offload_g_idx_to_cpu()
 
         weight = torch.bitwise_and(
-            torch.bitwise_right_shift(
+            _right_shift_unpack(
                 self.qweight.unsqueeze(1).expand(-1, self.pack_factor, -1),
                 self.wf_unsqueeze_neg_one,
-            ).to(self.dequant_dtype),
+                self.dequant_dtype,
+            ),
             self.maxq,
         )
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
