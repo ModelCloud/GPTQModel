@@ -10,14 +10,7 @@ from typing import Callable, Iterable
 import torch
 
 from gptqmodel.quantization.npu_linalg import npu_inverse_cholesky_factor
-
-
-try:
-    import torch_npu  # noqa: F401
-
-    NPU_AVAILABLE = torch.npu.is_available()
-except ImportError:
-    NPU_AVAILABLE = False
+from gptqmodel.utils.torch import HAS_NPU
 
 
 @dataclass
@@ -74,7 +67,7 @@ def run_benchmark(
     device: str,
     block_size: int,
 ) -> list[BenchResult]:
-    if not NPU_AVAILABLE:
+    if not HAS_NPU:
         raise RuntimeError("Ascend NPU is not available.")
 
     npu_device = torch.device(device)

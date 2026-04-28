@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
+import importlib
 import time
 from contextlib import contextmanager
 from enum import Enum
@@ -68,17 +69,23 @@ except BaseException:
     # triton built from source maybe incompatible with _dynamo private api
     pass
 
-if hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available") and torch.cuda.is_available():
-    HAS_CUDA = True
-
-if hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available") and torch.xpu.is_available():
-    HAS_XPU = True
-
-if hasattr(torch, "mps") and hasattr(torch.mps, "is_available") and torch.mps.is_available():
-    HAS_MPS = True
+try:
+    HAS_CUDA = torch.cuda.is_available()
+except Exception:
+    HAS_CUDA = False
 
 try:
-    import torch_npu  # type: ignore  # noqa: F401
+    HAS_XPU = torch.xpu.is_available()
+except Exception:
+    HAS_XPU = False
+
+try:
+    HAS_MPS = torch.mps.is_available()
+except Exception:
+    HAS_MPS = False
+
+try:
+    importlib.import_module("torch_npu")
     HAS_NPU = torch.npu.is_available()
 except Exception:
     HAS_NPU = False
@@ -92,7 +99,11 @@ try:
 except BaseException:
     pass
 
-BACKENDS_HAS_FP32_PRECISION = hasattr(torch.backends, "fp32_precision")
+try:
+    torch.backends.fp32_precision
+    BACKENDS_HAS_FP32_PRECISION = True
+except AttributeError:
+    BACKENDS_HAS_FP32_PRECISION = False
 
 
 def _set_tf32_state(enabled: bool) -> None:
@@ -205,7 +216,7 @@ def torch_sync(device: torch.device = None):
                 for idx in range(dev_count):
                     torch.cuda.synchronize(idx)
 
-        if HAS_XPU and hasattr(torch.xpu, "device_count"):
+        if HAS_XPU:
             dev_count = torch.xpu.device_count()
             if dev_count:
                 synchronized_any = True
@@ -248,7 +259,7 @@ def _normalize_device(device: Union[torch.device, str, int, None]) -> Optional[t
     if isinstance(device, int):
         if HAS_CUDA and torch.cuda.device_count() > device:
             return torch.device("cuda", device)
-        if HAS_XPU and hasattr(torch.xpu, "device_count") and torch.xpu.device_count() > device:
+        if HAS_XPU and torch.xpu.device_count() > device:
             return torch.device("xpu", device)
         if HAS_NPU and torch.npu.device_count() > device:
             return torch.device("npu", device)
@@ -260,11 +271,11 @@ def _normalize_device(device: Union[torch.device, str, int, None]) -> Optional[t
 def resolve_empty_cache_callable(device_type: str) -> Optional[Callable[[], None]]:
     try:
         if device_type == "cuda" and HAS_CUDA:
-            candidate = getattr(torch.cuda, "empty_cache", None)
+            candidate = torch.cuda.empty_cache
         elif device_type == "xpu" and HAS_XPU:
-            candidate = getattr(torch.xpu, "empty_cache", None)
+            candidate = torch.xpu.empty_cache
         elif device_type == "mps" and HAS_MPS:
-            candidate = getattr(torch.mps, "empty_cache", None)
+            candidate = torch.mps.empty_cache
         elif device_type == "npu" and HAS_NPU:
             candidate = torch.npu.empty_cache
         else:

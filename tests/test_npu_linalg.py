@@ -10,17 +10,10 @@ import pytest
 import torch
 
 from gptqmodel.quantization.npu_linalg import npu_inverse_cholesky_factor
+from gptqmodel.utils.torch import HAS_NPU
 
 
-try:
-    import torch_npu  # noqa: F401
-
-    NPU_AVAILABLE = torch.npu.is_available()
-except ImportError:
-    NPU_AVAILABLE = False
-
-
-pytestmark = pytest.mark.skipif(not NPU_AVAILABLE, reason="Ascend NPU is required")
+pytestmark = pytest.mark.skipif(not HAS_NPU, reason="Ascend NPU is required")
 
 
 def _spd_matrix(size: int, seed: int) -> torch.Tensor:
@@ -64,10 +57,12 @@ def test_gptq_npu_hessian_inverse_avoids_torch_npu_cpu_fallback_warnings():
         """
         import torch
         import torch.nn as nn
-        import torch_npu
-
         from gptqmodel.quantization.config import QuantizeConfig
         from gptqmodel.quantization.gptq import GPTQ
+        from gptqmodel.utils.torch import HAS_NPU
+
+        if not HAS_NPU:
+            raise RuntimeError("Ascend NPU is not available")
 
         torch.npu.set_device(0)
         torch.manual_seed(0)
