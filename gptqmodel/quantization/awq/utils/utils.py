@@ -8,6 +8,8 @@ import importlib
 import accelerate
 import torch
 
+from gptqmodel.utils.torch import HAS_NPU
+
 
 ipex_available = importlib.util.find_spec("intel_extension_for_pytorch") is not None
 try:
@@ -94,8 +96,10 @@ def get_best_device():
         return "mps"
     elif torch.cuda.is_available():
         return "cuda:0"
-    elif torch.xpu.is_available():
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
         return "xpu:0"
+    elif HAS_NPU:
+        return "npu:0"
     else:
         return "cpu"
 

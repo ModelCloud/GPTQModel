@@ -22,7 +22,7 @@ from ..utils.inspect import get_supported_kwargs
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, nested_move_to
 from ..utils.safe import ThreadSafe
-from ..utils.torch import ALL_DEVICES, CPU, torch_sync
+from ..utils.torch import ALL_DEVICES, CPU, HAS_NPU, torch_sync
 
 
 USE_TORCH_REPLICATE = env_flag("GPTQMODEL_USE_TORCH_REPLICATE", True)
@@ -94,6 +94,10 @@ def device_ctx(dev: Optional[torch.device | "DEVICE"]):
         return
     if dev.type == "xpu" and hasattr(torch, "xpu"):
         with torch.xpu.device(dev.index):  # type: ignore[attr-defined]
+            yield
+        return
+    if dev.type == "npu" and HAS_NPU:
+        with torch.npu.device(dev.index):  # type: ignore[attr-defined]
             yield
         return
 

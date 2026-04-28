@@ -24,6 +24,7 @@ from ..utils.logger import setup_logger, log_time_block
 from ..utils.device import get_device
 from ..utils.model import create_quant_module, find_modules, pack_module
 from ..utils.module_locks import parent_module_lock
+from ..utils.torch import HAS_NPU
 
 log = setup_logger()
 lock = threading.Lock()
@@ -274,6 +275,12 @@ class GPTQProcessor(LoopProcessor):
                 current_cuda_device = torch.device("cuda", torch.cuda.current_device())
                 assert current_cuda_device == expected_device, (
                     f"CUDA thread context {current_cuda_device} does not match expected device {expected_device} "
+                    f"while processing '{module.full_name}'."
+                )
+            if expected_device.type == "npu" and HAS_NPU:
+                current_npu_device = torch.device("npu", torch.npu.current_device())
+                assert current_npu_device == expected_device, (
+                    f"NPU thread context {current_npu_device} does not match expected device {expected_device} "
                     f"while processing '{module.full_name}'."
                 )
 
