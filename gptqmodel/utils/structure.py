@@ -1314,6 +1314,10 @@ class LazyTurtle:
         seen: set[str] = set()
 
         def add_candidate(candidate_name: str) -> None:
+            # Keep module-tree aliases attached to the fully resolved tensor key.
+            # Some HF mappings rewrite nested relative names (for example
+            # `spatial_linear.ln` -> `spatial_linear.3`), so alias expansion has
+            # to happen after `module_path` and `rel_name` are joined.
             if candidate_name not in seen:
                 seen.add(candidate_name)
                 candidates.append(candidate_name)
