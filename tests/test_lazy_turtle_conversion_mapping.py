@@ -317,6 +317,30 @@ def test_lazy_turtle_applies_reversed_weight_renamings_with_capturing_groups(tmp
     assert turtle._resolve_checkpoint_tensor_name("timm_model.backbone.conv", "weight") == "backbone.conv.weight"
 
 
+def test_lazy_turtle_applies_reversed_weight_renamings_inside_module_relative_name(tmp_path):
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "model.resampler_model.spatial_linear.3.weight": torch.zeros(2),
+        },
+        hf_conversion_map_reversed=[
+            SimpleNamespace(
+                source_patterns=["spatial_linear.ln"],
+                target_patterns=["spatial_linear.3"],
+                operations=[],
+            )
+        ],
+    )
+
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "model.resampler_model",
+            "spatial_linear.ln.weight",
+        )
+        == "model.resampler_model.spatial_linear.3.weight"
+    )
+
+
 def test_lazy_turtle_uses_transformers_checkpoint_conversion_mapping_for_gemma3(tmp_path, monkeypatch):
     conversion_mapping_module = SimpleNamespace(
         get_checkpoint_conversion_mapping=lambda model_type: _gemma3_weight_renamings()
