@@ -1,7 +1,15 @@
+import copy
+import os
+import warnings
+
 import pytest
 import torch
+import torch.nn as nn
 
 from gptqmodel.models._const import DEVICE, normalize_device
+from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
+from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch import _right_shift_unpack
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -11,6 +19,167 @@ from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import auto_select_device, select_quant_linear
 from gptqmodel.utils.torch import HAS_NPU
+
+
+NPU_TEST_DEVICE = os.environ.get("GPTQMODEL_TEST_NPU_DEVICE", "npu:0")
+NPU_CPU_FALLBACK_MARKERS = (
+    "not currently supported on the NPU backend",
+    "fall back to run on the CPU",
+)
+
+
+def _test_npu_device() -> torch.device:
+    return torch.device(NPU_TEST_DEVICE)
+
+
+def _assert_no_npu_cpu_fallback(caught: list[warnings.WarningMessage]) -> None:
+    fallback_warnings = [
+        str(warning.message)
+        for warning in caught
+        if any(marker in str(warning.message) for marker in NPU_CPU_FALLBACK_MARKERS)
+    ]
+    assert fallback_warnings == []
+
+
+def _assert_npu_forward_matches_cpu(
+    module: nn.Module,
+    x_cpu: torch.Tensor,
+    *,
+    atol: float = 1e-3,
+    rtol: float = 1e-3,
+) -> None:
+    npu_module = copy.deepcopy(module).to(_test_npu_device()).eval()
+    module = module.eval()
+
+    with torch.inference_mode():
+        y_cpu = module(x_cpu)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with torch.inference_mode():
+            y_npu = npu_module(x_cpu.to(_test_npu_device()))
+            y_npu_cpu = y_npu.to("cpu", dtype=torch.float32)
+
+    assert y_npu.device.type == "npu"
+    _assert_no_npu_cpu_fallback(caught)
+    torch.testing.assert_close(y_npu_cpu, y_cpu.to(torch.float32), atol=atol, rtol=rtol)
+
+
+def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
+    pack_factor = 32 // bits
+    order_map = [0, 2, 4, 6, 1, 3, 5, 7]
+    packed = torch.zeros((unpacked.shape[0], unpacked.shape[1] // pack_factor), dtype=torch.int32)
+    for col in range(unpacked.shape[1] // pack_factor):
+        for lane, order in enumerate(order_map):
+            packed[:, col] |= unpacked[:, col * pack_factor + order].to(torch.int32) << (lane * bits)
+    return packed
+
+
+def _make_awq_like_module(cls, dtype: torch.dtype, *, seed: int = 300, **kwargs):
+    in_features = kwargs.pop("in_features", 64)
+    out_features = kwargs.pop("out_features", 64)
+    group_size = kwargs.pop("group_size", 16)
+    bias = kwargs.pop("bias", True)
+    bits = 4
+
+    torch.manual_seed(seed)
+    groups = in_features // group_size
+    int_weight = torch.randint(0, 2**bits, size=(in_features, out_features), dtype=torch.int32)
+    zero_points = torch.randint(0, 2**bits, size=(groups, out_features), dtype=torch.int32)
+    scales = ((torch.rand(groups, out_features, dtype=torch.float32) * 2.0) + 0.25).to(dtype)
+
+    module = cls(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=bias,
+        dtype=dtype,
+        register_buffers=True,
+        **kwargs,
+    )
+    module.qweight.copy_(_pack_awq_tensor(int_weight, bits))
+    module.qzeros.copy_(_pack_awq_tensor(zero_points, bits))
+    module.scales.copy_(scales.to(module.scales.dtype))
+    if bias:
+        module.bias.copy_(torch.randn(out_features, dtype=dtype).to(module.bias.dtype))
+    return module
+
+
+def _make_gptq_module(bits: int, dtype: torch.dtype) -> TorchLinear:
+    in_features = 64
+    out_features = 64
+    group_size = 16
+
+    torch.manual_seed(100 + bits)
+    linear = nn.Linear(in_features, out_features, bias=True)
+    linear.weight.data.normal_(0, 0.12)
+    linear.bias.data.normal_(0, 0.03)
+
+    maxq = (1 << bits) - 1
+    groups = in_features // group_size
+    scales = torch.rand(out_features, groups, dtype=torch.float32) * 0.04 + 0.01
+    zeros = torch.randint(0, maxq + 1, (out_features, groups), dtype=torch.int32)
+    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
+
+    module = TorchLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=False,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        pack_dtype=torch.int32,
+    )
+    module.pack_block(linear, scales, zeros, g_idx)
+    module.optimized = True
+    module.post_init()
+    return module.to(dtype=dtype).eval()
+
+
+def _make_awq_module(dtype: torch.dtype) -> AwqTorchLinear:
+    module = _make_awq_like_module(AwqTorchLinear, dtype)
+    module.post_init()
+    return module.eval()
+
+
+def _make_paro_module(dtype: torch.dtype) -> ParoLinear:
+    module = _make_awq_like_module(ParoLinear, dtype, seed=350, krot=1)
+    theta = torch.linspace(-0.15, 0.15, module.in_features // 2, dtype=module.theta.dtype).view_as(module.theta)
+    channel_scales = torch.linspace(0.95, 1.05, module.in_features, dtype=module.channel_scales.dtype).view_as(
+        module.channel_scales
+    )
+    module.theta.copy_(theta)
+    module.channel_scales.copy_(channel_scales)
+    module.post_init()
+    return module.eval()
+
+
+def _make_gguf_module(bits: str, dtype: torch.dtype) -> GGUFTorchLinear:
+    in_features = 256
+    out_features = 32
+
+    torch.manual_seed(500 + sum(ord(ch) for ch in bits))
+    linear = nn.Linear(in_features, out_features, bias=True)
+    linear.weight.data.normal_(0, 0.12)
+    linear.bias.data.normal_(0, 0.03)
+
+    module = GGUFTorchLinear(
+        bits=bits,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        pack_dtype=torch.int32,
+    )
+    module.pack_original(linear, scales=None, zeros=None, g_idx=None)
+    module.post_init()
+    return module.to(dtype=dtype).eval()
 
 
 def test_npu_device_normalization():
@@ -66,6 +235,11 @@ def test_npu_auto_selects_torch_awq_for_gemm():
     assert qlinear_cls is AwqTorchLinear
 
 
+def test_npu_does_not_advertise_fp8_torch_until_cann_supports_float8():
+    assert DEVICE.ALL not in TorchFP8Linear.SUPPORTS_DEVICES
+    assert DEVICE.NPU not in TorchFP8Linear.SUPPORTS_DEVICES
+
+
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 def test_npu_awq_unpack_preserves_pack_dimension():
     qweight_cpu = torch.tensor(
@@ -119,3 +293,37 @@ def test_npu_torch_gptq_unpack_preserves_pack_dimension():
         >> torch.arange(0, 32, 4, dtype=torch.int32).view(1, 8, 1)
     ).to(torch.int8)
     assert torch.equal(unpacked.cpu(), expected)
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("bits", [2, 3, 4, 8])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_npu_torch_gptq_forward_matches_cpu(bits, dtype):
+    module = _make_gptq_module(bits, dtype)
+    x_cpu = torch.randn(2, 3, module.in_features, dtype=dtype)
+    _assert_npu_forward_matches_cpu(module, x_cpu, atol=5e-3, rtol=5e-3)
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_npu_torch_awq_forward_matches_cpu(dtype):
+    module = _make_awq_module(dtype)
+    x_cpu = torch.randn(2, 3, module.in_features, dtype=dtype)
+    _assert_npu_forward_matches_cpu(module, x_cpu, atol=5e-3, rtol=5e-3)
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_npu_torch_paro_forward_matches_cpu(dtype):
+    module = _make_paro_module(dtype)
+    x_cpu = torch.randn(2, 3, module.in_features, dtype=dtype)
+    _assert_npu_forward_matches_cpu(module, x_cpu, atol=6e-3, rtol=6e-3)
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("bits", ["q1_0", "q4_0", "q4_k_m", "q5_k_m", "q6_k", "q8_0"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_npu_torch_gguf_forward_matches_cpu_without_fallback(bits, dtype):
+    module = _make_gguf_module(bits, dtype)
+    x_cpu = torch.randn(2, 3, module.in_features, dtype=dtype)
+    _assert_npu_forward_matches_cpu(module, x_cpu, atol=8e-3, rtol=8e-3)

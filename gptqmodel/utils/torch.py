@@ -266,7 +266,7 @@ def resolve_empty_cache_callable(device_type: str) -> Optional[Callable[[], None
         elif device_type == "mps" and HAS_MPS:
             candidate = getattr(torch.mps, "empty_cache", None)
         elif device_type == "npu" and HAS_NPU:
-            candidate = getattr(torch.npu, "empty_cache", None)
+            candidate = torch.npu.empty_cache
         else:
             candidate = None
     except Exception:
