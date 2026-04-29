@@ -89,11 +89,21 @@ jobs:
     needs:
       - check-vm
     if: ${{ inputs.github_vm == false }}
+    env:
+      UV_PYTHON: 3.14yt
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:130-ubuntu24.04_0415
       volumes:
-        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
-        - /monster/ci/uv:/opt/uv
+        - /github/workspace/uv:/opt/uv
+        - /github/workspace/tmp:/opt/uv/tmp
+        - /monster/ci/uv/python:/opt/uv/python
+        - /monster/ci/uv/cache/python:/opt/uv/cache/python
+        - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
+        - /monster/ci/uv/uv:/opt/uv/uv
+        - /monster/ci/uv/uvx:/opt/uv/uvx
+        - /monster/ci/uv/env:/opt/uv/env
+        - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
+        - /monster/ci/env:/opt/env
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
@@ -101,12 +111,22 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
+      - name: Activate uv env
+        run: |
+          echo "::group::-- dust uv cache dir --"
+            dust $(uv cache dir)
+          echo "::endgroup::"
+
+          bash .github/scripts/ci_unit_activate_uv_env.sh \
+            "gptqmodel_py314t_release_source" \
+            130 \
+            "${{ env.TORCH_VERSION }}" \
+            "${{ github.run_id }}" \
+            "${{ github.run_attempt }}"
+
       - name: Setup release env
         run: |
-          export UV_PYTHON=3.14
-          echo "UV_PYTHON=3.14" >> "$GITHUB_ENV"
-
-          env_name="gptqmodel_py314_release_source"
+          env_name="gptqmodel_py314t_release_source"
           /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Run shared release source flow
