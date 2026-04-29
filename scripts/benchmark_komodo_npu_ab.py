@@ -12,10 +12,17 @@ import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
+os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+
 import torch
 import torch.nn as nn
 
-from gptqmodel.nn_modules.qlinear.komodo import AwqKomodoLinear, KomodoLinear, _native_int4_enabled
+from gptqmodel.nn_modules.qlinear.komodo import (
+    AwqKomodoLinear,
+    KomodoLinear,
+    _drop_source_weights_enabled,
+    _native_int4_enabled,
+)
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.utils.torch import HAS_NPU
@@ -283,6 +290,7 @@ def _run_case(
     cache_dequantized: bool,
     native_int4: bool,
     prefetch_native_plan: bool,
+    drop_source_weights: bool,
 ) -> dict:
     dtype = _dtype(case.dtype)
     if case.method == "gptq":
@@ -303,6 +311,9 @@ def _run_case(
         )
     else:
         raise ValueError(f"Unsupported method `{case.method}`.")
+
+    if native_int4 and drop_source_weights:
+        candidate.enable_source_weight_drop(True)
 
     x = torch.randn(case.tokens, case.in_features, dtype=dtype, device=device)
     with torch.inference_mode():
@@ -340,6 +351,8 @@ def _run_case(
         "komodo_dequant_cache": cache_dequantized,
         "komodo_native_int4": native_int4,
         "komodo_prefetch_native_plan": prefetch_native_plan,
+        "komodo_drop_source_weights": drop_source_weights,
+        "komodo_source_dropped": bool(getattr(candidate, "_native_source_dropped", False)),
         "komodo_prefetched": prefetched,
         "komodo_prepack_ms": prepack_ms,
         "komodo_first_ms": first_ms,
@@ -391,7 +404,7 @@ def _mode_name(*, native_int4: bool, cache_dequantized: bool) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="A/B benchmark Komodo NPU kernels against torch baselines.")
-    parser.add_argument("--device", type=int, default=0, help="NPU device index for this process.")
+    parser.add_argument("--device", type=int, default=0, help="NPU device index for this process. Use 0-6.")
     parser.add_argument(
         "--cases",
         choices=(
@@ -425,6 +438,19 @@ def main() -> None:
         help="When native int4 is active, prebuild the packed NPU plan on a side stream before first forward.",
     )
     parser.add_argument(
+        "--komodo-drop-source-weights",
+        dest="komodo_drop_source_weights",
+        action="store_true",
+        default=None,
+        help="After native int4 pack, drop source GPTQ/AWQ buffers and keep only the native plan.",
+    )
+    parser.add_argument(
+        "--no-komodo-drop-source-weights",
+        dest="komodo_drop_source_weights",
+        action="store_false",
+        help="Keep source GPTQ/AWQ buffers after native int4 pack.",
+    )
+    parser.add_argument(
         "--komodo-cache-dequantized",
         action="store_true",
         help="Opt into the dense dequantized-weight cache for comparison only.",
@@ -444,13 +470,20 @@ def main() -> None:
         raise ValueError("--num-shards must be >= 1.")
     if not (0 <= args.shard_index < args.num_shards):
         raise ValueError("--shard-index must be in [0, --num-shards).")
+    if not (0 <= args.device <= 6):
+        raise ValueError("--device must be in the PCI-ordered first seven device ids: 0-6.")
 
     if args.komodo_native_int4 is True:
         os.environ["GPTQMODEL_KOMODO_NATIVE_INT4"] = "1"
     elif args.komodo_native_int4 is False:
         os.environ["GPTQMODEL_KOMODO_NATIVE_INT4"] = "0"
+    if args.komodo_drop_source_weights is True:
+        os.environ["GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"] = "1"
+    elif args.komodo_drop_source_weights is False:
+        os.environ["GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"] = "0"
     os.environ["GPTQMODEL_KOMODO_CACHE_WEIGHTS"] = "1" if args.komodo_cache_dequantized else "0"
     native_int4 = _native_int4_enabled()
+    drop_source_weights = _drop_source_weights_enabled()
 
     torch.npu.set_device(args.device)
     device = torch.device(f"npu:{args.device}")
@@ -474,6 +507,7 @@ def main() -> None:
             cache_dequantized=args.komodo_cache_dequantized,
             native_int4=native_int4,
             prefetch_native_plan=args.komodo_prefetch_native_plan,
+            drop_source_weights=drop_source_weights,
         )
         for index, case in enumerate(cases)
     ]
@@ -483,12 +517,14 @@ def main() -> None:
         print(
             "{name} {device} mode={mode} baseline={baseline_ms:.4f}ms komodo={komodo_ms:.4f}ms "
             "speedup={speedup:.3f}x first={first_ms:.4f}ms repeat={repeat_ms:.4f}ms "
-            "prepack={prepack_ms:.4f}ms path={komodo_path} max_abs={max_abs:.6g} max_rel={max_rel:.6g}".format(
+            "prepack={prepack_ms:.4f}ms drop_source={drop_source} "
+            "path={komodo_path} max_abs={max_abs:.6g} max_rel={max_rel:.6g}".format(
                 **result,
                 mode=mode,
                 first_ms=result["komodo_first_ms"],
                 repeat_ms=result["komodo_repeat_ms"],
                 prepack_ms=result["komodo_prepack_ms"],
+                drop_source=result["komodo_source_dropped"],
                 max_abs=result["drift"]["max_abs"],
                 max_rel=result["drift"]["max_rel"],
             )
@@ -523,6 +559,7 @@ def main() -> None:
             "device": str(device),
             "komodo_native_int4": bool(native_int4),
             "komodo_prefetch_native_plan": bool(args.komodo_prefetch_native_plan),
+            "komodo_drop_source_weights": bool(drop_source_weights),
             "komodo_dequant_cache": bool(args.komodo_cache_dequantized),
             "mode": mode,
             "dtype_override": args.dtype,

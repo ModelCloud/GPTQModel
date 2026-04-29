@@ -15,6 +15,10 @@ weight caching by default and restricting Komodo inference to FP16.
 - Native NPU int4 is enabled by default. Set
   `GPTQMODEL_KOMODO_NATIVE_INT4=0`, or pass `--no-komodo-native-int4` to the
   benchmark, to force the exact torch-style Komodo fallback for drift checks.
+- Source GPTQ/AWQ buffers can be dropped after native prepack with
+  `GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS=1`, or benchmark option
+  `--komodo-drop-source-weights`. This is inference-only and should be used
+  after the model is already on its final NPU device.
 - Current performance numbers below compare Torch quantized kernels against
   Komodo native int4 prepack on the same synthetic packed weights with Qwen3.6
   projection sizes, and include a direct fallback/native/prefetch comparison.
@@ -41,12 +45,13 @@ python scripts/benchmark_komodo_npu_ab.py \
   --dtype fp16 \
   --device 0 \
   --shard-index 0 \
-  --num-shards 8 \
+  --num-shards 7 \
   --warmup 2 \
   --iters 5
 ```
 
-The full benchmark was sharded over `npu:0` through `npu:7`.
+Future accelerator benchmarks should use PCI ordering and shard over `npu:0`
+through `npu:6` only.
 
 Fallback and prefetch comparison commands:
 
@@ -54,6 +59,7 @@ Fallback and prefetch comparison commands:
 python scripts/benchmark_komodo_npu_ab.py --cases quick --dtype fp16 --device 0 --warmup 2 --iters 5 --no-komodo-native-int4
 python scripts/benchmark_komodo_npu_ab.py --cases quick --dtype fp16 --device 1 --warmup 2 --iters 5
 python scripts/benchmark_komodo_npu_ab.py --cases quick --dtype fp16 --device 2 --warmup 2 --iters 5 --komodo-prefetch-native-plan
+python scripts/benchmark_komodo_npu_ab.py --cases quick --dtype fp16 --device 3 --warmup 2 --iters 5 --komodo-drop-source-weights
 ```
 
 ## Native Mode Comparison
@@ -80,6 +86,29 @@ Interpretation:
 - The native drift in these quick cases matches the existing native path with
   and without prefetch, so prefetch is not introducing additional numerical
   drift.
+
+## Source Weight Drop
+
+When `GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS=1` is set, each Komodo layer empties
+its source quant buffers after a native plan is cached. GPTQ drops `qweight`,
+`qzeros`, `scales`, `g_idx`, and small unpack helper buffers. AWQ drops
+`qweight`, `qzeros`, and `scales`. The cached native plan remains the only
+inference weight representation for that layer.
+
+This reduces HBM used by duplicate source quant storage after the first native
+pack, but it is intentionally one-way:
+
+- The layer cannot fall back to the exact Torch path after source buffers are
+  dropped.
+- The layer cannot train after source buffers are dropped.
+- The native plan cache must not be cleared as a way to free memory, because it
+  is then the only remaining weight copy.
+- Saving or moving the module after source drop is not a supported model export
+  path because native plans are runtime caches, not portable checkpoint buffers.
+
+Quick validation on `npu:0` with `--komodo-drop-source-weights` kept the native
+path active for the repeat forward and preserved the same drift envelope:
+`73.983x` without prefetch and `69.344x` with prefetch on quick GPTQ+AWQ cases.
 
 ## Qwen3.6 Shapes
 

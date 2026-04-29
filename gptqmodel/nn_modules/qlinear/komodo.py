@@ -21,10 +21,15 @@ _KOMODO_CACHE_ENV = "GPTQMODEL_KOMODO_CACHE_WEIGHTS"
 # Native int4 is the default Komodo path. Set GPTQMODEL_KOMODO_NATIVE_INT4=0
 # to force the exact torch-style fallback when investigating numerical drift.
 _KOMODO_NATIVE_INT4_ENV = "GPTQMODEL_KOMODO_NATIVE_INT4"
+_KOMODO_DROP_SOURCE_ENV = "GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"
 
 
 def _native_int4_enabled() -> bool:
     return env_flag(_KOMODO_NATIVE_INT4_ENV, default=True)
+
+
+def _drop_source_weights_enabled() -> bool:
+    return env_flag(_KOMODO_DROP_SOURCE_ENV, default=False)
 
 
 def _native_int4_group_size(group_size: int, in_features: int) -> int | None:
@@ -56,6 +61,7 @@ class _KomodoNativePlanMixin:
     _native_plan_cache: dict
     _native_plan_pending: dict
     _native_prepack_streams: dict
+    _native_source_buffer_names: tuple[str, ...] = ("qweight", "qzeros", "scales")
 
     def _native_key(self, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
         return torch.device(device), dtype
@@ -79,10 +85,46 @@ class _KomodoNativePlanMixin:
     def clear_native_cache(self):
         if hasattr(self, "_native_plan_pending"):
             self._clear_pending_native_plans()
+        if getattr(self, "_native_source_dropped", False):
+            return
         if hasattr(self, "_native_plan_cache"):
             self._native_plan_cache.clear()
         if hasattr(self, "_native_prepack_streams"):
             self._native_prepack_streams.clear()
+
+    def enable_source_weight_drop(self, enabled: bool = True):
+        if not enabled and getattr(self, "_native_source_dropped", False):
+            raise RuntimeError("Komodo source weights have already been dropped and cannot be restored.")
+        self._drop_source_weights_after_native_pack = enabled
+        return self
+
+    def _native_source_available(self) -> bool:
+        for name in self._native_source_buffer_names:
+            tensor = getattr(self, name, None)
+            if isinstance(tensor, torch.Tensor) and tensor.numel() > 0:
+                continue
+            return False
+        return True
+
+    def _maybe_drop_native_source_weights(self) -> None:
+        if not getattr(self, "_drop_source_weights_after_native_pack", False):
+            return
+        if getattr(self, "_native_source_dropped", False):
+            return
+        if self.training or not self._native_plan_cache:
+            return
+
+        for device, _ in tuple(self._native_plan_cache):
+            if device.type == "npu":
+                torch.npu.synchronize(device)
+
+        for name in self._native_source_buffer_names:
+            tensor = getattr(self, name, None)
+            if isinstance(tensor, torch.Tensor):
+                setattr(self, name, tensor.detach().new_empty((0,)))
+        if hasattr(self, "_cached_weights"):
+            self._cached_weights.clear()
+        self._native_source_dropped = True
 
     def enable_lookahead(self, enabled: bool = True):
         self._lookahead_enabled = enabled
@@ -136,8 +178,12 @@ class _KomodoNativePlanMixin:
             return None
 
         _, event, plan = pending
-        torch.npu.current_stream(key[0]).wait_event(event)
+        if getattr(self, "_drop_source_weights_after_native_pack", False):
+            event.synchronize()
+        else:
+            torch.npu.current_stream(key[0]).wait_event(event)
         self._native_plan_cache[key] = plan
+        self._maybe_drop_native_source_weights()
         return plan
 
     def prefetch_native_plan(self, *, device: torch.device | None = None, dtype: torch.dtype = torch.float16) -> bool:
@@ -155,6 +201,8 @@ class _KomodoNativePlanMixin:
         key = self._native_key(device=device, dtype=dtype)
         if key in self._native_plan_cache or key in self._native_plan_pending:
             return True
+        if getattr(self, "_native_source_dropped", False):
+            return False
 
         stream = self._native_prepack_stream(device)
         with torch.npu.stream(stream):
@@ -194,6 +242,8 @@ def _weight_quant_matmul(
 
 class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
     """Ascend NPU GPTQ int4 kernel with Marlin-style prepacked steady-state execution."""
+
+    _native_source_buffer_names = ("qweight", "qzeros", "scales", "g_idx", "wf_unsqueeze_zero", "wf_unsqueeze_neg_one")
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_KOMODO]
     SUPPORTS_METHODS = [METHOD.GPTQ]
@@ -249,12 +299,16 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         self._native_plan_pending: dict[tuple[torch.device, torch.dtype], tuple[torch.npu.Stream, torch.npu.Event, tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]] = {}
         self._native_prepack_streams: dict[int, torch.npu.Stream] = {}
         self._native_layout_supported: bool | None = None
+        self._drop_source_weights_after_native_pack = _drop_source_weights_enabled()
+        self._native_source_dropped = False
 
     def post_init(self):
         super().post_init()
         self.clear_native_cache()
 
     def train(self, mode: bool = True):
+        if mode and getattr(self, "_native_source_dropped", False):
+            raise RuntimeError("KomodoLinear cannot enter training mode after source quant weights are dropped.")
         previous = self.training
         result = super().train(mode=mode)
         if previous != mode:
@@ -282,6 +336,13 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             return False
         if self.bits != 4 or x.shape[-1] != self.in_features:
             return False
+        key = self._native_key(device=x.device, dtype=compute_dtype)
+        if key in self._native_plan_cache:
+            return True
+        if getattr(self, "_native_source_dropped", False):
+            return False
+        if not self._native_source_available():
+            return False
         if self.qweight.device != x.device or self.qzeros.device != x.device or self.scales.device != x.device:
             return False
         if _native_int4_group_size(self.group_size, self.in_features) is None:
@@ -294,6 +355,13 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         if self.training or dtype != torch.float16 or device.type != "npu":
             return False
         if self.bits != 4:
+            return False
+        key = self._native_key(device=device, dtype=dtype)
+        if key in self._native_plan_cache:
+            return True
+        if getattr(self, "_native_source_dropped", False):
+            return False
+        if not self._native_source_available():
             return False
         if self.qweight.device != device or self.qzeros.device != device or self.scales.device != device:
             return False
@@ -337,8 +405,11 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         if pending is not None:
             return pending
 
+        if getattr(self, "_native_source_dropped", False):
+            raise RuntimeError("Komodo native source weights were dropped before a native plan was available.")
         plan = self._build_native_plan(device=device, dtype=dtype)
         self._native_plan_cache[key] = plan
+        self._maybe_drop_native_source_weights()
         return plan
 
     def _native_forward(self, x: torch.Tensor):
@@ -376,6 +447,8 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
 
 class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
     """Ascend NPU AWQ int4 kernel with optional dense fallback caching."""
+
+    _native_source_buffer_names = ("qweight", "qzeros", "scales")
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_KOMODO]
     SUPPORTS_METHODS = [METHOD.AWQ]
@@ -433,12 +506,16 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
         self._native_prepack_streams: dict[int, torch.npu.Stream] = {}
         self._lookahead_enabled = env_flag("GPTQ_TORCH_LOOKAHEAD", default=False)
         self._lookahead_next = None
+        self._drop_source_weights_after_native_pack = _drop_source_weights_enabled()
+        self._native_source_dropped = False
 
     def post_init(self):
         super().post_init()
         self.clear_weight_cache()
 
     def train(self, mode: bool = True):
+        if mode and getattr(self, "_native_source_dropped", False):
+            raise RuntimeError("AwqKomodoLinear cannot enter training mode after source quant weights are dropped.")
         previous = self.training
         result = super().train(mode=mode)
         if previous != mode:
@@ -487,6 +564,13 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
             return False
         if self.bits != 4 or x.shape[-1] != self.in_features:
             return False
+        key = self._native_key(device=x.device, dtype=compute_dtype)
+        if key in self._native_plan_cache:
+            return True
+        if getattr(self, "_native_source_dropped", False):
+            return False
+        if not self._native_source_available():
+            return False
         if self.qweight.device != x.device or self.qzeros.device != x.device or self.scales.device != x.device:
             return False
         return _native_int4_group_size(self.group_size, self.in_features) is not None
@@ -497,6 +581,13 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
         if self.training or dtype != torch.float16 or device.type != "npu":
             return False
         if self.bits != 4:
+            return False
+        key = self._native_key(device=device, dtype=dtype)
+        if key in self._native_plan_cache:
+            return True
+        if getattr(self, "_native_source_dropped", False):
+            return False
+        if not self._native_source_available():
             return False
         if self.qweight.device != device or self.qzeros.device != device or self.scales.device != device:
             return False
@@ -533,8 +624,11 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
         if pending is not None:
             return pending
 
+        if getattr(self, "_native_source_dropped", False):
+            raise RuntimeError("Komodo native source weights were dropped before a native plan was available.")
         plan = self._build_native_plan(device=device, dtype=dtype)
         self._native_plan_cache[key] = plan
+        self._maybe_drop_native_source_weights()
         return plan
 
     def _native_forward(self, x: torch.Tensor):
