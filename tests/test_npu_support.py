@@ -10,7 +10,7 @@ from gptqmodel.models._const import DEVICE, normalize_device
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
-from gptqmodel.nn_modules.qlinear.komodo import AwqKomodoLinear, KomodoLinear
+from gptqmodel.nn_modules.qlinear.komodo import AwqKomodoLinear, KomodoLinear, _native_int4_enabled
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, _right_shift_unpack
@@ -28,6 +28,13 @@ NPU_CPU_FALLBACK_MARKERS = (
     "not currently supported on the NPU backend",
     "fall back to run on the CPU",
 )
+
+
+def test_komodo_native_int4_default_enabled(monkeypatch):
+    monkeypatch.delenv("GPTQMODEL_KOMODO_NATIVE_INT4", raising=False)
+    assert _native_int4_enabled()
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "0")
+    assert not _native_int4_enabled()
 
 
 def _test_npu_device() -> torch.device:
@@ -491,7 +498,8 @@ def test_npu_torch_gptq_forward_matches_cpu(bits, dtype):
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("dtype", [torch.float16])
-def test_npu_komodo_gptq_matches_torch_baseline(dtype):
+def test_npu_komodo_gptq_matches_torch_baseline(dtype, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "0")
     baseline_cpu = _make_gptq_module(bits=4, dtype=dtype).eval()
     candidate = KomodoLinear(
         bits=4,
@@ -602,7 +610,8 @@ def test_npu_torch_awq_forward_matches_cpu(dtype):
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("dtype", [torch.float16])
-def test_npu_komodo_awq_matches_torch_baseline(dtype):
+def test_npu_komodo_awq_matches_torch_baseline(dtype, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "0")
     baseline = _make_awq_module(dtype).to(_test_npu_device()).eval()
     candidate = _make_awq_like_module(AwqKomodoLinear, dtype).to(_test_npu_device()).eval()
     _copy_matching_buffers(candidate, baseline)

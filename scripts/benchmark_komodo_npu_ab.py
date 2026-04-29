@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from gptqmodel.nn_modules.qlinear.komodo import AwqKomodoLinear, KomodoLinear
+from gptqmodel.nn_modules.qlinear.komodo import AwqKomodoLinear, KomodoLinear, _native_int4_enabled
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.utils.torch import HAS_NPU
@@ -308,12 +308,22 @@ def _run_case(
     with torch.inference_mode():
         candidate.clear_weight_cache()
         prefetched = False
+        prepack_ms = 0.0
         if native_int4 and prefetch_native_plan:
+            prepack_start = time.perf_counter()
             prefetched = bool(candidate.prefetch_native_plan(device=device, dtype=dtype))
+            _sync(device)
+            prepack_ms = (time.perf_counter() - prepack_start) * 1000.0
         expected = baseline(x)
+        _sync(device)
+        first_start = time.perf_counter()
         actual = candidate(x)
+        _sync(device)
+        first_ms = (time.perf_counter() - first_start) * 1000.0
+        repeat_start = time.perf_counter()
         repeat = candidate(x)
         _sync(device)
+        repeat_ms = (time.perf_counter() - repeat_start) * 1000.0
 
     drift = _drift(expected, actual)
     repeat_drift = _drift(expected, repeat)
@@ -331,6 +341,9 @@ def _run_case(
         "komodo_native_int4": native_int4,
         "komodo_prefetch_native_plan": prefetch_native_plan,
         "komodo_prefetched": prefetched,
+        "komodo_prepack_ms": prepack_ms,
+        "komodo_first_ms": first_ms,
+        "komodo_repeat_ms": repeat_ms,
         "komodo_path": "native_int4_prepack" if getattr(candidate, "_native_plan_cache", None) else (
             "dequant_cache" if cache_dequantized else "no_dequant_cache"
         ),
@@ -393,7 +406,19 @@ def main() -> None:
         ),
         default="default",
     )
-    parser.add_argument("--komodo-native-int4", action="store_true", help="Benchmark the opt-in native NPU int4 path.")
+    parser.add_argument(
+        "--komodo-native-int4",
+        dest="komodo_native_int4",
+        action="store_true",
+        default=None,
+        help="Force the native NPU int4 path.",
+    )
+    parser.add_argument(
+        "--no-komodo-native-int4",
+        dest="komodo_native_int4",
+        action="store_false",
+        help="Disable native NPU int4 and benchmark the exact torch-style fallback.",
+    )
     parser.add_argument(
         "--komodo-prefetch-native-plan",
         action="store_true",
@@ -420,11 +445,12 @@ def main() -> None:
     if not (0 <= args.shard_index < args.num_shards):
         raise ValueError("--shard-index must be in [0, --num-shards).")
 
-    if args.komodo_native_int4:
+    if args.komodo_native_int4 is True:
         os.environ["GPTQMODEL_KOMODO_NATIVE_INT4"] = "1"
-    else:
-        os.environ.pop("GPTQMODEL_KOMODO_NATIVE_INT4", None)
+    elif args.komodo_native_int4 is False:
+        os.environ["GPTQMODEL_KOMODO_NATIVE_INT4"] = "0"
     os.environ["GPTQMODEL_KOMODO_CACHE_WEIGHTS"] = "1" if args.komodo_cache_dequantized else "0"
+    native_int4 = _native_int4_enabled()
 
     torch.npu.set_device(args.device)
     device = torch.device(f"npu:{args.device}")
@@ -446,19 +472,23 @@ def main() -> None:
             iters=args.iters,
             seed=args.seed + index,
             cache_dequantized=args.komodo_cache_dequantized,
-            native_int4=args.komodo_native_int4,
+            native_int4=native_int4,
             prefetch_native_plan=args.komodo_prefetch_native_plan,
         )
         for index, case in enumerate(cases)
     ]
-    mode = _mode_name(native_int4=args.komodo_native_int4, cache_dequantized=args.komodo_cache_dequantized)
+    mode = _mode_name(native_int4=native_int4, cache_dequantized=args.komodo_cache_dequantized)
 
     for result in results:
         print(
             "{name} {device} mode={mode} baseline={baseline_ms:.4f}ms komodo={komodo_ms:.4f}ms "
-            "speedup={speedup:.3f}x path={komodo_path} max_abs={max_abs:.6g} max_rel={max_rel:.6g}".format(
+            "speedup={speedup:.3f}x first={first_ms:.4f}ms repeat={repeat_ms:.4f}ms "
+            "prepack={prepack_ms:.4f}ms path={komodo_path} max_abs={max_abs:.6g} max_rel={max_rel:.6g}".format(
                 **result,
                 mode=mode,
+                first_ms=result["komodo_first_ms"],
+                repeat_ms=result["komodo_repeat_ms"],
+                prepack_ms=result["komodo_prepack_ms"],
                 max_abs=result["drift"]["max_abs"],
                 max_rel=result["drift"]["max_rel"],
             )
@@ -491,7 +521,7 @@ def main() -> None:
         payload = {
             "pid": os.getpid(),
             "device": str(device),
-            "komodo_native_int4": bool(args.komodo_native_int4),
+            "komodo_native_int4": bool(native_int4),
             "komodo_prefetch_native_plan": bool(args.komodo_prefetch_native_plan),
             "komodo_dequant_cache": bool(args.komodo_cache_dequantized),
             "mode": mode,

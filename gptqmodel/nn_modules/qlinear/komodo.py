@@ -18,13 +18,13 @@ from .torch_awq import AwqTorchLinear
 _KOMODO_CACHE_ENV = "GPTQMODEL_KOMODO_CACHE_WEIGHTS"
 # Dense dequantized weight caching is opt-in only. The Marlin-like path should
 # keep weights quantized/prepacked, not persist a dense dequantized copy.
-# Opt-in only: the native NPU int4 op avoids dense weight materialization, but
-# its accumulation path can drift from the torch baseline on some grouped cases.
+# Native int4 is the default Komodo path. Set GPTQMODEL_KOMODO_NATIVE_INT4=0
+# to force the exact torch-style fallback when investigating numerical drift.
 _KOMODO_NATIVE_INT4_ENV = "GPTQMODEL_KOMODO_NATIVE_INT4"
 
 
 def _native_int4_enabled() -> bool:
-    return env_flag(_KOMODO_NATIVE_INT4_ENV, default=False)
+    return env_flag(_KOMODO_NATIVE_INT4_ENV, default=True)
 
 
 def _native_int4_group_size(group_size: int, in_features: int) -> int | None:

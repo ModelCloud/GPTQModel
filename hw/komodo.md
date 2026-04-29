@@ -12,9 +12,12 @@ weight caching by default and restricting Komodo inference to FP16.
 - BF16 inference is intentionally rejected at selector validation and at runtime.
 - Dense dequantized weight caching is off by default and should not be used for
   performance claims.
+- Native NPU int4 is enabled by default. Set
+  `GPTQMODEL_KOMODO_NATIVE_INT4=0`, or pass `--no-komodo-native-int4` to the
+  benchmark, to force the exact torch-style Komodo fallback for drift checks.
 - Current performance numbers below compare Torch quantized kernels against
   Komodo native int4 prepack on the same synthetic packed weights with Qwen3.6
-  projection sizes.
+  projection sizes, and include a direct fallback/native/prefetch comparison.
 
 The BF16 gate is deliberate. Running AWQ through the native NPU int4 BF16 path
 was either extremely slow when routed through the exact no-cache fallback, or
@@ -28,7 +31,7 @@ Baseline: existing Torch quantized implementation. This host has no GPU capable
 of running Marlin, so Marlin/Machete are references for implementation direction
 only, not runtime baselines.
 
-Mode: `native_int4_prepack`, no dense dequantized cache.
+Default mode: `native_int4_prepack`, no dense dequantized cache.
 
 Command shape:
 
@@ -40,11 +43,43 @@ python scripts/benchmark_komodo_npu_ab.py \
   --shard-index 0 \
   --num-shards 8 \
   --warmup 2 \
-  --iters 5 \
-  --komodo-native-int4
+  --iters 5
 ```
 
 The full benchmark was sharded over `npu:0` through `npu:7`.
+
+Fallback and prefetch comparison commands:
+
+```bash
+python scripts/benchmark_komodo_npu_ab.py --cases quick --dtype fp16 --device 0 --warmup 2 --iters 5 --no-komodo-native-int4
+python scripts/benchmark_komodo_npu_ab.py --cases quick --dtype fp16 --device 1 --warmup 2 --iters 5
+python scripts/benchmark_komodo_npu_ab.py --cases quick --dtype fp16 --device 2 --warmup 2 --iters 5 --komodo-prefetch-native-plan
+```
+
+## Native Mode Comparison
+
+Quick FP16 synthetic cases on the same host show that the exact fallback remains
+Torch-speed, while default native int4 is substantially faster. Prefetch does
+not change the math path; it moves native plan packing earlier so first use can
+overlap with other work.
+
+| Mode | Cases | Torch total ms | Komodo total ms | Speedup | GPTQ first/repeat/prepack ms | AWQ first/repeat/prepack ms | Max abs drift |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Exact fallback (`--no-komodo-native-int4`) | quick GPTQ+AWQ | 20.1202 | 20.1741 | 0.997x | 11.4833 / 9.9030 / 0.0000 | 10.7821 / 10.4394 / 0.0000 | 0 |
+| Default native int4 | quick GPTQ+AWQ | 20.1133 | 0.3150 | 63.852x | 34.0792 / 0.3671 / 0.0000 | 15.7432 / 0.2505 / 0.0000 | GPTQ 0.010498, AWQ 0.5 |
+| Native int4 + prefetch | quick GPTQ+AWQ | 19.7168 | 0.3031 | 65.040x | 16.4877 / 0.3823 / 82.4116 | 0.3779 / 0.2386 / 21.0576 | GPTQ 0.010498, AWQ 0.5 |
+
+Interpretation:
+
+- Default native int4 is the only Komodo path in this comparison with a material
+  speedup over Torch or exact fallback.
+- Prefetch improves measured steady-state total from 63.852x to 65.040x on the
+  quick cases, reduces GPTQ first-forward latency from 34.0792 ms to 16.4877
+  ms, and reduces AWQ first-forward latency from 15.7432 ms to 0.3779 ms after
+  prepacking.
+- The native drift in these quick cases matches the existing native path with
+  and without prefetch, so prefetch is not introducing additional numerical
+  drift.
 
 ## Qwen3.6 Shapes
 
