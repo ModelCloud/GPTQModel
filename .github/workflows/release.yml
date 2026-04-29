@@ -62,8 +62,8 @@ jobs:
     env:
       UV_TORCH_BACKEND: cu130
       TORCH_VERSION: 2.11.0
-      PYTHON_VERSION: 3.14t
-      UV_PYTHON: 3.14t
+      PYTHON_VERSION: 3.14
+      UV_PYTHON: 3.14
     container:
       image: 10.0.13.31:5000/nvidia/cuda:130-ubuntu24.04_0415
       volumes:
