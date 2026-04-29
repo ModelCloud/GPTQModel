@@ -90,7 +90,10 @@ jobs:
       - check-vm
     if: ${{ inputs.github_vm == false }}
     env:
-      UV_PYTHON: 3.14yt
+      UV_TORCH_BACKEND: cu130
+      TORCH_VERSION: 2.11.0
+      PYTHON_VERSION: 3.14t
+      UV_PYTHON: 3.14t
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:130-ubuntu24.04_0415
       volumes:
@@ -126,6 +129,10 @@ jobs:
 
       - name: Setup release env
         run: |
+          echo "::group::-- uv envs --"
+            printenv | grep UV
+          echo "::endgroup::"
+
           env_name="gptqmodel_py314t_release_source"
           /opt/uv/setup_uv_venv.sh $env_name
 
