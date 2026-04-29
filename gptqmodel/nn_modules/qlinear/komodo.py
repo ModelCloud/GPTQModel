@@ -22,6 +22,7 @@ _KOMODO_CACHE_ENV = "GPTQMODEL_KOMODO_CACHE_WEIGHTS"
 # to force the exact torch-style fallback when investigating numerical drift.
 _KOMODO_NATIVE_INT4_ENV = "GPTQMODEL_KOMODO_NATIVE_INT4"
 _KOMODO_DROP_SOURCE_ENV = "GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"
+_NativePlan = tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor | None]
 
 
 def _native_int4_enabled() -> bool:
@@ -96,6 +97,8 @@ class _KomodoNativePlanMixin:
             self._clear_pending_native_plans()
         if getattr(self, "_native_source_dropped", False):
             return
+        if hasattr(self, "_native_g_idx_plan_cache"):
+            self._native_g_idx_plan_cache = None
         if hasattr(self, "_native_plan_cache"):
             self._native_plan_cache.clear()
         if hasattr(self, "_native_prepack_streams"):
@@ -306,10 +309,12 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             **kwargs,
         )
         self.enable_weight_cache(env_flag(_KOMODO_CACHE_ENV, default=False))
-        self._native_plan_cache: dict[tuple[torch.device, torch.dtype], tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]] = {}
-        self._native_plan_pending: dict[tuple[torch.device, torch.dtype], tuple[torch.npu.Stream, torch.npu.Event, tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]] = {}
+        self._native_plan_cache: dict[tuple[torch.device, torch.dtype], _NativePlan] = {}
+        self._native_plan_pending: dict[
+            tuple[torch.device, torch.dtype], tuple[torch.npu.Stream, torch.npu.Event, _NativePlan]
+        ] = {}
         self._native_prepack_streams: dict[int, torch.npu.Stream] = {}
-        self._native_layout_supported: bool | None = None
+        self._native_g_idx_plan_cache: tuple[bool, torch.Tensor | None] | None = None
         self._drop_source_weights_after_native_pack = _drop_source_weights_enabled()
         self._native_source_dropped = False
 
@@ -330,13 +335,35 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         super().clear_weight_cache()
         self.clear_native_cache()
 
-    def _has_natural_g_idx(self) -> bool:
-        if self._native_layout_supported is not None:
-            return self._native_layout_supported
-        g_idx = self.g_idx.detach().to(device="cpu", dtype=torch.int32)
-        expected = torch.arange(self.in_features, dtype=torch.int32) // self.group_size
-        self._native_layout_supported = bool(torch.equal(g_idx, expected))
-        return self._native_layout_supported
+    def _native_g_idx_plan(self) -> tuple[bool, torch.Tensor | None]:
+        cached = self._native_g_idx_plan_cache
+        if cached is not None:
+            return cached
+
+        native_group_size = _native_int4_group_size(self.group_size, self.in_features)
+        if native_group_size is None:
+            result = (False, None)
+            self._native_g_idx_plan_cache = result
+            return result
+
+        g_idx = self.g_idx.detach().to(device="cpu", dtype=torch.int64)
+        if native_group_size == 0:
+            expected = torch.zeros(self.in_features, dtype=torch.int64)
+        else:
+            expected = torch.arange(self.in_features, dtype=torch.int64) // native_group_size
+
+        if torch.equal(g_idx, expected):
+            result = (True, None)
+            self._native_g_idx_plan_cache = result
+            return result
+
+        perm = torch.argsort(g_idx, stable=True)
+        if torch.equal(g_idx[perm], expected):
+            result = (True, perm.to(dtype=torch.int64))
+        else:
+            result = (False, None)
+        self._native_g_idx_plan_cache = result
+        return result
 
     def _can_use_native_int4(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
         if not _native_int4_enabled() or not _npu_int4_ops_available():
@@ -356,9 +383,8 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             return False
         if self.qweight.device != x.device or self.qzeros.device != x.device or self.scales.device != x.device:
             return False
-        if _native_int4_group_size(self.group_size, self.in_features) is None:
-            return False
-        return self._has_natural_g_idx()
+        supported, _ = self._native_g_idx_plan()
+        return supported
 
     def _can_prefetch_native_plan(self, *, device: torch.device, dtype: torch.dtype) -> bool:
         if not _native_int4_enabled() or not _npu_int4_ops_available():
@@ -376,13 +402,14 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             return False
         if self.qweight.device != device or self.qzeros.device != device or self.scales.device != device:
             return False
-        if _native_int4_group_size(self.group_size, self.in_features) is None:
-            return False
-        return self._has_natural_g_idx()
+        supported, _ = self._native_g_idx_plan()
+        return supported
 
-    def _build_native_plan(
-        self, *, device: torch.device, dtype: torch.dtype
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    def _build_native_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativePlan:
+        supported, input_perm_cpu = self._native_g_idx_plan()
+        if not supported:
+            raise RuntimeError("Komodo native int4 plan requested for an unsupported GPTQ g_idx layout.")
+
         weight = torch.bitwise_and(
             _right_shift_unpack(
                 self.qweight.unsqueeze(1).expand(-1, self.pack_factor, -1),
@@ -392,6 +419,10 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             self.maxq,
         )
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).to(torch.int32)
+        input_perm = None
+        if input_perm_cpu is not None:
+            input_perm = input_perm_cpu.to(device=device, non_blocking=self.g_idx.device.type == "cpu")
+            weight = weight.index_select(0, input_perm)
         signed_weight = (weight - 8).contiguous()
         packed_weight = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
 
@@ -402,11 +433,9 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         if native_group_size is None:
             raise RuntimeError("Komodo native int4 plan requested for an unsupported group size.")
 
-        return packed_weight, scales, offsets, native_group_size
+        return packed_weight, scales, offsets, native_group_size, input_perm
 
-    def _native_plan(
-        self, *, device: torch.device, dtype: torch.dtype
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    def _native_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativePlan:
         key = self._native_key(device=device, dtype=dtype)
         cached = self._native_plan_cache.get(key)
         if cached is not None:
@@ -432,7 +461,11 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         if x_flat.dtype != compute_dtype or not x_flat.is_contiguous():
             x_flat = x_flat.to(dtype=compute_dtype).contiguous()
 
-        packed_weight, scales, offsets, native_group_size = self._native_plan(device=x_flat.device, dtype=compute_dtype)
+        packed_weight, scales, offsets, native_group_size, input_perm = self._native_plan(
+            device=x_flat.device, dtype=compute_dtype
+        )
+        if input_perm is not None:
+            x_flat = x_flat.index_select(1, input_perm)
         out = _weight_quant_matmul(x_flat, packed_weight, scales, offsets, native_group_size)
         out = out.reshape(out_shape)
 
@@ -512,8 +545,10 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
         )
         self._cache_enabled = env_flag(_KOMODO_CACHE_ENV, default=False)
         self._cached_weights: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
-        self._native_plan_cache: dict[tuple[torch.device, torch.dtype], tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]] = {}
-        self._native_plan_pending: dict[tuple[torch.device, torch.dtype], tuple[torch.npu.Stream, torch.npu.Event, tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]] = {}
+        self._native_plan_cache: dict[tuple[torch.device, torch.dtype], _NativePlan] = {}
+        self._native_plan_pending: dict[
+            tuple[torch.device, torch.dtype], tuple[torch.npu.Stream, torch.npu.Event, _NativePlan]
+        ] = {}
         self._native_prepack_streams: dict[int, torch.npu.Stream] = {}
         self._lookahead_enabled = env_flag("GPTQ_TORCH_LOOKAHEAD", default=False)
         self._lookahead_next = None
@@ -604,9 +639,7 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
             return False
         return _native_int4_group_size(self.group_size, self.in_features) is not None
 
-    def _build_native_plan(
-        self, *, device: torch.device, dtype: torch.dtype
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    def _build_native_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativePlan:
         iweight, izeros = unpack_awq(self.qweight, self.qzeros, self.bits)
         iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
         max_val = (1 << self.bits) - 1
@@ -621,11 +654,9 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
         if native_group_size is None:
             raise RuntimeError("Komodo native int4 plan requested for an unsupported group size.")
 
-        return packed_weight, scales, offsets, native_group_size
+        return packed_weight, scales, offsets, native_group_size, None
 
-    def _native_plan(
-        self, *, device: torch.device, dtype: torch.dtype
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    def _native_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativePlan:
         key = self._native_key(device=device, dtype=dtype)
         cached = self._native_plan_cache.get(key)
         if cached is not None:
@@ -654,7 +685,7 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
         elif not x_flat.is_contiguous():
             x_flat = x_flat.contiguous()
 
-        packed_weight, scales, offsets, native_group_size = self._native_plan(device=device, dtype=compute_dtype)
+        packed_weight, scales, offsets, native_group_size, _ = self._native_plan(device=device, dtype=compute_dtype)
         output = _weight_quant_matmul(x_flat, packed_weight, scales, offsets, native_group_size)
 
         if self.bias is not None:

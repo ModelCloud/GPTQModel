@@ -90,6 +90,17 @@ def _copy_matching_buffers(dst: nn.Module, src: nn.Module) -> None:
                 dst_tensor.copy_(src_tensor.to(device=dst_tensor.device, dtype=dst_tensor.dtype))
 
 
+def _set_supported_act_order_g_idx(module: TorchLinear) -> None:
+    group_size = module.requested_group_size
+    groups = module.in_features // group_size
+    natural = torch.arange(module.in_features, dtype=torch.int32) // group_size
+    act_order = torch.arange(module.in_features).reshape(groups, group_size).t().reshape(-1)
+    with torch.no_grad():
+        module.g_idx.copy_(natural[act_order].to(dtype=module.g_idx.dtype, device=module.g_idx.device))
+    module.desc_act = True
+    module._stream_reset_cache()
+
+
 def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
     pack_factor = 32 // bits
     order_map = [0, 2, 4, 6, 1, 3, 5, 7]
@@ -608,6 +619,55 @@ def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
         lookahead = next_candidate(x)
         torch.npu.synchronize()
     torch.testing.assert_close(lookahead.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16])
+def test_npu_komodo_gptq_native_int4_act_order_matches_torch_baseline(dtype, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
+    baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=32).eval()
+    _set_supported_act_order_g_idx(baseline_cpu)
+    candidate = KomodoLinear(
+        bits=4,
+        group_size=baseline_cpu.requested_group_size,
+        sym=baseline_cpu.sym,
+        desc_act=baseline_cpu.desc_act,
+        in_features=baseline_cpu.in_features,
+        out_features=baseline_cpu.out_features,
+        bias=baseline_cpu.bias is not None,
+        pack_dtype=baseline_cpu.pack_dtype,
+        register_buffers=True,
+    )
+    _copy_matching_buffers(candidate, baseline_cpu)
+    candidate.optimized = True
+    candidate.post_init()
+    baseline = baseline_cpu.to(_test_npu_device()).eval()
+    candidate = candidate.to(_test_npu_device(), dtype=dtype).eval()
+
+    x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
+    with torch.inference_mode():
+        expected = baseline(x)
+        actual = candidate(x)
+        repeat = candidate(x)
+        torch.npu.synchronize()
+
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    native_plan = candidate._native_plan_cache[(x.device, dtype)]
+    assert native_plan[4] is not None
+    expected_g_idx = torch.arange(candidate.in_features, dtype=torch.int32) // candidate.requested_group_size
+    sorted_g_idx = candidate.g_idx.detach().cpu()[native_plan[4].cpu()]
+    assert torch.equal(sorted_g_idx, expected_g_idx)
+
+    candidate.clear_native_cache()
+    assert candidate.prefetch_native_plan(device=x.device, dtype=dtype)
+    assert candidate.native_plan_prepacked(device=x.device, dtype=dtype)
+    with torch.inference_mode():
+        prefetched = candidate(x)
+        torch.npu.synchronize()
+    torch.testing.assert_close(prefetched.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    assert candidate._native_plan_cache[(x.device, dtype)][4] is not None
+    assert candidate._native_plan_pending == {}
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
