@@ -277,7 +277,7 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 | 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
 
 `Marlin` and JIT CUDA kernels now support NVIDIA `Turing+` (`sm_75+`) GPUs.
-Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`; FP8 is not advertised on NPU until CANN accepts float8 tensors on Ascend devices.
+Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`.
 
 
 ## Install
