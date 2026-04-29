@@ -2,5 +2,5 @@
 set -euo pipefail
 
 python -m pip install uv
-uv python -m pip install -U build twine setuptools
+uv pip install -U build twine setuptools
 python -m build --sdist
