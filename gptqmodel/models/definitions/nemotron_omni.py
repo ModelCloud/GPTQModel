@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 from .nemotron_h import NemotronHQModel
 from .._const import CPU
 from ...utils.model import move_to
@@ -149,7 +151,15 @@ class NemotronOmniQModel(NemotronHQModel):
                 attention_mask=None,
         ):
             if is_fast_path_available and "cuda" in self.in_proj.qweight.device.type:
-                return self.cuda_kernels_forward(hidden_states, cache_params, cache_position, attention_mask)
+                cuda_forward = self.cuda_kernels_forward
+                try:
+                    supports_attention_mask = "attention_mask" in inspect.signature(cuda_forward).parameters
+                except (TypeError, ValueError):
+                    supports_attention_mask = False
+
+                if supports_attention_mask:
+                    return cuda_forward(hidden_states, cache_params, cache_position, attention_mask)
+                return cuda_forward(hidden_states, cache_params, cache_position)
             dtype = hidden_states.dtype
             if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
                 hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
