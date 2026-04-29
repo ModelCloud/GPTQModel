@@ -149,6 +149,9 @@ tests/models:
   test_internvl_chat.py:
     - timm
 
+  test_ling_2_6_flash_support:
+    - flash-linear-attention
+
 tests/models/awq:
   test_qwen3_8b_base_awq.py:
     - peft

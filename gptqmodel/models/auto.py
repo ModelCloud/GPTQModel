@@ -10,7 +10,6 @@ from contextlib import contextmanager
 
 from ..utils.logger import setup_logger
 
-
 log = setup_logger()
 
 ASCII_LOGO = r"""
@@ -282,6 +281,7 @@ MODEL_MAP = {
     "llava_qwen2": LlavaQwen2QModel,
     "nemotron_h": NemotronHQModel,
     "bailing_moe": BailingMoeQModel,
+    "bailing_hybrid": BailingMoeQModel,
     "lfm2_moe": LFM2MoeQModel,
     "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
