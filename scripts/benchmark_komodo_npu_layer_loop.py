@@ -181,7 +181,8 @@ def _run(args) -> dict:
     if args.mode.startswith("prefetch_all"):
         start = time.perf_counter()
         for module in candidate_modules:
-            prefetched += int(bool(module.prefetch_native_plan(device=device, dtype=dtype)))
+            if not module.native_plan_prepacked(device=device, dtype=dtype):
+                prefetched += int(bool(module.prefetch_native_plan(device=device, dtype=dtype)))
         _sync(device)
         prepack_ms = (time.perf_counter() - start) * 1000.0
 

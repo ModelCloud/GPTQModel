@@ -66,6 +66,15 @@ class _KomodoNativePlanMixin:
     def _native_key(self, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
         return torch.device(device), dtype
 
+    def native_plan_prepacked(self, *, device: torch.device | None = None, dtype: torch.dtype = torch.float16) -> bool:
+        if device is None:
+            device = self.runtime_device()
+        if device is None:
+            return False
+
+        key = self._native_key(device=torch.device(device), dtype=dtype)
+        return key in self._native_plan_cache or key in self._native_plan_pending
+
     def _native_prepack_stream(self, device: torch.device):
         key = _npu_stream_key(device)
         stream = self._native_prepack_streams.get(key)
@@ -164,6 +173,8 @@ class _KomodoNativePlanMixin:
             device = module.runtime_device()
             if device is None:
                 return
+            if module.native_plan_prepacked(device=device, dtype=dtype):
+                return
             module.prefetch_native_plan(device=device, dtype=dtype)
 
         if isinstance(next_module, tuple):
@@ -200,7 +211,7 @@ class _KomodoNativePlanMixin:
 
         key = self._native_key(device=device, dtype=dtype)
         if key in self._native_plan_cache or key in self._native_plan_pending:
-            return True
+            return False
         if getattr(self, "_native_source_dropped", False):
             return False
 

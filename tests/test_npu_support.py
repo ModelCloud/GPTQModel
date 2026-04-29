@@ -573,12 +573,15 @@ def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
     candidate.clear_native_cache()
     assert candidate.prefetch_native_plan(device=x.device, dtype=dtype)
     assert (x.device, dtype) in candidate._native_plan_pending
+    assert candidate.native_plan_prepacked(device=x.device, dtype=dtype)
+    assert not candidate.prefetch_native_plan(device=x.device, dtype=dtype)
     with torch.inference_mode():
         prefetched = candidate(x)
         torch.npu.synchronize()
     torch.testing.assert_close(prefetched.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
     assert (x.device, dtype) in candidate._native_plan_cache
     assert candidate._native_plan_pending == {}
+    assert not candidate.prefetch_native_plan(device=x.device, dtype=dtype)
 
     next_candidate = KomodoLinear(
         bits=4,
@@ -648,6 +651,8 @@ def test_npu_komodo_gptq_drops_source_after_native_pack(dtype, monkeypatch):
 
     candidate.clear_native_cache()
     assert (x.device, dtype) in candidate._native_plan_cache
+    assert candidate.native_plan_prepacked(device=x.device, dtype=dtype)
+    assert not candidate.prefetch_native_plan(device=x.device, dtype=dtype)
     with torch.inference_mode():
         after_clear = candidate(x)
         torch.npu.synchronize()
@@ -709,12 +714,15 @@ def test_npu_komodo_awq_native_int4_matches_torch_baseline(dtype, monkeypatch):
     candidate.clear_native_cache()
     assert candidate.prefetch_native_plan(device=x.device, dtype=dtype)
     assert (x.device, dtype) in candidate._native_plan_pending
+    assert candidate.native_plan_prepacked(device=x.device, dtype=dtype)
+    assert not candidate.prefetch_native_plan(device=x.device, dtype=dtype)
     with torch.inference_mode():
         prefetched = candidate(x)
         torch.npu.synchronize()
     torch.testing.assert_close(prefetched.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
     assert (x.device, dtype) in candidate._native_plan_cache
     assert candidate._native_plan_pending == {}
+    assert not candidate.prefetch_native_plan(device=x.device, dtype=dtype)
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
@@ -742,6 +750,8 @@ def test_npu_komodo_awq_drops_source_after_native_pack(dtype, monkeypatch):
     assert candidate._native_source_dropped
     assert (x.device, dtype) in candidate._native_plan_cache
     assert candidate._native_plan_pending == {}
+    assert candidate.native_plan_prepacked(device=x.device, dtype=dtype)
+    assert not candidate.prefetch_native_plan(device=x.device, dtype=dtype)
     _assert_empty_source_buffers(candidate, ("qweight", "qzeros", "scales"))
 
 

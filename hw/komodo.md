@@ -83,6 +83,9 @@ Interpretation:
   quick cases, reduces GPTQ first-forward latency from 34.0792 ms to 16.4877
   ms, and reduces AWQ first-forward latency from 15.7432 ms to 0.3779 ms after
   prepacking.
+- Prefetch is cold-pack only. Once a module has a cached or pending native plan,
+  `prefetch_native_plan()` reports no new scheduling work, and lookahead skips
+  that module.
 - The native drift in these quick cases matches the existing native path with
   and without prefetch, so prefetch is not introducing additional numerical
   drift.
