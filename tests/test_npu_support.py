@@ -1,5 +1,6 @@
 import copy
 import os
+import sys
 import warnings
 
 import pytest
@@ -307,17 +308,16 @@ def test_last_npu_device_by_pci_bus_order_uses_visible_logical_order(monkeypatch
     except (RuntimeError, ValueError):
         pytest.skip("This PyTorch build does not register the npu device type")
 
-    import gptqmodel.utils.torch as torch_utils
-
     class _FakeNpu:
         @staticmethod
         def device_count():
             return 3
 
+    torch_utils = sys.modules[last_npu_device_by_pci_bus_order.__module__]
     monkeypatch.setattr(torch_utils, "HAS_NPU", True)
     monkeypatch.setattr(torch_utils.torch, "npu", _FakeNpu())
 
-    assert str(torch_utils.last_npu_device_by_pci_bus_order()) == "npu:2"
+    assert str(last_npu_device_by_pci_bus_order()) == "npu:2"
 
 
 def test_npu_device_normalization():

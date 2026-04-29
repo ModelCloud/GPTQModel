@@ -1322,7 +1322,7 @@ class AWQProcessor(LoopProcessor):
 
         scales = scales.view(org_w_shape[0], -1)
 
-        # Symmetric quantization produces signed int values (e.g. int4 ∈ [-8, 7]),
+        # Symmetric quantization produces signed int values (e.g. int4 in [-8, 7]),
         # which cannot be packed directly. To make it packable, we shift the signed
         # representation to unsigned by adding 2^(bits-1), i.e. q_u = q_s + 2^(bits-1).
         # This is equivalent to using an affine form with zero_point = 2^(bits-1),
