@@ -12,14 +12,13 @@ from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask
 
-from ..base import BaseQModel
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, get_module, get_module_by_name_prefix, move_to
 from ...utils.offload import offload_to_disk
-from .._const import CPU
-from .ernie4_5_moe import Ernie4_5_MoeQModel
 from ...utils.structure import print_module_tree
+from .._const import CPU
+from ..base import BaseQModel
 
 
 class Ernie4_5_VLMoeQModel(BaseQModel):
