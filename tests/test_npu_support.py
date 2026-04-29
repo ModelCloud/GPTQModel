@@ -301,38 +301,7 @@ def _npu_select_quant_linear(qcfg, *, method: METHOD, fmt: FORMAT):
     )
 
 
-def test_last_npu_device_by_pci_bus_order_prefers_highest_bus_id(monkeypatch):
-    try:
-        torch.device("npu:0")
-    except (RuntimeError, ValueError):
-        pytest.skip("This PyTorch build does not register the npu device type")
-
-    import gptqmodel.utils.torch as torch_utils
-
-    class _Props:
-        def __init__(self, pci_bus_id: str):
-            self.pci_bus_id = pci_bus_id
-
-    class _FakeNpu:
-        @staticmethod
-        def device_count():
-            return 3
-
-        @staticmethod
-        def get_device_properties(index):
-            return [
-                _Props("0000:02:00.0"),
-                _Props("0000:ff:00.0"),
-                _Props("0000:10:00.0"),
-            ][index]
-
-    monkeypatch.setattr(torch_utils, "HAS_NPU", True)
-    monkeypatch.setattr(torch_utils.torch, "npu", _FakeNpu())
-
-    assert str(torch_utils.last_npu_device_by_pci_bus_order()) == "npu:1"
-
-
-def test_last_npu_device_by_pci_bus_order_falls_back_to_visible_logical_order(monkeypatch):
+def test_last_npu_device_by_pci_bus_order_uses_visible_logical_order(monkeypatch):
     try:
         torch.device("npu:0")
     except (RuntimeError, ValueError):
@@ -344,10 +313,6 @@ def test_last_npu_device_by_pci_bus_order_falls_back_to_visible_logical_order(mo
         @staticmethod
         def device_count():
             return 3
-
-        @staticmethod
-        def get_device_properties(index):
-            raise RuntimeError(f"no properties for {index}")
 
     monkeypatch.setattr(torch_utils, "HAS_NPU", True)
     monkeypatch.setattr(torch_utils.torch, "npu", _FakeNpu())

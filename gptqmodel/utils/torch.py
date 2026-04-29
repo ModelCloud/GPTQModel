@@ -5,7 +5,6 @@
 
 import contextlib
 import importlib
-import os
 import time
 from contextlib import contextmanager
 from enum import Enum
@@ -419,69 +418,12 @@ def torch_devices() -> List[torch.device]:
         return [CPU]
 
 
-def _npu_device_pci_bus_id(index: int) -> Optional[str]:
-    """Best-effort PCI bus identifier for a visible NPU logical index."""
-
-    if not HAS_NPU:
-        return None
-
-    npu = getattr(torch, "npu", None)
-    get_props = getattr(npu, "get_device_properties", None)
-    if not callable(get_props):
-        return None
-
-    try:
-        props = get_props(index)
-    except Exception:
-        return None
-
-    attr_names = (
-        "pci_bus_id",
-        "pci_busid",
-        "bus_id",
-        "busid",
-        "pcie_bus_id",
-        "pcie_id",
-    )
-    for attr_name in attr_names:
-        if isinstance(props, dict):
-            value = props.get(attr_name)
-        else:
-            value = getattr(props, attr_name, None)
-        if callable(value):
-            try:
-                value = value()
-            except Exception:
-                value = None
-        if value not in (None, ""):
-            return str(value).strip().lower()
-    return None
-
-
-def _parse_ascend_visible_devices() -> List[int]:
-    """Parse ASCEND_RT_VISIBLE_DEVICES without depending on torch-npu internals."""
-
-    visible = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
-    if visible is None:
-        return []
-    result: List[int] = []
-    for item in visible.split(","):
-        item = item.strip()
-        if not item:
-            return []
-        try:
-            result.append(int(item))
-        except ValueError:
-            return []
-    return result
-
-
 def npu_devices_by_pci_bus_order() -> List[torch.device]:
-    """Return visible NPU devices ordered by PCI bus id when the runtime exposes it.
+    """Return visible NPU devices in torch runtime order.
 
-    If torch-npu does not expose a bus id, the visible logical order is used.
-    With ASCEND_RT_VISIBLE_DEVICES set in PCI order, this keeps the requested
-    bus ordering while still returning logical torch device indices.
+    Ascend exposes process-level NPU visibility through ASCEND_RT_VISIBLE_DEVICES.
+    torch-npu remaps that visible set to logical indices, so callers should set
+    the env var before process start and then use the resulting torch order.
     """
 
     if not HAS_NPU:
@@ -494,28 +436,8 @@ def npu_devices_by_pci_bus_order() -> List[torch.device]:
     if count <= 0:
         return []
 
-    bus_entries = []
-    for logical_index in range(count):
-        bus_id = _npu_device_pci_bus_id(logical_index)
-        if bus_id:
-            bus_entries.append((bus_id, logical_index))
-
-    if len(bus_entries) == count:
-        entries = sorted(bus_entries, key=lambda item: (item[0], item[1]))
-    else:
-        visible_physical = _parse_ascend_visible_devices()
-        entries = [
-            (
-                visible_physical[logical_index]
-                if logical_index < len(visible_physical)
-                else logical_index,
-                logical_index,
-            )
-            for logical_index in range(count)
-        ]
-
     devices: List[torch.device] = []
-    for _, logical_index in entries:
+    for logical_index in range(count):
         try:
             devices.append(torch.device("npu", logical_index))
         except (RuntimeError, ValueError):
@@ -524,7 +446,7 @@ def npu_devices_by_pci_bus_order() -> List[torch.device]:
 
 
 def last_npu_device_by_pci_bus_order() -> Optional[torch.device]:
-    """Return the last visible NPU in PCI bus order, or None when unavailable."""
+    """Return the last visible NPU in torch runtime order, or None when unavailable."""
 
     devices = npu_devices_by_pci_bus_order()
     if not devices:
