@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+import os
 
 from model_test import ModelTest
-
-from gptqmodel.models.definitions.qwen3_vl import Qwen3_VLQModel
+from PIL import Image
 
 
 class TestQwen3_VL(ModelTest):
@@ -13,13 +13,12 @@ class TestQwen3_VL(ModelTest):
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
-            "acc": {"value": 0.3618, "floor_pct": 0.04},
-            "acc_norm": {"value": 00.3882, "floor_pct": 0.04},
+            "acc": {"value": 0.5094, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.4991, "floor_pct": 0.04},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     TRUST_REMOTE_CODE = False
-    EVAL_BATCH_SIZE = 6
     USE_FLASH_ATTN = False
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
@@ -28,46 +27,31 @@ class TestQwen3_VL(ModelTest):
             model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
                                                           dtype=self.TORCH_DTYPE)
 
-        # check image to text
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image",
-                        "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
-                    },
-                    {"type": "text", "text": "Describe this image."},
-                ],
-            }
+                    {"type": "text",
+                     "text": "Only use English during your responses and describe the following image."},
+                    {"type": "image"},
+                ]
+            },
         ]
-        # Preparation for inference
-        text = processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        image_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ovis/10016.jpg")
+        image = Image.open(image_path)
+        inputs = processor(text=[text], images=[image], return_tensors="pt").to(model.device)
+
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=64,
+            do_sample=False,
         )
 
-        image_inputs = Qwen3_VLQModel.process_vision_info(messages)
-        inputs = processor(
-            text=[text],
-            images=image_inputs,
-            videos=None,
-            padding=True,
-            return_tensors="pt",
-        )
-        inputs = inputs.to("cuda")
-
-        # Inference: Generation of the output
-        output_text = self.generate_stable_with_limit(
-            model,
-            processor,
-            inputs=inputs,
-            max_new_tokens=128,
-            batch_decode=True,
-            clean_up_tokenization_spaces=False,
-        )
+        output_text = processor.decode(generated_ids[0][len(inputs['input_ids'][0]):])
         print("output_text:", output_text)
 
-        self.assertIn("dog", output_text)
+        self.assertIn("snow", output_text)
 
 
         # check evaluation results
