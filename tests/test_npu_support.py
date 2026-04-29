@@ -12,11 +12,10 @@ from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
-from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.nn_modules.qlinear.torch import _right_shift_unpack
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear, _right_shift_unpack
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.awq.utils.packing_utils import unpack_awq
 from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization.awq.utils.packing_utils import unpack_awq
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import auto_select_device, get_kernel_for_backend, select_quant_linear

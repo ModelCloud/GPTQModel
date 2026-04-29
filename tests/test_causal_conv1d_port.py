@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import causal_conv1d
 import torch
 import torch.nn.functional as F
 
-import causal_conv1d
 import gptqmodel.hf_kernels.mamba_ssm as local_mamba_ssm
 
 

@@ -673,6 +673,47 @@ class _LazyWeightRenaming:
         return renamed_key, source_pattern_that_matched
 
 
+@dataclass
+class _LazyWeightConverter:
+    """Runtime->checkpoint key hints for HF `WeightConverter` entries.
+
+    LazyTurtle only materializes the tensors needed by the current shell module,
+    so it cannot run HF's full many-key conversion pipeline eagerly. This stores
+    enough metadata to resolve direct converted tensors and ERNIE split expert
+    leaves back to their checkpoint sources.
+    """
+
+    source_patterns: list[str] | str
+    target_patterns: list[str] | str
+    operations: list[Any]
+
+    def __post_init__(self) -> None:
+        self.source_patterns = _LazyWeightRenaming._coerce_patterns(self.source_patterns)
+        self.target_patterns = _LazyWeightRenaming._coerce_patterns(self.target_patterns)
+        self.operations = list(self.operations or [])
+
+    @property
+    def operation_names(self) -> tuple[str, ...]:
+        return tuple(type(operation).__name__ for operation in self.operations)
+
+    def iter_direct_renamings(self) -> Iterable[_LazyWeightRenaming]:
+        if not self.operations:
+            return
+
+        if len(self.source_patterns) == 1 and len(self.target_patterns) == 1:
+            yield _LazyWeightRenaming(self.source_patterns[0], self.target_patterns[0])
+            return
+
+        if len(self.target_patterns) == 1:
+            for source_pattern in self.source_patterns:
+                yield _LazyWeightRenaming(source_pattern, self.target_patterns[0])
+            return
+
+        if len(self.source_patterns) == len(self.target_patterns):
+            for source_pattern, target_pattern in zip(self.source_patterns, self.target_patterns):
+                yield _LazyWeightRenaming(source_pattern, target_pattern)
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local dense checkpoints.
 
@@ -712,14 +753,16 @@ class LazyTurtle:
         # Lazy checkpoint name resolution must come from model-definition truth.
         self._module_tree = copy.deepcopy(module_tree)
         self._module_tree_layer_prefix, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
-        # Resolve runtime->checkpoint renamings once up front so per-tensor
-        # lookups can apply the same renaming order as HF loading.
-        alias_items = self._normalize_runtime_to_checkpoint_renamings(
+        # Resolve runtime->checkpoint aliases once up front so per-tensor
+        # lookups can apply the same mapping order as HF loading.
+        conversion_aliases = (
             hf_conversion_map_reversed
             if hf_conversion_map_reversed is not None
-            else self.infer_hf_conversion_map_reversed(target_model=target_model),
+            else self.infer_hf_conversion_map_reversed(target_model=target_model)
         )
+        alias_items = self._normalize_runtime_to_checkpoint_renamings(conversion_aliases)
         self._runtime_to_checkpoint_renamings = tuple(alias_items)
+        self._runtime_to_checkpoint_converters = self._normalize_runtime_to_checkpoint_converters(conversion_aliases)
         self._lock = threading.RLock()
 
     @classmethod
@@ -968,6 +1011,20 @@ class LazyTurtle:
         return source_patterns[0], target_patterns[0]
 
     @classmethod
+    def _extract_weight_converter_patterns(cls, entry: Any) -> Optional[tuple[list[str], list[str], list[Any]]]:
+        operations = getattr(entry, "operations", None)
+        if not operations:
+            return None
+
+        source_patterns = getattr(entry, "_original_source_patterns", getattr(entry, "source_patterns", None))
+        target_patterns = getattr(entry, "_original_target_patterns", getattr(entry, "target_patterns", None))
+        source_patterns = cls._coerce_patterns(source_patterns)
+        target_patterns = cls._coerce_patterns(target_patterns)
+        if not source_patterns or not target_patterns:
+            return None
+        return source_patterns, target_patterns, list(operations)
+
+    @classmethod
     def _normalize_runtime_to_checkpoint_renamings(cls, raw_aliases: Optional[Any]) -> tuple[_LazyWeightRenaming, ...]:
         renamings: list[_LazyWeightRenaming] = []
         if raw_aliases is None:
@@ -999,6 +1056,25 @@ class LazyTurtle:
         return tuple(renamings)
 
     @classmethod
+    def _normalize_runtime_to_checkpoint_converters(cls, raw_aliases: Optional[Any]) -> tuple[_LazyWeightConverter, ...]:
+        converters: list[_LazyWeightConverter] = []
+        if raw_aliases is None or isinstance(raw_aliases, dict) or not isinstance(raw_aliases, (list, tuple)):
+            return ()
+
+        for entry in raw_aliases:
+            if isinstance(entry, _LazyWeightConverter):
+                converters.append(entry)
+                continue
+
+            patterns = cls._extract_weight_converter_patterns(entry)
+            if patterns is None:
+                continue
+            runtime_patterns, checkpoint_patterns, operations = patterns
+            converters.append(_LazyWeightConverter(runtime_patterns, checkpoint_patterns, operations))
+
+        return tuple(converters)
+
+    @classmethod
     def _iter_hf_conversion_pairs(cls, conversion_mapping: Optional[Any]) -> Iterable[tuple[str, str]]:
         if isinstance(conversion_mapping, dict):
             for checkpoint_pattern, runtime_prefix in conversion_mapping.items():
@@ -1015,12 +1091,29 @@ class LazyTurtle:
                 yield patterns
 
     @classmethod
-    def reverse_hf_conversion_map(cls, conversion_mapping: Optional[Any]) -> Optional[list[_LazyWeightRenaming]]:
-        """Invert simple HF checkpoint renames into reversed `WeightRenaming`-style rules."""
-        reversed_map: list[_LazyWeightRenaming] = []
-        for checkpoint_pattern, runtime_prefix in cls._iter_hf_conversion_pairs(conversion_mapping):
-            reversed_map.append(_LazyWeightRenaming(runtime_prefix, checkpoint_pattern))
+    def reverse_hf_conversion_map(cls, conversion_mapping: Optional[Any]) -> Optional[list[_LazyWeightRenaming | _LazyWeightConverter]]:
+        """Invert HF checkpoint conversion entries for LazyTurtle lookup."""
+        reversed_map: list[_LazyWeightRenaming | _LazyWeightConverter] = []
+        if isinstance(conversion_mapping, dict):
+            for checkpoint_pattern, runtime_prefix in cls._iter_hf_conversion_pairs(conversion_mapping):
+                reversed_map.append(_LazyWeightRenaming(runtime_prefix, checkpoint_pattern))
+            return reversed_map or None
 
+        if not isinstance(conversion_mapping, (list, tuple)):
+            return None
+
+        for entry in conversion_mapping:
+            converter_patterns = cls._extract_weight_converter_patterns(entry)
+            if converter_patterns is not None:
+                checkpoint_patterns, runtime_patterns, operations = converter_patterns
+                reversed_map.append(_LazyWeightConverter(runtime_patterns, checkpoint_patterns, operations))
+                continue
+
+            renaming_patterns = cls._extract_weight_renaming_patterns(entry)
+            if renaming_patterns is None:
+                continue
+            checkpoint_pattern, runtime_prefix = renaming_patterns
+            reversed_map.append(_LazyWeightRenaming(runtime_prefix, checkpoint_pattern))
         return reversed_map or None
 
     @classmethod
@@ -1283,6 +1376,35 @@ class LazyTurtle:
             candidates.append(renamed)
         return candidates
 
+    def _converter_direct_alias_candidates(self, name: str) -> list[str]:
+        if not name:
+            return []
+
+        candidates: list[str] = []
+        for converter in self._runtime_to_checkpoint_converters:
+            # This ERNIE op is many-to-many; it needs expert-index math instead
+            # of a direct string rewrite.
+            if "ErnieFuseAndSplitTextVisionExperts" in converter.operation_names:
+                continue
+            for renaming in converter.iter_direct_renamings():
+                renamed, _ = renaming.rename_source_key(name)
+                if renamed != name and renamed not in candidates:
+                    candidates.append(renamed)
+        return candidates
+
+    def _all_runtime_to_checkpoint_candidates(self, name: str) -> list[str]:
+        candidates = self._runtime_to_checkpoint_alias_candidates(name)
+        for candidate in tuple(candidates):
+            # Include aliases derived from simple WeightConverter entries
+            # such as Transpose-backed one-to-one gate renames.
+            for converted in self._converter_direct_alias_candidates(candidate):
+                if converted not in candidates:
+                    candidates.append(converted)
+                for aliased in self._runtime_to_checkpoint_alias_candidates(converted):
+                    if aliased not in candidates:
+                        candidates.append(aliased)
+        return candidates
+
     def _resolve_checkpoint_module_path(self, module_path: str) -> str:
         """Resolve a shell module path to the checkpoint path when wrappers add extra roots."""
 
@@ -1328,9 +1450,9 @@ class LazyTurtle:
                 candidates.append(alias)
 
         for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
-            for aliased_path in self._runtime_to_checkpoint_alias_candidates(candidate_path):
+            for aliased_path in self._all_runtime_to_checkpoint_candidates(candidate_path):
                 candidate_name = self._join_tensor_name(aliased_path, rel_name)
-                for aliased_name in self._runtime_to_checkpoint_alias_candidates(candidate_name):
+                for aliased_name in self._all_runtime_to_checkpoint_candidates(candidate_name):
                     add_candidate(aliased_name)
 
         for candidate in candidates:
@@ -1413,6 +1535,129 @@ class LazyTurtle:
                     return candidate_name, expert_index, split_index, split_dim
 
             return None, None, None, None
+
+        return None, None, None, None
+
+    def _checkpoint_indices_for_wildcard_pattern(self, wildcard_name: str) -> list[int]:
+        aliases = self._all_runtime_to_checkpoint_candidates(wildcard_name)
+        indices: set[int] = set()
+        for alias in aliases:
+            # HF expert mappings use one `*` for the expert index.
+            pattern = "^" + re.escape(alias).replace(r"\*", r"(\d+)") + "$"
+            compiled = re.compile(pattern)
+            for checkpoint_name in self._weight_map:
+                match = compiled.match(checkpoint_name)
+                if match is not None:
+                    indices.add(int(match.group(1)))
+        return sorted(indices)
+
+    def _resolve_ernie_text_vision_expert_tensor_name(
+        self,
+        module_path: str,
+        rel_name: str,
+    ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
+        combined_name = self._join_tensor_name(module_path, rel_name)
+        for converter in self._runtime_to_checkpoint_converters:
+            if "ErnieFuseAndSplitTextVisionExperts" not in converter.operation_names:
+                continue
+
+            target_count = len(converter.source_patterns)
+            if target_count == 0:
+                continue
+
+            for modality_index, runtime_pattern in enumerate(converter.source_patterns):
+                marker = ".experts."
+                if marker not in runtime_pattern:
+                    continue
+                modality_prefix = runtime_pattern.split(marker, 1)[0]
+                runtime_marker = f"{modality_prefix}.experts."
+                marker_index = combined_name.find(runtime_marker)
+                if marker_index < 0:
+                    continue
+
+                prefix = combined_name[:marker_index]
+                suffix = combined_name[marker_index + len(runtime_marker):]
+                expert_index_text, sep, leaf_name = suffix.partition(".")
+                if not sep or not expert_index_text.isdigit():
+                    continue
+
+                runtime_expert_index = int(expert_index_text)
+                source_pattern = None
+                if leaf_name.startswith("gate_proj."):
+                    source_pattern = next(
+                        (pattern for pattern in converter.target_patterns if ".gate_proj." in pattern),
+                        None,
+                    )
+                elif leaf_name.startswith("up_proj."):
+                    source_pattern = next(
+                        (pattern for pattern in converter.target_patterns if ".up_proj." in pattern),
+                        None,
+                    )
+                elif leaf_name.startswith("down_proj."):
+                    source_pattern = next(
+                        (pattern for pattern in converter.target_patterns if ".down_proj." in pattern),
+                        None,
+                    )
+                if source_pattern is None or "*" not in source_pattern:
+                    continue
+
+                wildcard_name = f"{prefix}{source_pattern}"
+                source_indices = self._checkpoint_indices_for_wildcard_pattern(wildcard_name)
+                if not source_indices:
+                    continue
+
+                # HF splits the original expert list into text and vision halves
+                # before fusing gate/up. Map the runtime modality-local index
+                # back to the original checkpoint expert index.
+                chunk_size = (len(source_indices) + target_count - 1) // target_count
+                source_position = modality_index * chunk_size + runtime_expert_index
+                if source_position >= len(source_indices):
+                    continue
+
+                checkpoint_expert_index = source_indices[source_position]
+                checkpoint_name = f"{prefix}{source_pattern.replace('*', str(checkpoint_expert_index))}"
+                for candidate in self._all_runtime_to_checkpoint_candidates(checkpoint_name):
+                    if candidate in self._weight_map:
+                        return candidate, None, None, None
+
+        return None, None, None, None
+
+    def _resolve_converter_tensor_source(
+        self,
+        module_path: str,
+        rel_name: str,
+    ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
+        combined_name = self._join_tensor_name(module_path, rel_name)
+        for converter in self._runtime_to_checkpoint_converters:
+            if "ErnieFuseAndSplitTextVisionExperts" in converter.operation_names:
+                continue
+
+            for source_index, runtime_pattern in enumerate(converter.source_patterns):
+                if len(converter.target_patterns) == 1:
+                    checkpoint_pattern = converter.target_patterns[0]
+                elif source_index < len(converter.target_patterns):
+                    checkpoint_pattern = converter.target_patterns[source_index]
+                else:
+                    continue
+
+                renamed, matched_pattern = _LazyWeightRenaming(
+                    runtime_pattern,
+                    checkpoint_pattern,
+                ).rename_source_key(combined_name)
+                if matched_pattern is None or renamed == combined_name:
+                    continue
+
+                split_index = None
+                split_dim = None
+                if converter.operation_names[:1] == ("Chunk",) and len(converter.source_patterns) > 1:
+                    # Chunk converters share one checkpoint tensor across
+                    # multiple runtime tensors; preserve the selected slice.
+                    split_index = source_index
+                    split_dim = getattr(converter.operations[0], "dim", 0)
+
+                for candidate in self._runtime_to_checkpoint_alias_candidates(renamed):
+                    if candidate in self._weight_map:
+                        return candidate, None, split_index, split_dim
 
         return None, None, None, None
 
@@ -1523,6 +1768,15 @@ class LazyTurtle:
         """Resolve a target tensor name to its checkpoint source and optional fused split index."""
 
         full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
+
+        resolved = self._resolve_converter_tensor_source(module_path, rel_name)
+        if resolved[0] is not None:
+            return resolved
+
+        resolved = self._resolve_ernie_text_vision_expert_tensor_name(module_path, rel_name)
+        if resolved[0] is not None:
+            return resolved
+
         if full_name in self._weight_map:
             return full_name, None, None, None
 
