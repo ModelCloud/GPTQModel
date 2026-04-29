@@ -555,6 +555,42 @@ def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
     torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
     assert (x.device, dtype) in candidate._native_plan_cache
 
+    candidate.clear_native_cache()
+    assert candidate.prefetch_native_plan(device=x.device, dtype=dtype)
+    assert (x.device, dtype) in candidate._native_plan_pending
+    with torch.inference_mode():
+        prefetched = candidate(x)
+        torch.npu.synchronize()
+    torch.testing.assert_close(prefetched.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    assert (x.device, dtype) in candidate._native_plan_cache
+    assert candidate._native_plan_pending == {}
+
+    next_candidate = KomodoLinear(
+        bits=4,
+        group_size=baseline_cpu.requested_group_size,
+        sym=baseline_cpu.sym,
+        desc_act=baseline_cpu.desc_act,
+        in_features=baseline_cpu.in_features,
+        out_features=baseline_cpu.out_features,
+        bias=baseline_cpu.bias is not None,
+        pack_dtype=baseline_cpu.pack_dtype,
+        register_buffers=True,
+    )
+    _copy_matching_buffers(next_candidate, baseline_cpu)
+    next_candidate.optimized = True
+    next_candidate.post_init()
+    next_candidate = next_candidate.to(_test_npu_device(), dtype=dtype).eval()
+    candidate.enable_lookahead(True).set_lookahead_next(next_candidate)
+    next_candidate.enable_lookahead(True)
+    next_candidate.clear_native_cache()
+    with torch.inference_mode():
+        candidate(x)
+    assert (x.device, dtype) in next_candidate._native_plan_pending or (x.device, dtype) in next_candidate._native_plan_cache
+    with torch.inference_mode():
+        lookahead = next_candidate(x)
+        torch.npu.synchronize()
+    torch.testing.assert_close(lookahead.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -604,6 +640,16 @@ def test_npu_komodo_awq_native_int4_matches_torch_baseline(dtype, monkeypatch):
     torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
     torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
     assert (x.device, dtype) in candidate._native_plan_cache
+
+    candidate.clear_native_cache()
+    assert candidate.prefetch_native_plan(device=x.device, dtype=dtype)
+    assert (x.device, dtype) in candidate._native_plan_pending
+    with torch.inference_mode():
+        prefetched = candidate(x)
+        torch.npu.synchronize()
+    torch.testing.assert_close(prefetched.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    assert (x.device, dtype) in candidate._native_plan_cache
+    assert candidate._native_plan_pending == {}
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")

@@ -282,6 +282,7 @@ def _run_case(
     seed: int,
     cache_dequantized: bool,
     native_int4: bool,
+    prefetch_native_plan: bool,
 ) -> dict:
     dtype = _dtype(case.dtype)
     if case.method == "gptq":
@@ -306,6 +307,9 @@ def _run_case(
     x = torch.randn(case.tokens, case.in_features, dtype=dtype, device=device)
     with torch.inference_mode():
         candidate.clear_weight_cache()
+        prefetched = False
+        if native_int4 and prefetch_native_plan:
+            prefetched = bool(candidate.prefetch_native_plan(device=device, dtype=dtype))
         expected = baseline(x)
         actual = candidate(x)
         repeat = candidate(x)
@@ -325,6 +329,8 @@ def _run_case(
         "candidate": candidate.__class__.__name__,
         "komodo_dequant_cache": cache_dequantized,
         "komodo_native_int4": native_int4,
+        "komodo_prefetch_native_plan": prefetch_native_plan,
+        "komodo_prefetched": prefetched,
         "komodo_path": "native_int4_prepack" if getattr(candidate, "_native_plan_cache", None) else (
             "dequant_cache" if cache_dequantized else "no_dequant_cache"
         ),
@@ -389,6 +395,11 @@ def main() -> None:
     )
     parser.add_argument("--komodo-native-int4", action="store_true", help="Benchmark the opt-in native NPU int4 path.")
     parser.add_argument(
+        "--komodo-prefetch-native-plan",
+        action="store_true",
+        help="When native int4 is active, prebuild the packed NPU plan on a side stream before first forward.",
+    )
+    parser.add_argument(
         "--komodo-cache-dequantized",
         action="store_true",
         help="Opt into the dense dequantized-weight cache for comparison only.",
@@ -436,6 +447,7 @@ def main() -> None:
             seed=args.seed + index,
             cache_dequantized=args.komodo_cache_dequantized,
             native_int4=args.komodo_native_int4,
+            prefetch_native_plan=args.komodo_prefetch_native_plan,
         )
         for index, case in enumerate(cases)
     ]
@@ -461,7 +473,7 @@ def main() -> None:
     print(
         "TOTAL cases={count} mode={mode} baseline_sum={baseline:.4f}ms "
         "komodo_sum={komodo:.4f}ms speedup={speedup:.3f}x "
-        "max_abs={max_abs:.6g} max_rel={max_rel:.6g} measured_loop={loop:.4f}s".format(
+        "max_abs={max_abs:.6g} max_rel={max_rel:.6g} prefetch={prefetch} measured_loop={loop:.4f}s".format(
             count=len(results),
             mode=mode,
             baseline=total_baseline_ms,
@@ -469,6 +481,7 @@ def main() -> None:
             speedup=total_speedup,
             max_abs=max_abs,
             max_rel=max_rel,
+            prefetch=bool(args.komodo_prefetch_native_plan),
             loop=measured_loop_seconds,
         )
     )
@@ -479,6 +492,7 @@ def main() -> None:
             "pid": os.getpid(),
             "device": str(device),
             "komodo_native_int4": bool(args.komodo_native_int4),
+            "komodo_prefetch_native_plan": bool(args.komodo_prefetch_native_plan),
             "komodo_dequant_cache": bool(args.komodo_cache_dequantized),
             "mode": mode,
             "dtype_override": args.dtype,

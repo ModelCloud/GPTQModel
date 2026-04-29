@@ -45,6 +45,127 @@ def _npu_int4_ops_available() -> bool:
         return False
 
 
+def _npu_stream_key(device: torch.device) -> int:
+    device = torch.device(device)
+    if device.index is not None:
+        return device.index
+    return torch.npu.current_device()
+
+
+class _KomodoNativePlanMixin:
+    _native_plan_cache: dict
+    _native_plan_pending: dict
+    _native_prepack_streams: dict
+
+    def _native_key(self, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
+        return torch.device(device), dtype
+
+    def _native_prepack_stream(self, device: torch.device):
+        key = _npu_stream_key(device)
+        stream = self._native_prepack_streams.get(key)
+        if stream is None:
+            stream = torch.npu.Stream(device=torch.device(device))
+            self._native_prepack_streams[key] = stream
+        return stream
+
+    def _clear_pending_native_plans(self) -> None:
+        for _, event, _ in self._native_plan_pending.values():
+            try:
+                event.synchronize()
+            except RuntimeError:
+                pass
+        self._native_plan_pending.clear()
+
+    def clear_native_cache(self):
+        if hasattr(self, "_native_plan_pending"):
+            self._clear_pending_native_plans()
+        if hasattr(self, "_native_plan_cache"):
+            self._native_plan_cache.clear()
+        if hasattr(self, "_native_prepack_streams"):
+            self._native_prepack_streams.clear()
+
+    def enable_lookahead(self, enabled: bool = True):
+        self._lookahead_enabled = enabled
+        if not enabled:
+            self._lookahead_next = None
+        return self
+
+    def set_lookahead_next(self, module):
+        if module is None:
+            self._lookahead_next = None
+            return self
+
+        if isinstance(module, (list, tuple)):
+            targets = tuple(target for target in module if target is not None)
+            if not targets:
+                self._lookahead_next = None
+                return self
+            for target in targets:
+                if not hasattr(target, "prefetch_native_plan"):
+                    raise TypeError("Komodo lookahead targets must support prefetch_native_plan().")
+            self._lookahead_next = targets
+            return self
+
+        if not hasattr(module, "prefetch_native_plan"):
+            raise TypeError("Komodo lookahead target must support prefetch_native_plan().")
+        self._lookahead_next = module
+        return self
+
+    def _maybe_schedule_lookahead(self, dtype: torch.dtype):
+        if not getattr(self, "_lookahead_enabled", False) or self.training:
+            return
+        next_module = getattr(self, "_lookahead_next", None)
+        if next_module is None:
+            return
+
+        def schedule(module):
+            device = module.runtime_device()
+            if device is None:
+                return
+            module.prefetch_native_plan(device=device, dtype=dtype)
+
+        if isinstance(next_module, tuple):
+            for module in next_module:
+                schedule(module)
+        else:
+            schedule(next_module)
+
+    def _consume_pending_native_plan(self, key: tuple[torch.device, torch.dtype]):
+        pending = self._native_plan_pending.pop(key, None)
+        if pending is None:
+            return None
+
+        _, event, plan = pending
+        torch.npu.current_stream(key[0]).wait_event(event)
+        self._native_plan_cache[key] = plan
+        return plan
+
+    def prefetch_native_plan(self, *, device: torch.device | None = None, dtype: torch.dtype = torch.float16) -> bool:
+        """Start NPU int4 prepack on a side stream for first-use latency hiding."""
+
+        if device is None:
+            device = self.runtime_device()
+        if device is None:
+            return False
+
+        device = torch.device(device)
+        if not self._can_prefetch_native_plan(device=device, dtype=dtype):
+            return False
+
+        key = self._native_key(device=device, dtype=dtype)
+        if key in self._native_plan_cache or key in self._native_plan_pending:
+            return True
+
+        stream = self._native_prepack_stream(device)
+        with torch.npu.stream(stream):
+            plan = self._build_native_plan(device=device, dtype=dtype)
+            event = torch.npu.Event()
+            event.record(stream)
+
+        self._native_plan_pending[key] = (stream, event, plan)
+        return True
+
+
 def _assert_fp16_inference_input(x: torch.Tensor, module_name: str) -> None:
     if x.dtype != torch.float16:
         raise RuntimeError(
@@ -71,7 +192,7 @@ def _weight_quant_matmul(
     )
 
 
-class KomodoLinear(TorchLinear):
+class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
     """Ascend NPU GPTQ int4 kernel with Marlin-style prepacked steady-state execution."""
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_KOMODO]
@@ -125,6 +246,8 @@ class KomodoLinear(TorchLinear):
         )
         self.enable_weight_cache(env_flag(_KOMODO_CACHE_ENV, default=False))
         self._native_plan_cache: dict[tuple[torch.device, torch.dtype], tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]] = {}
+        self._native_plan_pending: dict[tuple[torch.device, torch.dtype], tuple[torch.npu.Stream, torch.npu.Event, tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]] = {}
+        self._native_prepack_streams: dict[int, torch.npu.Stream] = {}
         self._native_layout_supported: bool | None = None
 
     def post_init(self):
@@ -141,10 +264,6 @@ class KomodoLinear(TorchLinear):
     def clear_weight_cache(self):
         super().clear_weight_cache()
         self.clear_native_cache()
-
-    def clear_native_cache(self):
-        if hasattr(self, "_native_plan_cache"):
-            self._native_plan_cache.clear()
 
     def _has_natural_g_idx(self) -> bool:
         if self._native_layout_supported is not None:
@@ -169,14 +288,22 @@ class KomodoLinear(TorchLinear):
             return False
         return self._has_natural_g_idx()
 
-    def _native_plan(
+    def _can_prefetch_native_plan(self, *, device: torch.device, dtype: torch.dtype) -> bool:
+        if not _native_int4_enabled() or not _npu_int4_ops_available():
+            return False
+        if self.training or dtype != torch.float16 or device.type != "npu":
+            return False
+        if self.bits != 4:
+            return False
+        if self.qweight.device != device or self.qzeros.device != device or self.scales.device != device:
+            return False
+        if _native_int4_group_size(self.group_size, self.in_features) is None:
+            return False
+        return self._has_natural_g_idx()
+
+    def _build_native_plan(
         self, *, device: torch.device, dtype: torch.dtype
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        key = (torch.device(device), dtype)
-        cached = self._native_plan_cache.get(key)
-        if cached is not None:
-            return cached
-
         weight = torch.bitwise_and(
             _right_shift_unpack(
                 self.qweight.unsqueeze(1).expand(-1, self.pack_factor, -1),
@@ -196,7 +323,21 @@ class KomodoLinear(TorchLinear):
         if native_group_size is None:
             raise RuntimeError("Komodo native int4 plan requested for an unsupported group size.")
 
-        plan = (packed_weight, scales, offsets, native_group_size)
+        return packed_weight, scales, offsets, native_group_size
+
+    def _native_plan(
+        self, *, device: torch.device, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        key = self._native_key(device=device, dtype=dtype)
+        cached = self._native_plan_cache.get(key)
+        if cached is not None:
+            return cached
+
+        pending = self._consume_pending_native_plan(key)
+        if pending is not None:
+            return pending
+
+        plan = self._build_native_plan(device=device, dtype=dtype)
         self._native_plan_cache[key] = plan
         return plan
 
@@ -222,6 +363,7 @@ class KomodoLinear(TorchLinear):
             out = self.adapter.apply(x=x_flat, out=out)
         if input_dtype == torch.float32:
             out = out.to(torch.float32)
+        self._maybe_schedule_lookahead(compute_dtype)
         return out
 
     def forward(self, x: torch.Tensor):
@@ -232,7 +374,7 @@ class KomodoLinear(TorchLinear):
         return super().forward(x)
 
 
-class AwqKomodoLinear(AwqTorchLinear):
+class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
     """Ascend NPU AWQ int4 kernel with optional dense fallback caching."""
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_KOMODO]
@@ -287,6 +429,10 @@ class AwqKomodoLinear(AwqTorchLinear):
         self._cache_enabled = env_flag(_KOMODO_CACHE_ENV, default=False)
         self._cached_weights: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
         self._native_plan_cache: dict[tuple[torch.device, torch.dtype], tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]] = {}
+        self._native_plan_pending: dict[tuple[torch.device, torch.dtype], tuple[torch.npu.Stream, torch.npu.Event, tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]] = {}
+        self._native_prepack_streams: dict[int, torch.npu.Stream] = {}
+        self._lookahead_enabled = env_flag("GPTQ_TORCH_LOOKAHEAD", default=False)
+        self._lookahead_next = None
 
     def post_init(self):
         super().post_init()
@@ -308,10 +454,6 @@ class AwqKomodoLinear(AwqTorchLinear):
     def clear_weight_cache(self):
         self._cached_weights.clear()
         self.clear_native_cache()
-
-    def clear_native_cache(self):
-        if hasattr(self, "_native_plan_cache"):
-            self._native_plan_cache.clear()
 
     def _cached_weight_key(self, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
         return torch.device(device), dtype
@@ -349,14 +491,20 @@ class AwqKomodoLinear(AwqTorchLinear):
             return False
         return _native_int4_group_size(self.group_size, self.in_features) is not None
 
-    def _native_plan(
+    def _can_prefetch_native_plan(self, *, device: torch.device, dtype: torch.dtype) -> bool:
+        if not _native_int4_enabled() or not _npu_int4_ops_available():
+            return False
+        if self.training or dtype != torch.float16 or device.type != "npu":
+            return False
+        if self.bits != 4:
+            return False
+        if self.qweight.device != device or self.qzeros.device != device or self.scales.device != device:
+            return False
+        return _native_int4_group_size(self.group_size, self.in_features) is not None
+
+    def _build_native_plan(
         self, *, device: torch.device, dtype: torch.dtype
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        key = (torch.device(device), dtype)
-        cached = self._native_plan_cache.get(key)
-        if cached is not None:
-            return cached
-
         iweight, izeros = unpack_awq(self.qweight, self.qzeros, self.bits)
         iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
         max_val = (1 << self.bits) - 1
@@ -371,7 +519,21 @@ class AwqKomodoLinear(AwqTorchLinear):
         if native_group_size is None:
             raise RuntimeError("Komodo native int4 plan requested for an unsupported group size.")
 
-        plan = (packed_weight, scales, offsets, native_group_size)
+        return packed_weight, scales, offsets, native_group_size
+
+    def _native_plan(
+        self, *, device: torch.device, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        key = self._native_key(device=device, dtype=dtype)
+        cached = self._native_plan_cache.get(key)
+        if cached is not None:
+            return cached
+
+        pending = self._consume_pending_native_plan(key)
+        if pending is not None:
+            return pending
+
+        plan = self._build_native_plan(device=device, dtype=dtype)
         self._native_plan_cache[key] = plan
         return plan
 
@@ -402,6 +564,7 @@ class AwqKomodoLinear(AwqTorchLinear):
         if output.dtype != input_dtype:
             output = output.to(dtype=input_dtype)
 
+        self._maybe_schedule_lookahead(compute_dtype)
         return output.reshape(original_shape)
 
     def forward(self, x: torch.Tensor):
@@ -432,6 +595,7 @@ class AwqKomodoLinear(AwqTorchLinear):
         if output.dtype != input_dtype:
             output = output.to(dtype=input_dtype)
 
+        self._maybe_schedule_lookahead(compute_dtype)
         return output.reshape(original_shape)
 
 
