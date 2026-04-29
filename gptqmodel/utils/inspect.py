@@ -13,12 +13,8 @@ from typing import Any, Callable, FrozenSet, Optional, Tuple
 SupportedKwargInfo = Tuple[bool, Optional[FrozenSet[str]]]
 
 
-@lru_cache(maxsize=None)
-def get_supported_kwargs(callable_obj: Callable) -> SupportedKwargInfo:
-    """Return (accepts_var_kwargs, allowed_kwargs) for a callable.
-
-    allowed_kwargs is None when the callable uses ``**kwargs`` or when inspection fails.
-    """
+def _get_supported_kwargs_uncached(callable_obj: Callable) -> SupportedKwargInfo:
+    """Inspect one callable without retaining it in any global cache."""
     try:
         signature = inspect.signature(callable_obj)
     except (TypeError, ValueError):
@@ -33,6 +29,60 @@ def get_supported_kwargs(callable_obj: Callable) -> SupportedKwargInfo:
         if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
     )
     return False, allowed
+
+
+@lru_cache(maxsize=256)
+def _get_supported_kwargs_cached(signature_target: Callable) -> SupportedKwargInfo:
+    """Inspect a cache-safe callable identity.
+
+    Only stable function objects should reach this helper. Bound methods and
+    instance-bound builtin methods must be normalized or bypass this cache so
+    the cache never keeps heavyweight objects alive.
+    """
+    return _get_supported_kwargs_uncached(signature_target)
+
+
+def _is_cache_safe_builtin(callable_obj: Callable) -> bool:
+    """Return True only for builtin callables that are safe to cache directly.
+
+    Keep this branch conservative. Builtin methods such as ``[].append`` expose
+    ``__self__`` as the owning instance; caching them directly would retain that
+    instance. Module-level builtins like ``len`` instead point at the builtins
+    module and are safe to reuse across the process.
+    """
+    if not inspect.isbuiltin(callable_obj):
+        return False
+
+    owner = getattr(callable_obj, "__self__", None)
+    return owner is None or inspect.ismodule(owner)
+
+
+def get_supported_kwargs(callable_obj: Callable) -> SupportedKwargInfo:
+    """Return (accepts_var_kwargs, allowed_kwargs) for a callable.
+
+    allowed_kwargs is None when the callable uses ``**kwargs`` or when inspection fails.
+
+    Never cache ``callable_obj`` directly. Multi-device quantization passes
+    bound ``nn.Module.forward`` methods here; caching those bound methods keeps
+    the owning module replicas alive and pins their device tensors in memory.
+    Instead, bound Python methods are normalized to ``__func__`` before hitting
+    the internal cache, while less stable callables fall back to uncached
+    inspection.
+    """
+    func = getattr(callable_obj, "__func__", None)
+    if func is not None:
+        # Bound Python methods differ per instance but share the same
+        # underlying function object. Caching on ``__func__`` preserves reuse
+        # without retaining the bound instance.
+        return _get_supported_kwargs_cached(func)
+
+    if inspect.isfunction(callable_obj):
+        return _get_supported_kwargs_cached(callable_obj)
+
+    if _is_cache_safe_builtin(callable_obj):
+        return _get_supported_kwargs_cached(callable_obj)
+
+    return _get_supported_kwargs_uncached(callable_obj)
 
 
 def safe_kwargs_call(

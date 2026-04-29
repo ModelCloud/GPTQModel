@@ -1,0 +1,195 @@
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+
+from contextlib import nullcontext
+from typing import Optional, Tuple
+
+import torch
+
+from ...adapter.adapter import Adapter, Lora
+from ...models._const import DEVICE, PLATFORM
+from ...nn_modules.qlinear import AWQuantLinear
+from ...quantization import FORMAT, METHOD
+from ...utils import has_gil_disabled
+from ...utils.backend import BACKEND
+from ...utils.env import env_flag
+from ...utils.torch import HAS_XPU
+
+
+# Shared runtime default: prefer accuracy first unless the user explicitly opts out.
+FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
+
+
+class AwqGemmTritonFn(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        qweight,
+        qzeros,
+        scales,
+        w_bit=4,
+        group_size=128,
+        bias=None,
+        out_features=0,
+        prefer_backend=None,
+    ):
+        from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
+
+        ctx.save_for_backward(x, qweight, qzeros, scales, bias)
+        ctx.out_features = out_features
+
+        out_shape = x.shape[:-1] + (out_features,)
+        x = x.to(torch.float16)
+        if x.shape[0] == 0:
+            return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
+
+        # Above compute density threshold it is faster to just dequantize the whole thing and do simple matmul
+        FULL_DEQUANT_MATMUL_THRESHOLD = x.shape[0] * x.shape[1] > 128
+        if FULL_DEQUANT_MATMUL_THRESHOLD:
+            out = awq_dequantize_triton(qweight, scales, qzeros)
+            out = torch.matmul(x, out.to(x.dtype))
+        else:
+            out = awq_gemm_triton(
+                x.reshape(-1, x.shape[-1]),
+                qweight,
+                scales,
+                qzeros,
+                split_k_iters=8,
+                fp32_accum=FP32_ACCUM,
+                output_dtype=x.dtype,
+            )
+
+        out = out + bias if bias is not None else out
+        out = out.reshape(out_shape)
+        if len(out.shape) == 2:
+            out = out.unsqueeze(0)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton
+
+
+        input, qweight, qzeros, scales, bias = ctx.saved_tensors
+
+        weights = awq_dequantize_triton(qweight, scales, qzeros).to(grad_output.dtype)
+
+        grad_input = None
+        if ctx.needs_input_grad[0]:
+            batch_size = grad_output.shape[0]
+            grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
+
+        return grad_input, None, None, None, None, None, None, None, None
+
+
+class AwqGEMMTritonLinear(AWQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMM_TRITON]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMM: 50}
+    SUPPORTS_BITS = [4]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = True
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+
+    # TODO: ROCM also has Triton support. Need to validate ROCM for triton
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = [Lora]
+
+    SUPPORTS_DTYPES = [torch.float16]
+
+    REQUIRES_FORMAT_V2 = False
+
+    QUANT_TYPE = "awq_gemm_triton"
+
+    @classmethod
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        from packaging import version
+        from triton import __version__ as triton_version
+        triton_v = version.parse(triton_version)
+
+        if triton_v < version.parse("2.0.0"):
+            raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
+
+        # GIL=0 is tested with Triton 3.4.0 and it works
+        if has_gil_disabled() and triton_v < version.parse("3.4.0"):
+            raise Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0")
+
+        return True, None
+
+    def __init__(
+        self,
+        bits: int,
+        group_size: int,
+        sym: bool,
+        desc_act: bool,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
+        register_buffers: bool = False,
+        **kwargs,
+    ):
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            backend=kwargs.pop("backend", BACKEND.AWQ_GEMM_TRITON),
+            adapter=adapter,
+            register_buffers=register_buffers,
+            **kwargs)
+
+    def post_init(self):
+        if self.scales is not None:
+            self.scales = self.scales.to(dtype=torch.float16)
+        super().post_init()
+
+    def forward(self, x: torch.Tensor):
+        out_shape = x.shape[:-1] + (self.out_features,)
+
+        input_dtype = x.dtype
+        if input_dtype != torch.float16:
+            x = x.half()
+
+        with torch.xpu.device(self.qweight.device) if HAS_XPU else torch.cuda.device(self.qweight.device):
+            with nullcontext() if self.training else torch.inference_mode():
+                out = AwqGemmTritonFn.apply(
+                    x,
+                    self.qweight,
+                    self.qzeros,
+                    self.scales,
+                    self.bits,
+                    self.group_size,
+                    self.bias,
+                    self.out_features,
+                    "triton",
+                )
+
+        if input_dtype != torch.float16:
+            out = out.to(dtype=input_dtype)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
+        return out.reshape(out_shape)
+
+
+__all__ = [
+    "AwqGemmTritonFn",
+    "AwqGEMMTritonLinear",
+]

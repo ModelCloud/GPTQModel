@@ -7,11 +7,13 @@
 
 from __future__ import annotations
 
+import os
 import random
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import torch
 
+from .attn_mask import normalize_seq_mask
 from .data import collate_data
 from .logger import setup_logger
 
@@ -92,9 +94,55 @@ def prepare_calibration_dataset(
     if len(raw_examples) == 0:
         raise ValueError("Quantize: calibration dataset is empty.")
 
+    message_examples = 0
+    message_template_name = None
+    message_text_fallback_examples = 0
+
     def _require_tokenizer(reason: str) -> None:
         if tokenizer is None:
             raise ValueError(f"tokenizer must be provided when {reason}.")
+
+    message_apply_fn = None
+    message_apply_name = None
+    message_template_checked = False
+
+    def _get_message_template():
+        # Prefer the model's native chat formatter when calibration rows carry
+        # `messages`, but only when the tokenizer has an actual template to use.
+        # Some HF tokenizers expose `apply_chat_template()` while leaving
+        # `chat_template=None`, which raises at runtime.
+        nonlocal message_apply_fn, message_apply_name, message_template_checked
+        if message_template_checked:
+            return message_apply_fn, message_apply_name
+
+        message_template_checked = True
+
+        if tokenizer is None:
+            return None, None
+
+        apply_fn = getattr(tokenizer, "apply_template", None)
+        if callable(apply_fn):
+            message_apply_fn = apply_fn
+            message_apply_name = "apply_template"
+            return message_apply_fn, message_apply_name
+
+        apply_chat_fn = getattr(tokenizer, "apply_chat_template", None)
+        if callable(apply_chat_fn):
+            chat_template = getattr(tokenizer, "chat_template", None)
+            if chat_template is None:
+                get_chat_template = getattr(tokenizer, "get_chat_template", None)
+                if callable(get_chat_template):
+                    try:
+                        chat_template = get_chat_template(None, None)
+                    except Exception:
+                        chat_template = None
+
+            if chat_template is not None:
+                message_apply_fn = apply_chat_fn
+                message_apply_name = "apply_chat_template"
+                return message_apply_fn, message_apply_name
+
+        return None, None
 
     def _to_2d_long_tensor(value: Any, name: str, idx: int) -> torch.Tensor:
         try:
@@ -106,11 +154,51 @@ def prepare_calibration_dataset(
             raise ValueError(f"Quantize: `{name}` for calibration item {idx} must be 1D or 2D, got scalar.")
         if tensor.ndim == 1:
             tensor = tensor.unsqueeze(0)
+        elif tensor.ndim > 2 and name == "attention_mask":
+            # Some tokenizers emit causal masks shaped like [B, 1, T, T] or [B, T, T].
+            # Collapse those higher-rank masks back to the token presence mask expected here.
+            tensor = tensor.ne(0)
+            for dim in range(tensor.ndim - 2, 0, -1):
+                tensor = tensor.any(dim=dim)
+            tensor = tensor.to(torch.long)
         elif tensor.ndim != 2:
             raise ValueError(
                 f"Quantize: `{name}` for calibration item {idx} must be rank 1 or 2, got rank {tensor.ndim}."
             )
         return tensor
+
+    def _normalize_attention_mask(mask_value: Any, ids_tensor: torch.Tensor, idx: int) -> torch.Tensor:
+        try:
+            mask_tensor = torch.as_tensor(mask_value)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise ValueError(
+                f"Quantize: failed to convert `attention_mask` to tensor for calibration item {idx}."
+            ) from exc
+
+        if mask_tensor.ndim == 0:
+            raise ValueError(
+                f"Quantize: `attention_mask` for calibration item {idx} must be rank 1 or higher, got scalar."
+            )
+        if mask_tensor.ndim == 1:
+            mask_tensor = mask_tensor.unsqueeze(0)
+
+        try:
+            keep_mask = normalize_seq_mask(mask_tensor, seq_len=ids_tensor.shape[-1])
+        except ValueError as exc:
+            raise ValueError(
+                f"Quantize: failed to normalize `attention_mask` for calibration item {idx}: {exc}"
+            ) from exc
+
+        mask_tensor = keep_mask.to(dtype=torch.long)
+        if mask_tensor.shape != ids_tensor.shape:
+            if mask_tensor.numel() == ids_tensor.numel():
+                mask_tensor = mask_tensor.reshape(ids_tensor.shape)
+            else:
+                raise ValueError(
+                    f"Quantize: attention_mask shape {tuple(mask_tensor.shape)} does not match input_ids shape "
+                    f"{tuple(ids_tensor.shape)} for calibration item {idx}."
+                )
+        return mask_tensor
 
     def _pack_ids(ids_value: Any, mask_value: Any, idx: int) -> Dict[str, torch.Tensor]:
         ids_tensor = _to_2d_long_tensor(ids_value, "input_ids", idx)
@@ -118,15 +206,7 @@ def prepare_calibration_dataset(
         if mask_value is None:
             mask_tensor = torch.ones_like(ids_tensor, dtype=torch.long)
         else:
-            mask_tensor = _to_2d_long_tensor(mask_value, "attention_mask", idx)
-            if mask_tensor.shape != ids_tensor.shape:
-                if mask_tensor.numel() == ids_tensor.numel():
-                    mask_tensor = mask_tensor.reshape(ids_tensor.shape)
-                else:
-                    raise ValueError(
-                        f"Quantize: attention_mask shape {tuple(mask_tensor.shape)} does not match input_ids shape "
-                        f"{tuple(ids_tensor.shape)} for calibration item {idx}."
-                    )
+            mask_tensor = _normalize_attention_mask(mask_value, ids_tensor, idx)
 
         return {
             "input_ids": ids_tensor.detach(),
@@ -145,17 +225,26 @@ def prepare_calibration_dataset(
         return _pack_ids(input_ids, attention_mask, idx)
 
     def _tokenize_messages_value(messages_value: Any, idx: int) -> Dict[str, torch.Tensor]:
+        nonlocal message_examples, message_template_name
         _require_tokenizer("calibration data uses the `messages` feature")
-        apply_fn = getattr(tokenizer, "apply_template", None)
+        apply_fn, template_name = _get_message_template()
         if apply_fn is None:
-            raise ValueError("tokenizer must expose `apply_template` to handle `messages` calibration data.")
+            raise ValueError(
+                "tokenizer must expose `apply_template` or `apply_chat_template` to handle `messages` calibration data."
+            )
         try:
-            templated = apply_fn(messages_value, tokenize=False)
+            if template_name == "apply_chat_template":
+                templated = apply_fn(messages_value, tokenize=False, add_generation_prompt=False)
+            else:
+                templated = apply_fn(messages_value, tokenize=False)
         except TypeError:
             templated = apply_fn(messages_value)
 
         if templated is None:
             raise ValueError(f"tokenizer.apply_template returned None for calibration item {idx}.")
+
+        message_examples += 1
+        message_template_name = template_name
 
         if hasattr(templated, "get"):
             ids_value = templated.get("input_ids")
@@ -187,13 +276,15 @@ def prepare_calibration_dataset(
     for idx, example in enumerate(raw_examples):
         if isinstance(example, dict):
             if "messages" in example:
-                apply_fn = getattr(tokenizer, "apply_template", None) if tokenizer else None
+                apply_fn, _ = _get_message_template()
                 if apply_fn is None:
                     if "text" in example:
+                        message_text_fallback_examples += 1
                         processed_examples.append(_tokenize_text_value(example["text"], idx))
                         continue
                     raise ValueError(
-                        "tokenizer must expose `apply_template` or calibration data must provide `text` when using `messages`."
+                        "tokenizer must expose `apply_template` or `apply_chat_template`, or calibration data must "
+                        "provide `text` when using `messages`."
                     )
                 processed_examples.append(_tokenize_messages_value(example["messages"], idx))
                 continue
@@ -281,6 +372,12 @@ def prepare_calibration_dataset(
                 if _maybe_resolve_length(getattr(model_config, attr_name, None), attr_name):
                     break
 
+    padding_side = getattr(tokenizer, "padding_side", "right") if tokenizer is not None else "right"
+    if padding_side not in ("left", "right"):
+        raise ValueError(
+            f"Unsupported tokenizer.padding_side `{padding_side}`. Expected `left` or `right`."
+        )
+
     for example in calibration_dataset:
         input_ids = _convert_tensor_to_list(example["input_ids"])
         attention_mask = _convert_tensor_to_list(example["attention_mask"])
@@ -296,8 +393,12 @@ def prepare_calibration_dataset(
                     trimmed = True
                     trimmed_row_count += 1
                     longest_trimmed_row = max(longest_trimmed_row, row_len)
-                    trimmed_input_ids.append(row_ids[:max_positions])
-                    trimmed_attention_mask.append(row_mask[:max_positions])
+                    if padding_side == "left":
+                        trimmed_input_ids.append(row_ids[-max_positions:])
+                        trimmed_attention_mask.append(row_mask[-max_positions:])
+                    else:
+                        trimmed_input_ids.append(row_ids[:max_positions])
+                        trimmed_attention_mask.append(row_mask[:max_positions])
                 else:
                     trimmed_input_ids.append(row_ids)
                     trimmed_attention_mask.append(row_mask)
@@ -321,6 +422,19 @@ def prepare_calibration_dataset(
         log.warn(
             f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
             f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length."
+        )
+
+    if message_examples > 0 and message_template_name is not None:
+        log.info(
+            "Calibration: tokenized %s `messages` examples via tokenizer.%s",
+            message_examples,
+            message_template_name,
+        )
+    if message_text_fallback_examples > 0:
+        log.warn(
+            "Calibration: fell back to raw `text` for %s `messages` examples because the tokenizer has no message "
+            "template configured.",
+            message_text_fallback_examples,
         )
 
     if trimmed_row_count > 0:
@@ -400,8 +514,12 @@ def prepare_calibration_dataset(
             padding_length = calibration_dataset_concat_size - len(input_ids_buff)
             if padding_length > 0:
                 pad_id = getattr(tokenizer, "pad_token_id", 0)
-                input_ids_buff.extend([pad_id] * padding_length)
-                attention_mask_buff.extend([0] * padding_length)
+                if padding_side == "left":
+                    input_ids_buff = ([pad_id] * padding_length) + input_ids_buff
+                    attention_mask_buff = ([0] * padding_length) + attention_mask_buff
+                else:
+                    input_ids_buff.extend([pad_id] * padding_length)
+                    attention_mask_buff.extend([0] * padding_length)
             concatenated_data.append(
                 {
                     "input_ids": [input_ids_buff],
@@ -432,10 +550,33 @@ def prepare_calibration_dataset(
         log.info("Calibration: Native order")
         sorted_dataset = new_calibration_dataset
 
+    preview_count = max(0, int(os.getenv("GPTQMODEL_LOG_CALIBRATION_SAMPLES", "0") or 0))
+    if preview_count > 0:
+        # Preview the exact token rows that will be batched for quantization.
+        for idx, example in enumerate(sorted_dataset[:preview_count], start=1):
+            row_ids = example["input_ids"][0]
+            preview = ""
+            if tokenizer is not None:
+                try:
+                    preview = tokenizer.decode(row_ids[:128], skip_special_tokens=False).replace("\n", " ")
+                except Exception:
+                    preview = ""
+            log.info(
+                "Calibration sample %s/%s: tokens=%s preview=%r",
+                idx,
+                min(preview_count, len(sorted_dataset)),
+                len(row_ids),
+                preview[:240],
+            )
+
     if support_batch_quantize:
         pad_token_id = getattr(tokenizer, "pad_token_id", 0) if tokenizer is not None else 0
         new_calibration_dataset_batched = [
-            collate_data(sorted_dataset[start : start + batch_size], pad_token_id)
+            collate_data(
+                sorted_dataset[start : start + batch_size],
+                pad_token_id,
+                padding_side=getattr(tokenizer, "padding_side", "right"),
+            )
             for start in range(0, len(sorted_dataset), batch_size)
         ]
 

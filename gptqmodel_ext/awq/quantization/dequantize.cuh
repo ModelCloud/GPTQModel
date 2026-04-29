@@ -11,6 +11,7 @@ Modified from NVIDIA FasterTransformer: https://github.com/NVIDIA/FasterTransfor
 
 #pragma once
 
+#include <cuda_bf16.h>
 
 __device__ uint4 dequantize_s4_to_fp16x2(uint32_t const& source)
 {
@@ -77,3 +78,24 @@ __device__ uint4 dequantize_s4_to_fp16x2(uint32_t const& source)
     return result;
 }
 
+__device__ uint4 dequantize_s4_to_bf16x2(uint32_t const& source)
+{
+    uint4 result;
+
+    uint32_t*      h   = reinterpret_cast<uint32_t*>(&result);
+    static constexpr uint32_t immLut = (0xf0 & 0xcc) | 0xaa;
+    static constexpr uint32_t LOW_NIBBLE_MASK = 0x000f000f;
+    static constexpr uint32_t OR_MASK = 0x43004300;
+    static constexpr uint32_t BF16_BIAS = 0x43004300;
+    for (int i = 0; i < 4; ++i)
+    {
+        h[i] = source >> (4 * i);
+        asm volatile("lop3.b32 %0, %0, %1, %2, %3;\n"
+                        : "+r"(h[i])
+                        : "n"(LOW_NIBBLE_MASK), "n"(OR_MASK), "n"(immLut));
+        const __nv_bfloat162 bias = *reinterpret_cast<const __nv_bfloat162*>(&BF16_BIAS);
+        reinterpret_cast<__nv_bfloat162*>(h)[i] = __hsub2(reinterpret_cast<__nv_bfloat162*>(h)[i], bias);
+    }
+
+    return result;
+}

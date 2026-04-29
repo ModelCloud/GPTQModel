@@ -6,11 +6,11 @@
 from collections import defaultdict
 from typing import Iterable, List, Tuple
 
-from .torch import TorchQuantLinear
+from .torch import TorchLinear
 
 
-def configure_lookahead_chain(modules: Iterable[TorchQuantLinear]):
-    """Wire a sequence of TorchQuantLinear modules for one-step lookahead.
+def configure_lookahead_chain(modules: Iterable[TorchLinear]):
+    """Wire a sequence of TorchLinear modules for one-step lookahead.
 
     Each module in *modules* (except the last) will prefetch the next module's
     dequantized weights the moment it finishes its own forward call. The last
@@ -27,7 +27,7 @@ def configure_lookahead_chain(modules: Iterable[TorchQuantLinear]):
         last.set_lookahead_next(None)
 
 
-def _clear_existing_links(modules: Iterable[TorchQuantLinear]):
+def _clear_existing_links(modules: Iterable[TorchLinear]):
     for module in modules:
         module.set_lookahead_next(None)
 
@@ -41,9 +41,9 @@ def configure_default_lookahead(model) -> None:
     are skipped.
     """
 
-    ordered_modules: List[Tuple[str, TorchQuantLinear]] = []
+    ordered_modules: List[Tuple[str, TorchLinear]] = []
     for name, module in model.named_modules():
-        if isinstance(module, TorchQuantLinear):
+        if isinstance(module, TorchLinear):
             ordered_modules.append((name, module))
 
     if not ordered_modules:

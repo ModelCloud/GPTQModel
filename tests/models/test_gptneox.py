@@ -11,6 +11,10 @@ class TestGptNeoX(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gpt-neox-20b" # "EleutherAI/gpt-neox-20b"
     NATIVE_ARC_CHALLENGE_ACC = 0.3805
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4078
+    NATIVE_ARC_CHALLENGE_ACC_SLOW = NATIVE_ARC_CHALLENGE_ACC
+    NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
+    NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
+    NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
     def test_gptneox(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()
 

@@ -13,7 +13,14 @@ from torch import device
 
 from ..utils import BACKEND
 from ..utils.rocm import IS_ROCM
-from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
+from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU
+
+
+def _optional_torch_device(spec: str, fallback: torch.device) -> torch.device:
+    try:
+        return device(spec)
+    except (RuntimeError, ValueError):
+        return fallback
 
 
 CPU = device("cpu")
@@ -22,6 +29,8 @@ CUDA = device("cuda")
 CUDA_0 = device("cuda:0")
 XPU = device("xpu")
 XPU_0 = device("xpu:0")
+NPU = _optional_torch_device("npu", CPU)
+NPU_0 = _optional_torch_device("npu:0", CPU)
 MPS = device("mps")
 ROCM = device("cuda:0")  # rocm maps to fake cuda
 
@@ -34,6 +43,7 @@ class DEVICE(str, Enum):
     CPU = "cpu"  # All CPU: Optimized for IPEX is CPU has AVX, AVX512, AMX, or XMX instructions
     CUDA = "cuda"  # Nvidia GPU: Optimized for Ampere+
     XPU = "xpu"  # Intel GPU: Datacenter Max + Arc
+    NPU = "npu"  # Ascend NPU: portable Torch kernels
     MPS = "mps"  # MacOS GPU: Apple Silicon/Metal)
     ROCM = "rocm"  # AMD GPU: ROCm maps to fake cuda
 
@@ -54,7 +64,7 @@ class DEVICE(str, Enum):
     @property
     def index(self) -> int | None:
         """Default index used when materialising a torch.device from this enum."""
-        if self in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU):
+        if self in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU):
             return 0
         return None
 
@@ -83,7 +93,7 @@ def validate_cuda_support(raise_exception: bool = False):
         if not at_least_one_cuda_v6:
             if raise_exception:
                 raise EnvironmentError(
-                    "GPTQModel cuda requires Pascal or later gpu with compute capability >= `6.0`.")
+                    "GPT-QModel cuda requires Pascal or later gpu with compute capability >= `6.0`.")
             else:
                 got_cuda = False
 
@@ -96,6 +106,8 @@ def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
             return DEVICE.CUDA
         elif HAS_XPU:
             return DEVICE.XPU
+        elif HAS_NPU:
+            return DEVICE.NPU
         elif HAS_MPS:
             return DEVICE.MPS
         else:
@@ -123,11 +135,11 @@ def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:
         return CUDA_0
     elif HAS_XPU:
         return XPU_0
+    elif HAS_NPU:
+        return NPU_0
     elif HAS_MPS:
         return MPS
     else:
         return CPU
-
-EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
 
 EXPERT_INDEX_PLACEHOLDER = "{expert_index}"

@@ -1,0 +1,97 @@
+name: Release Source Common
+description: Shared release-source checkout preparation, build, checks, uploads, and publish gates.
+
+inputs:
+  pr-number:
+    description: PR number to fetch and checkout when provided.
+    required: false
+    default: '0'
+  run-id:
+    description: Local artifact run id for self-hosted uploads.
+    required: false
+    default: ''
+  confirmation-mode:
+    description: Confirmation mode for PyPI release gating.
+    required: true
+  test-install:
+    description: Whether to test-install the built sdist.
+    required: false
+    default: 'false'
+  upload-local:
+    description: Whether to copy the built sdist to the local dist share.
+    required: false
+    default: 'false'
+  artifact-continue-on-error:
+    description: Whether artifact upload can continue when a local upload already succeeded.
+    required: false
+    default: 'false'
+  require-pypi-confirmation:
+    description: Whether uploading to PyPI requires PYPI_RELEASE_CONFIRMATION=1.
+    required: false
+    default: 'false'
+  pypi-token:
+    description: PyPI API token.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare checkout
+      shell: bash
+      run: |
+        bash .github/scripts/ci_prepare_checkout.sh "${{ inputs.pr-number }}"
+
+    - name: Build sdist
+      shell: bash
+      run: |
+        bash .github/scripts/ci_release_build_sdist.sh
+
+    - name: Check dist
+      shell: bash
+      run: |
+        bash .github/scripts/ci_release_check_dist.sh
+
+    - name: Test installation
+      if: ${{ inputs.test-install == 'true' }}
+      shell: bash
+      run: |
+        bash .github/scripts/ci_release_test_install.sh "${{ env.PKG_NAME }}"
+
+    - name: Upload to local
+      if: ${{ inputs.upload-local == 'true' }}
+      continue-on-error: true
+      shell: bash
+      run: |
+        bash .github/scripts/ci_release_upload_local.sh "${{ env.PKG_NAME }}" "${{ inputs.run-id }}"
+
+    - name: Upload to artifact
+      uses: actions/upload-artifact@v7
+      continue-on-error: ${{ inputs.artifact-continue-on-error == 'true' && env.UPLOADED == '1' }}
+      with:
+        name: ${{ env.PKG_NAME }}
+        path: dist/${{ env.PKG_NAME }}
+
+    - name: Upload package to release
+      uses: svenstaro/upload-release-action@v2
+      if: ${{ (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled() }}
+      with:
+        file: dist/${{ env.PKG_NAME }}
+        tag: ${{ env.ref }}
+        file_glob: true
+        overwrite: true
+
+    - name: Waiting for confirmation
+      if: ${{ (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled() }}
+      shell: bash
+      run: |
+        bash .github/scripts/ci_release_wait_for_confirmation.sh "${{ inputs.confirmation-mode }}"
+
+    - name: Upload sdist to pypi
+      if: ${{ (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled() && (inputs.require-pypi-confirmation != 'true' || env.PYPI_RELEASE_CONFIRMATION == '1') }}
+      shell: bash
+      env:
+        TWINE_USERNAME: "__token__"
+        TWINE_PASSWORD: ${{ inputs.pypi-token }}
+      run: |
+        python -m twine upload dist/*.tar.gz

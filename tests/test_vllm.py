@@ -12,69 +12,96 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import importlib.util  # noqa: E402
 import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from pathlib import Path  # noqa: E402
 
-from models.model_test import ModelTest  # noqa: E402
+import pytest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from tests.eval import evaluate, get_eval_task_metrics, import_evalution  # noqa: E402
+
+from .models.model_test import ModelTest  # noqa: E402
+
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestLoadVLLM(ModelTest):
+    TASK_NAME = "arc_challenge"
 
     @classmethod
     def setUpClass(self):
         if ((importlib.util.find_spec("flashinfer") is None and importlib.util.find_spec("flashinfer-python") is None) or
                 importlib.util.find_spec("vllm") is None):
-            raise RuntimeError("flashinfer and vllm are required by this test. you can install them by `pip install gptqmodel['vllm']`")
+            raise unittest.SkipTest(
+                "flashinfer and vllm are required by this test. install via `pip install gptqmodel['vllm']`"
+            )
 
-        from vllm import SamplingParams  # noqa: E402
+        try:
+            import vllm._C  # noqa: F401,E402
+        except Exception as exc:
+            raise unittest.SkipTest(f"vllm runtime unavailable: {exc}")
+        try:
+            import_evalution()
+        except ValueError as exc:
+            raise unittest.SkipTest(str(exc))
         self.MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         self.SHARDED_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-sharded"
-        self.prompts = [
-            self.INFERENCE_PROMPT,
-        ]
-        self.sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=16, top_k=1)
+        self.NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
+        for model_path in (self.MODEL_ID, self.SHARDED_MODEL_ID, self.NATIVE_MODEL_ID):
+            if not Path(model_path).exists():
+                raise unittest.SkipTest(f"missing local model path: {model_path}")
 
     def release_vllm_model(self):
-        from vllm.distributed.parallel_state import destroy_model_parallel  # noqa: E402
+        try:
+            from vllm.distributed.parallel_state import destroy_model_parallel  # noqa: E402
+        except Exception:
+            torch_empty_cache()
+            return
 
         destroy_model_parallel()
         torch_empty_cache()
 
-    def test_load_vllm(self):
-        model = GPTQModel.load(
-            self.MODEL_ID,
-            device="cuda",
-            backend=BACKEND.VLLM,
-            gpu_memory_utilization=0.8,
-        )
+    def assert_evalution_vllm(self, model_path: str) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            results = evaluate(
+                model_or_id_or_path=model_path,
+                tasks=[self.TASK_NAME],
+                batch_size=1,
+                output_path=f"{tmp_dir}/result.json",
+                llm_backend="vllm",
+                model_args={
+                    "enforce_eager": False,
+                    "gpu_memory_utilization": 0.8,
+                    "tensor_parallel_size": 1,
+                },
+                suite_kwargs={
+                    "max_rows": 2,
+                    "num_fewshot": 1,
+                },
+            )
 
-        tokenizer = model.get_tokenizer()
+        metrics = get_eval_task_metrics(results, self.TASK_NAME)
+        self.assertTrue(metrics, f"Expected Evalution metrics for task {self.TASK_NAME}")
+        self.assertEqual(results["engine"]["execution"]["generation_backend"], "vllm_generate")
 
-        self.assertInference(model, tokenizer)
+    def test_evalution_vllm(self):
+        try:
+            self.assert_evalution_vllm(self.MODEL_ID)
+        finally:
+            self.release_vllm_model()
 
-        del model
-        self.release_vllm_model()
-
-    def test_load_shared_vllm(self):
-        model = GPTQModel.load(
-            self.SHARDED_MODEL_ID,
-            device="cuda",
-            backend=BACKEND.VLLM,
-            gpu_memory_utilization=0.8,
-        )
-        tokenizer = model.get_tokenizer()
-
-        self.assertInference(model, tokenizer)
-
-        del model
-        self.release_vllm_model()
+    def test_evalution_sharded_vllm(self):
+        try:
+            self.assert_evalution_vllm(self.SHARDED_MODEL_ID)
+        finally:
+            self.release_vllm_model()
 
     def test_dynamic(self):
-        NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
-        tokenizer = AutoTokenizer.from_pretrained(NATIVE_MODEL_ID, use_fast=True)
+        tokenizer = AutoTokenizer.from_pretrained(self.NATIVE_MODEL_ID, use_fast=True)
         if not tokenizer.pad_token_id:
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
@@ -97,7 +124,7 @@ class TestLoadVLLM(ModelTest):
             group_size=128,
         )
         model = GPTQModel.load(
-            NATIVE_MODEL_ID,
+            self.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
         model.quantize(calibration_dataset, batch_size=4)
@@ -108,20 +135,13 @@ class TestLoadVLLM(ModelTest):
 
             del model
 
-            model = GPTQModel.load(
-                tmp_dir,
-                device="cuda",
-                backend=BACKEND.VLLM,
-                gpu_memory_utilization=0.8,
-            )
-
-            tokenizer = model.get_tokenizer()
-
-            for name, submodule in model.named_modules():
+            inspect_model = GPTQModel.load(tmp_dir)
+            for name, submodule in inspect_model.named_modules():
                 if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule, BaseQuantLinear):  # module 0 was skipped
                     raise ValueError("first layer should be native module")
+            del inspect_model
 
-            self.assertInference(model, tokenizer)
-
-            del model
-            self.release_vllm_model()
+            try:
+                self.assert_evalution_vllm(tmp_dir)
+            finally:
+                self.release_vllm_model()

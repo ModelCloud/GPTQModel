@@ -5,10 +5,7 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
 
-
-# | Metric                         |   MARLIN |
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.5154 |
 # | arc_challenge :: acc_norm,none |   0.535  |
@@ -17,15 +14,16 @@ class TestGlm(ModelTest):
     GROUP_SIZE = 32
     # real: THUDM/glm-4-9b-chat-hf
     NATIVE_MODEL_ID = "/monster/data/model/glm-4-9b-chat-hf"
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
             "acc": {"value": 0.5154, "floor_pct": 0.04},
             "acc_norm": {"value": 0.5350, "floor_pct": 0.04},
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
-            "acc": {"value": 0.6325, "floor_pct": 0.04},
+        "mmlu_stem": {
+            "acc": {"value": 0.5810, "floor_pct": 0.04},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     def test_glm(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

@@ -6,8 +6,6 @@
 # -- do not touch
 import os
 
-from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
-
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -15,43 +13,39 @@ import logging  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
-from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.nn_modules.qlinear.bitblas import BitBLASLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
+from tests.eval import evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
 
 RAND_SEED = 42
-TASK_NAME = EVAL.LM_EVAL.ARC_CHALLENGE
+TASK_NAME = "arc_challenge"
 
 class TestBits(unittest.TestCase):
     QLINEAR_DICT = {
-        BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
-        BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
-        BACKEND.TRITON: TritonV2QuantLinear,
-        BACKEND.TORCH: TorchQuantLinear,
-        BACKEND.BITBLAS: BitBLASQuantLinear,
-        BACKEND.MARLIN: MarlinQuantLinear,
-        BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
+        BACKEND.EXLLAMA_V2: ExllamaV2Linear,
+        BACKEND.TRITON: TritonV2Linear,
+        BACKEND.TORCH: TorchLinear,
+        BACKEND.BITBLAS: BitBLASLinear,
+        BACKEND.MARLIN: MarlinLinear,
     }
 
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
     QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.2
 
     CUDA_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS = {
-        2: {'acc,none': 0.2150170648464164, 'acc_norm,none': 0.2696245733788396},
-        3: {'acc,none': 0.2175767918088737, 'acc_norm,none': 0.26621160409556316},
-        4: {'acc,none': 0.2363, 'acc_norm,none': 0.2517},
-        8: {'acc,none': 0.3020, 'acc_norm,none': 0.3319112627986348},
+        2: {'accuracy,loglikelihood': 0.2150170648464164, 'accuracy,loglikelihood_norm': 0.2696245733788396},
+        3: {'accuracy,loglikelihood': 0.2175767918088737, 'accuracy,loglikelihood_norm': 0.26621160409556316},
+        4: {'accuracy,loglikelihood': 0.2363, 'accuracy,loglikelihood_norm': 0.2517},
+        8: {'accuracy,loglikelihood': 0.3020, 'accuracy,loglikelihood_norm': 0.3319112627986348},
     }
 
     def calculatorPer(self, filter, value, base_value):
@@ -69,11 +63,6 @@ class TestBits(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # cls.pack_backends = [BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH, BACKEND.BITBLAS,
-        #                      BACKEND.IPEX]
-        # cls.backends = list(cls.pack_backends)
-        # cls.backends.extend([BACKEND.EXLLAMA_V2, BACKEND.MARLIN, ])
-
         # TODO Only CUDA Quant Linear is tested for now
         cls.pack_backends = [BACKEND.TRITON]
         cls.backends = [BACKEND.MARLIN]
@@ -134,22 +123,19 @@ class TestBits(unittest.TestCase):
             device_map="auto",
             backend=inference_backend,
         )
-        results = GPTQModel.eval(
+        results = evaluate(
             model_or_id_or_path=model,
             output_path=tmp_dir,
             tasks=[TASK_NAME],
             apply_chat_template=False,
             trust_remote_code=False,
             batch_size=4,
-            random_seed=RAND_SEED,
         )
         print('--------Eval Result---------')
-        print(make_table(results))
-        if "groups" in results:
-            print(make_table(results, "groups"))
+        print(format_eval_result_table(results))
         print('--------Eval Result End---------')
         task_results = {
-            metric: value for metric, value in results['results'].get(TASK_NAME.value, {}).items()
+            metric: value for metric, value in get_eval_task_metrics(results, TASK_NAME).items()
             if metric != 'alias' and 'stderr' not in metric
         }
         print(f"bits is: {quantize_config.bits}, quant_backend: {quant_backend}, inference_backend: {inference_backend} -> task_results: {task_results}")

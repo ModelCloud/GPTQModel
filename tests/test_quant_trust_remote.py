@@ -12,11 +12,15 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
 
+import pytest  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
+
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestQuantWithTrustRemoteTrue(ModelTest):
@@ -55,6 +59,5 @@ class TestQuantWithTrustRemoteTrue(ModelTest):
             expected_files = ["modeling_minicpm.py", "configuration_minicpm.py"]
             for file in expected_files:
                 self.assertIn(file, py_files, f"File {file} is missing in the actual files list")
-
 
 

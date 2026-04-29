@@ -52,11 +52,21 @@ class OvisQModel(BaseQModel):
         self.model.llm.generation_config.max_length = 8192
 
     def pre_quantize_generate_hook_start(self):
+        self.shell_module_materialize(self.model.llm.model.embed_tokens, self.quantize_config.device)
+        self.shell_module_materialize(self.model.llm.model.rotary_emb, self.quantize_config.device)
         self.shell_module_materialize(self.model.visual_tokenizer, self.quantize_config.device)
         self.shell_module_materialize(self.model.vte, self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
         if self.quantize_config.offload_to_disk:
+            offload_to_disk(model=self.model.llm.model,
+                            module=self.model.llm.model.embed_tokens,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            offload_to_disk(model=self.model.llm.model,
+                            module=self.model.llm.model.rotary_emb,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
             offload_to_disk(model=self.model,
                             module=self.model.visual_tokenizer,
                             disk_path=self.quantize_config.offload_to_disk_path,
@@ -67,6 +77,8 @@ class OvisQModel(BaseQModel):
                             )
             return
 
+        self.model.llm.model.embed_tokens = move_to(self.model.llm.model.embed_tokens, device=CPU)
+        self.model.llm.model.rotary_emb = move_to(self.model.llm.model.rotary_emb, device=CPU)
         self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, device=CPU)
         self.model.vte = move_to(self.model.vte, device=CPU)
 
@@ -102,13 +114,7 @@ class OvisQModel(BaseQModel):
             "labels": labels,
         }
 
-    def prepare_dataset(
-            self,
-            calibration_dataset,
-            calibration_dataset_concat_size,
-            batch_size: int = 1,
-            tokenizer=None,
-            **kwargs):
+    def prepare_dataset(self,calibration_dataset,batch_size: int = 1, **kwargs):
         calib_data = []
         for batch in batched(calibration_dataset, batch_size, self.preprocess_dataset):
             pixel_values, input_ids, labels = tuple([instance[key] for instance in batch]
@@ -136,7 +142,34 @@ class OvisQModel(BaseQModel):
 
         return calib_data
 
-    def generate(self, inputs, **kwargs):
+    def generate(self, inputs=None, **kwargs):
         """shortcut for model.generate"""
+        if inputs is None:
+            inputs = kwargs.pop("input_ids", None)
         with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
             return self.model.generate(inputs, **kwargs)
+
+    def move_input_capture_example(self, example, data_device):
+        for key, value in example.items():
+            if isinstance(value, list):
+                for index, item in enumerate(value):
+                    if not torch.is_tensor(item):
+                        continue
+
+                    if item.ndim == 1:
+                        item = item.unsqueeze(0)
+
+                    value[index] = move_to(
+                        item.to(self.model.visual_tokenizer.dtype),
+                        device=data_device,
+                    )
+            elif torch.is_tensor(value):
+                if value.ndim == 1:
+                    value = value.unsqueeze(0)
+
+                example[key] = move_to(value, device=data_device)
+
+        return self.finalize_input_capture_example(example)
+
+    def run_input_capture(self, example, use_cache: bool, data_device):
+        return self.model.generate(inputs=example.pop("input_ids"), **example)

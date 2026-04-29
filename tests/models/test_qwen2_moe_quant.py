@@ -5,18 +5,17 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestQwen2_5_Moe(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen1.5-MoE-A2.7B" # Qwen/Qwen1.5-MoE-A2.7B
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.2739, "floor_pct": 0.2},
             "acc_norm": {"value": 0.3055, "floor_pct": 0.2},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     def test_qwen2_5(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

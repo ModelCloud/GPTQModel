@@ -5,17 +5,16 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestQwen3Omni(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-Omni-30B-A3B-Instruct/"
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
             "acc": {"value": 0.2739, "floor_pct": 0.2},
             "acc_norm": {"value": 0.3055, "floor_pct": 0.2},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     # # TRUST_REMOTE_CODE = False
     # APPLY_CHAT_TEMPLATE = True
     # # EVAL_BATCH_SIZE = 6
@@ -28,4 +27,4 @@ class TestQwen3Omni(ModelTest):
     QUANT_BATCH_SIZE = 1
 
     def test_omni(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

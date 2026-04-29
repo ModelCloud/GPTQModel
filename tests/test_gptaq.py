@@ -5,13 +5,13 @@
 
 from models.model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
+from gptqmodel.quantization.config import GPTAQConfig
 
 
-class TestQwen2_5_GPTQv2(ModelTest):
+class TestQwen2_5_GPTAQ(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.2739, "floor_pct": 0.2},
             "acc_norm": {"value": 0.3055, "floor_pct": 0.2},
@@ -19,7 +19,7 @@ class TestQwen2_5_GPTQv2(ModelTest):
     }
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
-    GPTQA = True
+    GPTAQ = GPTAQConfig()
 
     def test_qwen2_5(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

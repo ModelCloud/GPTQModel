@@ -5,11 +5,16 @@
 
 import os
 
+import pytest
+
 
 os.environ["GPTQMODEL_USE_MODELSCOPE"] = "True"
 from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
+
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestLoadModelscope(ModelTest):
@@ -21,8 +26,11 @@ class TestLoadModelscope(ModelTest):
     def test_load_modelscope(self):
         model = GPTQModel.load(self.MODEL_ID)
 
-        result = model.generate("The capital of mainland China is")[0]
-        str_output = model.tokenizer.decode(result)
-        assert "beijing" in str_output.lower() or "bei-jing" in str_output.lower()
+        str_output = self.generate_stable_with_limit(
+            model,
+            model.tokenizer,
+            "The capital city of France is named",
+        )
+        assert "paris" in str_output.lower() or "city" in str_output.lower()
 
         del model

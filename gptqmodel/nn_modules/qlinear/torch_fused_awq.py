@@ -8,6 +8,8 @@ import math
 import torch
 
 from ...adapter.adapter import Adapter
+from ...looper.linear_mode import LinearMode
+from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import (
     dequantize_gemm,
     reverse_awq_order,
@@ -16,35 +18,39 @@ from ...quantization.awq.utils.packing_utils import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
-from .torch_fused import Int4PackedOp, TorchFusedQuantLinear, pack_scales_and_zeros
+from . import AWQuantLinear
+from .torch_fused import Int4PackedOp, TorchFusedLinear, pack_scales_and_zeros
 
 
 log = setup_logger()
 
 
-class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
+class TorchFusedAwqLinear(AWQuantLinear):
     """Torch fused AWQ variant based on GPTQ fused kernels via CPU int4 packing."""
 
     QUANT_TYPE = "torch_fused_awq"
 
-    # inherit from torch fused
-    SUPPORTS_BITS = TorchFusedQuantLinear.SUPPORTS_BITS
-    SUPPORTS_GROUP_SIZE = TorchFusedQuantLinear.SUPPORTS_GROUP_SIZE
-    SUPPORTS_DESC_ACT = TorchFusedQuantLinear.SUPPORTS_DESC_ACT
-    SUPPORTS_SYM = TorchFusedQuantLinear.SUPPORTS_SYM
-    SUPPORTS_SHARDS = TorchFusedQuantLinear.SUPPORTS_SHARDS
-    SUPPORTS_TRAINING = TorchFusedQuantLinear.SUPPORTS_TRAINING
-    SUPPORTS_AUTO_PADDING = TorchFusedQuantLinear.SUPPORTS_AUTO_PADDING
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = TorchFusedQuantLinear.SUPPORTS_IN_FEATURES_DIVISIBLE_BY
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = TorchFusedQuantLinear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY
-    SUPPORTS_DEVICES = TorchFusedQuantLinear.SUPPORTS_DEVICES
-    SUPPORTS_PLATFORM = TorchFusedQuantLinear.SUPPORTS_PLATFORM
-    SUPPORTS_PACK_DTYPES = TorchFusedQuantLinear.SUPPORTS_PACK_DTYPES
-    SUPPORTS_ADAPTERS = TorchFusedQuantLinear.SUPPORTS_ADAPTERS
-    REQUIRES_FORMAT_V2 = TorchFusedQuantLinear.REQUIRES_FORMAT_V2
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_FUSED]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMM: 20}
 
-    # AWQ kernels are only accuracy validate for float16 for now
-    SUPPORTS_DTYPES = [torch.float16]
+    # inherit from torch fused
+    SUPPORTS_BITS = TorchFusedLinear.SUPPORTS_BITS
+    SUPPORTS_GROUP_SIZE = TorchFusedLinear.SUPPORTS_GROUP_SIZE
+    SUPPORTS_DESC_ACT = TorchFusedLinear.SUPPORTS_DESC_ACT
+    SUPPORTS_SYM = TorchFusedLinear.SUPPORTS_SYM
+    SUPPORTS_SHARDS = TorchFusedLinear.SUPPORTS_SHARDS
+    SUPPORTS_TRAINING = TorchFusedLinear.SUPPORTS_TRAINING
+    SUPPORTS_AUTO_PADDING = TorchFusedLinear.SUPPORTS_AUTO_PADDING
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = TorchFusedLinear.SUPPORTS_IN_FEATURES_DIVISIBLE_BY
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = TorchFusedLinear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY
+    SUPPORTS_DEVICES = TorchFusedLinear.SUPPORTS_DEVICES
+    SUPPORTS_PLATFORM = TorchFusedLinear.SUPPORTS_PLATFORM
+    SUPPORTS_PACK_DTYPES = TorchFusedLinear.SUPPORTS_PACK_DTYPES
+    SUPPORTS_ADAPTERS = TorchFusedLinear.SUPPORTS_ADAPTERS
+    REQUIRES_FORMAT_V2 = False
+
+    SUPPORTS_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
     def __init__(
         self,
@@ -60,7 +66,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         register_buffers: bool = True,
         **kwargs,
     ):
-        kwargs.setdefault("backend", BACKEND.TORCH_FUSED_AWQ)
+        kwargs.setdefault("backend", BACKEND.AWQ_TORCH_FUSED)
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -75,6 +81,8 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             register_buffers=False,
             **kwargs,
         )
+
+        self.linear_mode = None
 
         # Create awq buffers
         if register_buffers:
@@ -100,12 +108,20 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
                 torch.zeros((group_rows, self.out_features), dtype=torch.float16),
             )
 
-            self.register_buffer("g_idx", torch.arange(self.in_features, dtype=torch.int32) // group_size)
-
             if bias:
                 self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16))
             else:
                 self.bias = None
+
+    def post_init(self):
+        super().post_init()
+        self.optimize()
+
+    def optimize(self):
+        if self.optimized:
+            return
+
+        super().optimize()
 
     def prepare_awq_fused_tensors(self, need_zeros: bool = True):
         self.scales.to(torch.float16).contiguous()
@@ -162,31 +178,70 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         return packed.contiguous()
 
     def transform_cpu_awq(self, dtype):
-        self.qweight, self.qzeros, scales, zeros = self.prepare_awq_fused_tensors()
+        # Unpack AWQ weights directly to integer form
+        iweight, izeros = unpack_awq(self.qweight, self.qzeros, self.bits)
+        iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
+        max_val = (1 << self.bits) - 1
+        iweight = torch.bitwise_and(iweight, max_val)
+        izeros = torch.bitwise_and(izeros, max_val)
 
-        super().transform_cpu(dtype, do_scales_and_zeros=False)
+        # Compute zeros: (zero_offset - izeros) * scales
+        zero_offset = 1 << (self.bits - 1)
+        zeros = (zero_offset - izeros.reshape_as(self.scales)) * self.scales
 
-        self.scales = scales.to(device=self.qweight.device, dtype=dtype).contiguous()
+        # AWQ has no g_idx — weights are already in natural order, just transpose
+        # iweight: (in_features, out_features) -> (out_features, in_features) for int4pack
+        weight = iweight.t().contiguous()
+        self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(weight.int(), 1).contiguous()
+
+        self.scales = self.scales.to(dtype=dtype).contiguous()
         self.qzeros = zeros.to(device=self.qweight.device, dtype=dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
     def transform_xpu_awq(self, dtype):
-        self.qweight, self.qzeros, scales, _ = self.prepare_awq_fused_tensors(need_zeros=False)
+        # Unpack AWQ weights directly to integer form
+        iweight, izeros = unpack_awq(self.qweight, self.qzeros, self.bits)
+        iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
+        max_val = (1 << self.bits) - 1
+        iweight = torch.bitwise_and(iweight, max_val)
+        izeros = torch.bitwise_and(izeros, max_val)
 
-        super().transform_xpu(dtype)
+        self.scales = self.scales.to(dtype).contiguous()
 
-        self.scales = scales.to(device=self.qweight.device, dtype=dtype).contiguous()
+        # AWQ has no g_idx — pack weight directly for XPU without reordering
+        # iweight: (in_features, out_features) -> transpose for XPU packing
+        weight = iweight.t().contiguous()
+        packed = torch.zeros(weight.shape[0], weight.shape[1] // self.pack_factor, dtype=torch.int32, device=weight.device)
+        for col in range(weight.shape[1] // self.pack_factor):
+            for i in range(self.pack_factor):
+                packed_col = weight[:, col * self.pack_factor + i].to(torch.int32)
+                packed[:, col] |= packed_col << (i * self.bits)
+        self.qweight = packed.contiguous()
+        self.qzeros = izeros.contiguous()
 
     def transform_cpu(self, dtype):
         self.transform_cpu_awq(dtype)
 
+    @torch.no_grad()
+    def _fused_op_forward(self, x):
+        # AWQ has no g_idx reordering — skip ret_idx
+        if x.device.type == "xpu":
+            out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
+                x, self.qweight, self.group_size, self.scales, self.qzeros
+            )
+        elif x.device.type == "cpu":
+            out = self.torch_fused_op(x)
+        else:
+            raise NotImplementedError
+        return out
+
     def awq_weight_dequantize(self, device, dtype):
         return dequantize_gemm(
-            self.qweight,
-            self.qzeros,
-            self.scales,
-            self.bits,
-            self.group_size,
+            qweight=self.qweight,
+            qzeros=self.qzeros,
+            scales=self.scales,
+            bits=self.bits,
+            group_size=self.group_size,
         ).to(device=device, dtype=dtype)
 
     def transform(self, dtype, device):
@@ -196,16 +251,24 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             self.transform_xpu_awq(dtype)
         else:
             raise NotImplementedError(
-                "TorchFusedAwqQuantLinear only supports fused transforms on CPU or XPU devices."
+                "TorchFusedAwqLinear only supports fused transforms on CPU or XPU devices."
             )
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
-        self.assert_supported_dtype(x_flat.dtype)
-        if not self.training and not self.transformed and TORCH_HAS_FUSED_OPS:
+        input_dtype = x_flat.dtype
+        self.assert_supported_dtype(input_dtype)
+        if input_dtype == torch.float32:
+            x_flat = x_flat.to(torch.bfloat16)
+        if (
+            not self.training
+            and not x_flat.requires_grad
+            and self.linear_mode is None
+            and TORCH_HAS_FUSED_OPS
+        ):
             self.transform(x_flat.dtype, x_flat.device.type)
-            self.transformed = True
+            self.linear_mode = LinearMode.INFERENCE
             if x_flat.device.type == "cpu":
                 self.torch_fused_op = Int4PackedOp(
                     self.qweight, self.scales_and_zeros, self.group_size
@@ -213,8 +276,10 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
                 import torch._inductor.config as config
                 config.freezing = True
                 config.max_autotune = True
+        elif self.linear_mode is None:
+            self.linear_mode = LinearMode.TRAIN
 
-        if self.transformed:
+        if self.linear_mode == LinearMode.INFERENCE:
             # log.debug("awq calling fused op")
             out = self._fused_op_forward(x_flat)
         else:
@@ -227,6 +292,9 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
 
+        if input_dtype == torch.float32:
+            out = out.to(torch.float32)
+
         return out.reshape(out_shape)
 
     def assert_supported_dtype(self, dtype: torch.dtype):
@@ -237,4 +305,4 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             )
 
 
-__all__ = ["TorchFusedAwqQuantLinear"]
+__all__ = ["TorchFusedAwqLinear"]

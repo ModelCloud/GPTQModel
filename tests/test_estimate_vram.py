@@ -20,9 +20,11 @@ class TestEstimateVram(unittest.TestCase):
     NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
     def test_estimate_vram(self):
+        # If `offload_to_disk` is True, the size of `turtle_model` will be calculated repeatedly.
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
+            offload_to_disk=False,
         )
         model = GPTQModel.load(
             self.NATIVE_MODEL_ID,

@@ -16,7 +16,7 @@ from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
 
 
 class TestQ4Marlin(ModelTest):
@@ -44,17 +44,23 @@ class TestQ4Marlin(ModelTest):
 
             # # 4-bit, act_order==True, group_size=128
             "/monster/data/model/gemma-1.1-2b-it-GPTQ",
+            # quantize by transformers, format is gptq_v2
+            "/monster/data/model/Llama-3.2-1B-Instruct-HF-GPTQV2",
         ]
     )
     def test_generation(self, model_id):
-        try:
-            model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
-        except ValueError as e:
-            raise e
+        if model_id == "/monster/data/model/gemma-1.1-2b-it-GPTQ":
+            with self.assertRaisesRegex(
+                ValueError,
+                r"is_marlin_format.*no longer supported"
+            ):
+                GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
+            return
 
+        model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
         has_marlin = False
         for _, module in model_q.named_modules():
-            linear = MarlinQuantLinear
+            linear = MarlinLinear
             if isinstance(module, linear):
                 has_marlin = True
                 break

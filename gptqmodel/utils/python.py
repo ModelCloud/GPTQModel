@@ -5,6 +5,7 @@
 
 import platform
 import sys
+import sysconfig
 
 from packaging.version import Version
 
@@ -13,15 +14,27 @@ from gptqmodel.utils.logger import setup_logger
 
 log = setup_logger()
 
-# Check if GIL (global interpreter lock) is controllable in this Python build.
-# Starting from python 3.13 it is possible to disable GIL
-def has_gil_control():
-    return hasattr(sys, '_is_gil_enabled')
+# Check if this Python build supports free-threading / GIL control.
+# Starting from python 3.13 it is possible to disable GIL at build time.
+def is_free_threading_build():
+    """Return True when Python was built with free-threading support."""
+    py_gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
+    try:
+        return int(py_gil_disabled or 0) == 1
+    except (TypeError, ValueError):
+        return False
 
-# Check if GIL (global interpreter lock) is enabled.
-# Starting from python 3.13 it is possible to disable GIL
+
+# Check if GIL (global interpreter lock) is controllable in this Python build.
+# Starting from python 3.13 it is possible to disable GIL.
+def has_gil_control():
+    return is_free_threading_build()
+
+# Check if GIL (global interpreter lock) is enabled at runtime.
+# Starting from python 3.13 it is possible to disable GIL.
 def has_gil_disabled():
-    return has_gil_control() and not sys._is_gil_enabled()
+    gil_enabled = getattr(sys, "_is_gil_enabled", None)
+    return has_gil_control() and callable(gil_enabled) and not gil_enabled()
 
 # Check For Python >= 3.13.3
 def gte_python_3_13_3():

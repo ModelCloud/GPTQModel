@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import sys
 from pathlib import Path
 
 import jinja2
@@ -49,27 +50,78 @@ GROUP_BLOCKS = [0, 1, -1, 2, 4, 8]
 DTYPES = ["fp16", "bf16"]
 
 
+def _is_4bit_weight(scalar_type: str) -> bool:
+    return scalar_type in {
+        "vllm::kU4",
+        "vllm::kU4B8",
+        "vllm::kFE2M1f",
+    }
+
+
 def remove_old_kernels() -> None:
     root = Path(__file__).parent
     for path in root.glob("kernel_*.cu"):
         path.unlink(missing_ok=True)
 
-def _write_kernel_file(scalar_type: str, dtype: str, templates: list[str]) -> Path:
-    root = Path(__file__).parent
-    scalar_suffix = scalar_type.split("::", 1)[1].lower() if "::" in scalar_type else scalar_type.lower()
-    output_path = root / f"kernel_{dtype}_{scalar_suffix}.cu"
 
+def _kernel_output_path(root: Path, scalar_type: str, dtype: str) -> Path:
+    scalar_suffix = scalar_type.split("::", 1)[1].lower() if "::" in scalar_type else scalar_type.lower()
+    return root / f"kernel_{dtype}_{scalar_suffix}.cu"
+
+
+def _render_kernel_file_text(scalar_type: str, dtype: str, templates: list[str]) -> str:
     lines = [FILE_HEAD, "", f"// Instantiations for dtype={dtype}, weight={scalar_type}", ""]
     lines.append("\n".join(templates))
     lines.append("")
     lines.append(FILE_TAIL)
+    return "\n".join(lines)
 
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+def _write_kernel_file(root: Path, scalar_type: str, dtype: str, templates: list[str]) -> Path:
+    output_path = _kernel_output_path(root, scalar_type, dtype)
+    output_path.write_text(_render_kernel_file_text(scalar_type, dtype, templates), encoding="utf-8")
     return output_path
+
+
+def build_expected_kernels(root: Path | None = None) -> dict[Path, str]:
+    root = root or Path(__file__).parent
+    expected: dict[Path, str] = {}
+    for scalar_type, dtype in itertools.product(SCALAR_TYPES, DTYPES):
+        templates = render_templates_for_combo(scalar_type, dtype)
+        if not templates:
+            continue
+        output_path = _kernel_output_path(root, scalar_type, dtype)
+        expected[output_path] = _render_kernel_file_text(scalar_type, dtype, templates)
+
+    if not expected:
+        raise RuntimeError("No marlin kernels were generated; check template configuration.")
+    return expected
+
+
+def generated_kernels_are_current(root: Path | None = None) -> bool:
+    root = root or Path(__file__).parent
+    expected = build_expected_kernels(root)
+    expected_names = {path.name for path in expected}
+    existing_names = {path.name for path in root.glob("kernel_*.cu")}
+    if existing_names != expected_names:
+        return False
+
+    for output_path, expected_text in expected.items():
+        try:
+            current_text = output_path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if current_text != expected_text:
+            return False
+    return True
 
 
 def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
     results: list[str] = []
+    stage_values = ["pipe_stages"]
+    if dtype == "fp16":
+        # Turing uses a shorter pipeline depth than Ampere+.
+        stage_values.insert(0, 2)
     for group_blocks, m_blocks, thread_configs in itertools.product(
             GROUP_BLOCKS, THREAD_M_BLOCKS, THREAD_CONFIGS):
 
@@ -86,9 +138,9 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
             if m_blocks > 1 and thread_configs[0] != 64:
                 continue
 
-        # we only support channelwise quantization and group_size == 128
-        # for fp8
-        if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 8]:
+        # FP8 weights support channelwise/group128 in both fp16 and bf16, and
+        # group32 microscaling (MXFP8) in bf16.
+        if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 2, 8]:
             continue
         # nvfp4 only supports group_size == 16
         # mxfp4 only supports group_size == 32
@@ -118,45 +170,57 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
             if dtype == "fp16":
                 # we cannot safely dequantize e8m0 to fp16, so skip this
                 continue
+        elif scalar_type == "vllm::kFE4M3fn" and group_blocks == 2:
+            s_type = "vllm::kFE8M0fnu"
+            if dtype == "fp16":
+                # MXFP8 is only supported with bf16 compute.
+                continue
         elif dtype == "fp16":
             s_type = "vllm::kFloat16"
         elif dtype == "bf16":
             s_type = "vllm::kBFloat16"
 
         for is_zp_float in is_zp_float_list:
-            template_str = jinja2.Template(TEMPLATE).render(
-                scalar_t=c_dtype,
-                w_type_id=scalar_type + ".id()",
-                s_type_id=s_type + ".id()",
-                threads=threads,
-                thread_m_blocks=max(m_blocks, 1),
-                thread_n_blocks=n_blocks,
-                thread_k_blocks=k_blocks,
-                m_block_size_8=m_blocks == 0.5,
-                stages="pipe_stages",
-                group_blocks=group_blocks,
-                is_zp_float=is_zp_float,
-            )
+            for stage_value in stage_values:
+                if (
+                    stage_value == 2
+                    and _is_4bit_weight(scalar_type)
+                    and max(m_blocks, 1) * 2 > k_blocks
+                ):
+                    # Our dense Turing kernels need enough B-stage capacity to
+                    # cover the output tile. For 4-bit weights this rules out
+                    # the larger M tiles when thread_k_blocks == 4.
+                    continue
+                template_str = jinja2.Template(TEMPLATE).render(
+                    scalar_t=c_dtype,
+                    w_type_id=scalar_type + ".id()",
+                    s_type_id=s_type + ".id()",
+                    threads=threads,
+                    thread_m_blocks=max(m_blocks, 1),
+                    thread_n_blocks=n_blocks,
+                    thread_k_blocks=k_blocks,
+                    m_block_size_8=m_blocks == 0.5,
+                    stages=stage_value,
+                    group_blocks=group_blocks,
+                    is_zp_float=is_zp_float,
+                )
 
-            results.append(template_str)
+                results.append(template_str)
 
     return results
 
 
-def generate_new_kernels() -> None:
-    emitted = False
-    for scalar_type, dtype in itertools.product(SCALAR_TYPES, DTYPES):
-        templates = render_templates_for_combo(scalar_type, dtype)
-        if not templates:
-            continue
-
-        _write_kernel_file(scalar_type, dtype, templates)
-        emitted = True
-
-    if not emitted:
-        raise RuntimeError("No marlin kernels were generated; check template configuration.")
+def generate_new_kernels(root: Path | None = None) -> None:
+    root = root or Path(__file__).parent
+    expected = build_expected_kernels(root)
+    for path in root.glob("kernel_*.cu"):
+        if path not in expected:
+            path.unlink(missing_ok=True)
+    for output_path, rendered in expected.items():
+        output_path.write_text(rendered, encoding="utf-8")
 
 
 if __name__ == "__main__":
-    remove_old_kernels()
+    if "--check" in sys.argv[1:]:
+        raise SystemExit(0 if generated_kernels_are_current() else 1)
     generate_new_kernels()

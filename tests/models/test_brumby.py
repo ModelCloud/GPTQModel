@@ -3,42 +3,70 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from model_test import ModelTest
+import unittest
+from importlib.metadata import PackageNotFoundError, version
 
-from gptqmodel.utils.eval import EVAL
+from model_test import ModelTest
+from packaging.version import Version
 
 
 class TestBrumby(ModelTest):
     GROUP_SIZE = 32
     DATASET_SIZE = 1024
+    DATASET_SIZE_FAST = 128
+    # Brumby decoder layers are structurally uniform, so fast mode can quantize
+    # the first layers and avoid replaying 38 untouched layers during calibration.
+    MODEL_COMPAT_FAST_LAYER_COUNT = 1
+    MODEL_COMPAT_FAST_LAYER_POSITION = "first"
+    OFFLOAD_TO_DISK_FAST = False
     NATIVE_MODEL_ID = "/monster/data/model/Brumby-14B-Base"
     TRUST_REMOTE_CODE = True
     LOAD_MODEL_EXTRA_ARGS = {"use_cache": False}
     DATASET_CONCAT_SIZE = 2048
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+    EVAL_TASKS_SLOW = {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.87,
                 "floor_pct": 0.05,
                 "ceil_pct": 0.10,
             },
         },
-        EVAL.LM_EVAL.GSM8K_COT: {
+        "gsm8k_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.88,
                 "floor_pct": 0.05,
                 "ceil_pct": 0.10,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.89, "floor_pct": 0.05, "ceil_pct": 0.10},
         },
-        EVAL.LM_EVAL.MMLU: {
+        "mmlu": {
             "acc": {"value": 0.71, "floor_pct": 0.05, "ceil_pct": 0.10},
         },
     }
+    EVAL_TASKS_FAST = {
+        "arc_challenge": {
+            "evalution_batch_size": 8,
+            "evalution_suite_kwargs": {"max_rows": 32},
+            "acc": {"value": 0.89, "floor_pct": 0.10, "ceil_pct": 1.0},
+        },
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        try:
+            installed = Version(version("retention"))
+        except PackageNotFoundError:
+            raise unittest.SkipTest("retention>=1.0.7 is required for Brumby")
+
+        if installed < Version("1.0.7"):
+            raise unittest.SkipTest(
+                f"retention>=1.0.7 is required for Brumby, found {installed}"
+            )
 
     def test_brumby(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

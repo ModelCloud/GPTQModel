@@ -14,38 +14,35 @@ import tempfile  # noqa: E402
 import traceback  # noqa: E402
 import unittest  # noqa: E402
 
-from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
-from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.nn_modules.qlinear.bitblas import BitBLASLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
+from tests.eval import evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
 
 RAND_SEED = 42
-TASK_NAME = EVAL.LM_EVAL.ARC_CHALLENGE
+TASK_NAME = "arc_challenge"
 
 class TestGroupSize(unittest.TestCase):
     QLINEAR_DICT = {
-        BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
-        BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
-        BACKEND.TRITON: TritonV2QuantLinear,
-        BACKEND.TORCH: TorchQuantLinear,
-        BACKEND.BITBLAS: BitBLASQuantLinear,
-        BACKEND.MARLIN: MarlinQuantLinear,
+        BACKEND.EXLLAMA_V2: ExllamaV2Linear,
+        BACKEND.TRITON: TritonV2Linear,
+        BACKEND.TORCH: TorchLinear,
+        BACKEND.BITBLAS: BitBLASLinear,
+        BACKEND.MARLIN: MarlinLinear,
     }
 
 
     @classmethod
     def setUpClass(cls):
-        cls.pack_backends = [BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.TORCH, BACKEND.BITBLAS]
+        cls.pack_backends = [BACKEND.TRITON, BACKEND.TORCH, BACKEND.BITBLAS]
         cls.backends = list(cls.pack_backends)
         cls.backends.extend([BACKEND.EXLLAMA_V2, BACKEND.MARLIN, ])
 
@@ -104,7 +101,7 @@ class TestGroupSize(unittest.TestCase):
             device_map="auto",
             backend=inference_backend,
         )
-        results = GPTQModel.eval(
+        results = evaluate(
             model_or_id_or_path=model,
             output_path=tmp_dir,
             tasks=TASK_NAME,
@@ -112,15 +109,12 @@ class TestGroupSize(unittest.TestCase):
             trust_remote_code=False,
             batch_size=32,
             gen_kwargs="temperature=0.0,top_k=50",
-            random_seed=RAND_SEED,
         )
         print('--------Eval Result---------')
-        print(make_table(results))
-        if "groups" in results:
-            print(make_table(results, "groups"))
+        print(format_eval_result_table(results))
         print('--------Eval Result End---------')
         task_results = {
-            metric: value for metric, value in results['results'].get(TASK_NAME, {}).items()
+            metric: value for metric, value in get_eval_task_metrics(results, TASK_NAME).items()
             if metric != 'alias' and 'stderr' not in metric
         }
         print(

@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch
+from models.model_test import ModelTest
 
 
 def main():
@@ -31,5 +32,6 @@ def main():
             row.append("yes" if torch.cuda.can_device_access_peer(i, j) else " no")
         print(f"{i:>2}: " + " ".join(f"{r:>3}" for r in row))
 
-if __name__ == "__main__":
-    main()
+class Test(ModelTest):
+    def test(self):
+        main()

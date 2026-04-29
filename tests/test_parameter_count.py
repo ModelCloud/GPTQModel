@@ -16,20 +16,20 @@ from gptqmodel.utils.tensor import tensor_parameters
 
 
 class TestsParameterCount(ModelTest):
-    LLAMA_3_2_1B_PARAMETER_COUNT = 1235814432
+    LLAMA_3_2_1B_PARAMETER_COUNT = 1_235_814_400
 
     # ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1 incorrectly saves lm_head.weight,
     # and the number of calculated parameters will be larger.
     # The latest code has fixed this bug.
-    LLAMA_3_2_1B_VORTEX_V1_PARAMETER_COUNT = 1498482688
+    LLAMA_3_2_1B_VORTEX_V1_PARAMETER_COUNT = 1_498_482_688
 
     def test_parameter_count(self):
         import os.path
 
-        from huggingface_hub import hf_hub_download
         from safetensors.torch import load_file
 
         from gptqmodel import QuantizeConfig
+        from gptqmodel.utils.hub import hf_hub_download
         from gptqmodel.utils.tensor import tensor_parameters
 
         model_id = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"

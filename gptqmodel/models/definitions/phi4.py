@@ -8,6 +8,10 @@ from ..base import BaseQModel
 
 
 class Phi4MMGPTQ(BaseQModel):
+    require_pkgs = [
+        "backoff>=2.2.1",
+        "optimum>=1.24.0",
+    ]
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [

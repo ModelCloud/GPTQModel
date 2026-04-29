@@ -23,13 +23,17 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
+import pytest  # noqa: E402
 from datasets import load_dataset
 from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from tests.eval import evaluate  # noqa: E402
+
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
@@ -44,16 +48,19 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
     if backend == BACKEND.TORCH:
         model.optimize()
 
-    tokens = model.generate("Capital of France is")[0]
-    result = model.tokenizer.decode(tokens)
+    result = ModelTest.generate_stable_with_limit(
+        model,
+        model.tokenizer,
+        "The capital city of France is named",
+        max_new_tokens=128,
+    )
     print(f"BACKEND: {backend}, Result: {result}")
     if "paris" not in result.lower():
         raise AssertionError(" `paris` not found in `result`")
 
-    bench_result = GPTQModel.eval(
+    bench_result = evaluate(
         model_or_id_or_path=model,
-        framework=EVAL.LM_EVAL,
-        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU_STEM]
+        tasks=["arc_challenge", "mmlu_stem"]
     )
 
     del model
@@ -100,16 +107,15 @@ class TestEoraPostQuant(ModelTest):
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
             )
 
-            # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
-            # for backend in [BACKEND.MARLIN]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+            # for backend in [BACKEND.MARLIN]:  # BACKEND.TORCH_FUSED, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
             #     base_bench = bench(path=self.QUANTIZED_MODEL_PATH, backend=backend, adapter=None)  # inference using qweights only
             #     eora_bench = bench(path=self.QUANTIZED_MODEL_PATH, backend=backend, adapter=eora)  # inference using eora (lora)
             #
             #     print('--------Quant/EoRA Config ---------')
             #
-            #     # Convert the dictionary to a list of lists for tabulate
+            #     # Render the config dictionary as a two-column table
             #     table_data = [[key, value] for key, value in config_dict.items()]
-            #     print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
+            #     print(render_table(table_data, headers=["Key", "Value"], tablefmt="grid"))
             #
             #     print('--------Eval Base Result---------')
             #     print(make_table(base_bench))

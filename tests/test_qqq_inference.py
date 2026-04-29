@@ -3,12 +3,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import pytest
+from models.model_test import ModelTest
+
 from gptqmodel import GPTQModel
-from gptqmodel.utils.eval import EVAL
 
 
-eval_results = GPTQModel.eval("HandH1998/QQQ-Llama-3-8b-g128",
-                                 framework=EVAL.LM_EVAL,
-                                 tasks=[EVAL.LM_EVAL.ARC_CHALLENGE])
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
-print(f"{eval_results}")
+def test_qqq_inference():
+    model = GPTQModel.load("HandH1998/QQQ-Llama-3-8b-g128")
+    str_output = ModelTest.generate_stable_with_limit(
+        model,
+        model.tokenizer,
+        "The capital city of France is named",
+    )
+    assert "paris" in str_output.lower() or "city" in str_output.lower()

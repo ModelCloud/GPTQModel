@@ -264,9 +264,12 @@ torch::Tensor gemv_forward_cuda_decode(
     static constexpr int N_PER_BLOCK = 2;
     static constexpr int K_INTERLEAVE = 4;
     static constexpr int BLOCK_SIZE = 256;
+    static constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
 
     dim3 num_blocks(n / N_PER_BLOCK / K_INTERLEAVE);
     dim3 num_threads(BLOCK_SIZE);
+    // warp_reduce() writes one float accumulator tile per warp into extern shared memory
+    size_t smem_size = sizeof(float) * NUM_WARPS * N_PER_BLOCK * m * K_INTERLEAVE;
 
     // if (group_size == 64)
     // {
@@ -282,37 +285,37 @@ torch::Tensor gemv_forward_cuda_decode(
       switch (m)
       {
       case 1:
-        gemv_kernel<N_PER_BLOCK, 1, BLOCK_SIZE, 128><<<num_blocks, num_threads>>>(
+        gemv_kernel<N_PER_BLOCK, 1, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
           in_feats, kernel, scaling_factors, zeros, out_feats, k, n
         );
         break;
       case 2:
-        gemv_kernel<N_PER_BLOCK, 2, BLOCK_SIZE, 128><<<num_blocks, num_threads>>>(
+        gemv_kernel<N_PER_BLOCK, 2, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
           in_feats, kernel, scaling_factors, zeros, out_feats, k, n
         );
         break;
       case 3:
-        gemv_kernel<N_PER_BLOCK, 3, BLOCK_SIZE, 128><<<num_blocks, num_threads>>>(
+        gemv_kernel<N_PER_BLOCK, 3, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
           in_feats, kernel, scaling_factors, zeros, out_feats, k, n
         );
         break;
       case 4:
-        gemv_kernel<N_PER_BLOCK, 4, BLOCK_SIZE, 128><<<num_blocks, num_threads>>>(
+        gemv_kernel<N_PER_BLOCK, 4, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
           in_feats, kernel, scaling_factors, zeros, out_feats, k, n
         );
         break;
       case 5:
-        gemv_kernel<N_PER_BLOCK, 5, BLOCK_SIZE, 128><<<num_blocks, num_threads>>>(
+        gemv_kernel<N_PER_BLOCK, 5, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
           in_feats, kernel, scaling_factors, zeros, out_feats, k, n
         );
         break;
       case 6:
-        gemv_kernel<N_PER_BLOCK, 6, BLOCK_SIZE, 128><<<num_blocks, num_threads>>>(
+        gemv_kernel<N_PER_BLOCK, 6, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
           in_feats, kernel, scaling_factors, zeros, out_feats, k, n
         );
         break;
       case 7:
-        gemv_kernel<N_PER_BLOCK, 7, BLOCK_SIZE, 128><<<num_blocks, num_threads>>>(
+        gemv_kernel<N_PER_BLOCK, 7, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
           in_feats, kernel, scaling_factors, zeros, out_feats, k, n
         );
         break;
@@ -326,4 +329,3 @@ torch::Tensor gemv_forward_cuda_decode(
     }
     return _out_feats;
 }
-

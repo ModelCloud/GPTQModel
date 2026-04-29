@@ -15,6 +15,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
@@ -53,10 +54,14 @@ class TestSharded(unittest.TestCase):
                 device_map="auto",
             )
 
-            inp = tokenizer(self.prompt, return_tensors="pt").to(self.device)
-
-            tokens = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=60, max_new_tokens=60)
-            result = tokenizer.decode(tokens[0])
+            result = ModelTest.generate_stable_with_limit(
+                model,
+                tokenizer,
+                self.prompt,
+                min_new_tokens=60,
+                max_new_tokens=60,
+                skip_special_tokens=False,
+            )
 
             self.assertEqual(result[:100], self.reference_output[:100])
 
@@ -84,9 +89,13 @@ class TestSharded(unittest.TestCase):
                 device_map="auto",
             )
 
-            inp = tokenizer(self.prompt, return_tensors="pt").to(self.device)
-
-            tokens = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=60, max_new_tokens=60)
-            result = tokenizer.decode(tokens[0])
+            result = ModelTest.generate_stable_with_limit(
+                model,
+                tokenizer,
+                self.prompt,
+                min_new_tokens=60,
+                max_new_tokens=60,
+                skip_special_tokens=False,
+            )
 
             self.assertEqual(result[:100], self.reference_output[:100])

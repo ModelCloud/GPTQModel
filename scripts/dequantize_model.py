@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""CLI entry point for dequantizing GPTQModel safetensor shards."""
+"""CLI entry point for dequantizing GPT-QModel safetensor shards."""
 
 from __future__ import annotations
 

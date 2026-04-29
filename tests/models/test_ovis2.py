@@ -42,9 +42,13 @@ class Test(ModelTest):
         inputs['pixel_values'] = inputs['pixel_values'].to(torch.bfloat16)
 
         with torch.inference_mode():
-            output_ids = model.generate(**inputs, max_new_tokens=128, do_sample=False)
-            generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, output_ids)]
-            output = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            output = self.generate_stable_with_limit(
+                model,
+                processor,
+                inputs=inputs,
+                max_new_tokens=128,
+                batch_decode=True,
+            )
             print(f'Output:\n{output}')
 
             self.assertIn("snow", output.lower())

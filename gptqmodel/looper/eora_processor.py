@@ -12,7 +12,7 @@ from torch.nn import Module
 
 from ..adapter.adapter import Lora
 from ..eora.eora import eora_compute_lora, eora_process_input, merge_eora_segments
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
@@ -28,6 +28,8 @@ log = setup_logger()
 
 
 class EoraProcessor(LoopProcessor):
+    """Builds LoRA-style error adapters from dequantization residuals and activations."""
+
     def __init__(
         self,
         tokenizer,
@@ -40,6 +42,8 @@ class EoraProcessor(LoopProcessor):
         require_fwd: bool = True,
         calibration_concat_separator: Optional[str] = None,
     ):
+        """Initializes EoRA processing and per-module segment accumulation state."""
+
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
@@ -49,7 +53,7 @@ class EoraProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            require_fwd=require_fwd,
+            execution_config=ExecutionConfig(require_fwd=require_fwd),
         )
 
         # Track per-module segment accumulators keyed by device so we can merge
@@ -71,10 +75,14 @@ class EoraProcessor(LoopProcessor):
         self.eora_process_input = eora_process_input
 
     def set_calibration_dataset(self, calibration_dataset):
+        """Stores the calibration dataset because EoRA depends on batch counts."""
+
         self.calibration_dataset = calibration_dataset
         self.num_batches = len(calibration_dataset)
 
     def preprocess(self, module: NamedModule, **kwargs):
+        """Clones adapter config, applies rank overrides, and initializes accumulators."""
+
         # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
             module.adapter_cfg = None # hack
@@ -102,11 +110,17 @@ class EoraProcessor(LoopProcessor):
         return
 
     def is_skipped(self, module: NamedModule) -> bool:
+        """Reports whether EoRA was disabled for this module by dynamic config."""
+
         # dynamic override removed eora processing for this module
         return module.adapter_cfg in [None, {}]
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        """Returns the forward hook that accumulates EoRA activation statistics."""
+
         def tmp(module, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
+            """Processes one batch of inputs into an EoRA contribution segment."""
+
             batch_index = self.current_batch_index()
             batch, contribution, scale = self.eora_process_input(
                 input=input,
@@ -133,6 +147,8 @@ class EoraProcessor(LoopProcessor):
         contribution: torch.Tensor,
         scale: float,
     ) -> None:
+        """Merges one EoRA contribution segment into the per-device accumulator."""
+
         if batch <= 0:
             return
 
@@ -182,6 +198,8 @@ class EoraProcessor(LoopProcessor):
             del contribution
 
     def _finalize_eigen_scaling_matrix(self, name: str) -> torch.Tensor:
+        """Merges accumulated EoRA segments into the final scaling matrix."""
+
         with self.lock:
             segments = self._segment_accumulators.pop(name, {})
             target_device = self._module_target_devices.pop(name, None)
@@ -218,6 +236,8 @@ class EoraProcessor(LoopProcessor):
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
     ):
+        """Computes and installs the LoRA correction for one quantized module."""
+
         assert isinstance(module.adapter_cfg, Lora)
 
         self.pb.title(f"EoRA: Processing {module.name} ({module.module_dtype}) in layer").draw()
@@ -344,10 +364,14 @@ class EoraProcessor(LoopProcessor):
         module.state.pop("tp_pad_info", None)
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
+        """Stores the finalized adapter object in the processor result map."""
+
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         self.result_save(module.full_name, module.state.pop("adapter"))
 
     def finalize(self, model: BaseQModel, **kwargs):
+        """Releases accumulators and attaches the collected adapters to the model."""
+
         del self._segment_accumulators
         del self._module_target_devices
 
@@ -357,6 +381,8 @@ class EoraProcessor(LoopProcessor):
         super().finalize(model=model, **kwargs)
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
+        """Requires calibration on the first EoRA stage and reuses later caches thereafter."""
+
         if self.calibration_dataset is None:
             if processor_index == 0:
                 raise ValueError("EoraProcessor's calibration_dataset must be provided.")
@@ -365,4 +391,6 @@ class EoraProcessor(LoopProcessor):
         return True
 
     def name(self) -> str:
+        """Returns the processor label used in logs and lifecycle reporting."""
+
         return "eora"

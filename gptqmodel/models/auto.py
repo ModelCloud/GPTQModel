@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 
 from ..utils.logger import setup_logger
 
@@ -13,15 +14,9 @@ from ..utils.logger import setup_logger
 log = setup_logger()
 
 ASCII_LOGO = r"""
-_____/\\\\\\\\\\\\__/\\\\\\\\\\\\\____/\\\\\\\\\\\\\\\______________________/\\\________/\\\\____________/\\\\_______________________/\\\__________________/\\\\\\____
- ___/\\\//////////__\/\\\/////////\\\_\///////\\\/////____________________/\\\\/\\\\____\/\\\\\\________/\\\\\\______________________\/\\\_________________\////\\\____
-  __/\\\_____________\/\\\_______\/\\\_______\/\\\_______________________/\\\//\////\\\__\/\\\//\\\____/\\\//\\\______________________\/\\\____________________\/\\\____
-   _\/\\\____/\\\\\\\_\/\\\\\\\\\\\\\/________\/\\\________/\\\\\\\\\\\__/\\\______\//\\\_\/\\\\///\\\/\\\/_\/\\\_____/\\\\\___________\/\\\______/\\\\\\\\_____\/\\\____
-    _\/\\\___\/////\\\_\/\\\/////////__________\/\\\_______\///////////__\//\\\______/\\\__\/\\\__\///\\\/___\/\\\___/\\\///\\\____/\\\\\\\\\____/\\\/////\\\____\/\\\____
-     _\/\\\_______\/\\\_\/\\\___________________\/\\\______________________\///\\\\/\\\\/___\/\\\____\///_____\/\\\__/\\\__\//\\\__/\\\////\\\___/\\\\\\\\\\\_____\/\\\____
-      _\/\\\_______\/\\\_\/\\\___________________\/\\\________________________\////\\\//_____\/\\\_____________\/\\\_\//\\\__/\\\__\/\\\__\/\\\__\//\\///////______\/\\\____
-       _\//\\\\\\\\\\\\/__\/\\\___________________\/\\\___________________________\///\\\\\\__\/\\\_____________\/\\\__\///\\\\\/___\//\\\\\\\/\\__\//\\\\\\\\\\__/\\\\\\\\\_
-        __\////////////____\///____________________\///______________________________\//////___\///______________\///_____\/////______\///////\//____\//////////__\/////////__
+┌─────────────┐    ┌────────────────────────┐    ┌────────────┐    ┌─────────┐
+│ GPT-QModel  │ -> │ ▓▓▓▓▓▓▓▓▓▓▓▓ 16bit     │ -> │ ▒▒▒▒ 8bit  │ -> │ ░░ 4bit │
+└─────────────┘    └────────────────────────┘    └────────────┘    └─────────┘
 """
 
 # if not os.environ.get("PYTHON_GIL", None):
@@ -52,24 +47,30 @@ if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import os.path  # noqa: E402
-import random  # noqa: E402
 from os.path import isdir, join  # noqa: E402
-from typing import Any, Dict, List, Optional, Type, Union  # noqa: E402
+from typing import Dict, List, Optional, Union  # noqa: E402
 
-import numpy  # noqa: E402
 import torch  # noqa: E402
-from huggingface_hub import list_repo_files  # noqa: E402
-from tokenicer import Tokenicer  # noqa: E402
-from transformers import AutoConfig, GenerationConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
+from packaging.version import Version  # noqa: E402
+from transformers import AutoConfig, PreTrainedTokenizerBase  # noqa: E402
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
-from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from ..quantization import METHOD, QUANT_CONFIG_FILENAME  # noqa: E402
-from ..utils import BACKEND  # noqa: E402
-from ..utils.eval import EVAL  # noqa: E402
+from ..nn_modules.qlinear.torch import TorchLinear  # noqa: E402
+from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
+from ..utils import BACKEND, PROFILE  # noqa: E402
+from ..utils.backend import normalize_backend, normalize_profile  # noqa: E402
+from ..utils.hf import (  # noqa: E402
+    get_hf_gguf_load_kwargs,
+    normalize_model_id_or_path_for_hf_gguf,
+    normalize_torch_dtype_kwarg,
+    resolve_trust_remote_code,
+)
+from ..utils.hub import list_repo_files  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
-from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
-from .base import BaseQModel, QuantizeConfig  # noqa: E402
+from ..utils.torch import torch_empty_cache  # noqa: E402
+from .base import BaseQModel  # noqa: E402
+from .definitions.afmoe import AfMoeQModel  # noqa: E402
 from .definitions.apertus import ApertusQModel  # noqa: E402
 from .definitions.baichuan import BaiChuanQModel  # noqa: E402
 from .definitions.bailing_moe import BailingMoeQModel  # noqa: E402
@@ -82,15 +83,26 @@ from .definitions.dbrx_converted import DbrxConvertedQModel  # noqa: E402
 from .definitions.decilm import DeciLMQModel  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
+from .definitions.dots1 import Dots1QModel  # noqa: E402
 from .definitions.dream import DreamQModel  # noqa: E402
 from .definitions.ernie4_5 import Ernie4_5QModel  # noqa: E402
 from .definitions.ernie4_5_moe import Ernie4_5_MoeQModel  # noqa: E402
+from .definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel  # noqa: E402
 from .definitions.exaone import ExaOneQModel  # noqa: E402
+from .definitions.exaone4 import Exaone4QModel  # noqa: E402
 from .definitions.falcon_h1 import FalconH1QModel  # noqa: E402
+from .definitions.falcon_mamba import FalconMambaQModel  # noqa: E402
 from .definitions.gemma2 import Gemma2QModel  # noqa: E402
 from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel  # noqa: E402
+from .definitions.gemma3n import Gemma3nForConditionalGenerationGPTQ, Gemma3nTextQModel  # noqa: E402
+from .definitions.gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel  # noqa: E402
 from .definitions.glm import GlmQModel  # noqa: E402
 from .definitions.glm4_moe import GLM4MoEGPTQ  # noqa: E402
+from .definitions.glm4_moe_lite import Glm4MoeLiteQModel  # noqa: E402
+from .definitions.glm4v import Glm4vGPTQ  # noqa: E402
+from .definitions.glm_moe_dsa import GlmMoeDsaQModel  # noqa: E402
+from .definitions.glm_ocr import GlmOCRGPTQ  # noqa: E402
+from .definitions.glmasr import GlmASRGPTQ  # noqa: E402
 from .definitions.gpt2 import GPT2QModel  # noqa: E402
 from .definitions.gpt_bigcode import GptBigCodeQModel  # noqa: E402
 from .definitions.gpt_neo import GptNeoQModel  # noqa: E402
@@ -103,8 +115,11 @@ from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
+from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
+from .definitions.laguna import LagunaQModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
+from .definitions.llada2 import LLaDA2MoeQModel
 from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
@@ -112,7 +127,10 @@ from .definitions.longcat_flash import LongCatFlashQModel  # noqa: E402
 from .definitions.mimo import MimoQModel  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCpm3QModel  # noqa: E402
+from .definitions.minicpm_o import MiniCPMOQModel  # noqa: E402
+from .definitions.minicpm_v import MiniCPMVQModel  # noqa: E402
 from .definitions.minimax_m2 import MiniMaxM2GPTQ  # noqa: E402
+from .definitions.mistral3 import Mistral3GPTQ
 from .definitions.mixtral import MixtralQModel  # noqa: E402
 from .definitions.mllama import MLlamaQModel  # noqa: E402
 from .definitions.mobilellm import MobileLLMQModel  # noqa: E402
@@ -140,13 +158,18 @@ from .definitions.qwen3_vl import Qwen3_VLQModel
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
+from .definitions.voxtral import VoxtralGPTQ  # noqa: E402
 from .definitions.xverse import XverseQModel  # noqa: E402
 
 
-# make quants and inference more determinisitc
-torch.manual_seed(787)
-random.seed(787)
-numpy.random.seed(787)
+TRANSFORMERS_SUPPORTS_QWEN3_5 = Version(TRANSFORMERS_VERSION) >= Version("5.2.0")
+if TRANSFORMERS_SUPPORTS_QWEN3_5:
+    from .definitions.qwen3_5 import Qwen3_5QModel  # noqa: E402
+    from .definitions.qwen3_5_moe import Qwen3_5_MoeQModel  # noqa: E402
+else:
+    Qwen3_5QModel = None
+    Qwen3_5_MoeQModel = None
+
 
 MODEL_MAP = {
     "apertus": ApertusQModel,
@@ -156,6 +179,7 @@ MODEL_MAP = {
     "gpt_neo": GptNeoQModel,
     "kimi_k2": DeepSeekV3QModel, # 100% DeepSeekV3QModel clone
     "klear": KlearQModel,
+    "laguna": LagunaQModel,
     "gpt_neox": GPTNeoXQModel,
     "gptj": GptJQModel,
     "gpt2": GPT2QModel,
@@ -166,7 +190,12 @@ MODEL_MAP = {
     "chatglm": ChatGLMQModel,
     "glm": GlmQModel,
     "glm4": GlmQModel,
+    "glm4v": Glm4vGPTQ,
+    "glmasr": GlmASRGPTQ,
+    "glm_ocr": GlmOCRGPTQ,
     "glm4_moe": GLM4MoEGPTQ,
+    "glm4_moe_lite": Glm4MoeLiteQModel,
+    "glm_moe_dsa": GlmMoeDsaQModel,
     "gpt_bigcode": GptBigCodeQModel,
     "codegen": CodeGenQModel,
     "cohere": LlamaQModel, # 100% llama clone
@@ -174,9 +203,11 @@ MODEL_MAP = {
     "refinedWebModel": RwgQModel,
     "refinedWeb": RwgQModel,
     "falcon": RwgQModel,
+    "falcon_mamba": FalconMambaQModel,
     "baichuan": BaiChuanQModel,
     "internlm": InternLMQModel,
     "internlm2": InternLM2QModel,
+    "internvl_chat": InternVLChatQModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone
     "yi": LlamaQModel, # 100% llama clone
@@ -194,6 +225,10 @@ MODEL_MAP = {
     "gemma2": Gemma2QModel,
     "gemma3_text": Gemma3QModel,
     "gemma3": Gemma3ForConditionalGenerationGPTQ,
+    "gemma3n_text": Gemma3nTextQModel,
+    "gemma3n": Gemma3nForConditionalGenerationGPTQ,
+    "gemma4_text": Gemma4TextQModel,
+    "gemma4": Gemma4ForConditionalGenerationGPTQ,
     "phi": PhiQModel,
     "phi3": Phi3QModel,
     "phi4mm": Phi4MMGPTQ,
@@ -201,6 +236,8 @@ MODEL_MAP = {
     "mpt": MptQModel,
     "minicpm": MiniCPMGPTQ,
     "minicpm3": MiniCpm3QModel,
+    "minicpmo": MiniCPMOQModel,
+    "minicpmv": MiniCPMVQModel,
     "minimax": MiniMaxM2GPTQ,
     "minimax_m2": MiniMaxM2GPTQ,
     "qwen2_moe": Qwen2MoeQModel,
@@ -217,7 +254,9 @@ MODEL_MAP = {
     "dbrx_converted": DbrxConvertedQModel,
     "deepseek_v2": DeepSeekV2QModel,
     "deepseek_v3": DeepSeekV3QModel,
+    "dots1": Dots1QModel,
     "exaone": ExaOneQModel,
+    "exaone4": Exaone4QModel,
     "grinmoe": GrinMoeQModel,
     "mllama": MLlamaQModel,
     "marin": Qwen3QModel,
@@ -235,6 +274,8 @@ MODEL_MAP = {
     "gpt_pangu": PanguAlphaQModel,
     "ernie4_5": Ernie4_5QModel,
     "ernie4_5_moe": Ernie4_5_MoeQModel,
+    "ernie4_5_moe_vl": Ernie4_5_VLMoeQModel, # Backward Compatibility alias
+    "ernie4_5_vl_moe": Ernie4_5_VLMoeQModel,
     "seed_oss": LlamaQModel, # 100% llama clone
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
@@ -242,9 +283,49 @@ MODEL_MAP = {
     "nemotron_h": NemotronHQModel,
     "bailing_moe": BailingMoeQModel,
     "lfm2_moe": LFM2MoeQModel,
+    "llada2_moe": LLaDA2MoeQModel,
+    "mistral3": Mistral3GPTQ,
+    "afmoe": AfMoeQModel,
+    "voxtral": VoxtralGPTQ,
 }
 
+if Qwen3_5QModel is not None:
+    MODEL_MAP["qwen3_5"] = Qwen3_5QModel
+    MODEL_MAP["qwen3_5_text"] = Qwen3_5QModel
+
+if Qwen3_5_MoeQModel is not None:
+    MODEL_MAP["qwen3_5_moe"] = Qwen3_5_MoeQModel
+
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
+
+
+def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
+    """Return the first activation-quantization field that makes this config unsupported.
+
+    GPT-QModel can load weight-only quantized checkpoints through the Transformers
+    surface, but it does not currently implement activation-quantized runtime
+    semantics. This helper keeps the rejection logic in one place for both
+    ModelOpt-style grouped configs and flatter HF quantization payloads.
+    """
+
+    config_groups = quantization_config.get("config_groups")
+    if isinstance(config_groups, dict):
+        for group_cfg in config_groups.values():
+            if not isinstance(group_cfg, dict):
+                continue
+            input_activations = group_cfg.get("input_activations")
+            if isinstance(input_activations, dict) and input_activations:
+                return "input_activations"
+
+    kv_cache_scheme = quantization_config.get("kv_cache_scheme")
+    if isinstance(kv_cache_scheme, dict) and kv_cache_scheme:
+        return "kv_cache_scheme"
+
+    for key in ("input_activations", "activation_quantization", "activations"):
+        value = quantization_config.get(key)
+        if isinstance(value, dict) and value:
+            return key
+    return None
 
 
 def _is_supported_quantization_config(config: AutoConfig) -> bool:
@@ -252,27 +333,93 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     if not isinstance(quantization_config, dict):
         return False
 
+    # Fail fast before model selection so activation-quantized checkpoints do
+    # not accidentally proceed down a weight-only loader path.
+    unsupported_mode = _activation_quantization_mode(quantization_config)
+    if unsupported_mode is not None:
+        log.error("GPT-QModel currently does not support loading of activation quantized models")
+        raise ValueError(
+            "GPT-QModel currently does not support loading of activation quantized models. "
+            f"Detected unsupported metadata: {unsupported_mode}."
+        )
+
     quant_format = quantization_config.get("quant_format")
     if isinstance(quant_format, str) and quant_format.lower() in (
         METHOD.GPTQ,
+        METHOD.GGUF,
+        METHOD.FP8,
+        METHOD.BITSANDBYTES,
         METHOD.AWQ,
+        METHOD.PARO,
         METHOD.QQQ,
+        METHOD.EXL3,
     ):
         return True
 
-    quant_method = quantization_config.get("quant_method")
-    if isinstance(quant_method, str) and quant_method.lower() in (
+    method = quantization_config.get("method", quantization_config.get("quant_method"))
+    if isinstance(method, str) and method.lower() in (
         METHOD.GPTQ,
+        METHOD.GGUF,
+        METHOD.FP8,
+        METHOD.BITSANDBYTES,
         METHOD.AWQ,
+        METHOD.PARO,
         METHOD.QQQ,
+        METHOD.EXL3,
     ):
         return True
 
     return False
 
 
-def check_and_get_model_definition(model_dir, trust_remote_code=False):
-    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
+@contextmanager
+def _hide_unsupported_quantization_config_for_eval(model):
+    config = getattr(model, "config", None)
+    if config is None:
+        yield
+        return
+
+    quantization_config = getattr(config, "quantization_config", None)
+    if not isinstance(quantization_config, dict):
+        yield
+        return
+
+    try:
+        from transformers.quantizers import AutoQuantizationConfig
+
+        AutoQuantizationConfig.from_dict(dict(quantization_config))
+    except Exception:
+        pass
+    else:
+        yield
+        return
+
+    setattr(config, "quantization_config", None)
+    try:
+        yield
+    finally:
+        setattr(config, "quantization_config", quantization_config)
+
+
+@contextmanager
+def _hide_unsupported_quantization_config_for_lm_eval(model):
+    with _hide_unsupported_quantization_config_for_eval(model):
+        yield
+
+
+def _get_config_load_kwargs(kwargs: dict) -> dict:
+    return get_hf_gguf_load_kwargs(kwargs)
+
+
+def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_load_kwargs):
+    if "gguf_file" not in config_load_kwargs:
+        model_dir = normalize_model_id_or_path_for_hf_gguf(
+            model_dir,
+            config_load_kwargs,
+            api_name="check_and_get_model_definition",
+        )
+    trust_remote_code = resolve_trust_remote_code(model_dir, trust_remote_code=trust_remote_code)
+    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
     # if model_type is not supported, use BaseQModel, will use auto_detect_module_tree to generate module tree
@@ -281,12 +428,13 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False):
 
     return MODEL_MAP[model_type]
 
+
 class GPTQModel:
     def __init__(self):
         raise EnvironmentError(
-            "GPTQModel is not designed to be instantiated\n"
-            "use `GPTQModel.from_pretrained` to load pretrained model and prepare for quantization via `.quantize()`.\n"
-            "use `GPTQModel.from_quantized` to inference with post-quantized model."
+            "GPT-QModel is not designed to be instantiated\n"
+            "use `from_pretrained()` to load a pretrained model and prepare for quantization via `.quantize()`.\n"
+            "use `from_quantized()` for inference with a post-quantized model."
         )
 
     @classmethod
@@ -297,32 +445,50 @@ class GPTQModel:
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, torch.device]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
+            profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             **kwargs,
     ):
+        model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
+            model_id_or_path,
+            kwargs,
+            api_name="GPTQModel.load",
+        )
         if isinstance(model_id_or_path, str):
             model_id_or_path = model_id_or_path.strip()
+        requested_trust_remote_code = trust_remote_code
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
 
         # normalize config to cfg instance
         if isinstance(quantize_config, Dict):
             quantize_config = QuantizeConfig(**quantize_config)
 
-        if isinstance(backend, str):
-            backend = BACKEND(backend)
+        backend = normalize_backend(backend)
+        profile = normalize_profile(profile)
 
         is_gptqmodel_quantized = False
-        model_cfg = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-        if _is_supported_quantization_config(model_cfg):
+        treat_as_local_path = isinstance(model_id_or_path, str) and (
+            isdir(model_id_or_path) or os.path.isabs(model_id_or_path)
+        )
+
+        model_cfg = None
+        if not (treat_as_local_path and not isdir(model_id_or_path)):
+            model_cfg = AutoConfig.from_pretrained(
+                model_id_or_path,
+                trust_remote_code=trust_remote_code,
+                **_get_config_load_kwargs(kwargs),
+            )
+
+        if model_cfg is not None and _is_supported_quantization_config(model_cfg):
             # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
             is_gptqmodel_quantized = True
         else:
             # TODO FIX ME...not decoded to check if quant method is compatible or quantized by gptqmodel
             for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
-                if isdir(model_id_or_path):  # Local
-                    if os.path.exists(join(model_id_or_path, name)):
+                if treat_as_local_path:  # Local paths should never trigger remote Hub lookups
+                    if isdir(model_id_or_path) and os.path.exists(join(model_id_or_path, name)):
                         is_gptqmodel_quantized = True
                         break
-
                 else:  # Remote
                     files = list_repo_files(repo_id=model_id_or_path)
                     for f in files:
@@ -337,6 +503,7 @@ class GPTQModel:
                 device=device,
                 backend=backend,
                 trust_remote_code=trust_remote_code,
+                tokenizer_trust_remote_code=requested_trust_remote_code,
                 **kwargs,
             )
         else:
@@ -345,7 +512,10 @@ class GPTQModel:
                 quantize_config=quantize_config,
                 device_map=device_map,
                 device=device,
+                backend=backend,
+                profile=profile,
                 trust_remote_code=trust_remote_code,
+                tokenizer_trust_remote_code=requested_trust_remote_code,
                 **kwargs,
             )
 
@@ -361,10 +531,33 @@ class GPTQModel:
             cls,
             model_id_or_path: str,
             quantize_config: QuantizeConfig,
+            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseQModel:
-        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
+            model_id_or_path,
+            model_init_kwargs,
+            api_name="GPTQModel.from_pretrained",
+        )
+        normalize_torch_dtype_kwarg(
+            model_init_kwargs,
+            api_name="GPTQModel.from_pretrained",
+        )
+        backend = normalize_backend(backend)
+        profile = normalize_profile(profile)
+        requested_trust_remote_code = trust_remote_code
+        tokenizer_trust_remote_code = model_init_kwargs.pop(
+            "tokenizer_trust_remote_code",
+            requested_trust_remote_code,
+        )
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
+        config = AutoConfig.from_pretrained(
+            model_id_or_path,
+            trust_remote_code=trust_remote_code,
+            **_get_config_load_kwargs(model_init_kwargs),
+        )
         if _is_supported_quantization_config(config):
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
@@ -373,14 +566,21 @@ class GPTQModel:
 
         if quantize_config and quantize_config.dynamic:
             log.warn(
-                "GPTQModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
+                "GPT-QModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
 
-        model_definition = check_and_get_model_definition(model_id_or_path, trust_remote_code)
+        model_definition = check_and_get_model_definition(
+            model_id_or_path,
+            trust_remote_code,
+            **_get_config_load_kwargs(model_init_kwargs),
+        )
 
         return model_definition.from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,
             quantize_config=quantize_config,
+            backend=backend,
+            profile=profile,
             trust_remote_code=trust_remote_code,
+            tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             **model_init_kwargs,
         )
 
@@ -395,14 +595,29 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **kwargs,
     ) -> BaseQModel:
+        model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
+            model_id_or_path,
+            kwargs,
+            api_name="GPTQModel.from_quantized",
+        )
+        normalize_torch_dtype_kwarg(
+            kwargs,
+            api_name="GPTQModel.from_quantized",
+        )
+        requested_trust_remote_code = trust_remote_code
+        tokenizer_trust_remote_code = kwargs.pop("tokenizer_trust_remote_code", requested_trust_remote_code)
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
         # normalize adapter to instance
         adapter = normalize_adapter(adapter)
 
         print(f"from_quantized: adapter: {adapter}")
-        model_definition = check_and_get_model_definition(model_id_or_path, trust_remote_code)
+        model_definition = check_and_get_model_definition(
+            model_id_or_path,
+            trust_remote_code,
+            **_get_config_load_kwargs(kwargs),
+        )
 
-        if isinstance(backend, str):
-            backend = BACKEND(backend)
+        backend = normalize_backend(backend)
 
         return model_definition.from_quantized(
             model_id_or_path=model_id_or_path,
@@ -410,214 +625,14 @@ class GPTQModel:
             device=device,
             backend=backend,
             trust_remote_code=trust_remote_code,
+            tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             adapter=adapter,
             **kwargs,
         )
 
-    @classmethod
-    def eval(
-            cls,
-            model_or_id_or_path: str=None,
-            tokenizer: Union[PreTrainedTokenizerBase, Tokenicer]=None,
-            tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS], EVAL.MMLU_PRO, List[EVAL.MMLU_PRO]] = None, # set to None to fix mutable warning
-            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS],Type[EVAL.MMLU_PRO]] = EVAL.LM_EVAL,
-            batch_size: Union[int, str] = 1,
-            trust_remote_code: bool = False,
-            output_path: Optional[str] = None,
-            llm_backend: str = 'gptqmodel',
-            backend: BACKEND = BACKEND.AUTO, # gptqmodel arg only
-            random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
-            model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
-            ntrain: int = 1,  # only for framework=EVAL.MMLUPRO
-            **args
-    ):
-        from peft import PeftModel
-        if model_args is None:
-            model_args = {}
-        if tasks is None:
-            if framework == EVAL.LM_EVAL:
-                tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
-            elif framework == EVAL.MMLU_PRO:
-                tasks = [EVAL.MMLU_PRO.MATH]
-            else:
-                tasks = [EVAL.EVALPLUS.HUMAN]
-
-        elif not isinstance(tasks, List):
-            tasks = [tasks]
-
-        if framework is None:
-            raise ValueError("Eval parameter: `framework` cannot be set to None")
-
-        if not isinstance(tasks, list):
-            raise ValueError("Eval parameter: `tasks` must be of List type")
-
-        if llm_backend not in ['gptqmodel', 'vllm']:
-            raise ValueError('Eval framework support llm_backend: [gptqmodel, vllm]')
-
-        if llm_backend == "vllm":
-            if "tensor_parallel_size" not in model_args:
-                try:
-                    cuda_devices = torch.cuda.device_count() if torch.cuda.is_available() else 0
-                except Exception:
-                    cuda_devices = 0
-                if cuda_devices:
-                    model_args["tensor_parallel_size"] = cuda_devices
-            if "gpu_memory_utilization" not in model_args:
-                model_args["gpu_memory_utilization"] = 0.90
-
-        if isinstance(model_or_id_or_path, str):
-            load_backend = backend
-            load_kwargs = {}
-
-            if llm_backend == "vllm":
-                disallowed_keys = {"pretrained", "tokenizer", "gptqmodel", "trust_remote_code", "backend", "model_id_or_path"}
-                load_kwargs = {k: v for k, v in model_args.items() if k not in disallowed_keys}
-
-            backend_name = load_backend.value if isinstance(load_backend, BACKEND) else str(load_backend)
-            log.info(f"Eval: loading using backend = `{backend_name}`")
-            model = GPTQModel.load(
-                model_id_or_path=model_or_id_or_path,
-                backend=load_backend,
-                trust_remote_code=trust_remote_code,
-                **load_kwargs,
-            )
-            model_id_or_path = model_or_id_or_path
-        elif isinstance(model_or_id_or_path, BaseQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
-            model = model_or_id_or_path
-            model_id_or_path = model.config.name_or_path  #
-        else:
-            raise ValueError(f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`")
-
-        if tokenizer is None:
-            if isinstance(model, BaseQModel):
-                tokenizer = model.tokenizer
-            elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
-                tokenizer = Tokenicer.load(model_id_or_path.strip())
-
-        if tokenizer is None:
-            raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
-
-        if llm_backend == "gptqmodel": # vllm loads tokenizer
-            model_args["tokenizer"] = tokenizer
-
-        if framework == EVAL.LM_EVAL:
-            from lm_eval.utils import make_table  # hack: circular import
-
-            for task in tasks:
-                if task not in EVAL.get_task_enums():
-                    raise ValueError(f"Eval.lm_eval supported `tasks`: `{EVAL.get_all_tasks_string()}`, actual = `{task}`")
-
-            model_name = "hf" if llm_backend == "gptqmodel" else llm_backend
-
-            if llm_backend == "gptqmodel":
-                model_args["gptqmodel"] = True
-            model_args["pretrained"] = model_id_or_path
-
-            try:
-                from lm_eval import simple_evaluate
-                from lm_eval.models.huggingface import HFLM
-            except BaseException:
-                raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
-
-            if llm_backend == "gptqmodel" and model is not None:
-                model_name = HFLM(
-                    pretrained=model,
-                    batch_size=batch_size,
-                    trust_remote_code=trust_remote_code,
-                )
-
-            gen_kwargs = args.pop("gen_kwargs", None)
-
-            # use model.generation_config whenever possible
-            if gen_kwargs is None:
-                # TODO: move to utils
-                if hasattr(model, "generation_config") and isinstance(model.generation_config, GenerationConfig):
-                    gen_dict = {
-                        "do_sample": model.generation_config.do_sample,
-                        "temperature": model.generation_config.temperature,
-                        "top_k": model.generation_config.top_k,
-                        "top_p": model.generation_config.top_p,
-                        "min_p": model.generation_config.min_p,
-
-                    }
-                    gen_kwargs = ','.join(f"{key}={value}" for key, value in gen_dict.items() if value not in ["", {}, None, []])
-                else:
-                    gen_kwargs = "temperature=0.0,top_k=50" # default
-
-            log.info(f"LM-EVAL: `gen_kwargs` = `{gen_kwargs}`")
-
-            # lm-eval has very low scores if apply_chat_template is enabled
-            apply_chat_template = args.pop("apply_chat_template", False) # args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False)
-            log.info(f"LM-EVAL: `apply_chat_template` = `{apply_chat_template}`")
-
-            results = simple_evaluate(
-                model=model_name,
-                model_args=model_args,
-                tasks=[task.value for task in tasks],
-                batch_size=batch_size,
-                apply_chat_template=apply_chat_template,
-                gen_kwargs=gen_kwargs,
-                random_seed=random_seed,
-                numpy_random_seed=random_seed,
-                torch_random_seed=random_seed,
-                fewshot_random_seed=random_seed,
-                **args,
-            )
-
-            if results is None:
-                raise ValueError('lm_eval run fail, check your code!!!')
-
-            print('--------lm_eval Eval Result---------')
-            print(make_table(results))
-            if "groups" in results:
-                print(make_table(results, "groups"))
-            print('--------lm_eval Result End---------')
-            return results
-        elif framework == EVAL.EVALPLUS:
-            for task in tasks:
-                if task not in EVAL.get_task_enums():
-                    raise ValueError(f"evalplus support tasks: {EVAL.get_all_tasks_string()}")
-            from ..utils.eval import evalplus, evalplus_make_table
-
-            results = {}
-            for task in tasks:
-                base_formatted, plus_formatted, result_path = evalplus(
-                    model=model_id_or_path,
-                    dataset=task.value,
-                    batch=batch_size,
-                    trust_remote_code=trust_remote_code,
-                    output_file=output_path,
-                    backend=llm_backend
-                )
-                results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted,
-                                       "results_path": result_path}
-            print('--------evalplus Eval Result---------')
-            evalplus_make_table(results)
-            print('--------evalplus Result End---------')
-            return results
-        elif framework == EVAL.MMLU_PRO:
-            for task in tasks:
-                if task not in EVAL.get_task_enums():
-                    raise ValueError(f"eval support tasks: {EVAL.get_all_tasks_string()}")
-            from ..utils.mmlupro import mmlupro
-            selected_subjects = ",".join(tasks)
-            results = mmlupro(model,
-                              tokenizer,
-                              save_dir=output_path,
-                              seed=random_seed,
-                              selected_subjects=selected_subjects,
-                              ntrain=ntrain,
-                              batch_size=batch_size)
-
-            print('--------MMLUPro Eval Result---------')
-            print(results)
-            print('--------MMLUPro Result End---------')
-            return results
-        else:
-            raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS, EVAL.MMLUPRO")
-
     @staticmethod
     def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
         # load config
         config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
@@ -626,8 +641,25 @@ class GPTQModel:
 
         gptq_config = config.quantization_config
 
+        method = gptq_config.get("method", gptq_config.get("quant_method", ""))
+        normalized_method = str(method).lower()
+        if normalized_method == METHOD.GGUF.value:
+            backend = BACKEND.GGUF_TORCH
+        elif normalized_method == METHOD.BITSANDBYTES.value:
+            backend = BACKEND.BITSANDBYTES
+        elif normalized_method == METHOD.AWQ.value:
+            backend = BACKEND.AWQ_TORCH
+        elif normalized_method == METHOD.PARO.value:
+            backend = BACKEND.PAROQUANT_CUDA
+        elif normalized_method == METHOD.FP8.value:
+            backend = BACKEND.FP8_TORCH
+        elif normalized_method == METHOD.EXL3.value:
+            backend = BACKEND.EXL3_TORCH
+        else:
+            backend = BACKEND.GPTQ_TORCH
+
         # load gptq model
-        gptq_model = GPTQModel.load(model_id_or_path, backend=BACKEND.TORCH)
+        gptq_model = GPTQModel.load(model_id_or_path, backend=backend)
 
         if format == "mlx":
             try:
@@ -653,38 +685,6 @@ class GPTQModel:
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
 
-    # Use HfAPI and not Transformers to do upload
-    @staticmethod
-    def push_to_hub(repo_id: str,
-                    quantized_path: str,  # saved local directory path
-                    private: bool = False,
-                    exists_ok: bool = False,  # set to true if repo already exists
-                    token: Optional[str] = None,
-                    ):
-
-        if not quantized_path:
-            raise RuntimeError("You must pass quantized model path as str to push_to_hub.")
-
-        if not repo_id:
-            raise RuntimeError("You must pass repo_id as str to push_to_hub.")
-
-        from huggingface_hub import HfApi
-        repo_type = "model"
-
-        api = HfApi()
-        # if repo does not exist, create it
-        try:
-            api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token)
-        except Exception:
-            api.create_repo(repo_id=repo_id, repo_type=repo_type, token=token, private=private, exist_ok=exists_ok)
-
-        # upload the quantized save folder
-        api.upload_large_folder(
-            folder_path=quantized_path,
-            repo_id=repo_id,
-            repo_type=repo_type,
-        )
-
     class adapter:
         @classmethod
         def generate(
@@ -702,6 +702,7 @@ class GPTQModel:
             # pass-through vars for load()
             trust_remote_code: bool = False,
             dtype: Optional[Union[str, torch.dtype]] = None,
+            device: Optional[Union[str, torch.device]] = None,
         ):
             if not adapter or not isinstance(adapter, Lora):
                 raise ValueError(f"Adapter: expected `adapter` type to be `Lora`: actual = `{adapter}`.")
@@ -711,14 +712,14 @@ class GPTQModel:
             log.info("Model: Quant Model Loading...")
             quantized_model = GPTQModel.load(
                 model_id_or_path=quantized_model_id_or_path,
-                backend=BACKEND.TORCH,
-                device=CPU,
+                backend=BACKEND.GPTQ_TORCH,
+                device=device,
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
             )
 
             qcfg = quantized_model.quantize_config
-            qModules: Dict[str, TorchQuantLinear] = find_modules(module=quantized_model.model, layers=[TorchQuantLinear])
+            qModules: Dict[str, TorchLinear] = find_modules(module=quantized_model.model, layers=[TorchLinear])
             # for name, module in qModules.items():
             #     quantized_weights[name] = module.dequantize_weight()
             del quantized_model
@@ -728,10 +729,10 @@ class GPTQModel:
             model = GPTQModel.load(
                 model_id_or_path=model_id_or_path,
                 quantize_config=qcfg,
-                backend=BACKEND.TORCH,
+                backend=BACKEND.GPTQ_TORCH,
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
-                device=CPU,
+                device=device,
             )
 
             log.info("Model: Adapter generation started")

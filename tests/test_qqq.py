@@ -11,10 +11,11 @@ import tempfile
 import unittest
 
 from datasets import load_dataset
+from models.model_test import ModelTest
 from parameterized import parameterized
 from transformers import AutoTokenizer
 
-from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
+from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.torch import torch_empty_cache
 
@@ -43,6 +44,7 @@ class TestGroupSize(unittest.TestCase):
     def test_load_group_128(self):
         model = GPTQModel.load(
             "/monster/data/model/QQQ-Llama-3-8b-g128",
+            device="cuda"
         )
 
         self.assert_qqq_linear(model)
@@ -81,12 +83,18 @@ class TestGroupSize(unittest.TestCase):
 
             model = GPTQModel.load(
                 tmp_dir_name,
+                device="cuda"
             )
 
             self.assert_qqq_linear(model)
 
-            tokens = model.generate("The capital city of France is named", min_new_tokens=128, max_new_tokens=128)[0]
-            result = model.tokenizer.decode(tokens)
+            result = ModelTest.generate_stable_with_limit(
+                model,
+                model.tokenizer,
+                "The capital city of France is named",
+                min_new_tokens=128,
+                max_new_tokens=128,
+            )
             print(f"BACKEND: {BACKEND.QQQ}, Result: {result}")
             if "paris" not in result.lower() and "city" not in result.lower() and "country" not in result.lower():
                 raise AssertionError(" `paris` not found in `result`")
@@ -94,7 +102,7 @@ class TestGroupSize(unittest.TestCase):
     def assert_qqq_linear(self, model):
         has_qqq = False
         for _, module in model.named_modules():
-            linear = QQQQuantLinear
+            linear = QQQLinear
             if isinstance(module, linear):
                 has_qqq = True
                 break

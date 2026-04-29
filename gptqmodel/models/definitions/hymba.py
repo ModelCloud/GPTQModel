@@ -4,13 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class HymbaQModel(BaseQModel):
     supports_desc_act = [False]
     require_trust_remote_code = True
     require_monkeypatch = True
-    require_pkgs_version = ["tiktoken>=0.7.0",
+    require_pkgs = ["tiktoken>=0.7.0",
                             "sentencepiece>=0.2.0",
                             "protobuf>=5.28.3",
                             "ninja>=1.11.1.1",
@@ -21,6 +22,9 @@ class HymbaQModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.final_layernorm"
 
+    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
+    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
+
     module_tree = [
         "model",
         "layers",
@@ -29,7 +33,7 @@ class HymbaQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "mamba": ("in_proj:0", "out_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "moe": {
+            "moe:moe": {
                 "experts": {
                     "0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 }

@@ -25,7 +25,6 @@ from gptqmodel.models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from gptqmodel.quantization.config import QuantizeConfig
-from gptqmodel.utils.eval import EVAL
 from gptqmodel.utils.torch import torch_empty_cache
 
 
@@ -47,13 +46,13 @@ def _is_free_threaded() -> bool:
 class TestMultiVsSingleGPU(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.3311, "floor_pct": 0.05},
             "acc_norm": {"value": 0.3549, "floor_pct": 0.05},
         },
     }
-    GPTQA = False
+    GPTAQ = None
     DEBUG = True
     ACT_GROUP_AWARE = False
     DESC_ACT = True
@@ -168,7 +167,7 @@ class TestMultiVsSingleGPU(ModelTest):
             group_size=self.GROUP_SIZE,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
-            fail_safe=self.FAIL_SAFE,
+            fallback=self.FALLBACK,
             sym=self.SYM,
             v2=self.V2,
             adapter=self.EORA,
@@ -353,8 +352,8 @@ class TestMultiVsSingleGPU(ModelTest):
 
         original_preprocess = GPTQProcessor.preprocess
 
-        def wrapped_preprocess(self, module, fail_safe=False):  # type: ignore[override]
-            result = original_preprocess(self, module, fail_safe)
+        def wrapped_preprocess(self, module, fallback=None):  # type: ignore[override]
+            result = original_preprocess(self, module, fallback=fallback)
             task = self.tasks.get(module.name)
             if task is not None:
                 primary_handles[module.name] = hex(id(task))

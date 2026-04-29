@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from types import SimpleNamespace
+
 from ..base import BaseQModel
 from . import LlamaQModel
 
@@ -10,9 +12,39 @@ from . import LlamaQModel
 class Gemma3QModel(LlamaQModel):
     pass
 
+
 class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
     support_batch_quantize = False
     pre_lm_head_norm_module = "model.language_model.norm"
+    HF_CONVERSION_MAP_REVERSED = (
+        # Gemma 3 shells expose `model.vision_tower.*`, but checkpoint tensors
+        # live under `vision_tower.vision_model.*`, so restore that missing hop first.
+        SimpleNamespace(
+            source_patterns=[r"^model\.vision_tower\.(?!vision_model\.)(.+)$"],
+            target_patterns=[r"^vision_tower.vision_model.\1"],
+            operations=[],
+        ),
+        SimpleNamespace(
+            source_patterns=[r"model\.language_model"],
+            target_patterns=[r"^language_model.model"],
+            operations=[],
+        ),
+        SimpleNamespace(
+            source_patterns=[r"lm_head"],
+            target_patterns=[r"^language_model.lm_head"],
+            operations=[],
+        ),
+        SimpleNamespace(
+            source_patterns=[r"model\.vision_tower"],
+            target_patterns=[r"^vision_tower"],
+            operations=[],
+        ),
+        SimpleNamespace(
+            source_patterns=[r"model\.multi_modal_projector"],
+            target_patterns=[r"^multi_modal_projector"],
+            operations=[],
+        ),
+    )
 
     module_tree = [
         "model",

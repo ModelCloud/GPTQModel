@@ -15,6 +15,8 @@ import torch  # noqa: E402
 from logbar import LogBar  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
+from gptqmodel.utils.torch import TORCH_GTE_210
+
 
 log = LogBar.shared()
 
@@ -44,11 +46,15 @@ class Test(unittest.TestCase):
         ]
     )
     def test_linalg_eigh_magma(self, dtype: torch.dtype, size: int):
-        # force `magma` backend for linalg
-        original_backend = torch.backends.cuda.preferred_linalg_library()
-        torch.backends.cuda.preferred_linalg_library(backend="magma")
+        # force `magma` backend for linalg when available and allowed
+        restore_backend = None
+        preferred_linalg_library = getattr(torch.backends.cuda, "preferred_linalg_library", None)
+        if not TORCH_GTE_210 and callable(preferred_linalg_library):
+            restore_backend = preferred_linalg_library()
+            preferred_linalg_library(backend="magma")
 
         matrix = torch.randn([size, size], device=ROCM, dtype=dtype)
         torch.linalg.eigh(matrix)
 
-        torch.backends.cuda.preferred_linalg_library(backend=original_backend)
+        if restore_backend is not None:
+            preferred_linalg_library(backend=restore_backend)

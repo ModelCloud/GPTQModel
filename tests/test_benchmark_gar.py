@@ -4,9 +4,9 @@ import time
 
 import pytest
 import torch
-from tabulate import tabulate
 
 from gptqmodel.quantization import gar, gar_ref
+from gptqmodel.utils.logger import render_table
 
 
 def _benchmark_fn(label, fn, device, warmup_runs=3, measured_runs=10):
@@ -103,7 +103,7 @@ def test_benchmark_gar_cuda():
     ]
 
     headers = ["version", "mean_time_ms", "std_time_ms", "mean_mem_mb", "max_mem_mb"]
-    print(tabulate(table, headers=headers, tablefmt="github"))
+    print(render_table(table, headers=headers, tablefmt="github"))
     print(
         f"Speedup (original/optimized): {speedup:.2f}x; "
         f"Mean memory delta (optimized - original): {mem_delta:.2f} MB"

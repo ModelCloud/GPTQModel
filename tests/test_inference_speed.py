@@ -9,6 +9,7 @@ import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
+import pytest  # noqa: E402
 from inference_speed import InferenceSpeed  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
@@ -22,23 +23,21 @@ GPU: 4090
 
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 748),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 493),
-(InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 717),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 775),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 296),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 295),
 (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1474),
-(InferenceSpeed.NATIVE_MODEL_ID, BACKEND.IPEX, 48),
 '''
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 class TestInferenceSpeed(InferenceSpeed):
 
     @parameterized.expand(
         [
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_EORA, 282.64, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 286.74, False, False),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 176.00, False, False),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 259.00, False, False),  # 4090/A100 max expectation within the current 75%-125% pass band
             # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 53, False, False),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 282.64, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 290.60, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 239.58, False, False),
             (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 2167.38, False, False), # Second time running bitblas, there is cache
@@ -49,4 +48,4 @@ class TestInferenceSpeed(InferenceSpeed):
         # (there is a cache when running bitblas for the second time),
         # so only the results of the second run of bitblas are asserted.
         # The first run of bitblas only prints relevant information
-        self.inference(model_path=model_path, backend=backend, tokens_per_second=tokens_per_second, optimize=optimize, fullgraph=fullgraph, warmup_runs=1)
+        self.inference(model_path=model_path, backend=backend, tokens_per_second=tokens_per_second, optimize=optimize, fullgraph=fullgraph, warmup_runs=1, device="cuda")

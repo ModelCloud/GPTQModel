@@ -20,8 +20,11 @@ from ..utils.stream import stream_tensor_dict_to_cpu
 log = setup_logger()
 
 class NamedModule(torch.nn.Module):
+    """Thread-safe wrapper that adds stable names and scratch state to a module."""
 
     def __init__(self, module: torch.nn.Module, name: str, full_name:str, layer_index: int) -> None:
+        """Wraps a submodule with naming metadata used by the looper pipeline."""
+
         super().__init__()
 
         self.module = module  # wrapped module
@@ -30,6 +33,9 @@ class NamedModule(torch.nn.Module):
         self.full_name = full_name  # full dotted path inside model
         self.layer_index = layer_index  # layer index for repeated blocks
         self._parent_lock = get_parent_lock(full_name)
+
+        if hasattr(module, "module_name") and module.module_name is None:
+            module.module_name = full_name
 
         # persistent work state for named module (used by some LoopProcessors)
         # store all `processed()` work state/data/result here
@@ -64,30 +70,44 @@ class NamedModule(torch.nn.Module):
             })
 
     def parameters(self, recurse: bool = True):
+        """Delegates parameter iteration to the wrapped module."""
+
         return self.module.parameters(recurse=recurse)
 
     def named_parameters(self, prefix: str = "", recurse: bool = True):
+        """Delegates named parameter iteration to the wrapped module."""
+
         return self.module.named_parameters(prefix=prefix, recurse=recurse)
 
     def buffers(self, recurse: bool = True):
+        """Delegates buffer iteration to the wrapped module."""
+
         return self.module.buffers(recurse=recurse)
 
     def named_buffers(self, prefix: str = "", recurse: bool = True):
+        """Delegates named buffer iteration to the wrapped module."""
+
         return self.module.named_buffers(prefix=prefix, recurse=recurse)
 
     def register_forward_hook(
         self, *args, **kwargs
     ):
+        """Registers a forward hook while holding the parent module lock."""
+
         with self._parent_lock:
             return self.module.register_forward_hook(*args, **kwargs)
 
     def register_buffer(
         self, name: str, tensor: Optional[Tensor], persistent: bool = True
     ) -> None:
+        """Registers a buffer on the wrapped module under the parent lock."""
+
         with self._parent_lock:
             return self.module.register_buffer(name, tensor, persistent)
 
     def unregister_buffer(self, name: str):
+        """Removes a buffer from the wrapped module if it exists."""
+
         with self._parent_lock:
             if name in self.module._buffers:
                 del self.module._buffers[name]
@@ -95,10 +115,14 @@ class NamedModule(torch.nn.Module):
                     delattr(self.module, name)
 
     def register_parameter(self, name: str, param: Optional[Parameter]) -> None:
+        """Registers a parameter on the wrapped module under the parent lock."""
+
         with self._parent_lock:
             return self.module.register_parameter(name, param)
 
     def unregister_parameter(self, name: str) -> None:
+        """Removes a parameter from the wrapped module if it exists."""
+
         with self._parent_lock:
             if name in self.module._parameters:
                 del self.module._parameters[name]
@@ -116,6 +140,8 @@ class NamedModule(torch.nn.Module):
 
     # getattr is only called if python cannot find attr for `self`
     def __getattr__(self, name: str):
+        """Falls back to the wrapped module while preserving lock discipline."""
+
         try:
             lock = object.__getattribute__(self, "_parent_lock")
         except AttributeError:
@@ -128,6 +154,8 @@ class NamedModule(torch.nn.Module):
 
     # setattr is always called by python even if attr exists in `self`
     def __setattr__(self, name: str, value: Any) -> None:
+        """Routes non-wrapper attributes to the wrapped module under lock."""
+
         if name in [
             "module",
             "module_dtype",
@@ -160,6 +188,8 @@ class NamedModule(torch.nn.Module):
         self,
         tensors: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
+        """Streams arbitrary state tensors to CPU and records them in `state`."""
+
         state_lock = self._parent_lock
         return stream_tensor_dict_to_cpu(
             tensors,
@@ -169,6 +199,8 @@ class NamedModule(torch.nn.Module):
         )
 
     def stream_parameters_to_cpu(self) -> Dict[str, torch.Tensor]:
+        """Streams this module's direct parameters to CPU-backed state storage."""
+
         state_lock = self._parent_lock
         tensor_map = {name: param for name, param in self.module.named_parameters(recurse=False)}
         return stream_tensor_dict_to_cpu(
@@ -179,6 +211,8 @@ class NamedModule(torch.nn.Module):
         )
 
     def stream_buffers_to_cpu(self) -> Dict[str, torch.Tensor]:
+        """Streams this module's direct buffers to CPU-backed state storage."""
+
         state_lock = self._parent_lock
         tensor_map = {name: buf for name, buf in self.module.named_buffers(recurse=False)}
         return stream_tensor_dict_to_cpu(
@@ -189,9 +223,13 @@ class NamedModule(torch.nn.Module):
         )
 
     def stream_all_to_cpu(self) -> Dict[str, Dict[str, torch.Tensor]]:
+        """Streams direct parameters and buffers to CPU in one call."""
+
         params = self.stream_parameters_to_cpu()
         buffers = self.stream_buffers_to_cpu()
         return {"parameters": params, "buffers": buffers}
 
     def stream_sync(self) -> None:
+        """Waits for any outstanding asynchronous stream-to-CPU transfers."""
+
         stream_sync_events(self.state, self._parent_lock)

@@ -141,7 +141,11 @@ def make_data_block(
 
     return new_samples
 
-def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> Dict[str, Tensor]:
+def collate_data(
+    batch: List[Dict[str, List[List[int]]]],
+    pad_token_id: int,
+    padding_side: str = "right",
+) -> Dict[str, Tensor]:
     """
     Collate an outer batch (size B) of items, where each item holds multiple rows.
     We flatten the rows across items, pad to a global max length, and stack into
@@ -178,7 +182,7 @@ def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> 
     # Compute global max length
     max_len = max(t.numel() for t in rows_ids) if rows_ids else 0
 
-    # Right-pad each row to global max_len
+    # Right- or left-pad each row to global max_len
     def right_pad(row: torch.Tensor, pad_value, dtype=None) -> torch.Tensor:
         pad_len = max_len - row.numel()
         if pad_len <= 0:
@@ -191,9 +195,28 @@ def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> 
             dim=0,
         )
 
-    padded_ids = [right_pad(t, pad_token_id, dtype=torch.long) for t in rows_ids]
+    def left_pad(row: torch.Tensor, pad_value, dtype=None) -> torch.Tensor:
+        pad_len = max_len - row.numel()
+        if pad_len <= 0:
+            return row
+        return torch.cat(
+            [
+                torch.full((pad_len,), pad_value, dtype=dtype or row.dtype, device=row.device),
+                row,
+            ],
+            dim=0,
+        )
+
+    if padding_side == "left":
+        pad_fn = left_pad
+    elif padding_side == "right":
+        pad_fn = right_pad
+    else:
+        raise ValueError(f"Unsupported padding_side `{padding_side}`. Expected `left` or `right`.")
+
+    padded_ids = [pad_fn(t, pad_token_id, dtype=torch.long) for t in rows_ids]
     # pad masks with False, not 0
-    padded_msk = [right_pad(t, False, dtype=torch.bool) for t in rows_mask]
+    padded_msk = [pad_fn(t, False, dtype=torch.bool) for t in rows_mask]
 
     # Stack into [total_rows_in_batch, max_len]
     input_ids = torch.stack(padded_ids, dim=0) if padded_ids else torch.empty((0, 0), dtype=torch.long)

@@ -7,23 +7,38 @@ from typing import Dict, Optional
 
 import torch
 
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..nn_modules.qlinear.torch import TorchLinear
 from ..utils.logger import setup_logger
 
 log = setup_logger()
 
 class DequantizeProcessor(LoopProcessor):
-    def __init__(self, quantized_modules: Dict[str, TorchQuantLinear]):
-        super().__init__(tokenizer=None, qcfg=None, calibration=None, calibration_concat_size=None,
-                         prepare_dataset_func=None, batch_size=1,
-                         require_fwd=False)
+    """Restores quantized weights to dense tensors for comparison or recovery flows."""
+
+    def __init__(self, quantized_modules: Dict[str, TorchLinear]):
+        """Initializes the processor with the quantized modules to dequantize."""
+
+        super().__init__(
+            tokenizer=None,
+            qcfg=None,
+            calibration=None,
+            calibration_concat_size=None,
+            prepare_dataset_func=None,
+            batch_size=1,
+            execution_config=ExecutionConfig(
+                require_fwd=False,
+                fwd_replay_after_process=False,
+            ),
+        )
 
         self.quantized_modules = quantized_modules
 
     def set_calibration_dataset(self, calibration_dataset):
+        """Disables calibration inputs because dequantization is weight-only."""
+
         self.calibration_dataset = None
         self.num_batches = 0
 
@@ -37,6 +52,8 @@ class DequantizeProcessor(LoopProcessor):
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
     ):
+        """Dequantizes a module, preserving tensor-parallel padding when needed."""
+
         device = module.weight.device
 
         # TODO fix num_itr param..need to calculate this before dequant
@@ -70,11 +87,17 @@ class DequantizeProcessor(LoopProcessor):
         })
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
+        """Drops temporary dequantization tensors after downstream consumers finish."""
+
         module.state.pop("w", None)  # no need for these weights now
         module.state.pop("wq", None) # no need for these weights now
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
+        """Reports that no calibration dataset is required for this processor."""
+
         return False
 
     def name(self) -> str:
+        """Returns the processor label used in logs and lifecycle reporting."""
+
         return "de-quantize"

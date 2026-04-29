@@ -5,23 +5,27 @@
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Tuple
 
 import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear
+from ...nn_modules.qlinear import GPTQQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.machete import (
     _validate_machete_device_support,
     check_machete_supports_shape,
-    machete_import_exception,
     machete_mm,
     machete_prepack_B,
+    machete_runtime_available,
+    machete_runtime_error,
     pack_quantized_values_into_int32,
     query_machete_supported_group_sizes,
+    query_machete_supported_quant_types,
     unpack_quantized_values_into_int32,
 )
 from ...utils.marlin import replace_parameter
@@ -32,11 +36,14 @@ from ...utils.rocm import IS_ROCM
 log = setup_logger()
 
 
-class MacheteQuantLinear(BaseQuantLinear):
+class MacheteLinear(GPTQQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MACHETE]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 100}
     SUPPORTS_BITS = [4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
-    SUPPORTS_SYM = [True]
+    SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
@@ -49,13 +56,15 @@ class MacheteQuantLinear(BaseQuantLinear):
     SUPPORTS_ADAPTERS = [Lora]
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
-    REQUIRES_FORMAT_V2 = False
+    REQUIRES_FORMAT_V2 = True
 
     QUANT_TYPE = "machete"
 
     TYPE_MAP = {
         (4, True): scalar_types.uint4b8,
         (8, True): scalar_types.uint8b128,
+        (4, False): scalar_types.uint4,
+        (8, False): scalar_types.uint8,
     }
 
     def __init__(
@@ -71,12 +80,6 @@ class MacheteQuantLinear(BaseQuantLinear):
             register_buffers: bool = False,
             adapter: Adapter = None,
             **kwargs):
-        if machete_import_exception is not None:
-            raise ValueError(
-                "Trying to use the machete backend, but could not import the "
-                f"C++/CUDA dependencies with the following error: {machete_import_exception}"
-            )
-
         if (bits, sym) not in self.TYPE_MAP:
             raise ValueError(f"Unsupported quantization config: bits={bits}, sym={sym}")
 
@@ -89,7 +92,7 @@ class MacheteQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.MACHETE),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_MACHETE),
             adapter=adapter,
             register_buffers=False,
             **kwargs)
@@ -117,12 +120,12 @@ class MacheteQuantLinear(BaseQuantLinear):
         )
 
         # Scales
-        scales_rows = self.in_features if self.group_size == -1 else self.in_features // self.group_size
+        grouped_rows = math.ceil(self.in_features / self.group_size)
         self.register_parameter(
             "scales",
             torch.nn.Parameter(
                 torch.empty(
-                    scales_rows,
+                    grouped_rows,
                     self.out_features,
                     dtype=torch.float16,
                 ),
@@ -130,11 +133,16 @@ class MacheteQuantLinear(BaseQuantLinear):
             ),
         )
 
-        # Zero points unused for symmetric GPTQ
+        # Register GPTQ checkpoint-compatible qzero storage even for symmetric
+        # configs so Accelerate can bind tensors before post_init().
         self.register_parameter(
             "qzeros",
             torch.nn.Parameter(
-                torch.empty(0, dtype=torch.float16),
+                torch.empty(
+                    grouped_rows,
+                    self.out_features // self.pack_factor,
+                    dtype=self.pack_dtype,
+                ),
                 requires_grad=False,
             ),
         )
@@ -144,17 +152,20 @@ class MacheteQuantLinear(BaseQuantLinear):
         else:
             self.bias = None
 
-        self.weight_type = self.TYPE_MAP[(self.bits, sym)]
+        self.weight_type = self.TYPE_MAP[(self.bits, self.sym)]
         self.has_zero_points = False
 
         # Buffer storing permutation applied to activations (empty when unused)
         self.register_buffer("input_perm", torch.empty(0, dtype=torch.int32))
 
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        if machete_import_exception is not None:
-            return False, ImportError(machete_import_exception)
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        if not machete_runtime_available():
+            return False, ImportError(machete_runtime_error())
+        return True, None
 
+    @classmethod
+    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         ok, err = cls._validate(**args)
         if not ok:
             return ok, err
@@ -171,9 +182,11 @@ class MacheteQuantLinear(BaseQuantLinear):
         quant_type = cls.TYPE_MAP.get((bits, sym))
         if quant_type is None:
             return False, ValueError(f"Machete does not support bits={bits}, sym={sym}")
+        if quant_type not in query_machete_supported_quant_types(zero_points=not sym):
+            return False, ValueError(f"Machete does not support bits={bits}, sym={sym}")
 
         group_size = args.get("group_size")
-        dtype = args.get("dtype", torch.float16)
+        dtype = args.get("dtype") or torch.float16
         if group_size not in query_machete_supported_group_sizes(dtype):
             return False, ValueError(
                 f"Machete does not support group_size={group_size} for dtype={dtype}"
@@ -188,7 +201,7 @@ class MacheteQuantLinear(BaseQuantLinear):
             if IS_ROCM:
                 raise NotImplementedError("Machete kernel is not supported on ROCm.")
             if not _validate_machete_device_support():
-                raise NotImplementedError("Machete kernel requires compute capability >= 9.0.")
+                raise NotImplementedError(machete_runtime_error())
 
     def post_init(self):
         device = self.qweight.device
@@ -226,18 +239,36 @@ class MacheteQuantLinear(BaseQuantLinear):
             torch.nn.Parameter(prepacked.contiguous(), requires_grad=False),
         )
 
+        scales = self.scales.data.contiguous()
         replace_parameter(
             self,
             "scales",
-            torch.nn.Parameter(self.scales.data.contiguous(), requires_grad=False),
+            torch.nn.Parameter(scales, requires_grad=False),
         )
 
-        replace_parameter(
-            self,
-            "qzeros",
-            torch.nn.Parameter(torch.empty(0, dtype=self.scales.dtype, device=device), requires_grad=False),
-        )
-        self.has_zero_points = False
+        if self.sym:
+            replace_parameter(
+                self,
+                "qzeros",
+                torch.nn.Parameter(
+                    torch.empty(0, dtype=self.pack_dtype, device=device),
+                    requires_grad=False,
+                ),
+            )
+            self.has_zero_points = False
+        else:
+            qzeros_unpacked = unpack_quantized_values_into_int32(
+                self.qzeros.data,
+                self.weight_type,
+                packed_dim=1,
+            )
+            qzeros_fp = (-1.0 * scales * qzeros_unpacked.to(scales.dtype)).contiguous()
+            replace_parameter(
+                self,
+                "qzeros",
+                torch.nn.Parameter(qzeros_fp, requires_grad=False),
+            )
+            self.has_zero_points = True
 
         if self.bias is not None:
             self.bias = self.bias.to(device=device)
@@ -266,7 +297,13 @@ class MacheteQuantLinear(BaseQuantLinear):
         if group_scales.dtype != input_2d.dtype:
             group_scales = group_scales.to(dtype=input_2d.dtype)
 
-        group_zeros = self.qzeros if self.has_zero_points and self.qzeros.numel() > 0 else None
+        if self.has_zero_points:
+            assert self.qzeros is not None and self.qzeros.numel() > 0, (
+                "Asymmetric MacheteLinear requires non-empty qzeros after post_init()."
+            )
+            group_zeros = self.qzeros
+        else:
+            group_zeros = None
 
         output = machete_mm(
             a=input_2d,
@@ -288,4 +325,4 @@ class MacheteQuantLinear(BaseQuantLinear):
         return result
 
 
-__all__ = ["MacheteQuantLinear"]
+__all__ = ["MacheteLinear"]

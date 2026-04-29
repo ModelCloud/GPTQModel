@@ -9,8 +9,10 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
+from ...looper.linear_mode import LinearMode
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
@@ -34,6 +36,7 @@ def pack_scales_and_zeros(scales, zeros):
         .contiguous()
     )
 
+
 class Int4PackedOp(torch.nn.Module):
     def __init__(self, qweight_uint8, scales_and_zeros, group_size):
         super().__init__()
@@ -48,7 +51,10 @@ class Int4PackedOp(torch.nn.Module):
         return out
 
 
-class TorchFusedQuantLinear(PackableQuantLinear):
+class TorchFusedLinear(PackableQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH_FUSED]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 50, FORMAT.GPTQ_V2: 50}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -63,7 +69,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = True
 
@@ -93,12 +99,13 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TORCH),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_TORCH_FUSED),
             adapter=adapter,
             register_buffers=register_buffers,
+            enable_wf_unsqueeze=kwargs.pop("enable_wf_unsqueeze", True),
             **kwargs)
 
-        self.transformed = False
+        self.linear_mode = None # either train or inference
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
 
     def post_init(self):
@@ -229,10 +236,13 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if not self.training and not self.transformed and TORCH_HAS_FUSED_OPS:
+        input_dtype = x.dtype
+        if input_dtype == torch.float32:
+            x = x.to(torch.bfloat16)
+        if not self.training and not x.requires_grad and self.linear_mode is None and TORCH_HAS_FUSED_OPS:
             # one-time transform per module for xpu aten fused ops
             self.transform(x.dtype, x.device.type)
-            self.transformed = True
+            self.linear_mode = LinearMode.INFERENCE
             if x.device.type == "cpu":
                 self.torch_fused_op = Int4PackedOp(
                     self.qweight, self.scales_and_zeros, self.group_size
@@ -244,24 +254,31 @@ class TorchFusedQuantLinear(PackableQuantLinear):
                 # self.torch_fused_op.forward = torch.compile(
                 #     self.torch_fused_op.forward, options={"max_autotune": True}
                 # )
+        elif self.linear_mode is None:
+            self.linear_mode = LinearMode.TRAIN
 
-        if self.transformed:
+        if self.linear_mode == LinearMode.INFERENCE:
             out = self._fused_op_forward(x).reshape(out_shape)
         else:
             # make sure dequant dtype matches input x
             num_itr = self.g_idx.shape[0] // x.shape[-1]
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
             out = torch.matmul(x, weights).reshape(out_shape)
-            if self.bias is not None:
-                out.add_(self.bias)
-            if self.adapter:
-                out = self.adapter.apply(x=x, out=out)
+
+        # Add bias and adapter
+        if self.bias is not None:
+            out.add_(self.bias)
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
+        if input_dtype == torch.float32:
+            out = out.to(torch.float32)
 
         return out
 
     @torch.no_grad
     def _fused_op_forward(self, x):
-        x = x[:, self.ret_idx].contiguous()
+        x = x[:, self.ret_idx.to(x.device)].contiguous()
         # fused ops optimized for xpu using torch.ops
         # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
         if x.device.type == "xpu":
@@ -284,13 +301,13 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
 def dequantize_model(model: PreTrainedModel):
     for name, module in model.named_modules():
-        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchFusedQuantLinear):
+        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchFusedLinear):
             raise ValueError(
-                "Only models loaded using TorchFusedQuantLinear are supported for dequantization. "
-                "Please load model using backend=BACKEND.TORCH_FUSED"
+                "Only models loaded using TorchFusedLinear are supported for dequantization. "
+                "Please load model using backend=BACKEND.GPTQ_TORCH_FUSED"
             )
 
-        if isinstance(module, TorchFusedQuantLinear):
+        if isinstance(module, TorchFusedLinear):
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(module.in_features, module.out_features)
             new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
@@ -310,4 +327,4 @@ def dequantize_model(model: PreTrainedModel):
     return model
 
 
-__all__ = ["TorchFusedQuantLinear", "dequantize_model"]
+__all__ = ["TorchFusedLinear", "dequantize_model"]

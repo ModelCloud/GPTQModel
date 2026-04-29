@@ -9,10 +9,10 @@ import unittest
 import torch
 import torch.nn as nn
 from parameterized import parameterized
-from tabulate import tabulate
 
 from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.utils.logger import render_table
 
 
 class TestPackAccuracy(unittest.TestCase):
@@ -45,7 +45,7 @@ class TestPackAccuracy(unittest.TestCase):
         return linear, scales, zeros, g_idx
 
     def _quant_linear(self):
-        qlinear = TorchQuantLinear(
+        qlinear = TorchLinear(
             bits=self.current_bits,
             group_size=self.current_group_size,
             sym=True,
@@ -145,7 +145,7 @@ class TestPackAccuracy(unittest.TestCase):
             self.assertTrue(torch.equal(tensors["scales"], baseline["scales"]))
 
         print(
-            tabulate(
+            render_table(
                 rows,
                 headers=["impl", "max|Δ qweight|", "max|Δ qzeros|", "max|Δ scales|", "max|Δ g_idx|", "time [ms]"],
                 floatfmt=".3e",

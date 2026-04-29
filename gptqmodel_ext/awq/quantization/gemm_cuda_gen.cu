@@ -13,9 +13,13 @@
 #include <ATen/cuda/CUDAContext.h>
 #include "gemm_cuda.h"
 #include "dequantize.cuh"
+#include <algorithm>
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cublas_v2.h>
+#include <cstdlib>
+#include <type_traits>
 
 
 // Pack two half values.
@@ -30,20 +34,221 @@ __device__ __forceinline__ int make_divisible(int c, int divisor){
   return (c + divisor - 1) / divisor;
 }
 
-__global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, int split_k_iters, half* __restrict__ A, int* __restrict__ B, half* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, half* __restrict__ C) 
+template <typename output_t>
+__device__ __forceinline__ void store_accum_value(output_t* ptr, float value)
+{
+  *ptr = static_cast<output_t>(value);
+}
+
+template <>
+__device__ __forceinline__ void store_accum_value<half>(half* ptr, float value)
+{
+  *ptr = __float2half(value);
+}
+
+template <>
+__device__ __forceinline__ void store_accum_value<nv_bfloat16>(nv_bfloat16* ptr, float value)
+{
+  *ptr = __float2bfloat16(value);
+}
+
+template <typename scalar_t>
+struct vec2_type;
+
+template <>
+struct vec2_type<half>
+{
+  using type = half2;
+};
+
+template <>
+struct vec2_type<nv_bfloat16>
+{
+  using type = nv_bfloat162;
+};
+
+template <typename scalar_t>
+using vec2_t = typename vec2_type<scalar_t>::type;
+
+template <typename scalar_t>
+__device__ __forceinline__ uint4 dequantize_s4_to_x2(uint32_t const& source);
+
+template <>
+__device__ __forceinline__ uint4 dequantize_s4_to_x2<half>(uint32_t const& source)
+{
+  return dequantize_s4_to_fp16x2(source);
+}
+
+template <>
+__device__ __forceinline__ uint4 dequantize_s4_to_x2<nv_bfloat16>(uint32_t const& source)
+{
+  return dequantize_s4_to_bf16x2(source);
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ void apply_zero_and_scale(uint4& values_raw, const uint4& scales_raw, const uint4& zeros_raw);
+
+template <>
+__device__ __forceinline__ void apply_zero_and_scale<half>(uint4& values_raw, const uint4& scales_raw, const uint4& zeros_raw)
 {
   static constexpr uint32_t ZERO = 0x0;
+  asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(values_raw.x) : "r"(values_raw.x), "r"(zeros_raw.x));
+  asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(values_raw.x) : "r"(values_raw.x), "r"(scales_raw.x), "r"(ZERO));
+  asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(values_raw.y) : "r"(values_raw.y), "r"(zeros_raw.y));
+  asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(values_raw.y) : "r"(values_raw.y), "r"(scales_raw.y), "r"(ZERO));
+  asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(values_raw.z) : "r"(values_raw.z), "r"(zeros_raw.z));
+  asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(values_raw.z) : "r"(values_raw.z), "r"(scales_raw.z), "r"(ZERO));
+  asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(values_raw.w) : "r"(values_raw.w), "r"(zeros_raw.w));
+  asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(values_raw.w) : "r"(values_raw.w), "r"(scales_raw.w), "r"(ZERO));
+}
+
+template <>
+__device__ __forceinline__ void apply_zero_and_scale<nv_bfloat16>(uint4& values_raw, const uint4& scales_raw, const uint4& zeros_raw)
+{
+  auto* values = reinterpret_cast<nv_bfloat162*>(&values_raw);
+  auto* scales = reinterpret_cast<const nv_bfloat162*>(&scales_raw);
+  auto* zeros = reinterpret_cast<const nv_bfloat162*>(&zeros_raw);
+#pragma unroll
+  for (int i = 0; i < 4; ++i)
+  {
+    values[i] = __hmul2(__hsub2(values[i], zeros[i]), scales[i]);
+  }
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ void mma_m16n8(float* C_warp, scalar_t* A_shared_warp, scalar_t* B_shared_warp)
+{
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+  static_assert(std::is_same_v<scalar_t, half>, "BFloat16 AWQ GEMM requires CUDA_ARCH >= 800.");
+  asm volatile(
+    "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
+    "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
+    :  "=f"(((float *)(C_warp))[0]), "=f"(((float *)(C_warp))[1]), "=f"(((float *)(C_warp))[2]), "=f"(((float *)(C_warp))[3])
+    : "r"(((unsigned *)(A_shared_warp + 0))[0]), "r"(((unsigned *)(A_shared_warp + 0))[1]), "r"(((unsigned *)(B_shared_warp + 0))[0]), "f"(((float *)(C_warp))[0]), "f"(((float *)(C_warp))[1]), "f"(((float *)(C_warp))[2]), "f"(((float *)(C_warp))[3]));
+  asm volatile(
+    "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
+    "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
+    :  "=f"(((float *)(C_warp))[0]), "=f"(((float *)(C_warp))[1]), "=f"(((float *)(C_warp))[2]), "=f"(((float *)(C_warp))[3])
+    : "r"(((unsigned *)(A_shared_warp + 0))[2]), "r"(((unsigned *)(A_shared_warp + 0))[3]), "r"(((unsigned *)(B_shared_warp + 0))[1]), "f"(((float *)(C_warp))[0]), "f"(((float *)(C_warp))[1]), "f"(((float *)(C_warp))[2]), "f"(((float *)(C_warp))[3]));
+#else
+  if constexpr (std::is_same_v<scalar_t, half>)
+  {
+    asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+      "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
+      :  "=f"(((float *)(C_warp))[0]), "=f"(((float *)(C_warp))[1]), "=f"(((float *)(C_warp))[2]), "=f"(((float *)(C_warp))[3])
+      : "r"(((unsigned *)(A_shared_warp + 0))[0]), "r"(((unsigned *)(A_shared_warp + 0))[1]), "r"(((unsigned *)(A_shared_warp + 0))[2]), "r"(((unsigned *)(A_shared_warp + 0))[3]), "r"(((unsigned *)(B_shared_warp + 0))[0]), "r"(((unsigned *)(B_shared_warp + 0))[1]), "f"(((float *)(C_warp))[0]), "f"(((float *)(C_warp))[1]), "f"(((float *)(C_warp))[2]), "f"(((float *)(C_warp))[3]));
+  }
+  else
+  {
+    asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+      "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
+      :  "=f"(((float *)(C_warp))[0]), "=f"(((float *)(C_warp))[1]), "=f"(((float *)(C_warp))[2]), "=f"(((float *)(C_warp))[3])
+      : "r"(((unsigned *)(A_shared_warp + 0))[0]), "r"(((unsigned *)(A_shared_warp + 0))[1]), "r"(((unsigned *)(A_shared_warp + 0))[2]), "r"(((unsigned *)(A_shared_warp + 0))[3]), "r"(((unsigned *)(B_shared_warp + 0))[0]), "r"(((unsigned *)(B_shared_warp + 0))[1]), "f"(((float *)(C_warp))[0]), "f"(((float *)(C_warp))[1]), "f"(((float *)(C_warp))[2]), "f"(((float *)(C_warp))[3]));
+  }
+#endif
+}
+
+static void validate_bf16_device(torch::Device device);
+
+namespace {
+
+bool fused_splitk_reduce_enabled()
+{
+  const char* disable_value = std::getenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE");
+  return disable_value == nullptr || std::atoi(disable_value) == 0;
+}
+
+template <typename output_t>
+__global__ void reduce_splitk_fp32_to_output_kernel(
+    const float* __restrict__ partials,
+    output_t* __restrict__ out,
+    int split_k_iters,
+    int total_elements)
+{
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+
+  for (; idx < total_elements; idx += stride)
+  {
+    float acc = 0.0f;
+#pragma unroll 8
+    for (int split_idx = 0; split_idx < split_k_iters; ++split_idx)
+    {
+      acc += partials[split_idx * total_elements + idx];
+    }
+    store_accum_value(out + idx, acc);
+  }
+}
+
+template <typename output_t>
+torch::Tensor fused_reduce_splitk_fp32_to_output(torch::Tensor out_feats_tensor, at::ScalarType output_dtype)
+{
+  auto options = torch::TensorOptions().dtype(output_dtype).device(out_feats_tensor.device());
+  at::Tensor result = torch::empty({out_feats_tensor.size(1), out_feats_tensor.size(2)}, options);
+  const int total_elements = static_cast<int>(result.numel());
+  const int split_k_iters = static_cast<int>(out_feats_tensor.size(0));
+  const int threads = 256;
+  const int blocks = std::max(1, std::min((total_elements + threads - 1) / threads, 4096));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  auto partials = reinterpret_cast<const float*>(out_feats_tensor.data_ptr<float>());
+  output_t* out = nullptr;
+  if constexpr (std::is_same_v<output_t, half>)
+  {
+    out = reinterpret_cast<half*>(result.data_ptr<at::Half>());
+  }
+  else if constexpr (std::is_same_v<output_t, nv_bfloat16>)
+  {
+    out = reinterpret_cast<nv_bfloat16*>(result.data_ptr<at::BFloat16>());
+  }
+  else
+  {
+    out = reinterpret_cast<float*>(result.data_ptr<float>());
+  }
+
+  reduce_splitk_fp32_to_output_kernel<output_t><<<blocks, threads, 0, stream>>>(
+      partials, out, split_k_iters, total_elements);
+  return result;
+}
+
+torch::Tensor maybe_fused_reduce_splitk_fp32_to_output(torch::Tensor out_feats_tensor, at::ScalarType output_dtype)
+{
+  if (!fused_splitk_reduce_enabled())
+  {
+    return out_feats_tensor.sum(0).to(output_dtype);
+  }
+
+  switch (output_dtype)
+  {
+  case at::kHalf:
+    return fused_reduce_splitk_fp32_to_output<half>(out_feats_tensor, output_dtype);
+  case at::kBFloat16:
+    return fused_reduce_splitk_fp32_to_output<nv_bfloat16>(out_feats_tensor, output_dtype);
+  case at::kFloat:
+    return fused_reduce_splitk_fp32_to_output<float>(out_feats_tensor, output_dtype);
+  default:
+    return out_feats_tensor.sum(0).to(output_dtype);
+  }
+}
+
+} // namespace
+
+template <typename scalar_t, typename output_t>
+__global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, int split_k_iters, scalar_t* __restrict__ A, int* __restrict__ B, scalar_t* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, output_t* __restrict__ C) 
+{
   float C_warp[32];
-  __shared__ half A_shared[16 * (32 + 8)];
-  __shared__ half B_shared[32 * (128 + 8)];
+  __shared__ scalar_t A_shared[16 * (32 + 8)];
+  __shared__ scalar_t B_shared[32 * (128 + 8)];
 
   int j_factors1 = ((OC + 128 - 1) / 128);
   int blockIdx_x = 0;
   int blockIdx_y = blockIdx.x % ((M + 16 - 1) / 16 * j_factors1);
   int blockIdx_z = blockIdx.x / ((M + 16 - 1) / 16 * j_factors1);
 
-  half A_shared_warp[8];
-  half B_shared_warp[32];
+  scalar_t A_shared_warp[8];
+  scalar_t B_shared_warp[32];
   for (int j_0_4_init = 0; j_0_4_init < 4; ++j_0_4_init) {
     for (int i = 0; i < 8; ++i) {
       C_warp[(j_0_4_init * 8) + i] = 0.0;
@@ -57,7 +262,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
   bool ld_A_flag = (blockIdx_y / j_factors1 * 16 + threadIdx.y * row_stride_warp + threadIdx.x * 8 / 32) < M;     // threadIdx.y is warp_id
   // bool wb_C_flag = (threadIdx.x / 4) < M;
 
-  half* A_ptr = A 
+  scalar_t* A_ptr = A 
                 + (((int)blockIdx_y) / j_factors1 * 16 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8)) * IC
                 + (((int)threadIdx.x) % (32 / 8)) * 8;
   
@@ -68,12 +273,12 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
             + (((int)threadIdx.x) % (128 / 8)) * 1;
 // Why * 1 in the above line?
                         
-  half* A_shared_ptr = A_shared 
+  scalar_t* A_shared_ptr = A_shared 
                     + ((int)threadIdx.y) * row_stride_warp * (32 + 8) 
                     + (((int)threadIdx.x) / (32 / 8)) * (32 + 8)
                     + (((int)threadIdx.x) % (32 / 8) ) * 8;
 
-  half* B_shared_ptr = B_shared
+  scalar_t* B_shared_ptr = B_shared
                     + ((int)threadIdx.y) * (row_stride / 2) * (128 + 8)
                     + (((int)threadIdx.x) / (128 / 8)) * (128 + 8)
                     + (((int)threadIdx.x) % (128 / 8)) * 8;
@@ -82,11 +287,11 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
                 + (((int)blockIdx_y) % j_factors1) * (128 / 8)
                 + ((int)threadIdx.x) % (128 / 8);
   
-  half* scaling_factors_ptr = scaling_factors
+  scalar_t* scaling_factors_ptr = scaling_factors
                             + (((int)blockIdx_y) % j_factors1) * (128) 
                             + (((int)threadIdx.x) % (128 / 8)) * 8;
 
-  half* C_ptr = C 
+  output_t* C_ptr = C 
               + static_cast<long long>(blockIdx_z) * M * OC        // blockIdz.x -> split_k dim
               + (((int)blockIdx_y) % j_factors1) * 128
               + ((int)threadIdx.y) * 64
@@ -110,7 +315,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
 
     // for (int ax0_ax1_fused_0 = 0; ax0_ax1_fused_0 < 2; ++ax0_ax1_fused_0) {
     uint32_t zeros_loaded = *(uint32_t*)(zeros_ptr + k_0_0 * 32 / G * (OC / 8));
-    uint4 B_loaded_zero = dequantize_s4_to_fp16x2(zeros_loaded);
+    uint4 B_loaded_zero = dequantize_s4_to_x2<scalar_t>(zeros_loaded);
     uint4 B_loaded_scale = *(uint4*)(scaling_factors_ptr + k_0_0 * 32 / G * (OC));
     /*
     if (blockIdx_z == 0 && blockIdx_y == 0 && k_0_0 == 0 && threadIdx.x == 0 && threadIdx.y == 0){
@@ -128,20 +333,8 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
       // *(uint4*)(B_shared + ((((ax0_ax1_fused_0 * 544) + (((int)threadIdx.y) * 272)) + ((((int)threadIdx.x) >> 4) * 136)) + ((((int)threadIdx.x) & 15) * 8))) = *(uint4*)(B + ((((((k_0_0 * 163840) + (ax0_ax1_fused_0 * 20480)) + (((int)threadIdx.y) * 10240)) + ((((int)threadIdx.x) >> 4) * 5120)) + (((int)blockIdx_y) * 128)) + ((((int)threadIdx.x) & 15) * 8)));
       // row stride in shared memory: (NWARPS * 32 * 8 / cta_N) 
       uint32_t B_loaded = *(uint32_t*)(B_ptr_local + ax0_ax1_fused_0 * row_stride * (OC / 8));
-      uint4 B_loaded_fp16 = dequantize_s4_to_fp16x2(B_loaded);
-      //uint4 B_loaded_zero = *(uint4*)(zeros_shared + (threadIdx.x % (cta_N / 8)) * 8);
-
-      // uint4 B_loaded_scale = *(uint4*)(scaling_factors_shared + (threadIdx.x % (cta_N / 8)) * 8);
-      // - zero and * scale
-      // TODO (Haotian): can save 4 assembly instructions if sormulate as deq = q * scale - zero * scale.
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.x) : "r"(B_loaded_fp16.x), "r"(B_loaded_zero.x));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.x) : "r"(B_loaded_fp16.x), "r"(B_loaded_scale.x), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.y) : "r"(B_loaded_fp16.y), "r"(B_loaded_zero.y));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.y) : "r"(B_loaded_fp16.y), "r"(B_loaded_scale.y), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.z) : "r"(B_loaded_fp16.z), "r"(B_loaded_zero.z));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.z) : "r"(B_loaded_fp16.z), "r"(B_loaded_scale.z), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_zero.w));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_scale.w), "r"(ZERO));
+      uint4 B_loaded_values = dequantize_s4_to_x2<scalar_t>(B_loaded);
+      apply_zero_and_scale<scalar_t>(B_loaded_values, B_loaded_scale, B_loaded_zero);
       /*
       if (ax0_ax1_fused_0 == 0 && blockIdx_z == 0 && blockIdx_y == 0 && k_0_0 == 0 && threadIdx.x == 17 && threadIdx.y == 0){
         printf("[x] %X %X %X %X\n", B_loaded_fp16.x, B_loaded_fp16.y, B_loaded_fp16.z, B_loaded_fp16.w);
@@ -149,7 +342,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
       */
 
       // write back
-      *(uint4*)(B_shared_ptr + ax0_ax1_fused_0 * row_stride * (128 + 8)) = B_loaded_fp16;
+      *(uint4*)(B_shared_ptr + ax0_ax1_fused_0 * row_stride * (128 + 8)) = B_loaded_values;
     }
     __syncthreads();
 
@@ -188,55 +381,8 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
         }
       }
       for (int j_0_4 = 0; j_0_4 < 4; ++j_0_4) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
-            :  "=f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[0]), "r"(((unsigned *)(A_shared_warp + 0))[1]), "r"(((unsigned *)(B_shared_warp + (j_0_4 * 8)))[0]), "f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "f"(((float *)(C_warp + (j_0_4 * 8)))[3]));
-        }
-
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
-            :  "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[0]), "r"(((unsigned *)(A_shared_warp + 0))[1]), "r"(((unsigned *)(B_shared_warp + ((j_0_4 * 8) + 4)))[0]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3]));
-        }
-
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
-            :  "=f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[2]), "r"(((unsigned *)(A_shared_warp + 0))[3]), "r"(((unsigned *)(B_shared_warp + (j_0_4 * 8)))[1]), "f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "f"(((float *)(C_warp + (j_0_4 * 8)))[3]));
-        }
-
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
-            :  "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[2]), "r"(((unsigned *)(A_shared_warp + 0))[3]), "r"(((unsigned *)(B_shared_warp + ((j_0_4 * 8) + 4)))[1]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3]));
-        }
-#else
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
-            :  "=f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[0]), "r"(((unsigned *)(A_shared_warp + 0))[1]), "r"(((unsigned *)(A_shared_warp + 0))[2]), "r"(((unsigned *)(A_shared_warp + 0))[3]), "r"(((unsigned *)(B_shared_warp + (j_0_4 * 8)))[0]), "r"(((unsigned *)(B_shared_warp + (j_0_4 * 8)))[1]), "f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "f"(((float *)(C_warp + (j_0_4 * 8)))[3]));
-        }
-
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
-            :  "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[0]), "r"(((unsigned *)(A_shared_warp + 0))[1]), "r"(((unsigned *)(A_shared_warp + 0))[2]), "r"(((unsigned *)(A_shared_warp + 0))[3]), "r"(((unsigned *)(B_shared_warp + ((j_0_4 * 8) + 4)))[0]), "r"(((unsigned *)(B_shared_warp + ((j_0_4 * 8) + 4)))[1]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3]));
-        }
-#endif
+        mma_m16n8<scalar_t>(C_warp + (j_0_4 * 8), A_shared_warp, B_shared_warp + (j_0_4 * 8));
+        mma_m16n8<scalar_t>(C_warp + ((j_0_4 * 8) + 4), A_shared_warp, B_shared_warp + ((j_0_4 * 8) + 4));
       }
     }
   }
@@ -247,22 +393,19 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
       int row_offset = (((int)blockIdx_y) / j_factors1) * 16 + ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;
       if (row_offset < M)
       {
-        *(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2) = __float2half(C_warp[(ax1_0_1 * 8) + local_id]);
+        store_accum_value(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
       }
     }
   }
 }
 
 
-__global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, int split_k_iters, half* __restrict__ A, int* __restrict__ B, half* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, half* __restrict__ C) 
+template <typename scalar_t, typename output_t>
+__global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, int split_k_iters, scalar_t* __restrict__ A, int* __restrict__ B, scalar_t* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, output_t* __restrict__ C) 
 {
-  static constexpr uint32_t ZERO = 0x0;
   float C_warp[32];
-  __shared__ half A_shared[16 * (32 + 8)];
-  __shared__ half B_shared[32 * (64 + 8)];
-  
-  __shared__ half scaling_factors_shared[64];
-  __shared__ half zeros_shared[64];
+  __shared__ scalar_t A_shared[16 * (32 + 8)];
+  __shared__ scalar_t B_shared[32 * (64 + 8)];
 
   int j_factors1 = ((OC + 64 - 1) / 64);
 
@@ -270,8 +413,8 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, in
   int blockIdx_y = blockIdx.x % ((M + 16 - 1) / 16 * j_factors1);
   int blockIdx_z = blockIdx.x / ((M + 16 - 1) / 16 * j_factors1);
 
-  half A_shared_warp[8];
-  half B_shared_warp[16];
+  scalar_t A_shared_warp[8];
+  scalar_t B_shared_warp[16];
   for (int j_0_4_init = 0; j_0_4_init < 2; ++j_0_4_init) {
     for (int i = 0; i < 8; ++i) {
       C_warp[(j_0_4_init * 8) + i] = 0.0;
@@ -281,52 +424,47 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, in
   static constexpr int row_stride_warp = 32 * 8 / 32;
   static constexpr int row_stride = 2 * 32 * 8 / 64;
   bool ld_zero_flag = (threadIdx.y * 32 + threadIdx.x) * 8 < 64;
-  // TODO: Haotian: blockIdx_y / j_factors1 in A loading to support bsz > 16
-  bool ld_A_flag = (blockIdx_y / j_factors1 * 16 + threadIdx.y * row_stride_warp + threadIdx.x * 8 / 32) < M;     // threadIdx.y is warp_id
-  // bool wb_C_flag = (threadIdx.x / 4) < M;
+  bool ld_A_flag = (blockIdx_y / j_factors1 * 16 + threadIdx.y * row_stride_warp + threadIdx.x * 8 / 32) < M;
 
-  half* A_ptr = A 
+  scalar_t* A_ptr = A
                 + (((int)blockIdx_y) / j_factors1 * 16 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8)) * IC
                 + (((int)threadIdx.x) % (32 / 8)) * 8;
-  
+
   int* B_ptr = B
             + ((int)threadIdx.y) * (OC / 8) * 4
             + (((int)threadIdx.x) / (64 / 8)) * (OC / 8)
             + (((int)blockIdx_y) % j_factors1) * (64 / 8)
             + (((int)threadIdx.x) % (64 / 8)) * 1;
-// Why * 1 in the above line?
-                        
-  half* A_shared_ptr = A_shared 
-                    + ((int)threadIdx.y) * row_stride_warp * (32 + 8) 
+
+  scalar_t* A_shared_ptr = A_shared
+                    + ((int)threadIdx.y) * row_stride_warp * (32 + 8)
                     + (((int)threadIdx.x) / (32 / 8)) * (32 + 8)
                     + (((int)threadIdx.x) % (32 / 8) ) * 8;
 
-  half* B_shared_ptr = B_shared
+  scalar_t* B_shared_ptr = B_shared
                     + ((int)threadIdx.y) * (row_stride / 2) * (64 + 8)
                     + (((int)threadIdx.x) / (64 / 8)) * (64 + 8)
                     + (((int)threadIdx.x) % (64 / 8)) * 8;
-  
+
   int* zeros_ptr = zeros
                 + (((int)blockIdx_y) % j_factors1) * (64 / 8)
                 + ((int)threadIdx.x) % (64 / 8);
-  
-  half* scaling_factors_ptr = scaling_factors
-                            + (((int)blockIdx_y) % j_factors1) * (64) 
+
+  scalar_t* scaling_factors_ptr = scaling_factors
+                            + (((int)blockIdx_y) % j_factors1) * (64)
                             + (((int)threadIdx.x) % (64 / 8)) * 8;
 
-  half* C_ptr = C 
-              + static_cast<long long>(blockIdx_z) * M * OC        // blockIdz.x -> split_k dim
+  output_t* C_ptr = C
+              + static_cast<long long>(blockIdx_z) * M * OC
               + (((int)blockIdx_y) % j_factors1) * 64
               + ((int)threadIdx.y) * 32
               + (((int)threadIdx.x) % 4) * 2;
 
-  // preload s.f. and zeros
   int k_bound = (IC / 32 + split_k_iters - 1) / split_k_iters;
   if ((k_bound - 1) * split_k_iters * 32 + blockIdx_z * 32 >= IC) k_bound -= 1;
   for (int _k_0_0 = 0; _k_0_0 < k_bound; ++_k_0_0) {
     int k_0_0 = _k_0_0 * split_k_iters + blockIdx_z;
     __syncthreads();
-    // TODO: Haotian: blockIdx_y / j_factors1 in A loading to support bsz > 16
     if (ld_A_flag)
     {
       *(uint4*)(A_shared_ptr) = *(uint4*)(A_ptr + (k_0_0 * 32));
@@ -336,52 +474,20 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, in
       *(uint4*)(A_shared_ptr) = make_uint4(0, 0, 0, 0);
     }
 
-    // for (int ax0_ax1_fused_0 = 0; ax0_ax1_fused_0 < 2; ++ax0_ax1_fused_0) {
     uint32_t zeros_loaded = *(uint32_t*)(zeros_ptr + k_0_0 * 32 / G * (OC / 8));
-    uint4 B_loaded_zero = dequantize_s4_to_fp16x2(zeros_loaded);
+    uint4 B_loaded_zero = dequantize_s4_to_x2<scalar_t>(zeros_loaded);
     uint4 B_loaded_scale = *(uint4*)(scaling_factors_ptr + k_0_0 * 32 / G * (OC));
-    /*
-    if (blockIdx_z == 0 && blockIdx_y == 0 && k_0_0 == 0 && threadIdx.x == 0 && threadIdx.y == 0){
-      printf("%x %x %x %x %x %x %x %x\n", B_loaded_scale.x, B_loaded_scale.y, B_loaded_scale.z, B_loaded_scale.w, B_loaded_zero.x, B_loaded_zero.y, B_loaded_zero.z, B_loaded_zero.w);
-    }
-    */
-    // uint4 B_loaded_scale = make_uint4(0, 0, 0, 0);
     int* B_ptr_local = B_ptr + k_0_0 * 32 * (OC / 8);
 
     for (int ax0_ax1_fused_0 = 0; ax0_ax1_fused_0 < 4; ++ax0_ax1_fused_0) {
-
-      // B: 32 x 136 (128+8) float16
-      // each warp: 32 x 4
-      // each thr: read 32 bit -> convert to 8xFP16 (a UINT4) -> scale and minus zero -> WB UINT4
-      // *(uint4*)(B_shared + ((((ax0_ax1_fused_0 * 544) + (((int)threadIdx.y) * 272)) + ((((int)threadIdx.x) >> 4) * 136)) + ((((int)threadIdx.x) & 15) * 8))) = *(uint4*)(B + ((((((k_0_0 * 163840) + (ax0_ax1_fused_0 * 20480)) + (((int)threadIdx.y) * 10240)) + ((((int)threadIdx.x) >> 4) * 5120)) + (((int)blockIdx_y) * 128)) + ((((int)threadIdx.x) & 15) * 8)));
-      // row stride in shared memory: (NWARPS * 32 * 8 / cta_N) 
       uint32_t B_loaded = *(uint32_t*)(B_ptr_local + ax0_ax1_fused_0 * row_stride * (OC / 8));
-      uint4 B_loaded_fp16 = dequantize_s4_to_fp16x2(B_loaded);
-      //uint4 B_loaded_zero = *(uint4*)(zeros_shared + (threadIdx.x % (cta_N / 8)) * 8);
-
-      // uint4 B_loaded_scale = *(uint4*)(scaling_factors_shared + (threadIdx.x % (cta_N / 8)) * 8);
-      // - zero and * scale
-      // TODO (Haotian): can save 4 assembly instructions if sormulate as deq = q * scale - zero * scale.
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.x) : "r"(B_loaded_fp16.x), "r"(B_loaded_zero.x));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.x) : "r"(B_loaded_fp16.x), "r"(B_loaded_scale.x), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.y) : "r"(B_loaded_fp16.y), "r"(B_loaded_zero.y));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.y) : "r"(B_loaded_fp16.y), "r"(B_loaded_scale.y), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.z) : "r"(B_loaded_fp16.z), "r"(B_loaded_zero.z));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.z) : "r"(B_loaded_fp16.z), "r"(B_loaded_scale.z), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_zero.w));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_scale.w), "r"(ZERO));
-      /*
-      if (ax0_ax1_fused_0 == 0 && blockIdx_z == 0 && blockIdx_y == 0 && k_0_0 == 0 && threadIdx.x == 17 && threadIdx.y == 0){
-        printf("[x] %X %X %X %X\n", B_loaded_fp16.x, B_loaded_fp16.y, B_loaded_fp16.z, B_loaded_fp16.w);
-      }
-      */
-
-      // write back
-      *(uint4*)(B_shared_ptr + ax0_ax1_fused_0 * row_stride * (64 + 8)) = B_loaded_fp16;
+      uint4 B_loaded_values = dequantize_s4_to_x2<scalar_t>(B_loaded);
+      apply_zero_and_scale<scalar_t>(B_loaded_values, B_loaded_scale, B_loaded_zero);
+      *(uint4*)(B_shared_ptr + ax0_ax1_fused_0 * row_stride * (64 + 8)) = B_loaded_values;
     }
     __syncthreads();
 
-    for (int k_0_1 = 0; k_0_1 < 2; ++k_0_1) 
+    for (int k_0_1 = 0; k_0_1 < 2; ++k_0_1)
     {
       {
         unsigned int addr;
@@ -397,88 +503,37 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, in
           : "r"(addr)
         );
       }
-        
 
-      for (int ax1_0 = 0; ax1_0 < 2; ++ax1_0) 
+      for (int ax1_0 = 0; ax1_0 < 2; ++ax1_0)
       {
-        {
-          unsigned int addr;
-          asm volatile(
-            "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, addr; }\n"
-            : "=r"(addr)
-            : "l"((void *)((&(B_shared[(((k_0_1 * 1152) + (((int)threadIdx.y) * 32)) + (ax1_0 * 16))])) + (((((int)threadIdx.x) & 15) * 72) + ((((int)threadIdx.x) >> 4) * 8))))
-          );
-          asm volatile(
-            "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
-            "{%0, %1, %2, %3}, [%4];\n"
-            : "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[0]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[1]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[2]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[3])
-            : "r"(addr)
-          );
-        }
+        unsigned int addr;
+        asm volatile(
+          "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, addr; }\n"
+          : "=r"(addr)
+          : "l"((void *)((&(B_shared[(((k_0_1 * 1152) + (((int)threadIdx.y) * 32)) + (ax1_0 * 16))])) + (((((int)threadIdx.x) & 15) * 72) + ((((int)threadIdx.x) >> 4) * 8))))
+        );
+        asm volatile(
+          "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
+          "{%0, %1, %2, %3}, [%4];\n"
+          : "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[0]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[1]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[2]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[3])
+          : "r"(addr)
+        );
       }
-      
-      for (int j_0_4 = 0; j_0_4 < 2; ++j_0_4) 
+
+      for (int j_0_4 = 0; j_0_4 < 2; ++j_0_4)
       {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
-            :  "=f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[0]), "r"(((unsigned *)(A_shared_warp + 0))[1]), "r"(((unsigned *)(B_shared_warp + (j_0_4 * 8)))[0]), "f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "f"(((float *)(C_warp + (j_0_4 * 8)))[3]));
-        }
-
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
-            :  "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[0]), "r"(((unsigned *)(A_shared_warp + 0))[1]), "r"(((unsigned *)(B_shared_warp + ((j_0_4 * 8) + 4)))[0]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3]));
-        }
-
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
-            :  "=f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[2]), "r"(((unsigned *)(A_shared_warp + 0))[3]), "r"(((unsigned *)(B_shared_warp + (j_0_4 * 8)))[1]), "f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "f"(((float *)(C_warp + (j_0_4 * 8)))[3]));
-        }
-
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
-            :  "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[2]), "r"(((unsigned *)(A_shared_warp + 0))[3]), "r"(((unsigned *)(B_shared_warp + ((j_0_4 * 8) + 4)))[1]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3]));
-        }
-#else
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
-            :  "=f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "=f"(((float *)(C_warp + (j_0_4 * 8)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[0]), "r"(((unsigned *)(A_shared_warp + 0))[1]), "r"(((unsigned *)(A_shared_warp + 0))[2]), "r"(((unsigned *)(A_shared_warp + 0))[3]), "r"(((unsigned *)(B_shared_warp + (j_0_4 * 8)))[0]), "r"(((unsigned *)(B_shared_warp + (j_0_4 * 8)))[1]), "f"(((float *)(C_warp + (j_0_4 * 8)))[0]), "f"(((float *)(C_warp + (j_0_4 * 8)))[1]), "f"(((float *)(C_warp + (j_0_4 * 8)))[2]), "f"(((float *)(C_warp + (j_0_4 * 8)))[3]));
-        }
-
-        {
-          asm volatile(
-            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
-            "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
-            :  "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "=f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3])
-            : "r"(((unsigned *)(A_shared_warp + 0))[0]), "r"(((unsigned *)(A_shared_warp + 0))[1]), "r"(((unsigned *)(A_shared_warp + 0))[2]), "r"(((unsigned *)(A_shared_warp + 0))[3]), "r"(((unsigned *)(B_shared_warp + ((j_0_4 * 8) + 4)))[0]), "r"(((unsigned *)(B_shared_warp + ((j_0_4 * 8) + 4)))[1]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[0]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[1]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[2]), "f"(((float *)(C_warp + ((j_0_4 * 8) + 4)))[3]));
-        }
-#endif
+        mma_m16n8<scalar_t>(C_warp + (j_0_4 * 8), A_shared_warp, B_shared_warp + (j_0_4 * 8));
+        mma_m16n8<scalar_t>(C_warp + ((j_0_4 * 8) + 4), A_shared_warp, B_shared_warp + ((j_0_4 * 8) + 4));
       }
     }
   }
 
-// TODO: Shang: Hoist loop invariance.
   for (int ax1_0_1 = 0; ax1_0_1 < 2; ++ax1_0_1) {
     for (int local_id = 0; local_id < 8; ++local_id) {
       int row_offset = (((int)blockIdx_y) / j_factors1) * 16 + ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;
       if (row_offset < M)
       {
-        *(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2) = __float2half(C_warp[(ax1_0_1 * 8) + local_id]);
+        store_accum_value(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
       }
     }
   }
@@ -725,13 +780,14 @@ __global__ void __launch_bounds__(128) gemmv2_forward_4bit_cuda_m128n64k32(int s
   }
 }
 
-// Dequantization to fp16
+// Dequantization to fp16/bf16
 // kernel
 // Source - https://github.com/compressa-ai/AutoAWQ/blob/6673333456b8871522b11a7fb110de612edfdf95/awq_cuda/quantization/gemm_cuda_gen.cu#L32C1-L32C1
+template <typename scalar_t>
 __global__ void __launch_bounds__(64) dequantize_weights(int* __restrict__ B, // 4096x64    4096 rows    64 cols
-                                                         half* __restrict__ scaling_factors,  // 32x512   32 rows    512 cols
+                                                         scalar_t* __restrict__ scaling_factors,  // 32x512   32 rows    512 cols
                                                          int* __restrict__ zeros,  // 32x64    32 rows     64 cols
-                                                         half* __restrict__ C, // 4096x512    4096 rows    512 cols
+                                                         scalar_t* __restrict__ C, // 4096x512    4096 rows    512 cols
                                                          int G,
                                                          int in_c,
                                                          int out_c)
@@ -745,19 +801,18 @@ __global__ void __launch_bounds__(64) dequantize_weights(int* __restrict__ B, //
   int j_factors1 = 4;
   int row_stride2 = 4;
   int split_k_iters = 1;
-  static constexpr uint32_t ZERO = 0x0;
-  half B_shared[32 * (128 + 8)];
+  scalar_t B_shared[32 * (128 + 8)];
 
-  half* B_shared_ptr2 = B_shared;
+  scalar_t* B_shared_ptr2 = B_shared;
 
-  half B_shared_warp[32];
+  scalar_t B_shared_warp[32];
   int OC = 512;
 
   int N = blockDim.x * gridDim.x;  // 2
   int col = (blockIdx.x * blockDim.x + threadIdx.x);
   int row = blockIdx.y * blockDim.y + threadIdx.y;
   int index1 = 8 * col + 8 * row * N;  // + i (<8)
-  half* C_ptr2 = C + index1;
+  scalar_t* C_ptr2 = C + index1;
 
   int index2 = col + row * N;
   int* B_ptr2 = B + index2;
@@ -765,26 +820,19 @@ __global__ void __launch_bounds__(64) dequantize_weights(int* __restrict__ B, //
   int index3 = col + (int)(row / G) * N;
   int* zeros_ptr2 = zeros + index3;
   int index4 = 8 * col + (int)(row / G) * N * 8;  // + i (<8)
-  half* scaling_factors_ptr2 = scaling_factors + index4;
+  scalar_t* scaling_factors_ptr2 = scaling_factors + index4;
 
 
     uint32_t zeros_loaded = *(uint32_t*)(zeros_ptr2);
-    uint4 B_loaded_zero = dequantize_s4_to_fp16x2(zeros_loaded);
+    uint4 B_loaded_zero = dequantize_s4_to_x2<scalar_t>(zeros_loaded);
     uint4 B_loaded_scale = *(uint4*)(scaling_factors_ptr2);
 int j=0;
 
       uint32_t B_loaded = *(uint32_t*)(B_ptr2 + j);
-      uint4 B_loaded_fp16 = dequantize_s4_to_fp16x2(B_loaded);
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.x) : "r"(B_loaded_fp16.x), "r"(B_loaded_zero.x));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.x) : "r"(B_loaded_fp16.x), "r"(B_loaded_scale.x), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.y) : "r"(B_loaded_fp16.y), "r"(B_loaded_zero.y));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.y) : "r"(B_loaded_fp16.y), "r"(B_loaded_scale.y), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.z) : "r"(B_loaded_fp16.z), "r"(B_loaded_zero.z));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.z) : "r"(B_loaded_fp16.z), "r"(B_loaded_scale.z), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_zero.w));
-      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_scale.w), "r"(ZERO));
+      uint4 B_loaded_values = dequantize_s4_to_x2<scalar_t>(B_loaded);
+      apply_zero_and_scale<scalar_t>(B_loaded_values, B_loaded_scale, B_loaded_zero);
 
-      *(uint4*)(B_shared_ptr2 + j) = B_loaded_fp16;
+      *(uint4*)(B_shared_ptr2 + j) = B_loaded_values;
 
   for (int i=0; i<8; ++i) {
     *(C_ptr2 + i) = B_shared[i];
@@ -1119,6 +1167,15 @@ torch::Tensor dequantize_weights_cuda(
     int num_experts = _kernel.dim() == 2 ? 1 : _kernel.size(0);
     int out_c = qout_c * 8;
     int G = in_c / (_kernel.dim() == 2 ? _scaling_factors.size(0) : _scaling_factors.size(1));
+    TORCH_CHECK(_kernel.is_cuda(), "AWQ dequantize expects CUDA packed weights.");
+    TORCH_CHECK(_scaling_factors.is_cuda(), "AWQ dequantize expects CUDA scales.");
+    TORCH_CHECK(_zeros.is_cuda(), "AWQ dequantize expects CUDA zero-points.");
+    TORCH_CHECK(_kernel.scalar_type() == at::kInt, "AWQ dequantize packed weights must be int32.");
+    TORCH_CHECK(_zeros.scalar_type() == at::kInt, "AWQ dequantize packed zero-points must be int32.");
+    TORCH_CHECK(
+        _scaling_factors.scalar_type() == at::kHalf || _scaling_factors.scalar_type() == at::kBFloat16,
+        "AWQ dequantize only supports float16 and bfloat16 scales."
+    );
 
     int x_thread = thx;
     int y_thread = thy;
@@ -1143,25 +1200,34 @@ torch::Tensor dequantize_weights_cuda(
 
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_scaling_factors));
 
-    auto options = torch::TensorOptions().dtype(_scaling_factors.dtype()).device(_scaling_factors.device());
-    at::Tensor _de_kernel;
+	    auto options = torch::TensorOptions().dtype(_scaling_factors.dtype()).device(_scaling_factors.device());
+	    at::Tensor _de_kernel;
     if (num_experts == 1) {
       _de_kernel = torch::empty({in_c, out_c}, options);
     } else {
       _de_kernel = torch::empty({num_experts, in_c, out_c}, options);
     }
 
-    auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
-    auto de_kernel = reinterpret_cast<half*>(_de_kernel.data_ptr<at::Half>());
-    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
-    auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
+	    auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
+	    auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
 
-    dim3 num_blocks(x_blocks, y_blocks, num_experts);
-    dim3 threads_per_block(x_thread, y_thread);  //  col, row 64x4096
+	    dim3 num_blocks(x_blocks, y_blocks, num_experts);
+	    dim3 threads_per_block(x_thread, y_thread);  //  col, row 64x4096
+        if (_scaling_factors.scalar_type() == at::kBFloat16)
+        {
+          validate_bf16_device(_scaling_factors.device());
+          auto de_kernel = reinterpret_cast<nv_bfloat16*>(_de_kernel.data_ptr<at::BFloat16>());
+          auto scaling_factors = reinterpret_cast<nv_bfloat16*>(_scaling_factors.data_ptr<at::BFloat16>());
+          dequantize_weights<nv_bfloat16><<<num_blocks, threads_per_block>>>(kernel, scaling_factors, zeros, de_kernel, G, in_c, out_c);
+        }
+        else
+        {
+          auto de_kernel = reinterpret_cast<half*>(_de_kernel.data_ptr<at::Half>());
+          auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
+          dequantize_weights<half><<<num_blocks, threads_per_block>>>(kernel, scaling_factors, zeros, de_kernel, G, in_c, out_c);
+        }
 
-    dequantize_weights<<<num_blocks, threads_per_block>>>(kernel, scaling_factors, zeros, de_kernel, G, in_c, out_c);
-
-    return _de_kernel;
+	    return _de_kernel;
 }
 
 // in_feats: M, IC [float16]
@@ -1230,59 +1296,209 @@ torch::Tensor gemmv2_forward_cuda(
 // zeros: IC // G, OC // 8 [int32] -> cast to IC // G, OC [uint4b]
 // assume that batch_size < 16 for now
 
+template <typename scalar_t>
+scalar_t* tensor_ptr(torch::Tensor& tensor);
+
+template <>
+half* tensor_ptr<half>(torch::Tensor& tensor)
+{
+    return reinterpret_cast<half*>(tensor.data_ptr<at::Half>());
+}
+
+template <>
+nv_bfloat16* tensor_ptr<nv_bfloat16>(torch::Tensor& tensor)
+{
+    return reinterpret_cast<nv_bfloat16*>(tensor.data_ptr<at::BFloat16>());
+}
+
+static void validate_awq_gemm_args(
+    const torch::Tensor& in_feats,
+    const torch::Tensor& kernel,
+    const torch::Tensor& scaling_factors,
+    const torch::Tensor& zeros,
+    int group_size,
+    int num_out_channels)
+{
+    TORCH_CHECK(in_feats.is_cuda(), "AWQ GEMM expects CUDA input activations.");
+    TORCH_CHECK(kernel.is_cuda(), "AWQ GEMM expects CUDA packed weights.");
+    TORCH_CHECK(scaling_factors.is_cuda(), "AWQ GEMM expects CUDA scales.");
+    TORCH_CHECK(zeros.is_cuda(), "AWQ GEMM expects CUDA zero-points.");
+    TORCH_CHECK(in_feats.is_contiguous(), "AWQ GEMM expects contiguous activations.");
+    TORCH_CHECK(kernel.is_contiguous(), "AWQ GEMM expects contiguous packed weights.");
+    TORCH_CHECK(scaling_factors.is_contiguous(), "AWQ GEMM expects contiguous scales.");
+    TORCH_CHECK(zeros.is_contiguous(), "AWQ GEMM expects contiguous zero-points.");
+    TORCH_CHECK(kernel.scalar_type() == at::kInt, "AWQ GEMM packed weights must be int32.");
+    TORCH_CHECK(zeros.scalar_type() == at::kInt, "AWQ GEMM packed zero-points must be int32.");
+    TORCH_CHECK(
+        in_feats.scalar_type() == at::kHalf || in_feats.scalar_type() == at::kBFloat16,
+        "AWQ GEMM only supports float16 and bfloat16 activations."
+    );
+    TORCH_CHECK(
+        scaling_factors.scalar_type() == at::kHalf || scaling_factors.scalar_type() == at::kBFloat16,
+        "AWQ GEMM only supports float16 and bfloat16 scales."
+    );
+    TORCH_CHECK(
+        in_feats.scalar_type() == scaling_factors.scalar_type(),
+        "AWQ GEMM expects activations and scales to share the same dtype before launch."
+    );
+    TORCH_CHECK(num_out_channels % 64 == 0, "OC is not multiple of cta_N = 64");
+    TORCH_CHECK(num_out_channels % 8 == 0, "OC is not multiple of pack_num = 8");
+    TORCH_CHECK(group_size % 32 == 0, "Group size should be a multiple of 32");
+    TORCH_CHECK(num_out_channels % group_size == 0, "OC is not multiple of Group size");
+}
+
+static void validate_bf16_device(torch::Device device)
+{
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, device.index());
+    TORCH_CHECK(prop.major >= 8, "BFloat16 AWQ GEMM requires compute capability >= 8.0.");
+}
+
+template <typename scalar_t>
+torch::Tensor launch_gemm_forward_cuda(
+    torch::Tensor in_feats_tensor,
+    torch::Tensor kernel_tensor,
+    torch::Tensor scaling_factors_tensor,
+    torch::Tensor zeros_tensor,
+    int split_k_iters,
+    at::ScalarType output_dtype)
+{
+    int num_in_feats = in_feats_tensor.size(0);
+    int num_in_channels = in_feats_tensor.size(1);
+    auto options = torch::TensorOptions().dtype(in_feats_tensor.scalar_type()).device(in_feats_tensor.device());
+    at::Tensor out_feats_tensor = torch::empty({split_k_iters, num_in_feats, kernel_tensor.size(1) * 8}, options);
+    int num_out_feats = out_feats_tensor.size(-2);
+    int num_out_channels = out_feats_tensor.size(-1);
+    int group_size = num_in_channels / scaling_factors_tensor.size(0);
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    validate_awq_gemm_args(in_feats_tensor, kernel_tensor, scaling_factors_tensor, zeros_tensor, group_size, num_out_channels);
+    if constexpr (std::is_same_v<scalar_t, nv_bfloat16>)
+    {
+        validate_bf16_device(in_feats_tensor.device());
+    }
+
+    auto in_feats = tensor_ptr<scalar_t>(in_feats_tensor);
+    auto kernel = reinterpret_cast<int*>(kernel_tensor.data_ptr<int>());
+    auto out_feats = tensor_ptr<scalar_t>(out_feats_tensor);
+    auto scaling_factors = tensor_ptr<scalar_t>(scaling_factors_tensor);
+    auto zeros = reinterpret_cast<int*>(zeros_tensor.data_ptr<int>());
+
+    if (num_out_channels % 128 == 0)
+    {
+        int j_factors1 = num_out_channels / 128 / 1;
+        dim3 num_blocks((num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
+        dim3 threads_per_block(32, 2);
+        gemm_forward_4bit_cuda_m16n128k32<scalar_t, scalar_t><<<num_blocks, threads_per_block, 0, stream>>>(
+            group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
+    }
+    else if (num_out_channels % 64 == 0)
+    {
+        int j_factors1 = num_out_channels / 64 / 1;
+        dim3 num_blocks(1 * (num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
+        dim3 threads_per_block(32, 2);
+        gemm_forward_4bit_cuda_m16n64k32<scalar_t, scalar_t><<<num_blocks, threads_per_block, 0, stream>>>(
+            group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
+    }
+
+    auto result = out_feats_tensor.sum(0);
+    return result.scalar_type() == output_dtype ? result : result.to(output_dtype);
+}
+
+template <typename scalar_t>
+torch::Tensor launch_gemm_forward_cuda_fp32_reduce(
+    torch::Tensor in_feats_tensor,
+    torch::Tensor kernel_tensor,
+    torch::Tensor scaling_factors_tensor,
+    torch::Tensor zeros_tensor,
+    int split_k_iters,
+    at::ScalarType output_dtype)
+{
+    int num_in_feats = in_feats_tensor.size(0);
+    int num_in_channels = in_feats_tensor.size(1);
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(in_feats_tensor.device());
+    at::Tensor out_feats_tensor = torch::empty({split_k_iters, num_in_feats, kernel_tensor.size(1) * 8}, options);
+    int num_out_feats = out_feats_tensor.size(-2);
+    int num_out_channels = out_feats_tensor.size(-1);
+    int group_size = num_in_channels / scaling_factors_tensor.size(0);
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    validate_awq_gemm_args(in_feats_tensor, kernel_tensor, scaling_factors_tensor, zeros_tensor, group_size, num_out_channels);
+    if constexpr (std::is_same_v<scalar_t, nv_bfloat16>)
+    {
+        validate_bf16_device(in_feats_tensor.device());
+    }
+
+    auto in_feats = tensor_ptr<scalar_t>(in_feats_tensor);
+    auto kernel = reinterpret_cast<int*>(kernel_tensor.data_ptr<int>());
+    auto out_feats = reinterpret_cast<float*>(out_feats_tensor.data_ptr<float>());
+    auto scaling_factors = tensor_ptr<scalar_t>(scaling_factors_tensor);
+    auto zeros = reinterpret_cast<int*>(zeros_tensor.data_ptr<int>());
+
+    if (num_out_channels % 128 == 0)
+    {
+        int j_factors1 = num_out_channels / 128 / 1;
+        dim3 num_blocks((num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
+        dim3 threads_per_block(32, 2);
+        gemm_forward_4bit_cuda_m16n128k32<scalar_t, float><<<num_blocks, threads_per_block, 0, stream>>>(
+            group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
+    }
+    else if (num_out_channels % 64 == 0)
+    {
+        int j_factors1 = num_out_channels / 64 / 1;
+        dim3 num_blocks(1 * (num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
+        dim3 threads_per_block(32, 2);
+        gemm_forward_4bit_cuda_m16n64k32<scalar_t, float><<<num_blocks, threads_per_block, 0, stream>>>(
+            group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
+    }
+
+    return maybe_fused_reduce_splitk_fp32_to_output(out_feats_tensor, output_dtype);
+}
+
 torch::Tensor gemm_forward_cuda(
+    torch::Tensor _in_feats,
+    torch::Tensor _kernel,
+    torch::Tensor _scaling_factors,
+    torch::Tensor _zeros,
+    int split_k_iters,
+    bool fp32_accum)
+{
+    if (fp32_accum)
+    {
+        return gemm_forward_cuda_fp32_reduce(_in_feats, _kernel, _scaling_factors, _zeros, split_k_iters);
+    }
+
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
+    at::ScalarType output_dtype = _in_feats.scalar_type();
+    torch::Tensor in_feats = _in_feats;
+    torch::Tensor scaling_factors = _scaling_factors;
+    torch::Tensor kernel = _kernel;
+    torch::Tensor zeros = _zeros;
+
+    if (in_feats.scalar_type() == at::kBFloat16)
+    {
+        return launch_gemm_forward_cuda<nv_bfloat16>(in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype);
+    }
+    return launch_gemm_forward_cuda<half>(in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype);
+}
+
+torch::Tensor gemm_forward_cuda_fp32_reduce(
     torch::Tensor _in_feats,
     torch::Tensor _kernel,
     torch::Tensor _scaling_factors,
     torch::Tensor _zeros,
     int split_k_iters)
 {
-    int num_in_feats = _in_feats.size(0);
-    int num_in_channels = _in_feats.size(1);
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
+    at::ScalarType output_dtype = _in_feats.scalar_type();
+    torch::Tensor in_feats = _in_feats;
+    torch::Tensor scaling_factors = _scaling_factors;
+    torch::Tensor kernel = _kernel;
+    torch::Tensor zeros = _zeros;
 
-    auto options = torch::TensorOptions().dtype(_in_feats.dtype()).device(_in_feats.device());
-    at::Tensor _out_feats = torch::empty({split_k_iters, num_in_feats, _kernel.size(1) * 8}, options);
-    int num_out_feats = _out_feats.size(-2);
-    int num_out_channels = _out_feats.size(-1);
-
-    auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
-    auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
-    auto out_feats = reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>());
-    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
-    auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
-    int group_size = num_in_channels / _scaling_factors.size(0);
-    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-    if (num_out_channels % 64 != 0)
-        throw std::invalid_argument("OC is not multiple of cta_N = 64");
-    if (num_out_channels % 8 != 0)
-        throw std::invalid_argument("OC is not multiple of pack_num = 8");
-    if (group_size % 32 != 0)
-	      throw std::invalid_argument("Group size should be a multiple of 32");
-    if (num_out_channels % group_size != 0)
-        throw std::invalid_argument("OC is not multiple of Group size");
-
-    if (num_out_channels % 128 == 0)
+    if (in_feats.scalar_type() == at::kBFloat16)
     {
-        int j_factors1 = num_out_channels / 128 / 1;
-        dim3 num_blocks((num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
-        // threadIdx.x: 32
-        // threadIdx.y: i_factors[2] * j_factors[2]
-        dim3 threads_per_block(32, 2);
-        gemm_forward_4bit_cuda_m16n128k32<<<num_blocks, threads_per_block, 0, stream>>>(
-            group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
+        return launch_gemm_forward_cuda_fp32_reduce<nv_bfloat16>(in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype);
     }
-    else if (num_out_channels % 64 == 0)
-    {
-	int j_factors1 = num_out_channels / 64 / 1;
-        dim3 num_blocks(1 * (num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
-    
-        // threadIdx.x: 32
-        // threadIdx.y: i_factors[2] * j_factors[2]
-        dim3 threads_per_block(32, 2);
-        gemm_forward_4bit_cuda_m16n64k32<<<num_blocks, threads_per_block, 0, stream>>>(
-            group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
-    }
-    return _out_feats.sum(0);
+    return launch_gemm_forward_cuda_fp32_reduce<half>(in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype);
 }

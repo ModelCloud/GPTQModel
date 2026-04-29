@@ -16,7 +16,7 @@ try:
     from pydantic import BaseModel
 except ModuleNotFoundError as exception:
     raise type(exception)(
-        "GPTQModel OpenAi serve required dependencies are not installed.",
+        "GPT-QModel OpenAi serve required dependencies are not installed.",
         "Please install via `pip install gptqmodel[openai] --no-build-isolation`.",
     )
 
@@ -53,26 +53,37 @@ class OpenAiServer:
         @self.app.post("/v1/chat/completions", response_model=OpenAiResponse)
         async def create_completion(request: OpenAiRequest):
             try:
-                inputs_tensor = self.tokenizer.apply_chat_template(
+                model_inputs = self.tokenizer.apply_chat_template(
                     request.messages,
                     add_generation_prompt=True,
-                    return_tensors='pt').to(self.model.device)
+                    return_tensors='pt',
+                )
+
+                if isinstance(model_inputs, torch.Tensor):
+                    model_inputs = model_inputs.to(self.model.device)
+                    generate_inputs = {"inputs": model_inputs}
+                    prompt_length = model_inputs.size(-1)
+                else:
+                    model_inputs = model_inputs.to(self.model.device)
+                    input_ids = model_inputs["input_ids"]
+                    generate_inputs = dict(model_inputs)
+                    prompt_length = input_ids.size(-1)
 
                 do_sample = True if request.temperature != 0.0 else False
                 with torch.inference_mode():
                     outputs = self.model.generate(
-                        inputs_tensor,
-                        max_length=inputs_tensor.shape[0] + request.max_tokens,
+                        max_length=prompt_length + request.max_tokens,
                         temperature=request.temperature,
                         top_p=request.top_p,
                         num_return_sequences=request.n,
                         eos_token_id=self.tokenizer.eos_token_id,
                         stop_strings=request.stop,
-                        do_sample=do_sample
+                        do_sample=do_sample,
+                        **generate_inputs,
                     )
 
                 generated_texts = self.tokenizer.batch_decode(
-                    outputs[:, inputs_tensor.size(-1):],
+                    outputs[:, prompt_length:],
                     skip_special_tokens=True,
                 )
 
@@ -96,7 +107,7 @@ class OpenAiServer:
 
         @self.app.get("/")
         def read_root():
-            return {"message": "GPTQModel OpenAI Compatible Server is running."}
+            return {"message": "GPT-QModel OpenAI Compatible Server is running."}
 
         @self.app.get("/shutdown")
         def shutdown():
@@ -113,19 +124,19 @@ class OpenAiServer:
         if async_mode:
             thread = threading.Thread(target=run_server, daemon=False)
             thread.start()
-            print(f"GPTQModel OpenAi Server has started asynchronously at http://{host}:{port}.")
+            print(f"GPT-QModel OpenAi Server has started asynchronously at http://{host}:{port}.")
         else:
             run_server()
-            print(f"GPTQModel OpenAi Server has started synchronously at http://{host}:{port}.")
+            print(f"GPT-QModel OpenAi Server has started synchronously at http://{host}:{port}.")
 
     def shutdown(self):
         if self.uvicorn_server is not None:
             self.uvicorn_server.should_exit = True
-            print("GPTQModel OpenAi Server is shutting down...")
+            print("GPT-QModel OpenAi Server is shutting down...")
 
     def wait_until_ready(self, timeout: int = 30, check_interval: float = 0.1):
         start_time = time.time()
         while not self.uvicorn_server.started:
             if time.time() - start_time > timeout:
-                raise TimeoutError("GPTQModel OpenAi server failed to start within the specified time.")
+                raise TimeoutError("GPT-QModel OpenAi server failed to start within the specified time.")
             time.sleep(check_interval)

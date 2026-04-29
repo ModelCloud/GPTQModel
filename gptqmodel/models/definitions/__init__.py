@@ -18,13 +18,21 @@ from .dbrx_converted import DbrxConvertedQModel
 from .decilm import DeciLMQModel
 from .deepseek_v2 import DeepSeekV2QModel
 from .deepseek_v3 import DeepSeekV3QModel
+from .dots1 import Dots1QModel
 from .dream import DreamQModel
 from .exaone import ExaOneQModel
+from .exaone4 import Exaone4QModel
 from .ernie4_5 import Ernie4_5QModel
 from .ernie4_5_moe import Ernie4_5_MoeQModel
+from .ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
 from .gemma2 import Gemma2QModel
 from .gemma3 import Gemma3QModel
+from .gemma3n import Gemma3nForConditionalGenerationGPTQ, Gemma3nTextQModel
+from .gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel
 from .glm import GlmQModel
+from .glmasr import GlmASRGPTQ
+from .glm_ocr import GlmOCRGPTQ
+from .glm_moe_dsa import GlmMoeDsaQModel
 from .gpt2 import GPT2QModel
 from .gpt_bigcode import GptBigCodeQModel
 from .gpt_neo import GptNeoQModel
@@ -35,9 +43,12 @@ from .hymba import HymbaQModel
 from .instella import InstellaQModel
 from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
+from .internvl_chat import InternVLChatQModel
 from .llama4 import Llama4QModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel
+from .minicpm_o import MiniCPMOQModel
+from .minicpm_v import MiniCPMVQModel
 from .minimax_m2 import MiniMaxM2GPTQ
 from .mixtral import MixtralQModel
 from .mllama import MLlamaQModel
@@ -61,10 +72,17 @@ from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel
 from .xverse import XverseQModel
 from .falcon_h1 import FalconH1QModel
+from .falcon_mamba import FalconMambaQModel
 from .pangu_alpha import PanguAlphaQModel
 from .longcat_flash import LongCatFlashQModel
 from .apertus import ApertusQModel
 from .klear import KlearQModel
+from .laguna import LagunaQModel
 from .llava_qwen2 import LlavaQwen2QModel
 from .nemotron_h import NemotronHQModel
 from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
+from .mistral3 import Mistral3GPTQ
+from .afmoe import AfMoeQModel
+from .glm4v import Glm4vGPTQ
+from .voxtral import VoxtralGPTQ
+from .glm4_moe_lite import Glm4MoeLiteQModel

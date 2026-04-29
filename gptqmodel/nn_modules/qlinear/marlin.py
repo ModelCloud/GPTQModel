@@ -23,10 +23,13 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear
+from ...nn_modules.qlinear import GPTQQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
+    _marlin_capability_supported,
     _transform_param,
     apply_gptq_marlin_linear,
     gptq_marlin_repack,
@@ -37,7 +40,10 @@ from ...utils.marlin import (
     marlin_permute_bias,
     marlin_permute_scales,
     marlin_repeat_scales_on_all_ranks,
+    marlin_runtime_available,
+    marlin_runtime_error,
     marlin_sort_g_idx,
+    replace_parameter,
 )
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
@@ -46,7 +52,10 @@ from ...utils.rocm import IS_ROCM
 log = setup_logger()
 
 
-class MarlinQuantLinear(BaseQuantLinear):
+class MarlinLinear(GPTQQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 90, FORMAT.GPTQ_V2: 90, FORMAT.MARLIN: 90}
     SUPPORTS_BITS = [4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -89,7 +98,8 @@ class MarlinQuantLinear(BaseQuantLinear):
             **kwargs):
         if marlin_import_exception is not None:
             raise ValueError(
-                f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
+                "Trying to use the marlin backend, but the runtime requirements were not met: "
+                f"{marlin_import_exception}"
             )
 
         # self.original_in_features = in_features
@@ -100,6 +110,9 @@ class MarlinQuantLinear(BaseQuantLinear):
             # (since we have only one group per output channel)
             desc_act = False
 
+        self.compute_dtype = kwargs.get("dtype") or torch.float16
+        self.fp32 = env_flag("GPTQMODEL_MARLIN_USE_FP32", default=True)
+
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -109,17 +122,14 @@ class MarlinQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.MARLIN),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_MARLIN),
             adapter=adapter,
             register_buffers=False, # do not register buffers in super()
             **kwargs)
 
-        # toggle fp32 mode depending on MARLIN or MARLIN_FP16 backend
-        self.fp32 = True if self.backend in [BACKEND.MARLIN, BACKEND.AUTO] else False
-
         if not self.fp32:
             log.warn.once(
-                "Kernel: Marlin FP16 mode is activated with reduced accuracy. Use default Marlin model for improved inference quality.")
+                "Kernel: GPTQMODEL_MARLIN_USE_FP32 is disabled. Marlin will use reduced-precision reduction.")
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
@@ -162,7 +172,7 @@ class MarlinQuantLinear(BaseQuantLinear):
                 torch.empty(
                     scales_and_zp_size,
                     self.out_features,
-                    dtype=torch.float16,
+                    dtype=self.compute_dtype,
                 ),
                 requires_grad=False
             ),
@@ -182,7 +192,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         )
 
         if bias:
-            self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
+            self.register_buffer("bias", torch.zeros((self.out_features), dtype=self.compute_dtype))
         else:
             self.bias = None
 
@@ -208,11 +218,13 @@ class MarlinQuantLinear(BaseQuantLinear):
     #
     #     super().optimize()
 
+
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if marlin_import_exception is not None:
             return False, ImportError(marlin_import_exception)
-        return cls._validate(**args)
+        return True, None
+
 
     @classmethod
     def validate_device(cls, device: DEVICE):
@@ -222,15 +234,23 @@ class MarlinQuantLinear(BaseQuantLinear):
                 raise NotImplementedError("Marlin kernel is not supported on ROCm.")
 
             # Directly check capabilities of all currently visible CUDA devices
-            has_cuda_v8 = all(
-                torch.cuda.get_device_capability(i)[0] >= 8
+            has_supported_cuda = all(
+                _marlin_capability_supported(*torch.cuda.get_device_capability(i))
                 for i in range(torch.cuda.device_count())
             )
-            if not has_cuda_v8:
-                raise NotImplementedError("Marlin kernel only supports compute capability >= 8.0.")
+            if not has_supported_cuda:
+                raise NotImplementedError(
+                    "Marlin kernel only supports compute capability >= 7.5."
+                )
 
     def post_init(self):
         device = self.qweight.device
+
+        if not marlin_runtime_available(self.compute_dtype):
+            raise ModuleNotFoundError(
+                "Marlin torch.ops kernels are not properly installed. Error: "
+                + marlin_runtime_error(self.compute_dtype)
+            )
 
         self.is_k_full = marlin_is_k_full(self.desc_act, is_row_parallel=False)
 
@@ -242,7 +262,8 @@ class MarlinQuantLinear(BaseQuantLinear):
                                         perm=self.g_idx_sort_indices,
                                         size_k=self.in_features,
                                         size_n=self.out_features,
-                                        num_bits=self.bits)
+                                        num_bits=self.bits,
+                                        dtype=self.compute_dtype)
             return x
 
         def transform_w_s(x):
@@ -289,7 +310,9 @@ class MarlinQuantLinear(BaseQuantLinear):
 
         # make sure scales is synced with x/input
         if x.dtype != self.scales.dtype:
-            self.scales = self.scales.to(dtype=x.dtype)
+            replace_parameter(self, "scales", self.scales.to(dtype=x.dtype))
+        if self.bias is not None and self.bias.dtype != x.dtype:
+            self.bias.data = self.bias.data.to(dtype=x.dtype)
 
         out = apply_gptq_marlin_linear(
             input=x.contiguous() if self.is_lm_head else x,
@@ -368,4 +391,4 @@ def dequantize_qzeros(layer):
     return unpacked_qzeros
 
 
-__all__ = ["MarlinQuantLinear"]
+__all__ = ["MarlinLinear"]

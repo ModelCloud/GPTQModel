@@ -5,20 +5,19 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestHybridActOrder(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.3140, "floor_pct": 0.05},
             "acc_norm": {"value": 0.3439, "floor_pct": 0.05},
         },
     }
-    GPTQA = False
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
+    GPTAQ = None
     ACT_GROUP_AWARE = True
 
     def test_llama3_2(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

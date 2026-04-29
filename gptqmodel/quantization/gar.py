@@ -58,7 +58,7 @@ def compute_local_perms(
     H = diag_H[: num_groups * groupsize].view(num_groups, groupsize)
 
     # CUDA `topk` outperforms `argsort`/`sort` for the typical
-    # group sizes (<=192) used by GPTQModel while keeping identical ordering.
+    # group sizes (<=192) used by GPT-QModel while keeping identical ordering.
     use_topk = diag_H.is_cuda and groupsize <= 192 and groupsize > 0
     if use_topk:
         values, indices = torch.topk(H, k=groupsize, dim=1, largest=True, sorted=True)
@@ -144,6 +144,21 @@ def compose_final_perm(local_perms, global_perm, groupsize: int) -> torch.Tensor
     # NOTE: we index rows (groups) by global_perm, then flatten
     perm2d = (local + base)[global_perm.to(device=local.device, dtype=torch.long)]  # (G,S)
     return perm2d.reshape(-1)  # (G*S,)
+
+def extend_perm_with_tail(perm: torch.Tensor, total_columns: int) -> torch.Tensor:
+    """Append identity-mapped tail columns left outside the full GAR groups."""
+
+    covered = int(perm.numel())
+    if covered >= total_columns:
+        return perm
+
+    tail = torch.arange(
+        covered,
+        total_columns,
+        dtype=perm.dtype,
+        device=perm.device,
+    )
+    return torch.cat((perm, tail), dim=0)
 
 def invert_perm(perm):
     """

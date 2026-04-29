@@ -5,19 +5,18 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestGranite(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/granite-3.0-2b-instruct" # "ibm-granite/granite-3.0-2b-instruct"
     TRUST_REMOTE_CODE = True
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.4505, "floor_pct": 0.2},
             "acc_norm": {"value": 0.4770, "floor_pct": 0.2},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     def test_granite(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

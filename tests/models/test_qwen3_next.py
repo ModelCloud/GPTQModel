@@ -5,28 +5,27 @@
 
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import VRAMStrategy
-from gptqmodel.utils.eval import EVAL
+from gptqmodel.quantization.config import VramStrategy
 
 
-# | Metric                         |   MARLIN |
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.6271 |
 # | arc_challenge :: acc_norm,none |   0.6613 |
 # | mmlu_stem :: acc,none          |   0.8403 |
 class TestQwen3Next(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-Next-80B-A3B-Instruct"
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
             "acc": {"value": 0.6271, "floor_pct": 0.04},
             "acc_norm": {"value": 0.6613, "floor_pct": 0.04},
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "acc": {"value": 0.8403, "floor_pct": 0.04},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
-    VRAM_STRATEGY = VRAMStrategy.BALANCED
+    DENSE_VRAM_STRATEGY = VramStrategy.BALANCED
     # DATASET_SIZE = 2048
     # TRUST_REMOTE_CODE = True
     # APPLY_CHAT_TEMPLATE = True
@@ -43,4 +42,4 @@ class TestQwen3Next(ModelTest):
     # USE_FLASH_ATTN = True
 
     def test_mimo(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

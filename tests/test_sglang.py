@@ -10,10 +10,18 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import importlib.util  # noqa: E402
+import unittest  # noqa: E402
 
+import pytest  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel.utils.sglang import SGLANG_AVAILABLE, SGLANG_INSTALL_HINT  # noqa: E402
+
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestLoadSglang(ModelTest):
@@ -21,8 +29,12 @@ class TestLoadSglang(ModelTest):
     @classmethod
     def setUpClass(self):
         # sglang set disable_flashinfer=True still import flashinfer
-        if importlib.util.find_spec("flashinfer") is None or importlib.util.find_spec("sglang") is None:
-            raise RuntimeError("flashinfer and sglang are required by this test. you can install them by `pip install gptqmodel['sglang']`")
+        if importlib.util.find_spec("flashinfer") is None:
+            raise unittest.SkipTest(
+                "flashinfer is required by this test. install via `pip install gptqmodel['sglang']`"
+            )
+        if importlib.util.find_spec("sglang") is None or not SGLANG_AVAILABLE:
+            raise unittest.SkipTest(SGLANG_INSTALL_HINT)
 
         self.MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
@@ -42,4 +54,3 @@ class TestLoadSglang(ModelTest):
         self.assertTrue(len(output)>5)
         model.shutdown()
         del model
-

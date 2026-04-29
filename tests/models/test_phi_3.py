@@ -5,21 +5,30 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestPhi_3(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Phi-3-mini-4k-instruct" # "microsoft/Phi-3-mini-4k-instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.5401
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5674
+    NATIVE_ARC_CHALLENGE_ACC_SLOW = NATIVE_ARC_CHALLENGE_ACC
+    NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
+    NATIVE_ARC_CHALLENGE_ACC_FAST = 0.5477815699658704
+    NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = 0.5742320819112628
     TRUST_REMOTE_CODE = True
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},
         },
     }
+    EVAL_TASKS_FAST = {
+        "arc_challenge": {
+            "chat_template": True,
+            "acc": {"value": NATIVE_ARC_CHALLENGE_ACC_FAST, "ceil_pct": 1.0},
+            "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM_FAST, "ceil_pct": 1.0},
+        },
+    }
 
     def test_phi_3(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

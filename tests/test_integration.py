@@ -9,6 +9,8 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
+import torch
+from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
 
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -17,7 +19,6 @@ from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 class TestIntegration(unittest.TestCase):
     INFERENCE_PROMPT = "Which city is the capital of France? The city name is "
     INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country"]
-
 
     @classmethod
     def setUpClass(cls):
@@ -47,9 +48,11 @@ class TestIntegration(unittest.TestCase):
     def _test_quantize(self, device_map):
         model_id = "/monster/data/model/opt-125m"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        dataset = ["gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
+        dataset = [
+            "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
         gptq_config = GPTQConfig(bits=4, dataset=dataset, tokenizer=tokenizer)
-        quantized_model = AutoModelForCausalLM.from_pretrained(model_id, device_map=device_map, quantization_config=gptq_config)
+        quantized_model = AutoModelForCausalLM.from_pretrained(model_id, device_map=device_map, use_safetensors=False,
+                                                               quantization_config=gptq_config)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             quantized_model.save_pretrained(tmp_dir)
@@ -58,7 +61,13 @@ class TestIntegration(unittest.TestCase):
 
             model = AutoModelForCausalLM.from_pretrained(tmp_dir, device_map=device_map)
 
-            generate_str = tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0])
+            generate_str = ModelTest.generate_stable_with_limit(
+                model,
+                tokenizer,
+                "gptqmodel is",
+                max_new_tokens=30,
+                skip_special_tokens=False,
+            )
 
             self.assertIn("is a good", generate_str.lower())
 
@@ -100,8 +109,33 @@ class TestIntegration(unittest.TestCase):
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
             prompt = self.INFERENCE_PROMPT
-        inp = tokenizer(prompt, return_tensors="pt").to(model.device)
-        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=10, max_new_tokens=30)
-        output = tokenizer.decode(res[0])
+        output = ModelTest.generate_stable_with_limit(
+            model,
+            tokenizer,
+            prompt,
+            min_new_tokens=10,
+            max_new_tokens=30,
+            skip_special_tokens=False,
+        )
         print(f"Result is: >>\n{output}\n<<")
         return output
+
+    def test_llm_awq(self):
+        model_name = "ModelCloud/opt-125m-llm-awq"
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            device_map="cuda",
+        )
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        with torch.no_grad():
+            result = ModelTest.generate_stable_with_limit(
+                model,
+                tokenizer,
+                "The capital city of France is named",
+                max_new_tokens=128,
+            )
+            print("result:", result)
+
+            if "paris" not in result.lower() and "city" not in result.lower() and "food" not in result.lower() and "market" not in result.lower():
+                raise AssertionError(" `paris` not found in `result`")

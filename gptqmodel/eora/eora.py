@@ -20,6 +20,7 @@ from torch import Tensor
 
 from ..utils.logger import setup_logger
 from ..utils.rocm import IS_ROCM
+from ..utils.torch import TORCH_GTE_210
 
 log = setup_logger()
 
@@ -91,7 +92,7 @@ def eora_compute_lora(
     # save this later for SVD
     raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(device=device, dtype=torch.float64)
 
-    if IS_ROCM:
+    if IS_ROCM and not TORCH_GTE_210:
         # hip cannot resolve linalg ops
         original_backend = torch.backends.cuda.preferred_linalg_library()
         torch.backends.cuda.preferred_linalg_library(backend="magma")
@@ -131,7 +132,7 @@ def eora_compute_lora(
     del truc_s, truc_u, truc_v, truc_sigma, sqrtS
 
     # revert linalg backend
-    if IS_ROCM:
+    if IS_ROCM and not TORCH_GTE_210:
         torch.backends.cuda.preferred_linalg_library(original_backend)
 
     return A, B

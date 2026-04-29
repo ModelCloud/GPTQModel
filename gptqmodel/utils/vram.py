@@ -11,6 +11,20 @@ import torch.nn as nn
 from accelerate.utils import convert_bytes
 
 
+_ONE_BYTE_FLOATX_DTYPES = frozenset(
+    getattr(torch, name)
+    for name in (
+        "float8_e4m3fn",
+        "float8_e5m2",
+        "float8_e4m3fnuz",
+        "float8_e5m2fnuz",
+        "float8_e8m0fnu",
+        "float4_e2m1fn_x2",
+    )
+    if hasattr(torch, name)
+)
+
+
 def dtype_byte_size(dtype: torch.dtype):
     """
     Returns the size (in bytes) occupied by one parameter of type `dtype`.
@@ -30,7 +44,7 @@ def dtype_byte_size(dtype: torch.dtype):
         return 1 / 2
     elif dtype == "fp8":
         return 1
-    elif dtype == torch.float8_e4m3fn:
+    elif dtype in _ONE_BYTE_FLOATX_DTYPES:
         return 1
     elif dtype == torch.float16 or dtype == torch.bfloat16:
         return 2

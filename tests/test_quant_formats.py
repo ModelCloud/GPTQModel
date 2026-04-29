@@ -31,7 +31,7 @@ class TestQuantization(ModelTest):
 
     @classmethod
     def setUpClass(self):
-        self.pretrained_model_id = "/monster/data/model/Llama-3.2-1B"
+        self.pretrained_model_id = "/monster/data/model/Llama-3.2-1B-Instruct"
         #"/monster/data/model/Qwen2.5-0.5B-Instruct/" "/monster/data/model/Qwen2.5-0.5B-Instruct/" #
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)

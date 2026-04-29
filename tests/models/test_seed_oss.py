@@ -5,20 +5,19 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestSeedOSS(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Seed-OSS-36B-Instruct/"
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.2739, "floor_pct": 0.2},
             "acc_norm": {"value": 0.3055, "floor_pct": 0.2},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
 
     def test_seed_oss(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

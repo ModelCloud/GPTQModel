@@ -39,7 +39,12 @@ class TestTorchXPU(ModelTest):
               backend=BACKEND.TORCH,
               device=DEVICE.XPU,
           )
-          generate_str = tokenizer.decode(model.generate(**tokenizer("The capital of France is is", return_tensors="pt").to(model.device), max_new_tokens=2)[0])
+          generate_str = self.generate_stable_with_limit(
+              model,
+              tokenizer,
+              "The capital of France is is",
+              max_new_tokens=2,
+          )
 
           print(f"generate_str: {generate_str}")
 

@@ -25,7 +25,6 @@ from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
 
 
 class Test(ModelTest):
@@ -33,7 +32,7 @@ class Test(ModelTest):
     lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc"
 
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.3567, "floor_pct": 0.36},
             "acc_norm": {"value": 0.3805, "floor_pct": 0.36},
         },
@@ -48,10 +47,9 @@ class Test(ModelTest):
         #BACKEND.TORCH,
         # BACKEND.CUDA,
         # BACKEND.TRITON,
-        # BACKEND.EXLLAMA_V1,
         # BACKEND.EXLLAMA_V2,
         BACKEND.MARLIN,
-        # # (BACKEND.IPEX), <-- not tested yet
+        # # (BACKEND.TORCH_FUSED), <-- not tested yet
         # # (BACKEND.BITBLAS, <-- not tested yet
     ])
     def test_load(self, backend: BACKEND):
@@ -63,8 +61,11 @@ class Test(ModelTest):
         )
 
         # print(model)
-        tokens = model.generate("The capital city of France is named")[0]
-        result = model.tokenizer.decode(tokens)
+        result = self.generate_stable_with_limit(
+            model,
+            model.tokenizer,
+            "The capital city of France is named",
+        )
         print(f"Result: {result}")
         self.assertIn("paris", result.lower())
 
@@ -81,23 +82,28 @@ class Test(ModelTest):
             device_map="auto",
         )
 
-        tokens = model.generate("The capital city of France is named", min_new_tokens=128, max_new_tokens=128)[0]
-        result = model.tokenizer.decode(tokens)
+        result = self.generate_stable_with_limit(
+            model,
+            model.tokenizer,
+            "The capital city of France is named",
+            min_new_tokens=128,
+            max_new_tokens=128,
+        )
         print(f"Result: {result}")
         self.assertIn("paris", result.lower())
         if "paris" not in result.lower() and "built" not in result.lower():
             raise AssertionError(" `paris` not found in `result`")
 
-    def test_lm_eval_from_path(self):
+    def test_evalution_from_path(self):
         adapter = Lora(path=self.lora_path, rank=128)
-        task_results = self.lm_eval(self.NATIVE_MODEL_ID, extra_args={"adapter": adapter.to_dict()}) # "backend":"exllama_v2",
+        task_results = self.evaluate_model(self.NATIVE_MODEL_ID, extra_args={"adapter": adapter.to_dict()}) # "backend":"exllama_v2",
         self.check_results(task_results)
 
-    def test_lm_eval_from_model(self):
+    def test_evalution_from_model(self):
         model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             adapter=self.adapter,
             # backend=BACKEND.EXLLAMA_V2V,
         )
-        task_results = self.lm_eval(model)
+        task_results = self.evaluate_model(model)
         self.check_results(task_results)

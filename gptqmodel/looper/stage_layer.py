@@ -3,34 +3,387 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Layer execution stage extracted from ModuleLooper."""
+"""Layer-level orchestration for subset execution, replay, and finalization.
+
+For each processor and layer, this stage:
+- builds all subset plans up front
+- executes subsets using those plans
+- replays forward once when the processor needs post-process outputs
+- finalizes processed modules after the processor pipeline completes
+"""
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import time
 from concurrent.futures import as_completed
 from typing import TYPE_CHECKING, Dict, List, Optional
+
+from defuser.modeling.replace_modules import materialize_model
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
+from ..quantization.config import GcMode, QuantizeEmbed
 import torch
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.awq_processor import AWQProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
+from ..looper.paroquant_processor import ParoQuantProcessor
 from ..looper.qqq_processor import QQQProcessor
-from ..quantization.config import QuantizeEmbed
 from ..utils.device import get_device, get_device_new
-from ..utils.logger import log_time_block, setup_logger
+from ..utils.looper_helpers import normalize_device_like
+from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
 from ..utils.model import find_modules, get_module
 from ..utils.offload import offload_to_disk
-from ..utils.torch import CPU, torch_sync
-from .stage_subset import SubsetForwardContext, run_subset_stage
+from ..utils.torch import CPU, torch_empty_cache, torch_sync
+from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from .module_looper import ModuleLooper
+
+
+def _find_last_quantized_layer_index(
+    looper: "ModuleLooper",
+    *,
+    layer_modules: List[List[str]],
+    layers_prefix: Optional[str],
+    layer_count: int,
+) -> Optional[int]:
+    """Return the highest layer index whose tracked modules are not all dynamically skipped."""
+    if looper.gptq_model.quantize_config.lm_head or not layers_prefix:
+        return None
+
+    layer_module_names = {
+        name.split("#", 1)[0]
+        for module_group in layer_modules
+        for name in module_group
+        if name
+    }
+    if not layer_module_names:
+        return None
+
+    last_quantized_layer_index = -1
+    for candidate_layer_index in range(layer_count):
+        for module_name in layer_module_names:
+            module_full_name = f"{layers_prefix}.{candidate_layer_index}.{module_name}"
+            # If at least one module in this layer is not dynamically excluded,
+            # the layer still needs forward/quantization work.
+            if looper.gptq_model.quantize_config.dynamic_get(layer_name=module_full_name) != False:
+                last_quantized_layer_index = candidate_layer_index
+                break
+
+    return last_quantized_layer_index
+
+
+def _should_drain_finalize_futures_synchronously(
+    looper: "ModuleLooper",
+    *,
+    finalize_tasks,
+) -> bool:
+    """Decide whether one layer must finish finalization before the next begins.
+
+    ParoQuant layer/group optimization holds substantially more live CUDA state
+    than the weight-only paths. Letting its finalizers overlap the next layer
+    can visibly ratchet active VRAM upward from layer N to N+1, so ParoQuant
+    always drains per-layer finalizers synchronously.
+
+    Any multi-accelerator quantization flow can overlap layer N finalizers with
+    layer N+1 materialization/replay if we keep the default async drain. That
+    saves some wall time, but it also broadens the lifetime of device-resident
+    weights, activations, and packing state across layer boundaries. In
+    practice, the overlap is not worth the allocator pressure risk, so
+    multi-device runs drain per-layer finalizers synchronously.
+    """
+    if looper.gptq_model.quantize_config.wait_for_submodule_finalizers:
+        return True
+
+    quant_devices = getattr(looper, "_quant_devices", None) or []
+    active_accelerators = {
+        (device.type, device.index)
+        for device_like in quant_devices
+        if (device := normalize_device_like(device_like)) is not None and device.type != "cpu"
+    }
+    if len(active_accelerators) > 1:
+        return True
+    return any(isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks)
+
+
+def _should_empty_cache_after_sync_finalize(
+    looper: "ModuleLooper",
+    *,
+    finalize_tasks,
+) -> bool:
+    """Release CUDA cache after synchronous ParoQuant finalization when offload is active.
+
+    Disk offload correctly moves finalized modules out of the live model path,
+    but CUDA's allocator can still hold onto the just-freed pools across layer
+    boundaries. That shows up as a steady nvidia-smi climb even though the
+    previous layer no longer needs those weights on device. A cache release at
+    the synchronous boundary keeps layer-scope memory flat without changing the
+    quantization objective.
+    """
+    if not getattr(looper.gptq_model.quantize_config, "offload_to_disk", False):
+        return False
+    return any(isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks)
+
+
+def _processor_needs_pristine_group_clone(processor) -> bool:
+    """Whether grouped capture needs a dedicated pristine layer clone for this processor."""
+    needs_clone = getattr(processor, "needs_pristine_layer_clone", None)
+    if callable(needs_clone):
+        return bool(needs_clone())
+    uses_grouped_optimization = getattr(processor, "uses_grouped_optimization", None)
+    return callable(uses_grouped_optimization) and bool(uses_grouped_optimization())
+
+
+def _collect_layer_forward_progress(
+    looper: "ModuleLooper",
+    *,
+    processor,
+    layer_inputs: List[List[torch.Tensor]],
+) -> tuple[int, List[int], int]:
+    """Compute replay progress metadata for a whole-layer lifecycle forward.
+
+    Subset-driven replay normally reuses progress data that was already planned
+    inside :class:`SubsetPlan`. When an entire layer is dynamically excluded,
+    no subset plan exists, but the layer stage may still need one untouched
+    forward pass so the next layer receives the correct activations.
+
+    This helper mirrors the subset planner's batch/row normalization so the
+    fallback layer replay uses the same progress accounting contract:
+    - `batch_count`: number of cached calibration batches to replay
+    - `forward_row_counts`: per-batch row counts for progress updates
+    - `forward_total_rows`: normalized total rows shown by the replay progress
+    """
+
+    batch_count = looper._resolve_batch_total(
+        getattr(processor, "num_batches", None),
+        layer_inputs,
+    )
+    forward_row_counts = list(looper._collect_row_counts(layer_inputs))
+    if not forward_row_counts and batch_count > 0:
+        forward_row_counts = [1] * batch_count
+    if len(forward_row_counts) > batch_count:
+        forward_row_counts = forward_row_counts[:batch_count]
+
+    forward_total_rows = sum(forward_row_counts) if forward_row_counts else batch_count
+    forward_total_rows = max(forward_total_rows, 1)
+
+    if len(forward_row_counts) < batch_count:
+        forward_row_counts.extend([1] * (batch_count - len(forward_row_counts)))
+
+    return batch_count, forward_row_counts, forward_total_rows
+
+
+def _collect_hook_skip_modules(planning_layer_modules: List[List[str]]) -> set[str]:
+    """Collect module paths flagged as non-quantized in module-tree planning blocks."""
+
+    skip_modules: set[str] = set()
+    for block in planning_layer_modules:
+        for module_name in block:
+            if ":!" in module_name:
+                path = module_name.split(":", 1)[0]
+                if path:
+                    skip_modules.add(path)
+    return skip_modules
+
+
+def _replay_layer_outputs(
+    looper: "ModuleLooper",
+    *,
+    module: torch.nn.Module,
+    processor,
+    layer_inputs: List[List[torch.Tensor]],
+    layer_input_kwargs: List[Dict[str, torch.Tensor]],
+    position_ids: List[torch.Tensor],
+    attention_masks: List[torch.Tensor],
+    cur_layer_device: torch.device,
+    is_lm_head_module: bool,
+    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    layer_index: int,
+    layer_descriptor: str,
+    full,
+    log,
+    region_timer,
+    replay_plan: Optional[SubsetPlan] = None,
+    is_embeddings_module: Optional[bool] = None,
+) -> List[List[torch.Tensor]]:
+    """Replay one layer forward to materialize outputs for the next layer."""
+
+    if is_embeddings_module is None:
+        is_embeddings_module = is_lm_head_module
+
+    if replay_plan is None:
+        replay_batch_count, replay_row_counts, replay_total_rows = _collect_layer_forward_progress(
+            looper,
+            processor=processor,
+            layer_inputs=layer_inputs,
+        )
+        replay_source = f"{layer_descriptor}:untouched"
+        replay_modules = None
+        replay_forward_device_map: Dict[str, torch.device] = {}
+        replay_force_serial = False
+        replay_preserve_module_devices = False
+    else:
+        replay_batch_count = replay_plan.batch_count
+        replay_row_counts = replay_plan.forward_row_counts
+        replay_total_rows = replay_plan.forward_total_rows
+        replay_source = (
+            f"{layer_descriptor}:subset"
+            f"{replay_plan.subset_index + 1}/{replay_plan.subset_total}"
+        )
+        replay_modules = replay_plan.modules
+        replay_forward_device_map = replay_plan.forward_device_map
+        replay_force_serial = replay_plan.subset_forward_serial
+        replay_preserve_module_devices = replay_plan.preserve_module_devices
+
+    replay_msg = (
+        "Forward replay "
+        f"(layer=`{layer_descriptor}`, batches={replay_batch_count}, rows={replay_total_rows})"
+    )
+    replay_pb = (
+        log.pb(range(replay_total_rows))
+           .manual()
+           .set(show_left_steps=False)
+    )
+    replay_pb.title(replay_msg).subtitle(
+        f"Forward replay Row 0/{replay_total_rows}"
+    ).draw()
+
+    replay_prev_devices: Dict[str, torch.device] = {}
+    if replay_modules is not None and replay_forward_device_map:
+        replay_prev_devices = looper._apply_forward_device_overrides(
+            replay_modules,
+            replay_forward_device_map,
+            fallback_modules=full,
+        )
+
+    replay_start = time.perf_counter()
+    try:
+        looper._current_subset = None
+        layer_outputs = looper._run_forward_batches(
+            module=module,
+            processor=processor,
+            layer_inputs=layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            position_ids=position_ids,
+            attention_masks=attention_masks,
+            cur_layer_device=cur_layer_device,
+            is_lm_head_module=is_lm_head_module,
+            is_embeddings_module=is_embeddings_module,
+            shared_kv_cache_dict=shared_kv_cache_dict,
+            layer_index=layer_index,
+            need_outputs=True,
+            reuse_kv=False,
+            progress_pb=replay_pb,
+            progress_title=replay_msg,
+            progress_stage="Forward replay",
+            progress_rows_per_batch=replay_row_counts,
+            progress_total_rows=replay_total_rows,
+            force_serial=replay_force_serial,
+            preserve_module_devices=replay_preserve_module_devices,
+            # Replay should emit next-layer activations under the model's native router.
+            # And reduce the execution time of `forward()`.
+            apply_moe_config=False,
+        )
+    finally:
+        if (
+            replay_modules is not None
+            and replay_forward_device_map
+            and (replay_plan is None or replay_plan.restore_forward_device_overrides)
+        ):
+            looper._restore_forward_device_overrides(
+                replay_modules,
+                replay_prev_devices,
+                fallback_modules=full,
+            )
+        replay_pb.close()
+
+    if region_timer is not None:
+        region_timer.record(
+            "post_quant_forward",
+            time.perf_counter() - replay_start,
+            source=replay_source,
+        )
+
+    return layer_outputs
+
+
+def _capture_pristine_group_context(
+    looper: "ModuleLooper",
+    *,
+    processor,
+    module: torch.nn.Module,
+    pristine_module: Optional[torch.nn.Module],
+    subset_plans: List[SubsetPlan],
+    layer_inputs: List[List[torch.Tensor]],
+    layer_input_kwargs: List[Dict[str, torch.Tensor]],
+    position_ids: List[torch.Tensor],
+    attention_masks: List[torch.Tensor],
+    cur_layer_device: torch.device,
+    is_lm_head_module: bool,
+    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    layer_index: int,
+    layer_descriptor: str,
+    full,
+    log,
+    region_timer,
+) -> None:
+    """Capture clean grouped targets while the main layer cache keeps the noisy stream."""
+    uses_grouped_optimization = getattr(processor, "uses_grouped_optimization", None)
+    if not callable(uses_grouped_optimization) or not uses_grouped_optimization():
+        return
+    clean_layer_inputs = layer_inputs
+    resolve_clean_inputs = getattr(processor, "clean_group_layer_inputs", None)
+    if callable(resolve_clean_inputs):
+        clean_layer_inputs = resolve_clean_inputs(
+            layer_index=layer_index,
+            layer_inputs=layer_inputs,
+        )
+    capture_pristine_layer_module = getattr(processor, "receive_pristine_layer_module", None)
+    if subset_plans and callable(capture_pristine_layer_module):
+        capture_pristine_layer_module(
+            layer_index=layer_index,
+            layer_module=pristine_module if pristine_module is not None else module,
+        )
+
+    pristine_replay_module = pristine_module if pristine_module is not None else module
+    pristine_outputs = _replay_layer_outputs(
+        looper,
+        module=pristine_replay_module,
+        processor=processor,
+        layer_inputs=clean_layer_inputs,
+        layer_input_kwargs=layer_input_kwargs,
+        position_ids=position_ids,
+        attention_masks=attention_masks,
+        cur_layer_device=cur_layer_device,
+        is_lm_head_module=is_lm_head_module,
+        shared_kv_cache_dict=shared_kv_cache_dict,
+        layer_index=layer_index,
+        layer_descriptor=layer_descriptor,
+        full=full,
+        log=log,
+        region_timer=region_timer,
+        replay_plan=None,
+    )
+    receive_clean_layer_inputs = getattr(processor, "receive_clean_layer_inputs", None)
+    if callable(receive_clean_layer_inputs):
+        receive_clean_layer_inputs(
+            layer_index=layer_index,
+            layer_inputs=pristine_outputs,
+        )
+    if subset_plans:
+        processor.receive_layer_forward_context(
+            layer_index=layer_index,
+            layer_inputs=layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            layer_outputs=pristine_outputs,
+            subset_index=None,
+            subset_total=len(subset_plans),
+        )
 
 
 def run_layer_stage(
@@ -38,52 +391,93 @@ def run_layer_stage(
     *,
     layers: List[torch.nn.Module],
     layer_modules: List[List[str]],
+    planning_layer_modules: List[List[str]],
     layers_prefix: Optional[str],
-    fail_safe: bool,
+    fallback,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
     pb,
     layer_count: int,
     region_timer,
     finalize_progress_cls,
-    embed_quant_mode: Optional[QuantizeEmbed],
+    embed_quant_mode: Optional[QuantizeEmbed] = None,
     logger=None,
 ) -> None:
     """Execute the main per-layer quantization loop."""
+    # Trailing layers whose tracked modules are all dynamically excluded never
+    # need another forward or finalize pass, so the loop can stop once the
+    # final eligible layer has been processed.
+    last_quantized_layer_index = _find_last_quantized_layer_index(
+        looper,
+        layer_modules=layer_modules,
+        layers_prefix=layers_prefix,
+        layer_count=layer_count,
+    )
+
     log = logger or setup_logger()
+    durable_progress_logs = live_renderables_suppressed()
+    hook_skip_modules = _collect_hook_skip_modules(planning_layer_modules)
+    quant_input_embeddings = embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+    quant_output_embeddings = embed_quant_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH)
+    layer_index_offset = 1 if quant_input_embeddings else 0
+
     for layer_index in pb:
         # Iterate over every transformer layer (plus lm_head when enabled) as
         # progress-bar controlled units of work.
         if looper._check_loop_stop():
             break
+        progress_index = layer_index
+        is_input_embeddings_module = quant_input_embeddings and progress_index == 0
+        model_layer_index = progress_index - layer_index_offset
+        is_output_embeddings_module = quant_output_embeddings and model_layer_index >= layer_count
+        is_lm_head_module = (
+            not is_output_embeddings_module
+            and looper.gptq_model.quantize_config.lm_head
+            and model_layer_index >= layer_count
+        )
+        is_embeddings_module = is_input_embeddings_module or is_output_embeddings_module or is_lm_head_module
 
-        if embed_quant_mode == QuantizeEmbed.INPUT:
-            is_input_embeddings_module = layer_index == 0
-            is_output_embeddings_module = False
-        elif embed_quant_mode == QuantizeEmbed.OUTPUT:
-            is_input_embeddings_module = False
-            is_output_embeddings_module = layer_index == layer_count
-        elif embed_quant_mode == QuantizeEmbed.BOTH:
-            is_input_embeddings_module = layer_index == 0
-            is_output_embeddings_module = layer_index == layer_count + 1
-        else:
-            is_input_embeddings_module = False
-            is_output_embeddings_module = False
-
-        is_embeddings_module = is_input_embeddings_module or is_output_embeddings_module
+        if (
+            embed_quant_mode is None
+            and not is_embeddings_module
+            and last_quantized_layer_index is not None
+            and model_layer_index > last_quantized_layer_index
+        ):
+            # The remaining layers are fully skipped by dynamic config, so
+            # avoid entering another layer-level quantization cycle.
+            log.debug(
+                "StageLayer: early stop at layer=%s, last_quantized_layer=%s",
+                model_layer_index,
+                last_quantized_layer_index,
+            )
+            pb.close()
+            break
 
         if is_input_embeddings_module:
             layer_title = "Quantizing input embeddings"
             module = looper.gptq_model.get_input_embeddings()
+            pristine_group_module = None
         elif is_output_embeddings_module:
             layer_title = "Quantizing output embeddings"
             module = looper.gptq_model.get_output_embeddings()
+            pristine_group_module = None
+        elif is_lm_head_module:
+            layer_title = "Quantizing lm_head"
+            module = get_module(looper.gptq_model.model, key=looper.gptq_model.lm_head)
+            pristine_group_module = None
         else:
-            if embed_quant_mode == QuantizeEmbed.INPUT or embed_quant_mode == QuantizeEmbed.BOTH:
-                layer_index = layer_index - 1
+            layer_index = model_layer_index
             layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
             module = layers[layer_index]
+            pristine_group_module = None
 
         pb.title(layer_title).subtitle("").draw()
+        if durable_progress_logs:
+            log.info(
+                "StageLayer: start layer=%s/%s title=`%s`",
+                layer_index if not is_embeddings_module else layer_title.replace("Quantizing ", ""),
+                layer_count - 1 if not is_embeddings_module else layer_title.replace("Quantizing ", ""),
+                layer_title,
+            )
 
         if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
             # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
@@ -91,94 +485,151 @@ def run_layer_stage(
 
         module = looper.gptq_model.pre_quantize(module)
 
-        model_type = looper.gptq_model.model.config.model_type
-        if model_type in MODULE_CONVERTER_MAP:
-            converter = MODULE_CONVERTER_MAP[model_type]
-            module = converter(module, looper.gptq_model.model.config)
-
-        replace_module_with_hooked_legacy(module, embed_quant_mode=looper.embed_quant_mode)
-
+        embedding_module_name = None
         if is_input_embeddings_module:
-            layer_descriptor = looper.gptq_model.get_input_embeddings_name()
+            embedding_module_name = looper.gptq_model.get_input_embeddings_name()
+            layer_descriptor = embedding_module_name
         elif is_output_embeddings_module:
-            layer_descriptor = looper.gptq_model.get_output_embeddings_name()
-        elif layers_prefix:
-            layers[layer_index] = module
-            layer_descriptor = f"{layers_prefix}.{layer_index}"
+            embedding_module_name = looper.gptq_model.get_output_embeddings_name()
+            layer_descriptor = embedding_module_name
+        elif is_lm_head_module:
+            layer_descriptor = looper.gptq_model.lm_head
         else:
-            layer_descriptor = str(layer_index)
+            model_type = looper.gptq_model.model.config.model_type
+            if model_type in MODULE_CONVERTER_MAP:
+                converter = MODULE_CONVERTER_MAP[model_type]
+                module = converter(module, looper.gptq_model.model.config)
+
+            needs_group_pristine = any(
+                callable(getattr(processor, "uses_grouped_optimization", None)) and processor.uses_grouped_optimization()
+                for processor in looper.processors
+            )
+            needs_pristine_group_clone = any(
+                _processor_needs_pristine_group_clone(processor)
+                for processor in looper.processors
+            )
+            if needs_group_pristine:
+                pristine_group_module = copy.deepcopy(module) if needs_pristine_group_clone else None
+
+            replace_module_with_hooked_legacy(
+                module,
+                quant_lm_head=looper.gptq_model.quantize_config.lm_head,
+                skip_module_paths=hook_skip_modules,
+            )
+
+            layers[layer_index] = module
+
+            if layers_prefix:
+                layer_descriptor = f"{layers_prefix}.{layer_index}"
+            else:
+                layer_descriptor = str(layer_index)
+
+        materialize_model(module)
 
         cur_layer_device = get_device(module)
-        print("find_modules", is_input_embeddings_module, is_output_embeddings_module)
-        if is_input_embeddings_module:
-            name = looper.gptq_model.get_input_embeddings_name()
-        elif is_output_embeddings_module:
-            name = looper.gptq_model.get_output_embeddings_name()
-        else:
-            name = ""
-        full = find_modules(module, name=name)
-
+        if getattr(cur_layer_device, "type", None) == "meta":
+            # Lazy shell layers can stay meta until a later subset stage materializes them.
+            cur_layer_device = normalize_device_like(looper.gptq_model.quantize_config.device) or CPU
+        full = find_modules(module, name=embedding_module_name or (looper.gptq_model.lm_head if is_lm_head_module else ""))
 
         for p_index, processor in enumerate(looper.processors):
             # Each processor contributes a quantization phase; walk them in
             # order so their caches and side effects line up with the pipeline.
             processor.log_call_count = 0  # reset
             processor.collect_memory_info(layer_index)
-
-            if is_input_embeddings_module:
-                modules = [[looper.gptq_model.get_input_embeddings_name()]]
-            elif is_output_embeddings_module:
-                modules = [[looper.gptq_model.get_output_embeddings_name()]]
-            else:
-                modules = layer_modules
-
-            # for NativeProcessor we process one time forward on all grouped module subsets
-            if processor.fwd_all_modules_in_single_pass:
-                # merge all subsets into one
-                modules = [sum(modules, [])]
+            # Read the replay policy once per processor so the layer stage uses
+            # one execution config instead of a group of unrelated flags.
+            execution_config = processor.execution_config
 
             if is_input_embeddings_module:
                 layer_inputs = processor.inputs_cache.src_inputs
-            elif is_output_embeddings_module:
-                layer_inputs = processor.inputs_cache.layer_inputs
-                layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
                 layer_inputs = processor.inputs_cache.layer_inputs
-
+            if (is_output_embeddings_module or is_lm_head_module) and layer_inputs:
+                layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
             position_ids = processor.inputs_cache.position_ids
             attention_masks = processor.inputs_cache.attention_masks
 
             processed_subset: Dict[str, NamedModule] = {}
-            last_subset_context: Optional[SubsetForwardContext] = None
-            subset_total = len(modules)
+            last_subset_plan: Optional[SubsetPlan] = None
             previous_subset_processed: Optional[Dict[str, NamedModule]] = None
 
-            for index, names in enumerate(modules):
+            # Freeze all subset-level execution decisions before the processor
+            # starts running this layer. The rest of the layer stage can then
+            # iterate plans instead of repeatedly re-deriving replay, batching,
+            # and device-routing state inside the execution loop.
+            subset_plans = build_layer_subset_plans(
+                looper,
+                processor=processor,
+                module=module,
+                layer_modules=layer_modules,
+                planning_layer_modules=planning_layer_modules,
+                layer_inputs=layer_inputs,
+                full=full,
+                is_lm_head_module=is_lm_head_module,
+                layer_index=layer_index,
+                layers_prefix=layers_prefix,
+                fallback=fallback,
+                embedding_module_name=embedding_module_name,
+            )
+            if durable_progress_logs:
+                log.info(
+                    "StageLayer: layer=%s processor=%s begin subsets=%s",
+                    layer_index if not is_lm_head_module else "lm_head",
+                    processor.name(),
+                    len(subset_plans),
+                )
+
+            _capture_pristine_group_context(
+                looper,
+                processor=processor,
+                module=module,
+                pristine_module=pristine_group_module,
+                subset_plans=subset_plans,
+                layer_inputs=layer_inputs,
+                layer_input_kwargs=layer_input_kwargs,
+                position_ids=position_ids,
+                attention_masks=attention_masks,
+                cur_layer_device=cur_layer_device,
+                is_lm_head_module=is_lm_head_module,
+                shared_kv_cache_dict=shared_kv_cache_dict,
+                layer_index=layer_index,
+                layer_descriptor=layer_descriptor,
+                full=full,
+                log=log,
+                region_timer=region_timer,
+            )
+            pristine_group_module = None
+
+            is_last_module = layer_index == len(pb) - 1
+            for subset_plan in subset_plans:
                 # Process the layer in smaller subsets so attention groups or
                 # MoE experts can be quantized independently within a layer.
                 if DEBUG_ON and log.isEnabledFor(logging.DEBUG):
-                    if isinstance(processor, AWQProcessor):
+                    if isinstance(processor, (AWQProcessor, ParoQuantProcessor)):
                         log.debug(
-                            "StageLayer[awq]: layer=%s subset=%s/%s size=%s names=%s",
+                            "StageLayer[%s]: layer=%s subset=%s/%s size=%s names=%s",
+                            processor.name(),
                             layer_index,
-                            index + 1,
-                            subset_total,
-                            len(names),
-                            names[:5],
+                            subset_plan.subset_index + 1,
+                            subset_plan.subset_total,
+                            len(subset_plan.modules),
+                            list(subset_plan.modules.keys())[:5],
                         )
                     else:
                         log.debug(
                             "StageLayer: layer=%s subset=%s/%s processor=%s size=%s names=%s",
                             layer_index,
-                            index + 1,
-                            subset_total,
+                            subset_plan.subset_index + 1,
+                            subset_plan.subset_total,
                             processor.name(),
-                            len(names),
-                            names[:8],
+                            len(subset_plan.modules),
+                            list(subset_plan.modules.keys())[:8],
                         )
                 subset_result = run_subset_stage(
                     looper=looper,
+                    plan=subset_plan,
                     processor=processor,
                     module=module,
                     layer_inputs=layer_inputs,
@@ -186,17 +637,13 @@ def run_layer_stage(
                     position_ids=position_ids,
                     attention_masks=attention_masks,
                     cur_layer_device=cur_layer_device,
+                    is_lm_head_module=is_lm_head_module,
                     is_embeddings_module=is_embeddings_module,
-                    embed_quant_mode=embed_quant_mode,
                     layer_descriptor=layer_descriptor,
                     layer_title=layer_title,
                     layer_index=layer_index,
-                    layers_prefix=layers_prefix,
-                    subset_names=names,
-                    subset_index=index,
-                    subset_total=subset_total,
                     full=full,
-                    fail_safe=fail_safe,
+                    fallback=fallback,
                     shared_kv_cache_dict=shared_kv_cache_dict,
                     pb=pb,
                     log=log,
@@ -208,119 +655,67 @@ def run_layer_stage(
                 layer_inputs = subset_result.layer_inputs
                 processed_subset.update(subset_result.processed_subset)
                 previous_subset_processed = subset_result.processed_subset
-                if subset_result.forward_context is not None:
-                    last_subset_context = subset_result.forward_context
+                if subset_result.plan is not None:
+                    # The most recent subset plan defines the replay contract
+                    # for the outputs that flow into the next layer.
+                    last_subset_plan = subset_result.plan
+                if durable_progress_logs:
+                    log.info(
+                        "StageLayer: layer=%s processor=%s subset=%s/%s complete modules=%s",
+                        layer_index if not is_lm_head_module else "lm_head",
+                        processor.name(),
+                        subset_plan.subset_index + 1,
+                        subset_plan.subset_total,
+                        len(subset_plan.modules),
+                    )
 
-            is_last_module = layer_index == len(pb) - 1
             layer_outputs: List[List[torch.Tensor]] = []
-            subset_context = last_subset_context
-            forward_device_map = subset_context.forward_device_map if subset_context else {}
-            subset_forward_serial = subset_context.subset_forward_serial if subset_context else False
-            subset_reference_total = subset_context.subset_total if subset_context else subset_total
-            subset_reference_index = subset_context.subset_index if subset_context else max(subset_total - 1, 0)
-            subset_for_overrides = subset_context.subset if subset_context else {}
-            preserve_devices = bool(forward_device_map)
+            replay_plan = last_subset_plan
 
-            # second forward after process()
-            if not is_last_module and processor.fwd_after_process and subset_context is not None:
-                replay_batch_count = looper._resolve_batch_total(
-                    getattr(processor, "num_batches", None),
-                    layer_inputs,
+            # When dynamic exclusions remove every tracked module from a layer,
+            # no subset stage runs, so nothing materializes that layer's
+            # outputs. Processors that enable post-process forward replay
+            # (`fwd_replay_after_process`) still need one forward of the untouched
+            # layer so the next layer receives the correct activations.
+            replay_skipped_layer = (
+                not is_last_module
+                and not subset_plans
+                and execution_config.require_fwd
+                and execution_config.fwd_replay_after_process
+            )
+
+            # Some processors consume outputs only after `process()` updates the
+            # current layer. In that case, replay the layer once using the
+            # metadata already computed by the final subset plan.
+            replay_after_process = (
+                not is_last_module
+                and replay_plan is not None
+                and replay_plan.replay_after_process
+            )
+
+            if replay_skipped_layer or replay_after_process:
+                # Pass `replay_plan` through unconditionally: the helper uses
+                # subset metadata when available and falls back to generic
+                # untouched-layer replay when it is `None`.
+                layer_outputs = _replay_layer_outputs(
+                    looper,
+                    module=module,
+                    processor=processor,
+                    layer_inputs=layer_inputs,
+                    layer_input_kwargs=layer_input_kwargs,
+                    position_ids=position_ids,
+                    attention_masks=attention_masks,
+                    cur_layer_device=cur_layer_device,
+                    is_lm_head_module=is_lm_head_module,
+                    is_embeddings_module=is_embeddings_module,
+                    shared_kv_cache_dict=shared_kv_cache_dict,
+                    layer_index=layer_index,
+                    layer_descriptor=layer_descriptor,
+                    full=full,
+                    log=log,
+                    region_timer=region_timer,
+                    replay_plan=replay_plan,
                 )
-                replay_row_counts = list(looper._collect_row_counts(layer_inputs))
-                if not replay_row_counts and replay_batch_count > 0:
-                    replay_row_counts = [1] * replay_batch_count
-                if len(replay_row_counts) > replay_batch_count:
-                    replay_row_counts = replay_row_counts[:replay_batch_count]
-                replay_total_rows = sum(replay_row_counts) if replay_row_counts else replay_batch_count
-                replay_total_rows = max(replay_total_rows, 1)
-                if len(replay_row_counts) < replay_batch_count:
-                    replay_row_counts.extend([1] * (replay_batch_count - len(replay_row_counts)))
-                replay_msg = (
-                    "Forward replay "
-                    f"(layer=`{layer_descriptor}`, batches={replay_batch_count}, rows={replay_total_rows})"
-                )
-                replay_pb = (
-                    log.pb(range(replay_total_rows))
-                       .manual()
-                       .set(show_left_steps=False)
-                )
-                replay_pb.title(replay_msg).subtitle(
-                    f"Forward replay Row 0/{replay_total_rows}"
-                ).draw()
-                # Forward replay shares the same VRAM spike; block until the pool drains first.
-                # DEVICE_THREAD_POOL.wait()
-                # try to cleanup recent objects before forward
-                #timed_gc_collect(1)
-
-                replay_start = time.perf_counter()
-                replay_source = f"{layer_descriptor}:subset{subset_reference_index + 1}/{subset_reference_total}"
-
-                replay_prev_devices: Dict[str, torch.device] = {}
-                if forward_device_map:
-                    replay_prev_devices = looper._apply_forward_device_overrides(
-                        subset_for_overrides,
-                        forward_device_map,
-                        fallback_modules=full,
-                    )
-
-                # if log.isEnabledFor(logging.DEBUG):
-                #     replay_snapshot = []
-                #     for name, named_module in subset.items():
-                #         target_device = getattr(named_module, "target_device", None)
-                #         if target_device is None:
-                #             try:
-                #                 target_device = get_device(named_module.module)
-                #             except Exception:
-                #                 target_device = None
-                #         target_device_str = str(target_device) if target_device is not None else "unknown"
-                #         replay_snapshot.append(f"{name}:{target_device_str}")
-                #     log.debug(
-                #         "ModuleLooper: Forward replay device snapshot (layer=`%s`, subset=%d/%d, serial=%s) %s",
-                #         layer_descriptor,
-                #         index + 1,
-                #         subset_total,
-                #         subset_forward_serial,
-                #         ", ".join(replay_snapshot),
-                #     )
-
-                try:
-                    layer_outputs = looper._run_forward_batches(
-                        module=module,
-                        processor=processor,
-                        layer_inputs=layer_inputs,
-                        layer_input_kwargs=layer_input_kwargs,
-                        position_ids=position_ids,
-                        attention_masks=attention_masks,
-                        cur_layer_device=cur_layer_device,
-                        is_embeddings_module=is_embeddings_module,
-                        shared_kv_cache_dict=shared_kv_cache_dict,
-                        layer_index=layer_index,
-                        need_outputs=True,
-                        reuse_kv=False,
-                        progress_pb=replay_pb,
-                        progress_title=replay_msg,
-                        progress_stage="Forward replay",
-                        progress_rows_per_batch=replay_row_counts,
-                        progress_total_rows=replay_total_rows,
-                        force_serial=subset_forward_serial,
-                        preserve_module_devices=preserve_devices,
-                    )
-                finally:
-                    if forward_device_map:
-                        looper._restore_forward_device_overrides(
-                            subset_for_overrides,
-                            replay_prev_devices,
-                            fallback_modules=full,
-                        )
-                    if replay_pb is not None:
-                        replay_pb.close()
-                if region_timer is not None:
-                    region_timer.record(
-                        "post_quant_forward",
-                        time.perf_counter() - replay_start,
-                        source=replay_source,
-                    )
 
             # Finalize module after last processor
             if p_index == len(looper.processors) - 1:
@@ -346,11 +741,10 @@ def run_layer_stage(
                 if region_timer is not None:
                     region_timer.flush()
 
-            if processor.fwd_after_process:
+            if execution_config.fwd_replay_after_process:
                 processor.clear_cache_data()
                 processor.receive_layer_inputs(layer_outputs)
                 layer_inputs = processor.inputs_cache.layer_inputs
-
                 pb.title(layer_title).subtitle("").draw()
 
             if p_index == len(looper.processors) - 1:
@@ -387,6 +781,8 @@ def run_layer_stage(
 
                 @torch.inference_mode()
                 def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
+                    """Runs processor finalization and optional disk offload for one module."""
+
                     resolved_label = module_label or getattr(module, "full_name", getattr(module, "name", ""))
                     start = time.perf_counter() if region_timer is not None else None
                     try:
@@ -398,7 +794,7 @@ def run_layer_stage(
                             process.submodule_finalize(module, looper.gptq_model)
 
                         # Disk offload (lifecycle TODO note preserved)
-                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
+                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoQuantProcessor)):
                             quant_config = getattr(looper.gptq_model, "quantize_config", None)
                             if quant_config and getattr(quant_config, "offload_to_disk", False):
                                 offload_path = getattr(quant_config, "offload_to_disk_path", None)
@@ -502,6 +898,8 @@ def run_layer_stage(
                     finalize_count_local,
                     layer_idx_for_callback,
                 ):
+                    """Consumes finalize futures, updating progress and surfacing errors."""
+
                     completed_local = 0
                     try:
                         for future in as_completed(futures):
@@ -543,21 +941,63 @@ def run_layer_stage(
                         )
 
                 if finalize_futures_snapshot:
-                    # Drain finalize futures asynchronously so the main loop can continue scheduling work.
-                    threading.Thread(
-                        target=_drain_finalize_futures,
-                        args=(
+                    drain_sync = _should_drain_finalize_futures_synchronously(
+                        looper,
+                        finalize_tasks=finalize_tasks,
+                    )
+                    if durable_progress_logs:
+                        log.info(
+                            "StageLayer: layer=%s finalize queued modules=%s mode=%s",
+                            layer_index if not is_lm_head_module else "lm_head",
+                            finalize_count,
+                            "sync" if drain_sync else "async",
+                        )
+                    if drain_sync:
+                        # Synchronous: wait for all finalization to complete before proceeding to next layer
+                        # This ensures all packing and writing tasks are done
+                        _drain_finalize_futures(
                             [future for future, *_ in finalize_futures_snapshot],
                             finalize_pb,
                             finalize_count,
                             layer_index,
-                        ),
-                        name="SubmoduleFinalizeWatcher",
-                        daemon=True,
-                    ).start()
+                        )
+                        if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
+                            torch_empty_cache(device=cur_layer_device, sync=True)
+                        elif _should_empty_cache_after_sync_finalize(
+                            looper,
+                            finalize_tasks=finalize_tasks,
+                        ):
+                            torch_empty_cache(device=cur_layer_device, gc=False, sync=True)
+                    else:
+                        # Asynchronous (current/default behavior): drain in background thread
+                        # This allows next layer to start while current layer finalizes
+                        finalizer_thread = threading.Thread(
+                            target=_drain_finalize_futures,
+                            args=(
+                                [future for future, *_ in finalize_futures_snapshot],
+                                finalize_pb,
+                                finalize_count,
+                                layer_index,
+                            ),
+                            name="SubmoduleFinalizeWatcher",
+                            daemon=True,
+                        )
+                        looper.register_dangling_thread(finalizer_thread)
+                        finalizer_thread.start()
                 else:
                     looper._emit_layer_complete(
                         layer_idx=layer_index,
                         submodule_finalized=True,
                         raise_in_place=True,
                     )
+                    if durable_progress_logs:
+                        log.info(
+                            "StageLayer: layer=%s complete (no finalize tasks)",
+                            layer_index if not is_lm_head_module else "lm_head",
+                        )
+
+        if durable_progress_logs:
+            log.info(
+                "StageLayer: handoff complete for layer=%s",
+                layer_index if not is_lm_head_module else "lm_head",
+            )

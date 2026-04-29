@@ -1,0 +1,14 @@
+name: Test Compatibility
+
+on:
+  push:
+    paths:
+      - pyproject.toml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setuptools-compatibility:
+    uses: ./.github/workflows/setuptools_compatibility_reusable.yml

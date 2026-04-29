@@ -12,33 +12,28 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
 
+import torch  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
-from gptqmodel.utils.perplexity import Perplexity  # noqa: E402
 
 
 class TestQuantBatch(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
 
-    def calculate_avg_ppl(self, model, tokenizer):
-        ppl = Perplexity(
-            model=model,
-            tokenizer=tokenizer,
-            dataset_path="wikitext",
-            dataset_name="wikitext-2-raw-v1",
-            split="test",
-            text_column="text",
-        )
-
-        all = ppl.calculate(n_ctx=512, n_batch=512)
-
-        # average ppl
-        avg = sum(all) / len(all)
-
-        return avg
+    def _generate(self, model, tokenizer, prompt: str = "Paris is known as"):
+        inputs = tokenizer(prompt, return_tensors="pt")
+        with torch.inference_mode():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=10,
+                num_beams=1,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+        return outputs
 
     @classmethod
     def setUpClass(self):
@@ -73,12 +68,12 @@ class TestQuantBatch(ModelTest):
                 tmp_dir,
             )
 
-            batch_1_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+            batch_1_ids = self._generate(model, self.tokenizer)
 
-        model = GPTQModel.load(
-            self.NATIVE_MODEL_ID,
-            quantize_config=quantize_config,
-        )
+            model = GPTQModel.load(
+                self.NATIVE_MODEL_ID,
+                quantize_config=quantize_config,
+            )
 
         model.quantize(self.calibration_dataset, batch_size=256)
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -92,8 +87,8 @@ class TestQuantBatch(ModelTest):
                 tmp_dir,
             )
 
-            batch_n_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+            batch_n_ids = self._generate(model, self.tokenizer)
 
             del model
 
-        self.assertTrue(abs(batch_1_ppl - batch_n_ppl) / batch_1_ppl <= 0.05)
+        self.assertTrue((batch_1_ids == batch_n_ids).all().item())

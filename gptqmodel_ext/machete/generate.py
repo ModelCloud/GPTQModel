@@ -26,15 +26,28 @@ else:
 
 _CUTLASS_PYTHON_DIR = _CUTLASS_ROOT / "python"
 
-_CUTLASS_PYTHON_DIR.mkdir(parents=True, exist_ok=True)
 
-if str(_CUTLASS_EXT_DIR) not in sys.path:
-    sys.path.append(str(_CUTLASS_EXT_DIR))
-if _CUTLASS_PYTHON_DIR.exists() and str(_CUTLASS_PYTHON_DIR) not in sys.path:
-    sys.path.append(str(_CUTLASS_PYTHON_DIR))
-if not _CUTLASS_PYTHON_DIR.exists():
+def _prepend_sys_path(path: Path) -> None:
+    path_text = str(path)
+    if path_text in sys.path:
+        sys.path.remove(path_text)
+    sys.path.insert(0, path_text)
+
+
+def _cutlass_python_bindings_present(path: Path) -> bool:
+    return (
+        (path / "cutlass_library.py").is_file()
+        or (path / "cutlass_library" / "__init__.py").is_file()
+    )
+
+
+_prepend_sys_path(_CUTLASS_EXT_DIR)
+if _cutlass_python_bindings_present(_CUTLASS_PYTHON_DIR):
+    _prepend_sys_path(_CUTLASS_PYTHON_DIR)
+else:
     raise RuntimeError(
-        "CUTLASS python bindings not found. Set GPTQMODEL_CUTLASS_DIR to a valid CUTLASS checkout."
+        "CUTLASS python bindings not found under "
+        f"`{_CUTLASS_PYTHON_DIR}`. Set GPTQMODEL_CUTLASS_DIR to a valid CUTLASS checkout."
     )
 
 from vllm_cutlass_library_extension import (

@@ -13,7 +13,9 @@ import threading
 import time
 import traceback
 from concurrent.futures import Future
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
@@ -25,18 +27,44 @@ except Exception:  # pragma: no cover - defensive: optional dependency may be un
     Device = None
 
 from .. import DEBUG_ON
+from ..utils import torch as torch_utils
 from ..utils.ctx import ctx
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_empty_cache_any
+from ..utils.torch import HAS_NPU, torch_empty_cache_any
 
 
 log = setup_logger()
+
+
+def _best_effort_stderr_write(message: str) -> None:
+    with contextlib.suppress(Exception):
+        sys.stderr.write(f"{message}\n")
+        sys.stderr.flush()
+
 
 # Debug logging is very chatty and can alter timings subtly in tests.
 # We gate all extra diagnostics behind the DEBUG env (1/true/yes/on).
 
 # DeviceLike allows ergonomic call sites: 'cuda:0', 0, torch.device('cuda', 0), etc.
 DeviceLike = Union[str, int, torch.device]
+WarmupFn = Callable[[torch.device, "WarmUpCtx"], None]
+
+
+class WarmUpCtx(str, Enum):
+    THREAD = "thread"
+    DEVICE = "device"
+    THREAD_AND_DEVICE = "thread_and_device"
+
+    def invocation_order(self) -> Tuple["WarmUpCtx", ...]:
+        if self is WarmUpCtx.THREAD_AND_DEVICE:
+            return (WarmUpCtx.DEVICE, WarmUpCtx.THREAD)
+        return (self,)
+
+
+@dataclass(frozen=True)
+class WarmupTask:
+    fn: WarmupFn
+    scope: WarmUpCtx = WarmUpCtx.DEVICE
 
 
 # --------------------------- Backend availability helpers ---------------------------
@@ -65,10 +93,12 @@ def _coerce_device(d: DeviceLike) -> torch.device:
             return torch.device("cuda", d)
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             return torch.device("xpu", d)
+        if HAS_NPU:
+            return torch.device("npu", d)
         if _mps_available():
             return torch.device("mps")
         return torch.device("cpu")
-    # Accept strings like 'cuda:0', 'xpu:1', 'cpu', 'mps'
+    # Accept strings like 'cuda:0', 'xpu:1', 'npu:2', 'cpu', 'mps'
     return torch.device(d)
 
 
@@ -87,6 +117,10 @@ def _device_ctx(dev: torch.device):
         target = dev if dev.index is not None else "xpu"
         with torch.xpu.device(target):
             yield
+    elif dev.type == "npu" and HAS_NPU:
+        target = dev if dev.index is not None else "npu"
+        with torch.npu.device(target):
+            yield
     else:
         yield
 
@@ -102,6 +136,9 @@ def _activate_thread_device(dev: torch.device):
     elif dev.type == "xpu" and hasattr(torch, "xpu"):
         target = dev if dev.index is not None else "xpu"
         torch.xpu.set_device(target)
+    elif dev.type == "npu" and HAS_NPU:
+        target = dev if dev.index is not None else "npu"
+        torch.npu.set_device(target)
     # mps/cpu: nothing to pin
 
 
@@ -261,6 +298,57 @@ class _WaitAndLock(contextlib.AbstractContextManager):
         return self._group.__exit__(exc_type, exc, tb)
 
 
+class _WorkerWarmupState:
+    """
+    Coordinate a single warmup invocation.
+
+    Device-scoped states may be shared across workers for the same physical
+    device. Thread-scoped states are owned by a single worker.
+    """
+
+    def __init__(self, warmup_task: WarmupTask, warmup_ctx: WarmUpCtx):
+        self._warmup_task = warmup_task
+        self._warmup_ctx = warmup_ctx
+        self._claim_lock = threading.Lock()
+        self._started = False
+        self._done = threading.Event()
+        self._error: Optional[BaseException] = None
+
+    def run(self, *, device: torch.device, rwlock: _RWLock) -> None:
+        if self._done.is_set():
+            self._raise_if_failed()
+            return
+
+        should_run = False
+        with self._claim_lock:
+            if self._done.is_set():
+                pass
+            elif not self._started:
+                self._started = True
+                should_run = True
+
+        if should_run:
+            try:
+                with ctx(rwlock.reader(), _device_ctx(device)):
+                    self._warmup_task.fn(device, self._warmup_ctx)
+            except BaseException as exc:
+                with self._claim_lock:
+                    self._error = exc
+                raise
+            finally:
+                self._done.set()
+        else:
+            self._done.wait()
+
+        self._raise_if_failed()
+
+    def _raise_if_failed(self) -> None:
+        with self._claim_lock:
+            error = self._error
+        if error is not None:
+            raise error
+
+
 # --------------------------- Worker Thread ---------------------------
 # Each worker is bound to a specific device and runs a single thread. Tasks are
 # executed under the device’s read lock; GC acquires the writer lock to keep
@@ -284,7 +372,7 @@ class _DeviceWorker:
         name: Optional[str] = None,
         inference_mode: bool = False,
         cpu_core: Optional[int] = None,
-        warmup_fn: Optional[Callable[[torch.device], None]] = None,
+        warmup_plan: Optional[Tuple[_WorkerWarmupState, ...]] = None,
         *,
         key_override: Optional[str] = None,
     ):
@@ -292,7 +380,7 @@ class _DeviceWorker:
         self.rwlock = rwlock
         self._on_task_finished = on_task_finished
         self._on_worker_exit = on_worker_exit
-        self._warmup_fn = warmup_fn
+        self._pending_warmups = warmup_plan or ()
 
         if key_override is not None:
             self.key = key_override
@@ -367,14 +455,12 @@ class _DeviceWorker:
             self._affinity_applied = True
 
     def _run_warmup(self) -> None:
-        warmup_fn = self._warmup_fn
-        if warmup_fn is None:
+        pending_warmups = self._pending_warmups
+        if not pending_warmups:
             return
-        try:
-            with ctx(self.rwlock.reader(), _device_ctx(self.device)):
-                warmup_fn(self.device)
-        finally:
-            self._warmup_fn = None
+        for warmup_state in pending_warmups:
+            warmup_state.run(device=self.device, rwlock=self.rwlock)
+        self._pending_warmups = ()
 
     def _run(self):
         """
@@ -387,11 +473,6 @@ class _DeviceWorker:
         """
         self._apply_cpu_affinity()
         _activate_thread_device(self.device)
-        try:
-            self._run_warmup()
-        except BaseException as exc:
-            self._abort_process(exc)
-            return
         while not self._stop.is_set():
             is_task, fn, args, kwargs, fut = self._q.get()
             try:
@@ -399,6 +480,12 @@ class _DeviceWorker:
                     if DEBUG_ON: log.debug(f"{self.name}: received sentinel; exiting")
                     break
                 if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
+
+                try:
+                    self._run_warmup()
+                except BaseException as exc:
+                    self._abort_process(exc)
+                    return
 
                 event = kwargs.pop("cuda_event", None)
                 override_inference = _pop_public_kwarg(
@@ -526,14 +613,15 @@ class DeviceThreadPool:
         *,
         include_cuda: bool = True,
         include_xpu: bool = True,
+        include_npu: bool = True,
         include_mps: bool = True,
         include_cpu: bool = True,
         inference_mode: bool = False,
-        warmups: Optional[Dict[str, Callable[[torch.device], None]]] = None,
+        warmups: Optional[Dict[str, WarmupTask]] = None,
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
-        gc_min_interval_seconds: float = 1.0,  # throttle janitor passes
+        gc_min_interval_seconds: float = 0.0,  # throttle janitor passes
         pin_cpu_workers: bool = False,
         pin_accelerator_workers: bool = False,
     ):
@@ -545,15 +633,21 @@ class DeviceThreadPool:
                 - 'mps': N                -> N workers for MPS (single device)
                 - 'cuda:per': N           -> N workers per CUDA index
                 - 'xpu:per': N            -> N workers per XPU index
+                - 'npu:per': N            -> N workers per NPU index
                 - 'cuda:<i>': N           -> override for specific CUDA index
                 - 'xpu:<i>': N            -> override for specific XPU index
+                - 'npu:<i>': N            -> override for specific NPU index
                 - '<alias>:<parent>': N   -> virtual pool sharing locks with parent device
-                  (CUDA parents must include an explicit index, e.g. 'alias:cuda:0')
+                  (CUDA/NPU parents must include an explicit index, e.g. 'alias:cuda:0')
               Unspecified devices default to 1 worker each.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
-            warmups: optional mapping from device family (e.g. 'cuda') to a callable
-                run once after the worker activates its device. A special key
-                'default' applies when no family-specific warmup is found.
+            warmups: optional mapping from device family (e.g. 'cuda') to a
+                `WarmupTask`. Each warmup callable receives `(device, ctx)`,
+                where `ctx` is `WarmUpCtx.DEVICE` or `WarmUpCtx.THREAD`.
+                A task scoped to `WarmUpCtx.THREAD_AND_DEVICE` runs once per
+                physical device with `ctx=DEVICE`, then once per worker thread
+                with `ctx=THREAD`. A special key 'default' applies when no
+                family-specific warmup is found.
             gc_min_interval_seconds: minimum interval between GC passes. Values <= 0 disable throttling.
             pin_cpu_workers: bind CPU device workers to individual CPU cores when
                 affinity APIs are available. Defaults to False so CPU tasks may
@@ -570,6 +664,9 @@ class DeviceThreadPool:
             if include_xpu and hasattr(torch, "xpu") and torch.xpu.is_available():
                 for i in range(torch.xpu.device_count()):
                     discovered.append(torch.device("xpu", i))
+            if include_npu and HAS_NPU:
+                for i in range(torch.npu.device_count()):
+                    discovered.append(torch.device("npu", i))
             if include_mps and _mps_available():
                 discovered.append(torch.device("mps"))
             if include_cpu:
@@ -623,11 +720,9 @@ class DeviceThreadPool:
         self._device_smi_failures: Set[str] = set()
 
         self._inference_mode = bool(inference_mode)
-        self._worker_warmups = (
-            {str(k).lower(): fn for k, fn in warmups.items()} if warmups else None
-        )
-        self._warmup_lock = threading.Lock()
-        self._warmup_ran_keys: Set[str] = set()
+        self._worker_warmups = self._normalize_worker_warmups(warmups)
+        self._device_warmup_lock = threading.Lock()
+        self._device_warmup_states: Dict[str, _WorkerWarmupState] = {}
 
         workers_cfg = workers or {}
         base_workers: Dict[str, int] = {}
@@ -642,11 +737,11 @@ class DeviceThreadPool:
                 base_workers[raw_key] = count
             else:
                 _, parent_key = alias_info
-                if parent_key.startswith("cuda"):
+                if parent_key.startswith("cuda") or parent_key.startswith("npu"):
                     parts = parent_key.split(":")
                     if len(parts) < 2 or not parts[1].isdigit():
                         raise ValueError(
-                            f"Virtual pool '{raw_key}' must target a concrete CUDA index (e.g. 'alias:cuda:0'); got '{parent_key}'"
+                            f"Virtual pool '{raw_key}' must target a concrete accelerator index (e.g. 'alias:cuda:0'); got '{parent_key}'"
                         )
                 virtual_workers[raw_key] = (parent_key, count)
 
@@ -667,7 +762,7 @@ class DeviceThreadPool:
         # Eagerly build workers, locks, inflight tracking, and counters.
         for d in devices:
             dev = _coerce_device(d)
-            if dev.type not in ("cuda", "xpu", "mps", "cpu"):
+            if dev.type not in ("cuda", "xpu", "npu", "mps", "cpu"):
                 continue
             key = self._key(dev)
             if key in self._devices_by_key:
@@ -680,7 +775,7 @@ class DeviceThreadPool:
             self._inflight_cv[key] = threading.Condition()
             self._last_gc_done_per_device[key] = 0
             self._physical_children[key] = {key}
-            if dev.type in ("cuda", "xpu", "mps"):
+            if dev.type in ("cuda", "xpu", "npu", "mps"):
                 self._gc_done_physical[key] = 0
                 self._last_gc_done_physical[key] = 0
 
@@ -701,9 +796,9 @@ class DeviceThreadPool:
             parent_dev = self._devices_by_key.get(parent_key)
             if parent_dev is None:
                 raise ValueError(f"Virtual pool '{v_key}' references unknown parent '{parent_key}'")
-            if parent_dev.type == "cuda" and parent_dev.index is None:
+            if parent_dev.type in ("cuda", "npu") and parent_dev.index is None:
                 raise ValueError(
-                    f"Virtual pool '{v_key}' requires an indexed CUDA parent device (e.g. '{v_key}:cuda:0'); got '{parent_key}'"
+                    f"Virtual pool '{v_key}' requires an indexed accelerator parent device (e.g. '{v_key}:cuda:0'); got '{parent_key}'"
                 )
             parent_group = self._worker_groups.get(parent_key, [])
             parent_budget = len(parent_group)
@@ -741,7 +836,7 @@ class DeviceThreadPool:
 
         # Start janitor if enabled and there exists at least one accelerator.
         if self._empty_cache_every_n > 0 and any(
-            self._devices_by_key[k].type in ("cuda", "xpu", "mps") for k in self._ordered_keys
+            self._devices_by_key[k].type in ("cuda", "xpu", "npu", "mps") for k in self._ordered_keys
         ):
             self._janitor = threading.Thread(
                 target=self._janitor_loop, name="DP-Janitor", daemon=True
@@ -763,7 +858,7 @@ class DeviceThreadPool:
         if not isinstance(key, str) or ":" not in key:
             return None
         head, tail = key.split(":", 1)
-        if head in {"cuda", "xpu", "mps", "cpu"}:
+        if head in {"cuda", "xpu", "npu", "mps", "cpu"}:
             return None
         if not tail:
             return None
@@ -835,11 +930,11 @@ class DeviceThreadPool:
         worker_specs: List[Tuple[str, str, int]] = []
         for raw_dev in devices:
             dev = _coerce_device(raw_dev)
-            if dev.type not in ("cuda", "xpu", "mps", "cpu"):
+            if dev.type not in ("cuda", "xpu", "npu", "mps", "cpu"):
                 continue
             if dev.type == "cpu" and not pin_cpu_workers:
                 continue
-            if dev.type in ("cuda", "xpu", "mps") and not pin_accelerator_workers:
+            if dev.type in ("cuda", "xpu", "npu", "mps") and not pin_accelerator_workers:
                 continue
             key = self._key(dev)
             n_workers = int(max(1, self._resolve_workers_for_device(dev, worker_table)))
@@ -850,7 +945,7 @@ class DeviceThreadPool:
             return {}
 
         def _priority(dev_type: str) -> int:
-            if dev_type in ("cuda", "xpu"):
+            if dev_type in ("cuda", "xpu", "npu"):
                 return 0
             if dev_type == "mps":
                 return 1
@@ -881,27 +976,55 @@ class DeviceThreadPool:
 
         return plan
 
-    def _resolve_worker_warmup(self, dev: torch.device, key: str) -> Optional[Callable[[torch.device], None]]:
-        mapping = self._worker_warmups
-        if not mapping:
-            return None
-        family = dev.type.lower()
-        warmup = mapping.get(family)
-        primary_key = key.split(":", 1)[0].lower()
-        if warmup is None and primary_key in mapping:
-            warmup = mapping[primary_key]
-        if warmup is None:
-            warmup = mapping.get("default")
-        if warmup is None:
+    @staticmethod
+    def _normalize_worker_warmups(
+        warmups: Optional[Dict[str, WarmupTask]],
+    ) -> Optional[Dict[str, WarmupTask]]:
+        if not warmups:
             return None
 
-        # Map virtual workers back to their parent key so warmup runs once per physical device.
+        normalized: Dict[str, WarmupTask] = {}
+        for raw_key, raw_task in warmups.items():
+            if not isinstance(raw_task, WarmupTask):
+                raise TypeError(
+                    "warmups entries must be WarmupTask instances; "
+                    f"got {type(raw_task).__name__!s} for key '{raw_key}'"
+                )
+            normalized[str(raw_key).lower()] = raw_task
+        return normalized
+
+    def _resolve_worker_warmup(
+        self,
+        dev: torch.device,
+        key: str,
+    ) -> Tuple[_WorkerWarmupState, ...]:
+        mapping = self._worker_warmups
+        if not mapping:
+            return ()
+        family = dev.type.lower()
+        warmup_task = mapping.get(family)
+        primary_key = key.split(":", 1)[0].lower()
+        if warmup_task is None and primary_key in mapping:
+            warmup_task = mapping[primary_key]
+        if warmup_task is None:
+            warmup_task = mapping.get("default")
+        if warmup_task is None:
+            return ()
+
+        states: List[_WorkerWarmupState] = []
         physical_key = self._virtual_to_parent.get(key, key)
-        with self._warmup_lock:
-            if physical_key in self._warmup_ran_keys:
-                return None
-            self._warmup_ran_keys.add(physical_key)
-        return warmup
+        for warmup_ctx in warmup_task.scope.invocation_order():
+            if warmup_ctx is WarmUpCtx.THREAD:
+                states.append(_WorkerWarmupState(warmup_task, warmup_ctx))
+                continue
+
+            with self._device_warmup_lock:
+                state = self._device_warmup_states.get(physical_key)
+                if state is None:
+                    state = _WorkerWarmupState(warmup_task, warmup_ctx)
+                    self._device_warmup_states[physical_key] = state
+            states.append(state)
+        return tuple(states)
 
     def _spawn_worker(
         self,
@@ -913,7 +1036,7 @@ class DeviceThreadPool:
         """
         Create and start a worker bound to the provided device.
         """
-        warmup_fn = self._resolve_worker_warmup(dev, key)
+        warmup_plan = self._resolve_worker_warmup(dev, key)
         w = _DeviceWorker(
             device=dev,
             rwlock=self._locks[key],
@@ -922,7 +1045,7 @@ class DeviceThreadPool:
             name=name,
             inference_mode=self._inference_mode,
             cpu_core=cpu_core,
-            warmup_fn=warmup_fn,
+            warmup_plan=warmup_plan,
             key_override=key,
         )
         return w
@@ -1390,6 +1513,8 @@ class DeviceThreadPool:
         """
         start = time.time()
         try:
+            # Tests and runtime hooks may monkeypatch empty_cache between janitor passes.
+            torch_utils.resolve_empty_cache_callable.cache_clear()
             success = torch_empty_cache_any(device=dev, gc=False)
         except Exception as exc:
             if DEBUG_ON:
@@ -1421,6 +1546,11 @@ class DeviceThreadPool:
             if idx is None:
                 return None
             return f"xpu:{idx}"
+        if dev.type == "npu":
+            idx = dev.index
+            if idx is None:
+                return None
+            return f"npu:{idx}"
         return None
 
     def _query_device_vram_gib(self, key: str) -> Optional[float]:
@@ -1529,15 +1659,19 @@ class DeviceThreadPool:
             if (
                 dev is not None
                 and self._empty_cache_every_n > 0
-                and dev.type in ("cuda", "xpu", "mps")
+                and dev.type in ("cuda", "xpu", "npu", "mps")
             ):
                 physical_key = self._physical_key(key)
                 current = self._gc_done_physical.get(physical_key, 0) + 1
                 self._gc_done_physical[physical_key] = current
-                if current % self._empty_cache_every_n == 0:
-                    pending_map = self._gc_pending_physical
-                    pending_map[physical_key] = pending_map.get(physical_key, 0) + 1
-                    self._gc_generation += 1
+                last_done = self._last_gc_done_physical.get(physical_key, 0)
+                completed_chunks = max(0, (current - last_done) // self._empty_cache_every_n)
+                pending_map = self._gc_pending_physical
+                already_pending = pending_map.get(physical_key, 0)
+                new_triggers = completed_chunks - already_pending
+                if new_triggers > 0:
+                    pending_map[physical_key] = already_pending + new_triggers
+                    self._gc_generation += new_triggers
                     trigger_gc = True
                     if DEBUG_ON:
                         log.debug(
@@ -1659,8 +1793,8 @@ class DeviceThreadPool:
             w = snap["workers"].get(k, 0)
             infl = snap["inflight"].get(k, 0)
             done = snap["per_done"].get(k, 0)
-            accel = "Y" if t in ("cuda", "xpu", "mps") else "N"
-            if thr > 0 and t in ("cuda", "xpu", "mps"):
+            accel = "Y" if t in ("cuda", "xpu", "npu", "mps") else "N"
+            if thr > 0 and t in ("cuda", "xpu", "npu", "mps"):
                 rem = thr - (done % thr) if (done % thr) != 0 else 0
                 nextgc = "now" if rem == 0 and done > 0 else str(rem)
             else:
@@ -1707,6 +1841,14 @@ class DeviceThreadPool:
             if hasattr(torch, "xpu") and hasattr(torch.xpu, "synchronize"):
                 with torch.xpu.device(dev.index):
                     torch.xpu.synchronize()
+        # NPU
+        for key in self._ordered_keys:
+            dev = self._devices_by_key[key]
+            if dev.type != "npu":
+                continue
+            if HAS_NPU:
+                with torch.npu.device(dev.index):
+                    torch.npu.synchronize()
         # MPS
         has_mps_device = any(self._devices_by_key[k].type == "mps" for k in self._ordered_keys)
         if has_mps_device and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
@@ -1736,10 +1878,10 @@ class DeviceThreadPool:
         Record 'done' counters as of a GC pass to require fresh progress
         before a subsequent pass is allowed.
         """
-        threshold = int(self._empty_cache_every_n)
+        int(self._empty_cache_every_n)
         per_done_physical = snap_after.get("per_done_physical") or {}
         per_done = snap_after.get("per_done") or {}
-        meta = snap_after.get("meta") or {}
+        snap_after.get("meta") or {}
         processed = snap_after.get("_gc_processed_devices")
         if processed is None:
             processed_iter = per_done_physical.keys()
@@ -1750,21 +1892,14 @@ class DeviceThreadPool:
             done_phys = per_done_physical.get(phys_key)
             if done_phys is None:
                 continue
-            if threshold <= 0:
-                self._last_gc_done_physical[phys_key] = done_phys
-            else:
-                self._last_gc_done_physical[phys_key] = done_phys - (done_phys % threshold)
+            self._last_gc_done_physical[phys_key] = done_phys
 
             members = self._physical_children.get(phys_key, {phys_key})
             for member in members:
                 done_member = per_done.get(member)
                 if done_member is None:
                     continue
-                dev_type = meta.get(member, {}).get("type")
-                if threshold <= 0 or dev_type not in ("cuda", "xpu", "mps"):
-                    self._last_gc_done_per_device[member] = done_member
-                else:
-                    self._last_gc_done_per_device[member] = done_member - (done_member % threshold)
+                self._last_gc_done_per_device[member] = done_member
 
     def _janitor_loop(self):
         """
@@ -1909,13 +2044,32 @@ class DeviceThreadPool:
                     self._last_consumed_gc_generation = max(self._last_consumed_gc_generation, current_generation)
                 continue
 
+            # A single trigger runs a full accelerator sweep so memory pressure is
+            # normalized across all active devices under the janitor's exclusive pass.
+            sweep_targets: List[str] = []
+            seen_targets: Set[str] = set()
+            for candidate in self._ordered_keys:
+                physical = self._physical_key(candidate)
+                if physical in seen_targets:
+                    continue
+                dev = self._devices_by_key.get(physical)
+                if dev is None or dev.type not in ("cuda", "xpu", "npu", "mps"):
+                    continue
+                if physical not in self._locks:
+                    continue
+                seen_targets.add(physical)
+                sweep_targets.append(physical)
+
+            if not sweep_targets:
+                sweep_targets = pending_targets
+
             processed_devices: List[str] = []
             skipped_devices: List[str] = []
             per_device_durations: Dict[str, float] = {}
 
-            for key in pending_targets:
+            for key in sweep_targets:
                 dev = self._devices_by_key.get(key)
-                if dev is None or dev.type not in ("cuda", "xpu", "mps"):
+                if dev is None or dev.type not in ("cuda", "xpu", "npu", "mps"):
                     skipped_devices.append(key)
                     continue
                 lk = self._locks.get(key)
@@ -1947,12 +2101,36 @@ class DeviceThreadPool:
                 delta_s = t1 - prev_gc_ts
                 since_last_gc = f"since last GC: {delta_s:.3f}s ({delta_s * 1000:.1f}ms)"
 
+            post = None
             if processed_devices:
-                vram_summary = self._format_vram_summary(processed_devices)
                 try:
                     post = self._collect_state_snapshot()
                     post["_gc_processed_devices"] = processed_devices
                     self._update_gc_watermarks(post)
+                except Exception as e:
+                    try:
+                        log.warn(f"Failed to update GC watermarks: {e!r}")
+                    except Exception as log_exc:
+                        _best_effort_stderr_write(
+                            f"Failed to update GC watermarks: {e!r}; secondary logging failed: {log_exc!r}"
+                        )
+
+            with self._stats_lock:
+                pending_map = self._gc_pending_physical
+                if not isinstance(pending_map, dict):
+                    pending_map = dict.fromkeys(pending_map, 1)
+                    self._gc_pending_physical = pending_map
+                for key in processed_devices:
+                    pending_map.pop(key, None)
+                for key in skipped_devices:
+                    pending_map.pop(key, None)
+                self._last_consumed_gc_generation = max(self._last_consumed_gc_generation, current_generation)
+                if any(count > 0 for count in pending_map.values()):
+                    self._gc_event.set()
+
+            if processed_devices:
+                vram_summary = self._format_vram_summary(processed_devices)
+                try:
                     devices_clause = ", ".join(processed_devices)
                     log.info(
                         f"GC completed in {t1 - t0:.3f}s (pass #{self._gc_passes}) at {gc_timestamp}; devices={devices_clause}; VRAM {vram_summary}; {since_last_gc}."
@@ -1968,22 +2146,10 @@ class DeviceThreadPool:
                 except Exception as e:
                     try:
                         log.warn(f"Failed to render GC post-snapshot: {e!r}")
-                    except Exception:
-                        pass
-
-            with self._stats_lock:
-                pending_map = self._gc_pending_physical
-                if not isinstance(pending_map, dict):
-                    pending_map = dict.fromkeys(pending_map, 1)
-                    self._gc_pending_physical = pending_map
-                for key in processed_devices:
-                    pending_map.pop(key, None)
-                    self._last_gc_done_physical[key] = self._gc_done_physical.get(key, 0)
-                for key in skipped_devices:
-                    pending_map.pop(key, None)
-                self._last_consumed_gc_generation = max(self._last_consumed_gc_generation, current_generation)
-                if any(count > 0 for count in pending_map.values()):
-                    self._gc_event.set()
+                    except Exception as log_exc:
+                        _best_effort_stderr_write(
+                            f"Failed to render GC post-snapshot: {e!r}; secondary logging failed: {log_exc!r}"
+                        )
 
     def _empty_all_caches(self):
         torch_empty_cache_any(gc=False)

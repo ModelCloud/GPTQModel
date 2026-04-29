@@ -18,8 +18,12 @@ import torch
 import triton
 import triton.language as tl
 
+from gptqmodel.utils.env import env_flag
+
 
 AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
+# Shared runtime default: fp32 accumulation trades a little speed for lower numerical drift.
+FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
 def get_same_device_cm(t):
     if t.device.type == 'xpu':
@@ -140,6 +144,7 @@ def awq_gemm_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     SPLIT_K: tl.constexpr,
+    USE_FP32_ACCUM: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     pid_z = tl.program_id(1)
@@ -151,15 +156,10 @@ def awq_gemm_kernel(
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
 
-    accumulator_dtype = c_ptr.type.element_ty
-
-    # NOTE: This doesn't work in TRITON_INTERPRET=1 mode.  Use below instead.
-    # accumulator = tl.arange(0, BLOCK_SIZE_N)
-    # accumulator = tl.broadcast_to(accumulator[None, :],
-    # (BLOCK_SIZE_M, BLOCK_SIZE_N))
-    # accumulator = accumulator & 0x0
-    # accumulator = accumulator.to(accumulator_dtype)
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=accumulator_dtype)
+    if USE_FP32_ACCUM:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    else:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=c_ptr.type.element_ty)
 
     # Create reverse AWQ order as tensor: [0, 4, 1, 5, 2, 6, 3, 7]
     # that will map given indices to the correct order.
@@ -198,10 +198,10 @@ def awq_gemm_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)):
         masks_k = offsets_k < K
         masks_a = masks_am[:, None] & masks_k[None, :]
-        a = tl.load(a_ptrs, mask=masks_a)
+        a = tl.load(a_ptrs, mask=masks_a, other=0.0)
 
         masks_b = masks_k[:, None] & masks_bn[None, :]
-        b = tl.load(b_ptrs, mask=masks_b)
+        b = tl.load(b_ptrs, mask=masks_b, other=0)
         b = tl.interleave(b, b)
         b = tl.interleave(b, b)
         b = tl.interleave(b, b)
@@ -214,7 +214,7 @@ def awq_gemm_kernel(
         masks_zk = offsets_szk < K // group_size
         masks_z = masks_zk[:, None] & masks_zn[None, :]
         zeros_ptrs = zeros_ptr + offsets_z
-        zeros = tl.load(zeros_ptrs, mask=masks_z)
+        zeros = tl.load(zeros_ptrs, mask=masks_z, other=0)
         zeros = tl.interleave(zeros, zeros)
         zeros = tl.interleave(zeros, zeros)
         zeros = tl.interleave(zeros, zeros)
@@ -224,16 +224,19 @@ def awq_gemm_kernel(
         masks_sk = offsets_szk < K // group_size
         masks_s = masks_sk[:, None] & masks_sn[None, :]
         scales_ptrs = scales_ptr + offsets_s
-        scales = tl.load(scales_ptrs, mask=masks_s)
+        scales = tl.load(scales_ptrs, mask=masks_s, other=0.0)
         scales = tl.broadcast_to(scales, (BLOCK_SIZE_K, BLOCK_SIZE_N))
 
         b = (b >> shifts) & 0xF
         zeros = (zeros >> shifts) & 0xF
         b = (b - zeros) * scales
-        b = b.to(c_ptr.type.element_ty)
+        b = b.to(a.dtype)
 
         # Accumulate results.
-        accumulator = tl.dot(a, b, accumulator, out_dtype=accumulator_dtype)
+        if USE_FP32_ACCUM:
+            accumulator = tl.dot(a, b, accumulator, out_dtype=tl.float32)
+        else:
+            accumulator = tl.dot(a, b, accumulator, out_dtype=c_ptr.type.element_ty)
 
         offsets_k += BLOCK_SIZE_K * SPLIT_K
         a_ptrs += BLOCK_SIZE_K * SPLIT_K
@@ -318,6 +321,8 @@ def awq_gemm_triton(
     block_size_m: int = 32,
     block_size_n: int = 32,
     block_size_k: int = 32,
+    fp32_accum: bool = FP32_ACCUM,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     M, K = input.shape
     N = qweight.shape[1] * 8
@@ -338,7 +343,11 @@ def awq_gemm_triton(
             split_k_iters,
         )
 
-    result = torch.zeros((M, N), dtype=scales.dtype, device=input.device)
+    if output_dtype is None:
+        output_dtype = scales.dtype
+
+    accum_dtype = torch.float32 if fp32_accum else output_dtype
+    result = torch.zeros((M, N), dtype=accum_dtype, device=input.device)
 
     # A = input, B = qweight, C = result
     # A = M x K, B = K x N, C = M x N
@@ -357,6 +366,10 @@ def awq_gemm_triton(
             BLOCK_SIZE_N=block_size_n,
             BLOCK_SIZE_K=block_size_k,
             SPLIT_K=split_k_iters,
+            USE_FP32_ACCUM=fp32_accum,
         )
+
+    if result.dtype != output_dtype:
+        return result.to(output_dtype)
 
     return result

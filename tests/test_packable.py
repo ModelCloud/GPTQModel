@@ -13,13 +13,11 @@ from parameterized import parameterized
 from safetensors.torch import load_file
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
-from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
 from gptqmodel.utils.model import convert_gptq_v2_to_v1_format, find_modules
 
 
@@ -27,15 +25,12 @@ log = LogBar.shared()
 
 class TestPackable(unittest.TestCase):
     QLINEAR_DICT = {
-        BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
-        BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
-        BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
-        BACKEND.TRITON: TritonV2QuantLinear,
-        BACKEND.TORCH: TorchQuantLinear,
-        BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
-        BACKEND.MARLIN: MarlinQuantLinear,
-        BACKEND.MARLIN_FP16: MarlinQuantLinear,
-        # BACKEND.BITBLAS: BitBLASQuantLinear,
+        BACKEND.EXLLAMA_V2: ExllamaV2Linear,
+        BACKEND.TRITON: TritonV2Linear,
+        BACKEND.TORCH: TorchLinear,
+        BACKEND.TORCH_FUSED: TorchFusedLinear,
+        BACKEND.MARLIN: MarlinLinear,
+        # BACKEND.BITBLAS: BitBLASLinear,
     }
 
     model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
@@ -53,15 +48,12 @@ class TestPackable(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (BACKEND.EXLLAMA_EORA, {"qweight": False, "qzeros": True, "scales": True, "g_idx": False}),
-            (BACKEND.EXLLAMA_V1, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.EXLLAMA_V2, {"qweight": False, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TRITON, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TORCH, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TORCH_FUSED, {"qweight": True, "qzeros": True, "scales": False, "g_idx": True}),
             # (BACKEND.BITBLAS, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.MARLIN, {"qweight": False, "qzeros": False, "scales": False, "g_idx": False}),
-            (BACKEND.MARLIN_FP16, {"qweight": False, "qzeros": False, "scales": False, "g_idx": False}),
         ]
     )
     def test_post_init(self, backend: BACKEND, equal: Dict[str, bool]):

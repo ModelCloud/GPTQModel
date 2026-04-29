@@ -1,25 +1,10 @@
-# Copyright 2025 ModelCloud
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 # -- do not touch
 import os
-
-import torch
-from peft.tuners.lora.gptq import GPTQLoraLinear
-from safetensors.torch import load_file
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -28,28 +13,33 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
+import torch  # noqa: E402
 from datasets import load_dataset  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
-from logbar import LogBar
+from logbar import LogBar  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
-from tabulate import tabulate  # noqa: E402
+from peft.tuners.lora.gptq import GPTQLoraLinear  # noqa: E402
+from safetensors.torch import load_file  # noqa: E402
+from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.utils.logger import render_table  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from tests.eval import evaluate, format_eval_result_table  # noqa: E402
 
 
 log = LogBar.shared()
 
 
-class Test(ModelTest):
+class TestTransformers(ModelTest):
     # NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
     # NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
+    DATASET_SIZE = 512
+    DATASET_SIZE_FAST = 32
 
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.3567, "floor_pct": 0.36},
             "acc_norm": {"value": 0.3805, "floor_pct": 0.36},
         },
@@ -65,7 +55,7 @@ class Test(ModelTest):
         desc_act = True
         rank = 128
         batch_size = 1
-        calibration_dataset_rows = 512
+        calibration_dataset_rows = self._mode_specific_test_setting("DATASET_SIZE")
         calibration_dataset_concat_size = 0  # disable
         adapter_path = "eora"
         dataset_id = "allenai/c4"
@@ -88,7 +78,7 @@ class Test(ModelTest):
         calibration_dataset = load_dataset(
             dataset_id,
             data_files=dataset_files,
-            split="train"
+            split="train",
         ).select(range(calibration_dataset_rows))["text"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -106,7 +96,7 @@ class Test(ModelTest):
                 dynamic={
                     ".*\\.gate_proj.*": {
                         "adapter": {
-                            "rank": 256
+                            "rank": 256,
                         }
                     }
                 },
@@ -121,7 +111,7 @@ class Test(ModelTest):
                 calibration=calibration_dataset,
                 batch_size=batch_size,
                 calibration_concat_size=calibration_dataset_concat_size,
-            )  #
+            )
 
             # EoRA adapter is saved according to Lora.path property
             # if Lora.path is not set, we will save the lora as "lora.safetensors" in the same path as quant model
@@ -131,35 +121,31 @@ class Test(ModelTest):
             del model
             torch_empty_cache()
 
-            # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
-            for backend in [BACKEND.MARLIN]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+            for backend in [BACKEND.MARLIN]:  # BACKEND.TORCH_FUSED, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
                 eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora)  # inference using eora (lora)
                 base_bench = self.bench(path=tmpdir, backend=backend, adapter=None)  # inference using qweights only
 
-                print('--------GPTQModel + EoRA Config ---------')
+                print("--------GPT-QModel + EoRA Config ---------")
 
-                # Convert the dictionary to a list of lists for tabulate
                 table_data = [[key, value] for key, value in config_dict.items()]
-                print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
+                print(render_table(table_data, headers=["Key", "Value"], tablefmt="grid"))
 
-                print('--------Eval GPTQ Result---------')
-                print(make_table(base_bench))
-                if "groups" in base_bench:
-                    print(make_table(base_bench, "groups"))
+                print("--------Eval GPTQ Result---------")
+                print(format_eval_result_table(base_bench))
 
-                print('--------Eval GPTQ + EoRA Result---------')
-                print(make_table(eora_bench))
-                if "groups" in eora_bench:
-                    print(make_table(eora_bench, "groups"))
+                print("--------Eval GPTQ + EoRA Result---------")
+                print(format_eval_result_table(eora_bench))
 
     def bench(self, path: str, backend: BACKEND, adapter: Optional[Lora]):
         # test post-quant inference
         if adapter:
             adapter_weights = load_file(os.path.join(adapter.path, HF_ADAPTER_FILE_NAME))
             origin_lora_a_weight = adapter_weights[
-                f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}model.layers.5.self_attn.v_proj.lora_A.weight"]
+                f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}model.layers.5.self_attn.v_proj.lora_A.weight"
+            ]
             origin_lora_b_weight = adapter_weights[
-                f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}model.layers.5.self_attn.v_proj.lora_B.weight"]
+                f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}model.layers.5.self_attn.v_proj.lora_B.weight"
+            ]
 
             model = AutoModelForCausalLM.from_pretrained(path, device_map="cuda")
             log.info("PEFT: converting model to lora model")
@@ -194,11 +180,8 @@ class Test(ModelTest):
         print(f"BACKEND: {backend}, Result: {result}")
         # assert "paris" in result.lower(), f"`paris` not found in `{result}`"
 
-        bench_result = GPTQModel.eval(
-            model_or_id_or_path=model,
-            framework=EVAL.LM_EVAL,
-            tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU_STEM],
-        )
+        eval_tasks = ["arc_challenge"] if self._is_fast_model_test_mode() else ["arc_challenge", "mmlu_stem"]
+        bench_result = evaluate(model_or_id_or_path=model, tasks=eval_tasks)
 
         del model
         torch_empty_cache()

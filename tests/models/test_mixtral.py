@@ -5,22 +5,24 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestMixtral(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Mixtral-8x7B-Instruct-v0.1" # "mistralai/Mixtral-8x7B-Instruct-v0.1"
     NATIVE_ARC_CHALLENGE_ACC = 0.5213
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5247
-    TRUST_REMOTE_CODE = True
+    NATIVE_ARC_CHALLENGE_ACC_SLOW = NATIVE_ARC_CHALLENGE_ACC
+    NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
+    NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
+    NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
     EVAL_BATCH_SIZE = 6
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     def test_mixtral(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

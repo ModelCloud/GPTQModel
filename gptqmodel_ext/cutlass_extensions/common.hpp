@@ -3,16 +3,17 @@
 #include "cutlass/cutlass.h"
 #include <climits>
 #include "cuda_runtime.h"
-#include <iostream>
+
+#include <torch/headeronly/util/shim_utils.h>
 
 /**
  * Helper function for checking CUTLASS errors
  */
-#define CUTLASS_CHECK(status)                       \
-  {                                                 \
-    cutlass::Status error = status;                 \
-    TORCH_CHECK(error == cutlass::Status::kSuccess, \
-                cutlassGetStatusString(error));     \
+#define CUTLASS_CHECK(status)                           \
+  {                                                     \
+    cutlass::Status error = status;                     \
+    STD_TORCH_CHECK(error == cutlass::Status::kSuccess, \
+                    cutlassGetStatusString(error));     \
   }
 
 inline int get_cuda_max_shared_memory_per_block_opt_in(int const device) {

@@ -10,8 +10,11 @@ class TestGemma(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gemma-3-1b-it" # "google/gemma-3-1b-it"
     NATIVE_ARC_CHALLENGE_ACC = 0.3404
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3541
+    NATIVE_ARC_CHALLENGE_ACC_SLOW = NATIVE_ARC_CHALLENGE_ACC
+    NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
+    NATIVE_ARC_CHALLENGE_ACC_FAST = 0.37457337883959047
+    NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = 0.3839590443686007
 
     def test_gemma(self):
-        self.quant_lm_eval()
-
+        self.quantize_and_evaluate()
 

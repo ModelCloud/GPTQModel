@@ -3,7 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from .backend import BACKEND
+import os
+import threading
+
+from .backend import BACKEND, PROFILE
 from .logger import setup_logger
 from .python import gte_python_3_13_3, gte_python_3_14, has_gil_control, has_gil_disabled, log_gil_requirements_for
 from .threads import AsyncManager, SerialWorker
@@ -11,14 +14,17 @@ from .vram import get_vram
 
 
 log = setup_logger()
+# Shared across runtime monkeypatch entrypoints; some patch helpers nest.
+_MONKEY_PATCH_LOCK = threading.RLock()
 
 ASYNC_BG_QUEUE = AsyncManager(threads=4)
 SERIAL_BG_QUEUE = SerialWorker()
 
 # TODO: datasets is not compatible with free threading
-if has_gil_disabled():
-    log.info("Python GIL is disabled and GPTQModel will auto enable multi-gpu quant acceleration for MoE models plus multi-cpu accelerated packing.")
-    from .perplexity import Perplexity
+if os.environ.get("GPTQMODEL_DISABLE_GIL_WARNING") == "1":
+    pass
+elif has_gil_disabled():
+    log.info("Python GIL is disabled and GPT-QModel will auto enable multi-gpu quant acceleration for MoE models plus multi-cpu accelerated packing.")
 else:
     if has_gil_control():
         log.warn(
@@ -26,5 +32,3 @@ else:
 
     log.warn(
         "Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.")
-
-    log_gil_requirements_for("utils/Perplexity")

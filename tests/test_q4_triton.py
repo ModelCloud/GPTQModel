@@ -15,7 +15,7 @@ from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
 
 
 class TestsQ4Triton(ModelTest):
@@ -30,7 +30,7 @@ class TestsQ4Triton(ModelTest):
             dtype=torch.float16,
         )
         for _, submodule in model_q.named_modules():
-            if isinstance(submodule, TritonV2QuantLinear):
+            if isinstance(submodule, TritonV2Linear):
                 break
         else:
             raise ValueError("Did not find a tritonv2 linear layer")
@@ -53,7 +53,7 @@ class TestsQ4Triton(ModelTest):
 
         )
         for _, submodule in model_q.named_modules():
-            if isinstance(submodule, TritonV2QuantLinear):
+            if isinstance(submodule, TritonV2Linear):
                 break
         else:
             raise ValueError("Did not find a tritonv2 linear layer")

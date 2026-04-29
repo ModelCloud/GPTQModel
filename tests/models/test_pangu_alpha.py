@@ -11,9 +11,13 @@ class TestGpt2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/pangu_alpha_2_6B" # "ModelCloud/pangu_alpha_2_6B"
     NATIVE_ARC_CHALLENGE_ACC = 0.1655
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.1945
+    NATIVE_ARC_CHALLENGE_ACC_SLOW = NATIVE_ARC_CHALLENGE_ACC
+    NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
+    NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
+    NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
     TORCH_DTYPE = torch.float16
     TRUST_REMOTE_CODE = True
     INPUTS_MAX_LENGTH = 1024
 
     def test_gpt2(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

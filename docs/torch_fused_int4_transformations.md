@@ -7,7 +7,7 @@
 
 # Torch Fused INT4 Transformations
 
-This note explains what `TorchFusedQuantLinear.transform_xpu` and `transform_cpu`
+This note explains what `TorchFusedLinear.transform_xpu` and `transform_cpu`
 do to GPTQ-format tensors before calling the fused `torch.ops.aten` kernels.
 The goal is to document the exact tensor shapes, the axis permutations, and the
 bit packing order expected by `aten._weight_int4pack_mm_*` so you do not need to
@@ -231,7 +231,7 @@ in the final storage type, accompanying metadata, and fused operator ABI.
 
 ## AWQ compatibility (`torch_fused_awq.py`)
 
-`TorchFusedAwqQuantLinear` (`gptqmodel/nn_modules/qlinear/torch_fused_awq.py`)
+`TorchFusedAwqLinear` (`gptqmodel/nn_modules/qlinear/torch_fused_awq.py`)
 reuses the CPU fused kernel while accepting checkpoints emitted by the AWQ
 tooling. The module always expects `qweight` to be stored in the AWQ layout
 `[in_features, out_features / pack_factor]`, meaning each row corresponds to a
@@ -263,7 +263,7 @@ the standard CPU packing runs:
    `_weight_int4pack_mm_for_cpu` receives the same affine parameters the AWQ
    calibration solved for.
 
-Because the shim runs entirely on the CPU path, `TorchFusedAwqQuantLinear`
+Because the shim runs entirely on the CPU path, `TorchFusedAwqLinear`
 currently raises `NotImplementedError` when asked to run the fused transform on
 `xpu` devices. If the module has not been transformed yet (or fused ops are
 unavailable), inference falls back to the dense AWQ matmul computed by

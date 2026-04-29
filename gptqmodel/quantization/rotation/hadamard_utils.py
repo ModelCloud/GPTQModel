@@ -102,10 +102,18 @@ def random_hadamard_matrix(size, device):
     Q = torch.diag(Q)
     return matmul_hadU(Q).to(device)
 
+fast_hadamard_transform = None
+
+
 # TODO make this a util
 def import_fast_hadamard_transform():
+    global fast_hadamard_transform
+    if fast_hadamard_transform is not None:
+        return
+
     try:
-        import fast_hadamard_transform  # noqa: F401
+        import fast_hadamard_transform as fht
+        fast_hadamard_transform = fht
     except ImportError as e:
         log.error("Package: Please install missing `fast_hadamard_transform` module via: `pip install -U git+https://github.com/Dao-AILab/fast-hadamard-transform.git --no-build-isolation -v`")
         raise e

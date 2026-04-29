@@ -24,7 +24,8 @@
 
 #define KERNEL_LAUNCH_CODE                                                                                                                              \
   int num_mn_tiles = (num_in_feats + CTA_M - 1) / CTA_M * (num_out_channels + CTA_N - 1) / CTA_N;                                                       \
-  torch::Tensor _semaphores = torch::empty({num_mn_tiles}, options_int);                                                                                \
+  /* Split-K tiles use these semaphores for inter-CTA ordering, so they must start at zero. */                                                          \
+  torch::Tensor _semaphores = torch::zeros({num_mn_tiles}, options_int);                                                                                \
   auto semaphores = reinterpret_cast<int *>(_semaphores.data_ptr<int>());                                                                               \
   constexpr int NUM_WARPS = (CTA_M / WARP_M) * (CTA_N / WARP_N) * (CTA_K / WARP_K);                                                                     \
   constexpr int SCALES_SMEM_SIZE = (G >= CTA_K) ? (CTA_N / (G / CTA_K) * STAGES * 2) : (CTA_N * (CTA_K / G) * STAGES * 2);                              \

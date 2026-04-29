@@ -14,12 +14,12 @@ class Phi3QModel(BaseQModel):
         "#",
         {
             "self_attn": ("qkv_proj:0", "o_proj:1"),
-            "mlp": ("gate_up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
 
 class PhiMoEGPTQForCausalLM(BaseQModel):
-    require_pkgs_version = ["transformers<=4.44.2"]
+    dynamic_expert_index = "num_local_experts"
 
     module_tree = [
         "model",
@@ -29,9 +29,10 @@ class PhiMoEGPTQForCausalLM(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "block_sparse_moe": {
+            "mlp|block_sparse_moe:moe:?": {
+                "router": ("router:!",),  # PhimoeTopKRouter.forward() returns two values, skipping its quantization.
                 "experts": {
-                    "#": ("w1:0", "w2:1"),
+                    "#": ("gate_proj|w1:0", "up_proj|w3:0", "down_proj|w2:1"),
                 },
             },
         }

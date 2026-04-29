@@ -214,10 +214,10 @@ __global__ void reconstruct_gptq_kernel
     half2 y1y16[4][2];
     b_gptq_qzeros_.item4(zeros, group, n);
     b_gptq_scales_.item4_h2(scales, group, n);
-    dequant_4bit_8_prep_zero((zeros[0] + 1) & 0x0f, z1z16[0], y1y16[0]);
-    dequant_4bit_8_prep_zero((zeros[1] + 1) & 0x0f, z1z16[1], y1y16[1]);
-    dequant_4bit_8_prep_zero((zeros[2] + 1) & 0x0f, z1z16[2], y1y16[2]);
-    dequant_4bit_8_prep_zero((zeros[3] + 1) & 0x0f, z1z16[3], y1y16[3]);
+    dequant_4bit_8_prep_zero((zeros[0]) & 0x0f, z1z16[0], y1y16[0]);
+    dequant_4bit_8_prep_zero((zeros[1]) & 0x0f, z1z16[1], y1y16[1]);
+    dequant_4bit_8_prep_zero((zeros[2]) & 0x0f, z1z16[2], y1y16[2]);
+    dequant_4bit_8_prep_zero((zeros[3]) & 0x0f, z1z16[3], y1y16[3]);
 
     __syncthreads();
 
@@ -232,10 +232,10 @@ __global__ void reconstruct_gptq_kernel
             nextgroup += groupsize;
             b_gptq_qzeros_.item4(zeros, group, n);
             b_gptq_scales_.item4_h2(scales, group, n);
-            dequant_4bit_8_prep_zero((zeros[0] + 1) & 0x0f, z1z16[0], y1y16[0]);
-            dequant_4bit_8_prep_zero((zeros[1] + 1) & 0x0f, z1z16[1], y1y16[1]);
-            dequant_4bit_8_prep_zero((zeros[2] + 1) & 0x0f, z1z16[2], y1y16[2]);
-            dequant_4bit_8_prep_zero((zeros[3] + 1) & 0x0f, z1z16[3], y1y16[3]);
+            dequant_4bit_8_prep_zero((zeros[0]) & 0x0f, z1z16[0], y1y16[0]);
+            dequant_4bit_8_prep_zero((zeros[1]) & 0x0f, z1z16[1], y1y16[1]);
+            dequant_4bit_8_prep_zero((zeros[2]) & 0x0f, z1z16[2], y1y16[2]);
+            dequant_4bit_8_prep_zero((zeros[3]) & 0x0f, z1z16[3], y1y16[3]);
         }
 
         for (int p = 0; p < 4; p++)

@@ -27,7 +27,15 @@ from gptqmodel.quantization.awq.utils.module import get_op_by_name, set_op_by_na
 from gptqmodel.quantization.awq.utils.utils import get_best_device
 
 
+try:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm
+except Exception:  # pragma: no cover - older transformers builds do not expose Gemma 4 yet
+    Gemma4RMSNorm = None
+
+
 allowed_norms = [nn.LayerNorm, LlamaRMSNorm, GemmaRMSNorm, Gemma2RMSNorm, CohereLayerNorm]
+if Gemma4RMSNorm is not None:
+    allowed_norms.append(Gemma4RMSNorm)
 allowed_act_fns = [
     nn.GELU,
     BloomGelu,
@@ -63,7 +71,7 @@ def apply_scale(module, scales_list, input_feat_dict=None):
 
         if (
             isinstance(prev_op, nn.Linear)
-            and type(layers) is list
+            and isinstance(layers, list)
             and isinstance(layers[0], nn.Linear)
         ):
             scale_fc_fcs(prev_op, layers, scales)

@@ -4,26 +4,24 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   ruff-check:
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: [3.13]
-        os: [ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
-  
+    runs-on: ubuntu-24.04
+
     steps:
-    - uses: actions/checkout@v6
-      with:
-        repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-        ref: ${{ github.event.pull_request.head.ref || github.ref }}
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
 
-    - uses: actions/setup-python@v6
-      with:
-        python-version: ${{ matrix.python-version }}
-        cache: 'pip'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: 'pip'
 
-    - name: Ruff Check
-      run: |
-        format/format.sh
+      - name: Ruff Check
+        run: |
+          format/format.sh

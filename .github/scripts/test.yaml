@@ -1,0 +1,25 @@
+common:
+  py: 3.14t # common config
+  gpu: 1
+  sm: 0
+  skip: false
+
+tests:
+  test_multi_gpu_inference: # per-test config
+    gpu: 5
+    py: 3.14t
+
+  test_calibration_data_device:
+    gpu: 2
+    py: 3.14t
+
+tests/models:
+  py: 3.13
+
+  test_llama3_2_fp8:
+    sm: '12.0'
+
+tests/kernels:
+  test_asymmetric_real_models:
+    sm: '9.0'
+    skip: true # no SM90 card

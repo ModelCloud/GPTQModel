@@ -24,14 +24,13 @@ import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
-from tabulate import tabulate  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.utils.logger import render_table  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from tests.eval import evaluate, format_eval_result_table  # noqa: E402
 
 
 def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
@@ -51,10 +50,9 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
     print(f"BACKEND: {backend}, Result: {result}")
     # assert "paris" in result.lower(), f"`paris` not found in `{result}`"
 
-    bench_result = GPTQModel.eval(
+    bench_result = evaluate(
         model_or_id_or_path=model,
-        framework=EVAL.LM_EVAL,
-        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU_STEM],
+        tasks=["arc_challenge", "mmlu_stem"],
         batch_size=16,
     )
 
@@ -71,7 +69,7 @@ class Test(ModelTest):
 
 
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.3567, "floor_pct": 0.36},
             "acc_norm": {"value": 0.3805, "floor_pct": 0.36},
         },
@@ -167,21 +165,17 @@ class Test(ModelTest):
                 del model
                 torch_empty_cache()
 
-            # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
-            for backend in [ BACKEND.TORCH ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+            for backend in [ BACKEND.TORCH ]: # BACKEND.TORCH_FUSED, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
                 base_bench = bench(path=save_path, backend=backend, adapter=None) # inference using qweights only
                 # eora_bench = bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
 
-                print('--------GPTQModel + EoRA Config ---------')
+                print('--------GPT-QModel + EoRA Config ---------')
 
-                # Convert the dictionary to a list of lists for tabulate
                 table_data = [[key, value] for key, value in config_dict.items()]
-                print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
+                print(render_table(table_data, headers=["Key", "Value"], tablefmt="grid"))
 
                 print('--------Eval GPTQ Result---------')
-                print(make_table(base_bench))
-                if "groups" in base_bench:
-                    print(make_table(base_bench, "groups"))
+                print(format_eval_result_table(base_bench))
 
                 # print('--------Eval GPTQ + EoRA Result---------')
                 # print(make_table(eora_bench))

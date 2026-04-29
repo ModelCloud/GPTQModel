@@ -3,17 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import importlib
-
 import torch.nn as nn
 
-
-def try_import(module_name):
-    try:
-        module = importlib.import_module(module_name)
-        return module, ""
-    except Exception as ex:
-        return None, str(ex)
 
 def get_named_linears(module):
     return {name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)}

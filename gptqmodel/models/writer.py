@@ -11,18 +11,14 @@ import json
 import os
 import shutil
 from os.path import isfile, join
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
-import pcre as re
+import pcre
 import torch
-import transformers
 from safetensors import safe_open
 from safetensors.torch import save_file
-from torch import nn
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
-from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
-from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
@@ -32,7 +28,7 @@ from ..quantization.config import (
     META_FIELD_ACT_GROUP_AWARE,
     META_FIELD_DAMP_AUTO_INCREMENT,
     META_FIELD_DAMP_PERCENT,
-    META_FIELD_GPTAQ_ALPHA,
+    META_FIELD_FOEM_ENABLED,
     META_FIELD_GPTAQ_ENABLED,
     META_FIELD_MSE,
     META_FIELD_QUANTIZER,
@@ -42,14 +38,24 @@ from ..quantization.config import (
     META_QUANTIZER_GPTQMODEL,
     META_VALUE_URI,
     MIN_VERSION_WITH_V2,
+    resolve_quant_format,
 )
 from ..utils.backend import BACKEND
-from ..utils.hf import sanitize_generation_config_file
+from ..utils.exllamav3 import build_exllamav3_tensor_storage
+from ..utils.hf import (
+    _normalize_legacy_tied_weights_keys,
+    prepare_remote_code_compat,
+    sanitize_generation_config_file,
+    sanitize_model_config,
+    suspend_hf_weight_init,
+)
 from ..utils.logger import setup_logger
 from ..utils.model import (
+    TensorSource,
     copy_py_files,
     find_modules,
     get_model_files_size,
+    get_module_by_name,
     get_module_name,
     get_state_dict_for_save,
     is_embeddings_module_quantized,
@@ -60,7 +66,7 @@ from ..utils.model import (
 from ..utils.structure import alias_all_from_turtle_if_meta
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
-from ._const import DEFAULT_MAX_SHARD_SIZE
+from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
 
 
 log = setup_logger()
@@ -76,6 +82,324 @@ PROCESS_LOG_FWD_TIME = "fwd_time"
 PROCESS_USED_MEMORY = "(v)ram"
 
 EORA_DEFAULT_FILE = "eora.safetensors"
+
+# disable gptqmodel split_by layer feature (until sglang pr is merged since our dir struct is not compatible)
+# SUPPORTED_SPLIT_BY = {None, "layer"}
+SUPPORTED_SPLIT_BY = {None}
+_MAX_SHARD_SIZE_RE = pcre.compile(
+    r"\s*(\d+)([KMGTP]?B?)\s*",
+    flags=pcre.Flag.CASELESS,
+)
+
+
+def _parse_split_by(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("split_by must be a string or None.")
+
+    normalized = value.strip().lower()
+    if normalized in ("", "none"):
+        return None
+    if normalized not in SUPPORTED_SPLIT_BY:
+        raise ValueError(f"Unsupported split_by value: {value}. Supported values: None, 'layer'.")
+    return normalized
+
+
+def _cleanup_saved_weight_files(
+    save_dir: str,
+    expected_files: List[str],
+    model_base_name: str,
+    model_save_name: str,
+) -> None:
+    expected = set(expected_files)
+    shard_pattern = pcre.compile(
+        rf"{pcre.escape(model_base_name)}-\d{{5}}-of-\d{{5}}\.safetensors"
+    )
+
+    for filename in os.listdir(save_dir):
+        full_filename = join(save_dir, filename)
+        if not isfile(full_filename):
+            continue
+        if filename == model_save_name and filename not in expected:
+            os.remove(full_filename)
+            continue
+        if filename == model_save_name + ".index.json" and filename not in expected:
+            os.remove(full_filename)
+            continue
+        if shard_pattern.fullmatch(filename) and filename not in expected:
+            os.remove(full_filename)
+
+
+
+def _resolve_out_of_model_source_files(
+    model_local_path: str,
+    source_files: Optional[List[str]] = None,
+) -> List[str]:
+    if source_files:
+        return sorted(dict.fromkeys(source_files))
+
+    index_path = join(model_local_path, "model.safetensors.index.json")
+    if os.path.exists(index_path):
+        try:
+            with open(index_path, "r", encoding="utf-8") as handle:
+                index_data = json.load(handle)
+            weight_map = index_data.get("weight_map", {})
+            if isinstance(weight_map, dict):
+                return sorted(
+                    {
+                        filename
+                        for filename in weight_map.values()
+                        if isinstance(filename, str) and filename.endswith(".safetensors")
+                    }
+                )
+        except Exception as exc:
+            log.warn(f"Model: Failed to inspect original safetensors index at '{index_path}': {exc}")
+
+    return sorted(
+        filename
+        for filename in os.listdir(model_local_path)
+        if filename.endswith(".safetensors") and isfile(join(model_local_path, filename))
+    )
+
+
+def _load_tensors_by_prefixes(
+    model_local_path: str,
+    prefixes: List[str],
+    source_files: Optional[List[str]] = None,
+) -> Dict[str, torch.Tensor]:
+    # Gather tensors whose names match any of the requested prefixes.
+    # Gather tensors whose names match any of the requested prefixes from all available shards.
+    tensors: Dict[str, torch.Tensor] = {}
+    source_file_names = _resolve_out_of_model_source_files(model_local_path, source_files)
+    for source_file_name in source_file_names:
+        source_tensor_path = os.path.join(model_local_path, source_file_name)
+        if not os.path.exists(source_tensor_path):
+            continue
+        try:
+            with safe_open(source_tensor_path, framework="pt", device="cpu") as f:
+                for tensor_name in f.keys():
+                    if any(tensor_name.startswith(prefix) for prefix in prefixes):
+                        if tensor_name not in tensors:
+                            tensors[tensor_name] = f.get_tensor(tensor_name)
+        except Exception as exc:
+            log.warn(
+                f"Model: Failed to read tensors from {source_file_name} while scanning for prefixes "
+                f"{prefixes}: {exc}"
+            )
+    return tensors
+
+
+def _tensor_source_from_tensor(name: str, tensor: torch.Tensor) -> TensorSource:
+    # Create a TensorSource wrapper so the merged tensor behaves like original state_dict entries.
+    # Wrap a raw tensor into a TensorSource so it can be merged into state_dict.
+    return TensorSource(
+        name=name,
+        torch_dtype=tensor.dtype,
+        shape=tuple(tensor.shape),
+        source=tensor,
+    )
+
+
+def _merge_prefix_tensors_into_state_dict(
+    prefixes: List[str], model_local_path: str, state_dict: Dict[str, TensorSource]
+) -> None:
+    # Inject matched tensors into the ongoing state_dict before sharding.
+    merged = 0
+    normalized_prefixes = [prefix if prefix.endswith(".") else f"{prefix}." for prefix in prefixes]
+    tensors = _load_tensors_by_prefixes(model_local_path, normalized_prefixes)
+    for name, tensor in tensors.items():
+        state_dict[name] = _tensor_source_from_tensor(name, tensor)
+        merged += 1
+    if merged:
+        log.info(f"Model: Merged {merged} tensors with prefixes {normalized_prefixes} into the state dict")
+    else:
+        log.warn(f"Model: No tensors matched prefixes {normalized_prefixes} while merging into the state dict")
+
+
+def _normalize_out_of_model_tensors_entries(
+    entries: Optional[List[Union[str, Dict[str, Any]]]]
+) -> tuple[List[str], List[str]]:
+    # Normalize configured files/prefixes into explicit lists.
+    copy_files: List[str] = []
+    prefixes: List[str] = []
+    if not entries:
+        return copy_files, prefixes
+
+    raw_entries = list(entries) if isinstance(entries, (list, tuple)) else [entries]
+    for entry in raw_entries:
+        if isinstance(entry, str):
+            copy_files.append(entry)
+            continue
+        if not isinstance(entry, dict):
+            raise TypeError("out_of_model_tensors entries must be dict.")
+
+        files_value = entry.get("files")
+        if files_value is not None:
+            files = [files_value] if isinstance(files_value, str) else list(files_value)
+            for file in files:
+                if not isinstance(file, str) or not file:
+                    raise ValueError("`files` entries must be non-empty strings.")
+                copy_files.append(file)
+
+        prefixes_value = entry.get("prefixes")
+        if prefixes_value is not None:
+            prefix_list = [prefixes_value] if isinstance(prefixes_value, str) else list(prefixes_value)
+            for prefix in prefix_list:
+                if not isinstance(prefix, str) or not prefix:
+                    raise ValueError("`prefixes` entries must be non-empty strings.")
+                prefixes.append(prefix)
+
+    return copy_files, prefixes
+
+
+def _resolve_layer_split_group(tensor_name: str, layer_prefixes: List[str]) -> tuple[str, bool]:
+    for prefix in sorted((prefix for prefix in layer_prefixes if prefix), key=len, reverse=True):
+        expected_prefix = f"{prefix}."
+        if not tensor_name.startswith(expected_prefix):
+            continue
+        remainder = tensor_name[len(expected_prefix):]
+        layer_idx, dot, _ = remainder.partition(".")
+        if layer_idx.isdigit() and dot:
+            return f"{prefix}.{layer_idx}", True
+
+    if "." in tensor_name:
+        return tensor_name.rsplit(".", 1)[0], False
+    return "", False
+
+
+def _module_is_leaf(model, module_name: str) -> bool:
+    if not module_name:
+        return False
+    try:
+        module = get_module_by_name(model, module_name)
+    except Exception:
+        return False
+    return not any(True for _ in module.named_children())
+
+
+def _cleanup_legacy_leaf_group_dir(save_dir: str, group_name: str) -> None:
+    legacy_dir = join(save_dir, group_name)
+    if not os.path.isdir(legacy_dir):
+        return
+
+    for cleanup_base_name, cleanup_save_name in {
+        ("layer", "layer.safetensors"),
+        ("model", "model.safetensors"),
+    }:
+        _cleanup_saved_weight_files(
+            save_dir=legacy_dir,
+            expected_files=[],
+            model_base_name=cleanup_base_name,
+            model_save_name=cleanup_save_name,
+        )
+
+    try:
+        if not os.listdir(legacy_dir):
+            os.rmdir(legacy_dir)
+    except OSError:
+        pass
+
+
+def _stream_state_dict_to_layer_dirs(
+    state_dict: Dict[str, Any],
+    save_dir: str,
+    model_base_name: str,
+    model_save_name: str,
+    metadata: Dict[str, str],
+    max_shard_size: Optional[int],
+    layer_prefixes: List[str],
+    model,
+) -> tuple[List[str], Dict[str, str], int]:
+    grouped_state_dict: Dict[str, Dict[str, Any]] = {}
+    layer_groups: Dict[str, bool] = {}
+    for tensor_name, tensor_source in state_dict.items():
+        group_name, is_layer_group = _resolve_layer_split_group(tensor_name, layer_prefixes)
+        group = grouped_state_dict.setdefault(group_name, {})
+        group[tensor_name] = tensor_source
+        layer_groups[group_name] = is_layer_group
+
+    expected_files: List[str] = []
+    tensor_to_filename: Dict[str, str] = {}
+    total_size = 0
+    root_expected_files: List[str] = []
+    cleanup_specs = {(model_base_name, model_save_name)}
+    if model_base_name != "model" or model_save_name != "model.safetensors":
+        cleanup_specs.add(("model", "model.safetensors"))
+
+    for group_dir_name, group_state_dict in grouped_state_dict.items():
+        is_layer_group = layer_groups.get(group_dir_name, False)
+        is_leaf_group = (not is_layer_group) and _module_is_leaf(model, group_dir_name)
+
+        if is_layer_group:
+            group_dir = join(save_dir, group_dir_name)
+            group_model_base_name = model_base_name
+            group_model_save_name = model_save_name
+            relative_prefix = f"{group_dir_name}/"
+            group_cleanup_specs = cleanup_specs
+        elif is_leaf_group and group_dir_name:
+            group_dir = save_dir
+            group_model_base_name = group_dir_name
+            group_model_save_name = f"{group_dir_name}.safetensors"
+            relative_prefix = ""
+            group_cleanup_specs = {(group_model_base_name, group_model_save_name)}
+        else:
+            group_dir = save_dir if not group_dir_name else join(save_dir, group_dir_name)
+            group_model_base_name = model_base_name
+            group_model_save_name = model_save_name
+            relative_prefix = "" if not group_dir_name else f"{group_dir_name}/"
+            group_cleanup_specs = cleanup_specs
+
+        os.makedirs(group_dir, exist_ok=True)
+
+        group_expected_files, group_tensor_to_filename, group_total_size = streaming_state_dict_to_shards(
+            group_state_dict,
+            save_dir=group_dir,
+            model_base_name=group_model_base_name,
+            single_file_name=group_model_save_name,
+            metadata=metadata,
+            max_shard_size=max_shard_size,
+        )
+        total_size += group_total_size
+
+        for cleanup_base_name, cleanup_save_name in group_cleanup_specs:
+            _cleanup_saved_weight_files(
+                save_dir=group_dir,
+                expected_files=group_expected_files,
+                model_base_name=cleanup_base_name,
+                model_save_name=cleanup_save_name,
+            )
+
+        if is_leaf_group and group_dir_name:
+            _cleanup_legacy_leaf_group_dir(save_dir=save_dir, group_name=group_dir_name)
+        elif group_dir_name:
+            _cleanup_saved_weight_files(
+                save_dir=save_dir,
+                expected_files=[],
+                model_base_name=group_dir_name,
+                model_save_name=f"{group_dir_name}.safetensors",
+            )
+
+        if not group_dir_name and not is_leaf_group:
+            root_expected_files.extend(group_expected_files)
+
+        for filename in group_expected_files:
+            relative_filename = f"{relative_prefix}{filename}" if relative_prefix else filename
+            expected_files.append(relative_filename)
+
+        for tensor_name, filename in group_tensor_to_filename.items():
+            relative_filename = f"{relative_prefix}{filename}" if relative_prefix else filename
+            tensor_to_filename[tensor_name] = relative_filename
+
+    for cleanup_base_name, cleanup_save_name in cleanup_specs:
+        _cleanup_saved_weight_files(
+            save_dir=save_dir,
+            expected_files=root_expected_files,
+            model_base_name=cleanup_base_name,
+            model_save_name=cleanup_save_name,
+        )
+
+    return expected_files, tensor_to_filename, total_size
 
 def ModelWriter(cls):
     def save_pretrained(
@@ -143,6 +467,7 @@ def ModelWriter(cls):
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
             eora_path: Optional[str] = None,
+            split_by: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -177,19 +502,23 @@ def ModelWriter(cls):
         )
 
         # meta: write config fields to meta if they doe not participate in inference
+        gptaq_cfg = getattr(self.quantize_config, "gptaq", None)
+
+        foem_cfg = getattr(self.quantize_config, "foem", None)
+
         self.quantize_config.meta_set(
             key=META_FIELD_DAMP_PERCENT,
-            value=self.quantize_config.damp_percent
+            value=getattr(self.quantize_config, "damp_percent", None)
         )
 
         self.quantize_config.meta_set(
             key=META_FIELD_DAMP_AUTO_INCREMENT,
-            value=self.quantize_config.damp_auto_increment
+            value=getattr(self.quantize_config, "damp_auto_increment", None)
         )
 
         self.quantize_config.meta_set(
             key=META_FIELD_STATIC_GROUPS,
-            value=self.quantize_config.static_groups
+            value=getattr(self.quantize_config, "static_groups", None)
         )
 
         self.quantize_config.meta_set(
@@ -199,37 +528,61 @@ def ModelWriter(cls):
 
         self.quantize_config.meta_set(
             key=META_FIELD_MSE,
-            value=self.quantize_config.mse
+            value=getattr(self.quantize_config, "mse", None)
         )
 
         self.quantize_config.meta_set(
             key=META_FIELD_GPTAQ_ENABLED,
-            value=self.quantize_config.gptaq
+            value=None if gptaq_cfg is None else {
+                "alpha": gptaq_cfg.alpha,
+                "device": (
+                    gptaq_cfg.device
+                    if isinstance(gptaq_cfg.device, str)
+                    else str(gptaq_cfg.device)
+                ),
+            }
         )
 
         self.quantize_config.meta_set(
-            key=META_FIELD_GPTAQ_ALPHA,
-            value=self.quantize_config.gptaq_alpha
+            key=META_FIELD_FOEM_ENABLED,
+            value=None if foem_cfg is None else {
+                "alpha": foem_cfg.alpha,
+                "beta": foem_cfg.beta,
+                "device": (
+                    foem_cfg.device
+                    if isinstance(foem_cfg.device, str)
+                    else str(foem_cfg.device)
+                ),
+            }
         )
 
         self.quantize_config.meta_set(
             key=META_FIELD_ACT_GROUP_AWARE,
-            value=self.quantize_config.act_group_aware
+            value=getattr(self.quantize_config, "act_group_aware", None)
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.
+        sanitize_model_config(self.model.config)
         config = copy.deepcopy(self.model.config)
+
         quantize_config = copy.deepcopy(self.quantize_config)
 
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
-        if quantize_config.format == FORMAT.GPTQ_V2:
+        runtime_format = resolve_quant_format(quantize_config.format, quantize_config.method)
+
+        if runtime_format == FORMAT.GPTQ_V2:
             log.warn(
-                f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
+                f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPT-QModel version >= {MIN_VERSION_WITH_V2}."
             )
 
-        if self.load_quantized_model:
+        if runtime_format == FORMAT.EXL3:
+            tensor_storage = build_exllamav3_tensor_storage(self.model)
+            quantize_config.tensor_storage = tensor_storage
+            self.quantize_config.tensor_storage = copy.deepcopy(tensor_storage)
+
+        if self.load_quantized_model and runtime_format != FORMAT.EXL3:
             self.model = self.get_model_with_quantize(
                 qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,
@@ -262,6 +615,7 @@ def ModelWriter(cls):
             removed_config_attention_attrs = strip_attention_impl_fields(self.model.config)
             if generation_config is not None:
                 removed_generation_attention_attrs = strip_attention_impl_fields(generation_config)
+            _normalize_legacy_tied_weights_keys(self.model)
 
             # Save model config, including generation_config
             # Use empty state_dict hack to bypass saving weights
@@ -311,6 +665,11 @@ def ModelWriter(cls):
 
         offload_root = self.quantize_config.offload_to_disk_path if getattr(self.quantize_config, "offload_to_disk", False) else None
         state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
+        copy_tensor_files, prefix_entries = _normalize_out_of_model_tensors_entries(
+            getattr(self, "out_of_model_tensors", None)
+        )
+        if prefix_entries:
+            _merge_prefix_tensors_into_state_dict(prefix_entries, self.model_local_path, state_dict)
 
         model_base_name = "model"
         model_save_name = model_base_name + ".safetensors"
@@ -324,7 +683,7 @@ def ModelWriter(cls):
                 return None
             if isinstance(value, int):
                 return value
-            match = re.fullmatch(r"\s*(\d+)([KMGTP]?B?)\s*", value, re.IGNORECASE)
+            match = _MAX_SHARD_SIZE_RE.fullmatch(value)
             if not match:
                 raise ValueError(f"Invalid max_shard_size value: {value}")
             base = int(match.group(1))
@@ -366,30 +725,38 @@ def ModelWriter(cls):
         max_shard_size_bytes = _parse_max_shard_size(max_shard_size)
         metadata_dict = _normalize_metadata(safetensors_metadata)
         metadata_dict["format"] = "pt"
+        split_by_mode = _parse_split_by(split_by)
 
-        expected_files, tensor_to_filename, total_size_bytes = streaming_state_dict_to_shards(
-            state_dict,
-            save_dir=save_dir,
-            model_base_name=model_base_name,
-            single_file_name=model_save_name,
-            metadata=metadata_dict,
-            max_shard_size=max_shard_size_bytes,
-        )
-
-        pattern = re.compile(rf"{re.escape(model_base_name)}-\d{{5}}-of-\d{{5}}\.safetensors")
-        for filename in os.listdir(save_dir):
-            full_filename = join(save_dir, filename)
-            if not isfile(full_filename):
-                continue
-            if filename == model_save_name and filename not in expected_files:
-                os.remove(full_filename)
-                continue
-            if pattern.fullmatch(filename) and filename not in expected_files:
-                os.remove(full_filename)
+        if split_by_mode == "layer":
+            expected_files, tensor_to_filename, total_size_bytes = _stream_state_dict_to_layer_dirs(
+                state_dict,
+                save_dir=save_dir,
+                model_base_name="layer",
+                model_save_name="layer.safetensors",
+                metadata=metadata_dict,
+                max_shard_size=max_shard_size_bytes,
+                layer_prefixes=self.extract_layers_node(),
+                model=self.model,
+            )
+        else:
+            expected_files, tensor_to_filename, total_size_bytes = streaming_state_dict_to_shards(
+                state_dict,
+                save_dir=save_dir,
+                model_base_name=model_base_name,
+                single_file_name=model_save_name,
+                metadata=metadata_dict,
+                max_shard_size=max_shard_size_bytes,
+            )
+            _cleanup_saved_weight_files(
+                save_dir=save_dir,
+                expected_files=expected_files,
+                model_base_name=model_base_name,
+                model_save_name=model_save_name,
+            )
 
         total_size_mb = total_size_bytes / (1024 * 1024)
 
-        if len(expected_files) > 1:
+        if split_by_mode == "layer" or len(expected_files) > 1:
             index = {
                 "metadata": {"total_size": total_size_bytes},
                 "weight_map": tensor_to_filename,
@@ -410,82 +777,21 @@ def ModelWriter(cls):
         if self.quantize_config.adapter:
             _eora_save(self, save_dir=eora_path if eora_path else self.quantize_config.adapter.path, model_save_dir=save_dir)
 
-        # Handle `dangling` tensor files that HF doesn't support (optional) but very useful
-        extra_tensor_files = getattr(self, "out_of_model_tensor_files", None)
-        if extra_tensor_files:
-            if isinstance(extra_tensor_files, str):
-                extra_tensor_files = [extra_tensor_files]
-            else:
-                extra_tensor_files = list(extra_tensor_files)
-
-            index_save_name = model_save_name + ".index.json"
-            index_save_path = join(save_dir, index_save_name)
-
-            if os.path.exists(index_save_path):
-                with open(index_save_path, "r", encoding="utf-8") as f:
-                    index_data = json.load(f)
-            else:
-                index_data = {
-                    "metadata": {"total_size": total_size_bytes},
-                    "weight_map": dict(tensor_to_filename),
-                }
-
-            if "metadata" not in index_data:
-                index_data["metadata"] = {}
-            if "weight_map" not in index_data:
-                index_data["weight_map"] = {}
-
-            total_size_value = index_data["metadata"].get("total_size", total_size_bytes)
-            index_updated = False
-
-            for tensor_file_name in extra_tensor_files:
-                original_tensor_path = os.path.join(self.model_local_path, tensor_file_name)
-                if not os.path.exists(original_tensor_path):
-                    log.warn(
-                        f"Model: out_of_model_tensor_files configured with '{tensor_file_name}', "
-                        f"but the file was not found at '{original_tensor_path}'"
-                    )
-                    continue
-
-                target_tensor_path = os.path.join(save_dir, tensor_file_name)
-                shutil.copy2(original_tensor_path, target_tensor_path)
-                log.info(
-                    f"Model: Copied {tensor_file_name} from original model directory to quantized model directory"
+        # Copy any requested safetensors files without modifying the index
+        for tensor_file_name in copy_tensor_files:
+            original_tensor_path = os.path.join(self.model_local_path, tensor_file_name)
+            if not os.path.exists(original_tensor_path):
+                log.warn(
+                    f"Model: out_of_model_tensors configured with '{tensor_file_name}', "
+                    f"but the file was not found at '{original_tensor_path}'"
                 )
+                continue
 
-                tensor_names = []
-                try:
-                    with safe_open(original_tensor_path, framework="pt", device="cpu") as f:
-                        tensor_names = list(f.keys())
-                except Exception as exc:
-                    log.warn(
-                        f"Model: Failed to read tensor names from {tensor_file_name}: {exc}"
-                    )
-
-                for tensor_name in tensor_names:
-                    index_data["weight_map"][tensor_name] = tensor_file_name
-
-                if tensor_names:
-                    log.info(
-                        f"Model: Added {len(tensor_names)} tensors from {tensor_file_name} to weight_map"
-                    )
-
-                try:
-                    tensor_file_size = os.path.getsize(target_tensor_path)
-                except OSError:
-                    tensor_file_size = 0
-
-                total_size_value += tensor_file_size
-                index_updated = True
-
-            if index_updated:
-                index_data["metadata"]["total_size"] = total_size_value
-                with open(index_save_path, "w", encoding="utf-8") as f:
-                    content = json.dumps(index_data, indent=2, sort_keys=True) + "\n"
-                    f.write(content)
-                log.info(
-                    f"Model: Updated {index_save_name} to include `out_of_model_tensor_files`"
-                )
+            target_tensor_path = os.path.join(save_dir, tensor_file_name)
+            shutil.copy2(original_tensor_path, target_tensor_path)
+            log.info(
+                f"Model: Copied {tensor_file_name} from original model directory to quantized model directory"
+            )
 
         # If the saved model is a loaded quantized model, do not calculate the size diff.
         if not self.load_quantized_model:
@@ -504,54 +810,57 @@ def ModelWriter(cls):
         if self.tokenizer:
             self.tokenizer.save_pretrained(save_dir)
 
-            # fixed this issue: https://github.com/huggingface/transformers/issues/35832
-            saved_tokenizer_config = get_tokenizer_config(save_dir)
-            config_tokenizer_class = saved_tokenizer_config.get("tokenizer_class")
-            # if the tokenizer is fast, but the tokenizer_config.json does not have Fast suffix, add "Fast" suffix
-            if (not config_tokenizer_class.endswith("Fast")) and (
-                isinstance(self.tokenizer.tokenizer, PreTrainedTokenizerFast)
-                ):
-                saved_tokenizer_config["tokenizer_class"] = saved_tokenizer_config["tokenizer_class"] + "Fast"
-                with open(os.path.join(save_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
-                    json.dump(saved_tokenizer_config, f, indent=2, ensure_ascii=False)
+            # Use source model's tokenizer_class for cross-version compatibility
+            # (transformers 5.0 save_pretrained writes "TokenizersBackend" which older versions can't load)
+            source_tokenizer_config = get_tokenizer_config(self.model_local_path)
+            source_tokenizer_class = source_tokenizer_config.get("tokenizer_class")
+
+            if source_tokenizer_class:
+                # fix https://github.com/huggingface/transformers/issues/35832
+                # if source tokenizer_class lacks "Fast" suffix but tokenizer is actually fast, add it
+                if (not source_tokenizer_class.endswith("Fast")) and isinstance(self.tokenizer.tokenizer, PreTrainedTokenizerFast):
+                    source_tokenizer_class = source_tokenizer_class + "Fast"
+
+                saved_tokenizer_config = get_tokenizer_config(save_dir)
+                if saved_tokenizer_config.get("tokenizer_class") != source_tokenizer_class:
+                    saved_tokenizer_config["tokenizer_class"] = source_tokenizer_class
+                    with open(os.path.join(save_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
+                        json.dump(saved_tokenizer_config, f, indent=2, ensure_ascii=False)
 
 
     cls.save_quantized = save_quantized
 
-    def get_model_with_quantize(self, qcfg, model_id_or_path, input_embeddings: nn.Module, output_embeddings: nn.Module):
+    def get_model_with_quantize(self, qcfg, model_id_or_path, input_embeddings=None, output_embeddings=None):
 
         config = AutoConfig.from_pretrained(
             model_id_or_path,
             trust_remote_code=True,
         )
+        prepare_remote_code_compat(config)
 
-        def skip(*args, **kwargs):
-            pass
-
-        torch.nn.init.kaiming_uniform_ = skip
-        torch.nn.init.uniform_ = skip
-        torch.nn.init.normal_ = skip
-        transformers.modeling_utils._init_weights = False
-        init_contexts = [no_init_weights()]
-        with ContextManagers(init_contexts):
+        with suspend_hf_weight_init():
             model = cls.loader.from_config(
                 config, dtype=torch.float16
             )
 
             modules = find_modules(model)
             ignore_modules = [self.lm_head] + self.get_base_modules(model)
+            input_embed_name = get_module_name(model, model.get_input_embeddings()) if model.get_input_embeddings() is not None else None
+            output_embed_name = get_module_name(model, model.get_output_embeddings()) if model.get_output_embeddings() is not None else None
+            input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
+                model_dir=model_id_or_path,
+                input_embed_name=input_embed_name,
+                output_embed_name=output_embed_name,
+            )
 
-            input_embed_name = get_module_name(model, model.get_input_embeddings())
-            output_embed_name = get_module_name(model, model.get_output_embeddings())
-            input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(model_dir=model_id_or_path,
-                                                                                           input_embed_name=input_embed_name,
-                                                                                           output_embed_name=output_embed_name)
             for name in list(modules.keys()):
-                # allow loading of quantized input_embed/output_embed
                 if input_embed_quantized and name == input_embed_name:
                     continue
 
                 if output_embed_quantized and name == output_embed_name:
+                    continue
+
+                if qcfg.lm_head and name == self.lm_head:
                     continue
 
                 if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
@@ -570,6 +879,7 @@ def ModelWriter(cls):
                 backend=BACKEND.AUTO,
                 lm_head_name=cls.lm_head,
                 pack=True,
+                device=DEVICE.CPU,
             )
 
         load_checkpoint_in_model_then_tie_weights(
@@ -581,13 +891,10 @@ def ModelWriter(cls):
             # offload_state_dict=True,
             # offload_buffers=True,
         )
-
-        # Set the quantized embeddings module
         if isinstance(input_embeddings, BaseQuantLinear):
             model.set_input_embeddings(input_embeddings)
         if isinstance(output_embeddings, BaseQuantLinear):
             model.set_output_embeddings(output_embeddings)
-
         torch_empty_cache()
         return model
 

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-FileCopyrightText: 2024-2025 gptqmodel contributors
 # SPDX-License-Identifier: Apache-2.0
-"""CLI helper to run lm-eval tasks against a GPTQModel checkpoint."""
+"""CLI helper to run Evalution-backed tasks against a GPT-QModel checkpoint."""
 
 import argparse
 import json
@@ -15,7 +15,12 @@ import gptqmodel
 from tabulate import tabulate
 from gptqmodel import GPTQModel
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.utils.eval import EVAL
+from tests.eval import (
+    evaluate,
+    get_eval_task_results,
+    list_supported_tasks,
+    normalize_eval_task_name,
+)
 
 
 if sys.platform == "darwin":
@@ -27,9 +32,8 @@ os.environ.setdefault(
     "expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7",
 )
 
-DEFAULT_RESULTS_PATH = Path("lm_eval_results.json")
-DEFAULT_TASKS = (EVAL.LM_EVAL.ARC_CHALLENGE,)
-DEFAULT_TASK_MANAGER_PATH = Path(__file__).resolve().parent.parent / "tests" / "tasks"
+DEFAULT_RESULTS_PATH = Path("evalution_results.json")
+DEFAULT_TASKS = ("arc_challenge",)
 
 
 def _available_backends() -> Dict[str, gptqmodel.BACKEND]:
@@ -81,31 +85,29 @@ def _parse_key_value_pairs(pairs: Iterable[str]) -> Dict[str, object]:
     return result
 
 
-def _resolve_task(name: str) -> EVAL.LM_EVAL:
-    normalized = name.strip()
-    for task in EVAL.LM_EVAL:
-        if normalized.lower() in {task.value.lower(), task.name.lower()}:
-            return task
-    available = ", ".join(task.value for task in EVAL.LM_EVAL)
-    raise argparse.ArgumentTypeError(f"Unknown lm-eval task '{name}'. Expected one of: {available}")
+def _resolve_task(name: str) -> str:
+    normalized = normalize_eval_task_name(name)
+    if normalized in list_supported_tasks():
+        return normalized
+    available = ", ".join(list_supported_tasks())
+    raise argparse.ArgumentTypeError(f"Unknown Evalution task '{name}'. Expected one of: {available}")
 
 
 def _list_tasks() -> None:
-    rows = [(task.name, task.value) for task in EVAL.LM_EVAL]
+    rows = [(task_name, task_name) for task_name in list_supported_tasks()]
     print(tabulate(rows, headers=["Name", "Identifier"]))
 
 
 def _extract_metrics(results: Dict) -> Dict[str, Dict[str, float]]:
-    aggregated: Dict[str, Dict[str, float]] = {}
-    task_results = results.get("results", {})
-    for task_name, metrics in task_results.items():
-        filtered = {
+    aggregated = get_eval_task_results(results)
+    return {
+        task_name: {
             metric: value
             for metric, value in metrics.items()
             if metric != "alias" and "stderr" not in metric
         }
-        aggregated[task_name] = filtered
-    return aggregated
+        for task_name, metrics in aggregated.items()
+    }
 
 
 def _print_metrics_table(metrics: Dict[str, Dict[str, float]], table_format: str) -> None:
@@ -134,9 +136,9 @@ def _split_tasks(arg_value: str | None) -> List[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run lm-eval tasks against a quantized model loaded via gptqmodel."
+        description="Run Evalution tasks against a quantized model loaded via gptqmodel."
     )
-    parser.add_argument("--model", required=True, help="Model path or Hugging Face repo id.")
+    parser.add_argument("--model", help="Model path or Hugging Face repo id.")
     parser.add_argument(
         "--backend",
         default="auto",
@@ -145,8 +147,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--tasks",
-        default=",".join(task.value for task in DEFAULT_TASKS),
-        help="Comma-separated lm-eval task identifiers (see --list-tasks).",
+        default=",".join(DEFAULT_TASKS),
+        help="Comma-separated Evalution task identifiers (see --list-tasks).",
     )
     parser.add_argument(
         "--chat-template-tasks",
@@ -157,7 +159,7 @@ def parse_args() -> argparse.Namespace:
         "--batch-size",
         default="auto",
         type=_parse_batch_size,
-        help="Evaluation batch size passed to lm-eval (integer or 'auto').",
+        help="Evaluation batch size passed to Evalution (integer or 'auto').",
     )
     parser.add_argument(
         "--dtype",
@@ -167,14 +169,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gen-kwargs",
         default=None,
-        help="Generation kwargs forwarded to lm-eval, e.g. 'temperature=0.0,top_k=50'.",
+        help="Generation kwargs forwarded to Evalution, e.g. 'temperature=0.0,top_k=50'.",
     )
     parser.add_argument(
         "--model-arg",
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="Extra model_args forwarded to GPTQModel.eval (repeatable).",
+        help="Extra model_args forwarded to Evalution (repeatable).",
     )
     parser.add_argument(
         "--load-arg",
@@ -187,34 +189,6 @@ def parse_args() -> argparse.Namespace:
         "--trust-remote-code",
         action="store_true",
         help="Allow loading models that require remote code execution.",
-    )
-    parser.add_argument(
-        "--use-vllm",
-        action="store_true",
-        help="Run evaluation with the vLLM backend instead of the default gptqmodel harness.",
-    )
-    parser.add_argument(
-        "--max-model-len",
-        type=int,
-        default=None,
-        help="Optional max_model_len passed to vLLM model args.",
-    )
-    parser.add_argument(
-        "--random-seed",
-        type=int,
-        default=898,
-        help="Seed propagated to lm-eval for reproducibility.",
-    )
-    parser.add_argument(
-        "--task-manager-path",
-        type=str,
-        default=str(DEFAULT_TASK_MANAGER_PATH) if DEFAULT_TASK_MANAGER_PATH.exists() else None,
-        help="Optional path containing custom lm-eval tasks.",
-    )
-    parser.add_argument(
-        "--include-default-tasks",
-        action="store_true",
-        help="Include lm-eval's builtin task registry alongside the custom task directory.",
     )
     parser.add_argument(
         "--output",
@@ -230,7 +204,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--list-tasks",
         action="store_true",
-        help="List supported lm-eval task identifiers and exit.",
+        help="List supported Evalution task identifiers and exit.",
     )
     return parser.parse_args()
 
@@ -241,13 +215,13 @@ def main() -> None:
     if args.list_tasks:
         _list_tasks()
         return
+    if not args.model:
+        raise ValueError("--model is required unless --list-tasks is used.")
 
     tasks = [_resolve_task(name) for name in _split_tasks(args.tasks)]
     if not tasks:
-        raise ValueError("No lm-eval tasks specified.")
-    chat_template_tasks = {_resolve_task(name).value for name in _split_tasks(args.chat_template_tasks)}
-
-    llm_backend = "vllm" if args.use_vllm else "gptqmodel"
+        raise ValueError("No Evalution tasks specified.")
+    chat_template_tasks = {_resolve_task(name) for name in _split_tasks(args.chat_template_tasks)}
     backend: gptqmodel.BACKEND = args.backend
 
     load_kwargs = _parse_key_value_pairs(args.load_arg)
@@ -260,54 +234,31 @@ def main() -> None:
     )
 
     if not isinstance(model, BaseQModel):
-        raise RuntimeError("Failed to load GPTQModel; received unexpected object type.")
+        raise RuntimeError("Failed to load GPT-QModel; received unexpected object type.")
 
     model_args = _parse_key_value_pairs(args.model_arg)
-    if args.max_model_len is not None:
-        model_args.setdefault("max_model_len", args.max_model_len)
-
-    if args.use_vllm:
-        model_args.setdefault("dtype", "auto")
-        model_args.setdefault("tensor_parallel_size", 1)
-        model_args.setdefault("gpu_memory_utilization", 0.8)
-
-    task_manager = None
-    if args.task_manager_path:
-        task_manager_path = Path(args.task_manager_path).expanduser().resolve()
-        if not task_manager_path.exists():
-            raise FileNotFoundError(f"Task manager path does not exist: {task_manager_path}")
-        from lm_eval.tasks import TaskManager
-
-        task_manager = TaskManager(
-            include_path=str(task_manager_path),
-            include_defaults=args.include_default_tasks,
-        )
 
     aggregated_metrics: Dict[str, Dict[str, float]] = {}
 
-    grouped_tasks: Dict[bool, List[EVAL.LM_EVAL]] = {}
+    grouped_tasks: Dict[bool, List[str]] = {}
     for task in tasks:
-        apply_chat = task.value in chat_template_tasks
+        apply_chat = task in chat_template_tasks
         grouped_tasks.setdefault(apply_chat, []).append(task)
 
     for apply_chat_template, grouped in grouped_tasks.items():
         if not grouped:
             continue
 
-        result = gptqmodel.GPTQModel.eval(
+        result = evaluate(
             model_or_id_or_path=model,
             tasks=grouped,
-            framework=EVAL.LM_EVAL,
             batch_size=args.batch_size,
             trust_remote_code=args.trust_remote_code,
             output_path=None,
-            llm_backend=llm_backend,
             backend=backend,
-            random_seed=args.random_seed,
             model_args=model_args.copy(),
             gen_kwargs=args.gen_kwargs,
             apply_chat_template=apply_chat_template,
-            task_manager=task_manager,
         )
 
         group_metrics = _extract_metrics(result)

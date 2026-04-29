@@ -16,7 +16,7 @@ import torch
 from gptqmodel.utils.threadx import DeviceThreadPool
 
 
-pytestmark = pytest.mark.ci
+pytestmark = [pytest.mark.ci, pytest.mark.cpu]
 
 
 def _affinity_supported() -> bool:

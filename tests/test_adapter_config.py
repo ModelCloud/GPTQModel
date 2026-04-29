@@ -14,6 +14,7 @@
 # limitations under the License.
 
 # -- do not touch
+# GPU=-1
 import os
 
 from gptqmodel import QuantizeConfig
@@ -72,6 +73,17 @@ class TestExtensionConfig(unittest.TestCase):
         assert rank_field in kv.keys()
         assert kv[rank_field] == rank
 
+    def test_extension_parse_does_not_mutate_serialized_payload(self):
+        payload = Lora(path="/tmp/adapter", rank=128).to_dict()
+
+        first = normalize_adapter(adapter=payload)
+        second = normalize_adapter(adapter=payload)
+
+        assert isinstance(first, Lora)
+        assert isinstance(second, Lora)
+        assert payload["name"] == lora
+        assert payload["rank"] == 128
+
     def test_extension_embed(self):
         bits = 4
         rank = 2
@@ -88,6 +100,4 @@ class TestExtensionConfig(unittest.TestCase):
         assert qconfig.bits == bits
         assert qconfig.adapter == eora_config
         assert qconfig.adapter.rank == rank
-
-
 

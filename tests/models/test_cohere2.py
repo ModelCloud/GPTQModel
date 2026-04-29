@@ -5,19 +5,18 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestCohere2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/c4ai-command-r7b-12-2024"
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
             "acc": {"value": 0.4680, "floor_pct": 0.15},
             "acc_norm": {"value": 0.4693, "floor_pct": 0.15},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     EVAL_BATCH_SIZE = 4
     USE_FLASH_ATTN = False
 
     def test_cohere2(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

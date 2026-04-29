@@ -6,11 +6,38 @@ from __future__ import annotations
 
 import contextlib
 import threading
+from typing import TYPE_CHECKING
 
 import torch
 
+from .torch import TORCH_GTE_210
+
+
+if TYPE_CHECKING:
+    from .threadx import WarmUpCtx
+
 
 _GLOBAL_WARMUP_LOCK = threading.Lock()
+
+
+def _get_cuda_preferred_linalg_library():
+    preferred = getattr(torch.backends.cuda, "preferred_linalg_library", None)
+    if preferred is None:
+        return None
+    if callable(preferred):
+        return preferred()
+    return preferred
+
+
+def _set_cuda_preferred_linalg_library(backend) -> bool:
+    preferred = getattr(torch.backends.cuda, "preferred_linalg_library", None)
+    if preferred is None:
+        return False
+    if callable(preferred):
+        preferred(backend=backend)
+        return True
+    setattr(torch.backends.cuda, "preferred_linalg_library", backend)
+    return True
 
 
 def _make_spd(size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -23,6 +50,11 @@ def _make_spd(size: int, device: torch.device, dtype: torch.dtype) -> torch.Tens
 def _run_cholesky_and_eigh(device: torch.device, dtype: torch.dtype) -> None:
     spd = _make_spd(4, device, dtype)
     torch.linalg.cholesky(spd)
+
+    # mps has no aten.eigh implementation
+    if device.type == "mps":
+        return
+
     torch.linalg.eigh(spd)
 
 
@@ -32,16 +64,21 @@ def _run_svd(device: torch.device, dtype: torch.dtype) -> None:
 
 
 def _run_qr(device: torch.device, dtype: torch.dtype) -> None:
+    # mps has no aten.qr implementation
+    if device.type == "mps":
+        return
+
     square = torch.randn((4, 4), device=device, dtype=dtype)
     torch.linalg.qr(square)
 
 
-def run_torch_linalg_warmup(device: torch.device) -> None:
+def run_torch_linalg_warmup(device: torch.device, warmup_ctx: "WarmUpCtx") -> None:
     """
     Execute the torch.linalg operators used across the project once on the worker thread.
 
-    Serialized under a global lock to avoid races inside PyTorch's lazy wrappers. The warmup
-    still runs once per physical device so backend-specific handles are initialized where needed.
+    Serialized under a global lock to avoid races inside PyTorch's lazy wrappers.
+    The caller decides whether this invocation is running in device-wide or
+    thread-local warmup context via `warmup_ctx`.
     """
     with _GLOBAL_WARMUP_LOCK:
         if device.type == "mps":
@@ -55,19 +92,18 @@ def run_torch_linalg_warmup(device: torch.device) -> None:
             _run_qr(device, dtype)
 
         if device.type == "cuda" and hasattr(torch.backends, "cuda"):
-            preferred = getattr(torch.backends.cuda, "preferred_linalg_library", None)
-            if callable(preferred):
-                current = preferred()
+            current = _get_cuda_preferred_linalg_library()
+            if current is not None and not TORCH_GTE_210:
                 # Core warmup already ran using the currently preferred backend above.
                 # Some installations fall back to MAGMA when the primary solver is unavailable,
                 # so we pre-initialize MAGMA as well when it differs from the preferred backend.
                 if current and current != "magma":
                     with contextlib.suppress(Exception):
-                        torch.backends.cuda.preferred_linalg_library(backend="magma")
+                        _set_cuda_preferred_linalg_library("magma")
                         _run_cholesky_and_eigh(device, torch.float32)
                 if current:
                     with contextlib.suppress(Exception):
-                        torch.backends.cuda.preferred_linalg_library(backend=current)
+                        _set_cuda_preferred_linalg_library(current)
 
 
 __all__ = ["run_torch_linalg_warmup"]

@@ -23,7 +23,7 @@ class Test(ModelTest):
 
     def test(self):
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
-        model = GPTQModel.load(self.MODEL_ID, attn_implementation="flash_attention_2")
+        model = GPTQModel.load(self.MODEL_ID, attn_implementation="flash_attention_2", device="cuda")
 
         self.assertEqual(model.config._attn_implementation, "flash_attention_2")
 

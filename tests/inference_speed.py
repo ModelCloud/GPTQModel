@@ -6,6 +6,8 @@
 import os
 import time
 
+import torch
+
 from gptqmodel.utils.torch import torch_empty_cache
 
 
@@ -43,6 +45,9 @@ class InferenceSpeed(unittest.TestCase):
     MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.25
 
     def inference(self, model_path, backend, tokens_per_second, assert_result=True, optimize=False, fullgraph=False, warmup_runs=0, device=None):
+        if device == "cuda" and torch.cuda.is_available():
+            device = f"cuda:{torch.cuda.current_device()}"
+
         model = GPTQModel.from_quantized(
             model_path,
             backend=backend,
@@ -57,37 +62,38 @@ class InferenceSpeed(unittest.TestCase):
         inp = tokenizer(self.PROMPTS, padding=True, truncation=True, return_tensors="pt", padding_side='left').to(
             model.device)
 
-        times = []
-        tokens = []
-
         # compile kernels need JIT compile (Bitblas, IPEX, Triton) so we should do some warmup before actual speed run
         if warmup_runs > 0:
+            warmup_times = []
+            warmup_tokens = []
             pb = logger.pb(range(warmup_runs)).title("Warmup")
             for _ in pb:
                 start_time = time.time()
                 result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
                 end_time = time.time()
                 elapsed_time = end_time - start_time
-                times.append(elapsed_time)
+                warmup_times.append(elapsed_time)
 
                 for j in range(result.shape[0]):
                     new_tokens = result[j][inp['input_ids'].shape[1]:]
                     new_token_count = len(new_tokens)
-                    tokens.append(new_token_count)
+                    warmup_tokens.append(new_token_count)
 
-            sum_time = sum(times)
-            sum_tokens = sum(tokens)
+            sum_time = sum(warmup_times)
+            sum_tokens = sum(warmup_tokens)
 
             avg_tokens_per_second = round(sum_tokens / sum_time, 2)
 
             print(f"\n**************** {backend} Warm-up Result Info****************")
-            print(f"Times: {times}")
-            print(f"New Tokens (Size Per Batch Request): {tokens}")
+            print(f"Times: {warmup_times}")
+            print(f"New Tokens (Size Per Batch Request): {warmup_tokens}")
             print(f"Sum Times: {sum_time}")
             print(f"Sum New Tokens: {sum_tokens}")
             print(f"New Token Per Second: {avg_tokens_per_second} token/s")
             print(f"****************  {backend} Warm-up Result Info End****************")
 
+        times = []
+        tokens = []
         pb = logger.pb(range(self.NUM_RUNS)).title("Run")
         for _ in pb:
             start_time = time.time()
@@ -115,7 +121,7 @@ class InferenceSpeed(unittest.TestCase):
         print(f"****************  {backend} Result Info End****************")
 
         if not assert_result:
-            return
+            return avg_tokens_per_second
 
         diff_pct = (avg_tokens_per_second / tokens_per_second) * 100
         negative_pct = 100 * (1 - self.MAX_DELTA_FLOOR_PERCENT)
@@ -126,3 +132,4 @@ class InferenceSpeed(unittest.TestCase):
 
         del model
         torch_empty_cache()
+        return avg_tokens_per_second

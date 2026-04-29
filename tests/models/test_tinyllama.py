@@ -10,7 +10,11 @@ class TestTinyllama(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
     NATIVE_ARC_CHALLENGE_ACC = 0.2995
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3268
+    NATIVE_ARC_CHALLENGE_ACC_SLOW = NATIVE_ARC_CHALLENGE_ACC
+    NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
+    NATIVE_ARC_CHALLENGE_ACC_FAST = 0.30802047781569963
+    NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = 0.3250853242320819
     TRUST_REMOTE_CODE = True
 
     def test_tinyllama(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

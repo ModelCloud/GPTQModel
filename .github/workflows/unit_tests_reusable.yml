@@ -1,0 +1,250 @@
+name: Unit Tests Reusable
+
+defaults:
+  run:
+    shell: bash -le {0}
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: "GitHub repo {owner}/{repo}"
+        required: false
+        default: ""
+        type: string
+      ref:
+        description: "GitHub ref: Branch, Tag or Commit SHA"
+        required: false
+        default: ""
+        type: string
+      pr_number:
+        description: "PR Number"
+        required: false
+        default: 0
+        type: number
+      check_vm_ip:
+        description: "Selected CI runner IP"
+        required: true
+        type: string
+      check_vm_max_parallel:
+        description: "Serialized max parallel payload"
+        required: true
+        type: string
+      check_vm_cuda_version:
+        description: "CUDA version selected by the caller"
+        required: true
+        type: string
+      matrix_json:
+        description: "Serialized unit test matrix for this reusable job"
+        required: true
+        type: string
+      model_test_mode:
+        description: "Model compat test mode"
+        required: false
+        default: "fast"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CUDA_DEVICE_ORDER: PCI_BUS_ID
+  CUDA_VISIBLE_DEVICES: 0
+  GPTQMODEL_KERNEL_REBUILD: '1'
+  TORCH_CUDA_ARCH_LIST: '8.0 8.6 8.9 9.0 12.0'
+  PYTORCH_ALLOC_CONF: 'expandable_segments:True'
+  RUNNER: 10.0.13.31
+  XEON5: 10.0.14.249
+  GPU_ALLOCATOR_URL: http://10.0.13.31/gpu
+  LOGBAR_ANIMATION: '0'
+  UV_TORCH_BACKEND: cu130
+  TORCH_VERSION: 2.11.0
+  PYTHON_VERSION: 3.13
+  UV_PYTHON: python3.13
+  MODEL_TEST_MODE: ${{ inputs.model_test_mode || 'fast' }}
+  MODEL_TEST_GPU_COUNT: '1'
+  DEFUSER_GIT_URL: git+https://github.com/modelcloud/Defuser.git
+  PYPCRE_GIT_URL: git+https://github.com/modelcloud/PyPcre.git
+  TOKENICER_GIT_URL: git+https://github.com/modelcloud/Tokenicer.git
+  LOGBAR_GIT_URL: git+https://github.com/modelcloud/LogBar.git
+  EVALUTION_GIT_URL: git+https://github.com/modelcloud/Evalution.git
+  repo: ${{ inputs.repo || github.repository }}
+  ref: ${{ inputs.ref || github.ref }}
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+jobs:
+  test:
+    runs-on: [ self-hosted, xeon5 ]
+    container:
+      image: ${{ inputs.check_vm_ip }}:5000/nvidia/cuda:${{ inputs.check_vm_cuda_version }}-ubuntu24.04_0415
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
+      volumes:
+        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
+        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
+        - /dev/dri/by-path:/dev/dri/by-path
+        - /monster/ci/models:/monster/data/model
+        - /monster/ci/dataset:/monster/data/model/dataset
+        - /monster/ci/huggingface:/github/home/.cache/huggingface
+        - /github/workspace/uv:/opt/uv
+        - /github/workspace/tmp:/opt/uv/tmp
+        - /monster/ci/uv/python:/opt/uv/python
+        - /monster/ci/uv/cache/python:/opt/uv/cache/python
+        - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
+        - /monster/ci/uv/uv:/opt/uv/uv
+        - /monster/ci/uv/uvx:/opt/uv/uvx
+        - /monster/ci/uv/env:/opt/uv/env
+        - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
+        - /monster/ci/env:/opt/env
+        - /monster/ci/dist:/opt/dist
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.check_vm_max_parallel).size || 20 }}
+      matrix:
+        include: ${{ fromJSON(inputs.matrix_json || '[]') }}
+    if: ${{ !cancelled() && inputs.matrix_json != '[]' }}
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
+      - name: Prepare checkout
+        run: |
+          .github/scripts/ci_prepare_checkout.sh "${{ inputs.pr_number }}"
+
+      - name: Restore uv cache
+        continue-on-error: true
+        run: |
+          .github/scripts/ci_restore_uv_cache.sh
+
+      - name: Activate uv env
+        run: |
+          echo "::group::-- dust uv cache dir --"
+            dust $(uv cache dir)
+          echo "::endgroup::"
+
+          bash .github/scripts/ci_unit_activate_uv_env.sh \
+            "${{ matrix.test_script }}" \
+            "${{ inputs.check_vm_cuda_version }}" \
+            "${{ env.TORCH_VERSION }}" \
+            "${{ github.run_id }}" \
+            "${{ github.run_attempt }}"
+
+      - name: Setup uv env
+        run: |
+          echo "::group::-- uv envs --"
+            printenv | grep UV
+          echo "::endgroup::"
+
+          bash .github/scripts/ci_unit_setup_uv_env.sh \
+            "${{ matrix.test_group }}" \
+            "${{ matrix.test_script }}" \
+            "${{ inputs.check_vm_cuda_version }}" \
+            "${{ env.TORCH_VERSION }}" \
+            "${{ env.PYTHON_VERSION }}"
+
+      - name: Install package from source
+        run: |
+          uv pip uninstall gptqmodel || true
+          /opt/env/install_torch.sh ${{ inputs.check_vm_cuda_version }} ${{ env.TORCH_VERSION }}
+          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          uv pip install . -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          .github/scripts/ci_install_modelcloud_git_deps.sh
+          /opt/env/install_torch.sh ${{ inputs.check_vm_cuda_version }} ${{ env.TORCH_VERSION }}
+
+      - name: Print uv env
+        run: |
+          echo "::group::uv python list"
+          uv python list
+          echo "::endgroup::"
+
+          which python
+          which pip || true
+          python -V
+
+          echo "::group::uv python list"
+          uv python list
+          echo "::endgroup::"
+
+          echo "== nvcc =="
+          nvcc --version
+
+          echo "::group::project files"
+          ls -ahl
+          echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch
+
+          echo "::group::pip list"
+          uv pip list
+          echo "::endgroup::"
+
+      - name: Find suitable GPU
+        if: ${{ !cancelled() && env.SKIP_GPU_ALLOCATION != 'true' }}
+        run: |
+          alloc_gpu_count="$GPU_COUNT"
+          if [[ "${{ matrix.alloc_gpu_count }}" != "resolved" ]]; then
+            alloc_gpu_count="${{ matrix.alloc_gpu_count }}"
+          fi
+          alloc_args=(
+            --base-url "${GPU_ALLOCATOR_URL}"
+            --run-id "${{ github.run_id }}"
+            --test "${{ matrix.test_script }}"
+            --runner "${RUNNER_NAME:-unknown}"
+            --count "$alloc_gpu_count"
+            --sm "${SM}"
+          )
+          if [[ "${{ matrix.require_single_gpu }}" == "true" ]]; then
+            alloc_args+=(--require-single)
+          fi
+          python .github/scripts/ci_gpu.py allocate \
+            "${alloc_args[@]}"
+
+      - name: Run tests
+        run: |
+          extra_args=()
+          if [[ "${XPU_MODE}" == "true" ]]; then
+            extra_args+=(--clear-cuda --xpu-mode)
+          fi
+          if [[ "${{ matrix.include_model_test_mode }}" == "true" ]]; then
+            extra_args+=(--model-test-mode "${MODEL_TEST_MODE}")
+          fi
+          python .github/scripts/ci_tests.py run \
+            --base-url "${GPU_ALLOCATOR_URL}" \
+            --run-id "${{ github.run_id }}" \
+            --test-script "${{ matrix.test_script }}" \
+            --runner "${RUNNER_NAME}" \
+            --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
+            "${extra_args[@]}"
+
+      - name: Check log
+        if: ${{ !cancelled() && failure() }}
+        continue-on-error: true
+        run: |
+          python .github/scripts/ci_tests.py check-log \
+            --run-id "${{ github.run_id }}" \
+            --test-script "${{ matrix.test_script }}"
+
+      - name: Release GPU
+        if: always() && env.SKIP_GPU_ALLOCATION != 'true'
+        run: |
+          python .github/scripts/ci_gpu.py release \
+            --base-url "${GPU_ALLOCATOR_URL}" \
+            --run-id "${{ github.run_id }}" \
+            --gpu-id "${{ env.CUDA_VISIBLE_DEVICES }}" \
+            --test "${{ matrix.test_script }}" \
+            --runner "${RUNNER_NAME}"
+
+      - name: Clean cache
+        if: always()
+        run: |
+          echo "Cleaning workspace: $PWD"
+          rm -rf ./* .[^.] .??* || true
+          echo "cleaning venv: ${{ env.VIRTUAL_ENV }}"
+          rm -rf "${{ env.VIRTUAL_ENV }}"
+
+          echo "::group::-- dust uv cache dir --"
+            dust $(uv cache dir)
+          echo "::endgroup::"

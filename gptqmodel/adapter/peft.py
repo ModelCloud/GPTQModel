@@ -326,6 +326,8 @@ class LoraConfig():
         return kv
 
     def save_pretrained(self, save_dir: str):
+        """Writes the LoRA config in PEFT-compatible JSON form."""
+
         from ..adapter.adapter import HF_ADAPTER_CONFIG_FILE_NAME
 
         log.info(f"Adapter: Saving EoRA/Lora config to -> `{save_dir}`")
@@ -338,6 +340,8 @@ class LoraConfig():
             f.write(json_str)
 
     def __post_init__(self):
+        """Normalizes list inputs and validates the subset of PEFT options supported here."""
+
         self.peft_type = "LORA"
         self.target_modules = (
             set(self.target_modules) if isinstance(self.target_modules, list) else self.target_modules
@@ -390,6 +394,8 @@ class LoraConfig():
 
     @classmethod
     def from_pretrained(cls, path: str, filename: str):
+        """Loads a saved LoRA config and filters out unsupported empty fields."""
+
         resolved_path = resolve_path(path=path, filename=filename)
         with open(resolved_path, "r") as file:
             config_dict = json.load(file)

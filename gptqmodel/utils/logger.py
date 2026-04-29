@@ -4,16 +4,200 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
+import numbers
+import os
+import sys
 import threading
 import time
 from collections import OrderedDict
-from typing import Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Optional, Sequence
 
+import pcre
 from logbar import LogBar
 
 
+_ANSI_ESCAPE_RE = pcre.compile(r"\x1b\[[0-9;]*m")
+
+
+class _SilentProgress:
+    """Minimal no-op progress handle for non-interactive test sessions."""
+
+    def __init__(self, iterable=None):
+        self._iterable = iterable if iterable is not None else ()
+        self.current_iter_step = 0
+
+    def __iter__(self):
+        if isinstance(self._iterable, int):
+            return iter(range(self._iterable))
+        return iter(self._iterable)
+
+    def __len__(self):
+        if isinstance(self._iterable, int):
+            return self._iterable
+        return len(self._iterable)
+
+    def attach(self, *_args, **_kwargs):
+        return self
+
+    def manual(self):
+        return self
+
+    def set(self, **_kwargs):
+        return self
+
+    def title(self, *_args, **_kwargs):
+        return self
+
+    def subtitle(self, *_args, **_kwargs):
+        return self
+
+    def draw(self, force: bool = False):
+        return self
+
+    def refresh(self):
+        return self
+
+    def next(self, step: int = 1):
+        self.current_iter_step += int(step)
+        return self
+
+    def close(self):
+        return None
+
+
+class _AdaptiveLoggerProxy:
+    """Proxy that keeps structured logs while adapting live rendering at call time."""
+
+    def __init__(self, logger: LogBar):
+        self._logger = logger
+
+    def pb(self, iterable, *, output_interval: Optional[int] = None):
+        if _suppress_live_renderables():
+            return _SilentProgress(iterable)
+        return self._logger.pb(iterable, output_interval=output_interval)
+
+    def spinner(self, title: str = "", *, interval: float = 0.5, tail_length: int = 4):
+        if _suppress_live_renderables():
+            return _SilentProgress()
+        return self._logger.spinner(title=title, interval=interval, tail_length=tail_length)
+
+    def __getattr__(self, name):
+        return getattr(self._logger, name)
+
+
+def _suppress_live_renderables() -> bool:
+    """Disable live progress redraws under non-interactive pytest capture."""
+
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        return False
+
+    try:
+        return not sys.stdout.isatty()
+    except Exception:
+        return True
+
+
+def live_renderables_suppressed() -> bool:
+    """Report whether redraw-based progress should be replaced by durable logs."""
+
+    return _suppress_live_renderables()
+
+
 def setup_logger():
-    return LogBar.shared()
+    return _AdaptiveLoggerProxy(LogBar.shared())
+
+
+def _table_cell_text(value: Any, floatfmt: Optional[str]) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value)
+    if floatfmt is not None and isinstance(value, numbers.Real) and not isinstance(value, numbers.Integral):
+        return format(float(value), floatfmt)
+    return str(value)
+
+
+def _visible_width(value: str) -> int:
+    return len(_ANSI_ESCAPE_RE.sub("", value))
+
+
+def _pad_table_cell(value: str, width: int) -> str:
+    return value + (" " * max(0, width - _visible_width(value)))
+
+
+def _render_grid_table(headers: Sequence[str], rows: Sequence[Sequence[str]], widths: Sequence[int]) -> str:
+    def border() -> str:
+        return "+" + "+".join("-" * (width + 2) for width in widths) + "+"
+
+    def row_line(values: Sequence[str]) -> str:
+        return "| " + " | ".join(_pad_table_cell(value, widths[idx]) for idx, value in enumerate(values)) + " |"
+
+    lines = [border(), row_line(headers), border()]
+    lines.extend(row_line(row) for row in rows)
+    lines.append(border())
+    return "\n".join(lines)
+
+
+def _render_github_table(headers: Sequence[str], rows: Sequence[Sequence[str]], widths: Sequence[int]) -> str:
+    def row_line(values: Sequence[str]) -> str:
+        return "| " + " | ".join(_pad_table_cell(value, widths[idx]) for idx, value in enumerate(values)) + " |"
+
+    separator = "| " + " | ".join("-" * width for width in widths) + " |"
+    lines = [row_line(headers), separator]
+    lines.extend(row_line(row) for row in rows)
+    return "\n".join(lines)
+
+
+def _render_simple_table(headers: Sequence[str], rows: Sequence[Sequence[str]], widths: Sequence[int]) -> str:
+    def row_line(values: Sequence[str]) -> str:
+        return "  ".join(_pad_table_cell(value, widths[idx]) for idx, value in enumerate(values))
+
+    separator = "  ".join("-" * width for width in widths)
+    lines = [row_line(headers), separator]
+    lines.extend(row_line(row) for row in rows)
+    return "\n".join(lines)
+
+
+def render_table(
+    rows: Sequence[Sequence[Any]],
+    *,
+    headers: Sequence[Any],
+    tablefmt: str = "grid",
+    floatfmt: Optional[str] = None,
+    logger: Optional[LogBar] = None,
+) -> str:
+    """Render a small diagnostic table using LogBar-compatible column sizing."""
+
+    header_text = [str(header) for header in headers]
+    row_text: list[list[str]] = []
+    for row in rows:
+        values = list(row)
+        if len(values) != len(header_text):
+            raise ValueError(
+                f"Row length {len(values)} does not match header length {len(header_text)}"
+            )
+        row_text.append([_table_cell_text(value, floatfmt) for value in values])
+
+    widths = [_visible_width(header) for header in header_text]
+    if header_text:
+        columns = (logger or LogBar.shared()).columns(
+            cols=[{"label": header, "width": "fit"} for header in header_text],
+            padding=1,
+        )
+        for row in row_text:
+            columns.info.simulate(*row)
+        widths = [max(widths[idx], width) for idx, width in enumerate(columns.widths)]
+
+    for row in row_text:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], _visible_width(cell))
+
+    tablefmt_normalized = (tablefmt or "grid").lower()
+    if tablefmt_normalized == "github":
+        return _render_github_table(header_text, row_text, widths)
+    if tablefmt_normalized == "simple":
+        return _render_simple_table(header_text, row_text, widths)
+    return _render_grid_table(header_text, row_text, widths)
 
 
 class QuantizationRegionTimer:

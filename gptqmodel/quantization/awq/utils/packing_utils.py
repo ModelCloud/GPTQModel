@@ -10,21 +10,30 @@ AWQ_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]
 AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 
 
-def unpack_awq(qweight: torch.Tensor, qzeros: torch.Tensor, bits: int):
-    shifts = torch.arange(0, 32, bits, device=qzeros.device)
+def _unpack_columnwise(qtensor: torch.Tensor, bits: int) -> torch.Tensor:
+    if qtensor.device.type == "npu":
+        # CANN does not implement bitwise_right_shift. Use int64 arithmetic
+        # shift equivalents on NPU so AWQ unpacking avoids torch-npu's CPU
+        # fallback path.
+        shifts = torch.arange(0, 32, bits, dtype=torch.int64, device=qtensor.device)
+        divisors = torch.pow(torch.full_like(shifts, 2), shifts)
+        unpacked = torch.floor_divide(qtensor[:, :, None].to(torch.int64), divisors[None, None, :])
+        return unpacked.to(torch.int8).view(qtensor.shape[0], -1)
 
-    # unpacking columnwise
-    iweights = torch.bitwise_right_shift(qweight[:, :, None], shifts[None, None, :]).to(
+    shifts = torch.arange(0, 32, bits, device=qtensor.device)
+    unpacked = torch.bitwise_right_shift(qtensor[:, :, None], shifts[None, None, :]).to(
         torch.int8  # smallest dtype available
     )
-    iweights = iweights.view(iweights.shape[0], -1)
+    return unpacked.view(unpacked.shape[0], -1)
+
+
+def unpack_awq(qweight: torch.Tensor, qzeros: torch.Tensor, bits: int):
+    # unpacking columnwise
+    iweights = _unpack_columnwise(qweight, bits)
 
     # unpacking columnwise
     if qzeros is not None:
-        izeros = torch.bitwise_right_shift(qzeros[:, :, None], shifts[None, None, :]).to(
-            torch.int8  # smallest dtype available
-        )
-        izeros = izeros.view(izeros.shape[0], -1)
+        izeros = _unpack_columnwise(qzeros, bits)
     else:
         izeros = qzeros
 
@@ -35,7 +44,7 @@ def reverse_awq_order(iweights: torch.Tensor, izeros: torch.Tensor, bits: int):
     reverse_order_tensor = torch.arange(
         iweights.shape[-1],
         dtype=torch.int32,
-        device=izeros.device,
+        device=iweights.device,
     )
     reverse_order_tensor = reverse_order_tensor.view(-1, 32 // bits)
     reverse_order_tensor = reverse_order_tensor[:, AWQ_REVERSE_ORDER]
@@ -53,19 +62,27 @@ def pack_exllama(iweights: torch.Tensor, izeros: torch.Tensor, bits: int):
 
     # packing rowwise
     iweights = iweights.view(iweights.shape[0] // (32 // bits), 32 // bits, -1)
-    qweight = (
-        torch.bitwise_left_shift(iweights, shifts[None, :, None])
-        .sum(dim=1)
-        .to(torch.int32)
-    )
+    if iweights.device.type == "npu":
+        powers = torch.pow(torch.full_like(shifts, 2, dtype=torch.int64), shifts.to(torch.int64))
+        qweight = (iweights.to(torch.int64) * powers[None, :, None]).sum(dim=1).to(torch.int32)
+    else:
+        qweight = (
+            torch.bitwise_left_shift(iweights, shifts[None, :, None])
+            .sum(dim=1)
+            .to(torch.int32)
+        )
 
     # packing columnwise
     izeros = izeros.view(-1, izeros.shape[1] // (32 // bits), 32 // bits)
-    qzeros = (
-        torch.bitwise_left_shift(izeros, shifts[None, None, :])
-        .sum(dim=-1)
-        .to(torch.int32)
-    )
+    if izeros.device.type == "npu":
+        powers = torch.pow(torch.full_like(shifts, 2, dtype=torch.int64), shifts.to(torch.int64))
+        qzeros = (izeros.to(torch.int64) * powers[None, None, :]).sum(dim=-1).to(torch.int32)
+    else:
+        qzeros = (
+            torch.bitwise_left_shift(izeros, shifts[None, None, :])
+            .sum(dim=-1)
+            .to(torch.int32)
+        )
 
     return qweight, qzeros
 
@@ -80,9 +97,6 @@ def unpack_reorder_pack(qweight, qzeros, bits):
     iweight = torch.bitwise_and(iweight, (2**bits) - 1)
     izeros = torch.bitwise_and(izeros, (2**bits) - 1)
 
-    # Subtract 1 from the izeros tensor (exllama adds 1 during inference)
-    # We can remove it if we remove the +1 in the exllama code
-    izeros = izeros - 1
     # Pack the qweight and qzeros tensors
     qweight, qzeros = pack_exllama(iweight, izeros, bits)
 

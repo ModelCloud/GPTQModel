@@ -5,10 +5,8 @@
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
-from gptqmodel.utils.eval import EVAL
 
 
-# a100:0, TORCH kernel
 # desc_act = False, act_group_aware = True
 # | Metric                         |   MARLIN |
 # |--------------------------------|----------|
@@ -20,8 +18,8 @@ class Test_Granite_4_0_H_350M(ModelTest):
     GROUP_SIZE = 32
     EVAL_BATCH_SIZE = 16
     LOAD_BACKEND = BACKEND.TORCH
-    EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.3046,
@@ -34,7 +32,7 @@ class Test_Granite_4_0_H_350M(ModelTest):
                 "ceil_pct": 0.10,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.2915,
@@ -43,6 +41,29 @@ class Test_Granite_4_0_H_350M(ModelTest):
             },
         },
     }
+    EVAL_TASKS_FAST = {
+        "arc_challenge": {
+            "chat_template": True,
+            "acc": {
+                "value": 0.3054607508532423,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+            "acc_norm": {
+                "value": 0.3293515358361775,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+        "mmlu_stem": {
+            "chat_template": False,
+            "acc": {
+                "value": 0.34411671424040596,
+                "floor_pct": 0.1,
+                "ceil_pct": 1.0,
+            },
+        },
+    }
 
     def test_granite(self):
-        self.quant_lm_eval()
+        self.quantize_and_evaluate()

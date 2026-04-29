@@ -17,15 +17,14 @@ class _DummyKernel:
 
 class _DummyQuantizeConfig:
     format = FORMAT.GPTQ
+    checkpoint_format = FORMAT.GPTQ
     quant_method = METHOD.GPTQ
     damp_percent = 0.0
     damp_auto_increment = 0.0
     static_groups = False
     true_sequential = False
     mse = False
-    gptaq = False
-    gptaq_alpha = 0.0
-    gptaq_memory_device = "auto"
+    gptaq = None
     act_group_aware = False
     adapter = None
     dynamic = False

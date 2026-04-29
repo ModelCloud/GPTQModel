@@ -1,21 +1,16 @@
 [build-system]
 requires = [
-    "setuptools>=80.9",
-    "ninja>=1.13.0", # required for faster compilataion
+    "setuptools>=77.0.1,<83",
 ]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "GPTQModel"
-dynamic = ["version"]
+dynamic = ["version", "dependencies"]
 description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-license-files = [
-    "LICENSE",
-    "licenses/LICENSE.apache",
-]
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
 ]
@@ -35,38 +30,13 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-dependencies = [
-    "accelerate>=1.10.1",
-    "numpy==2.2.6",
-    "torch>=2.8.0",
-    "safetensors>=0.6.2",
-    "transformers>=4.57.1",
-    "threadpoolctl>=3.6.0",
-    "packaging>=24.2",
-    "device-smi>=0.5.2",
-    "protobuf>=6.32.0",
-    "pillow>=11.3.0",
-    "pypcre>=0.2.5",
-    "hf_transfer>=0.1.9",
-    "huggingface_hub>=0.34.4",
-    "random_word>=1.0.13",
-    "tokenicer>=0.0.5",
-    "logbar>=0.1.7",
-    "maturin>=1.9.4", # required by safetensors and hf_transfer
-    "datasets>=3.6.0",
-    "pyarrow>=21.0",
-    "dill>=0.3.8", # datasets requirements
-    "pypcre>=0.2.4",
-    "torchao>=0.14.1", # fix bad transformers 4.57.1 breaking torchao compat
-    # "cython>=3.1.4", # required by hf-xet/hf-transfer
-# "flash-attn>=2.8.3", <-- install for lower vram usage
-]
-
-[project.scripts]
-gptqmodel = "gptqmodel.cli.gptqmodel:main"
 
 [project.urls]
 Homepage = "https://github.com/ModelCloud/GPTQModel"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
 
 [project.optional-dependencies]
 test = [
@@ -89,15 +59,29 @@ sglang = [
 bitblas = [
     "bitblas==0.1.0.post1",
 ]
+bitsandbytes = [
+    "bitsandbytes>=0.49.3",
+]
 hf = [
     "optimum>=1.21.2",
 ]
 eval = [
-    "lm_eval>=0.4.7",
-    "evalplus>=0.3.1",
+    "Evalution",
 ]
 triton = [
     "triton>=3.4.0",
+]
+marlin-cuda12 = [
+    "nvidia-cuda-runtime-cu12==12.9.79",
+    "nvidia-cublas-cu12==12.9.1.4",
+    "nvidia-cusparse-cu12==12.5.10.65",
+    "nvidia-cusolver-cu12==11.7.5.82",
+]
+marlin-cuda = [
+    "nvidia-cuda-runtime>=13.0.96",
+    "nvidia-cublas>=13.1.0.3",
+    "nvidia-cusparse>=12.6.3.3",
+    "nvidia-cusolver>=12.0.4.66",
 ]
 openai = [
     "uvicorn",
@@ -107,3 +91,6 @@ openai = [
 mlx = [
     "mlx_lm>=0.24.0",
 ]
+
+[tool.uv]
+torch-backend = "auto"
