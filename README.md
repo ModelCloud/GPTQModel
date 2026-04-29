@@ -20,6 +20,7 @@
 </p>
 
 ## Latest News
+* 04/29/2026 [7.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.1.0): ✨ Added PoolSideAI `Laguna` model support with Defuser-backed expert defusion for fused Laguna MoE checkpoints.
 * 04/28/2026 [7.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.0.0): 🚀 Added Huawei Ascend NPU support through native torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3. Added `internvl_chat`, `gemma3n`, `GLM-OCR`, `GLM-ASR`, and `falcon_mamba` model support.
 * 04/16/2026 [6.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.1.0): 🚀🔥⚡ CUDA kernels are now fully JIT-compiled, shrinking the wheel by about 300x and building only what you use; Marlin now supports NVIDIA `Turing+` GPUs, Machete kernel validation now covers supported GPUs, `GLM 5/5.1` joins the lineup, and LazyTurtle plus AWQ / multi-GPU MoE fixes make large-model quantization easier, lighter, and smoother.
 * 04/03/2026 [6.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.0.3): 🎉 New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`, and `FOEM: First-Order Error Matters`. Added PrismML/Bonsai 1bit model quantization (inference only), faster ParoQuant/AWQ kernels, ParoQuant `optimization scope` control: `module` (Paro Lite) or `layer` (Paro reference), plus `Gemma4`, `MiniCPM-O`, `MiniCPM-V`, and `GLM4 MoE Lite` model support.
@@ -256,7 +257,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | ERNIE 4.5 / 4.5 MoE | ✅ | GLM 4/4V/5/5.1/OCR/ASR | ✅ | GLM4 MoE / Lite   | ✅ | MiniCPM 3/O/V  | ✅ | PanGu-α             | ✅ |
 | XVERSE            | ✅ | Brumby        | ✅ | Hymba                  | ✅ | Mistral                      | ✅ | Qwen 1/2/3/3.5     | ✅ |
 | MiniMax M2        | ✅ | AfMoE         | ✅ | Bailing-MoE            | ✅ | LFM2-MoE       | ✅ | Marin               | ✅ |
-| InternVL Chat | ✅ |               |   |                        |   |                |   |                     |   |
+| InternVL Chat | ✅ | Laguna       | ✅ |                        |   |                |   |                     |   |
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 
