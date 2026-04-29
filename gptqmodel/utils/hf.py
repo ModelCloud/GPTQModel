@@ -19,6 +19,7 @@ from accelerate import init_empty_weights
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
+    AutoTokenizer,
     GenerationConfig,
     PreTrainedConfig,
     PreTrainedModel,
@@ -33,7 +34,6 @@ from ..nn_modules.qlinear.gguf import (
     _is_prism_q1_0_g128,
 )
 from ..utils import _MONKEY_PATCH_LOCK, internal_gguf
-
 
 # Compatibility wrapper for no_init_weights across different transformers versions
 # transformers >= 5.0.0: from transformers.initialization import no_init_weights
@@ -59,6 +59,7 @@ __all__ = [
     "normalize_model_id_or_path_for_hf_gguf",
     "resolve_trust_remote_code",
     "set_hf_config_dtype",
+    "load_hf_tokenizer",
     "load_tokenizer",
 ]
 
@@ -875,6 +876,53 @@ def _patch_transformers_remote_code_compat() -> None:
             # during init, but newer transformers dropped the default attribute.
             PreTrainedModel.is_parallelizable = False
 
+        if not hasattr(PreTrainedModel, "get_head_mask"):
+            def get_head_mask(self, head_mask, num_hidden_layers, is_attention_chunked: bool = False):
+                # transformers 5.x removed this helper from PreTrainedModel,
+                # but many older trust_remote_code decoder implementations
+                # still call `self.get_head_mask(...)` from `forward()`.
+                #
+                # Legacy behavior:
+                # - `None` means no masking and expands to `[None] * n_layers`
+                # - 1D masks are `[num_heads]` and must be broadcast to every
+                #   layer
+                # - 2D masks are `[num_hidden_layers, num_heads]` and must be
+                #   expanded to the 5D attention-mask shape expected by old
+                #   attention blocks
+                #
+                # Keeping this compat shim at the base-class level is safer
+                # than patching each remote model individually because many
+                # pre-transformers-5 architectures shared the same contract.
+                if head_mask is None:
+                    return [None] * num_hidden_layers
+
+                if head_mask.dim() == 1:
+                    # [num_heads] -> [num_hidden_layers, batch, num_heads, seq, seq]
+                    head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+                    head_mask = head_mask.expand(num_hidden_layers, -1, -1, -1, -1)
+                elif head_mask.dim() == 2:
+                    # [num_hidden_layers, num_heads] -> [num_hidden_layers, batch, num_heads, seq, seq]
+                    head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
+                else:
+                    raise ValueError(
+                        f"head_mask must have dim 1 or 2, but got shape {tuple(head_mask.shape)}."
+                    )
+
+                target_dtype = getattr(self, "dtype", None)
+                if isinstance(target_dtype, torch.dtype):
+                    # Match the model compute dtype to avoid dtype promotion or
+                    # precision mismatches inside legacy attention kernels.
+                    head_mask = head_mask.to(dtype=target_dtype)
+
+                if is_attention_chunked:
+                    # Older chunked-attention implementations expect one extra
+                    # axis for chunk broadcasting.
+                    head_mask = head_mask.unsqueeze(-1)
+
+                return head_mask
+
+            PreTrainedModel.get_head_mask = get_head_mask
+
         if not getattr(PreTrainedModel, "_gptqmodel_missing_all_tied_weights_patch", False):
             original_getattr = PreTrainedModel.__getattr__
 
@@ -1336,6 +1384,75 @@ def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
         stacklevel=2,
     )
     return Tokenicer.load(tokenizer_or_path, model_config=model_config, **kwargs)
+
+
+def load_hf_tokenizer(
+        tokenizer_or_path,
+        *,
+        model_config: Any = None,
+        trust_remote_code: bool = False,
+        **kwargs,
+):
+    auto_tokenizer_exc = None
+    try:
+        # Preferred path: let transformers perform its normal tokenizer
+        # resolution. This keeps behavior identical for native tokenizers and
+        # for remote-code tokenizers that are still compatible with the
+        # installed transformers release.
+        return AutoTokenizer.from_pretrained(
+            tokenizer_or_path,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
+    except AttributeError as exc:
+        # Narrow fallback for legacy trust_remote_code repositories. On
+        # transformers 5.x, some old repos no longer resolve to a tokenizer
+        # class inside AutoTokenizer and instead fail with
+        # `None.from_pretrained(...)`. Only intercept that specific compat
+        # break; all other exceptions should propagate unchanged.
+        if not trust_remote_code or "from_pretrained" not in str(exc):
+            raise
+        auto_tokenizer_exc = exc
+
+    auto_map = getattr(model_config, "auto_map", None) or {}
+    # Old repositories often still expose an authoritative dynamic tokenizer
+    # reference in `config.auto_map`, even when the higher-level
+    # AutoTokenizer registry no longer reaches it.
+    class_ref = auto_map.get("AutoTokenizer")
+    if isinstance(class_ref, (list, tuple)):
+        # HF stores tokenizer refs as [slow, fast]. Prefer the fast tokenizer
+        # when present, otherwise use the slow one.
+        class_ref = class_ref[1] if len(class_ref) > 1 and class_ref[1] is not None else class_ref[0]
+
+    if not isinstance(class_ref, str):
+        raise auto_tokenizer_exc
+
+    from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+    tokenizer_cls = get_class_from_dynamic_module(class_ref, str(tokenizer_or_path), **kwargs)
+    original_init = getattr(tokenizer_cls, "__init__", None)
+    if callable(original_init) and not getattr(tokenizer_cls, "_gptqmodel_legacy_init_compat", False):
+        def patched_init(self, *init_args, **init_kwargs):
+            # Some legacy tokenizers assign `bos/eos/pad/..._token_id` before
+            # they call `PreTrainedTokenizer.__init__()`. In transformers 5.x
+            # those assignments now go through base-class attribute handling,
+            # which expects `_special_tokens_map` to already exist. Creating
+            # the storage eagerly preserves the old constructor order without
+            # modifying the upstream repository code.
+            if not hasattr(self, "_special_tokens_map"):
+                object.__setattr__(self, "_special_tokens_map", {})
+            return original_init(self, *init_args, **init_kwargs)
+
+        tokenizer_cls.__init__ = patched_init
+        # Avoid wrapping the same dynamically imported class multiple times in
+        # a long-running process.
+        tokenizer_cls._gptqmodel_legacy_init_compat = True
+    tokenizer_cls.register_for_auto_class()
+    return tokenizer_cls.from_pretrained(
+        tokenizer_or_path,
+        trust_remote_code=trust_remote_code,
+        **kwargs,
+    )
 
 
 

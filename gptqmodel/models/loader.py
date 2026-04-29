@@ -19,7 +19,6 @@ import transformers
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.structure import LazyTurtle, print_module_tree
 
-
 if ensure_modelscope_available():
     from modelscope import snapshot_download
 else:
@@ -27,7 +26,7 @@ else:
 
 import defuser
 from packaging.version import InvalidVersion, Version
-from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 
 from ..adapter.adapter import Adapter
@@ -45,6 +44,7 @@ from ..utils.hf import (
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
     has_native_transformers_causallm_support,
+    load_hf_tokenizer,
     normalize_hf_config_compat,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
@@ -473,8 +473,9 @@ def ModelLoader(cls):
             # Align config metadata with the dtype we will materialize weights in.
             set_hf_config_dtype(config, dtype)
 
-        tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer = load_hf_tokenizer(
             model_local_path,
+            model_config=config,
             trust_remote_code=tokenizer_trust_remote_code,
             **_get_tokenizer_load_kwargs(model_init_kwargs),
         )
@@ -913,8 +914,9 @@ def ModelLoader(cls):
 
         qcfg.calculate_bits_per_weight()
 
-        tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer = load_hf_tokenizer(
             model_local_path,
+            model_config=config,
             trust_remote_code=tokenizer_trust_remote_code,
             **hf_gguf_load_kwargs,
         )
