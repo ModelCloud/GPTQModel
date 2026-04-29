@@ -6,5 +6,5 @@ venv_dir="${2:-local_uv_env}"
 
 python -m venv "$venv_dir"
 source "$venv_dir/bin/activate"
-# if released on github, no uv was preinstalled, use pip here
-pip install "dist/$pkg_name"
+pip install uv
+uv pip install "dist/$pkg_name"
