@@ -87,6 +87,7 @@ from .definitions.dots1 import Dots1QModel  # noqa: E402
 from .definitions.dream import DreamQModel  # noqa: E402
 from .definitions.ernie4_5 import Ernie4_5QModel  # noqa: E402
 from .definitions.ernie4_5_moe import Ernie4_5_MoeQModel  # noqa: E402
+from .definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel  # noqa: E402
 from .definitions.exaone import ExaOneQModel  # noqa: E402
 from .definitions.exaone4 import Exaone4QModel  # noqa: E402
 from .definitions.falcon_h1 import FalconH1QModel  # noqa: E402
@@ -271,6 +272,8 @@ MODEL_MAP = {
     "gpt_pangu": PanguAlphaQModel,
     "ernie4_5": Ernie4_5QModel,
     "ernie4_5_moe": Ernie4_5_MoeQModel,
+    "ernie4_5_moe_vl": Ernie4_5_VLMoeQModel, # Backward Compatibility alias
+    "ernie4_5_vl_moe": Ernie4_5_VLMoeQModel,
     "seed_oss": LlamaQModel, # 100% llama clone
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,

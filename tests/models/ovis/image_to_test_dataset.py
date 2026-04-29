@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-
+from gptqmodel.models.definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
 from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
@@ -99,6 +99,7 @@ def get_calib_dataset(model):
         or isinstance(model, MiniCPMOQModel)
         or isinstance(model, MiniCPMVQModel)
         or isinstance(model, InternVLChatQModel)
+        or isinstance(model, Ernie4_5_VLMoeQModel)
     ):
         return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)
 

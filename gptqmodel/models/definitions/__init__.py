@@ -24,6 +24,7 @@ from .exaone import ExaOneQModel
 from .exaone4 import Exaone4QModel
 from .ernie4_5 import Ernie4_5QModel
 from .ernie4_5_moe import Ernie4_5_MoeQModel
+from .ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
 from .gemma2 import Gemma2QModel
 from .gemma3 import Gemma3QModel
 from .gemma3n import Gemma3nForConditionalGenerationGPTQ, Gemma3nTextQModel
