@@ -32,4 +32,3 @@ GPTQModel Ultra is a highly hardware/software optimized edition of upstream GPTQ
 | Breaking upstream APIs unnecessarily | Ultra should remain easy to adopt for existing GPTQModel users. |
 | Optimization without measurable impact | Ultra changes should target speed, memory, quality, compatibility, or kernel performance. |
 | Hardware-specific code that blocks general use | Specialized kernels should coexist with safe fallback paths where practical. |
-

@@ -76,4 +76,3 @@ Ultra is also missing one latest upstream CI-fix commit at this baseline.
 | Save/load quantized embeddings | Not present at this baseline | Added safetensors detection and preservation |
 | Embedding GPTQ Hessian handling | Dense module path only | Adds embedding-specific diagonal Hessian path |
 | Embedding inference module | Not present at this baseline | Adds `TorchQuantEmbeddings` |
-
