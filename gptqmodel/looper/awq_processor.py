@@ -18,12 +18,13 @@ from torch.nn import Module
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import SUPPORTS_MODULE_TYPES
+from ..models._const import DEVICE, SUPPORTS_MODULE_TYPES
 from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
+from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
@@ -272,12 +273,31 @@ class AWQProcessor(LoopProcessor):
 
         raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
 
+    def _quant_device_is_npu(self) -> bool:
+        """Return whether this processor is quantizing for an Ascend NPU runtime."""
+
+        device = getattr(self.qcfg, "device", None)
+        if isinstance(device, DEVICE):
+            return device == DEVICE.NPU
+        if isinstance(device, torch.device):
+            return device.type == "npu"
+        if isinstance(device, str):
+            return device.split(":", 1)[0].lower() == "npu"
+        return False
+
     def _select_qlinear_kernel_for_format(self, format_value: FORMAT):
         """Maps the resolved AWQ format to its concrete quantized linear kernel."""
 
         fmt = FORMAT(format_value) if not isinstance(format_value, FORMAT) else format_value
         if fmt == FORMAT.GEMM:
+            if self._quant_device_is_npu():
+                return AwqTorchLinear
             return AwqGEMMLinear
+        if self._quant_device_is_npu():
+            raise ValueError(
+                "NPU AWQ quantization requires FORMAT.GEMM so the AwqTorchLinear runtime can run on NPU; "
+                f"actual format is `{fmt}`."
+            )
         if fmt == FORMAT.GEMV:
             return AwqGEMVLinear
         if fmt == FORMAT.GEMV_FAST:
@@ -1820,11 +1840,7 @@ class AWQProcessor(LoopProcessor):
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports whether preprocessing excluded this module from AWQ work."""
 
-        t = self.tasks.get(module.name, False)
-        if t == False:
-            return True
-        else:
-            return False
+        return not self.tasks.get(module.name, False)
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that caches module input activations for AWQ."""
