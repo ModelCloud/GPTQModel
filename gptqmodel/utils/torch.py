@@ -417,6 +417,42 @@ def torch_devices() -> List[torch.device]:
     else:
         return [CPU]
 
+
+def npu_devices_by_pci_bus_order() -> List[torch.device]:
+    """Return visible NPU devices in torch runtime order.
+
+    Ascend exposes process-level NPU visibility through ASCEND_RT_VISIBLE_DEVICES.
+    torch-npu remaps that visible set to logical indices, so callers should set
+    the env var before process start and then use the resulting torch order.
+    """
+
+    if not HAS_NPU:
+        return []
+
+    try:
+        count = int(torch.npu.device_count())
+    except Exception:
+        return []
+    if count <= 0:
+        return []
+
+    devices: List[torch.device] = []
+    for logical_index in range(count):
+        try:
+            devices.append(torch.device("npu", logical_index))
+        except (RuntimeError, ValueError):
+            return []
+    return devices
+
+
+def last_npu_device_by_pci_bus_order() -> Optional[torch.device]:
+    """Return the last visible NPU in torch runtime order, or None when unavailable."""
+
+    devices = npu_devices_by_pci_bus_order()
+    if not devices:
+        return None
+    return devices[-1]
+
 ALL_DEVICES = torch_devices()
 
 if HAS_CUDA:
