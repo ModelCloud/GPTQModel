@@ -10,6 +10,7 @@ from gptqmodel.models._const import DEVICE, normalize_device
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
+from gptqmodel.nn_modules.qlinear.komodo import AwqKomodoLinear, KomodoLinear
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, _right_shift_unpack
@@ -66,6 +67,15 @@ def _assert_npu_forward_matches_cpu(
     torch.testing.assert_close(y_npu_cpu, y_cpu.to(torch.float32), atol=atol, rtol=rtol)
 
 
+def _copy_matching_buffers(dst: nn.Module, src: nn.Module) -> None:
+    src_buffers = dict(src.named_buffers())
+    with torch.no_grad():
+        for name, dst_tensor in dst.named_buffers():
+            src_tensor = src_buffers.get(name)
+            if src_tensor is not None and src_tensor.shape == dst_tensor.shape:
+                dst_tensor.copy_(src_tensor.to(device=dst_tensor.device, dtype=dst_tensor.dtype))
+
+
 def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
     pack_factor = 32 // bits
     order_map = [0, 2, 4, 6, 1, 3, 5, 7]
@@ -109,10 +119,14 @@ def _make_awq_like_module(cls, dtype: torch.dtype, *, seed: int = 300, **kwargs)
     return module
 
 
-def _make_gptq_module(bits: int, dtype: torch.dtype) -> TorchLinear:
-    in_features = 64
-    out_features = 64
-    group_size = 16
+def _make_gptq_module(
+    bits: int,
+    dtype: torch.dtype,
+    *,
+    in_features: int = 64,
+    out_features: int = 64,
+    group_size: int = 16,
+) -> TorchLinear:
 
     torch.manual_seed(100 + bits)
     linear = nn.Linear(in_features, out_features, bias=True)
@@ -274,7 +288,7 @@ def test_auto_select_device_uses_npu_when_available(monkeypatch):
 
 
 @pytest.mark.parametrize("fmt", [FORMAT.GPTQ, FORMAT.GPTQ_V2])
-def test_npu_auto_selects_torch_gptq(fmt):
+def test_npu_auto_selects_komodo_gptq(fmt):
     qlinear_cls = select_quant_linear(
         bits=4,
         group_size=128,
@@ -287,10 +301,10 @@ def test_npu_auto_selects_torch_gptq(fmt):
         pack_dtype=torch.int32,
     )
 
-    assert qlinear_cls is TorchLinear
+    assert qlinear_cls is KomodoLinear
 
 
-def test_npu_auto_selects_torch_awq_for_gemm():
+def test_npu_auto_selects_komodo_awq_for_gemm():
     qlinear_cls = select_quant_linear(
         bits=4,
         group_size=128,
@@ -303,7 +317,55 @@ def test_npu_auto_selects_torch_awq_for_gemm():
         pack_dtype=torch.int32,
     )
 
-    assert qlinear_cls is AwqTorchLinear
+    assert qlinear_cls is AwqKomodoLinear
+
+
+def test_npu_explicit_komodo_selects_gptq_and_awq():
+    gptq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.NPU,
+        backend=BACKEND.KOMODO,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+    awq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.NPU,
+        backend=BACKEND.KOMODO,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert gptq_cls is KomodoLinear
+    assert awq_cls is AwqKomodoLinear
+
+
+@pytest.mark.parametrize(
+    ("quant_method", "fmt"),
+    [(METHOD.GPTQ, FORMAT.GPTQ), (METHOD.AWQ, FORMAT.GEMM)],
+)
+def test_npu_explicit_komodo_rejects_bfloat16_dtype(quant_method, fmt):
+    with pytest.raises(ValueError, match="only supports"):
+        select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.NPU,
+            backend=BACKEND.KOMODO,
+            format=fmt,
+            quant_method=quant_method,
+            pack_dtype=torch.int32,
+            dtype=torch.bfloat16,
+        )
 
 
 def test_npu_auto_selects_paroquant_torch_dense_fallback():
@@ -428,11 +490,150 @@ def test_npu_torch_gptq_forward_matches_cpu(bits, dtype):
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16])
+def test_npu_komodo_gptq_matches_torch_baseline(dtype):
+    baseline_cpu = _make_gptq_module(bits=4, dtype=dtype).eval()
+    candidate = KomodoLinear(
+        bits=4,
+        group_size=baseline_cpu.requested_group_size,
+        sym=baseline_cpu.sym,
+        desc_act=baseline_cpu.desc_act,
+        in_features=baseline_cpu.in_features,
+        out_features=baseline_cpu.out_features,
+        bias=baseline_cpu.bias is not None,
+        pack_dtype=baseline_cpu.pack_dtype,
+        register_buffers=True,
+    )
+    _copy_matching_buffers(candidate, baseline_cpu)
+    candidate.optimized = True
+    candidate.post_init()
+    baseline = baseline_cpu.to(_test_npu_device()).eval()
+    candidate = candidate.to(_test_npu_device(), dtype=dtype).eval()
+
+    x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
+    with torch.inference_mode():
+        expected = baseline(x)
+        actual = candidate(x)
+        repeat = candidate(x)
+        torch.npu.synchronize()
+
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    assert candidate._cached_weights == {}
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16])
+def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
+    baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=32).eval()
+    candidate = KomodoLinear(
+        bits=4,
+        group_size=baseline_cpu.requested_group_size,
+        sym=baseline_cpu.sym,
+        desc_act=baseline_cpu.desc_act,
+        in_features=baseline_cpu.in_features,
+        out_features=baseline_cpu.out_features,
+        bias=baseline_cpu.bias is not None,
+        pack_dtype=baseline_cpu.pack_dtype,
+        register_buffers=True,
+    )
+    _copy_matching_buffers(candidate, baseline_cpu)
+    candidate.optimized = True
+    candidate.post_init()
+    baseline = baseline_cpu.to(_test_npu_device()).eval()
+    candidate = candidate.to(_test_npu_device(), dtype=dtype).eval()
+
+    x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
+    with torch.inference_mode():
+        expected = baseline(x)
+        actual = candidate(x)
+        repeat = candidate(x)
+        torch.npu.synchronize()
+
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    assert (x.device, dtype) in candidate._native_plan_cache
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_npu_torch_awq_forward_matches_cpu(dtype):
     module = _make_awq_module(dtype)
     x_cpu = torch.randn(2, 3, module.in_features, dtype=dtype)
     _assert_npu_forward_matches_cpu(module, x_cpu, atol=5e-3, rtol=5e-3)
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16])
+def test_npu_komodo_awq_matches_torch_baseline(dtype):
+    baseline = _make_awq_module(dtype).to(_test_npu_device()).eval()
+    candidate = _make_awq_like_module(AwqKomodoLinear, dtype).to(_test_npu_device()).eval()
+    _copy_matching_buffers(candidate, baseline)
+    candidate.post_init()
+
+    x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
+    with torch.inference_mode():
+        expected = baseline(x)
+        actual = candidate(x)
+        repeat = candidate(x)
+        torch.npu.synchronize()
+
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    assert candidate._cached_weights == {}
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16])
+def test_npu_komodo_awq_native_int4_matches_torch_baseline(dtype, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
+    baseline = _make_awq_like_module(AwqTorchLinear, dtype, group_size=32).to(_test_npu_device()).eval()
+    baseline.post_init()
+    candidate = _make_awq_like_module(AwqKomodoLinear, dtype, group_size=32).to(_test_npu_device()).eval()
+    _copy_matching_buffers(candidate, baseline)
+    candidate.post_init()
+
+    x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
+    with torch.inference_mode():
+        expected = baseline(x)
+        actual = candidate(x)
+        repeat = candidate(x)
+        torch.npu.synchronize()
+
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    assert (x.device, dtype) in candidate._native_plan_cache
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("cls", [KomodoLinear, AwqKomodoLinear])
+def test_npu_komodo_rejects_bfloat16_inference(cls):
+    if cls is KomodoLinear:
+        baseline_cpu = _make_gptq_module(bits=4, dtype=torch.float16).eval()
+        candidate = KomodoLinear(
+            bits=4,
+            group_size=baseline_cpu.requested_group_size,
+            sym=baseline_cpu.sym,
+            desc_act=baseline_cpu.desc_act,
+            in_features=baseline_cpu.in_features,
+            out_features=baseline_cpu.out_features,
+            bias=baseline_cpu.bias is not None,
+            pack_dtype=baseline_cpu.pack_dtype,
+            register_buffers=True,
+        )
+        _copy_matching_buffers(candidate, baseline_cpu)
+        candidate.optimized = True
+        candidate.post_init()
+    else:
+        candidate = _make_awq_like_module(AwqKomodoLinear, torch.float16)
+        candidate.post_init()
+
+    candidate = candidate.to(_test_npu_device(), dtype=torch.bfloat16).eval()
+    x = torch.randn(2, 3, candidate.in_features, dtype=torch.bfloat16, device=_test_npu_device())
+    with pytest.raises(RuntimeError, match="supports only torch.float16 inference"):
+        with torch.inference_mode():
+            candidate(x)
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")

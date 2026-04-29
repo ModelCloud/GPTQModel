@@ -23,7 +23,7 @@ from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import AUTO_BACKEND_KERNEL_MAPPING, auto_select_device, select_quant_linear
 from gptqmodel.utils.rocm import IS_ROCM
-from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
+from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU
 
 
 def _iter_kernel_classes():
@@ -61,6 +61,8 @@ def _pick_device(cls):
         return DEVICE.ROCM
     if DEVICE.XPU in devices and HAS_XPU:
         return DEVICE.XPU
+    if DEVICE.NPU in devices and HAS_NPU:
+        return DEVICE.NPU
     if DEVICE.MPS in devices and HAS_MPS:
         return DEVICE.MPS
     return None
