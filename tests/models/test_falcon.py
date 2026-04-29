@@ -4,6 +4,8 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch  # noqa: E402
+
+from gptqmodel import BACKEND
 from model_test import ModelTest
 
 
@@ -22,6 +24,7 @@ class TestFalcon(ModelTest):
     EVAL_BATCH_SIZE = 6
     USE_VLLM = False
     ACT_GROUP_AWARE = False
+    LOAD_BACKEND = BACKEND.AUTO
 
     def test_falcon(self):
         self.quantize_and_evaluate()
