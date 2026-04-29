@@ -29,6 +29,19 @@ class TestLagunaXS2(ModelTest):
     EVAL_BATCH_SIZE = "auto"
 
     EVAL_TASKS_FAST = {
+        "gsm8k_platinum_cot": {
+            "chat_template": False,
+            "evalution_suite_kwargs": {
+                "max_new_tokens": 256,
+                "stream": True,
+                "max_rows": 128,
+            },
+            "acc,num": {
+                "value": 0.3828125,
+                "floor_pct": 0.50,
+                "ceil_pct": 1.0,
+            },
+        },
         "arc_challenge": {
             "chat_template": False,
             "evalution_suite_kwargs": {
