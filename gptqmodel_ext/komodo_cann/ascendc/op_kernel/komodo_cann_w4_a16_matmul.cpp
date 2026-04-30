@@ -8,6 +8,10 @@ using namespace AscendC;
 using namespace matmul;
 #endif
 
+#if defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH) && !defined(KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER)
+#error "KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH requires KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER"
+#endif
+
 namespace {
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
 constexpr uint32_t kKernelModeStagedDequant = 1;
@@ -1192,23 +1196,26 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
     GM_ADDR workspace,
     GM_ADDR tiling)
 {
+#ifdef KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+#else
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-#ifndef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
-    if ASCEND_IS_AIC {
-        return;
-    }
 #endif
     GET_TILING_DATA(tiling_data, tiling);
 #ifdef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
-    AscendC::SetSysWorkspaceForce(workspace);
-    TPipe cube_pipe;
-    KomodoCannW4A16CubeConsumerProbe cube_probe;
-    TCubeTiling cube_tiling = MakeCubeConsumerTiling(&tiling_data);
-    REGIST_MATMUL_OBJ(&cube_pipe, GetSysWorkSpacePtr(), cube_probe.mm, &cube_tiling);
-#endif
+    if ASCEND_IS_AIC {
+        AscendC::SetSysWorkspaceForce(workspace);
+        TPipe cube_pipe;
+        KomodoCannW4A16CubeConsumerProbe cube_probe;
+        TCubeTiling cube_tiling = MakeCubeConsumerTiling(&tiling_data);
+        REGIST_MATMUL_OBJ(&cube_pipe, GetSysWorkSpacePtr(), cube_probe.mm, &cube_tiling);
+        return;
+    }
+#else
     if ASCEND_IS_AIC {
         return;
     }
+#endif
     KomodoCannW4A16ScalarKernel op;
     op.Init(x, packed_weight, scales, offsets, bias, y, workspace, &tiling_data);
     op.Process();

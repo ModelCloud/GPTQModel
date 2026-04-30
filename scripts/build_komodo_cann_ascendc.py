@@ -100,6 +100,13 @@ def _enable_kernel_define(output: Path, define: str) -> None:
     option = f"-D{define}=1"
     if option in text:
         return
+    experimental_prefix = "add_ops_compile_options(ALL OPTIONS -DKOMODO_CANN_EXPERIMENTAL_"
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.startswith(experimental_prefix):
+            lines[index] = line.replace(")\n", f" {option})\n", 1)
+            cmake_path.write_text("".join(lines))
+            return
     marker = "add_kernels_compile()\n"
     if marker not in text:
         raise RuntimeError(f"Could not find `{marker.strip()}` in {cmake_path}.")
@@ -131,6 +138,14 @@ def main() -> int:
         action="store_true",
         help="Compile guarded Matmul/Cube consumer registration for Komodo-CANN fused-kernel bring-up.",
     )
+    parser.add_argument(
+        "--experimental-mixed-launch",
+        action="store_true",
+        help=(
+            "Compile the guarded Komodo-CANN kernel as a MIX_AIC_1_2 AIC/AIV launch. "
+            "This implies --experimental-cube-consumer."
+        ),
+    )
     args = parser.parse_args()
 
     output = args.output.resolve()
@@ -159,8 +174,10 @@ def main() -> int:
     _force_compute_unit(output, args.compute_unit)
     if args.experimental_staged_dequant:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT")
-    if args.experimental_cube_consumer:
+    if args.experimental_cube_consumer or args.experimental_mixed_launch:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER")
+    if args.experimental_mixed_launch:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH")
 
     if args.no_build:
         print(f"Generated project with Komodo-CANN overlay at {output}")

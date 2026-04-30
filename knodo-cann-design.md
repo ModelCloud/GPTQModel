@@ -441,6 +441,20 @@ Ascend C custom-op bring-up:
   `524288` bytes on all devices, while the Cube-reserved ABI reported offset
   `12582912`, cube workspace `12582912`, and total custom workspace
   `13107200` bytes on all devices.
+- The next mixed-launch gate is now explicit and remains opt-in:
+  `--experimental-mixed-launch` implies the Cube-consumer compile define and
+  switches the kernel metadata from default `KERNEL_TYPE_AIV_ONLY` to
+  `KERNEL_TYPE_MIX_AIC_1_2`. The build helper must coalesce all experimental
+  defines into one `add_ops_compile_options` line; separate lines made CANN's
+  dynamic compile script keep only the last define. Validation built a default
+  control package with binary metadata `coreType=VectorCore`, `core_type=AIV`,
+  and a mixed package with `coreType=MIX`, `taskRation=tilingKey`,
+  `intercoreSync=1`, and binary config `coreType=0`.
+- The mixed kernel currently keeps the visible output path on the AIV scalar
+  worker while the AIC branch only registers the local `Matmul` Cube consumer
+  object and returns. This is a launch/topology milestone, not the final fused
+  algorithm. The next runtime milestone is a safe AIC/AIV handshake around the
+  bounded staged tile ring before replacing scalar output with Cube output.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and
