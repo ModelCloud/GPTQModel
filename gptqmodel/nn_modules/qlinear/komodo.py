@@ -730,7 +730,7 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         group_size = 16
         group_count = self.in_features // group_size
         tile_n = _native_prepack_tile_n(self.out_features, self.pack_factor)
-        packed_groups = None
+        packed_stack = None
 
         for start in range(0, self.out_features, tile_n):
             width = min(tile_n, self.out_features - start)
@@ -752,25 +752,24 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             for group_idx in range(group_count):
                 signed_weight = (weight.narrow(0, group_idx * group_size, group_size) - 8).contiguous()
                 packed_tile = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
-                if packed_groups is None:
-                    packed_groups = [
-                        packed_tile.new_empty((group_size, self.out_features // self.pack_factor))
-                        for _ in range(group_count)
-                    ]
-                packed_groups[group_idx].narrow(1, packed_start, packed_width).copy_(packed_tile)
+                if packed_stack is None:
+                    packed_stack = packed_tile.new_empty(
+                        (group_count, group_size, self.out_features // self.pack_factor)
+                    )
+                packed_stack[group_idx].narrow(1, packed_start, packed_width).copy_(packed_tile)
             del weight
 
-        if packed_groups is None:
+        if packed_stack is None:
             raise RuntimeError("Komodo group-16 native plan requested for an empty weight.")
 
         zeros = self._stream_decode_qzeros().to(device=device)
         scales = self.scales.to(device=device, dtype=dtype).contiguous()
         offsets = (8 - zeros.to(torch.int32)).to(device=device, dtype=dtype).contiguous()
-        scale_groups = tuple(scales.narrow(0, group_idx, 1) for group_idx in range(group_count))
-        offset_groups = tuple(offsets.narrow(0, group_idx, 1) for group_idx in range(group_count))
-        packed_stack = torch.stack(packed_groups).contiguous()
-        scale_stack = torch.stack(scale_groups).contiguous()
-        offset_stack = torch.stack(offset_groups).contiguous()
+        packed_groups = tuple(packed_stack.unbind(0))
+        scale_stack = scales.unsqueeze(1)
+        offset_stack = offsets.unsqueeze(1)
+        scale_groups = tuple(scale_stack.unbind(0))
+        offset_groups = tuple(offset_stack.unbind(0))
         bias_stack = None
         if self.bias is not None:
             max_bias_n = _native_group16_fuse_bias_max_n()
