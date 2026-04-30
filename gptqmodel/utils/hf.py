@@ -1038,6 +1038,12 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
     rope_scaling = getattr(config, "rope_scaling", None)
     if not isinstance(rope_scaling, dict):
         return
+    if not rope_scaling:
+        # Some remote config classes materialize an empty dict here, while
+        # legacy model code treats any dict as "scaled RoPE enabled" and then
+        # directly indexes mandatory fields like `factor`.
+        config.rope_scaling = None
+        return
 
     if model_type != "instella" and rope_scaling.get("rope_type") == "default" and set(rope_scaling).issubset({"rope_type", "rope_theta"}):
         # transformers 5.x materializes default RoPE metadata into
@@ -1046,11 +1052,18 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
         config.rope_scaling = None
         return
 
+    if "factor" not in rope_scaling:
+        rope_scaling = dict(rope_scaling)
+        rope_scaling["factor"] = 1.0
+
     if "type" in rope_scaling:
+        config.rope_scaling = rope_scaling
         return
 
     rope_type = rope_scaling.get("rope_type")
     if rope_type is None:
+        if "factor" not in rope_scaling:
+            config.rope_scaling = None
         return
 
     rope_scaling = dict(rope_scaling)

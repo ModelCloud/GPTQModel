@@ -151,7 +151,10 @@ tests/models:
     - sentencepiece
     - tiktoken
 
-  test_nemotron_omni_support.py:
+  test_ling_2_6_flash_support:
+    - flash-linear-attention
+
+test_nemotron_omni_support.py:
     - einops
     - timm
     - open-clip-torch

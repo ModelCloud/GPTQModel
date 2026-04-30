@@ -283,6 +283,7 @@ MODEL_MAP = {
     "nemotron_h": NemotronHQModel,
     "nemotronh_nano_omni_reasoning_v3": NemotronOmniQModel,
     "bailing_moe": BailingMoeQModel,
+    "bailing_hybrid": BailingMoeQModel,
     "lfm2_moe": LFM2MoeQModel,
     "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
