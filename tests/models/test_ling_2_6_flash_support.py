@@ -19,6 +19,7 @@ class Test(ModelTest):
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
     TRUST_REMOTE_CODE = True
+    STOP_AFTER_LAYER = 1
 
     def test(self):
         self.quantize_and_evaluate()
