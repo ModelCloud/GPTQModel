@@ -148,6 +148,8 @@ tests/models:
 
   test_internvl_chat.py:
     - timm
+    - sentencepiece
+    - tiktoken
 
   test_nemotron_omni_support.py:
     - einops
