@@ -28,6 +28,7 @@ _KOMODO_CANN_MIN_SPLIT_K_RATIO_ENV = "GPTQMODEL_KOMODO_CANN_MIN_SPLIT_K_RATIO"
 _KOMODO_CANN_FUSED_ENV = "GPTQMODEL_KOMODO_CANN_FUSED"
 _KOMODO_CANN_FUSED_REQUIRE_ENV = "GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE"
 _KOMODO_CANN_FUSED_OP_ENV = "GPTQMODEL_KOMODO_CANN_FUSED_OP"
+_KOMODO_CANN_ASCENDC_ENV = "GPTQMODEL_KOMODO_CANN_ASCENDC"
 _KOMODO_CANN_V3_ENV = "GPTQMODEL_KOMODO_CANN_V3"
 _KOMODO_CANN_INNER_PRECISE_ENV = "GPTQMODEL_KOMODO_CANN_INNER_PRECISE"
 _NPU_PREFETCH_OP_UNSET = object()
@@ -39,8 +40,10 @@ _FUSED_OP_LAST_ERROR = ""
 _DEFAULT_FUSED_OP_NAMES = (
     "gptqmodel_komodo_cann.w4a16_matmul",
     "gptqmodel_komodo_cann.komodo_cann_w4a16_matmul",
+    "gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul",
     "npu.gptqmodel_komodo_cann_w4a16_matmul",
     "npu.komodo_cann_w4a16_matmul",
+    "npu.komodo_cann_w4_a16_matmul",
 )
 
 
@@ -112,6 +115,10 @@ def _komodo_cann_fused_required() -> bool:
 
 def _komodo_cann_v3_enabled() -> bool:
     return env_flag(_KOMODO_CANN_V3_ENV, default=False)
+
+
+def _komodo_cann_ascendc_enabled() -> bool:
+    return env_flag(_KOMODO_CANN_ASCENDC_ENV, default=False)
 
 
 def _komodo_cann_inner_precise(rows: int, in_features: int, out_features: int, group_size: int) -> int:
@@ -218,12 +225,32 @@ def _try_load_komodo_cann_v3() -> bool:
         return False
 
 
+def _try_load_komodo_cann_ascendc() -> bool:
+    global _FUSED_OP_LAST_ERROR
+
+    if not _komodo_cann_ascendc_enabled():
+        return False
+    try:
+        from ...utils.komodo_cann import komodo_cann_ascendc_runtime_error, load_komodo_cann_ascendc
+
+        loaded = load_komodo_cann_ascendc()
+        _FUSED_OP_LAST_ERROR = "" if loaded else komodo_cann_ascendc_runtime_error()
+        return loaded
+    except Exception as exc:  # pragma: no cover - depends on local CANN toolchain/runtime
+        _FUSED_OP_LAST_ERROR = str(exc)
+        return False
+
+
 def _komodo_cann_fused_op():
     global _FUSED_OP_CACHE, _FUSED_OP_CACHE_KEY
 
     names = _komodo_cann_fused_op_names()
     cache_key = (
         names,
+        os.getenv(_KOMODO_CANN_ASCENDC_ENV),
+        os.getenv("GPTQMODEL_KOMODO_CANN_ASCENDC_BUILD_ROOT"),
+        os.getenv("GPTQMODEL_KOMODO_CANN_ASCENDC_FORCE_REBUILD"),
+        os.getenv("GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB"),
         os.getenv(_KOMODO_CANN_V3_ENV),
         os.getenv("GPTQMODEL_KOMODO_CANN_V3_BUILD_ROOT"),
         os.getenv("GPTQMODEL_KOMODO_CANN_V3_FORCE_REBUILD"),
@@ -237,6 +264,14 @@ def _komodo_cann_fused_op():
             _FUSED_OP_CACHE = (name, op)
             _FUSED_OP_CACHE_KEY = cache_key
             return _FUSED_OP_CACHE
+
+    if _try_load_komodo_cann_ascendc():
+        for name in names:
+            op = _resolve_torch_op(name)
+            if op is not None:
+                _FUSED_OP_CACHE = (name, op)
+                _FUSED_OP_CACHE_KEY = cache_key
+                return _FUSED_OP_CACHE
 
     if _try_load_komodo_cann_v3():
         for name in names:
@@ -263,16 +298,17 @@ def _komodo_cann_fused_status(group_size: int) -> tuple[bool, bool, bool, str | 
     if resolved is None:
         if _komodo_cann_fused_required():
             names = ", ".join(_komodo_cann_fused_op_names())
-            suffix = (
-                f" Last V3 loader error: {_FUSED_OP_LAST_ERROR}"
-                if _komodo_cann_v3_enabled() and _FUSED_OP_LAST_ERROR
-                else ""
-            )
+            suffix = f" Last fused loader error: {_FUSED_OP_LAST_ERROR}" if _FUSED_OP_LAST_ERROR else ""
             raise RuntimeError(
                 "Komodo-CANN fused W4A16 op was required but no registered torch op was found. "
                 f"Checked: {names}.{suffix}"
             )
-        reason = "v3_extension_unavailable" if _komodo_cann_v3_enabled() else "op_not_registered"
+        if _komodo_cann_ascendc_enabled():
+            reason = "ascendc_extension_unavailable"
+        elif _komodo_cann_v3_enabled():
+            reason = "v3_extension_unavailable"
+        else:
+            reason = "op_not_registered"
         return enabled, supported, False, None, reason
 
     op_name, _ = resolved
@@ -495,6 +531,7 @@ class _KomodoCannPlanMixin:
             os.getenv(_KOMODO_CANN_FUSED_ENV),
             os.getenv(_KOMODO_CANN_FUSED_REQUIRE_ENV),
             os.getenv(_KOMODO_CANN_FUSED_OP_ENV),
+            os.getenv(_KOMODO_CANN_ASCENDC_ENV),
             os.getenv(_KOMODO_CANN_V3_ENV),
             os.getenv(_KOMODO_CANN_INNER_PRECISE_ENV),
         )

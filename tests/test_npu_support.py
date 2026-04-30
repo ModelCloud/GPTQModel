@@ -119,6 +119,14 @@ def test_komodo_cann_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):
     assert balanced.inner_precise == 0
 
 
+def test_komodo_cann_default_fused_op_names_include_msopgen_snake_case(monkeypatch):
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", raising=False)
+    names = komodo_cann_module._komodo_cann_fused_op_names()
+
+    assert "gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul" in names
+    assert "npu.komodo_cann_w4_a16_matmul" in names
+
+
 def test_komodo_cann_tiling_plan_requires_registered_fused_op(monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
     monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED", "1")

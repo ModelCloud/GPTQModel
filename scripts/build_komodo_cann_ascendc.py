@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+OP_IR = REPO_ROOT / "gptqmodel_ext" / "komodo_cann" / "op_ir" / "komodo_cann_w4a16_matmul.json"
+OVERLAY_ROOT = REPO_ROOT / "gptqmodel_ext" / "komodo_cann" / "ascendc"
+DEFAULT_CANN_ROOTS = (
+    Path("/usr/local/Ascend/cann-8.5.1"),
+    Path("/usr/local/Ascend/ascend-toolkit/latest"),
+)
+
+
+def _find_cann_root() -> Path | None:
+    for env_name in ("ASCEND_HOME_PATH", "ASCEND_AICPU_PATH", "BASE_LIBS_PATH"):
+        raw = os.environ.get(env_name)
+        if raw:
+            path = Path(raw)
+            if path.exists():
+                return path
+    for path in DEFAULT_CANN_ROOTS:
+        if path.exists():
+            return path
+    return None
+
+
+def _find_msopgen(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+
+    env_msopgen = os.environ.get("MSOPGEN")
+    if env_msopgen:
+        return env_msopgen
+
+    cann_root = _find_cann_root()
+    candidates: list[Path] = []
+    if cann_root is not None:
+        candidates.extend(
+            [
+                cann_root / "python" / "site-packages" / "bin" / "msopgen",
+                cann_root / "tools" / "msopgen" / "bin" / "msopgen",
+            ]
+        )
+    candidates.extend(Path(p) / "msopgen" for p in os.environ.get("PATH", "").split(os.pathsep) if p)
+
+    for candidate in candidates:
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    resolved = shutil.which("msopgen")
+    if resolved:
+        return resolved
+    raise FileNotFoundError("Could not find msopgen. Set MSOPGEN or ASCEND_HOME_PATH.")
+
+
+def _copy_overlay(output: Path) -> None:
+    for rel in (
+        Path("op_host") / "komodo_cann_w4_a16_matmul.cpp",
+        Path("op_host") / "komodo_cann_w4_a16_matmul_tiling.h",
+        Path("op_kernel") / "komodo_cann_w4_a16_matmul.cpp",
+    ):
+        src = OVERLAY_ROOT / rel
+        dst = output / rel
+        if not src.exists():
+            raise FileNotFoundError(src)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def _force_compute_unit(output: Path, compute_unit: str) -> None:
+    presets_path = output / "CMakePresets.json"
+    if not presets_path.exists():
+        raise FileNotFoundError(presets_path)
+    presets = json.loads(presets_path.read_text())
+    for preset in presets.get("configurePresets", []):
+        cache = preset.setdefault("cacheVariables", {})
+        ascend_compute_unit = cache.get("ASCEND_COMPUTE_UNIT")
+        if isinstance(ascend_compute_unit, dict):
+            ascend_compute_unit["value"] = compute_unit
+        else:
+            cache["ASCEND_COMPUTE_UNIT"] = {"type": "STRING", "value": compute_unit}
+    presets_path.write_text(json.dumps(presets, indent=4) + "\n")
+
+
+def _run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
+    print("+", " ".join(command), flush=True)
+    subprocess.run(command, cwd=str(cwd) if cwd is not None else None, env=env, check=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Generate and build the Komodo-CANN Ascend C custom op.")
+    parser.add_argument("--output", type=Path, default=Path("/tmp/komodo_cann_w4a16_op"))
+    parser.add_argument("--msopgen", default=None)
+    parser.add_argument("--cann-root", type=Path, default=None)
+    parser.add_argument("--target", default=None, help="Optional generated build.sh target, for example install.")
+    parser.add_argument("--compute-unit", default="ascend910b", help="ASCEND_COMPUTE_UNIT for generated CMake.")
+    parser.add_argument("--clean", action="store_true", help="Remove the output directory before generating.")
+    parser.add_argument("--no-build", action="store_true", help="Only run msopgen and overlay repo sources.")
+    args = parser.parse_args()
+
+    output = args.output.resolve()
+    if args.clean and output.exists():
+        shutil.rmtree(output)
+    output.mkdir(parents=True, exist_ok=True)
+
+    msopgen = _find_msopgen(args.msopgen)
+    _run(
+        [
+            msopgen,
+            "gen",
+            "-i",
+            str(OP_IR),
+            "-f",
+            "pytorch",
+            "-c",
+            "ai_core-ascend910b",
+            "-lan",
+            "cpp",
+            "-out",
+            str(output),
+        ]
+    )
+    _copy_overlay(output)
+    _force_compute_unit(output, args.compute_unit)
+
+    if args.no_build:
+        print(f"Generated project with Komodo-CANN overlay at {output}")
+        return 0
+
+    if shutil.which("cmake") is None:
+        raise FileNotFoundError("CMake is required by the msopgen build.sh but was not found on PATH.")
+
+    env = os.environ.copy()
+    cann_root = args.cann_root or _find_cann_root()
+    if cann_root is not None:
+        env.setdefault("ASCEND_HOME_PATH", str(cann_root))
+
+    build_cmd = ["bash", str(output / "build.sh")]
+    if args.target:
+        build_cmd.append(args.target)
+    _run(build_cmd, cwd=output, env=env)
+    print(f"Built Komodo-CANN Ascend C project at {output}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -435,7 +435,7 @@ at::Tensor w4a16_matmul_v3(
 
 }  // namespace
 
-TORCH_LIBRARY(gptqmodel_komodo_cann, m)
+TORCH_LIBRARY_FRAGMENT(gptqmodel_komodo_cann, m)
 {
     m.def(
         "w4a16_matmul(Tensor x, Tensor packed_weight, Tensor scales, Tensor offsets, Tensor? bias, "

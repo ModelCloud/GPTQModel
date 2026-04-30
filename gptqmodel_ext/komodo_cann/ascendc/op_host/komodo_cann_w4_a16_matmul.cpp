@@ -1,0 +1,215 @@
+#include "komodo_cann_w4_a16_matmul_tiling.h"
+#include "register/op_def_registry.h"
+#include "tiling/platform/platform_ascendc.h"
+
+namespace {
+constexpr size_t kInputX = 0;
+constexpr size_t kInputPackedWeight = 1;
+constexpr size_t kInputScales = 2;
+constexpr size_t kInputOffsets = 3;
+constexpr size_t kInputBias = 4;
+
+constexpr size_t kAttrGroupSize = 0;
+constexpr size_t kAttrSplitK = 1;
+constexpr size_t kAttrBaseM = 2;
+constexpr size_t kAttrBaseN = 3;
+constexpr size_t kAttrBaseK = 4;
+
+uint32_t AttrAsU32(const gert::RuntimeAttrs* attrs, size_t index, uint32_t fallback)
+{
+    if (attrs == nullptr) {
+        return fallback;
+    }
+    const int64_t* value = attrs->GetInt(index);
+    if (value == nullptr || *value < 0) {
+        return fallback;
+    }
+    return static_cast<uint32_t>(*value);
+}
+
+uint32_t ClampU64ToU32(uint64_t value)
+{
+    constexpr uint64_t kMaxU32 = static_cast<uint64_t>(0xffffffffU);
+    return static_cast<uint32_t>(value > kMaxU32 ? kMaxU32 : value);
+}
+
+uint32_t PickBlockDim(gert::TilingContext* context, uint32_t total_outputs)
+{
+    if (total_outputs == 0) {
+        return 1;
+    }
+
+    uint32_t core_num = 24;
+    auto platform_info = context->GetPlatformInfo();
+    if (platform_info != nullptr) {
+        auto platform = platform_ascendc::PlatformAscendC(platform_info);
+        uint32_t queried = platform.GetCoreNumAic();
+        if (queried == 0) {
+            queried = platform.GetCoreNum();
+        }
+        if (queried > 0) {
+            core_num = queried;
+        }
+    }
+    return total_outputs < core_num ? total_outputs : core_num;
+}
+}  // namespace
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    const gert::StorageShape* x_shape = context->GetInputShape(kInputX);
+    const gert::StorageShape* packed_shape = context->GetInputShape(kInputPackedWeight);
+    const gert::StorageShape* scales_shape = context->GetInputShape(kInputScales);
+    const gert::StorageShape* offsets_shape = context->GetInputShape(kInputOffsets);
+    if (x_shape == nullptr || packed_shape == nullptr || scales_shape == nullptr || offsets_shape == nullptr) {
+        return ge::GRAPH_FAILED;
+    }
+
+    const auto& x = x_shape->GetStorageShape();
+    const auto& packed = packed_shape->GetStorageShape();
+    const auto& scales = scales_shape->GetStorageShape();
+    const auto& offsets = offsets_shape->GetStorageShape();
+    if (x.GetDimNum() != 2 || packed.GetDimNum() != 2 || scales.GetDimNum() != 2 || offsets.GetDimNum() != 2) {
+        return ge::GRAPH_FAILED;
+    }
+
+    const int64_t rows64 = x.GetDim(0);
+    const int64_t k64 = x.GetDim(1);
+    const int64_t packed_k64 = packed.GetDim(0);
+    const int64_t packed_n_words64 = packed.GetDim(1);
+    const int64_t scale_groups64 = scales.GetDim(0);
+    const int64_t n64 = scales.GetDim(1);
+    if (rows64 <= 0 || k64 <= 0 || packed_k64 != k64 || packed_n_words64 <= 0 || n64 <= 0 ||
+        offsets.GetDim(0) != scale_groups64 || offsets.GetDim(1) != n64 || packed_n_words64 * 8 != n64) {
+        return ge::GRAPH_FAILED;
+    }
+
+    const auto attrs = context->GetAttrs();
+    const uint32_t group_size = AttrAsU32(attrs, kAttrGroupSize, 0);
+    if (group_size != 0 && (group_size < 32 || (static_cast<uint64_t>(k64) % group_size) != 0)) {
+        return ge::GRAPH_FAILED;
+    }
+    const uint32_t expected_groups =
+        group_size == 0 ? 1 : static_cast<uint32_t>((static_cast<uint64_t>(k64) + group_size - 1) / group_size);
+    if (static_cast<uint32_t>(scale_groups64) != expected_groups) {
+        return ge::GRAPH_FAILED;
+    }
+
+    const uint64_t total_outputs64 = static_cast<uint64_t>(rows64) * static_cast<uint64_t>(n64);
+    if (total_outputs64 == 0 || total_outputs64 > static_cast<uint64_t>(0xffffffffU)) {
+        return ge::GRAPH_FAILED;
+    }
+    const uint32_t total_outputs = static_cast<uint32_t>(total_outputs64);
+    const uint32_t block_dim = PickBlockDim(context, total_outputs);
+
+    KomodoCannW4A16MatmulTilingData tiling;
+    tiling.set_rows(static_cast<uint32_t>(rows64));
+    tiling.set_in_features(static_cast<uint32_t>(k64));
+    tiling.set_out_features(static_cast<uint32_t>(n64));
+    tiling.set_group_size(group_size);
+    tiling.set_has_bias(context->GetOptionalInputShape(kInputBias) != nullptr ? 1U : 0U);
+    tiling.set_split_k(AttrAsU32(attrs, kAttrSplitK, 1));
+    tiling.set_base_m(AttrAsU32(attrs, kAttrBaseM, rows64 <= 16 ? 16 : 128));
+    tiling.set_base_n(AttrAsU32(attrs, kAttrBaseN, 256));
+    tiling.set_base_k(AttrAsU32(attrs, kAttrBaseK, 64));
+    tiling.set_total_outputs(total_outputs);
+    tiling.set_block_dim(block_dim);
+
+    uint64_t ub_size = 0;
+    uint64_t l1_size = 0;
+    uint64_t l0a_size = 0;
+    uint64_t l0b_size = 0;
+    uint64_t l0c_size = 0;
+    auto platform_info = context->GetPlatformInfo();
+    if (platform_info != nullptr) {
+        auto platform = platform_ascendc::PlatformAscendC(platform_info);
+        platform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ub_size);
+        platform.GetCoreMemSize(platform_ascendc::CoreMemType::L1, l1_size);
+        platform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_A, l0a_size);
+        platform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_B, l0b_size);
+        platform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_C, l0c_size);
+    }
+    tiling.set_ub_bytes(ClampU64ToU32(ub_size));
+    tiling.set_l1_bytes(ClampU64ToU32(l1_size));
+    tiling.set_l0a_bytes(ClampU64ToU32(l0a_size));
+    tiling.set_l0b_bytes(ClampU64ToU32(l0b_size));
+    tiling.set_l0c_bytes(ClampU64ToU32(l0c_size));
+
+    context->SetBlockDim(block_dim);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    return ge::GRAPH_SUCCESS;
+}
+}  // namespace optiling
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(kInputX);
+    const gert::Shape* scales_shape = context->GetInputShape(kInputScales);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    if (x_shape == nullptr || scales_shape == nullptr || y_shape == nullptr || x_shape->GetDimNum() != 2 ||
+        scales_shape->GetDimNum() != 2) {
+        return GRAPH_FAILED;
+    }
+    *y_shape = gert::Shape({x_shape->GetDim(0), scales_shape->GetDim(1)});
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext* context)
+{
+    context->SetOutputDataType(0, context->GetInputDataType(kInputX));
+    return ge::GRAPH_SUCCESS;
+}
+}  // namespace ge
+
+namespace ops {
+class KomodoCannW4A16Matmul : public OpDef {
+public:
+    explicit KomodoCannW4A16Matmul(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("packed_weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("scales")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("offsets")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("group_size").Int();
+        this->Attr("split_k").Int();
+        this->Attr("base_m").Int();
+        this->Attr("base_n").Int();
+        this->Attr("base_k").Int();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(KomodoCannW4A16Matmul);
+}  // namespace ops

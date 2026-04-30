@@ -7,8 +7,10 @@ The Python runtime looks for one of these torch operators:
 
 - `torch.ops.gptqmodel_komodo_cann.w4a16_matmul`
 - `torch.ops.gptqmodel_komodo_cann.komodo_cann_w4a16_matmul`
+- `torch.ops.gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul`
 - `torch.ops.npu.gptqmodel_komodo_cann_w4a16_matmul`
 - `torch.ops.npu.komodo_cann_w4a16_matmul`
+- `torch.ops.npu.komodo_cann_w4_a16_matmul`
 
 The operator must implement:
 
@@ -102,3 +104,45 @@ GPTQMODEL_KOMODO_CANN_V3_WORKSPACE_CACHE=1   # default
 
 Set either variable to `0` while isolating CANN runtime behavior or measuring
 per-call setup overhead.
+
+## Ascend C Custom Op
+
+`ascendc/` contains the repo-owned custom-op overlay for the real Komodo-CANN
+device kernel. Generate and build it from the repo root:
+
+```bash
+python scripts/build_komodo_cann_ascendc.py \
+  --output /tmp/komodo_cann_w4a16_op
+```
+
+The helper forces the generated CMake preset to `ASCEND_COMPUTE_UNIT=ascend910b`
+and the op definition registers `ascend910b`, so the generated ACLNN shim
+advertises `SOC_VERSION_ASCEND910B` instead of the msopgen default 910A target.
+
+Install the generated package into a temporary OPP root and source its env file
+before testing:
+
+```bash
+/tmp/komodo_cann_w4a16_op/build_out/custom_opp_ubuntu_aarch64.run \
+  --quiet \
+  --install-path=/tmp/komodo_cann_opp_install
+source /tmp/komodo_cann_opp_install/vendors/customize/bin/set_env.bash
+```
+
+Enable the managed bridge with:
+
+```bash
+GPTQMODEL_KOMODO_CANN_ASCENDC=1 \
+GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE=1 \
+GPTQMODEL_KOMODO_CANN_FUSED_OP=gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul \
+python scripts/profile_komodo_cann_npu.py --mode cann --iters 3 --warmup 1
+```
+
+The first implementation is a correctness baseline that unpacks Komodo's packed
+INT4 weights in the device kernel, stages 64-value dequant tiles in UB, and
+writes only final FP16 outputs. It does not write a full dense FP16 weight matrix
+through GM/L2. The currently validated baseline uses one writing AI Core; a
+multi-core strided variant was accepted by CANN but produced sparse writes on
+the local 910B bring-up run, so the next tuning step is reintroducing multi-core
+tile ownership with a stronger launch/tiling contract before replacing the
+scalar accumulation loop with vectorized tile math and Cube matmul consumption.

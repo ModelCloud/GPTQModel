@@ -111,6 +111,17 @@ _EXTENSION_SPECS = (
             "gptqmodel.utils.komodo_cann", "komodo_cann_v3_environment_error"
         )(),
     ),
+    _ExtensionSpec(
+        name="komodo_cann_ascendc",
+        aliases=("komodo_cann_custom", "komodo_cann_ascend"),
+        resolve=lambda: _resolve_extension_attr(
+            "gptqmodel.utils.komodo_cann", "_KOMODO_CANN_ASCENDC_TORCH_OPS_EXTENSION"
+        ),
+        supported=lambda: _resolve_attr("gptqmodel.utils.komodo_cann", "_komodo_cann_ascendc_supported")(),
+        unsupported_error=lambda: _resolve_attr(
+            "gptqmodel.utils.komodo_cann", "komodo_cann_ascendc_environment_error"
+        )(),
+    ),
 )
 
 _EXTENSION_SPECS_BY_NAME = {spec.name: spec for spec in _EXTENSION_SPECS}

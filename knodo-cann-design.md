@@ -28,8 +28,10 @@ As of this pass, the Python runtime also has a real fused-op dispatch boundary:
 ```text
 torch.ops.gptqmodel_komodo_cann.w4a16_matmul
 torch.ops.gptqmodel_komodo_cann.komodo_cann_w4a16_matmul
+torch.ops.gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul
 torch.ops.npu.gptqmodel_komodo_cann_w4a16_matmul
 torch.ops.npu.komodo_cann_w4a16_matmul
+torch.ops.npu.komodo_cann_w4_a16_matmul
 ```
 
 If one of those ops is registered, Komodo-CANN uses it for supported W4A16 GPTQ
@@ -206,6 +208,44 @@ reuse, it is slower than the current native
 `torch.ops.npu.npu_weight_quant_batchmatmul` path. The real target remains an
 Ascend C device kernel that stages INT4 dequant tiles without materializing full
 FP16 weights through GM/L2.
+
+Ascend C custom-op bring-up:
+
+- Added `gptqmodel_ext/komodo_cann/ascendc/` as the repo-owned overlay for the
+  msopgen-generated custom operator project.
+- Added `scripts/build_komodo_cann_ascendc.py` to generate the CANN project from
+  `op_ir/komodo_cann_w4a16_matmul.json`, overlay the custom host/kernel sources,
+  and optionally build it.
+- The build helper now patches generated `CMakePresets.json` to
+  `ASCEND_COMPUTE_UNIT=ascend910b`, and the op definition registers
+  `ascend910b`. This makes the generated ACLNN support list advertise
+  `SOC_VERSION_ASCEND910B`; the msopgen default emitted a 910A support list and
+  failed executor creation on the local 910B host.
+- Added `w4a16_ascendc_bridge.cpp`, a managed torch.ops bridge that dlopens the
+  generated `libcust_opapi.so` and calls
+  `aclnnKomodoCannW4A16MatmulGetWorkspaceSize` /
+  `aclnnKomodoCannW4A16Matmul`. The bridge registers
+  `torch.ops.gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul`.
+- The Python runtime can auto-load that bridge behind
+  `GPTQMODEL_KOMODO_CANN_ASCENDC=1`. It keeps plain Komodo-CANN fallback
+  behavior unchanged unless the gate or another fused op is enabled.
+- The first device kernel is a correctness baseline: the writing AI Core reads
+  packed INT4 words directly, stages a 64-value INT4-to-FP16 dequant tile in UB,
+  accumulates FP32, and writes only FP16 output.
+- This baseline intentionally avoids writing full dequantized FP16 weights
+  through GM/L2. It is slower than the target design, but it creates the real
+  custom-op registration, tiling, shape inference, optional bias handling, and
+  packed-weight decode path needed before vector/Cube fusion.
+- The initial multi-core strided writer was accepted by CANN but produced sparse
+  output writes on the local 910B runtime. The committed correctness baseline
+  therefore uses one writing AI Core while keeping the host tiling metadata for
+  the next pass.
+- Local validation after installing the generated custom OPP:
+  - deterministic all-ones `M=2,K=64,N=16` matched exactly with and without bias.
+  - randomized sweeps over `(M,K,N)=(8,64,64),(3,96,32),(1,128,128)`,
+    `group_size` in `{0,32,64}` where divisible, and bias/no-bias all passed
+    against a CPU dequant reference with observed max error below `0.003` after
+    rerunning the tail case that had one transient high reading.
 
 ## Fused W4A16 Operator Contract
 
