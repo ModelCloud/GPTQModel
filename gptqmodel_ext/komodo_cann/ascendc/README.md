@@ -70,6 +70,14 @@ constructed from Komodo-CANN's primitive tiling fields. Keep that layout: adding
 kernel-side `TCubeTiling` alias. The scaffold is not the runtime default and
 does not yet consume staged INT4-dequant tiles through Cube.
 
+Runtime Cube bring-up uses a second opt-in gate,
+`GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER=1`. When it is combined with staged
+dequant, Python passes a negative `split_k` attribute and the host tiler
+reserves a leading KFC/Matmul system-workspace region before the FP16 staged
+tiles. The AIV producer then writes staged tiles at `workspace +
+staging_workspace_offset`, avoiding collision with CANN's message queues and UB
+map. This remains bounded by the same "smaller than dense dequant" check.
+
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
 with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset

@@ -130,8 +130,13 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     assert default_plan.staging_blocks == 0
     assert default_plan.staging_tile_bytes == 0
     assert default_plan.staging_workspace_bytes == 0
+    assert default_plan.staging_workspace_offset == 0
+    assert default_plan.cube_consumer is False
+    assert default_plan.cube_workspace_bytes == 0
+    assert default_plan.custom_workspace_bytes == 0
 
     monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", "1")
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER", raising=False)
     staged_plan = _komodo_cann_tiling_plan(
         rows=8,
         in_features=8192,
@@ -152,8 +157,30 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     assert staged_plan.staging_workspace_bytes == (
         staged_plan.staging_slots * staged_plan.staging_blocks * staged_plan.staging_tile_bytes
     )
+    assert staged_plan.staging_workspace_offset == 0
+    assert staged_plan.cube_consumer is False
+    assert staged_plan.cube_workspace_bytes == 0
+    assert staged_plan.custom_workspace_bytes == staged_plan.staging_workspace_bytes
     assert staged_plan.staging_workspace_bytes < staged_plan.in_features * staged_plan.out_features * 2
     assert staged_plan.strategy == "planned_staged_dequant_aic_matmul"
+
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER", "1")
+    cube_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=8192,
+        out_features=1024,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+
+    assert cube_plan.staged_dequant is True
+    assert cube_plan.cube_consumer is True
+    assert cube_plan.cube_workspace_bytes == 12 * 1024 * 1024
+    assert cube_plan.staging_workspace_offset == cube_plan.cube_workspace_bytes
+    assert cube_plan.custom_workspace_bytes == (
+        cube_plan.cube_workspace_bytes + cube_plan.staging_workspace_bytes
+    )
+    assert cube_plan.custom_workspace_bytes < cube_plan.in_features * cube_plan.out_features * 2
 
 
 def test_komodo_cann_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):

@@ -19,6 +19,8 @@ BEGIN_TILING_DATA_DEF(KomodoCannW4A16MatmulTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, staging_slots);
   TILING_DATA_FIELD_DEF(uint32_t, staging_tile_bytes);
   TILING_DATA_FIELD_DEF(uint32_t, staging_workspace_bytes);
+  TILING_DATA_FIELD_DEF(uint32_t, staging_workspace_offset);
+  TILING_DATA_FIELD_DEF(uint32_t, cube_workspace_bytes);
   TILING_DATA_FIELD_DEF(uint32_t, ub_bytes);
   TILING_DATA_FIELD_DEF(uint32_t, l1_bytes);
   TILING_DATA_FIELD_DEF(uint32_t, l0a_bytes);

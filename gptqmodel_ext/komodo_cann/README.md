@@ -153,4 +153,8 @@ ranges; the cap avoids sparse physical block-ID behavior observed with wider
 symmetric GPTQ zero-offset specialization that skips offset GM reads for
 `rows >= 8`; the smaller tails and AWQ path keep the normal nonzero-offset flow.
 The next tuning step is replacing the scalar accumulation loop with vectorized
-tile math and Cube matmul consumption.
+tile math and Cube matmul consumption. During that bring-up,
+`GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT=1` enables bounded FP16 tile staging, and
+`GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER=1` additionally reserves the leading CANN
+Matmul/KFC system workspace before those staged tiles. Both gates are off by
+default.

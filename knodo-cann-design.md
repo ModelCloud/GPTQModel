@@ -426,6 +426,21 @@ Ascend C custom-op bring-up:
   `Matmul<GM/ND fp16, GM/ND fp16, GM/ND fp16>` consumer object with a locally
   populated Cube tiling record, but it does not yet feed staged INT4-dequant
   tiles into Cube or replace the scalar visible-output path.
+- The next workspace-layout pass separates CANN Matmul/KFC system workspace
+  from the staged FP16 tile ring. `GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER=1`
+  now marks the fused call with a negative `split_k` attribute. The host tiler
+  decodes the absolute Split-K value, reserves a leading 12 MiB KFC workspace
+  region, records `staging_workspace_offset`, and only enables the staged path
+  when `cube_workspace + staged_tiles` is still smaller than full dense
+  dequantization. This prevents the AIV dequant producer from overwriting
+  CANN's message queues once the Cube consumer starts running.
+- Validation for the workspace split built both `--experimental-staged-dequant`
+  and `--experimental-staged-dequant --experimental-cube-consumer` packages.
+  Two 8-NPU fused-op smokes used one visible NPU per process on the q-proj
+  shape with `tokens=1`: staged-only reported offset `0` and custom workspace
+  `524288` bytes on all devices, while the Cube-reserved ABI reported offset
+  `12582912`, cube workspace `12582912`, and total custom workspace
+  `13107200` bytes on all devices.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and
@@ -508,6 +523,7 @@ Implementation plan:
    - Keep `baseN=256` unless L0/UB pressure says otherwise.
    - Keep `TCubeTiling` construction device-local; do not add it as generated
      nested tiling data unless the CANN parser/name-conflict issue is solved.
+   - Keep the KFC system workspace and staged tile ring in separate GM ranges.
 4. Split-K decode:
    - Use 24 cube cores for large `K >> N`.
    - Reduce partials on vector cores or through an atomic/fixpipe path.

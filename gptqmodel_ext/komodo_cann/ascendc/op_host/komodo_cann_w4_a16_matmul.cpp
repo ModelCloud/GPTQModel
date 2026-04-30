@@ -19,6 +19,7 @@ constexpr uint32_t kKernelModeScalar = 0;
 constexpr uint32_t kKernelModeStagedDequant = 1;
 constexpr uint32_t kStagingSlots = 2;
 constexpr uint64_t kStagingAlignmentBytes = 512;
+constexpr uint64_t kCubeSysWorkspaceBytes = 12ULL * 1024ULL * 1024ULL;
 
 uint32_t AttrAsU32(const gert::RuntimeAttrs* attrs, size_t index, uint32_t fallback)
 {
@@ -141,7 +142,8 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_group_size(group_size);
     tiling.set_has_bias(context->GetOptionalInputShape(kInputBias) != nullptr ? 1U : 0U);
     tiling.set_zero_offsets(AttrIsNegative(attrs, kAttrBaseK));
-    const uint32_t requested_split_k = AttrAsU32(attrs, kAttrSplitK, 1);
+    const uint32_t cube_workspace_requested = AttrIsNegative(attrs, kAttrSplitK);
+    const uint32_t requested_split_k = AttrAbsAsU32(attrs, kAttrSplitK, 1);
     tiling.set_split_k(requested_split_k);
     tiling.set_base_m(AttrAsU32(attrs, kAttrBaseM, rows64 <= 16 ? 16 : 128));
     const uint32_t requested_base_n = AttrAbsAsU32(attrs, kAttrBaseN, 256);
@@ -179,6 +181,8 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_staging_slots(0);
     tiling.set_staging_tile_bytes(0);
     tiling.set_staging_workspace_bytes(0);
+    tiling.set_staging_workspace_offset(0);
+    tiling.set_cube_workspace_bytes(0);
 
     if (AttrIsNegative(attrs, kAttrBaseN) != 0 && requested_base_n != 0 && requested_base_k != 0) {
         const uint32_t n_tiles = CeilDivU32(static_cast<uint32_t>(n64), requested_base_n);
@@ -192,8 +196,10 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
         const uint64_t tile_bytes = AlignUpU64(
             static_cast<uint64_t>(requested_base_k) * static_cast<uint64_t>(requested_base_n) * sizeof(uint16_t),
             kStagingAlignmentBytes);
-        const uint64_t workspace_bytes = tile_bytes * static_cast<uint64_t>(kStagingSlots) *
+        const uint64_t staging_workspace_bytes = tile_bytes * static_cast<uint64_t>(kStagingSlots) *
             static_cast<uint64_t>(staging_blocks);
+        const uint64_t cube_workspace_bytes = cube_workspace_requested != 0 ? kCubeSysWorkspaceBytes : 0;
+        const uint64_t workspace_bytes = cube_workspace_bytes + staging_workspace_bytes;
         const uint64_t dense_dequant_bytes =
             static_cast<uint64_t>(k64) * static_cast<uint64_t>(n64) * sizeof(uint16_t);
         if (workspace_bytes > 0 && workspace_bytes < dense_dequant_bytes) {
@@ -201,7 +207,9 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
             tiling.set_staging_blocks(staging_blocks);
             tiling.set_staging_slots(kStagingSlots);
             tiling.set_staging_tile_bytes(ClampU64ToU32(tile_bytes));
-            tiling.set_staging_workspace_bytes(ClampU64ToU32(workspace_bytes));
+            tiling.set_staging_workspace_bytes(ClampU64ToU32(staging_workspace_bytes));
+            tiling.set_staging_workspace_offset(ClampU64ToU32(cube_workspace_bytes));
+            tiling.set_cube_workspace_bytes(ClampU64ToU32(cube_workspace_bytes));
             size_t* workspaces = context->GetWorkspaceSizes(1);
             if (workspaces == nullptr) {
                 return ge::GRAPH_FAILED;

@@ -74,7 +74,9 @@ public:
         y_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(y));
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
         if (tiling->kernel_mode == kKernelModeStagedDequant && tiling->staging_workspace_bytes != 0) {
-            staged_weight_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(workspace));
+            __gm__ uint8_t* workspace_bytes = reinterpret_cast<__gm__ uint8_t*>(workspace);
+            staged_weight_gm_.SetGlobalBuffer(
+                reinterpret_cast<__gm__ half*>(workspace_bytes + tiling->staging_workspace_offset));
         }
 #else
         (void)workspace;

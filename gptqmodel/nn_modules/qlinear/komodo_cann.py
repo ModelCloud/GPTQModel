@@ -32,6 +32,8 @@ _KOMODO_CANN_ASCENDC_ENV = "GPTQMODEL_KOMODO_CANN_ASCENDC"
 _KOMODO_CANN_V3_ENV = "GPTQMODEL_KOMODO_CANN_V3"
 _KOMODO_CANN_INNER_PRECISE_ENV = "GPTQMODEL_KOMODO_CANN_INNER_PRECISE"
 _KOMODO_CANN_STAGED_DEQUANT_ENV = "GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT"
+_KOMODO_CANN_CUBE_CONSUMER_ENV = "GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER"
+_KOMODO_CANN_CUBE_WORKSPACE_BYTES = 12 * 1024 * 1024
 _NPU_PREFETCH_OP_UNSET = object()
 _NPU_PREFETCH_OP = _NPU_PREFETCH_OP_UNSET
 _FUSED_OP_UNSET = object()
@@ -75,6 +77,10 @@ class KomodoCannTilingPlan:
     staging_blocks: int
     staging_tile_bytes: int
     staging_workspace_bytes: int
+    staging_workspace_offset: int
+    cube_consumer: bool
+    cube_workspace_bytes: int
+    custom_workspace_bytes: int
     l2_cache_size: int
     prefetch_enabled: bool
     prefetch_min_bytes: int
@@ -126,6 +132,10 @@ def _komodo_cann_v3_enabled() -> bool:
 
 def _komodo_cann_staged_dequant_enabled() -> bool:
     return env_flag(_KOMODO_CANN_STAGED_DEQUANT_ENV, default=False)
+
+
+def _komodo_cann_cube_consumer_enabled() -> bool:
+    return env_flag(_KOMODO_CANN_CUBE_CONSUMER_ENV, default=False)
 
 
 def _komodo_cann_ascendc_enabled() -> bool:
@@ -398,17 +408,27 @@ def _komodo_cann_tiling_plan(
     scalar_owner_cap = min(vector_cores, max(1, out_features // 8), 8)
     staging_blocks = min(scalar_owner_cap, max(1, n_tiles * split_k))
     staging_workspace_bytes = staging_tile_bytes * staging_slots * staging_blocks
+    cube_workspace_bytes = (
+        _KOMODO_CANN_CUBE_WORKSPACE_BYTES
+        if _komodo_cann_staged_dequant_enabled() and _komodo_cann_cube_consumer_enabled()
+        else 0
+    )
+    custom_workspace_bytes = staging_workspace_bytes + cube_workspace_bytes
     dense_dequant_bytes = in_features * out_features * 2
     staged_dequant = (
         _komodo_cann_staged_dequant_enabled()
         and staging_workspace_bytes > 0
-        and staging_workspace_bytes < dense_dequant_bytes
+        and custom_workspace_bytes < dense_dequant_bytes
     )
     if not staged_dequant:
         staging_slots = 0
         staging_blocks = 0
         staging_tile_bytes = 0
         staging_workspace_bytes = 0
+        cube_workspace_bytes = 0
+        custom_workspace_bytes = 0
+    staging_workspace_offset = cube_workspace_bytes
+    cube_consumer = cube_workspace_bytes > 0
     active_cores = min(cube_cores, max(1, n_tiles * split_k))
     prefetch_enabled = _komodo_cann_prefetch_enabled()
     prefetch_min_bytes = _komodo_cann_prefetch_min_bytes()
@@ -451,6 +471,10 @@ def _komodo_cann_tiling_plan(
         staging_blocks=staging_blocks,
         staging_tile_bytes=staging_tile_bytes,
         staging_workspace_bytes=staging_workspace_bytes,
+        staging_workspace_offset=staging_workspace_offset,
+        cube_consumer=cube_consumer,
+        cube_workspace_bytes=cube_workspace_bytes,
+        custom_workspace_bytes=custom_workspace_bytes,
         l2_cache_size=l2_cache_size,
         prefetch_enabled=prefetch_enabled,
         prefetch_min_bytes=prefetch_min_bytes,
@@ -515,7 +539,7 @@ def _komodo_cann_fused_matmul(
         offsets,
         bias,
         int(group_size),
-        int(plan.split_k),
+        -int(plan.split_k) if plan.cube_consumer else int(plan.split_k),
         int(plan.base_m),
         -int(plan.base_n) if plan.staged_dequant else int(plan.base_n),
         -int(plan.base_k) if plan.zero_offsets else int(plan.base_k),
@@ -575,6 +599,8 @@ class _KomodoCannPlanMixin:
             os.getenv(_KOMODO_CANN_ASCENDC_ENV),
             os.getenv(_KOMODO_CANN_V3_ENV),
             os.getenv(_KOMODO_CANN_INNER_PRECISE_ENV),
+            os.getenv(_KOMODO_CANN_STAGED_DEQUANT_ENV),
+            os.getenv(_KOMODO_CANN_CUBE_CONSUMER_ENV),
         )
         hot_key = (x_flat.device, x_flat.shape[0], group_size, bool(zero_offsets), env_key)
         if getattr(self, "_cann_hot_plan_key", None) == hot_key:
