@@ -150,21 +150,22 @@ class NemotronOmniQModel(NemotronHQModel):
                 cache_position=None,
                 attention_mask=None,
         ):
-            if is_fast_path_available and "cuda" in self.in_proj.qweight.device.type:
-                cuda_forward = self.cuda_kernels_forward
+            def call_mixer_compat(fn):
+                call_args = (hidden_states, cache_params, cache_position, attention_mask)
                 try:
-                    supports_attention_mask = "attention_mask" in inspect.signature(cuda_forward).parameters
+                    arity = len(inspect.signature(fn).parameters)
                 except (TypeError, ValueError):
-                    supports_attention_mask = False
+                    arity = 3
+                arity = max(1, min(arity, len(call_args)))
+                return fn(*call_args[:arity])
 
-                if supports_attention_mask:
-                    return cuda_forward(hidden_states, cache_params, cache_position, attention_mask)
-                return cuda_forward(hidden_states, cache_params, cache_position)
+            if is_fast_path_available and "cuda" in self.in_proj.qweight.device.type:
+                return call_mixer_compat(self.cuda_kernels_forward)
             dtype = hidden_states.dtype
             if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
                 hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
 
-            return self.torch_forward(hidden_states, cache_params, cache_position, attention_mask)
+            return call_mixer_compat(self.torch_forward)
 
         for layer in self.model.language_model.backbone.layers:
             if layer.mixer.__class__.__name__ == "NemotronHMamba2Mixer":

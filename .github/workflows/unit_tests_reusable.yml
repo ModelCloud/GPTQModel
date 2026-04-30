@@ -71,6 +71,7 @@ env:
   repo: ${{ inputs.repo || github.repository }}
   ref: ${{ inputs.ref || github.ref }}
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  DEBUG_ON: 1
 
 jobs:
   test:
