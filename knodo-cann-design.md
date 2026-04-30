@@ -340,6 +340,18 @@ Ascend C custom-op bring-up:
   `0.743 ms` for `M=16` zero offsets, from `46.037 ms` to `5.887 ms` for
   `M=8,K=1024,N=1024` nonzero offsets, and from `45.673 ms` to `5.824 ms` for
   the matching zero-offset case.
+- The single-row path now hoists the offset term out of the per-K inner loop.
+  For each quant group it accumulates `sum(x)` once, accumulates only the signed
+  INT4 lane products in the K loop, then applies `sum(x) * offset * scale` once
+  per output lane. This keeps the no-full-dense-materialization contract and
+  removes one offset add from every lane/K product at the cost of FP32
+  reassociation drift on asymmetric offsets. The 8-NPU raw-op A/B sweep improved
+  `M=1,K=256,N=256,group_size=32` from `0.101 ms` to `0.093 ms`,
+  `M=1,K=1024,N=1024,group_size=32` from `1.493 ms` to `1.355 ms`, and
+  `M=1,K=1024,N=1024,group_size=64` from `1.457 ms` to `1.312 ms`. Symmetric
+  zero-offset M1 cases stayed exact. The Qwen down-proj-shaped
+  `M=1,K=17408,N=5120,group_size=32` check improved from `127.73 ms` to
+  `116.32 ms` with max drift `0.0625` and mean drift about `1.0e-4`.
 - A direct CANN `Matmul<fp16, int4, fp16>` probe was rejected for now. In the
   default msopgen package the kernel still compiled as `VectorCore`, so the
   sentinel Cube path returned zeros because no AIC side was scheduled. Forcing

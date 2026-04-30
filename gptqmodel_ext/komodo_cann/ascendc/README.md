@@ -69,6 +69,14 @@ from `0.713 ms` to `0.099 ms`, `M=8,K=256,N=256` from `2.895 ms` to
 `0.376 ms`, symmetric `M=16,K=256,N=256` from `5.750 ms` to `0.743 ms`, and
 `M=8,K=1024,N=1024` from `46.037 ms` to `5.887 ms`. Max observed error in that
 sweep stayed below `0.0005`.
+The M1 path now hoists the constant offset contribution out of each quant-group
+K loop and applies it from a per-group activation sum. In an 8-NPU raw-op A/B
+sweep this reduced `M=1,K=256,N=256,group_size=32` from `0.101 ms` to
+`0.093 ms`, `M=1,K=1024,N=1024,group_size=32` from `1.493 ms` to `1.355 ms`,
+and `M=1,K=1024,N=1024,group_size=64` from `1.457 ms` to `1.312 ms`.
+The large down-proj check `M=1,K=17408,N=5120,group_size=32` improved from
+`127.73 ms` to `116.32 ms`; max drift was `0.0625` with mean drift about
+`1.0e-4`.
 
 Build from the repo root:
 

@@ -137,29 +137,49 @@ private:
                 const float offset16 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 6));
                 const float offset17 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 7));
 
+                // Offset is constant within a quant group, so M1 can apply its
+                // contribution once after accumulating the signed INT4 lanes.
+                float x_sum = 0.0f;
                 for (uint32_t k = k_begin; k < k_end; ++k) {
                     const float x_value = static_cast<float>(x_gm_.GetValue(x_offset + k));
+                    x_sum += x_value;
                     const uint32_t word0 =
                         static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
                     const uint32_t word1 =
                         static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col + 1));
-                    acc00 += x_value * DequantLane(word0, 0, scale00, offset00);
-                    acc01 += x_value * DequantLane(word0, 1, scale01, offset01);
-                    acc02 += x_value * DequantLane(word0, 2, scale02, offset02);
-                    acc03 += x_value * DequantLane(word0, 3, scale03, offset03);
-                    acc04 += x_value * DequantLane(word0, 4, scale04, offset04);
-                    acc05 += x_value * DequantLane(word0, 5, scale05, offset05);
-                    acc06 += x_value * DequantLane(word0, 6, scale06, offset06);
-                    acc07 += x_value * DequantLane(word0, 7, scale07, offset07);
-                    acc10 += x_value * DequantLane(word1, 0, scale10, offset10);
-                    acc11 += x_value * DequantLane(word1, 1, scale11, offset11);
-                    acc12 += x_value * DequantLane(word1, 2, scale12, offset12);
-                    acc13 += x_value * DequantLane(word1, 3, scale13, offset13);
-                    acc14 += x_value * DequantLane(word1, 4, scale14, offset14);
-                    acc15 += x_value * DequantLane(word1, 5, scale15, offset15);
-                    acc16 += x_value * DequantLane(word1, 6, scale16, offset16);
-                    acc17 += x_value * DequantLane(word1, 7, scale17, offset17);
+                    acc00 += x_value * DequantLaneNoOffset(word0, 0, scale00);
+                    acc01 += x_value * DequantLaneNoOffset(word0, 1, scale01);
+                    acc02 += x_value * DequantLaneNoOffset(word0, 2, scale02);
+                    acc03 += x_value * DequantLaneNoOffset(word0, 3, scale03);
+                    acc04 += x_value * DequantLaneNoOffset(word0, 4, scale04);
+                    acc05 += x_value * DequantLaneNoOffset(word0, 5, scale05);
+                    acc06 += x_value * DequantLaneNoOffset(word0, 6, scale06);
+                    acc07 += x_value * DequantLaneNoOffset(word0, 7, scale07);
+                    acc10 += x_value * DequantLaneNoOffset(word1, 0, scale10);
+                    acc11 += x_value * DequantLaneNoOffset(word1, 1, scale11);
+                    acc12 += x_value * DequantLaneNoOffset(word1, 2, scale12);
+                    acc13 += x_value * DequantLaneNoOffset(word1, 3, scale13);
+                    acc14 += x_value * DequantLaneNoOffset(word1, 4, scale14);
+                    acc15 += x_value * DequantLaneNoOffset(word1, 5, scale15);
+                    acc16 += x_value * DequantLaneNoOffset(word1, 6, scale16);
+                    acc17 += x_value * DequantLaneNoOffset(word1, 7, scale17);
                 }
+                acc00 += x_sum * offset00 * scale00;
+                acc01 += x_sum * offset01 * scale01;
+                acc02 += x_sum * offset02 * scale02;
+                acc03 += x_sum * offset03 * scale03;
+                acc04 += x_sum * offset04 * scale04;
+                acc05 += x_sum * offset05 * scale05;
+                acc06 += x_sum * offset06 * scale06;
+                acc07 += x_sum * offset07 * scale07;
+                acc10 += x_sum * offset10 * scale10;
+                acc11 += x_sum * offset11 * scale11;
+                acc12 += x_sum * offset12 * scale12;
+                acc13 += x_sum * offset13 * scale13;
+                acc14 += x_sum * offset14 * scale14;
+                acc15 += x_sum * offset15 * scale15;
+                acc16 += x_sum * offset16 * scale16;
+                acc17 += x_sum * offset17 * scale17;
             }
 
             StoreRow(row_offset + n_base0, acc00, acc01, acc02, acc03, acc04, acc05, acc06, acc07);
@@ -198,19 +218,31 @@ private:
                 const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
                 const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
 
+                // Offset is constant within a quant group, so M1 can apply its
+                // contribution once after accumulating the signed INT4 lanes.
+                float x_sum = 0.0f;
                 for (uint32_t k = k_begin; k < k_end; ++k) {
                     const float x_value = static_cast<float>(x_gm_.GetValue(x_offset + k));
+                    x_sum += x_value;
                     const uint32_t word =
                         static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
-                    acc0 += x_value * DequantLane(word, 0, scale0, offset0);
-                    acc1 += x_value * DequantLane(word, 1, scale1, offset1);
-                    acc2 += x_value * DequantLane(word, 2, scale2, offset2);
-                    acc3 += x_value * DequantLane(word, 3, scale3, offset3);
-                    acc4 += x_value * DequantLane(word, 4, scale4, offset4);
-                    acc5 += x_value * DequantLane(word, 5, scale5, offset5);
-                    acc6 += x_value * DequantLane(word, 6, scale6, offset6);
-                    acc7 += x_value * DequantLane(word, 7, scale7, offset7);
+                    acc0 += x_value * DequantLaneNoOffset(word, 0, scale0);
+                    acc1 += x_value * DequantLaneNoOffset(word, 1, scale1);
+                    acc2 += x_value * DequantLaneNoOffset(word, 2, scale2);
+                    acc3 += x_value * DequantLaneNoOffset(word, 3, scale3);
+                    acc4 += x_value * DequantLaneNoOffset(word, 4, scale4);
+                    acc5 += x_value * DequantLaneNoOffset(word, 5, scale5);
+                    acc6 += x_value * DequantLaneNoOffset(word, 6, scale6);
+                    acc7 += x_value * DequantLaneNoOffset(word, 7, scale7);
                 }
+                acc0 += x_sum * offset0 * scale0;
+                acc1 += x_sum * offset1 * scale1;
+                acc2 += x_sum * offset2 * scale2;
+                acc3 += x_sum * offset3 * scale3;
+                acc4 += x_sum * offset4 * scale4;
+                acc5 += x_sum * offset5 * scale5;
+                acc6 += x_sum * offset6 * scale6;
+                acc7 += x_sum * offset7 * scale7;
             }
 
             StoreRow(row_offset + n_base, acc0, acc1, acc2, acc3, acc4, acc5, acc6, acc7);
@@ -913,6 +945,14 @@ private:
         const int32_t raw = static_cast<int32_t>((word >> shift) & 0xFU);
         const int32_t signed_w = (raw ^ 0x8) - 0x8;
         return (static_cast<float>(signed_w) + offset) * scale;
+    }
+
+    __aicore__ inline float DequantLaneNoOffset(uint32_t word, uint32_t lane, float scale)
+    {
+        const uint32_t shift = lane << 2;
+        const int32_t raw = static_cast<int32_t>((word >> shift) & 0xFU);
+        const int32_t signed_w = (raw ^ 0x8) - 0x8;
+        return static_cast<float>(signed_w) * scale;
     }
 
     GlobalTensor<half> x_gm_;
