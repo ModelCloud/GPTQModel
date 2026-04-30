@@ -268,21 +268,22 @@ def main() -> None:
     parser.add_argument("--model", choices=("qwen3_6_27b", "qwen3_6_35b_a3b"), default="qwen3_6_35b_a3b")
     parser.add_argument("--method", choices=("gptq", "awq"), default="gptq")
     parser.add_argument("--mode", choices=MODES, default="native")
-    parser.add_argument("--device", type=int, default=0, help="PCI-ordered NPU device index. Use 0-6.")
+    parser.add_argument("--device", type=int, default=0, help="PCI-ordered NPU device index.")
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--tokens", type=int, default=1)
     parser.add_argument("--dtype", choices=("fp16",), default="fp16")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--iters", type=int, default=3)
     parser.add_argument("--seed", type=int, default=19000)
-    parser.add_argument("--stabilize-scale", type=float, default=0.01)
+    parser.add_argument("--stabilize-scale", type=float, default=0.001)
     parser.add_argument("--json-output", type=Path)
     args = parser.parse_args()
 
     if not HAS_NPU:
         raise RuntimeError("Ascend NPU is required for Komodo benchmarking.")
-    if not (0 <= args.device <= 6):
-        raise ValueError("--device must be in the PCI-ordered first seven device ids: 0-6.")
+    device_count = torch.npu.device_count()
+    if not (0 <= args.device < device_count):
+        raise ValueError(f"--device must be in [0, {device_count}); got {args.device}.")
     if args.layers < 1:
         raise ValueError("--layers must be >= 1.")
     if args.tokens < 1:

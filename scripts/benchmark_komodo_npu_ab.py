@@ -404,7 +404,7 @@ def _mode_name(*, native_int4: bool, cache_dequantized: bool) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="A/B benchmark Komodo NPU kernels against torch baselines.")
-    parser.add_argument("--device", type=int, default=0, help="NPU device index for this process. Use 0-6.")
+    parser.add_argument("--device", type=int, default=0, help="PCI-ordered NPU device index for this process.")
     parser.add_argument(
         "--cases",
         choices=(
@@ -470,8 +470,9 @@ def main() -> None:
         raise ValueError("--num-shards must be >= 1.")
     if not (0 <= args.shard_index < args.num_shards):
         raise ValueError("--shard-index must be in [0, --num-shards).")
-    if not (0 <= args.device <= 6):
-        raise ValueError("--device must be in the PCI-ordered first seven device ids: 0-6.")
+    device_count = torch.npu.device_count()
+    if not (0 <= args.device < device_count):
+        raise ValueError(f"--device must be in [0, {device_count}); got {args.device}.")
 
     if args.komodo_native_int4 is True:
         os.environ["GPTQMODEL_KOMODO_NATIVE_INT4"] = "1"

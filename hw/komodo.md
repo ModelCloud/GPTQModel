@@ -57,8 +57,10 @@ python scripts/benchmark_komodo_npu_ab.py \
   --iters 5
 ```
 
-Future accelerator benchmarks should use PCI ordering and shard over `npu:0`
-through `npu:6` only.
+Future accelerator benchmarks should use PCI ordering. For full-machine sweeps,
+use `scripts/benchmark_komodo_npu_matrix.py`; it maps one physical NPU per
+process with `ASCEND_RT_VISIBLE_DEVICES=<physical_id>` and uses logical
+`--device 0` inside each worker.
 
 Fallback and prefetch comparison commands:
 
@@ -120,6 +122,27 @@ Quick validation on `npu:0` with `--komodo-drop-source-weights` kept the native
 path active for the repeat forward and preserved the same drift envelope:
 `73.983x` without prefetch and `69.344x` with prefetch on quick GPTQ+AWQ cases.
 
+## Validation Matrix
+
+The reusable multi-NPU validation runner is:
+
+```bash
+python scripts/benchmark_komodo_npu_matrix.py \
+  --output-dir /tmp/komodo_npu_matrix \
+  --devices all
+```
+
+By default this runs the same 78-task matrix used for the 2026-04-30
+validation: one Komodo NPU test subset per physical NPU, Qwen3.6 projection
+A/B sweeps across prepack tile sizes and source-drop modes, layer-loop
+decode-style simulations across fallback/native/lookahead/prefetch modes, and
+quick fallback/native/dequant-cache comparisons. Add `--include-memory` to add
+the cold load/prepack peak-memory sweep.
+
+The 8-NPU run on this host completed with `78 passed, 0 failed` in `396.6s`.
+The follow-up AWQ layer-loop stabilization run used `--stabilize-scale 0.001`
+and completed with `14 passed, 0 failed`.
+
 ## Prepack Workspace
 
 Native prepack now chunks the GPTQ/AWQ source weights by output columns before
@@ -142,6 +165,25 @@ scratch tile is unpacked at a time. Example gate/up projections on Qwen3.6-27B
 dropped from about `1.54 GB` to about `0.24 GB` cold peak. Smaller projections
 with `out_features <= 1024` keep the full-width path because there is no useful
 tile split.
+
+The checked-in cold prepack memory benchmark is:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID ASCEND_RT_VISIBLE_DEVICES=0 \
+python scripts/benchmark_komodo_npu_prepack_memory.py \
+  --device 0 \
+  --cases qwen3_6_27b_gptq \
+  --dtype fp16 \
+  --tile-n 1024 \
+  --drop-source
+```
+
+This benchmark measures the actual cold module move/prepack path, including
+eager `post_init()` prepack after the module reaches NPU and source-buffer drop
+after the native plan is cached. A fresh run on Qwen3.6-27B GPTQ showed the
+full-width max cold peak at `1.542 GB`; `--tile-n 1024` reduced the max cold
+peak to `0.389 GB`, with `source_dropped_all=True` and
+`source_empty_all=True`.
 
 ## Qwen3.6 Shapes
 
@@ -202,6 +244,9 @@ RuntimeError: KomodoLinear currently supports only torch.float16 inference on NP
 
 ## Future Work
 
+- Autotune `GPTQMODEL_KOMODO_PREPACK_TILE_N` by projection shape and available
+  HBM. `1024` is still the default because it gives the large cold-peak memory
+  reduction without changing steady-state layout.
 - Investigate why AWQ scale ranges are much larger than GPTQ scales in these
   synthetic packed benchmarks and why that amplifies native BF16 regressions.
 - Determine whether the NPU `npu_weight_quant_batchmatmul` BF16 path has lower
@@ -210,6 +255,9 @@ RuntimeError: KomodoLinear currently supports only torch.float16 inference on NP
 - Add a real-model layer extraction benchmark once local Qwen3.6 checkpoints are
   available, so scale distributions come from actual quantized layers instead of
   synthetic random packed weights.
+- Explore lower-level CANN/torch-npu overlap for data fetch, unpack, prepack,
+  and matmul. The current prefetch/lookahead path validates scheduling behavior
+  but does not implement a fused overlapped pipeline.
 - Re-enable Komodo BF16 only when native BF16 is both fast and passes drift
   thresholds without silently doing FP16 inference and upcasting the result.
 
