@@ -13,7 +13,6 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
-from gptqmodel.nn_modules.qlinear.gptq_gemm import GPTQGemmLinear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
@@ -487,33 +486,6 @@ def test_explicit_gptq_machete_backend_selects_asymmetric_kernel(monkeypatch):
     )
 
     assert qlinear_cls is MacheteLinear
-
-
-def test_explicit_gptq_gemm_backend_selects_kernel(monkeypatch):
-    monkeypatch.setattr(
-        GPTQGemmLinear,
-        "cached_validate_once",
-        classmethod(lambda qlinear_cls: (True, None)),
-    )
-    monkeypatch.setattr(
-        GPTQGemmLinear,
-        "validate_device",
-        classmethod(lambda qlinear_cls, _device: None),
-    )
-
-    qlinear_cls = select_quant_linear(
-        bits=4,
-        group_size=128,
-        desc_act=False,
-        sym=True,
-        device=DEVICE.CUDA,
-        backend=BACKEND.GPTQ_GEMM,
-        format=FORMAT.GPTQ,
-        quant_method=METHOD.GPTQ,
-        pack_dtype=torch.int32,
-    )
-
-    assert qlinear_cls is GPTQGemmLinear
 
 
 def test_torch_fused_auto_device_prefers_xpu_or_cpu(monkeypatch):

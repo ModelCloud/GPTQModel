@@ -14,13 +14,17 @@ def test_legacy_komodo_backend_normalizes_by_quant_method():
     assert normalize_backend(BACKEND.KOMODO, quant_method=METHOD.AWQ) == BACKEND.AWQ_KOMODO
 
 
-def test_removed_mentaray_backend_names_are_rejected():
+def test_removed_backend_names_are_rejected():
     with pytest.raises(ValueError):
         normalize_backend("mentaray", quant_method=METHOD.GPTQ)
     with pytest.raises(ValueError):
         normalize_backend("gptq_mentaray")
     with pytest.raises(ValueError):
         normalize_backend("awq_mentaray")
+    with pytest.raises(ValueError):
+        normalize_backend("gptq-gemm", quant_method=METHOD.GPTQ)
+    with pytest.raises(ValueError):
+        normalize_backend("GPTQ_GEMM")
 
 
 def test_legacy_torch_backend_normalizes_by_quant_method():
@@ -38,11 +42,6 @@ def test_name_based_lookup_accepts_canonical_member_names():
     assert normalize_backend("GPTQ_MARLIN") == BACKEND.GPTQ_MARLIN
     assert normalize_backend("AWQ_GEMM_TRITON") == BACKEND.AWQ_GEMM_TRITON
     assert normalize_backend("GPTQ_KOMODO") == BACKEND.GPTQ_KOMODO
-    assert normalize_backend("GPTQ_GEMM") == BACKEND.GPTQ_GEMM
-
-
-def test_gptq_gemm_backend_accepts_hyphenated_value():
-    assert normalize_backend("gptq-gemm", quant_method=METHOD.GPTQ) == BACKEND.GPTQ_GEMM
 
 
 @pytest.mark.parametrize(
