@@ -1,11 +1,17 @@
 import copy
 import os
+import sys
 import warnings
 
 import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.gptq_processor import GPTQProcessor
+from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.looper.qqq_processor import QQQProcessor
+from gptqmodel.looper.weight_only_processor import WeightOnlyProcessor
 from gptqmodel.models._const import DEVICE, normalize_device
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
@@ -16,13 +22,19 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear, _right_shift_unpack
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.awq.utils.packing_utils import unpack_awq
+from gptqmodel.quantization.config import AWQConfig, GGUFConfig, ParoConfig, QQQConfig, QuantizeConfig
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import auto_select_device, get_kernel_for_backend, select_quant_linear
-from gptqmodel.utils.torch import HAS_NPU
+from gptqmodel.utils.torch import HAS_NPU, last_npu_device_by_pci_bus_order
 
 
-NPU_TEST_DEVICE = os.environ.get("GPTQMODEL_TEST_NPU_DEVICE", "npu:0")
+def _default_npu_test_device() -> str:
+    selected = last_npu_device_by_pci_bus_order()
+    return str(selected) if selected is not None else "npu:0"
+
+
+NPU_TEST_DEVICE = os.environ.get("GPTQMODEL_TEST_NPU_DEVICE", _default_npu_test_device())
 NPU_CPU_FALLBACK_MARKERS = (
     "not currently supported on the NPU backend",
     "fall back to run on the CPU",
@@ -30,7 +42,10 @@ NPU_CPU_FALLBACK_MARKERS = (
 
 
 def _test_npu_device() -> torch.device:
-    return torch.device(NPU_TEST_DEVICE)
+    device = torch.device(NPU_TEST_DEVICE)
+    if HAS_NPU:
+        torch.npu.set_device(device)
+    return device
 
 
 def _assert_no_npu_cpu_fallback(caught: list[warnings.WarningMessage]) -> None:
@@ -253,6 +268,58 @@ def _make_exllamav3_torch_module(*, device: torch.device | str = "cpu") -> Exlla
     ).eval()
 
 
+class _NpuProcessorModelStub:
+    def __init__(self, qlinear_kernel=None):
+        self.qlinear_kernel = qlinear_kernel
+        self.rotary_embedding = None
+        self.lm_head = "lm_head"
+        self.model = nn.Sequential()
+
+
+def _processor_common_kwargs(qcfg):
+    return {
+        "tokenizer": None,
+        "qcfg": qcfg,
+        "calibration": None,
+        "prepare_dataset_func": None,
+        "calibration_concat_size": None,
+        "calibration_sort": None,
+        "batch_size": 1,
+    }
+
+
+def _npu_select_quant_linear(qcfg, *, method: METHOD, fmt: FORMAT):
+    return select_quant_linear(
+        bits=qcfg.runtime_bits,
+        group_size=qcfg.group_size,
+        desc_act=qcfg.desc_act,
+        sym=qcfg.sym,
+        device=DEVICE.NPU,
+        backend=BACKEND.AUTO,
+        format=fmt,
+        quant_method=method,
+        pack_dtype=qcfg.pack_dtype,
+    )
+
+
+def test_last_npu_device_by_pci_bus_order_uses_visible_logical_order(monkeypatch):
+    try:
+        torch.device("npu:0")
+    except (RuntimeError, ValueError):
+        pytest.skip("This PyTorch build does not register the npu device type")
+
+    class _FakeNpu:
+        @staticmethod
+        def device_count():
+            return 3
+
+    torch_utils = sys.modules[last_npu_device_by_pci_bus_order.__module__]
+    monkeypatch.setattr(torch_utils, "HAS_NPU", True)
+    monkeypatch.setattr(torch_utils.torch, "npu", _FakeNpu())
+
+    assert str(last_npu_device_by_pci_bus_order()) == "npu:2"
+
+
 def test_npu_device_normalization():
     assert normalize_device("npu") is DEVICE.NPU
     assert normalize_device("npu:3") is DEVICE.NPU
@@ -358,6 +425,103 @@ def test_qqq_torch_backend_selects_torch_kernel():
     assert get_kernel_for_backend(BACKEND.QQQ_TORCH, METHOD.QQQ, FORMAT.QQQ) is QQQTorchLinear
 
 
+def test_npu_gptq_processor_has_torch_runtime_kernel():
+    qcfg = QuantizeConfig(bits=4, group_size=128, device=DEVICE.NPU, offload_to_disk=False)
+    processor = GPTQProcessor(**_processor_common_kwargs(qcfg))
+
+    assert processor.name() == "gptq"
+    assert processor.execution_config.require_fwd is True
+    assert _npu_select_quant_linear(qcfg, method=METHOD.GPTQ, fmt=FORMAT.GPTQ) is TorchLinear
+
+
+def test_npu_awq_processor_selects_torch_runtime_kernel():
+    qcfg = AWQConfig(bits=4, group_size=128, device=DEVICE.NPU, offload_to_disk=False)
+    model_stub = _NpuProcessorModelStub()
+    processor = AWQProcessor(
+        **_processor_common_kwargs(qcfg),
+        gptq_model=model_stub,
+        model=model_stub.model,
+    )
+
+    assert processor.name() == "awq"
+    assert processor.execution_config.enable_activation_capture is True
+    assert processor.qlinear_kernel is AwqTorchLinear
+    assert _npu_select_quant_linear(qcfg, method=METHOD.AWQ, fmt=FORMAT.GEMM) is AwqTorchLinear
+
+
+def test_npu_paroquant_processor_has_torch_runtime_kernel():
+    qcfg = ParoConfig(
+        bits=4,
+        group_size=128,
+        device=DEVICE.NPU,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=1,
+        offload_to_disk=False,
+    )
+    model_stub = _NpuProcessorModelStub()
+    processor = ParoQuantProcessor(
+        **_processor_common_kwargs(qcfg),
+        gptq_model=model_stub,
+        model=model_stub.model,
+    )
+
+    assert processor.name() == "paroquant"
+    assert processor.execution_config.enable_activation_capture is True
+    assert processor.qlinear_kernel is ParoLinear
+    assert _npu_select_quant_linear(qcfg, method=METHOD.PARO, fmt=FORMAT.PAROQUANT) is ParoLinear
+
+
+def test_npu_qqq_processor_selects_torch_runtime_kernel():
+    qcfg = QQQConfig(bits=4, group_size=128, device=DEVICE.NPU, offload_to_disk=False)
+    processor = QQQProcessor(**_processor_common_kwargs(qcfg))
+    qlinear_cls, backend = processor._quant_linear_kernel()
+
+    assert processor.name() == "qqq"
+    assert qlinear_cls is QQQTorchLinear
+    assert backend is BACKEND.QQQ_TORCH
+    assert _npu_select_quant_linear(qcfg, method=METHOD.QQQ, fmt=FORMAT.QQQ) is QQQTorchLinear
+
+
+def test_npu_gguf_weight_only_processor_has_torch_runtime_kernel():
+    qcfg = GGUFConfig(bits="q4_0", device=DEVICE.NPU, offload_to_disk=False)
+    processor = WeightOnlyProcessor(tokenizer=None, qcfg=qcfg)
+
+    assert processor.name() == "weight_only_gguf"
+    assert processor.execution_config.require_fwd is False
+    assert _npu_select_quant_linear(qcfg, method=METHOD.GGUF, fmt=FORMAT.GGUF) is GGUFTorchLinear
+
+
+def test_npu_supported_quant_methods_have_torch_runnable_kernel():
+    cases = [
+        (METHOD.GPTQ, FORMAT.GPTQ, 4, 128, TorchLinear),
+        (METHOD.AWQ, FORMAT.GEMM, 4, 128, AwqTorchLinear),
+        (METHOD.PARO, FORMAT.PAROQUANT, 4, 128, ParoLinear),
+        (METHOD.GGUF, FORMAT.GGUF, "q4_0", -1, GGUFTorchLinear),
+        (METHOD.QQQ, FORMAT.QQQ, 4, 128, QQQTorchLinear),
+    ]
+    for method, fmt, bits, group_size, expected_cls in cases:
+        qlinear_cls = select_quant_linear(
+            bits=bits,
+            group_size=group_size,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.NPU,
+            backend=BACKEND.AUTO,
+            format=fmt,
+            quant_method=method,
+            pack_dtype=torch.int32,
+        )
+        assert qlinear_cls is expected_cls
+        assert DEVICE.ALL in qlinear_cls.SUPPORTS_DEVICES or DEVICE.NPU in qlinear_cls.SUPPORTS_DEVICES
+
+
+def test_npu_exl3_has_torch_runtime_kernel():
+    module = _make_exllamav3_torch_module()
+
+    assert isinstance(module, ExllamaV3TorchLinear)
+    assert module.QUANT_TYPE == "exl3"
+
+
 def test_npu_does_not_advertise_fp8_torch_until_cann_supports_float8():
     assert DEVICE.ALL not in TorchFP8Linear.SUPPORTS_DEVICES
     assert DEVICE.NPU not in TorchFP8Linear.SUPPORTS_DEVICES
@@ -365,6 +529,7 @@ def test_npu_does_not_advertise_fp8_torch_until_cann_supports_float8():
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 def test_npu_awq_unpack_preserves_pack_dimension():
+    device = _test_npu_device()
     qweight_cpu = torch.tensor(
         [[0, 1, -1], [-2147483648, 2147483647, -123456789]],
         dtype=torch.int32,
@@ -373,8 +538,8 @@ def test_npu_awq_unpack_preserves_pack_dimension():
         [[-1, 0, 123456789], [2147483647, -2147483648, 7]],
         dtype=torch.int32,
     )
-    qweight = qweight_cpu.to("npu:0")
-    qzeros = qzeros_cpu.to("npu:0")
+    qweight = qweight_cpu.to(device)
+    qzeros = qzeros_cpu.to(device)
 
     iweight, izeros = unpack_awq(qweight, qzeros, bits=4)
     shifts = torch.arange(0, 32, 4, dtype=torch.int32)
@@ -391,6 +556,7 @@ def test_npu_awq_unpack_preserves_pack_dimension():
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 def test_npu_torch_gptq_unpack_preserves_pack_dimension():
+    device = _test_npu_device()
     qweight_cpu = torch.tensor(
         [
             [0, 1, -1],
@@ -400,8 +566,8 @@ def test_npu_torch_gptq_unpack_preserves_pack_dimension():
         ],
         dtype=torch.int32,
     )
-    qweight = qweight_cpu.to("npu:0")
-    shifts = torch.arange(0, 32, 4, dtype=torch.int32, device="npu:0").view(1, 8, 1)
+    qweight = qweight_cpu.to(device)
+    shifts = torch.arange(0, 32, 4, dtype=torch.int32, device=device).view(1, 8, 1)
 
     unpacked = _right_shift_unpack(
         qweight.unsqueeze(1).expand(-1, 8, -1),

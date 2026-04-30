@@ -781,6 +781,11 @@ class BaseQModel(nn.Module):
                 quant_device_type = str(quant_device).split(":")[0].lower()
 
             if export_quant_method == METHOD.AWQ:
+                if quant_device_type == "npu" and format_code != FORMAT.GEMM:
+                    raise ValueError(
+                        "NPU AWQ quantization requires FORMAT.GEMM so the AwqTorchLinear runtime can run on NPU; "
+                        f"actual format is `{format_code}`."
+                    )
                 if format_code == FORMAT.GEMM:
                     # Weight-only RTN->AWQ export should stay on the portable torch kernel.
                     preferred_backend = (
@@ -2938,8 +2943,8 @@ class BaseQModel(nn.Module):
         def _find_parents(module, possible_names):
             found = set()
             for n, _ in module.named_children():
-                l = n.lower()
-                if any(k in l for k in possible_names):
+                lowered_name = n.lower()
+                if any(k in lowered_name for k in possible_names):
                     found.add(n)
             return found
 

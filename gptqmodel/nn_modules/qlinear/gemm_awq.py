@@ -13,7 +13,6 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.utils import get_best_device
 from ...utils.awq import awq_dequantize_weights, awq_gemm_forward, awq_runtime_available, awq_runtime_error
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
@@ -229,7 +228,7 @@ class AwqGEMMLinear(AWQuantLinear):
         intweight = intweight.t().contiguous()
         intweight = intweight.to(dtype=torch.int32)
 
-        best_device = get_best_device()
+        best_device = str(linear.weight.device)
 
         # Avoid: The operator 'aten::__lshift__.Scalar' is not currently implemented for the MPS device
         if "mps" in best_device:

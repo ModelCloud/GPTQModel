@@ -18,15 +18,15 @@ from torch.nn import Module
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import SUPPORTS_MODULE_TYPES
+from ..models._const import DEVICE, SUPPORTS_MODULE_TYPES
 from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
+from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
-from ..quantization.awq.utils.utils import get_best_device
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.ctx import ctx
@@ -38,6 +38,18 @@ from ..utils.module_locks import parent_module_lock
 from ..utils.torch import CPU
 
 log = setup_logger()
+
+
+def _resolve_module_exec_device(module: nn.Module) -> torch.device:
+    """Prefer a module's planned target device, then fall back to its current device."""
+
+    target_device = getattr(module, "target_device", None)
+    if target_device is not None:
+        try:
+            return torch.device(target_device)
+        except (TypeError, RuntimeError, ValueError):
+            pass
+    return get_device(module)
 
 
 @dataclass
@@ -272,12 +284,31 @@ class AWQProcessor(LoopProcessor):
 
         raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
 
+    def _quant_device_is_npu(self) -> bool:
+        """Return whether this processor is quantizing for an Ascend NPU runtime."""
+
+        device = getattr(self.qcfg, "device", None)
+        if isinstance(device, DEVICE):
+            return device == DEVICE.NPU
+        if isinstance(device, torch.device):
+            return device.type == "npu"
+        if isinstance(device, str):
+            return device.split(":", 1)[0].lower() == "npu"
+        return False
+
     def _select_qlinear_kernel_for_format(self, format_value: FORMAT):
         """Maps the resolved AWQ format to its concrete quantized linear kernel."""
 
         fmt = FORMAT(format_value) if not isinstance(format_value, FORMAT) else format_value
         if fmt == FORMAT.GEMM:
+            if self._quant_device_is_npu():
+                return AwqTorchLinear
             return AwqGEMMLinear
+        if self._quant_device_is_npu():
+            raise ValueError(
+                "NPU AWQ quantization requires FORMAT.GEMM so the AwqTorchLinear runtime can run on NPU; "
+                f"actual format is `{fmt}`."
+            )
         if fmt == FORMAT.GEMV:
             return AwqGEMVLinear
         if fmt == FORMAT.GEMV_FAST:
@@ -1190,13 +1221,16 @@ class AWQProcessor(LoopProcessor):
             if any([_ in name for _ in avoid_clipping]):
                 continue
 
-            named_linears[name].to(get_best_device())
+            linear = named_linears[name]
+            original_device = get_device(linear)
+            target_device = _resolve_module_exec_device(linear)
+            move_to(linear, device=target_device)
 
             max_val = self._compute_best_clip(
-                named_linears[name].weight, input_feat[name]
+                linear.weight, input_feat[name]
             )
             clip_list.append((name, max_val))
-            named_linears[name].cpu()
+            move_to(linear, device=original_device)
 
         return clip_list
 
@@ -1302,7 +1336,7 @@ class AWQProcessor(LoopProcessor):
 
         scales = scales.view(org_w_shape[0], -1)
 
-        # Symmetric quantization produces signed int values (e.g. int4 ∈ [-8, 7]),
+        # Symmetric quantization produces signed int values (e.g. int4 in [-8, 7]),
         # which cannot be packed directly. To make it packable, we shift the signed
         # representation to unsigned by adding 2^(bits-1), i.e. q_u = q_s + 2^(bits-1).
         # This is equivalent to using an affine form with zero_point = 2^(bits-1),
@@ -1672,7 +1706,7 @@ class AWQProcessor(LoopProcessor):
             self.draw_progress(base_title)
 
             linear_layer = self.resolve_quant_source_module(named_module)
-            linear_layer = linear_layer.to(get_best_device())
+            move_to(linear_layer, device=_resolve_module_exec_device(linear_layer))
 
             tp_info = named_module.state.get("tp_pad_info")
             pad_cols = 0
@@ -1820,11 +1854,7 @@ class AWQProcessor(LoopProcessor):
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports whether preprocessing excluded this module from AWQ work."""
 
-        t = self.tasks.get(module.name, False)
-        if t == False:
-            return True
-        else:
-            return False
+        return not self.tasks.get(module.name, False)
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that caches module input activations for AWQ."""

@@ -152,6 +152,13 @@ tests/models:
   test_ling_2_6_flash_support:
     - flash-linear-attention
 
+test_nemotron_omni_support.py:
+    - einops
+    - timm
+    - open-clip-torch
+    - librosa
+    - mamba_ssm
+
 tests/models/awq:
   test_qwen3_8b_base_awq.py:
     - peft
