@@ -25,6 +25,9 @@ weight caching by default and restricting Komodo inference to FP16.
   dequantized weight. `GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED=0` disables the
   grouped fusion, and `GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS`
   caps the grouped temporary output size before falling back to the loop path.
+  For small output widths, group-size 16 also folds bias into the grouped op via
+  a bias-only group tensor. `GPTQMODEL_KOMODO_NATIVE_GROUP16_FUSE_BIAS_MAX_N`
+  controls the width cutoff and defaults to `2048`.
 - Unsupported native int4 layouts use the exact Torch fallback. Dense
   dequantized fallback weight caching stays off by default, but can be enabled
   for debugging with `GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE=1`.

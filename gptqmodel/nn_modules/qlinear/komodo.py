@@ -30,6 +30,7 @@ _KOMODO_FUSE_BIAS_ENV = "GPTQMODEL_KOMODO_FUSE_BIAS"
 _KOMODO_NATIVE_GROUP16_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16"
 _KOMODO_NATIVE_GROUP16_GROUPED_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED"
 _KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS"
+_KOMODO_NATIVE_GROUP16_FUSE_BIAS_MAX_N_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16_FUSE_BIAS_MAX_N"
 _KOMODO_NATIVE_FALLBACK_CACHE_ENV = "GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE"
 _NativePlan = tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor | None]
 _NativeGroup16Plan = tuple[
@@ -39,6 +40,7 @@ _NativeGroup16Plan = tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor | None,
     torch.Tensor | None,
 ]
 
@@ -75,6 +77,16 @@ def _native_group16_grouped_max_elements() -> int:
         return int(raw)
     except ValueError as err:
         raise RuntimeError(f"{_KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS_ENV} must be an integer; got `{raw}`.") from err
+
+
+def _native_group16_fuse_bias_max_n() -> int:
+    raw = os.getenv(_KOMODO_NATIVE_GROUP16_FUSE_BIAS_MAX_N_ENV)
+    if raw is None:
+        return 2048
+    try:
+        return int(raw)
+    except ValueError as err:
+        raise RuntimeError(f"{_KOMODO_NATIVE_GROUP16_FUSE_BIAS_MAX_N_ENV} must be an integer; got `{raw}`.") from err
 
 
 def _native_fallback_cache_enabled() -> bool:
@@ -759,7 +771,23 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         packed_stack = torch.stack(packed_groups).contiguous()
         scale_stack = torch.stack(scale_groups).contiguous()
         offset_stack = torch.stack(offset_groups).contiguous()
-        return tuple(packed_groups), scale_groups, offset_groups, packed_stack, scale_stack, offset_stack, input_perm
+        bias_stack = None
+        if self.bias is not None:
+            max_bias_n = _native_group16_fuse_bias_max_n()
+            if max_bias_n <= 0 or self.out_features <= max_bias_n:
+                bias = self.bias.to(device=device, dtype=dtype).contiguous()
+                bias_stack = torch.zeros((group_count, self.out_features), dtype=dtype, device=device)
+                bias_stack[0].copy_(bias)
+        return (
+            tuple(packed_groups),
+            scale_groups,
+            offset_groups,
+            packed_stack,
+            scale_stack,
+            offset_stack,
+            bias_stack,
+            input_perm,
+        )
 
     def _native_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativePlan:
         key = self._native_key(device=device, dtype=dtype)
@@ -867,6 +895,7 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             packed_stack,
             scale_stack,
             offset_stack,
+            bias_stack,
             input_perm,
         ) = self._native_group16_plan(
             device=x_flat.device, dtype=compute_dtype
@@ -877,6 +906,7 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         group_size = 16
         group_count = len(packed_groups)
         rows = x_flat.shape[0]
+        fused_bias = False
         if self._can_use_native_group16_grouped(rows=rows, group_count=group_count):
             self._native_group16_last_path = "grouped"
             x_groups = x_flat.reshape(rows, group_count, group_size).transpose(0, 1).contiguous()
@@ -885,9 +915,11 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
                 rows=rows,
                 group_count=group_count,
             )
+            fused_bias = bias_stack is not None and _fuse_bias_enabled()
             out_groups = torch.ops.npu.npu_grouped_matmul(
                 [x_groups.reshape(rows * group_count, group_size)],
                 [packed_stack],
+                bias=[bias_stack] if fused_bias else None,
                 antiquant_scale=[scale_stack],
                 antiquant_offset=[offset_stack],
                 group_list=group_list,
@@ -927,7 +959,7 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
                 out_acc = partial if out_acc is None else out_acc.add_(partial)
             out = out_acc.to(dtype=compute_dtype).reshape(out_shape)
 
-        if self.bias is not None:
+        if self.bias is not None and not fused_bias:
             bias = self.bias
             if bias.device != out.device or bias.dtype != out.dtype:
                 bias = bias.to(device=out.device, dtype=out.dtype)
