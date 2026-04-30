@@ -149,6 +149,13 @@ tests/models:
   test_internvl_chat.py:
     - timm
 
+  test_nemotron_omni_support.py:
+    - einops
+    - timm
+    - open-clip-torch
+    - librosa
+    - mamba_ssm
+
 tests/models/awq:
   test_qwen3_8b_base_awq.py:
     - peft
