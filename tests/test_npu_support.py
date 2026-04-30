@@ -17,6 +17,12 @@ from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.komodo import AwqKomodoLinear, KomodoLinear, _native_int4_enabled
+import gptqmodel.nn_modules.qlinear.komodo_cann as komodo_cann_module
+from gptqmodel.nn_modules.qlinear.komodo_cann import (
+    AwqKomodoCannLinear,
+    KomodoCannLinear,
+    _komodo_cann_tiling_plan,
+)
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, _right_shift_unpack
@@ -47,6 +53,111 @@ def test_komodo_native_int4_default_enabled(monkeypatch):
     assert _native_int4_enabled()
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "0")
     assert not _native_int4_enabled()
+
+
+def test_komodo_cann_tiling_plan_uses_split_k_for_decode_large_k(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_SPLIT_K", raising=False)
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_PREFETCH", raising=False)
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", raising=False)
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_V3", raising=False)
+    plan = _komodo_cann_tiling_plan(
+        rows=1,
+        in_features=8192,
+        out_features=1024,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+
+    assert plan.split_k > 1
+    assert plan.base_k == 64
+    assert plan.split_k_shard_k == plan.in_features // plan.split_k
+    assert plan.int4_values_per_int32 == 8
+    assert plan.packed_int4_tile_bytes == plan.base_k * plan.base_n // 2
+    assert plan.dequant_fp16_tile_bytes == plan.base_k * plan.base_n * 2
+    assert plan.vector_dequant_tasks == (plan.out_features // plan.base_n) * plan.split_k * plan.k_tiles_per_split
+    assert plan.active_cores == min(plan.cube_cores, plan.split_k * 4)
+    assert plan.strategy == "planned_split_k_aiv_dequant_aic_matmul"
+    assert not plan.prefetch_enabled
+    assert plan.fused_enabled
+    assert plan.fused_supported
+    assert not plan.fused_available
+    assert plan.fused_reason == "op_not_registered"
+    assert plan.inner_precise == 0
+
+
+def test_komodo_cann_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_INNER_PRECISE", raising=False)
+
+    liked = _komodo_cann_tiling_plan(
+        rows=1,
+        in_features=5120,
+        out_features=6144,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+    narrow_decode = _komodo_cann_tiling_plan(
+        rows=1,
+        in_features=5120,
+        out_features=1024,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+    balanced = _komodo_cann_tiling_plan(
+        rows=1,
+        in_features=4096,
+        out_features=4096,
+        group_size=128,
+        device=torch.device("cpu"),
+    )
+
+    assert liked.inner_precise == 1
+    assert narrow_decode.inner_precise == 0
+    assert balanced.inner_precise == 0
+
+
+def test_komodo_cann_tiling_plan_requires_registered_fused_op(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_V3", raising=False)
+
+    with pytest.raises(RuntimeError, match="fused W4A16 op"):
+        _komodo_cann_tiling_plan(
+            rows=1,
+            in_features=8192,
+            out_features=1024,
+            group_size=32,
+            device=torch.device("cpu"),
+        )
+
+
+def test_komodo_cann_tiling_plan_reports_v3_autoload_failure(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED", "1")
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", raising=False)
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_V3", "1")
+    monkeypatch.setattr(komodo_cann_module, "_try_load_komodo_cann_v3", lambda: False)
+    monkeypatch.setattr(komodo_cann_module, "_FUSED_OP_CACHE", komodo_cann_module._FUSED_OP_UNSET)
+    monkeypatch.setattr(komodo_cann_module, "_FUSED_OP_CACHE_KEY", None)
+
+    plan = _komodo_cann_tiling_plan(
+        rows=1,
+        in_features=8192,
+        out_features=1024,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+
+    assert plan.fused_enabled
+    assert plan.fused_supported
+    assert not plan.fused_available
+    assert plan.fused_reason == "v3_extension_unavailable"
 
 
 def _test_npu_device() -> torch.device:
@@ -438,6 +549,34 @@ def test_npu_explicit_komodo_selects_gptq_and_awq():
 
     assert gptq_cls is KomodoLinear
     assert awq_cls is AwqKomodoLinear
+
+
+def test_npu_explicit_komodo_cann_selects_gptq_and_awq():
+    gptq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.NPU,
+        backend=BACKEND.KOMODO_CANN,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+    awq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.NPU,
+        backend=BACKEND.KOMODO_CANN,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert gptq_cls is KomodoCannLinear
+    assert awq_cls is AwqKomodoCannLinear
 
 
 @pytest.mark.parametrize(
@@ -889,6 +1028,48 @@ def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
         lookahead = next_candidate(x)
         torch.npu.synchronize()
     torch.testing.assert_close(lookahead.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16])
+def test_npu_komodo_cann_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_PREPACK_TILE_N", "16")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_PREFETCH", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_PREFETCH_MIN_BYTES", "0")
+    baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=32).eval()
+    candidate = KomodoCannLinear(
+        bits=4,
+        group_size=baseline_cpu.requested_group_size,
+        sym=baseline_cpu.sym,
+        desc_act=baseline_cpu.desc_act,
+        in_features=baseline_cpu.in_features,
+        out_features=baseline_cpu.out_features,
+        bias=baseline_cpu.bias is not None,
+        pack_dtype=baseline_cpu.pack_dtype,
+        register_buffers=True,
+    )
+    _copy_matching_buffers(candidate, baseline_cpu)
+    candidate.optimized = True
+    candidate.post_init()
+    baseline = baseline_cpu.to(_test_npu_device()).eval()
+    candidate = candidate.to(_test_npu_device(), dtype=dtype).eval()
+    assert candidate.backend == BACKEND.GPTQ_KOMODO_CANN
+    assert candidate.native_plan_prepacked(device=_test_npu_device(), dtype=dtype)
+
+    x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
+    with torch.inference_mode():
+        expected = baseline(x)
+        actual = candidate(x)
+        repeat = candidate(x)
+        torch.npu.synchronize()
+
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    assert (x.device, dtype) in candidate._native_plan_cache
+    assert candidate._last_cann_plan is not None
+    assert candidate._last_cann_plan.prefetch_enabled
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")

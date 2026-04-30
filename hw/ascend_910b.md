@@ -410,6 +410,110 @@ FlashMLA:
   possible, and choose NZ/paged cache layouts that let Cube reuse K/V without
   repeated vector-side conversion.
 
+## Follow-up Kernel Search and Strategy Notes
+
+Additional public sources checked after the first pass show a clear pattern:
+Ascend NPUs need hardware-specific kernels when the workload crosses AIC/AIV
+boundaries, repeatedly touches GM, depends on paged KV cache, or needs static
+graph-friendly decode behavior. Generic PyTorch/Torch-NPU fallbacks can be good
+for broad coverage, but the public optimization work is concentrated around
+fusing multi-step LLM blocks into fewer CANN operators.
+
+### Why Ascend-specific kernels are worth writing
+
+- The AIC/Cube and AIV/Vector split means CPU/GPU-style fusion intuition is not
+  enough. A fusion that looks good on CUDA can become slower on 910B if it forces
+  extra GM/L2 exchange between vector and cube phases.
+- Decode is usually memory-bound. A-IO's 2026 Ascend 910B paper calls out
+  autoregressive decode as a memory-bound NPU deployment problem and notes that
+  fine-grained speculative decoding can suffer graph/kernel synchronization
+  overhead.
+- FastAttention reports that an Ascend adaptation needed NPU-specific two-level
+  tiling, tiling masks, and tiling-AllReduce instead of a direct FlashAttention
+  port.
+- AMLA reports Ascend-specific MLA wins from replacing part of FlashAttention
+  rescaling with integer-add logic plus a preload pipeline and hierarchical
+  tiling. The transferable idea is to reduce scalar/vector rescale overhead and
+  overlap movement with Cube work.
+- AscendOptimizer's 2026 paper frames Ascend optimization as a coupled problem:
+  host-side tiling/data movement plus kernel-side instruction scheduling. Treat
+  tiling search and kernel rewrite as one loop, not as independent tasks.
+
+### Additional public kernel sources to mine
+
+- TileLang-Ascend:
+  - Supports Ascend C/PTO and AscendNPU IR backends.
+  - Public docs show GEMM examples with explicit L1/L0A/L0B/L0C allocation,
+    layout annotations, L2 swizzling, pipelining, and manual cross-scope sync.
+  - It also lists Flash Attention, Sparse Flash Attention, LightningIndexer,
+    TopK Selector, ACLGraph examples, and 2026 DeepSeek V4 kernel releases.
+  - Useful tactic to steal: use a DSL to generate candidate tile schedules, then
+    inspect the lowered Ascend C/PTO for SRAM size, layout, and sync correctness.
+- llama.cpp CANN backend:
+  - Uses AscendC and ACLNN through CANN.
+  - Public docs list 910B support for Atlas A2 and Q4_0/Q8_0 model support.
+  - Useful as a reference for lower-level quantized LLM inference integration
+    outside PyTorch/vLLM.
+- LMCache-Ascend:
+  - Public repo contains `csrc` and a KV-cache ops submodule.
+  - It integrates with vLLM-Ascend and SGLang, and its blog says it replaces
+    generic PyTorch/C++ operation bindings with Ascend NPU-specific kernels and
+    Ascend-aware memory management.
+  - Useful for KV transfer/cache movement, especially prefill-decode
+    disaggregation and cache offload/reuse.
+- KsanaLLM:
+  - Builds an Ascend path with `WITH_CUDA=OFF` and `WITH_ACL=ON`.
+  - Worth mining later for ACL integration and scheduler/memory-management
+    choices, though the public landing page exposes fewer kernel details than
+    SGLang-Kernel-NPU or vLLM-Ascend.
+- ascend-rs:
+  - Not an LLM inference engine, but useful for safety and reproducibility.
+  - Public docs show Ascend 910B examples, PTO/AscendC lowering, double-buffered
+    softmax, and tooling that catches UB capacity overflow and aliasing bugs.
+  - Useful lesson: add a static/kernel-lowering check for UB high-water mark,
+    tile aliasing, dead tiles, and target SoC mismatch; C++ compilation alone may
+    not catch these mistakes.
+
+### Extra optimization motifs from Huawei CANN docs
+
+- Prefer `DataCopyParams`/strided `DataCopy` over manual loops. Huawei's example
+  moves 16 rows of 2 KB each as a single 32 KB strided operation instead of 16
+  separate 2 KB copies.
+- Use `SetL2CacheHint` on `GlobalTensor`:
+  - Keep reused tensors cacheable.
+  - Disable L2 for one-shot streaming inputs/outputs so they do not evict reused
+    tiles.
+- Use Matmul `enAtomic=1` when the next operation is `C + D` in GM. Huawei's
+  example avoids bringing C and D into UB for a separate Add and reports a 12.4%
+  cycle reduction on one M=64, N=256, K=256 case.
+- In MIX AIC/AIV kernels, prefer `Iterate<false>` or `IterateAll<false>` async
+  interfaces when applicable. Huawei documents that sync Iterate sends a message
+  from AIV to AIC on every call, while async sends once and reduces cross-core
+  interaction. Async usage needs workspace.
+- Treat L2 split/swizzle as part of tiling. TileLang-Ascend's high-performance
+  GEMM examples explicitly use L2 cache swizzling; Huawei CANN best practices
+  list L2 Cache tiling and inter-core load balancing as tiling optimizations.
+- Use graph capture for decode only after shapes and stream counts are stable.
+  vLLM-Ascend and SGLang both use graph paths, but both ecosystems expose shape,
+  stream, and workspace caveats.
+- For attention/MLA, optimize the layout first:
+  - Keep paged KV block size aligned with backend expectations, commonly 128 in
+    vLLM-Ascend/SGLang paths.
+  - Prefer NZ/FIA-compatible paths when using Ascend fused infer attention.
+  - Fuse RMSNorm, dequant, projections, RoPE, and cache write when possible.
+- For MoE, avoid a "torch loop over experts":
+  - Route tokens once, pack by expert, then use grouped matmul or fused
+    dispatch-FFN-combine kernels.
+  - Keep routing/top-k on NPU with `npu_moe_gating_top_k*` or custom Ascend C.
+  - Use low-precision dispatch payloads where accuracy allows, then BF16 combine.
+- For custom quant kernels, make the first target a fused data-movement win, not
+  a novel math instruction:
+  - Avoid writing full dequantized weights to GM.
+  - Dequant per K tile and consume immediately.
+  - Cache small/reused matrices in L1; stream only the large side.
+  - Benchmark Split-K only for tiny decode batches where it hides latency more
+    than it adds reduction traffic.
+
 ## Practical CANN Kernel Checklist for 910B
 
 1. Query hardware:
@@ -464,6 +568,16 @@ Hardware and CANN:
   https://www.hiascend.com/document/detail/en/canncommercial/800/apiref/ascendcopapi/atlasascendc_api_07_0673.html
 - Huawei CANN `GetCoreMemSize` docs:
   https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha001/API/ascendcopapi/atlasascendc_api_07_1034.html
+- Huawei CANN efficient DataCopy best practice:
+  https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha002/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_0015.html
+- Huawei CANN L2 CacheMode best practice:
+  https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha002/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_00014.html
+- Huawei CANN double-buffer best practice:
+  https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha002/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_0033.html
+- Huawei CANN async Matmul Iterate best practice:
+  https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_0034.html
+- Huawei CANN Matmul AtomicAdd best practice:
+  https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_0029.html
 - Arthur Chiao, Ascend 910B notes:
   https://arthurchiao.art/blog/gpu-advanced-notes-2-zh/
 - WareDB Ascend 910B page, lower confidence because values conflict with CSET
@@ -473,9 +587,20 @@ Hardware and CANN:
   https://openreview.net/pdf?id=wPepcNWMhs
 - arXiv, "W4A16 Mixed-Precision Matrix Multiplication on Decoupled Architecture":
   https://arxiv.org/abs/2601.16536
+- arXiv, "FastAttention: Extend FlashAttention2 to NPUs and Low-resource GPUs":
+  https://arxiv.org/abs/2410.16663
+- arXiv, "AMLA: MUL by ADD in FlashAttention Rescaling":
+  https://arxiv.org/abs/2509.25224
+- arXiv, "A-IO: Adaptive Inference Orchestration for Memory-Bound NPUs":
+  https://arxiv.org/abs/2604.09752
 - arXiv, "AscendCraft: Automatic Ascend NPU Kernel Generation via DSL-Guided
   Transcompilation":
   https://arxiv.org/abs/2601.22760
+- arXiv, "AscendOptimizer: Episodic Agent for Ascend NPU Operator Optimization":
+  https://arxiv.org/abs/2603.23566
+- arXiv, "AscendKernelGen: A Systematic Study of LLM-Based Kernel Generation
+  for Neural Processing Units":
+  https://arxiv.org/abs/2601.07160
 
 Frameworks and kernels:
 
@@ -491,6 +616,16 @@ Frameworks and kernels:
   https://github.com/sgl-project/sglang
 - SGLang-Kernel-NPU:
   https://github.com/sgl-project/sgl-kernel-npu
+- TileLang-Ascend:
+  https://github.com/tile-ai/tilelang-ascend
+- llama.cpp CANN backend:
+  https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/CANN.md
+- LMCache-Ascend:
+  https://github.com/LMCache/LMCache-Ascend
+- KsanaLLM:
+  https://github.com/Tencent/KsanaLLM
+- ascend-rs:
+  https://ascend-rs.org/en/appendix/appendix-j-reproducible-examples.html
 - DeepSeek-V3:
   https://github.com/deepseek-ai/DeepSeek-V3
 - DeepEP:

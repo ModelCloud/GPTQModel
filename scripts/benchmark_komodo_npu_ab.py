@@ -23,6 +23,12 @@ from gptqmodel.nn_modules.qlinear.komodo import (
     _drop_source_weights_enabled,
     _native_int4_enabled,
 )
+from gptqmodel.nn_modules.qlinear.komodo_cann import (
+    AwqKomodoCannLinear,
+    KomodoCannLinear,
+    _komodo_cann_prefetch_enabled,
+    komodo_cann_plan_asdict,
+)
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.utils.torch import HAS_NPU
@@ -177,6 +183,7 @@ def _make_gptq_pair(
     seed: int,
     *,
     cache_dequantized: bool,
+    candidate_cls=KomodoLinear,
 ):
     torch.manual_seed(seed)
     bits = 4
@@ -209,7 +216,7 @@ def _make_gptq_pair(
     baseline.enable_weight_cache(False)
     baseline.eval()
 
-    candidate = KomodoLinear(
+    candidate = candidate_cls(
         bits=bits,
         group_size=case.group_size,
         sym=False,
@@ -236,6 +243,7 @@ def _make_awq_pair(
     seed: int,
     *,
     cache_dequantized: bool,
+    candidate_cls=AwqKomodoLinear,
 ):
     torch.manual_seed(seed)
     bits = 4
@@ -256,7 +264,7 @@ def _make_awq_pair(
         dtype=dtype,
         register_buffers=True,
     )
-    candidate = AwqKomodoLinear(
+    candidate = candidate_cls(
         bits=bits,
         group_size=case.group_size,
         sym=True,
@@ -317,9 +325,12 @@ def _run_case(
     cache_dequantized: bool,
     native_int4: bool,
     prefetch_native_plan: bool,
+    komodo_cann: bool,
     drop_source_weights: bool,
 ) -> dict:
     dtype = _dtype(case.dtype)
+    gptq_candidate_cls = KomodoCannLinear if komodo_cann else KomodoLinear
+    awq_candidate_cls = AwqKomodoCannLinear if komodo_cann else AwqKomodoLinear
     if case.method == "gptq":
         baseline, candidate = _make_gptq_pair(
             case,
@@ -327,6 +338,7 @@ def _run_case(
             device=device,
             seed=seed,
             cache_dequantized=cache_dequantized,
+            candidate_cls=gptq_candidate_cls,
         )
     elif case.method == "awq":
         baseline, candidate = _make_awq_pair(
@@ -335,6 +347,7 @@ def _run_case(
             device=device,
             seed=seed,
             cache_dequantized=cache_dequantized,
+            candidate_cls=awq_candidate_cls,
         )
     else:
         raise ValueError(f"Unsupported method `{case.method}`.")
@@ -387,9 +400,13 @@ def _run_case(
         "device": str(device),
         "baseline": baseline.__class__.__name__,
         "candidate": candidate.__class__.__name__,
+        "komodo_kernel": "komodo_cann" if komodo_cann else "komodo",
+        "komodo_cann_plan": komodo_cann_plan_asdict(getattr(candidate, "_last_cann_plan", None)),
+        "komodo_cann_path": getattr(candidate, "_last_cann_path", None),
         "komodo_dequant_cache": cache_dequantized,
         "komodo_native_int4": native_int4,
         "komodo_prefetch_native_plan": prefetch_native_plan,
+        "komodo_cann_prefetch": bool(_komodo_cann_prefetch_enabled()) if komodo_cann else False,
         "komodo_drop_source_weights": drop_source_weights,
         "komodo_source_dropped": bool(getattr(candidate, "_native_source_dropped", False)),
         "komodo_prefetched": prefetched,
@@ -478,6 +495,26 @@ def main() -> None:
         help="When native int4 is active, prebuild the packed NPU plan on a side stream before first forward.",
     )
     parser.add_argument(
+        "--komodo-cann",
+        action="store_true",
+        help="Use the separate Komodo-CANN kernel class instead of the plain Komodo kernel.",
+    )
+    parser.add_argument(
+        "--komodo-cann-prefetch",
+        action="store_true",
+        help="Enable Komodo-CANN host-issued npu_prefetch probes. Only applies with --komodo-cann.",
+    )
+    parser.add_argument(
+        "--komodo-cann-prefetch-max-bytes",
+        type=int,
+        help="Override GPTQMODEL_KOMODO_CANN_PREFETCH_MAX_BYTES for the Komodo-CANN kernel.",
+    )
+    parser.add_argument(
+        "--komodo-cann-prefetch-min-bytes",
+        type=int,
+        help="Override GPTQMODEL_KOMODO_CANN_PREFETCH_MIN_BYTES for the Komodo-CANN kernel.",
+    )
+    parser.add_argument(
         "--komodo-drop-source-weights",
         dest="komodo_drop_source_weights",
         action="store_true",
@@ -522,8 +559,16 @@ def main() -> None:
         os.environ["GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"] = "1"
     elif args.komodo_drop_source_weights is False:
         os.environ["GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"] = "0"
+    if args.komodo_cann_prefetch:
+        os.environ["GPTQMODEL_KOMODO_CANN_PREFETCH"] = "1"
+    if args.komodo_cann_prefetch_max_bytes is not None:
+        os.environ["GPTQMODEL_KOMODO_CANN_PREFETCH_MAX_BYTES"] = str(args.komodo_cann_prefetch_max_bytes)
+    if args.komodo_cann_prefetch_min_bytes is not None:
+        os.environ["GPTQMODEL_KOMODO_CANN_PREFETCH_MIN_BYTES"] = str(args.komodo_cann_prefetch_min_bytes)
     os.environ["GPTQMODEL_KOMODO_CACHE_WEIGHTS"] = "1" if args.komodo_cache_dequantized else "0"
     native_int4 = _native_int4_enabled()
+    komodo_cann = bool(args.komodo_cann)
+    cann_prefetch = bool(_komodo_cann_prefetch_enabled()) if komodo_cann else False
     drop_source_weights = _drop_source_weights_enabled()
 
     torch.npu.set_device(args.device)
@@ -548,6 +593,7 @@ def main() -> None:
             cache_dequantized=args.komodo_cache_dequantized,
             native_int4=native_int4,
             prefetch_native_plan=args.komodo_prefetch_native_plan,
+            komodo_cann=komodo_cann,
             drop_source_weights=drop_source_weights,
         )
         for index, case in enumerate(cases)
@@ -558,13 +604,15 @@ def main() -> None:
         print(
             "{name} {device} mode={mode} baseline={baseline_ms:.4f}ms komodo={komodo_ms:.4f}ms "
             "speedup={speedup:.3f}x first={first_ms:.4f}ms repeat={repeat_ms:.4f}ms "
-            "prepack={prepack_ms:.4f}ms drop_source={drop_source} "
+            "prepack={prepack_ms:.4f}ms kernel={kernel} cann_prefetch={cann_prefetch} drop_source={drop_source} "
             "path={komodo_path} max_abs={max_abs:.6g} max_rel={max_rel:.6g}".format(
                 **result,
                 mode=mode,
                 first_ms=result["komodo_first_ms"],
                 repeat_ms=result["komodo_repeat_ms"],
                 prepack_ms=result["komodo_prepack_ms"],
+                kernel=result["komodo_kernel"],
+                cann_prefetch=result["komodo_cann_prefetch"],
                 drop_source=result["komodo_source_dropped"],
                 max_abs=result["drift"]["max_abs"],
                 max_rel=result["drift"]["max_rel"],
@@ -598,8 +646,12 @@ def main() -> None:
         payload = {
             "pid": os.getpid(),
             "device": str(device),
+            "komodo_kernel": "komodo_cann" if komodo_cann else "komodo",
             "komodo_native_int4": bool(native_int4),
             "komodo_prefetch_native_plan": bool(args.komodo_prefetch_native_plan),
+            "komodo_cann_prefetch": bool(cann_prefetch),
+            "komodo_cann_prefetch_max_bytes": args.komodo_cann_prefetch_max_bytes,
+            "komodo_cann_prefetch_min_bytes": args.komodo_cann_prefetch_min_bytes,
             "komodo_drop_source_weights": bool(drop_source_weights),
             "komodo_dequant_cache": bool(args.komodo_cache_dequantized),
             "mode": mode,

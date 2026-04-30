@@ -100,6 +100,17 @@ _EXTENSION_SPECS = (
         aliases=("paroquant_rotation",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.paroquant", "_PAROQUANT_ROTATION_EXTENSION"),
     ),
+    _ExtensionSpec(
+        name="komodo_cann_v3",
+        aliases=("komodo_cann", "komodo_v3"),
+        resolve=lambda: _resolve_extension_attr(
+            "gptqmodel.utils.komodo_cann", "_KOMODO_CANN_V3_TORCH_OPS_EXTENSION"
+        ),
+        supported=lambda: _resolve_attr("gptqmodel.utils.komodo_cann", "_komodo_cann_v3_supported")(),
+        unsupported_error=lambda: _resolve_attr(
+            "gptqmodel.utils.komodo_cann", "komodo_cann_v3_environment_error"
+        )(),
+    ),
 )
 
 _EXTENSION_SPECS_BY_NAME = {spec.name: spec for spec in _EXTENSION_SPECS}

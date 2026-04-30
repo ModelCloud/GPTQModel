@@ -39,6 +39,11 @@ LOOP_MODES = (
 QUICK_MODES = (
     ("fallback", ("--no-komodo-native-int4",)),
     ("native_keep", ("--komodo-native-int4", "--no-komodo-drop-source-weights")),
+    ("komodo_cann_keep", ("--komodo-native-int4", "--no-komodo-drop-source-weights", "--komodo-cann")),
+    (
+        "komodo_cann_prefetch_keep",
+        ("--komodo-native-int4", "--no-komodo-drop-source-weights", "--komodo-cann", "--komodo-cann-prefetch"),
+    ),
     ("native_drop", ("--komodo-native-int4", "--komodo-drop-source-weights")),
     ("prefetch_keep", ("--komodo-native-int4", "--komodo-prefetch-native-plan", "--no-komodo-drop-source-weights")),
     ("dequant_cache", ("--no-komodo-native-int4", "--komodo-cache-dequantized")),
@@ -106,35 +111,40 @@ def _build_tasks(args, output_dir: Path, devices: list[int]) -> list[MatrixTask]
             )
 
     if not args.skip_ab:
+        ab_modes = [("native", ())]
+        if args.include_komodo_cann_ab:
+            ab_modes.append(("komodo_cann", ("--komodo-cann",)))
         for cases in AB_CASE_SETS:
             for tile in args.tiles:
-                for drop in (False, True):
-                    label = f"ab_{cases}_tile{tile}_drop{int(drop)}"
-                    command = [
-                        python,
-                        "scripts/benchmark_komodo_npu_ab.py",
-                        "--device",
-                        "0",
-                        "--cases",
-                        cases,
-                        "--dtype",
-                        "fp16",
-                        "--warmup",
-                        str(args.warmup),
-                        "--iters",
-                        str(args.iters),
-                        "--komodo-native-int4",
-                        "--json-output",
-                        str(output_dir / f"{label}.json"),
-                    ]
-                    command.append("--komodo-drop-source-weights" if drop else "--no-komodo-drop-source-weights")
-                    _add_task(
-                        tasks,
-                        label=label,
-                        command=command,
-                        devices=devices,
-                        env={"GPTQMODEL_KOMODO_PREPACK_TILE_N": str(tile)},
-                    )
+                for mode_name, mode_flags in ab_modes:
+                    for drop in (False, True):
+                        label = f"ab_{cases}_{mode_name}_tile{tile}_drop{int(drop)}"
+                        command = [
+                            python,
+                            "scripts/benchmark_komodo_npu_ab.py",
+                            "--device",
+                            "0",
+                            "--cases",
+                            cases,
+                            "--dtype",
+                            "fp16",
+                            "--warmup",
+                            str(args.warmup),
+                            "--iters",
+                            str(args.iters),
+                            "--komodo-native-int4",
+                            "--json-output",
+                            str(output_dir / f"{label}.json"),
+                            *mode_flags,
+                        ]
+                        command.append("--komodo-drop-source-weights" if drop else "--no-komodo-drop-source-weights")
+                        _add_task(
+                            tasks,
+                            label=label,
+                            command=command,
+                            devices=devices,
+                            env={"GPTQMODEL_KOMODO_PREPACK_TILE_N": str(tile)},
+                        )
 
     if not args.skip_loop:
         for model in LOOP_MODELS:
@@ -347,6 +357,7 @@ def main() -> None:
     parser.add_argument("--iters", type=int, default=2)
     parser.add_argument("--stabilize-scale", type=float, default=0.001)
     parser.add_argument("--include-memory", action="store_true")
+    parser.add_argument("--include-komodo-cann-ab", action="store_true")
     parser.add_argument("--skip-unit", action="store_true")
     parser.add_argument("--skip-ab", action="store_true")
     parser.add_argument("--skip-loop", action="store_true")

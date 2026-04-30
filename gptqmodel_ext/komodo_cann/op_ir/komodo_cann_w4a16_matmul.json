@@ -1,0 +1,72 @@
+[
+  {
+    "op": "KomodoCannW4A16Matmul",
+    "input_desc": [
+      {
+        "name": "x",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp16"]
+      },
+      {
+        "name": "packed_weight",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["int32"]
+      },
+      {
+        "name": "scales",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp16"]
+      },
+      {
+        "name": "offsets",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp16"]
+      },
+      {
+        "name": "bias",
+        "param_type": "optional",
+        "format": ["ND"],
+        "type": ["fp16"]
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "y",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp16"]
+      }
+    ],
+    "attr": [
+      {
+        "name": "group_size",
+        "param_type": "required",
+        "type": "int"
+      },
+      {
+        "name": "split_k",
+        "param_type": "required",
+        "type": "int"
+      },
+      {
+        "name": "base_m",
+        "param_type": "required",
+        "type": "int"
+      },
+      {
+        "name": "base_n",
+        "param_type": "required",
+        "type": "int"
+      },
+      {
+        "name": "base_k",
+        "param_type": "required",
+        "type": "int"
+      }
+    ]
+  }
+]

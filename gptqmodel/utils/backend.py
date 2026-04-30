@@ -21,6 +21,7 @@ class BACKEND(str, Enum):
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
     GPTQ_KOMODO = "gptq_komodo"  # Ascend NPU fused-style cached int4 kernel
+    GPTQ_KOMODO_CANN = "gptq_komodo_cann"  # Ascend CANN kernel experiment
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
 
@@ -41,6 +42,7 @@ class BACKEND(str, Enum):
     AWQ_MACHETE = "awq_machete"
     AWQ_MARLIN = "awq_marlin"
     AWQ_KOMODO = "awq_komodo"  # Ascend NPU fused-style cached int4 kernel
+    AWQ_KOMODO_CANN = "awq_komodo_cann"  # Ascend CANN kernel experiment
     AWQ_EXLLAMA_V2 = "awq_exllama_v2"
 
     # ParoQuant kernels
@@ -75,6 +77,7 @@ class BACKEND(str, Enum):
     MACHETE = "machete"
     MARLIN = "marlin"
     KOMODO = "komodo"
+    KOMODO_CANN = "komodo_cann"
     BITBLAS = "bitblas"
     GEMM = "gemm"
     GEMM_TRITON = "gemm_triton"
@@ -104,6 +107,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.MACHETE: BACKEND.GPTQ_MACHETE,
         BACKEND.MARLIN: BACKEND.GPTQ_MARLIN,
         BACKEND.KOMODO: BACKEND.GPTQ_KOMODO,
+        BACKEND.KOMODO_CANN: BACKEND.GPTQ_KOMODO_CANN,
         BACKEND.BITBLAS: BACKEND.GPTQ_BITBLAS,
     },
     "awq": {
@@ -122,6 +126,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.MACHETE: BACKEND.AWQ_MACHETE,
         BACKEND.MARLIN: BACKEND.AWQ_MARLIN,
         BACKEND.KOMODO: BACKEND.AWQ_KOMODO,
+        BACKEND.KOMODO_CANN: BACKEND.AWQ_KOMODO_CANN,
         BACKEND.EXLLAMA_V2: BACKEND.AWQ_EXLLAMA_V2,
     },
     "paroquant": {
