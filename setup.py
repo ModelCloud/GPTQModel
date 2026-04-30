@@ -8,7 +8,7 @@ from pathlib import Path
 from setuptools import find_namespace_packages, find_packages, setup
 
 
-def _package_version() -> str:
+def _runtime_version() -> str:
     version_vars: dict[str, str] = {}
     exec(Path("gptqmodel/version.py").read_text(encoding="utf-8"), {}, version_vars)
     return version_vars["__version__"]
@@ -21,7 +21,8 @@ for package_name in find_namespace_packages(include=("gptqmodel_ext.*",)):
 
 
 setup(
-    version=_package_version(),
+    name="gptqmodel",
+    version=_runtime_version(),
     packages=packages,
     include_package_data=True,
 )
