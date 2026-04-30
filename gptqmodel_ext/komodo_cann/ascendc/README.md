@@ -13,12 +13,21 @@ The current device kernel is a bring-up baseline for GPTQ W4A16:
 - Supported group sizes are `0`, `32`, `64`, and `128`.
 
 The kernel deliberately does not materialize a full dense FP16 weight matrix in
-GM or L2. The validated baseline uses one writing AI Core, stages a 64-value
-INT4-to-FP16 dequant tile in UB, consumes that tile immediately for the current
-accumulation, and writes only the final output. This is not yet the final
-high-throughput Cube-tiled design; it is the first custom-op baseline needed
+GM or L2. The current validated baseline uses one writing AI Core and reuses
+each packed INT4 word across its eight output lanes while the matching FP16
+activation value stays live. It writes only the final output. This is not yet
+the final high-throughput Cube-tiled design; it is the custom-op baseline needed
 before reintroducing multi-core tile ownership and replacing the scalar
 accumulation loop with Cube tile consumption.
+
+The host tiler intentionally sets `blockDim=1` for this scalar baseline. Earlier
+multi-block launch experiments exposed non-contiguous AIV block IDs on the local
+910B runtime, so multi-core ownership stays disabled until the kernel has a real
+partitioning scheme that does not assume block 0 is present.
+
+Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
+improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
+with the 8-lane packed-word loop.
 
 Build from the repo root:
 

@@ -33,25 +33,10 @@ uint32_t ClampU64ToU32(uint64_t value)
     return static_cast<uint32_t>(value > kMaxU32 ? kMaxU32 : value);
 }
 
-uint32_t PickBlockDim(gert::TilingContext* context, uint32_t total_outputs)
+uint32_t PickBlockDim(uint32_t total_outputs)
 {
-    if (total_outputs == 0) {
-        return 1;
-    }
-
-    uint32_t core_num = 24;
-    auto platform_info = context->GetPlatformInfo();
-    if (platform_info != nullptr) {
-        auto platform = platform_ascendc::PlatformAscendC(platform_info);
-        uint32_t queried = platform.GetCoreNumAic();
-        if (queried == 0) {
-            queried = platform.GetCoreNum();
-        }
-        if (queried > 0) {
-            core_num = queried;
-        }
-    }
-    return total_outputs < core_num ? total_outputs : core_num;
+    (void)total_outputs;
+    return 1;
 }
 }  // namespace
 
@@ -101,7 +86,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
         return ge::GRAPH_FAILED;
     }
     const uint32_t total_outputs = static_cast<uint32_t>(total_outputs64);
-    const uint32_t block_dim = PickBlockDim(context, total_outputs);
+    const uint32_t block_dim = PickBlockDim(total_outputs);
 
     KomodoCannW4A16MatmulTilingData tiling;
     tiling.set_rows(static_cast<uint32_t>(rows64));

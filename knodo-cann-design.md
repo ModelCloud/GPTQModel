@@ -229,9 +229,25 @@ Ascend C custom-op bring-up:
 - The Python runtime can auto-load that bridge behind
   `GPTQMODEL_KOMODO_CANN_ASCENDC=1`. It keeps plain Komodo-CANN fallback
   behavior unchanged unless the gate or another fused op is enabled.
-- The first device kernel is a correctness baseline: the writing AI Core reads
-  packed INT4 words directly, stages a 64-value INT4-to-FP16 dequant tile in UB,
-  accumulates FP32, and writes only FP16 output.
+- The first device kernel was a correctness baseline: the writing AI Core read
+  packed INT4 words directly, staged a 64-value INT4-to-FP16 dequant tile in UB,
+  accumulated FP32, and wrote only FP16 output.
+- The next validated kernel removed that intermediate FP16 dequant tile and
+  restructured the loop around Komodo's `int32 [K, N / 8]` packing. Each packed
+  word is loaded once and dequantized across all eight output lanes while the
+  activation value stays live, cutting repeated GM packed-weight reads.
+- The scalar baseline host tiler now pins `blockDim=1`. The earlier dynamic AIV
+  block count was unsafe because CANN did not always launch a contiguous set
+  including block index 0, which could leave stale output when the kernel used a
+  single writer.
+- The torch bridge now dispatches the ACLNN run through
+  `at_npu::native::OpCommand::RunOpApiV2`. Direct ACLNN launch could race
+  Torch-NPU queued producers for freshly-created NPU tensors; the OpCommand path
+  fixed the mixed no-bias/bias/group-size correctness sweep.
+- Raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True` improved
+  from `63.67 ms` on the UB-tile baseline at commit `2e12b84f` to `10.33 ms`
+  with the 8-lane packed-word loop. Correctness sweeps remained below `0.003`
+  max absolute drift against the CPU dequant reference.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

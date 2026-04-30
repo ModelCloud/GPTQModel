@@ -22,75 +22,76 @@ public:
             bias_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(bias));
         }
         y_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(y));
-        pipe_.InitBuffer(dequant_tile_buf_, kDequantTileValues * sizeof(half));
         tiling_ = tiling;
     }
 
     __aicore__ inline void Process()
     {
+        const uint32_t rows = tiling_->rows;
         const uint32_t in_features = tiling_->in_features;
         const uint32_t out_features = tiling_->out_features;
         const uint32_t group_size = tiling_->group_size;
         const uint32_t has_bias = tiling_->has_bias;
-        const uint32_t total_outputs = tiling_->total_outputs;
         const uint32_t core_idx = GetBlockIdx();
         if (core_idx != 0) {
             return;
         }
-        constexpr uint32_t block_dim = 1;
 
-        for (uint32_t out_index = core_idx; out_index < total_outputs; out_index += block_dim) {
-            const uint32_t m = out_index / out_features;
-            const uint32_t n = out_index - m * out_features;
-            float acc = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n)) : 0.0f;
+        const uint32_t packed_stride = out_features >> 3;
+        for (uint32_t m = 0; m < rows; ++m) {
+            const uint32_t row_offset = m * out_features;
+            const uint32_t x_offset = m * in_features;
+            for (uint32_t packed_col = 0; packed_col < packed_stride; ++packed_col) {
+                const uint32_t n_base = packed_col << 3;
+                float acc0 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base)) : 0.0f;
+                float acc1 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 1)) : 0.0f;
+                float acc2 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 2)) : 0.0f;
+                float acc3 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 3)) : 0.0f;
+                float acc4 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 4)) : 0.0f;
+                float acc5 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 5)) : 0.0f;
+                float acc6 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 6)) : 0.0f;
+                float acc7 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 7)) : 0.0f;
 
-            LocalTensor<half> dequant_tile = dequant_tile_buf_.Get<half>();
-            for (uint32_t k_tile = 0; k_tile < in_features; k_tile += kDequantTileValues) {
-                const uint32_t tile_len =
-                    k_tile + kDequantTileValues <= in_features ? kDequantTileValues : in_features - k_tile;
-                StageDequantTile(dequant_tile, k_tile, tile_len, n, out_features, group_size);
-                for (uint32_t k_inner = 0; k_inner < tile_len; ++k_inner) {
-                    const uint32_t k = k_tile + k_inner;
-                    const float x_value = static_cast<float>(x_gm_.GetValue(m * in_features + k));
-                    const float dequant_w = static_cast<float>(dequant_tile.GetValue(k_inner));
-                    acc += x_value * dequant_w;
+                for (uint32_t k = 0; k < in_features; ++k) {
+                    const float x_value = static_cast<float>(x_gm_.GetValue(x_offset + k));
+                    const uint32_t word =
+                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                    const uint32_t group = group_size == 0 ? 0 : k / group_size;
+                    const uint32_t scale_base = group * out_features + n_base;
+                    acc0 += x_value * DequantLane(word, 0, scale_base);
+                    acc1 += x_value * DequantLane(word, 1, scale_base + 1);
+                    acc2 += x_value * DequantLane(word, 2, scale_base + 2);
+                    acc3 += x_value * DequantLane(word, 3, scale_base + 3);
+                    acc4 += x_value * DequantLane(word, 4, scale_base + 4);
+                    acc5 += x_value * DequantLane(word, 5, scale_base + 5);
+                    acc6 += x_value * DequantLane(word, 6, scale_base + 6);
+                    acc7 += x_value * DequantLane(word, 7, scale_base + 7);
                 }
-            }
 
-            y_gm_.SetValue(out_index, static_cast<half>(acc));
+                const uint32_t y_base = row_offset + n_base;
+                y_gm_.SetValue(y_base, static_cast<half>(acc0));
+                y_gm_.SetValue(y_base + 1, static_cast<half>(acc1));
+                y_gm_.SetValue(y_base + 2, static_cast<half>(acc2));
+                y_gm_.SetValue(y_base + 3, static_cast<half>(acc3));
+                y_gm_.SetValue(y_base + 4, static_cast<half>(acc4));
+                y_gm_.SetValue(y_base + 5, static_cast<half>(acc5));
+                y_gm_.SetValue(y_base + 6, static_cast<half>(acc6));
+                y_gm_.SetValue(y_base + 7, static_cast<half>(acc7));
+            }
         }
     }
 
 private:
-    __aicore__ inline void StageDequantTile(
-        LocalTensor<half>& dequant_tile,
-        uint32_t k_tile,
-        uint32_t tile_len,
-        uint32_t n,
-        uint32_t out_features,
-        uint32_t group_size)
+    __aicore__ inline float DequantLane(uint32_t word, uint32_t lane, uint32_t scale_idx)
     {
-        const uint32_t packed_col = n >> 3;
-        const uint32_t packed_stride = out_features >> 3;
-        const uint32_t shift = (n & 7U) << 2;
-        for (uint32_t k_inner = 0; k_inner < tile_len; ++k_inner) {
-            const uint32_t k = k_tile + k_inner;
-            const uint32_t packed_idx = k * packed_stride + packed_col;
-            const uint32_t word = static_cast<uint32_t>(packed_weight_gm_.GetValue(packed_idx));
-            const int32_t raw = static_cast<int32_t>((word >> shift) & 0xFU);
-            const int32_t signed_w = raw >= 8 ? raw - 16 : raw;
-            const uint32_t group = group_size == 0 ? 0 : k / group_size;
-            const uint32_t scale_idx = group * out_features + n;
-            const float scale = static_cast<float>(scales_gm_.GetValue(scale_idx));
-            const float offset = static_cast<float>(offsets_gm_.GetValue(scale_idx));
-            const float dequant_w = (static_cast<float>(signed_w) + offset) * scale;
-            dequant_tile.SetValue(k_inner, static_cast<half>(dequant_w));
-        }
+        const uint32_t shift = lane << 2;
+        const int32_t raw = static_cast<int32_t>((word >> shift) & 0xFU);
+        const int32_t signed_w = raw >= 8 ? raw - 16 : raw;
+        const float scale = static_cast<float>(scales_gm_.GetValue(scale_idx));
+        const float offset = static_cast<float>(offsets_gm_.GetValue(scale_idx));
+        return (static_cast<float>(signed_w) + offset) * scale;
     }
 
-    static constexpr uint32_t kDequantTileValues = 64;
-    TPipe pipe_;
-    TBuf<QuePosition::VECCALC> dequant_tile_buf_;
     GlobalTensor<half> x_gm_;
     GlobalTensor<int32_t> packed_weight_gm_;
     GlobalTensor<half> scales_gm_;
