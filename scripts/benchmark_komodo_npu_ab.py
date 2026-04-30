@@ -37,6 +37,7 @@ class BenchCase:
     in_features: int
     out_features: int
     group_size: int
+    desc_act: bool = False
 
 
 QUICK_CASES = [
@@ -89,6 +90,17 @@ QWEN3_6_35B_A3B_AWQ_CASES = [
     BenchCase("qwen3_6_35b_a3b_awq_gate_proj", "awq", "bf16", 1, 2048, 512, 128),
     BenchCase("qwen3_6_35b_a3b_awq_up_proj", "awq", "bf16", 1, 2048, 512, 128),
     BenchCase("qwen3_6_35b_a3b_awq_down_proj", "awq", "bf16", 1, 512, 2048, 128),
+]
+
+GPTQ_GROUP_SIZE_CASES = [
+    BenchCase("gptq_gs16", "gptq", "fp16", 8, 1024, 1024, 16),
+    BenchCase("gptq_gs32", "gptq", "fp16", 8, 1024, 1024, 32),
+    BenchCase("gptq_gs64", "gptq", "fp16", 8, 1024, 1024, 64),
+    BenchCase("gptq_gs128", "gptq", "fp16", 8, 1024, 1024, 128),
+    BenchCase("gptq_full", "gptq", "fp16", 8, 1024, 1024, 1024),
+    BenchCase("gptq_act_order_gs16", "gptq", "fp16", 8, 1024, 1024, 16, True),
+    BenchCase("gptq_act_order_gs32", "gptq", "fp16", 8, 1024, 1024, 32, True),
+    BenchCase("gptq_act_order_gs128", "gptq", "fp16", 8, 1024, 1024, 128, True),
 ]
 
 
@@ -145,6 +157,19 @@ def _copy_named_buffers(dst: nn.Module, src: nn.Module) -> None:
             dst_tensor.copy_(src_tensor.to(device=dst_tensor.device, dtype=dst_tensor.dtype))
 
 
+def _set_supported_act_order_g_idx(module: TorchLinear) -> None:
+    group_size = module.requested_group_size
+    if group_size <= 0 or module.in_features % group_size != 0:
+        raise ValueError("Synthetic Komodo act-order cases require a positive divisor group_size.")
+    groups = module.in_features // group_size
+    natural = torch.arange(module.in_features, dtype=torch.int32) // group_size
+    act_order = torch.arange(module.in_features).reshape(groups, group_size).t().reshape(-1)
+    with torch.no_grad():
+        module.g_idx.copy_(natural[act_order].to(dtype=module.g_idx.dtype, device=module.g_idx.device))
+    module.desc_act = True
+    module._stream_reset_cache()
+
+
 def _make_gptq_pair(
     case: BenchCase,
     dtype: torch.dtype,
@@ -165,7 +190,7 @@ def _make_gptq_pair(
         bits=bits,
         group_size=case.group_size,
         sym=False,
-        desc_act=False,
+        desc_act=case.desc_act,
         in_features=case.in_features,
         out_features=case.out_features,
         bias=True,
@@ -177,6 +202,8 @@ def _make_gptq_pair(
     baseline.scales.copy_(scales.to(baseline.scales.dtype))
     baseline.g_idx.copy_(torch.arange(case.in_features, dtype=torch.int32) // case.group_size)
     baseline.bias.copy_(bias.to(baseline.bias.dtype))
+    if case.desc_act:
+        _set_supported_act_order_g_idx(baseline)
     baseline.optimized = True
     baseline.post_init()
     baseline.enable_weight_cache(False)
@@ -186,7 +213,7 @@ def _make_gptq_pair(
         bits=bits,
         group_size=case.group_size,
         sym=False,
-        desc_act=False,
+        desc_act=case.desc_act,
         in_features=case.in_features,
         out_features=case.out_features,
         bias=True,
@@ -342,6 +369,9 @@ def _run_case(
     with torch.inference_mode():
         baseline_ms = _measure(lambda: baseline(x), warmup=warmup, iters=iters, device=device)
         candidate_ms = _measure(lambda: candidate(x), warmup=warmup, iters=iters, device=device)
+    native_cache = bool(getattr(candidate, "_native_plan_cache", None))
+    native_group16_cache = bool(getattr(candidate, "_native_group16_plan_cache", None))
+    dense_cache = bool(getattr(candidate, "_cached_weights", None))
 
     return {
         **asdict(case),
@@ -357,8 +387,14 @@ def _run_case(
         "komodo_prepack_ms": prepack_ms,
         "komodo_first_ms": first_ms,
         "komodo_repeat_ms": repeat_ms,
-        "komodo_path": "native_int4_prepack" if getattr(candidate, "_native_plan_cache", None) else (
-            "dequant_cache" if cache_dequantized else "no_dequant_cache"
+        "komodo_path": (
+            "native_int4_prepack"
+            if native_cache
+            else "native_int4_group16"
+            if native_group16_cache
+            else "exact_fallback_cache"
+            if dense_cache
+            else "no_dequant_cache"
         ),
         "baseline_ms": baseline_ms,
         "komodo_ms": candidate_ms,
@@ -385,6 +421,8 @@ def _select_cases(name: str) -> list[BenchCase]:
         return QWEN3_6_35B_A3B_AWQ_CASES
     if name == "qwen3_6_35b_a3b_all":
         return QWEN3_6_35B_A3B_GPTQ_CASES + QWEN3_6_35B_A3B_AWQ_CASES
+    if name == "gptq_group_sizes":
+        return GPTQ_GROUP_SIZE_CASES
     raise ValueError(f"Unsupported case set `{name}`.")
 
 
@@ -416,6 +454,7 @@ def main() -> None:
             "qwen3_6_35b_a3b_gptq",
             "qwen3_6_35b_a3b_awq",
             "qwen3_6_35b_a3b_all",
+            "gptq_group_sizes",
         ),
         default="default",
     )

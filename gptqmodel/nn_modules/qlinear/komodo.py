@@ -26,7 +26,10 @@ _KOMODO_NATIVE_INT4_ENV = "GPTQMODEL_KOMODO_NATIVE_INT4"
 _KOMODO_DROP_SOURCE_ENV = "GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"
 _KOMODO_EAGER_PREPACK_ENV = "GPTQMODEL_KOMODO_EAGER_PREPACK"
 _KOMODO_PREPACK_TILE_N_ENV = "GPTQMODEL_KOMODO_PREPACK_TILE_N"
+_KOMODO_NATIVE_GROUP16_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16"
+_KOMODO_NATIVE_FALLBACK_CACHE_ENV = "GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE"
 _NativePlan = tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor | None]
+_NativeGroup16Plan = tuple[tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor, torch.Tensor | None]
 
 
 def _native_int4_enabled() -> bool:
@@ -39,6 +42,14 @@ def _drop_source_weights_enabled() -> bool:
 
 def _eager_native_prepack_enabled() -> bool:
     return env_flag(_KOMODO_EAGER_PREPACK_ENV, default=True)
+
+
+def _native_group16_enabled() -> bool:
+    return env_flag(_KOMODO_NATIVE_GROUP16_ENV, default=True)
+
+
+def _native_fallback_cache_enabled() -> bool:
+    return env_flag(_KOMODO_NATIVE_FALLBACK_CACHE_ENV, default=False)
 
 
 def _native_int4_group_size(group_size: int, in_features: int) -> int | None:
@@ -115,7 +126,11 @@ class _KomodoNativePlanMixin:
             return False
 
         key = self._native_key(device=torch.device(device), dtype=dtype)
-        return key in self._native_plan_cache or key in self._native_plan_pending
+        return (
+            key in self._native_plan_cache
+            or key in self._native_plan_pending
+            or key in getattr(self, "_native_group16_plan_cache", {})
+        )
 
     def _native_prepack_stream(self, device: torch.device):
         key = _npu_stream_key(device)
@@ -140,8 +155,12 @@ class _KomodoNativePlanMixin:
             return
         if hasattr(self, "_native_g_idx_plan_cache"):
             self._native_g_idx_plan_cache = None
+        if hasattr(self, "_native_group16_g_idx_plan_cache"):
+            self._native_group16_g_idx_plan_cache = None
         if hasattr(self, "_native_plan_cache"):
             self._native_plan_cache.clear()
+        if hasattr(self, "_native_group16_plan_cache"):
+            self._native_group16_plan_cache.clear()
         if hasattr(self, "_native_prepack_streams"):
             self._native_prepack_streams.clear()
 
@@ -164,10 +183,13 @@ class _KomodoNativePlanMixin:
             return
         if getattr(self, "_native_source_dropped", False):
             return
-        if (self.training and not force) or not self._native_plan_cache:
+        native_keys = tuple(getattr(self, "_native_plan_cache", {})) + tuple(
+            getattr(self, "_native_group16_plan_cache", {})
+        )
+        if (self.training and not force) or not native_keys:
             return
 
-        for device, _ in tuple(self._native_plan_cache):
+        for device, _ in native_keys:
             if device.type == "npu":
                 torch.npu.synchronize(device)
 
@@ -190,15 +212,25 @@ class _KomodoNativePlanMixin:
             return False
         device = torch.device(device)
         dtype = torch.float16
-        if not self._can_prefetch_native_plan(device=device, dtype=dtype, allow_training=True):
-            return False
 
         key = self._native_key(device=device, dtype=dtype)
-        if key in self._native_plan_cache or key in self._native_plan_pending:
+        if (
+            key in self._native_plan_cache
+            or key in self._native_plan_pending
+            or key in getattr(self, "_native_group16_plan_cache", {})
+        ):
             return True
 
-        plan = self._build_native_plan(device=device, dtype=dtype)
-        self._native_plan_cache[key] = plan
+        if self._can_prefetch_native_plan(device=device, dtype=dtype, allow_training=True):
+            plan = self._build_native_plan(device=device, dtype=dtype)
+            self._native_plan_cache[key] = plan
+        elif getattr(self, "_can_prefetch_native_group16_plan", None) and self._can_prefetch_native_group16_plan(
+            device=device, dtype=dtype, allow_training=True
+        ):
+            plan = self._build_native_group16_plan(device=device, dtype=dtype)
+            self._native_group16_plan_cache[key] = plan
+        else:
+            return False
         self._maybe_drop_native_source_weights(force=True)
         return True
 
@@ -374,11 +406,13 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         )
         self.enable_weight_cache(env_flag(_KOMODO_CACHE_ENV, default=False))
         self._native_plan_cache: dict[tuple[torch.device, torch.dtype], _NativePlan] = {}
+        self._native_group16_plan_cache: dict[tuple[torch.device, torch.dtype], _NativeGroup16Plan] = {}
         self._native_plan_pending: dict[
             tuple[torch.device, torch.dtype], tuple[torch.npu.Stream, torch.npu.Event, _NativePlan]
         ] = {}
         self._native_prepack_streams: dict[int, torch.npu.Stream] = {}
         self._native_g_idx_plan_cache: tuple[bool, torch.Tensor | None] | None = None
+        self._native_group16_g_idx_plan_cache: tuple[bool, torch.Tensor | None] | None = None
         self._drop_source_weights_after_native_pack = _drop_source_weights_enabled()
         self._native_source_dropped = False
         self._native_post_initialized = False
@@ -402,6 +436,23 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         super().clear_weight_cache()
         self.clear_native_cache()
 
+    def _g_idx_plan_for_group_size(self, native_group_size: int) -> tuple[bool, torch.Tensor | None]:
+        g_idx = self.g_idx.detach().to(device="cpu", dtype=torch.int64)
+        if native_group_size == 0:
+            expected = torch.zeros(self.in_features, dtype=torch.int64)
+        else:
+            if native_group_size <= 0 or self.in_features % native_group_size != 0:
+                return False, None
+            expected = torch.arange(self.in_features, dtype=torch.int64) // native_group_size
+
+        if torch.equal(g_idx, expected):
+            return True, None
+
+        perm = torch.argsort(g_idx, stable=True)
+        if torch.equal(g_idx[perm], expected):
+            return True, perm.to(dtype=torch.int64)
+        return False, None
+
     def _native_g_idx_plan(self) -> tuple[bool, torch.Tensor | None]:
         cached = self._native_g_idx_plan_cache
         if cached is not None:
@@ -413,23 +464,20 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             self._native_g_idx_plan_cache = result
             return result
 
-        g_idx = self.g_idx.detach().to(device="cpu", dtype=torch.int64)
-        if native_group_size == 0:
-            expected = torch.zeros(self.in_features, dtype=torch.int64)
-        else:
-            expected = torch.arange(self.in_features, dtype=torch.int64) // native_group_size
-
-        if torch.equal(g_idx, expected):
-            result = (True, None)
-            self._native_g_idx_plan_cache = result
-            return result
-
-        perm = torch.argsort(g_idx, stable=True)
-        if torch.equal(g_idx[perm], expected):
-            result = (True, perm.to(dtype=torch.int64))
-        else:
-            result = (False, None)
+        result = self._g_idx_plan_for_group_size(native_group_size)
         self._native_g_idx_plan_cache = result
+        return result
+
+    def _native_group16_g_idx_plan(self) -> tuple[bool, torch.Tensor | None]:
+        cached = self._native_group16_g_idx_plan_cache
+        if cached is not None:
+            return cached
+
+        if self.group_size != 16 or self.scales.shape[0] != self.in_features // 16:
+            result = (False, None)
+        else:
+            result = self._g_idx_plan_for_group_size(16)
+        self._native_group16_g_idx_plan_cache = result
         return result
 
     def _can_use_native_int4(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
@@ -453,6 +501,27 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         supported, _ = self._native_g_idx_plan()
         return supported
 
+    def _can_use_native_group16(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
+        if not _native_int4_enabled() or not _native_group16_enabled() or not _npu_int4_ops_available():
+            return False
+        if self.training or x.requires_grad or x.device.type != "npu":
+            return False
+        if compute_dtype != torch.float16:
+            return False
+        if self.bits != 4 or x.shape[-1] != self.in_features or self.in_features % 16 != 0:
+            return False
+        key = self._native_key(device=x.device, dtype=compute_dtype)
+        if key in self._native_group16_plan_cache:
+            return True
+        if getattr(self, "_native_source_dropped", False):
+            return False
+        if not self._native_source_available():
+            return False
+        if self.qweight.device != x.device or self.qzeros.device != x.device or self.scales.device != x.device:
+            return False
+        supported, _ = self._native_group16_g_idx_plan()
+        return supported
+
     def _can_prefetch_native_plan(
         self, *, device: torch.device, dtype: torch.dtype, allow_training: bool = False
     ) -> bool:
@@ -473,6 +542,43 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             return False
         supported, _ = self._native_g_idx_plan()
         return supported
+
+    def _can_prefetch_native_group16_plan(
+        self, *, device: torch.device, dtype: torch.dtype, allow_training: bool = False
+    ) -> bool:
+        if not _native_int4_enabled() or not _native_group16_enabled() or not _npu_int4_ops_available():
+            return False
+        if (self.training and not allow_training) or dtype != torch.float16 or device.type != "npu":
+            return False
+        if self.bits != 4 or self.in_features % 16 != 0:
+            return False
+        key = self._native_key(device=device, dtype=dtype)
+        if key in self._native_group16_plan_cache:
+            return True
+        if getattr(self, "_native_source_dropped", False):
+            return False
+        if not self._native_source_available():
+            return False
+        if self.qweight.device != device or self.qzeros.device != device or self.scales.device != device:
+            return False
+        supported, _ = self._native_group16_g_idx_plan()
+        return supported
+
+    def _can_cache_native_fallback(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
+        if not _native_int4_enabled() or not _native_fallback_cache_enabled():
+            return False
+        if self.training or x.requires_grad or x.device.type != "npu":
+            return False
+        if compute_dtype != torch.float16:
+            return False
+        if self.bits != 4 or x.shape[-1] != self.in_features:
+            return False
+        if getattr(self, "_native_source_dropped", False):
+            return False
+        if not self._native_source_available():
+            return False
+        supported, _ = self._native_g_idx_plan()
+        return not supported
 
     def _build_native_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativePlan:
         supported, input_perm_cpu = self._native_g_idx_plan()
@@ -521,6 +627,56 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
 
         return packed_weight, scales, offsets, native_group_size, input_perm
 
+    def _build_native_group16_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativeGroup16Plan:
+        supported, input_perm_cpu = self._native_group16_g_idx_plan()
+        if not supported:
+            raise RuntimeError("Komodo group-16 native plan requested for an unsupported GPTQ g_idx layout.")
+
+        input_perm = None
+        if input_perm_cpu is not None:
+            input_perm = input_perm_cpu.to(device=device, non_blocking=self.g_idx.device.type == "cpu")
+
+        group_size = 16
+        group_count = self.in_features // group_size
+        tile_n = _native_prepack_tile_n(self.out_features, self.pack_factor)
+        packed_groups = None
+
+        for start in range(0, self.out_features, tile_n):
+            width = min(tile_n, self.out_features - start)
+            qweight_tile = self.qweight.narrow(1, start, width)
+            weight = torch.bitwise_and(
+                _right_shift_unpack(
+                    qweight_tile.unsqueeze(1).expand(-1, self.pack_factor, -1),
+                    self.wf_unsqueeze_neg_one,
+                    self.dequant_dtype,
+                ),
+                self.maxq,
+            )
+            weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).to(torch.int32)
+            if input_perm is not None:
+                weight = weight.index_select(0, input_perm)
+
+            packed_start = start // self.pack_factor
+            packed_width = width // self.pack_factor
+            for group_idx in range(group_count):
+                signed_weight = (weight.narrow(0, group_idx * group_size, group_size) - 8).contiguous()
+                packed_tile = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
+                if packed_groups is None:
+                    packed_groups = [
+                        packed_tile.new_empty((group_size, self.out_features // self.pack_factor))
+                        for _ in range(group_count)
+                    ]
+                packed_groups[group_idx].narrow(1, packed_start, packed_width).copy_(packed_tile)
+            del weight
+
+        if packed_groups is None:
+            raise RuntimeError("Komodo group-16 native plan requested for an empty weight.")
+
+        zeros = self._stream_decode_qzeros().to(device=device)
+        scales = self.scales.to(device=device, dtype=dtype).contiguous()
+        offsets = (8 - zeros.to(torch.int32)).to(device=device, dtype=dtype).contiguous()
+        return tuple(packed_groups), scales, offsets, input_perm
+
     def _native_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativePlan:
         key = self._native_key(device=device, dtype=dtype)
         cached = self._native_plan_cache.get(key)
@@ -535,6 +691,19 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             raise RuntimeError("Komodo native source weights were dropped before a native plan was available.")
         plan = self._build_native_plan(device=device, dtype=dtype)
         self._native_plan_cache[key] = plan
+        self._maybe_drop_native_source_weights()
+        return plan
+
+    def _native_group16_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativeGroup16Plan:
+        key = self._native_key(device=device, dtype=dtype)
+        cached = self._native_group16_plan_cache.get(key)
+        if cached is not None:
+            return cached
+
+        if getattr(self, "_native_source_dropped", False):
+            raise RuntimeError("Komodo native source weights were dropped before a group-16 native plan was available.")
+        plan = self._build_native_group16_plan(device=device, dtype=dtype)
+        self._native_group16_plan_cache[key] = plan
         self._maybe_drop_native_source_weights()
         return plan
 
@@ -567,11 +736,57 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         self._maybe_schedule_lookahead(compute_dtype)
         return out
 
+    def _native_group16_forward(self, x: torch.Tensor):
+        _assert_fp16_inference_input(x, self.__class__.__name__)
+        input_dtype = x.dtype
+        compute_dtype = torch.float16
+        out_shape = x.shape[:-1] + (self.out_features,)
+        x_flat = x.reshape(-1, x.shape[-1])
+        if x_flat.dtype != compute_dtype or not x_flat.is_contiguous():
+            x_flat = x_flat.to(dtype=compute_dtype).contiguous()
+
+        packed_groups, scales, offsets, input_perm = self._native_group16_plan(
+            device=x_flat.device, dtype=compute_dtype
+        )
+        if input_perm is not None:
+            x_flat = x_flat.index_select(1, input_perm)
+
+        group_size = 16
+        group_count = len(packed_groups)
+        x_groups = x_flat.reshape(x_flat.shape[0], group_count, group_size).transpose(0, 1).contiguous()
+        out_acc = None
+        for group_idx in range(group_count):
+            partial = _weight_quant_matmul(
+                x_groups[group_idx],
+                packed_groups[group_idx],
+                scales.narrow(0, group_idx, 1),
+                offsets.narrow(0, group_idx, 1),
+                0,
+            ).to(torch.float32)
+            out_acc = partial if out_acc is None else out_acc.add_(partial)
+
+        out = out_acc.to(dtype=compute_dtype).reshape(out_shape)
+        if self.bias is not None:
+            bias = self.bias
+            if bias.device != out.device or bias.dtype != out.dtype:
+                bias = bias.to(device=out.device, dtype=out.dtype)
+            out.add_(bias)
+        if self.adapter:
+            out = self.adapter.apply(x=x_flat, out=out)
+        if input_dtype == torch.float32:
+            out = out.to(torch.float32)
+        self._maybe_schedule_lookahead(compute_dtype)
+        return out
+
     def forward(self, x: torch.Tensor):
         _assert_fp16_inference_input(x, self.__class__.__name__)
         compute_dtype = torch.float16
         if self._can_use_native_int4(x, compute_dtype):
             return self._native_forward(x)
+        if self._can_use_native_group16(x, compute_dtype):
+            return self._native_group16_forward(x)
+        if self._can_cache_native_fallback(x, compute_dtype):
+            self.enable_weight_cache(True)
         return super().forward(x)
 
 

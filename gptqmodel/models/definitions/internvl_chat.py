@@ -9,9 +9,7 @@ from copy import deepcopy
 from typing import Any, Dict, Optional
 
 import torch
-import torchvision.transforms as T
 from PIL import Image
-from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, GenerationConfig
 
 from ...utils.calibration import batched
@@ -24,6 +22,15 @@ from ..base import BaseQModel
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def _torchvision_transforms():
+    try:
+        import torchvision.transforms as transforms
+        from torchvision.transforms.functional import InterpolationMode
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("InternVL image calibration requires `torchvision`.") from exc
+    return transforms, InterpolationMode
 
 
 class InternVLChatQModel(BaseQModel):
@@ -78,12 +85,13 @@ class InternVLChatQModel(BaseQModel):
 
     @staticmethod
     def _build_transform(input_size: int):
-        return T.Compose(
+        transforms, interpolation_mode = _torchvision_transforms()
+        return transforms.Compose(
             [
-                T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
-                T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
-                T.ToTensor(),
-                T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+                transforms.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
+                transforms.Resize((input_size, input_size), interpolation=interpolation_mode.BICUBIC),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
             ]
         )
 

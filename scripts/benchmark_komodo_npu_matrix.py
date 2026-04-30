@@ -19,6 +19,7 @@ import torch
 
 
 AB_CASE_SETS = (
+    "gptq_group_sizes",
     "qwen3_6_27b_gptq",
     "qwen3_6_27b_awq",
     "qwen3_6_35b_a3b_gptq",
@@ -100,7 +101,7 @@ def _build_tasks(args, output_dir: Path, devices: list[int]) -> list[MatrixTask]
             _add_task(
                 tasks,
                 label=f"unit_komodo_phys{device}",
-                command=["pytest", "tests/test_npu_support.py", "-q", "-k", "komodo"],
+                command=[python, "-m", "pytest", "tests/test_npu_support.py", "-q", "-k", "komodo"],
                 devices=[device],
             )
 
@@ -271,10 +272,26 @@ def _run_tasks(tasks: list[MatrixTask], *, output_dir: Path, max_active: int) ->
     results = []
     start_all = time.time()
     total = len(tasks)
+    physical_devices = sorted({task.physical_device for task in tasks})
+    max_active = min(max_active, max(1, len(physical_devices)))
+
+    def pop_next_for_free_device() -> tuple[int, MatrixTask] | None:
+        if not pending:
+            return None
+        busy_devices = {info["task"].physical_device for info in running.values()}
+        for _ in range(len(pending)):
+            index, task = pending.popleft()
+            if task.physical_device not in busy_devices:
+                return index, task
+            pending.append((index, task))
+        return None
 
     while pending or running:
         while pending and len(running) < max_active:
-            index, task = pending.popleft()
+            next_task = pop_next_for_free_device()
+            if next_task is None:
+                break
+            index, task = next_task
             launched = _launch_task(index, total, task, output_dir)
             running[launched["proc"].pid] = launched
 

@@ -15,12 +15,20 @@ weight caching by default and restricting Komodo inference to FP16.
 - Native NPU int4 is enabled by default. Set
   `GPTQMODEL_KOMODO_NATIVE_INT4=0`, or pass `--no-komodo-native-int4` to the
   benchmark, to force the exact torch-style Komodo fallback for drift checks.
+- The native int4 path requires `torch.ops.npu.npu_convert_weight_to_int4pack`
+  and `torch.ops.npu.npu_weight_quant_batchmatmul`; see
+  [ascend_npu.md](ascend_npu.md) for the scanned public `torch.ops.npu`
+  operator snapshot.
+- Unsupported native int4 layouts use the exact Torch fallback. Dense
+  dequantized fallback weight caching stays off by default, but can be enabled
+  for debugging with `GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE=1`.
 - Native NPU int4 plans are built eagerly during `post_init()` once a Komodo
   module is on its final NPU device. Set `GPTQMODEL_KOMODO_EAGER_PREPACK=0` to
   restore first-forward packing for debugging.
 - NPU flash attention is eligible for `attn_implementation=auto` when torch-npu
-  exposes both prompt and incremental flash-attention ops. Explicit
-  `attn_implementation` values still take precedence.
+  exposes both `torch.ops.npu.npu_prompt_flash_attention` and
+  `torch.ops.npu.npu_incre_flash_attention`. Explicit `attn_implementation`
+  values still take precedence.
 - Native prepack is streamed across output columns to reduce temporary HBM
   workspace. `GPTQMODEL_KOMODO_PREPACK_TILE_N` controls the output-column tile
   size, defaults to `1024`, and `0` restores the previous full-width pack.

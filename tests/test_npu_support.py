@@ -716,6 +716,88 @@ def test_npu_komodo_gptq_matches_torch_baseline(dtype, monkeypatch):
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("desc_act", [False, True])
+def test_npu_komodo_gptq_group16_uses_packed_native_without_dense_cache_by_default(dtype, desc_act, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
+    monkeypatch.delenv("GPTQMODEL_KOMODO_NATIVE_GROUP16", raising=False)
+    monkeypatch.delenv("GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE", raising=False)
+    monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
+    baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=16).eval()
+    if desc_act:
+        _set_supported_act_order_g_idx(baseline_cpu)
+    candidate = KomodoLinear(
+        bits=4,
+        group_size=baseline_cpu.requested_group_size,
+        sym=baseline_cpu.sym,
+        desc_act=baseline_cpu.desc_act,
+        in_features=baseline_cpu.in_features,
+        out_features=baseline_cpu.out_features,
+        bias=baseline_cpu.bias is not None,
+        pack_dtype=baseline_cpu.pack_dtype,
+        register_buffers=True,
+    )
+    _copy_matching_buffers(candidate, baseline_cpu)
+    candidate.optimized = True
+    candidate.post_init()
+    baseline = baseline_cpu.to(_test_npu_device()).eval()
+    candidate = candidate.to(_test_npu_device(), dtype=dtype).eval()
+    assert candidate.native_plan_prepacked(device=_test_npu_device(), dtype=dtype)
+
+    x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
+    with torch.inference_mode():
+        expected = baseline(x)
+        actual = candidate(x)
+        repeat = candidate(x)
+        torch.npu.synchronize()
+
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=2e-2, rtol=2e-2)
+    assert candidate._native_plan_cache == {}
+    assert (x.device, dtype) in candidate._native_group16_plan_cache
+    assert candidate._cached_weights == {}
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16])
+def test_npu_komodo_gptq_group16_uses_exact_cached_fallback_when_enabled(dtype, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_GROUP16", "0")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
+    baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=16).eval()
+    candidate = KomodoLinear(
+        bits=4,
+        group_size=baseline_cpu.requested_group_size,
+        sym=baseline_cpu.sym,
+        desc_act=baseline_cpu.desc_act,
+        in_features=baseline_cpu.in_features,
+        out_features=baseline_cpu.out_features,
+        bias=baseline_cpu.bias is not None,
+        pack_dtype=baseline_cpu.pack_dtype,
+        register_buffers=True,
+    )
+    _copy_matching_buffers(candidate, baseline_cpu)
+    candidate.optimized = True
+    candidate.post_init()
+    baseline = baseline_cpu.to(_test_npu_device()).eval()
+    candidate = candidate.to(_test_npu_device(), dtype=dtype).eval()
+    assert not candidate.native_plan_prepacked(device=_test_npu_device(), dtype=dtype)
+
+    x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
+    with torch.inference_mode():
+        expected = baseline(x)
+        actual = candidate(x)
+        repeat = candidate(x)
+        torch.npu.synchronize()
+
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
+    assert candidate._native_plan_cache == {}
+    assert dtype in candidate._cached_weights
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16])
 def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
     monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
