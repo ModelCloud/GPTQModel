@@ -553,6 +553,7 @@ def test_npu_komodo_gptq_matches_torch_baseline(dtype, monkeypatch):
 def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
     monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_PREPACK_TILE_N", "16")
     baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=32).eval()
     candidate = KomodoLinear(
         bits=4,
@@ -629,6 +630,7 @@ def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
 def test_npu_komodo_gptq_native_int4_act_order_matches_torch_baseline(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
     monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_PREPACK_TILE_N", "16")
     baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=32).eval()
     _set_supported_act_order_g_idx(baseline_cpu)
     candidate = KomodoLinear(
@@ -681,6 +683,7 @@ def test_npu_komodo_gptq_native_int4_act_order_matches_torch_baseline(dtype, mon
 def test_npu_komodo_gptq_drops_source_after_native_pack(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
     monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_PREPACK_TILE_N", "16")
     baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=32).eval()
     candidate = KomodoLinear(
         bits=4,
@@ -767,6 +770,7 @@ def test_npu_komodo_awq_matches_torch_baseline(dtype, monkeypatch):
 def test_npu_komodo_awq_native_int4_matches_torch_baseline(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
     monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_PREPACK_TILE_N", "16")
     baseline = _make_awq_like_module(AwqTorchLinear, dtype, group_size=32).to(_test_npu_device()).eval()
     baseline.post_init()
     candidate = _make_awq_like_module(AwqKomodoLinear, dtype, group_size=32).to(_test_npu_device()).eval()
@@ -805,6 +809,7 @@ def test_npu_komodo_awq_native_int4_matches_torch_baseline(dtype, monkeypatch):
 def test_npu_komodo_awq_drops_source_after_native_pack(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
     monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_PREPACK_TILE_N", "16")
     baseline = _make_awq_like_module(AwqTorchLinear, dtype, group_size=32).to(_test_npu_device()).eval()
     baseline.post_init()
     candidate = _make_awq_like_module(AwqKomodoLinear, dtype, group_size=32).to(_test_npu_device()).eval()

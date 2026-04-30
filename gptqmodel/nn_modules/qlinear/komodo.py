@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from ...adapter.adapter import Adapter
@@ -23,6 +25,7 @@ _KOMODO_CACHE_ENV = "GPTQMODEL_KOMODO_CACHE_WEIGHTS"
 _KOMODO_NATIVE_INT4_ENV = "GPTQMODEL_KOMODO_NATIVE_INT4"
 _KOMODO_DROP_SOURCE_ENV = "GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"
 _KOMODO_EAGER_PREPACK_ENV = "GPTQMODEL_KOMODO_EAGER_PREPACK"
+_KOMODO_PREPACK_TILE_N_ENV = "GPTQMODEL_KOMODO_PREPACK_TILE_N"
 _NativePlan = tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor | None]
 
 
@@ -44,6 +47,32 @@ def _native_int4_group_size(group_size: int, in_features: int) -> int | None:
     if group_size < 32 or group_size % 32 != 0:
         return None
     return group_size
+
+
+def _native_prepack_tile_n(out_features: int, pack_factor: int) -> int:
+    if out_features % pack_factor != 0:
+        raise RuntimeError(
+            f"Komodo native int4 requires out_features to be divisible by {pack_factor}; got {out_features}."
+        )
+
+    raw = os.getenv(_KOMODO_PREPACK_TILE_N_ENV)
+    if raw is None:
+        tile_n = 1024
+    else:
+        try:
+            tile_n = int(raw)
+        except ValueError as err:
+            raise RuntimeError(f"{_KOMODO_PREPACK_TILE_N_ENV} must be an integer; got `{raw}`.") from err
+
+    if tile_n <= 0 or tile_n >= out_features:
+        return out_features
+
+    tile_n = (tile_n // pack_factor) * pack_factor
+    return max(pack_factor, tile_n)
+
+
+def _packed_weight_empty_like_tile(tile: torch.Tensor, out_features: int, pack_factor: int) -> torch.Tensor:
+    return tile.new_empty((tile.shape[0], out_features // pack_factor))
 
 
 def _npu_int4_ops_available() -> bool:
@@ -450,21 +479,38 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         if not supported:
             raise RuntimeError("Komodo native int4 plan requested for an unsupported GPTQ g_idx layout.")
 
-        weight = torch.bitwise_and(
-            _right_shift_unpack(
-                self.qweight.unsqueeze(1).expand(-1, self.pack_factor, -1),
-                self.wf_unsqueeze_neg_one,
-                self.dequant_dtype,
-            ),
-            self.maxq,
-        )
-        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).to(torch.int32)
         input_perm = None
         if input_perm_cpu is not None:
             input_perm = input_perm_cpu.to(device=device, non_blocking=self.g_idx.device.type == "cpu")
-            weight = weight.index_select(0, input_perm)
-        signed_weight = (weight - 8).contiguous()
-        packed_weight = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
+
+        tile_n = _native_prepack_tile_n(self.out_features, self.pack_factor)
+        packed_weight = None
+        for start in range(0, self.out_features, tile_n):
+            width = min(tile_n, self.out_features - start)
+            qweight_tile = self.qweight.narrow(1, start, width)
+            weight = torch.bitwise_and(
+                _right_shift_unpack(
+                    qweight_tile.unsqueeze(1).expand(-1, self.pack_factor, -1),
+                    self.wf_unsqueeze_neg_one,
+                    self.dequant_dtype,
+                ),
+                self.maxq,
+            )
+            weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).to(torch.int32)
+            if input_perm is not None:
+                weight = weight.index_select(0, input_perm)
+
+            signed_weight = (weight - 8).contiguous()
+            packed_tile = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
+            if packed_weight is None:
+                packed_weight = _packed_weight_empty_like_tile(packed_tile, self.out_features, self.pack_factor)
+            packed_start = start // self.pack_factor
+            packed_width = width // self.pack_factor
+            packed_weight.narrow(1, packed_start, packed_width).copy_(packed_tile)
+            del weight, signed_weight, packed_tile
+
+        if packed_weight is None:
+            raise RuntimeError("Komodo native int4 plan requested for an empty weight.")
 
         zeros = self._stream_decode_qzeros().to(device=device)
         scales = self.scales.to(device=device, dtype=dtype).contiguous()
@@ -685,14 +731,33 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
         return _native_int4_group_size(self.group_size, self.in_features) is not None
 
     def _build_native_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativePlan:
-        iweight, izeros = unpack_awq(self.qweight, self.qzeros, self.bits)
-        iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
         max_val = (1 << self.bits) - 1
-        iweight = torch.bitwise_and(iweight, max_val).to(torch.int32)
-        izeros = torch.bitwise_and(izeros, max_val).reshape_as(self.scales)
 
-        signed_weight = (iweight - 8).contiguous()
-        packed_weight = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
+        tile_n = _native_prepack_tile_n(self.out_features, self.pack_factor)
+        packed_weight = None
+        izeros_tiles = []
+        for start in range(0, self.out_features, tile_n):
+            width = min(tile_n, self.out_features - start)
+            packed_start = start // self.pack_factor
+            packed_width = width // self.pack_factor
+            qweight_tile = self.qweight.narrow(1, packed_start, packed_width)
+            qzeros_tile = self.qzeros.narrow(1, packed_start, packed_width)
+            iweight, izeros = unpack_awq(qweight_tile, qzeros_tile, self.bits)
+            iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
+            iweight = torch.bitwise_and(iweight, max_val).to(torch.int32)
+            izeros = torch.bitwise_and(izeros, max_val).reshape(self.scales.shape[0], width)
+
+            signed_weight = (iweight - 8).contiguous()
+            packed_tile = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
+            if packed_weight is None:
+                packed_weight = _packed_weight_empty_like_tile(packed_tile, self.out_features, self.pack_factor)
+            packed_weight.narrow(1, packed_start, packed_width).copy_(packed_tile)
+            izeros_tiles.append(izeros)
+            del iweight, signed_weight, packed_tile
+
+        if packed_weight is None:
+            raise RuntimeError("Komodo native int4 plan requested for an empty weight.")
+        izeros = torch.cat(izeros_tiles, dim=1) if len(izeros_tiles) > 1 else izeros_tiles[0]
         scales = self.scales.to(device=device, dtype=dtype).contiguous()
         offsets = (8 - izeros.to(torch.int32)).to(device=device, dtype=dtype).contiguous()
         native_group_size = _native_int4_group_size(self.group_size, self.in_features)

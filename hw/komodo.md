@@ -18,6 +18,9 @@ weight caching by default and restricting Komodo inference to FP16.
 - Native NPU int4 plans are built eagerly during `post_init()` once a Komodo
   module is on its final NPU device. Set `GPTQMODEL_KOMODO_EAGER_PREPACK=0` to
   restore first-forward packing for debugging.
+- Native prepack is streamed across output columns to reduce temporary HBM
+  workspace. `GPTQMODEL_KOMODO_PREPACK_TILE_N` controls the output-column tile
+  size, defaults to `1024`, and `0` restores the previous full-width pack.
 - Source GPTQ/AWQ buffers are dropped by default after native prepack. Set
   `GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS=0`, or benchmark option
   `--no-komodo-drop-source-weights`, to keep source quant buffers for debugging,
@@ -116,6 +119,29 @@ pack, but it is intentionally one-way:
 Quick validation on `npu:0` with `--komodo-drop-source-weights` kept the native
 path active for the repeat forward and preserved the same drift envelope:
 `73.983x` without prefetch and `69.344x` with prefetch on quick GPTQ+AWQ cases.
+
+## Prepack Workspace
+
+Native prepack now chunks the GPTQ/AWQ source weights by output columns before
+calling `npu_convert_weight_to_int4pack`. This avoids materializing the full
+unpacked int4 weight for large projections during model load. The packed native
+weight is still assembled into the same cached layout, so inference uses the
+same steady-state kernel and the source-drop behavior is unchanged.
+
+Observed cold prepack HBM peak with eager prepack and source drop enabled:
+
+| Model | Method | Previous cold peak GB | Tiled cold peak GB | Drop | Live source GB | Cached native GB |
+|---|---:|---:|---:|---:|---:|---:|
+| Qwen3.6-35B-A3B | GPTQ | 0.145 | 0.067 | 53.9% | 0.004 | 0.067 |
+| Qwen3.6-35B-A3B | AWQ | 0.145 | 0.067 | 53.9% | 0.004 | 0.067 |
+| Qwen3.6-27B | GPTQ | 1.542 | 0.389 | 74.8% | 0.055 | 0.239 |
+| Qwen3.6-27B | AWQ | 1.546 | 0.392 | 74.6% | 0.052 | 0.236 |
+
+For wide MLP projections the reduction is larger because only a 1024-column
+scratch tile is unpacked at a time. Example gate/up projections on Qwen3.6-27B
+dropped from about `1.54 GB` to about `0.24 GB` cold peak. Smaller projections
+with `out_features <= 1024` keep the full-width path because there is no useful
+tile split.
 
 ## Qwen3.6 Shapes
 
