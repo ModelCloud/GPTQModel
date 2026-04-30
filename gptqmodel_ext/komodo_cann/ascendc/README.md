@@ -29,7 +29,8 @@ Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
 with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset
 loads to quant-group scope, and to `5.56 ms` after adding a two-row micro-tile
-that reuses each dequantized packed word across two activation rows.
+that reuses each dequantized packed word across two activation rows. Branchless
+INT4 sign extension then reduced the same raw-op timing to `4.60 ms`.
 
 Build from the repo root:
 

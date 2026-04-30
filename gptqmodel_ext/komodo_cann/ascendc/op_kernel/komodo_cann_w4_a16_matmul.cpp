@@ -233,7 +233,7 @@ private:
     {
         const uint32_t shift = lane << 2;
         const int32_t raw = static_cast<int32_t>((word >> shift) & 0xFU);
-        const int32_t signed_w = raw >= 8 ? raw - 16 : raw;
+        const int32_t signed_w = (raw ^ 0x8) - 0x8;
         return (static_cast<float>(signed_w) + offset) * scale;
     }
 

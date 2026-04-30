@@ -257,6 +257,11 @@ Ascend C custom-op bring-up:
   dequantized eight-lane result across two activation rows. The same timing
   dropped from `9.22 ms` to `5.56 ms` with zero observed drift in the mixed
   correctness sweep. Odd row counts fall back to the single-row path.
+- Replacing the per-lane signed INT4 branch with branchless two's-complement
+  sign extension dropped the same raw-op timing from `5.56 ms` to `4.60 ms`.
+  The mixed correctness sweep passed with max observed drift
+  `0.00048828125`, and the 8-NPU deterministic smoke reported zero error on
+  all devices.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and
