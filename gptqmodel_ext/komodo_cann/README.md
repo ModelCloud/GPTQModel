@@ -30,6 +30,12 @@ The operator must implement:
 The first target is GPTQ W4A16 FP16 output for `group_size` 0, 32, 64, and 128.
 Group-16 remains on the native fallback path until it has a separate fused
 grouped design.
+For the repo-owned Ascend C op, Python may pass a negative `base_k` as an
+internal side-band flag for symmetric GPTQ zero-offset row-oct calls. The host
+tiler uses the absolute value as the real `base_k` tile size and records a
+separate `zero_offsets` tiling field for the device kernel. Generic fused-op
+implementations should continue treating `base_k` as the positive tile size
+unless they explicitly support this extension.
 
 `op_ir/komodo_cann_w4a16_matmul.json` can be passed to `msopgen` as a starting
 point for an Ascend C project:
@@ -146,3 +152,6 @@ multi-core strided variant was accepted by CANN but produced sparse writes on
 the local 910B bring-up run, so the next tuning step is reintroducing multi-core
 tile ownership with a stronger launch/tiling contract before replacing the
 scalar accumulation loop with vectorized tile math and Cube matmul consumption.
+The row-oct path also has a symmetric GPTQ zero-offset specialization that
+skips offset GM reads for `rows >= 8`; the smaller tails and AWQ path keep the
+normal nonzero-offset flow.

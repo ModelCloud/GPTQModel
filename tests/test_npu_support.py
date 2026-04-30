@@ -85,6 +85,25 @@ def test_komodo_cann_tiling_plan_uses_split_k_for_decode_large_k(monkeypatch):
     assert not plan.fused_available
     assert plan.fused_reason == "op_not_registered"
     assert plan.inner_precise == 0
+    assert plan.zero_offsets is False
+
+
+def test_komodo_cann_tiling_plan_records_zero_offsets_flag(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", raising=False)
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_V3", raising=False)
+
+    plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=256,
+        out_features=256,
+        group_size=32,
+        device=torch.device("cpu"),
+        zero_offsets=True,
+    )
+
+    assert plan.zero_offsets is True
 
 
 def test_komodo_cann_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):

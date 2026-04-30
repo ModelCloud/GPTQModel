@@ -54,6 +54,14 @@ that temporary. No-bias NPU0 medians improved from `0.827 ms` to `0.802 ms` for
 `M=1,K=256,N=256,group_size=32`, from `1.118 ms` to `1.086 ms` for `M=2`, and
 from `3.248 ms` to `3.213 ms` for `M=8`; bias-present timings stayed within
 noise.
+For symmetric GPTQ cases with at least eight rows, the planner marks the
+eight-row path as zero-offset and the host tiler decodes that internal flag from
+a negative `base_k` attribute while preserving the absolute tile size. This lets
+the row-oct loop skip eight GM offset loads per group. NPU0 medians improved
+from `3.214 ms` to `2.964 ms` for `M=8,K=256,N=256,group_size=32`, from
+`6.353 ms` to `5.833 ms` for `M=16,K=256,N=256,group_size=32`, and from
+`50.033 ms` to `45.781 ms` for `M=8,K=1024,N=1024,group_size=32`; M1/M2/M4
+nonzero-offset paths stayed within timing noise.
 
 Build from the repo root:
 

@@ -32,6 +32,7 @@ public:
         const uint32_t out_features = tiling_->out_features;
         const uint32_t group_size = tiling_->group_size;
         const uint32_t has_bias = tiling_->has_bias;
+        const uint32_t zero_offsets = tiling_->zero_offsets;
         const uint32_t core_idx = GetBlockIdx();
         if (core_idx != 0) {
             return;
@@ -40,7 +41,7 @@ public:
         const uint32_t packed_stride = out_features >> 3;
         uint32_t m = 0;
         for (; m + 7 < rows; m += 8) {
-            ProcessRowOct(m, in_features, out_features, group_size, has_bias, packed_stride);
+            ProcessRowOct(m, in_features, out_features, group_size, has_bias, zero_offsets, packed_stride);
         }
         for (; m + 3 < rows; m += 4) {
             ProcessRowQuad(m, in_features, out_features, group_size, has_bias, packed_stride);
@@ -210,6 +211,7 @@ private:
         uint32_t out_features,
         uint32_t group_size,
         uint32_t has_bias,
+        uint32_t zero_offsets,
         uint32_t packed_stride)
     {
         const uint32_t row_offset0 = m * out_features;
@@ -281,14 +283,14 @@ private:
                 const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
                 const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
                 const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
-                const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));
-                const float offset1 = static_cast<float>(offsets_gm_.GetValue(scale_base + 1));
-                const float offset2 = static_cast<float>(offsets_gm_.GetValue(scale_base + 2));
-                const float offset3 = static_cast<float>(offsets_gm_.GetValue(scale_base + 3));
-                const float offset4 = static_cast<float>(offsets_gm_.GetValue(scale_base + 4));
-                const float offset5 = static_cast<float>(offsets_gm_.GetValue(scale_base + 5));
-                const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
-                const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
+                const float offset0 = OffsetValue(scale_base, zero_offsets);
+                const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
+                const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
+                const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
+                const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
+                const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
+                const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
+                const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
 
                 for (uint32_t k = k_begin; k < k_end; ++k) {
                     const float x_value0 = static_cast<float>(x_gm_.GetValue(x_offset0 + k));
@@ -880,6 +882,11 @@ private:
         y_gm_.SetValue(y_base + 5, static_cast<half>(acc5));
         y_gm_.SetValue(y_base + 6, static_cast<half>(acc6));
         y_gm_.SetValue(y_base + 7, static_cast<half>(acc7));
+    }
+
+    __aicore__ inline float OffsetValue(uint32_t offset, uint32_t zero_offsets)
+    {
+        return zero_offsets != 0 ? 0.0f : static_cast<float>(offsets_gm_.GetValue(offset));
     }
 
     __aicore__ inline float DequantLane(uint32_t word, uint32_t lane, float scale, float offset)

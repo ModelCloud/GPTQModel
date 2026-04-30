@@ -27,6 +27,29 @@ uint32_t AttrAsU32(const gert::RuntimeAttrs* attrs, size_t index, uint32_t fallb
     return static_cast<uint32_t>(*value);
 }
 
+uint32_t AttrAbsAsU32(const gert::RuntimeAttrs* attrs, size_t index, uint32_t fallback)
+{
+    if (attrs == nullptr) {
+        return fallback;
+    }
+    const int64_t* value = attrs->GetInt(index);
+    if (value == nullptr || *value == 0) {
+        return fallback;
+    }
+    const uint64_t magnitude = *value < 0 ? static_cast<uint64_t>(-(*value + 1)) + 1U : static_cast<uint64_t>(*value);
+    constexpr uint64_t kMaxU32 = static_cast<uint64_t>(0xffffffffU);
+    return static_cast<uint32_t>(magnitude > kMaxU32 ? kMaxU32 : magnitude);
+}
+
+uint32_t AttrIsNegative(const gert::RuntimeAttrs* attrs, size_t index)
+{
+    if (attrs == nullptr) {
+        return 0;
+    }
+    const int64_t* value = attrs->GetInt(index);
+    return value != nullptr && *value < 0 ? 1U : 0U;
+}
+
 uint32_t ClampU64ToU32(uint64_t value)
 {
     constexpr uint64_t kMaxU32 = static_cast<uint64_t>(0xffffffffU);
@@ -94,10 +117,11 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_out_features(static_cast<uint32_t>(n64));
     tiling.set_group_size(group_size);
     tiling.set_has_bias(context->GetOptionalInputShape(kInputBias) != nullptr ? 1U : 0U);
+    tiling.set_zero_offsets(AttrIsNegative(attrs, kAttrBaseK));
     tiling.set_split_k(AttrAsU32(attrs, kAttrSplitK, 1));
     tiling.set_base_m(AttrAsU32(attrs, kAttrBaseM, rows64 <= 16 ? 16 : 128));
     tiling.set_base_n(AttrAsU32(attrs, kAttrBaseN, 256));
-    tiling.set_base_k(AttrAsU32(attrs, kAttrBaseK, 64));
+    tiling.set_base_k(AttrAbsAsU32(attrs, kAttrBaseK, 64));
     tiling.set_total_outputs(total_outputs);
     tiling.set_block_dim(block_dim);
 

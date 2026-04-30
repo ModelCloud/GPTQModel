@@ -308,6 +308,20 @@ Ascend C custom-op bring-up:
   timings were unchanged within noise. This removes host-side artificial
   materialization; it does not change the device kernel's scalar AIV-only
   status.
+- Symmetric GPTQ weights have all-zero offsets, so the planner now marks
+  `rows >= 8` symmetric calls with a zero-offset flag and encodes that flag as a
+  negative `base_k` attribute for the Ascend C tiler. The host tiler restores
+  the absolute `base_k` value for tile sizing and stores a separate tiling flag;
+  only the row-oct path consumes it. This skips eight FP16 offset GM reads per
+  quant group without touching AWQ or smaller GPTQ tails. NPU0 medians improved
+  from `3.214 ms` to `2.964 ms` for `M=8,K=256,N=256,group_size=32`, from
+  `3.931 ms` to `3.685 ms` for `M=9,K=256,N=256,group_size=32`, from
+  `6.353 ms` to `5.833 ms` for `M=16,K=256,N=256,group_size=32`, from
+  `50.033 ms` to `45.781 ms` for `M=8,K=1024,N=1024,group_size=32`, and from
+  `99.956 ms` to `91.477 ms` for `M=16,K=1024,N=1024,group_size=32`.
+  M1/M2/M4 cases continue to use positive `base_k` and normal offset loads;
+  they measured flat within noise. CPU-reference checks covered zero-offset and
+  nonzero-offset paths with max observed error below `0.001`.
 - A direct CANN `Matmul<fp16, int4, fp16>` probe was rejected for now. In the
   default msopgen package the kernel still compiled as `VectorCore`, so the
   sentinel Cube path returned zeros because no AIC side was scheduled. Forcing

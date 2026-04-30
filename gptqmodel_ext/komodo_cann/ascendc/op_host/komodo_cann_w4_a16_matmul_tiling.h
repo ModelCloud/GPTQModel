@@ -7,6 +7,7 @@ BEGIN_TILING_DATA_DEF(KomodoCannW4A16MatmulTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, out_features);
   TILING_DATA_FIELD_DEF(uint32_t, group_size);
   TILING_DATA_FIELD_DEF(uint32_t, has_bias);
+  TILING_DATA_FIELD_DEF(uint32_t, zero_offsets);
   TILING_DATA_FIELD_DEF(uint32_t, split_k);
   TILING_DATA_FIELD_DEF(uint32_t, base_m);
   TILING_DATA_FIELD_DEF(uint32_t, base_n);

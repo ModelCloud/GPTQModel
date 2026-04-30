@@ -74,6 +74,7 @@ class KomodoCannTilingPlan:
     prefetch_min_bytes: int
     prefetch_max_bytes: int
     inner_precise: int
+    zero_offsets: bool
     fused_enabled: bool
     fused_supported: bool
     fused_available: bool
@@ -365,6 +366,7 @@ def _komodo_cann_tiling_plan(
     out_features: int,
     group_size: int,
     device: torch.device,
+    zero_offsets: bool = False,
 ) -> KomodoCannTilingPlan:
     cube_cores, vector_cores, l2_cache_size = _komodo_cann_device_caps(device)
     split_k = _komodo_cann_split_k(rows, in_features, out_features, cube_cores)
@@ -421,6 +423,7 @@ def _komodo_cann_tiling_plan(
         prefetch_min_bytes=prefetch_min_bytes,
         prefetch_max_bytes=prefetch_max_bytes,
         inner_precise=inner_precise,
+        zero_offsets=bool(zero_offsets),
         fused_enabled=fused_enabled,
         fused_supported=fused_supported,
         fused_available=fused_available,
@@ -482,7 +485,7 @@ def _komodo_cann_fused_matmul(
         int(plan.split_k),
         int(plan.base_m),
         int(plan.base_n),
-        int(plan.base_k),
+        -int(plan.base_k) if plan.zero_offsets else int(plan.base_k),
     )
 
 
@@ -520,7 +523,12 @@ class _KomodoCannPlanMixin:
             self._cann_hot_plan = None
         return result
 
-    def _cann_plan(self, x_flat: torch.Tensor, group_size: int) -> KomodoCannTilingPlan:
+    def _cann_plan(
+        self,
+        x_flat: torch.Tensor,
+        group_size: int,
+        zero_offsets: bool = False,
+    ) -> KomodoCannTilingPlan:
         env_key = (
             os.getenv(_KOMODO_CANN_PREFETCH_ENV),
             os.getenv(_KOMODO_CANN_PREFETCH_MAX_BYTES_ENV),
@@ -535,7 +543,7 @@ class _KomodoCannPlanMixin:
             os.getenv(_KOMODO_CANN_V3_ENV),
             os.getenv(_KOMODO_CANN_INNER_PRECISE_ENV),
         )
-        hot_key = (x_flat.device, x_flat.shape[0], group_size, env_key)
+        hot_key = (x_flat.device, x_flat.shape[0], group_size, bool(zero_offsets), env_key)
         if getattr(self, "_cann_hot_plan_key", None) == hot_key:
             self._last_cann_plan = self._cann_hot_plan
             return self._cann_hot_plan
@@ -545,7 +553,8 @@ class _KomodoCannPlanMixin:
             hot_key[1],
             self.in_features,
             self.out_features,
-            hot_key[2],
+            group_size,
+            bool(zero_offsets),
             env_key,
         )
         cached = self._cann_plan_cache.get(key)
@@ -556,6 +565,7 @@ class _KomodoCannPlanMixin:
                 out_features=self.out_features,
                 group_size=group_size,
                 device=x_flat.device,
+                zero_offsets=zero_offsets,
             )
             self._cann_plan_cache[key] = cached
         self._cann_hot_plan_key = hot_key
@@ -608,7 +618,11 @@ class KomodoCannLinear(_KomodoCannPlanMixin, KomodoLinear):
         packed_weight, scales, offsets, native_group_size, input_perm = self._native_plan(
             device=x_flat.device, dtype=compute_dtype
         )
-        plan = self._cann_plan(x_flat, native_group_size)
+        plan = self._cann_plan(
+            x_flat,
+            native_group_size,
+            zero_offsets=bool(self.sym) and x_flat.shape[0] >= 8,
+        )
         if input_perm is not None:
             x_flat = x_flat.index_select(1, input_perm)
         bias = self.bias
