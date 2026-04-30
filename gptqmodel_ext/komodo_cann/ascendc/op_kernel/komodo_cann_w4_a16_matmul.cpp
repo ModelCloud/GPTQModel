@@ -3,6 +3,10 @@
 using namespace AscendC;
 
 namespace {
+#ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
+constexpr uint32_t kKernelModeStagedDequant = 1;
+#endif
+
 class KomodoCannW4A16ScalarKernel {
 public:
     __aicore__ inline void Init(
@@ -12,6 +16,7 @@ public:
         GM_ADDR offsets,
         GM_ADDR bias,
         GM_ADDR y,
+        GM_ADDR workspace,
         const KomodoCannW4A16MatmulTilingData* tiling)
     {
         x_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(x));
@@ -22,6 +27,13 @@ public:
             bias_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(bias));
         }
         y_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(y));
+#ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
+        if (tiling->kernel_mode == kKernelModeStagedDequant && tiling->staging_workspace_bytes != 0) {
+            staged_weight_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(workspace));
+        }
+#else
+        (void)workspace;
+#endif
         tiling_ = tiling;
     }
 
@@ -1023,6 +1035,9 @@ private:
     GlobalTensor<half> offsets_gm_;
     GlobalTensor<half> bias_gm_;
     GlobalTensor<half> y_gm_;
+#ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
+    GlobalTensor<half> staged_weight_gm_;
+#endif
     const KomodoCannW4A16MatmulTilingData* tiling_;
 };
 }  // namespace
@@ -1043,6 +1058,6 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
     }
     GET_TILING_DATA(tiling_data, tiling);
     KomodoCannW4A16ScalarKernel op;
-    op.Init(x, packed_weight, scales, offsets, bias, y, &tiling_data);
+    op.Init(x, packed_weight, scales, offsets, bias, y, workspace, &tiling_data);
     op.Process();
 }

@@ -62,6 +62,7 @@ def test_komodo_cann_tiling_plan_uses_split_k_for_decode_large_k(monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
     monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", raising=False)
     monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_V3", raising=False)
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", raising=False)
     plan = _komodo_cann_tiling_plan(
         rows=1,
         in_features=8192,
@@ -78,6 +79,8 @@ def test_komodo_cann_tiling_plan_uses_split_k_for_decode_large_k(monkeypatch):
     assert plan.dequant_fp16_tile_bytes == plan.base_k * plan.base_n * 2
     assert plan.vector_dequant_tasks == (plan.out_features // plan.base_n) * plan.split_k * plan.k_tiles_per_split
     assert plan.active_cores == min(plan.cube_cores, plan.split_k * 4)
+    assert plan.staged_dequant is False
+    assert plan.staging_workspace_bytes == 0
     assert plan.strategy == "planned_split_k_aiv_dequant_aic_matmul"
     assert not plan.prefetch_enabled
     assert plan.fused_enabled
@@ -93,6 +96,7 @@ def test_komodo_cann_tiling_plan_records_zero_offsets_flag(monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
     monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", raising=False)
     monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_V3", raising=False)
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", raising=False)
 
     plan = _komodo_cann_tiling_plan(
         rows=8,
@@ -106,10 +110,57 @@ def test_komodo_cann_tiling_plan_records_zero_offsets_flag(monkeypatch):
     assert plan.zero_offsets is True
 
 
+def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", raising=False)
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_V3", raising=False)
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", raising=False)
+
+    default_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=8192,
+        out_features=1024,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+
+    assert default_plan.staged_dequant is False
+    assert default_plan.staging_slots == 0
+    assert default_plan.staging_blocks == 0
+    assert default_plan.staging_tile_bytes == 0
+    assert default_plan.staging_workspace_bytes == 0
+
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", "1")
+    staged_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=8192,
+        out_features=1024,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+
+    assert staged_plan.staged_dequant is True
+    assert staged_plan.staging_slots == 2
+    assert staged_plan.staging_blocks == min(
+        staged_plan.vector_cores,
+        max(1, staged_plan.out_features // 8),
+        8,
+        (staged_plan.out_features // staged_plan.base_n) * staged_plan.split_k,
+    )
+    assert staged_plan.staging_tile_bytes == staged_plan.base_k * staged_plan.base_n * 2
+    assert staged_plan.staging_workspace_bytes == (
+        staged_plan.staging_slots * staged_plan.staging_blocks * staged_plan.staging_tile_bytes
+    )
+    assert staged_plan.staging_workspace_bytes < staged_plan.in_features * staged_plan.out_features * 2
+    assert staged_plan.strategy == "planned_staged_dequant_aic_matmul"
+
+
 def test_komodo_cann_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
     monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
     monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_INNER_PRECISE", raising=False)
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", raising=False)
 
     liked = _komodo_cann_tiling_plan(
         rows=1,

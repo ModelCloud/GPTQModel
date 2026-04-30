@@ -387,6 +387,22 @@ Ascend C custom-op bring-up:
   generated package still launches as AIV-only. An 8-NPU raw-op A/B against the
   row-pair baseline was flat across `M=1/2/4/8/16` and `K=256/1024`, with the
   largest measured delta `+0.22%` on `M=2,K=256,N=256`.
+- Added the first explicit staged-dequant control plane for the real fused
+  AIV/Cube target. `GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT=1` marks the tiling
+  plan and passes a negative `base_n` only to the fused Ascend C op; the normal
+  planner and scalar package remain unchanged. The host tiler requests custom-op
+  workspace only when the bounded ping-pong FP16 tile store is smaller than a
+  full dense dequantized `K x N` matrix, so the default path still has zero
+  workspace and never caches dequantized dense weights. This commit is the
+  workspace/ABI hook for the future AIV producer / AIC Cube consumer state
+  machine; it does not make the scalar baseline a mixed kernel.
+- Validation for that staged-dequant control plane built both the default and
+  `--experimental-staged-dequant` OPP packages, ran the focused planner tests,
+  and ran two 8-NPU raw-op smokes with one visible NPU per process. The default
+  positive-`base_n` package and the experimental negative-`base_n` package both
+  covered rows `1/2/3/4/6/8/16`, group sizes `0/32/64/128`, bias/no-bias, and
+  `K` values `256/384/512`; max observed drift against native CANN was
+  `0.0078125`.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

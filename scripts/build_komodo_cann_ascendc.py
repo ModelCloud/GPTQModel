@@ -92,6 +92,21 @@ def _force_compute_unit(output: Path, compute_unit: str) -> None:
     presets_path.write_text(json.dumps(presets, indent=4) + "\n")
 
 
+def _enable_kernel_define(output: Path, define: str) -> None:
+    cmake_path = output / "op_kernel" / "CMakeLists.txt"
+    if not cmake_path.exists():
+        raise FileNotFoundError(cmake_path)
+    text = cmake_path.read_text()
+    option = f"-D{define}=1"
+    if option in text:
+        return
+    marker = "add_kernels_compile()\n"
+    if marker not in text:
+        raise RuntimeError(f"Could not find `{marker.strip()}` in {cmake_path}.")
+    text = text.replace(marker, f"add_ops_compile_options(ALL OPTIONS {option})\n{marker}", 1)
+    cmake_path.write_text(text)
+
+
 def _run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
     print("+", " ".join(command), flush=True)
     subprocess.run(command, cwd=str(cwd) if cwd is not None else None, env=env, check=True)
@@ -106,6 +121,11 @@ def main() -> int:
     parser.add_argument("--compute-unit", default="ascend910b", help="ASCEND_COMPUTE_UNIT for generated CMake.")
     parser.add_argument("--clean", action="store_true", help="Remove the output directory before generating.")
     parser.add_argument("--no-build", action="store_true", help="Only run msopgen and overlay repo sources.")
+    parser.add_argument(
+        "--experimental-staged-dequant",
+        action="store_true",
+        help="Compile guarded staged-dequant workspace hooks for Komodo-CANN fused-kernel bring-up.",
+    )
     args = parser.parse_args()
 
     output = args.output.resolve()
@@ -132,6 +152,8 @@ def main() -> int:
     )
     _copy_overlay(output)
     _force_compute_unit(output, args.compute_unit)
+    if args.experimental_staged_dequant:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT")
 
     if args.no_build:
         print(f"Generated project with Komodo-CANN overlay at {output}")

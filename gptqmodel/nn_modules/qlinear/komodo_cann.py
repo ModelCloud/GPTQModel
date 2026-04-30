@@ -31,6 +31,7 @@ _KOMODO_CANN_FUSED_OP_ENV = "GPTQMODEL_KOMODO_CANN_FUSED_OP"
 _KOMODO_CANN_ASCENDC_ENV = "GPTQMODEL_KOMODO_CANN_ASCENDC"
 _KOMODO_CANN_V3_ENV = "GPTQMODEL_KOMODO_CANN_V3"
 _KOMODO_CANN_INNER_PRECISE_ENV = "GPTQMODEL_KOMODO_CANN_INNER_PRECISE"
+_KOMODO_CANN_STAGED_DEQUANT_ENV = "GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT"
 _NPU_PREFETCH_OP_UNSET = object()
 _NPU_PREFETCH_OP = _NPU_PREFETCH_OP_UNSET
 _FUSED_OP_UNSET = object()
@@ -69,6 +70,11 @@ class KomodoCannTilingPlan:
     l0a_tile_bytes: int
     l0b_tile_bytes: int
     l0c_tile_bytes: int
+    staged_dequant: bool
+    staging_slots: int
+    staging_blocks: int
+    staging_tile_bytes: int
+    staging_workspace_bytes: int
     l2_cache_size: int
     prefetch_enabled: bool
     prefetch_min_bytes: int
@@ -116,6 +122,10 @@ def _komodo_cann_fused_required() -> bool:
 
 def _komodo_cann_v3_enabled() -> bool:
     return env_flag(_KOMODO_CANN_V3_ENV, default=False)
+
+
+def _komodo_cann_staged_dequant_enabled() -> bool:
+    return env_flag(_KOMODO_CANN_STAGED_DEQUANT_ENV, default=False)
 
 
 def _komodo_cann_ascendc_enabled() -> bool:
@@ -383,6 +393,22 @@ def _komodo_cann_tiling_plan(
     l0a_tile_bytes = base_m * base_k * 2
     l0b_tile_bytes = dequant_fp16_tile_bytes
     l0c_tile_bytes = base_m * base_n * 4
+    staging_slots = 2
+    staging_tile_bytes = _align_up(dequant_fp16_tile_bytes, 512)
+    scalar_owner_cap = min(vector_cores, max(1, out_features // 8), 8)
+    staging_blocks = min(scalar_owner_cap, max(1, n_tiles * split_k))
+    staging_workspace_bytes = staging_tile_bytes * staging_slots * staging_blocks
+    dense_dequant_bytes = in_features * out_features * 2
+    staged_dequant = (
+        _komodo_cann_staged_dequant_enabled()
+        and staging_workspace_bytes > 0
+        and staging_workspace_bytes < dense_dequant_bytes
+    )
+    if not staged_dequant:
+        staging_slots = 0
+        staging_blocks = 0
+        staging_tile_bytes = 0
+        staging_workspace_bytes = 0
     active_cores = min(cube_cores, max(1, n_tiles * split_k))
     prefetch_enabled = _komodo_cann_prefetch_enabled()
     prefetch_min_bytes = _komodo_cann_prefetch_min_bytes()
@@ -390,7 +416,9 @@ def _komodo_cann_tiling_plan(
     inner_precise = _komodo_cann_inner_precise(rows, in_features, out_features, group_size)
     fused_enabled, fused_supported, fused_available, fused_op, fused_reason = _komodo_cann_fused_status(group_size)
     if fused_available:
-        strategy = "fused_w4a16_aiv_dequant_aic_matmul"
+        strategy = "fused_w4a16_staged_dequant_aic_matmul" if staged_dequant else "fused_w4a16_aiv_dequant_aic_matmul"
+    elif staged_dequant:
+        strategy = "planned_staged_dequant_aic_matmul"
     elif split_k > 1:
         strategy = "planned_split_k_aiv_dequant_aic_matmul"
     elif prefetch_enabled:
@@ -418,6 +446,11 @@ def _komodo_cann_tiling_plan(
         l0a_tile_bytes=l0a_tile_bytes,
         l0b_tile_bytes=l0b_tile_bytes,
         l0c_tile_bytes=l0c_tile_bytes,
+        staged_dequant=staged_dequant,
+        staging_slots=staging_slots,
+        staging_blocks=staging_blocks,
+        staging_tile_bytes=staging_tile_bytes,
+        staging_workspace_bytes=staging_workspace_bytes,
         l2_cache_size=l2_cache_size,
         prefetch_enabled=prefetch_enabled,
         prefetch_min_bytes=prefetch_min_bytes,
@@ -484,7 +517,7 @@ def _komodo_cann_fused_matmul(
         int(group_size),
         int(plan.split_k),
         int(plan.base_m),
-        int(plan.base_n),
+        -int(plan.base_n) if plan.staged_dequant else int(plan.base_n),
         -int(plan.base_k) if plan.zero_offsets else int(plan.base_k),
     )
 

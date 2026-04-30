@@ -15,6 +15,11 @@ constexpr size_t kAttrBaseM = 2;
 constexpr size_t kAttrBaseN = 3;
 constexpr size_t kAttrBaseK = 4;
 
+constexpr uint32_t kKernelModeScalar = 0;
+constexpr uint32_t kKernelModeStagedDequant = 1;
+constexpr uint32_t kStagingSlots = 2;
+constexpr uint64_t kStagingAlignmentBytes = 512;
+
 uint32_t AttrAsU32(const gert::RuntimeAttrs* attrs, size_t index, uint32_t fallback)
 {
     if (attrs == nullptr) {
@@ -54,6 +59,22 @@ uint32_t ClampU64ToU32(uint64_t value)
 {
     constexpr uint64_t kMaxU32 = static_cast<uint64_t>(0xffffffffU);
     return static_cast<uint32_t>(value > kMaxU32 ? kMaxU32 : value);
+}
+
+uint64_t AlignUpU64(uint64_t value, uint64_t alignment)
+{
+    if (alignment == 0) {
+        return value;
+    }
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
+uint32_t CeilDivU32(uint32_t value, uint32_t divisor)
+{
+    if (divisor == 0) {
+        return 0;
+    }
+    return (value + divisor - 1) / divisor;
 }
 
 uint32_t PickBlockDim(uint32_t packed_words, uint32_t aiv_cores)
@@ -120,10 +141,13 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_group_size(group_size);
     tiling.set_has_bias(context->GetOptionalInputShape(kInputBias) != nullptr ? 1U : 0U);
     tiling.set_zero_offsets(AttrIsNegative(attrs, kAttrBaseK));
-    tiling.set_split_k(AttrAsU32(attrs, kAttrSplitK, 1));
+    const uint32_t requested_split_k = AttrAsU32(attrs, kAttrSplitK, 1);
+    tiling.set_split_k(requested_split_k);
     tiling.set_base_m(AttrAsU32(attrs, kAttrBaseM, rows64 <= 16 ? 16 : 128));
-    tiling.set_base_n(AttrAsU32(attrs, kAttrBaseN, 256));
-    tiling.set_base_k(AttrAbsAsU32(attrs, kAttrBaseK, 64));
+    const uint32_t requested_base_n = AttrAbsAsU32(attrs, kAttrBaseN, 256);
+    tiling.set_base_n(requested_base_n);
+    const uint32_t requested_base_k = AttrAbsAsU32(attrs, kAttrBaseK, 64);
+    tiling.set_base_k(requested_base_k);
     tiling.set_total_outputs(total_outputs);
 
     uint64_t ub_size = 0;
@@ -150,6 +174,42 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 
     const uint32_t block_dim = PickBlockDim(static_cast<uint32_t>(packed_n_words64), aiv_cores);
     tiling.set_block_dim(block_dim);
+    tiling.set_kernel_mode(kKernelModeScalar);
+    tiling.set_staging_blocks(0);
+    tiling.set_staging_slots(0);
+    tiling.set_staging_tile_bytes(0);
+    tiling.set_staging_workspace_bytes(0);
+
+    if (AttrIsNegative(attrs, kAttrBaseN) != 0 && requested_base_n != 0 && requested_base_k != 0) {
+        const uint32_t n_tiles = CeilDivU32(static_cast<uint32_t>(n64), requested_base_n);
+        const uint32_t split_k = requested_split_k == 0 ? 1 : requested_split_k;
+        const uint64_t planned_stage_blocks = static_cast<uint64_t>(n_tiles) * static_cast<uint64_t>(split_k);
+        uint32_t staging_blocks =
+            planned_stage_blocks < block_dim ? static_cast<uint32_t>(planned_stage_blocks) : block_dim;
+        if (staging_blocks == 0) {
+            staging_blocks = 1;
+        }
+        const uint64_t tile_bytes = AlignUpU64(
+            static_cast<uint64_t>(requested_base_k) * static_cast<uint64_t>(requested_base_n) * sizeof(uint16_t),
+            kStagingAlignmentBytes);
+        const uint64_t workspace_bytes = tile_bytes * static_cast<uint64_t>(kStagingSlots) *
+            static_cast<uint64_t>(staging_blocks);
+        const uint64_t dense_dequant_bytes =
+            static_cast<uint64_t>(k64) * static_cast<uint64_t>(n64) * sizeof(uint16_t);
+        if (workspace_bytes > 0 && workspace_bytes < dense_dequant_bytes) {
+            tiling.set_kernel_mode(kKernelModeStagedDequant);
+            tiling.set_staging_blocks(staging_blocks);
+            tiling.set_staging_slots(kStagingSlots);
+            tiling.set_staging_tile_bytes(ClampU64ToU32(tile_bytes));
+            tiling.set_staging_workspace_bytes(ClampU64ToU32(workspace_bytes));
+            size_t* workspaces = context->GetWorkspaceSizes(1);
+            if (workspaces == nullptr) {
+                return ge::GRAPH_FAILED;
+            }
+            workspaces[0] = static_cast<size_t>(workspace_bytes);
+        }
+    }
+
     context->SetBlockDim(block_dim);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());

@@ -30,6 +30,25 @@ fallback first normalizes AIV block IDs by `GetTaskRation()` and returns
 immediately on AIC entry. The checked-in package remains AIV-only; this guard is
 only preparation for the staged vector/Cube kernel.
 
+The fused-kernel bring-up path now has an explicit staged-dequant mode. It is
+off by default. Python enables it only with
+`GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT=1`, and the fused-call ABI encodes that
+request with a negative `base_n` attribute so existing generated packages keep
+their behavior. The host tiler then requests workspace only when the planned
+ping-pong FP16 tile storage is strictly smaller than a dense `K x N` dequantized
+weight matrix. The current default scalar package therefore still reports zero
+custom-op workspace; an experimental package can be built with:
+
+```bash
+python scripts/build_komodo_cann_ascendc.py \
+  --output /tmp/komodo_cann_w4a16_staged_op \
+  --experimental-staged-dequant
+```
+
+This is a bounded tile-staging hook for the eventual AIV producer / AIC Cube
+consumer state machine. It is not a default cache and it never requests a full
+dense dequantized-weight buffer.
+
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
 with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset
