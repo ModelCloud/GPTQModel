@@ -704,11 +704,6 @@ class _LazyWeightConverter:
             yield _LazyWeightRenaming(self.source_patterns[0], self.target_patterns[0])
             return
 
-        if len(self.target_patterns) == 1:
-            for source_pattern in self.source_patterns:
-                yield _LazyWeightRenaming(source_pattern, self.target_patterns[0])
-            return
-
         if len(self.source_patterns) == len(self.target_patterns):
             for source_pattern, target_pattern in zip(self.source_patterns, self.target_patterns):
                 yield _LazyWeightRenaming(source_pattern, target_pattern)
@@ -1405,97 +1400,17 @@ class LazyTurtle:
                         candidates.append(aliased)
         return candidates
 
-    def _resolve_checkpoint_module_path(self, module_path: str) -> str:
-        """Resolve a shell module path to the checkpoint path when wrappers add extra roots."""
+    @staticmethod
+    def _fused_checkpoint_requests(
+        runtime_name: str,
+    ) -> list[tuple[str, Optional[int], Optional[int], Optional[int]]]:
+        """Describe fused checkpoint tensors that could back one runtime tensor name.
 
-        candidates = self._runtime_to_checkpoint_alias_candidates(module_path)
-        for aliased in tuple(candidates):
-            # Apply declared runtime->checkpoint aliases before the generic
-            # prefix-stripping fallback so nested shell paths such as
-            # `model.language_model.layers.0` can correctly resolve to
-            # checkpoint paths like `model.layers.0`.
-            candidates.extend(self._module_tree_name_aliases(aliased))
-            for candidate_path in self._candidate_module_paths(aliased):
-                candidates.extend(self._runtime_to_checkpoint_alias_candidates(candidate_path))
+        Each entry is `(fused_name, expert_index, split_index, split_dim)`.
+        `fused_name` is expressed relative to the provided `runtime_name`.
+        """
 
-        seen: set[str] = set()
-        for candidate in candidates:
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            prefix = f"{candidate}."
-            if any(full_name.startswith(prefix) for full_name in self._weight_map):
-                return candidate
-        return module_path
-
-    def _resolve_checkpoint_tensor_name(self, module_path: str, rel_name: str) -> str:
-        """Resolve a tensor name against checkpoint paths declared by `module_tree` and shell path prefixes."""
-
-        full_name = self._join_tensor_name(module_path, rel_name)
-        candidates: list[str] = []
-        seen: set[str] = set()
-
-        def add_candidate(candidate_name: str) -> None:
-            # Keep module-tree aliases attached to the fully resolved tensor key.
-            # Some HF mappings rewrite nested relative names (for example
-            # `spatial_linear.ln` -> `spatial_linear.3`), so alias expansion has
-            # to happen after `module_path` and `rel_name` are joined.
-            if candidate_name not in seen:
-                seen.add(candidate_name)
-                candidates.append(candidate_name)
-            for alias in self._module_tree_name_aliases(candidate_name):
-                if alias in seen:
-                    continue
-                seen.add(alias)
-                candidates.append(alias)
-
-        for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
-            for aliased_path in self._all_runtime_to_checkpoint_candidates(candidate_path):
-                candidate_name = self._join_tensor_name(aliased_path, rel_name)
-                for aliased_name in self._all_runtime_to_checkpoint_candidates(candidate_name):
-                    add_candidate(aliased_name)
-
-        for candidate in candidates:
-            if candidate in self._weight_map:
-                return candidate
-        return full_name
-
-    def _resolve_split_gate_up_tensor_name(
-        self,
-        module_path: str,
-        rel_name: str,
-    ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
-        """Resolve split gate/up projection tensors against fused `gate_up_proj` checkpoint entries."""
-
-        parts = rel_name.split(".")
-        if len(parts) < 2:
-            return None, None, None, None
-
-        proj_name = parts[-2]
-        tensor_name = parts[-1]
-        if proj_name not in {"gate_proj", "up_proj"} or tensor_name not in {"weight", "bias"}:
-            return None, None, None, None
-
-        fused_parts = list(parts)
-        fused_parts[-2] = "gate_up_proj"
-        fused_rel_name = ".".join(fused_parts)
-        split_index = 0 if proj_name == "gate_proj" else 1
-
-        for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
-            candidate_name = self._join_tensor_name(candidate_path, fused_rel_name)
-            if candidate_name in self._weight_map:
-                return candidate_name, None, split_index, 0
-
-        return None, None, None, None
-
-    def _resolve_fused_expert_tensor_name(
-        self,
-        module_path: str,
-        rel_name: str,
-    ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
-        """Resolve defused expert leaf tensors against fused per-expert checkpoint tensors."""
-
-        parts = rel_name.split(".")
+        parts = runtime_name.split(".")
         for expert_pos, part in enumerate(parts):
             if part != "experts" or expert_pos + 3 >= len(parts):
                 continue
@@ -1525,18 +1440,101 @@ class LazyTurtle:
                     fused_leaf = "down_proj_bias"
 
             if fused_leaf is None:
-                return None, None, None, None
+                return []
 
             fused_parts = parts[: expert_pos + 1] + [fused_leaf]
-            fused_rel_name = ".".join(fused_parts)
-            for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
-                candidate_name = self._join_tensor_name(candidate_path, fused_rel_name)
-                if candidate_name in self._weight_map:
-                    return candidate_name, expert_index, split_index, split_dim
+            return [(".".join(fused_parts), expert_index, split_index, split_dim)]
 
-            return None, None, None, None
+        if len(parts) < 2:
+            return []
 
+        proj_name = parts[-2]
+        tensor_name = parts[-1]
+        if proj_name not in {"gate_proj", "up_proj"} or tensor_name not in {"weight", "bias"}:
+            return []
+
+        fused_parts = list(parts)
+        fused_parts[-2] = "gate_up_proj"
+        split_index = 0 if proj_name == "gate_proj" else 1
+        return [(".".join(fused_parts), None, split_index, 0)]
+
+    def _checkpoint_tensor_candidates(self, module_path: str, rel_name: str) -> list[str]:
+        """Generate checkpoint key candidates for a runtime tensor without fused fallback semantics."""
+
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def add_candidate(candidate_name: str) -> None:
+            # Keep module-tree aliases attached to the fully resolved tensor key.
+            # Some HF mappings rewrite nested relative names (for example
+            # `spatial_linear.ln` -> `spatial_linear.3`), so alias expansion has
+            # to happen after `module_path` and `rel_name` are joined.
+            if candidate_name not in seen:
+                seen.add(candidate_name)
+                candidates.append(candidate_name)
+            for alias in self._module_tree_name_aliases(candidate_name):
+                if alias in seen:
+                    continue
+                seen.add(alias)
+                candidates.append(alias)
+
+        for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
+            for aliased_path in self._all_runtime_to_checkpoint_candidates(candidate_path):
+                candidate_name = self._join_tensor_name(aliased_path, rel_name)
+                for aliased_name in self._all_runtime_to_checkpoint_candidates(candidate_name):
+                    add_candidate(aliased_name)
+
+        return candidates
+
+    @staticmethod
+    def _resolve_fused_tensor_metadata_from_resolved_name(
+        *,
+        runtime_name: str,
+        checkpoint_name: str,
+    ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
+        """Recover fused split metadata when aliasing already resolved a leaf to its checkpoint tensor."""
+
+        for fused_name, expert_index, split_index, split_dim in LazyTurtle._fused_checkpoint_requests(runtime_name):
+            if checkpoint_name == fused_name or checkpoint_name.endswith(f".{fused_name}"):
+                return checkpoint_name, expert_index, split_index, split_dim
         return None, None, None, None
+
+    def _resolve_checkpoint_module_path(self, module_path: str) -> str:
+        """Resolve a shell module path to the checkpoint path when wrappers add extra roots."""
+
+        candidates = self._runtime_to_checkpoint_alias_candidates(module_path)
+        for aliased in tuple(candidates):
+            # Apply declared runtime->checkpoint aliases before the generic
+            # prefix-stripping fallback so nested shell paths such as
+            # `model.language_model.layers.0` can correctly resolve to
+            # checkpoint paths like `model.layers.0`.
+            candidates.extend(self._module_tree_name_aliases(aliased))
+            for candidate_path in self._candidate_module_paths(aliased):
+                candidates.extend(self._runtime_to_checkpoint_alias_candidates(candidate_path))
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            prefix = f"{candidate}."
+            if any(full_name.startswith(prefix) for full_name in self._weight_map):
+                return candidate
+        return module_path
+
+    def _resolve_checkpoint_tensor_name(self, module_path: str, rel_name: str) -> str:
+        """Resolve a tensor name against checkpoint paths declared by `module_tree` and shell path prefixes."""
+
+        full_name = self._join_tensor_name(module_path, rel_name)
+        for candidate in self._checkpoint_tensor_candidates(module_path, rel_name):
+            # `_resolve_checkpoint_tensor_name()` is intentionally limited to
+            # direct checkpoint keys; fused tensors are source-level fallbacks.
+            if candidate in self._weight_map and self._resolve_fused_tensor_metadata_from_resolved_name(
+                runtime_name=full_name,
+                checkpoint_name=candidate,
+            )[0] is None:
+                return candidate
+        return full_name
 
     def _checkpoint_indices_for_wildcard_pattern(self, wildcard_name: str) -> list[int]:
         aliases = self._all_runtime_to_checkpoint_candidates(wildcard_name)
@@ -1656,9 +1654,39 @@ class LazyTurtle:
                     split_dim = getattr(converter.operations[0], "dim", 0)
 
                 for candidate in self._runtime_to_checkpoint_alias_candidates(renamed):
+                    if self._resolve_fused_tensor_metadata_from_resolved_name(
+                        runtime_name=combined_name,
+                        checkpoint_name=candidate,
+                    )[0] is not None:
+                        continue
                     if candidate in self._weight_map:
                         return candidate, None, split_index, split_dim
 
+        return None, None, None, None
+
+    def _resolve_direct_checkpoint_tensor_source(
+        self,
+        module_path: str,
+        rel_name: str,
+    ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
+        # Reuse direct-name resolution so alias handling stays in one place.
+        full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
+        if full_name in self._weight_map:
+            return full_name, None, None, None
+        return None, None, None, None
+
+    def _resolve_fused_checkpoint_tensor_source(
+        self,
+        module_path: str,
+        rel_name: str,
+    ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
+        # Fused fallback is separate from direct key lookup because a runtime
+        # leaf like `gate_proj.weight` should keep its own logical name.
+        for fused_rel_name, expert_index, split_index, split_dim in self._fused_checkpoint_requests(rel_name):
+            for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
+                candidate_name = self._join_tensor_name(candidate_path, fused_rel_name)
+                if candidate_name in self._weight_map:
+                    return candidate_name, expert_index, split_index, split_dim
         return None, None, None, None
 
     @staticmethod
@@ -1767,8 +1795,8 @@ class LazyTurtle:
     ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
         """Resolve a target tensor name to its checkpoint source and optional fused split index."""
 
-        full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
-
+        # Keep the resolution order explicit: converter-specific mappings first,
+        # then plain direct keys, then structural fused fallbacks.
         resolved = self._resolve_converter_tensor_source(module_path, rel_name)
         if resolved[0] is not None:
             return resolved
@@ -1777,14 +1805,11 @@ class LazyTurtle:
         if resolved[0] is not None:
             return resolved
 
-        if full_name in self._weight_map:
-            return full_name, None, None, None
-
-        resolved = self._resolve_split_gate_up_tensor_name(module_path, rel_name)
+        resolved = self._resolve_direct_checkpoint_tensor_source(module_path, rel_name)
         if resolved[0] is not None:
             return resolved
 
-        resolved = self._resolve_fused_expert_tensor_name(module_path, rel_name)
+        resolved = self._resolve_fused_checkpoint_tensor_source(module_path, rel_name)
         if resolved[0] is not None:
             return resolved
 
@@ -1792,11 +1817,7 @@ class LazyTurtle:
         # just `weight` / `bias`. Retry resolution with the full module path so leaf-only
         # materialization can still map back to fused expert checkpoint tensors.
         combined_name = self._join_tensor_name(module_path, rel_name)
-        resolved = self._resolve_split_gate_up_tensor_name("", combined_name)
-        if resolved[0] is not None:
-            return resolved
-
-        return self._resolve_fused_expert_tensor_name("", combined_name)
+        return self._resolve_fused_checkpoint_tensor_source("", combined_name)
 
     @staticmethod
     def _materialization_issue_message(
