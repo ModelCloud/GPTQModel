@@ -253,6 +253,10 @@ Ascend C custom-op bring-up:
   `9.22 ms`. This keeps the no-full-dense-materialization contract and reduces
   repeated GM scale/offset traffic; observed max drift in the mixed smoke was
   `3.0517578125e-05`.
+- A two-row scalar micro-tile then reused each packed INT4 word and its
+  dequantized eight-lane result across two activation rows. The same timing
+  dropped from `9.22 ms` to `5.56 ms` with zero observed drift in the mixed
+  correctness sweep. Odd row counts fall back to the single-row path.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and
