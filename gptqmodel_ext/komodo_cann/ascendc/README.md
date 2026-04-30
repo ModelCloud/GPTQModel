@@ -38,6 +38,10 @@ For single-row decode, the scalar baseline also has a two-packed-word micro-tile
 that reuses each FP16 activation load across sixteen adjacent output channels.
 On NPU0 this reduced `M=1,K=256,N=256,group_size=32` from `1.03 ms` to
 `0.72 ms`, and `M=1,K=1024,N=1024,group_size=32` from `16.73 ms` to `11.42 ms`.
+The two-row tail now has the same two-packed-word reuse. In a rechecked NPU0
+median run it reduced `M=2,K=256,N=256,group_size=32` from `1.239 ms` to
+`1.191 ms`, and `M=2,K=1024,N=1024,group_size=32` from `18.734 ms` to
+`17.749 ms` while keeping `M=1` effectively unchanged.
 
 Build from the repo root:
 

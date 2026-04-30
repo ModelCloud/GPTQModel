@@ -282,14 +282,23 @@ Ascend C custom-op bring-up:
   row-oct path stayed essentially unchanged at `3.37 ms` for
   `M=8,K=256,N=256,group_size=32`, and the 8-NPU smoke passed on all devices
   with zero error for the deterministic packed-one validation.
+- A two-row two-packed-word micro-tile extended the same adjacent-output reuse
+  to `M=2` tails without materializing dequantized weights. Rechecked median
+  timings on NPU0 improved from `1.239 ms` to `1.191 ms` for
+  `M=2,K=256,N=256,group_size=32`, and from `18.734 ms` to `17.749 ms` for
+  `M=2,K=1024,N=1024,group_size=32`. `M=1` medians stayed unchanged within
+  noise, and random CPU-reference checks over group sizes 0, 32, 64, and 128
+  stayed below `0.008` max error for the covered small shapes.
 - A direct CANN `Matmul<fp16, int4, fp16>` probe was rejected for now. In the
   default msopgen package the kernel still compiled as `VectorCore`, so the
   sentinel Cube path returned zeros because no AIC side was scheduled. Forcing
   the generated project to `MIX_AIC` produced the expected `taskRation=1:2`
   package metadata, but the existing scalar fallback then raised device-side
   `SUSPECT REMOTE ERROR` at synchronize even with a minimal cross-core flag
-  handshake. Do not force the current scalar op to mixed launch; the next mixed
-  attempt needs a built-in-style AIC/AIV state machine from the start.
+  handshake. A no-op MIX package also failed on the AIC entry with an MTE DDR
+  range fault, so this is a launch/ABI issue rather than scalar math. Do not
+  force the current scalar op to mixed launch; the next mixed attempt needs a
+  built-in-style AIC/AIV state machine from the start.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and
