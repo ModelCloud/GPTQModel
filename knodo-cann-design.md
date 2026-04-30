@@ -262,6 +262,11 @@ Ascend C custom-op bring-up:
   The mixed correctness sweep passed with max observed drift
   `0.00048828125`, and the 8-NPU deterministic smoke reported zero error on
   all devices.
+- A four-row micro-tile then reused each packed word and dequantized lane group
+  across four activation rows. This dropped the same raw-op timing from
+  `4.60 ms` to `3.66 ms`, with max observed drift `0.000244140625`. An 8-NPU
+  smoke covered row counts 1-8 and group sizes 0, 32, 64, 96, and 128 with zero
+  deterministic error.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and
