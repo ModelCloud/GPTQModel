@@ -1558,7 +1558,7 @@ def autofix_hf_generation_config(cfg: GenerationConfig):
 
 
 def sanitize_model_config(config):
-    if config.model_type == "chatglm" and hasattr(config, "max_length"):
+    if getattr(config, "model_type", None) == "chatglm" and hasattr(config, "max_length"):
         # max_length can only be stored in generation_config.
         # see _normalize_chatglm_remote_code_config_compat()
         del config.attribute_map["max_length"]

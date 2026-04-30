@@ -567,7 +567,8 @@ def ModelWriter(cls):
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
-        runtime_format = resolve_quant_format(quantize_config.format, quantize_config.method)
+        quant_method = getattr(quantize_config, "method", getattr(quantize_config, "quant_method", None))
+        runtime_format = resolve_quant_format(quantize_config.format, quant_method)
 
         if runtime_format == FORMAT.GPTQ_V2:
             log.warn(
