@@ -413,6 +413,19 @@ Ascend C custom-op bring-up:
   and an 8-NPU negative-`base_n` smoke with producer writes enabled passed on
   rows `1/2/3/4/6/8/16`, group sizes `0/32/64/128`, and max native-CANN drift
   `0.0078125`.
+- The first Cube-consumer bring-up now compiles behind
+  `--experimental-cube-consumer`. The failed approach was to embed CANN's
+  `TCubeTiling` as a nested dynamic tiling-data struct; CANN's build-time
+  tiling parser first required a `TCubeTilingOp` registration, then generated a
+  kernel-side `TCubeTiling` class that conflicted with Ascend C's own
+  `TCubeTiling` alias. The working scaffold keeps Komodo-CANN's existing
+  primitive tiling fields as the ABI and constructs an Ascend C `TCubeTiling`
+  locally inside the experimental kernel before `REGIST_MATMUL_OBJ`.
+- Default and staged producer packages still build without the Cube consumer
+  flag. The Cube scaffold is compile-only at this point: it registers a
+  `Matmul<GM/ND fp16, GM/ND fp16, GM/ND fp16>` consumer object with a locally
+  populated Cube tiling record, but it does not yet feed staged INT4-dequant
+  tiles into Cube or replace the scalar visible-output path.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and
@@ -493,6 +506,8 @@ Implementation plan:
    - Consume staged B tile with `baseK=64`.
    - Use L0A/L0B double buffering.
    - Keep `baseN=256` unless L0/UB pressure says otherwise.
+   - Keep `TCubeTiling` construction device-local; do not add it as generated
+     nested tiling data unless the CANN parser/name-conflict issue is solved.
 4. Split-K decode:
    - Use 24 cube cores for large `K >> N`.
    - Reduce partials on vector cores or through an atomic/fixpipe path.

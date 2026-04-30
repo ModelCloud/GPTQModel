@@ -1,10 +1,55 @@
 #include "kernel_operator.h"
+#ifdef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
+#include "lib/matmul_intf.h"
+#endif
 
 using namespace AscendC;
+#ifdef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
+using namespace matmul;
+#endif
 
 namespace {
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
 constexpr uint32_t kKernelModeStagedDequant = 1;
+#endif
+
+#ifdef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
+class KomodoCannW4A16CubeConsumerProbe {
+public:
+    using AType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
+    using BType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
+    using CType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
+    using BiasType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
+    Matmul<AType, BType, CType, BiasType> mm;
+};
+
+__aicore__ inline TCubeTiling MakeCubeConsumerTiling(const KomodoCannW4A16MatmulTilingData* tiling)
+{
+    TCubeTiling cube_tiling;
+    cube_tiling.usedCoreNum = static_cast<int32_t>(tiling->block_dim);
+    cube_tiling.M = static_cast<int32_t>(tiling->rows);
+    cube_tiling.N = static_cast<int32_t>(tiling->out_features);
+    cube_tiling.Ka = static_cast<int32_t>(tiling->in_features);
+    cube_tiling.Kb = static_cast<int32_t>(tiling->in_features);
+    cube_tiling.singleCoreM = static_cast<int32_t>(tiling->base_m);
+    cube_tiling.singleCoreN = static_cast<int32_t>(tiling->base_n);
+    cube_tiling.singleCoreK = static_cast<int32_t>(tiling->base_k);
+    cube_tiling.baseM = static_cast<int32_t>(tiling->base_m);
+    cube_tiling.baseN = static_cast<int32_t>(tiling->base_n);
+    cube_tiling.baseK = static_cast<int32_t>(tiling->base_k);
+    cube_tiling.depthA1 = 1;
+    cube_tiling.depthB1 = 1;
+    cube_tiling.stepM = 1;
+    cube_tiling.stepN = 1;
+    cube_tiling.isBias = tiling->has_bias != 0 ? 1 : 0;
+    cube_tiling.stepKa = 1;
+    cube_tiling.stepKb = 1;
+    cube_tiling.dbL0A = 1;
+    cube_tiling.dbL0B = 1;
+    cube_tiling.dbL0C = 1;
+    cube_tiling.BatchNum = 1;
+    return cube_tiling;
+}
 #endif
 
 class KomodoCannW4A16ScalarKernel {
@@ -1146,10 +1191,22 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
     GM_ADDR tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+#ifndef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
     if ASCEND_IS_AIC {
         return;
     }
+#endif
     GET_TILING_DATA(tiling_data, tiling);
+#ifdef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
+    AscendC::SetSysWorkspaceForce(workspace);
+    TPipe cube_pipe;
+    KomodoCannW4A16CubeConsumerProbe cube_probe;
+    TCubeTiling cube_tiling = MakeCubeConsumerTiling(&tiling_data);
+    REGIST_MATMUL_OBJ(&cube_pipe, GetSysWorkSpacePtr(), cube_probe.mm, &cube_tiling);
+#endif
+    if ASCEND_IS_AIC {
+        return;
+    }
     KomodoCannW4A16ScalarKernel op;
     op.Init(x, packed_weight, scales, offsets, bias, y, workspace, &tiling_data);
     op.Process();

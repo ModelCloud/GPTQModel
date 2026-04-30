@@ -126,6 +126,11 @@ def main() -> int:
         action="store_true",
         help="Compile guarded staged-dequant workspace hooks for Komodo-CANN fused-kernel bring-up.",
     )
+    parser.add_argument(
+        "--experimental-cube-consumer",
+        action="store_true",
+        help="Compile guarded Matmul/Cube consumer registration for Komodo-CANN fused-kernel bring-up.",
+    )
     args = parser.parse_args()
 
     output = args.output.resolve()
@@ -154,6 +159,8 @@ def main() -> int:
     _force_compute_unit(output, args.compute_unit)
     if args.experimental_staged_dequant:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT")
+    if args.experimental_cube_consumer:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER")
 
     if args.no_build:
         print(f"Generated project with Komodo-CANN overlay at {output}")

@@ -55,6 +55,21 @@ its ping-pong FP16 workspace slots. The scalar path still writes the visible
 output while the AIC consumer is under construction, so this is a bring-up probe
 rather than the final fused kernel.
 
+The next guarded bring-up layer is the Cube consumer scaffold:
+
+```bash
+python scripts/build_komodo_cann_ascendc.py \
+  --output /tmp/komodo_cann_w4a16_cube_probe \
+  --experimental-staged-dequant \
+  --experimental-cube-consumer
+```
+
+This compiles Ascend C `Matmul` registration with a device-local `TCubeTiling`
+constructed from Komodo-CANN's primitive tiling fields. Keep that layout: adding
+`TCubeTiling` directly as nested generated tiling data collides with CANN's
+kernel-side `TCubeTiling` alias. The scaffold is not the runtime default and
+does not yet consume staged INT4-dequant tiles through Cube.
+
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
 with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset
