@@ -275,6 +275,14 @@ Ascend C custom-op bring-up:
   from `3.66 ms` to `3.42 ms`, with max observed drift `0.00048828125`. The
   follow-up 8-NPU smoke covered row counts 1, 2, 3, 4, 5, 7, 8, and 9 plus
   group sizes 0, 32, 64, 96, and 128 with zero deterministic error.
+- A direct CANN `Matmul<fp16, int4, fp16>` probe was rejected for now. In the
+  default msopgen package the kernel still compiled as `VectorCore`, so the
+  sentinel Cube path returned zeros because no AIC side was scheduled. Forcing
+  the generated project to `MIX_AIC` produced the expected `taskRation=1:2`
+  package metadata, but the existing scalar fallback then raised device-side
+  `SUSPECT REMOTE ERROR` at synchronize even with a minimal cross-core flag
+  handshake. Do not force the current scalar op to mixed launch; the next mixed
+  attempt needs a built-in-style AIC/AIV state machine from the start.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and
