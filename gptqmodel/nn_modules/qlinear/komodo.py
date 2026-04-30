@@ -27,9 +27,19 @@ _KOMODO_DROP_SOURCE_ENV = "GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"
 _KOMODO_EAGER_PREPACK_ENV = "GPTQMODEL_KOMODO_EAGER_PREPACK"
 _KOMODO_PREPACK_TILE_N_ENV = "GPTQMODEL_KOMODO_PREPACK_TILE_N"
 _KOMODO_NATIVE_GROUP16_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16"
+_KOMODO_NATIVE_GROUP16_GROUPED_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED"
+_KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS"
 _KOMODO_NATIVE_FALLBACK_CACHE_ENV = "GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE"
 _NativePlan = tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor | None]
-_NativeGroup16Plan = tuple[tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor, torch.Tensor | None]
+_NativeGroup16Plan = tuple[
+    tuple[torch.Tensor, ...],
+    tuple[torch.Tensor, ...],
+    tuple[torch.Tensor, ...],
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+]
 
 
 def _native_int4_enabled() -> bool:
@@ -46,6 +56,20 @@ def _eager_native_prepack_enabled() -> bool:
 
 def _native_group16_enabled() -> bool:
     return env_flag(_KOMODO_NATIVE_GROUP16_ENV, default=True)
+
+
+def _native_group16_grouped_enabled() -> bool:
+    return env_flag(_KOMODO_NATIVE_GROUP16_GROUPED_ENV, default=True)
+
+
+def _native_group16_grouped_max_elements() -> int:
+    raw = os.getenv(_KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS_ENV)
+    if raw is None:
+        return 128 * 1024 * 1024
+    try:
+        return int(raw)
+    except ValueError as err:
+        raise RuntimeError(f"{_KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS_ENV} must be an integer; got `{raw}`.") from err
 
 
 def _native_fallback_cache_enabled() -> bool:
@@ -92,6 +116,13 @@ def _npu_int4_ops_available() -> bool:
         return hasattr(npu_ops, "npu_convert_weight_to_int4pack") and hasattr(
             npu_ops, "npu_weight_quant_batchmatmul"
         )
+    except (AttributeError, RuntimeError):
+        return False
+
+
+def _npu_grouped_matmul_available() -> bool:
+    try:
+        return hasattr(torch.ops.npu, "npu_grouped_matmul")
     except (AttributeError, RuntimeError):
         return False
 
@@ -161,6 +192,8 @@ class _KomodoNativePlanMixin:
             self._native_plan_cache.clear()
         if hasattr(self, "_native_group16_plan_cache"):
             self._native_group16_plan_cache.clear()
+        if hasattr(self, "_native_group16_group_list_cache"):
+            self._native_group16_group_list_cache.clear()
         if hasattr(self, "_native_prepack_streams"):
             self._native_prepack_streams.clear()
 
@@ -413,6 +446,8 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         self._native_prepack_streams: dict[int, torch.npu.Stream] = {}
         self._native_g_idx_plan_cache: tuple[bool, torch.Tensor | None] | None = None
         self._native_group16_g_idx_plan_cache: tuple[bool, torch.Tensor | None] | None = None
+        self._native_group16_group_list_cache: dict[tuple[torch.device, int, int], torch.Tensor] = {}
+        self._native_group16_last_path: str | None = None
         self._drop_source_weights_after_native_pack = _drop_source_weights_enabled()
         self._native_source_dropped = False
         self._native_post_initialized = False
@@ -675,7 +710,12 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         zeros = self._stream_decode_qzeros().to(device=device)
         scales = self.scales.to(device=device, dtype=dtype).contiguous()
         offsets = (8 - zeros.to(torch.int32)).to(device=device, dtype=dtype).contiguous()
-        return tuple(packed_groups), scales, offsets, input_perm
+        scale_groups = tuple(scales.narrow(0, group_idx, 1) for group_idx in range(group_count))
+        offset_groups = tuple(offsets.narrow(0, group_idx, 1) for group_idx in range(group_count))
+        packed_stack = torch.stack(packed_groups).contiguous()
+        scale_stack = torch.stack(scale_groups).contiguous()
+        offset_stack = torch.stack(offset_groups).contiguous()
+        return tuple(packed_groups), scale_groups, offset_groups, packed_stack, scale_stack, offset_stack, input_perm
 
     def _native_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativePlan:
         key = self._native_key(device=device, dtype=dtype)
@@ -706,6 +746,22 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         self._native_group16_plan_cache[key] = plan
         self._maybe_drop_native_source_weights()
         return plan
+
+    def _native_group16_group_list(self, *, device: torch.device, rows: int, group_count: int) -> torch.Tensor:
+        key = (torch.device(device), rows, group_count)
+        cached = self._native_group16_group_list_cache.get(key)
+        if cached is None:
+            cached = torch.full((group_count,), rows, dtype=torch.int64, device=device)
+            self._native_group16_group_list_cache[key] = cached
+        return cached
+
+    def _can_use_native_group16_grouped(self, *, rows: int, group_count: int) -> bool:
+        if not _native_group16_grouped_enabled() or not _npu_grouped_matmul_available():
+            return False
+        max_elements = _native_group16_grouped_max_elements()
+        if max_elements <= 0:
+            return True
+        return rows * group_count * self.out_features <= max_elements
 
     def _native_forward(self, x: torch.Tensor):
         _assert_fp16_inference_input(x, self.__class__.__name__)
@@ -745,7 +801,15 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         if x_flat.dtype != compute_dtype or not x_flat.is_contiguous():
             x_flat = x_flat.to(dtype=compute_dtype).contiguous()
 
-        packed_groups, scales, offsets, input_perm = self._native_group16_plan(
+        (
+            packed_groups,
+            scale_groups,
+            offset_groups,
+            packed_stack,
+            scale_stack,
+            offset_stack,
+            input_perm,
+        ) = self._native_group16_plan(
             device=x_flat.device, dtype=compute_dtype
         )
         if input_perm is not None:
@@ -753,19 +817,58 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
 
         group_size = 16
         group_count = len(packed_groups)
-        x_groups = x_flat.reshape(x_flat.shape[0], group_count, group_size).transpose(0, 1).contiguous()
-        out_acc = None
-        for group_idx in range(group_count):
-            partial = _weight_quant_matmul(
-                x_groups[group_idx],
-                packed_groups[group_idx],
-                scales.narrow(0, group_idx, 1),
-                offsets.narrow(0, group_idx, 1),
-                0,
-            ).to(torch.float32)
-            out_acc = partial if out_acc is None else out_acc.add_(partial)
+        rows = x_flat.shape[0]
+        if self._can_use_native_group16_grouped(rows=rows, group_count=group_count):
+            self._native_group16_last_path = "grouped"
+            x_groups = x_flat.reshape(rows, group_count, group_size).transpose(0, 1).contiguous()
+            group_list = self._native_group16_group_list(
+                device=x_flat.device,
+                rows=rows,
+                group_count=group_count,
+            )
+            out_groups = torch.ops.npu.npu_grouped_matmul(
+                [x_groups.reshape(rows * group_count, group_size)],
+                [packed_stack],
+                antiquant_scale=[scale_stack],
+                antiquant_offset=[offset_stack],
+                group_list=group_list,
+                split_item=2,
+                group_type=0,
+                group_list_type=1,
+                output_dtype=compute_dtype,
+            )[0]
+            out = out_groups.reshape(group_count, rows, self.out_features).sum(0).reshape(out_shape)
+        elif rows == 1:
+            self._native_group16_last_path = "loop_narrow"
+            out_acc = None
+            for group_idx in range(group_count):
+                x_group = x_flat.narrow(1, group_idx * group_size, group_size)
+                if not x_group.is_contiguous():
+                    x_group = x_group.contiguous()
+                partial = _weight_quant_matmul(
+                    x_group,
+                    packed_groups[group_idx],
+                    scale_groups[group_idx],
+                    offset_groups[group_idx],
+                    0,
+                ).to(torch.float32)
+                out_acc = partial if out_acc is None else out_acc.add_(partial)
+            out = out_acc.to(dtype=compute_dtype).reshape(out_shape)
+        else:
+            self._native_group16_last_path = "loop"
+            out_acc = None
+            x_groups = x_flat.reshape(x_flat.shape[0], group_count, group_size).transpose(0, 1).contiguous()
+            for group_idx in range(group_count):
+                partial = _weight_quant_matmul(
+                    x_groups[group_idx],
+                    packed_groups[group_idx],
+                    scale_groups[group_idx],
+                    offset_groups[group_idx],
+                    0,
+                ).to(torch.float32)
+                out_acc = partial if out_acc is None else out_acc.add_(partial)
+            out = out_acc.to(dtype=compute_dtype).reshape(out_shape)
 
-        out = out_acc.to(dtype=compute_dtype).reshape(out_shape)
         if self.bias is not None:
             bias = self.bias
             if bias.device != out.device or bias.dtype != out.dtype:

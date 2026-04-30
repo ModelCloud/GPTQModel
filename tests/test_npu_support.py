@@ -752,6 +752,12 @@ def test_npu_komodo_gptq_group16_uses_packed_native_without_dense_cache_by_defau
 
     torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=2e-2, rtol=2e-2)
     torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=2e-2, rtol=2e-2)
+    x_decode = torch.randn(1, baseline.in_features, dtype=dtype, device=_test_npu_device())
+    with torch.inference_mode():
+        expected_decode = baseline(x_decode)
+        actual_decode = candidate(x_decode)
+        torch.npu.synchronize()
+    torch.testing.assert_close(actual_decode.cpu(), expected_decode.cpu(), atol=2e-2, rtol=2e-2)
     assert candidate._native_plan_cache == {}
     assert (x.device, dtype) in candidate._native_group16_plan_cache
     assert candidate._cached_weights == {}

@@ -372,6 +372,15 @@ def _run_case(
     native_cache = bool(getattr(candidate, "_native_plan_cache", None))
     native_group16_cache = bool(getattr(candidate, "_native_group16_plan_cache", None))
     dense_cache = bool(getattr(candidate, "_cached_weights", None))
+    if native_cache:
+        komodo_path = "native_int4_prepack"
+    elif native_group16_cache:
+        group16_path = getattr(candidate, "_native_group16_last_path", None)
+        komodo_path = f"native_int4_group16_{group16_path}" if group16_path else "native_int4_group16"
+    elif dense_cache:
+        komodo_path = "exact_fallback_cache"
+    else:
+        komodo_path = "no_dequant_cache"
 
     return {
         **asdict(case),
@@ -387,15 +396,7 @@ def _run_case(
         "komodo_prepack_ms": prepack_ms,
         "komodo_first_ms": first_ms,
         "komodo_repeat_ms": repeat_ms,
-        "komodo_path": (
-            "native_int4_prepack"
-            if native_cache
-            else "native_int4_group16"
-            if native_group16_cache
-            else "exact_fallback_cache"
-            if dense_cache
-            else "no_dequant_cache"
-        ),
+        "komodo_path": komodo_path,
         "baseline_ms": baseline_ms,
         "komodo_ms": candidate_ms,
         "speedup": baseline_ms / candidate_ms if candidate_ms > 0 else float("inf"),

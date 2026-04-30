@@ -15,10 +15,16 @@ weight caching by default and restricting Komodo inference to FP16.
 - Native NPU int4 is enabled by default. Set
   `GPTQMODEL_KOMODO_NATIVE_INT4=0`, or pass `--no-komodo-native-int4` to the
   benchmark, to force the exact torch-style Komodo fallback for drift checks.
-- The native int4 path requires `torch.ops.npu.npu_convert_weight_to_int4pack`
-  and `torch.ops.npu.npu_weight_quant_batchmatmul`; see
+- The native int4 path requires `torch.ops.npu.npu_convert_weight_to_int4pack`,
+  `torch.ops.npu.npu_weight_quant_batchmatmul`, and for GPTQ group-size 16
+  fusion `torch.ops.npu.npu_grouped_matmul`; see
   [ascend_npu.md](ascend_npu.md) for the scanned public `torch.ops.npu`
   operator snapshot.
+- GPTQ group-size 16 uses a grouped int4 matmul plan by default. It stores
+  int4-packed group weights plus scale/offset tensors, never a dense
+  dequantized weight. `GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED=0` disables the
+  grouped fusion, and `GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS`
+  caps the grouped temporary output size before falling back to the loop path.
 - Unsupported native int4 layouts use the exact Torch fallback. Dense
   dequantized fallback weight caching stays off by default, but can be enabled
   for debugging with `GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE=1`.

@@ -34,6 +34,7 @@ GPTQModel currently probes or calls this subset directly:
 | --- | --- |
 | `npu_convert_weight_to_int4pack` | Komodo GPTQ/AWQ native int4 prepack. |
 | `npu_weight_quant_batchmatmul` | Komodo native int4 inference matmul. |
+| `npu_grouped_matmul` | Komodo GPTQ group-16 grouped int4 matmul fusion. |
 | `npu_prompt_flash_attention` | NPU `flash_attention_2` prompt availability gate. |
 | `npu_incre_flash_attention` | NPU `flash_attention_2` incremental decode availability gate. |
 
