@@ -26,6 +26,7 @@ _KOMODO_NATIVE_INT4_ENV = "GPTQMODEL_KOMODO_NATIVE_INT4"
 _KOMODO_DROP_SOURCE_ENV = "GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"
 _KOMODO_EAGER_PREPACK_ENV = "GPTQMODEL_KOMODO_EAGER_PREPACK"
 _KOMODO_PREPACK_TILE_N_ENV = "GPTQMODEL_KOMODO_PREPACK_TILE_N"
+_KOMODO_FUSE_BIAS_ENV = "GPTQMODEL_KOMODO_FUSE_BIAS"
 _KOMODO_NATIVE_GROUP16_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16"
 _KOMODO_NATIVE_GROUP16_GROUPED_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED"
 _KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS"
@@ -52,6 +53,10 @@ def _drop_source_weights_enabled() -> bool:
 
 def _eager_native_prepack_enabled() -> bool:
     return env_flag(_KOMODO_EAGER_PREPACK_ENV, default=True)
+
+
+def _fuse_bias_enabled() -> bool:
+    return env_flag(_KOMODO_FUSE_BIAS_ENV, default=True)
 
 
 def _native_group16_enabled() -> bool:
@@ -405,6 +410,7 @@ def _weight_quant_matmul(
     scales: torch.Tensor,
     offsets: torch.Tensor,
     group_size: int,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.npu.npu_weight_quant_batchmatmul(
         x,
@@ -413,7 +419,7 @@ def _weight_quant_matmul(
         offsets,
         None,
         None,
-        None,
+        bias,
         group_size,
     )
 
@@ -819,10 +825,21 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         )
         if input_perm is not None:
             x_flat = x_flat.index_select(1, input_perm)
-        out = _weight_quant_matmul(x_flat, packed_weight, scales, offsets, native_group_size)
+        bias = self.bias
+        fuse_bias = bias is not None and _fuse_bias_enabled()
+        if fuse_bias and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
+            bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
+        out = _weight_quant_matmul(
+            x_flat,
+            packed_weight,
+            scales,
+            offsets,
+            native_group_size,
+            bias=bias if fuse_bias else None,
+        )
         out = out.reshape(out_shape)
 
-        if self.bias is not None:
+        if self.bias is not None and not fuse_bias:
             bias = self.bias
             if bias.device != out.device or bias.dtype != out.dtype:
                 bias = bias.to(device=out.device, dtype=out.dtype)
@@ -877,7 +894,6 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
                 split_item=2,
                 group_type=0,
                 group_list_type=1,
-                output_dtype=compute_dtype,
             )[0]
             out = out_groups.reshape(group_count, rows, self.out_features).sum(0).reshape(out_shape)
         elif rows == 1:

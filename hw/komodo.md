@@ -40,6 +40,9 @@ weight caching by default and restricting Komodo inference to FP16.
 - Native prepack is streamed across output columns to reduce temporary HBM
   workspace. `GPTQMODEL_KOMODO_PREPACK_TILE_N` controls the output-column tile
   size, defaults to `1024`, and `0` restores the previous full-width pack.
+- Regular native GPTQ int4 matmul fuses bias by default through
+  `npu_weight_quant_batchmatmul`. Set `GPTQMODEL_KOMODO_FUSE_BIAS=0` to restore
+  the separate post-matmul bias add for drift comparisons.
 - Source GPTQ/AWQ buffers are dropped by default after native prepack. Set
   `GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS=0`, or benchmark option
   `--no-komodo-drop-source-weights`, to keep source quant buffers for debugging,
