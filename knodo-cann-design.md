@@ -236,10 +236,10 @@ Ascend C custom-op bring-up:
   restructured the loop around Komodo's `int32 [K, N / 8]` packing. Each packed
   word is loaded once and dequantized across all eight output lanes while the
   activation value stays live, cutting repeated GM packed-weight reads.
-- The scalar baseline host tiler now pins `blockDim=1`. The earlier dynamic AIV
-  block count was unsafe because CANN did not always launch a contiguous set
-  including block index 0, which could leave stale output when the kernel used a
-  single writer.
+- The first scalar baseline host tiler pinned `blockDim=1`. Earlier dynamic AIV
+  block counts were unsafe because CANN did not always expose a contiguous
+  logical block-index set, which could leave stale output when packed output
+  words were owned directly by `GetBlockIdx()`.
 - The torch bridge now dispatches the ACLNN run through
   `at_npu::native::OpCommand::RunOpApiV2`. Direct ACLNN launch could race
   Torch-NPU queued producers for freshly-created NPU tensors; the OpCommand path
@@ -322,6 +322,24 @@ Ascend C custom-op bring-up:
   M1/M2/M4 cases continue to use positive `base_k` and normal offset loads;
   they measured flat within noise. CPU-reference checks covered zero-offset and
   nonzero-offset paths with max observed error below `0.001`.
+- The current scalar custom op parallelizes packed output-column ownership
+  across up to eight logical AIV owners. The host tiler caps `blockDim <= 8`
+  using the available AIV core count and `N / 8` packed-word count. The device
+  kernel maps sparse physical IDs with `GetBlockIdx() % tiling.block_dim`, then
+  assigns each owner a contiguous packed-word range so adjacent-output
+  micro-tiles remain intact. Attempts at `blockDim=32` left unwritten chunks on
+  this 910B runtime; capping at eight passed random CPU-reference sweeps over
+  single-row, two-row, four-row, row-oct, group-size 64, and K=1024 cases with
+  max observed error below `0.0005`.
+- The 8-owner raw-op A/B sweep used all eight NPUs with one visible NPU per
+  subprocess and compared against the prior pushed zero-offset baseline. Timings
+  improved from `0.713 ms` to `0.099 ms` for `M=1,K=256,N=256`, from
+  `1.002 ms` to `0.146 ms` for `M=2`, from `1.556 ms` to `0.234 ms` for
+  `M=4`, from `2.895 ms` to `0.376 ms` for `M=8` nonzero offsets, from
+  `2.868 ms` to `0.374 ms` for `M=8` zero offsets, from `5.750 ms` to
+  `0.743 ms` for `M=16` zero offsets, from `46.037 ms` to `5.887 ms` for
+  `M=8,K=1024,N=1024` nonzero offsets, and from `45.673 ms` to `5.824 ms` for
+  the matching zero-offset case.
 - A direct CANN `Matmul<fp16, int4, fp16>` probe was rejected for now. In the
   default msopgen package the kernel still compiled as `VectorCore`, so the
   sentinel Cube path returned zeros because no AIC side was scheduled. Forcing
@@ -337,9 +355,9 @@ Ascend C custom-op bring-up:
   custom-op registration, tiling, shape inference, optional bias handling, and
   packed-weight decode path needed before vector/Cube fusion.
 - The initial multi-core strided writer was accepted by CANN but produced sparse
-  output writes on the local 910B runtime. The committed correctness baseline
-  therefore uses one writing AI Core while keeping the host tiling metadata for
-  the next pass.
+  output writes on the local 910B runtime. The validated follow-up limits
+  ownership to eight logical chunks and maps sparse physical block IDs back into
+  that logical range.
 - Local validation after installing the generated custom OPP:
   - deterministic all-ones `M=2,K=64,N=16` matched exactly with and without bias.
   - randomized sweeps over `(M,K,N)=(8,64,64),(3,96,32),(1,128,128)`,

@@ -33,24 +33,34 @@ public:
         const uint32_t group_size = tiling_->group_size;
         const uint32_t has_bias = tiling_->has_bias;
         const uint32_t zero_offsets = tiling_->zero_offsets;
-        const uint32_t core_idx = GetBlockIdx();
-        if (core_idx != 0) {
+        const uint32_t physical_core_idx = static_cast<uint32_t>(GetBlockIdx());
+        const uint32_t scheduled_blocks = static_cast<uint32_t>(GetBlockNum());
+        const uint32_t block_dim = tiling_->block_dim != 0 ? tiling_->block_dim : scheduled_blocks;
+        if (block_dim == 0) {
             return;
         }
+        const uint32_t core_idx = physical_core_idx % block_dim;
 
         const uint32_t packed_stride = out_features >> 3;
+        const uint32_t packed_per_core = (packed_stride + block_dim - 1) / block_dim;
+        const uint32_t packed_begin = core_idx * packed_per_core;
+        if (packed_begin >= packed_stride) {
+            return;
+        }
+        const uint32_t packed_end_candidate = packed_begin + packed_per_core;
+        const uint32_t packed_end = packed_end_candidate < packed_stride ? packed_end_candidate : packed_stride;
         uint32_t m = 0;
         for (; m + 7 < rows; m += 8) {
-            ProcessRowOct(m, in_features, out_features, group_size, has_bias, zero_offsets, packed_stride);
+            ProcessRowOct(m, in_features, out_features, group_size, has_bias, zero_offsets, packed_begin, packed_end);
         }
         for (; m + 3 < rows; m += 4) {
-            ProcessRowQuad(m, in_features, out_features, group_size, has_bias, packed_stride);
+            ProcessRowQuad(m, in_features, out_features, group_size, has_bias, packed_begin, packed_end);
         }
         for (; m + 1 < rows; m += 2) {
-            ProcessRowPair(m, in_features, out_features, group_size, has_bias, packed_stride);
+            ProcessRowPair(m, in_features, out_features, group_size, has_bias, packed_begin, packed_end);
         }
         if (m < rows) {
-            ProcessSingleRow(m, in_features, out_features, group_size, has_bias, packed_stride);
+            ProcessSingleRow(m, in_features, out_features, group_size, has_bias, packed_begin, packed_end);
         }
     }
 
@@ -61,12 +71,14 @@ private:
         uint32_t out_features,
         uint32_t group_size,
         uint32_t has_bias,
-        uint32_t packed_stride)
+        uint32_t packed_begin,
+        uint32_t packed_end)
     {
+        const uint32_t packed_stride = out_features >> 3;
         const uint32_t row_offset = m * out_features;
         const uint32_t x_offset = m * in_features;
-        uint32_t packed_col = 0;
-        for (; packed_col + 1 < packed_stride; packed_col += 2) {
+        uint32_t packed_col = packed_begin;
+        for (; packed_col + 1 < packed_end; packed_col += 2) {
             const uint32_t n_base0 = packed_col << 3;
             const uint32_t n_base1 = n_base0 + 8;
             float acc00 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0)) : 0.0f;
@@ -153,7 +165,7 @@ private:
             StoreRow(row_offset + n_base0, acc00, acc01, acc02, acc03, acc04, acc05, acc06, acc07);
             StoreRow(row_offset + n_base1, acc10, acc11, acc12, acc13, acc14, acc15, acc16, acc17);
         }
-        for (; packed_col < packed_stride; ++packed_col) {
+        for (; packed_col < packed_end; ++packed_col) {
             const uint32_t n_base = packed_col << 3;
             float acc0 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base)) : 0.0f;
             float acc1 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 1)) : 0.0f;
@@ -212,8 +224,10 @@ private:
         uint32_t group_size,
         uint32_t has_bias,
         uint32_t zero_offsets,
-        uint32_t packed_stride)
+        uint32_t packed_begin,
+        uint32_t packed_end)
     {
+        const uint32_t packed_stride = out_features >> 3;
         const uint32_t row_offset0 = m * out_features;
         const uint32_t row_offset1 = row_offset0 + out_features;
         const uint32_t row_offset2 = row_offset1 + out_features;
@@ -251,7 +265,7 @@ private:
         prefix##6 += (x_value) * deq6; \
         prefix##7 += (x_value) * deq7
 
-        for (uint32_t packed_col = 0; packed_col < packed_stride; ++packed_col) {
+        for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
             const uint32_t n_base = packed_col << 3;
             const float bias0 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base)) : 0.0f;
             const float bias1 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 1)) : 0.0f;
@@ -342,8 +356,10 @@ private:
         uint32_t out_features,
         uint32_t group_size,
         uint32_t has_bias,
-        uint32_t packed_stride)
+        uint32_t packed_begin,
+        uint32_t packed_end)
     {
+        const uint32_t packed_stride = out_features >> 3;
         const uint32_t row_offset0 = m * out_features;
         const uint32_t row_offset1 = row_offset0 + out_features;
         const uint32_t row_offset2 = row_offset1 + out_features;
@@ -374,8 +390,8 @@ private:
         prefix##7 += (x_value) * d7
 
         const uint32_t groups = group_size == 0 ? 1 : in_features / group_size;
-        uint32_t packed_col = 0;
-        for (; packed_col + 1 < packed_stride; packed_col += 2) {
+        uint32_t packed_col = packed_begin;
+        for (; packed_col + 1 < packed_end; packed_col += 2) {
             const uint32_t n_base0 = packed_col << 3;
             const uint32_t n_base1 = n_base0 + 8;
             const float bias00 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0)) : 0.0f;
@@ -487,7 +503,7 @@ private:
             StoreRow(row_offset3 + n_base1, acc310, acc311, acc312, acc313, acc314, acc315, acc316, acc317);
         }
 
-        for (; packed_col < packed_stride; ++packed_col) {
+        for (; packed_col < packed_end; ++packed_col) {
             const uint32_t n_base = packed_col << 3;
             const float bias0 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base)) : 0.0f;
             const float bias1 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 1)) : 0.0f;
@@ -617,15 +633,17 @@ private:
         uint32_t out_features,
         uint32_t group_size,
         uint32_t has_bias,
-        uint32_t packed_stride)
+        uint32_t packed_begin,
+        uint32_t packed_end)
     {
+        const uint32_t packed_stride = out_features >> 3;
         const uint32_t row_offset0 = m * out_features;
         const uint32_t row_offset1 = row_offset0 + out_features;
         const uint32_t x_offset0 = m * in_features;
         const uint32_t x_offset1 = x_offset0 + in_features;
         const uint32_t groups = group_size == 0 ? 1 : in_features / group_size;
-        uint32_t packed_col = 0;
-        for (; packed_col + 1 < packed_stride; packed_col += 2) {
+        uint32_t packed_col = packed_begin;
+        for (; packed_col + 1 < packed_end; packed_col += 2) {
             const uint32_t n_base0 = packed_col << 3;
             const uint32_t n_base1 = n_base0 + 8;
             const float bias00 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0)) : 0.0f;
@@ -778,7 +796,7 @@ private:
             StoreRow(row_offset1 + n_base0, acc100, acc101, acc102, acc103, acc104, acc105, acc106, acc107);
             StoreRow(row_offset1 + n_base1, acc110, acc111, acc112, acc113, acc114, acc115, acc116, acc117);
         }
-        for (; packed_col < packed_stride; ++packed_col) {
+        for (; packed_col < packed_end; ++packed_col) {
             const uint32_t n_base = packed_col << 3;
             const float bias0 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base)) : 0.0f;
             const float bias1 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 1)) : 0.0f;

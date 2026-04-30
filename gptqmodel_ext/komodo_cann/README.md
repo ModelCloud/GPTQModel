@@ -145,13 +145,12 @@ python scripts/profile_komodo_cann_npu.py --mode cann --iters 3 --warmup 1
 ```
 
 The first implementation is a correctness baseline that unpacks Komodo's packed
-INT4 weights in the device kernel, stages 64-value dequant tiles in UB, and
-writes only final FP16 outputs. It does not write a full dense FP16 weight matrix
-through GM/L2. The currently validated baseline uses one writing AI Core; a
-multi-core strided variant was accepted by CANN but produced sparse writes on
-the local 910B bring-up run, so the next tuning step is reintroducing multi-core
-tile ownership with a stronger launch/tiling contract before replacing the
-scalar accumulation loop with vectorized tile math and Cube matmul consumption.
-The row-oct path also has a symmetric GPTQ zero-offset specialization that
-skips offset GM reads for `rows >= 8`; the smaller tails and AWQ path keep the
-normal nonzero-offset flow.
+INT4 weights in the device kernel and writes only final FP16 outputs. It does
+not write a full dense FP16 weight matrix through GM/L2. The currently validated
+baseline uses up to eight logical AIV owners over disjoint packed output-column
+ranges; the cap avoids sparse physical block-ID behavior observed with wider
+`blockDim` values on the local 910B runtime. The row-oct path also has a
+symmetric GPTQ zero-offset specialization that skips offset GM reads for
+`rows >= 8`; the smaller tails and AWQ path keep the normal nonzero-offset flow.
+The next tuning step is replacing the scalar accumulation loop with vectorized
+tile math and Cube matmul consumption.

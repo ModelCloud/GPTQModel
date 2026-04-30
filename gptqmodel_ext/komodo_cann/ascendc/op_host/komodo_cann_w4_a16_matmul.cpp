@@ -56,10 +56,13 @@ uint32_t ClampU64ToU32(uint64_t value)
     return static_cast<uint32_t>(value > kMaxU32 ? kMaxU32 : value);
 }
 
-uint32_t PickBlockDim(uint32_t total_outputs)
+uint32_t PickBlockDim(uint32_t packed_words, uint32_t aiv_cores)
 {
-    (void)total_outputs;
-    return 1;
+    if (packed_words <= 1 || aiv_cores == 0) {
+        return 1;
+    }
+    uint32_t block_dim = packed_words < aiv_cores ? packed_words : aiv_cores;
+    return block_dim < 8 ? block_dim : 8;
 }
 }  // namespace
 
@@ -109,7 +112,6 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
         return ge::GRAPH_FAILED;
     }
     const uint32_t total_outputs = static_cast<uint32_t>(total_outputs64);
-    const uint32_t block_dim = PickBlockDim(total_outputs);
 
     KomodoCannW4A16MatmulTilingData tiling;
     tiling.set_rows(static_cast<uint32_t>(rows64));
@@ -123,16 +125,17 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_base_n(AttrAsU32(attrs, kAttrBaseN, 256));
     tiling.set_base_k(AttrAbsAsU32(attrs, kAttrBaseK, 64));
     tiling.set_total_outputs(total_outputs);
-    tiling.set_block_dim(block_dim);
 
     uint64_t ub_size = 0;
     uint64_t l1_size = 0;
     uint64_t l0a_size = 0;
     uint64_t l0b_size = 0;
     uint64_t l0c_size = 0;
+    uint32_t aiv_cores = 1;
     auto platform_info = context->GetPlatformInfo();
     if (platform_info != nullptr) {
         auto platform = platform_ascendc::PlatformAscendC(platform_info);
+        aiv_cores = platform.GetCoreNumAiv();
         platform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ub_size);
         platform.GetCoreMemSize(platform_ascendc::CoreMemType::L1, l1_size);
         platform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_A, l0a_size);
@@ -145,6 +148,8 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_l0b_bytes(ClampU64ToU32(l0b_size));
     tiling.set_l0c_bytes(ClampU64ToU32(l0c_size));
 
+    const uint32_t block_dim = PickBlockDim(static_cast<uint32_t>(packed_n_words64), aiv_cores);
+    tiling.set_block_dim(block_dim);
     context->SetBlockDim(block_dim);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());

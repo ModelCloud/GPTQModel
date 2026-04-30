@@ -13,17 +13,18 @@ The current device kernel is a bring-up baseline for GPTQ W4A16:
 - Supported group sizes are `0`, `32`, `64`, and `128`.
 
 The kernel deliberately does not materialize a full dense FP16 weight matrix in
-GM or L2. The current validated baseline uses one writing AI Core and reuses
-each packed INT4 word across its eight output lanes while the matching FP16
-activation value stays live. It writes only the final output. This is not yet
-the final high-throughput Cube-tiled design; it is the custom-op baseline needed
-before reintroducing multi-core tile ownership and replacing the scalar
-accumulation loop with Cube tile consumption.
+GM or L2. The current validated baseline uses up to eight logical AIV owners
+over disjoint packed output-column ranges. Each owner reuses one packed INT4
+word across its eight output lanes while the matching FP16 activation value
+stays live, and it writes only the final output columns. This is not yet the
+final high-throughput Cube-tiled design; it is the custom-op baseline needed
+before replacing the scalar accumulation loop with Cube tile consumption.
 
-The host tiler intentionally sets `blockDim=1` for this scalar baseline. Earlier
-multi-block launch experiments exposed non-contiguous AIV block IDs on the local
-910B runtime, so multi-core ownership stays disabled until the kernel has a real
-partitioning scheme that does not assume block 0 is present.
+The host tiler caps scalar launch ownership at `blockDim <= 8`. Earlier
+multi-block experiments exposed sparse/non-contiguous physical AIV block IDs on
+the local 910B runtime, so the device kernel maps `GetBlockIdx()` through
+`physical_id % tiling.block_dim` and then owns a contiguous packed-column range.
+Wider logical ownership such as 32 chunks left unwritten columns on this host.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
@@ -62,6 +63,12 @@ from `3.214 ms` to `2.964 ms` for `M=8,K=256,N=256,group_size=32`, from
 `6.353 ms` to `5.833 ms` for `M=16,K=256,N=256,group_size=32`, and from
 `50.033 ms` to `45.781 ms` for `M=8,K=1024,N=1024,group_size=32`; M1/M2/M4
 nonzero-offset paths stayed within timing noise.
+With capped 8-owner AIV packed-column parallelism, the same no-dense baseline
+improved by about 85-87% in an 8-NPU raw-op A/B sweep: `M=1,K=256,N=256`
+from `0.713 ms` to `0.099 ms`, `M=8,K=256,N=256` from `2.895 ms` to
+`0.376 ms`, symmetric `M=16,K=256,N=256` from `5.750 ms` to `0.743 ms`, and
+`M=8,K=1024,N=1024` from `46.037 ms` to `5.887 ms`. Max observed error in that
+sweep stayed below `0.0005`.
 
 Build from the repo root:
 
