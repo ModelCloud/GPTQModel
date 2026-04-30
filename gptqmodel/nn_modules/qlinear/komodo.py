@@ -137,6 +137,7 @@ def _npu_stream_key(device: torch.device) -> int:
 class _KomodoNativePlanMixin:
     _native_plan_cache: dict
     _native_plan_pending: dict
+    _native_group16_plan_pending: dict
     _native_prepack_streams: dict
     _native_source_buffer_names: tuple[str, ...] = ("qweight", "qzeros", "scales")
 
@@ -161,6 +162,7 @@ class _KomodoNativePlanMixin:
             key in self._native_plan_cache
             or key in self._native_plan_pending
             or key in getattr(self, "_native_group16_plan_cache", {})
+            or key in getattr(self, "_native_group16_plan_pending", {})
         )
 
     def _native_prepack_stream(self, device: torch.device):
@@ -172,12 +174,13 @@ class _KomodoNativePlanMixin:
         return stream
 
     def _clear_pending_native_plans(self) -> None:
-        for _, event, _ in self._native_plan_pending.values():
-            try:
-                event.synchronize()
-            except RuntimeError:
-                pass
-        self._native_plan_pending.clear()
+        for pending in (self._native_plan_pending, getattr(self, "_native_group16_plan_pending", {})):
+            for _, event, _ in pending.values():
+                try:
+                    event.synchronize()
+                except RuntimeError:
+                    pass
+            pending.clear()
 
     def clear_native_cache(self):
         if hasattr(self, "_native_plan_pending"):
@@ -251,6 +254,7 @@ class _KomodoNativePlanMixin:
             key in self._native_plan_cache
             or key in self._native_plan_pending
             or key in getattr(self, "_native_group16_plan_cache", {})
+            or key in getattr(self, "_native_group16_plan_pending", {})
         ):
             return True
 
@@ -329,6 +333,20 @@ class _KomodoNativePlanMixin:
         self._maybe_drop_native_source_weights()
         return plan
 
+    def _consume_pending_native_group16_plan(self, key: tuple[torch.device, torch.dtype]):
+        pending = self._native_group16_plan_pending.pop(key, None)
+        if pending is None:
+            return None
+
+        _, event, plan = pending
+        if getattr(self, "_drop_source_weights_after_native_pack", False):
+            event.synchronize()
+        else:
+            torch.npu.current_stream(key[0]).wait_event(event)
+        self._native_group16_plan_cache[key] = plan
+        self._maybe_drop_native_source_weights()
+        return plan
+
     def prefetch_native_plan(self, *, device: torch.device | None = None, dtype: torch.dtype = torch.float16) -> bool:
         """Start NPU int4 prepack on a side stream for first-use latency hiding."""
 
@@ -338,22 +356,39 @@ class _KomodoNativePlanMixin:
             return False
 
         device = torch.device(device)
-        if not self._can_prefetch_native_plan(device=device, dtype=dtype):
-            return False
-
         key = self._native_key(device=device, dtype=dtype)
-        if key in self._native_plan_cache or key in self._native_plan_pending:
+        if (
+            key in self._native_plan_cache
+            or key in self._native_plan_pending
+            or key in getattr(self, "_native_group16_plan_cache", {})
+            or key in getattr(self, "_native_group16_plan_pending", {})
+        ):
             return False
         if getattr(self, "_native_source_dropped", False):
             return False
 
+        build_group16 = False
+        if not self._can_prefetch_native_plan(device=device, dtype=dtype):
+            if not (
+                getattr(self, "_can_prefetch_native_group16_plan", None)
+                and self._can_prefetch_native_group16_plan(device=device, dtype=dtype)
+            ):
+                return False
+            build_group16 = True
+
         stream = self._native_prepack_stream(device)
         with torch.npu.stream(stream):
-            plan = self._build_native_plan(device=device, dtype=dtype)
+            if build_group16:
+                plan = self._build_native_group16_plan(device=device, dtype=dtype)
+            else:
+                plan = self._build_native_plan(device=device, dtype=dtype)
             event = torch.npu.Event()
             event.record(stream)
 
-        self._native_plan_pending[key] = (stream, event, plan)
+        if build_group16:
+            self._native_group16_plan_pending[key] = (stream, event, plan)
+        else:
+            self._native_plan_pending[key] = (stream, event, plan)
         return True
 
 
@@ -442,6 +477,9 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         self._native_group16_plan_cache: dict[tuple[torch.device, torch.dtype], _NativeGroup16Plan] = {}
         self._native_plan_pending: dict[
             tuple[torch.device, torch.dtype], tuple[torch.npu.Stream, torch.npu.Event, _NativePlan]
+        ] = {}
+        self._native_group16_plan_pending: dict[
+            tuple[torch.device, torch.dtype], tuple[torch.npu.Stream, torch.npu.Event, _NativeGroup16Plan]
         ] = {}
         self._native_prepack_streams: dict[int, torch.npu.Stream] = {}
         self._native_g_idx_plan_cache: tuple[bool, torch.Tensor | None] | None = None
@@ -739,6 +777,10 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         cached = self._native_group16_plan_cache.get(key)
         if cached is not None:
             return cached
+
+        pending = self._consume_pending_native_group16_plan(key)
+        if pending is not None:
+            return pending
 
         if getattr(self, "_native_source_dropped", False):
             raise RuntimeError("Komodo native source weights were dropped before a group-16 native plan was available.")

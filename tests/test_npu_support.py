@@ -762,6 +762,18 @@ def test_npu_komodo_gptq_group16_uses_packed_native_without_dense_cache_by_defau
     assert (x.device, dtype) in candidate._native_group16_plan_cache
     assert candidate._cached_weights == {}
 
+    candidate.clear_native_cache()
+    assert candidate.prefetch_native_plan(device=x.device, dtype=dtype)
+    assert (x.device, dtype) in candidate._native_group16_plan_pending
+    assert candidate.native_plan_prepacked(device=x.device, dtype=dtype)
+    with torch.inference_mode():
+        prefetched = candidate(x)
+        torch.npu.synchronize()
+    torch.testing.assert_close(prefetched.cpu(), expected.cpu(), atol=2e-2, rtol=2e-2)
+    assert candidate._native_group16_plan_pending == {}
+    assert (x.device, dtype) in candidate._native_group16_plan_cache
+    assert candidate._cached_weights == {}
+
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("dtype", [torch.float16])
