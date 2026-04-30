@@ -24,7 +24,8 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from gptqmodel.quantization.awq.modules.act import ScaledActivation
 from gptqmodel.quantization.awq.utils.module import get_op_by_name, set_op_by_name
-from gptqmodel.quantization.awq.utils.utils import get_best_device
+from gptqmodel.utils.device import get_device
+from gptqmodel.utils.model import move_to
 
 
 try:
@@ -46,16 +47,31 @@ allowed_act_fns = [
 
 
 @torch.inference_mode()
+def _resolve_module_exec_device(module: nn.Module) -> torch.device:
+    """Prefer a module's planned target device, then fall back to its current device."""
+
+    target_device = getattr(module, "target_device", None)
+    if target_device is not None:
+        try:
+            return torch.device(target_device)
+        except (TypeError, RuntimeError, ValueError):
+            pass
+    return get_device(module)
+
+
+@torch.inference_mode()
 def apply_clip(module, clip_list: Tuple[str, torch.Tensor]):
     for name, max_val in clip_list:
         layer: nn.Linear = get_op_by_name(module, name)
-        layer.to(get_best_device())
+        original_device = get_device(layer)
+        target_device = _resolve_module_exec_device(layer)
+        move_to(layer, device=target_device)
         max_val = max_val.to(layer.weight.device)
         org_shape = layer.weight.shape
         layer.weight.data = layer.weight.data.reshape(*max_val.shape[:2], -1)
         layer.weight.data = torch.clamp(layer.weight.data, -max_val, max_val)
         layer.weight.data = layer.weight.data.reshape(org_shape)
-        layer.cpu()
+        move_to(layer, device=original_device)
 
 
 def apply_scale(module, scales_list, input_feat_dict=None):
@@ -63,11 +79,14 @@ def apply_scale(module, scales_list, input_feat_dict=None):
         prev_op = get_op_by_name(module, prev_op_name)
         layers = [get_op_by_name(module, name) for name in layer_names]
 
-        best_device = get_best_device()
-        prev_op.to(best_device)
+        original_prev_device = get_device(prev_op)
+        original_layer_devices = [get_device(layer) for layer in layers]
+        target_device = _resolve_module_exec_device(layers[0] if layers else prev_op)
+
+        move_to(prev_op, device=target_device)
         for layer in layers:
-            layer.to(best_device)
-        scales.to(best_device)
+            move_to(layer, device=target_device)
+        scales = scales.to(target_device)
 
         if (
             isinstance(prev_op, nn.Linear)
@@ -102,10 +121,9 @@ def apply_scale(module, scales_list, input_feat_dict=None):
                     inp = input_feat_dict[layer_name]
                     inp.div_(scales.view(1, -1).to(inp.device))
 
-        prev_op.cpu()
-        for layer in layers:
-            layer.cpu()
-        scales.cpu()
+        move_to(prev_op, device=original_prev_device)
+        for layer, original_device in zip(layers, original_layer_devices):
+            move_to(layer, device=original_device)
 
 
 @torch.inference_mode()

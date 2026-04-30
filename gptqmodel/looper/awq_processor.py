@@ -27,7 +27,6 @@ from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
-from ..quantization.awq.utils.utils import get_best_device
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.ctx import ctx
@@ -39,6 +38,18 @@ from ..utils.module_locks import parent_module_lock
 from ..utils.torch import CPU
 
 log = setup_logger()
+
+
+def _resolve_module_exec_device(module: nn.Module) -> torch.device:
+    """Prefer a module's planned target device, then fall back to its current device."""
+
+    target_device = getattr(module, "target_device", None)
+    if target_device is not None:
+        try:
+            return torch.device(target_device)
+        except (TypeError, RuntimeError, ValueError):
+            pass
+    return get_device(module)
 
 
 @dataclass
@@ -1210,13 +1221,16 @@ class AWQProcessor(LoopProcessor):
             if any([_ in name for _ in avoid_clipping]):
                 continue
 
-            named_linears[name].to(get_best_device())
+            linear = named_linears[name]
+            original_device = get_device(linear)
+            target_device = _resolve_module_exec_device(linear)
+            move_to(linear, device=target_device)
 
             max_val = self._compute_best_clip(
-                named_linears[name].weight, input_feat[name]
+                linear.weight, input_feat[name]
             )
             clip_list.append((name, max_val))
-            named_linears[name].cpu()
+            move_to(linear, device=original_device)
 
         return clip_list
 
@@ -1692,7 +1706,7 @@ class AWQProcessor(LoopProcessor):
             self.draw_progress(base_title)
 
             linear_layer = self.resolve_quant_source_module(named_module)
-            linear_layer = linear_layer.to(get_best_device())
+            move_to(linear_layer, device=_resolve_module_exec_device(linear_layer))
 
             tp_info = named_module.state.get("tp_pad_info")
             pad_cols = 0
