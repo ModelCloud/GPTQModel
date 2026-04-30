@@ -20,6 +20,7 @@ class BACKEND(str, Enum):
     GPTQ_EXLLAMA_V2 = "gptq_exllama_v2"  # FASTER: optimized for batching > 1
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
+    GPTQ_GEMM = "gptq-gemm"  # experimental GPTQ-Pro-derived explicit INT4 GEMM path for Ampere+
     GPTQ_KOMODO = "gptq_komodo"  # Ascend NPU fused-style cached int4 kernel
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel

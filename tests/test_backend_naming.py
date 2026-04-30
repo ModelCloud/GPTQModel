@@ -38,6 +38,11 @@ def test_name_based_lookup_accepts_canonical_member_names():
     assert normalize_backend("GPTQ_MARLIN") == BACKEND.GPTQ_MARLIN
     assert normalize_backend("AWQ_GEMM_TRITON") == BACKEND.AWQ_GEMM_TRITON
     assert normalize_backend("GPTQ_KOMODO") == BACKEND.GPTQ_KOMODO
+    assert normalize_backend("GPTQ_GEMM") == BACKEND.GPTQ_GEMM
+
+
+def test_gptq_gemm_backend_accepts_hyphenated_value():
+    assert normalize_backend("gptq-gemm", quant_method=METHOD.GPTQ) == BACKEND.GPTQ_GEMM
 
 
 @pytest.mark.parametrize(
