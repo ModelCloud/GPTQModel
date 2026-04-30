@@ -48,6 +48,12 @@ from `53.206 ms` to `51.678 ms` for `M=7,K=1024,N=1024,group_size=64` and from
 `36.833 ms` to `36.688 ms` for `M=5,K=1024,N=1024,group_size=32`; the small
 `M=4,K=256,N=256` median was effectively flat (`1.665 ms` to `1.678 ms`) while
 the 8-NPU smoke passed on all devices.
+The torch bridge now passes a true null optional bias into ACLNN instead of
+allocating a synthetic zero-bias tensor and synchronizing the stream to preserve
+that temporary. No-bias NPU0 medians improved from `0.827 ms` to `0.802 ms` for
+`M=1,K=256,N=256,group_size=32`, from `1.118 ms` to `1.086 ms` for `M=2`, and
+from `3.248 ms` to `3.213 ms` for `M=8`; bias-present timings stayed within
+noise.
 
 Build from the repo root:
 

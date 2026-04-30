@@ -299,6 +299,15 @@ Ascend C custom-op bring-up:
   (`1.665 ms` to `1.678 ms`). Deterministic and random CPU-reference checks
   covered group sizes 0, 32, 64, and 128 with max observed drift below `0.008`,
   and the 8-NPU smoke passed on all devices.
+- The AscendC torch bridge now preserves optional bias as a real null optional
+  input instead of materializing an all-zero FP16 bias and synchronizing the
+  stream to keep that temporary alive. On NPU0 this reduced no-bias medians from
+  `0.827 ms` to `0.802 ms` for `M=1,K=256,N=256,group_size=32`, from
+  `1.118 ms` to `1.086 ms` for `M=2,K=256,N=256,group_size=32`, and from
+  `3.248 ms` to `3.213 ms` for `M=8,K=256,N=256,group_size=32`. Bias-present
+  timings were unchanged within noise. This removes host-side artificial
+  materialization; it does not change the device kernel's scalar AIV-only
+  status.
 - A direct CANN `Matmul<fp16, int4, fp16>` probe was rejected for now. In the
   default msopgen package the kernel still compiled as `VectorCore`, so the
   sentinel Cube path returned zeros because no AIC side was scheduled. Forcing

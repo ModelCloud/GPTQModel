@@ -246,14 +246,8 @@ at::Tensor komodo_cann_w4_a16_matmul(
     at::Tensor scales_arg = scales.is_contiguous() ? scales : scales.contiguous();
     at::Tensor offsets_arg = offsets.is_contiguous() ? offsets : offsets.contiguous();
     c10::optional<at::Tensor> bias_arg = bias;
-    at::Tensor zero_bias;
-    bool synthesized_bias = false;
     if (bias_arg.has_value() && !bias_arg->is_contiguous()) {
         bias_arg = bias_arg->contiguous();
-    } else if (!bias_arg.has_value()) {
-        zero_bias = at::zeros({out_features}, x_arg.options());
-        bias_arg = zero_bias;
-        synthesized_bias = true;
     }
 
     at::Tensor y = at::empty({x_arg.size(0), out_features}, x_arg.options());
@@ -298,11 +292,6 @@ at::Tensor komodo_cann_w4_a16_matmul(
         return static_cast<int>(run_status);
     };
     at_npu::native::OpCommand::RunOpApiV2("aclnnKomodoCannW4A16Matmul", acl_call);
-    if (synthesized_bias) {
-        const aclError sync_status = aclrtSynchronizeStream(stream);
-        TORCH_CHECK(sync_status == ACL_SUCCESS, "aclrtSynchronizeStream failed after Komodo-CANN zero-bias launch: ",
-                    sync_status);
-    }
     return y;
 }
 
