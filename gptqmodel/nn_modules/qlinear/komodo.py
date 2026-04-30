@@ -22,6 +22,7 @@ _KOMODO_CACHE_ENV = "GPTQMODEL_KOMODO_CACHE_WEIGHTS"
 # to force the exact torch-style fallback when investigating numerical drift.
 _KOMODO_NATIVE_INT4_ENV = "GPTQMODEL_KOMODO_NATIVE_INT4"
 _KOMODO_DROP_SOURCE_ENV = "GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"
+_KOMODO_EAGER_PREPACK_ENV = "GPTQMODEL_KOMODO_EAGER_PREPACK"
 _NativePlan = tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor | None]
 
 
@@ -30,7 +31,11 @@ def _native_int4_enabled() -> bool:
 
 
 def _drop_source_weights_enabled() -> bool:
-    return env_flag(_KOMODO_DROP_SOURCE_ENV, default=False)
+    return env_flag(_KOMODO_DROP_SOURCE_ENV, default=True)
+
+
+def _eager_native_prepack_enabled() -> bool:
+    return env_flag(_KOMODO_EAGER_PREPACK_ENV, default=True)
 
 
 def _native_int4_group_size(group_size: int, in_features: int) -> int | None:
@@ -63,6 +68,13 @@ class _KomodoNativePlanMixin:
     _native_plan_pending: dict
     _native_prepack_streams: dict
     _native_source_buffer_names: tuple[str, ...] = ("qweight", "qzeros", "scales")
+
+    def _apply(self, fn):
+        result = super()._apply(fn)
+        if getattr(self, "_native_post_initialized", False) and not getattr(self, "_native_source_dropped", False):
+            self.clear_native_cache()
+            self._maybe_eager_native_prepack()
+        return result
 
     def _native_key(self, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
         return torch.device(device), dtype
@@ -118,12 +130,12 @@ class _KomodoNativePlanMixin:
             return False
         return True
 
-    def _maybe_drop_native_source_weights(self) -> None:
+    def _maybe_drop_native_source_weights(self, *, force: bool = False) -> None:
         if not getattr(self, "_drop_source_weights_after_native_pack", False):
             return
         if getattr(self, "_native_source_dropped", False):
             return
-        if self.training or not self._native_plan_cache:
+        if (self.training and not force) or not self._native_plan_cache:
             return
 
         for device, _ in tuple(self._native_plan_cache):
@@ -137,6 +149,29 @@ class _KomodoNativePlanMixin:
         if hasattr(self, "_cached_weights"):
             self._cached_weights.clear()
         self._native_source_dropped = True
+
+    def _maybe_eager_native_prepack(self) -> bool:
+        if not _eager_native_prepack_enabled() or not _native_int4_enabled() or not _npu_int4_ops_available():
+            return False
+        if getattr(self, "_native_source_dropped", False) or not self._native_source_available():
+            return False
+
+        device = self.runtime_device()
+        if device is None:
+            return False
+        device = torch.device(device)
+        dtype = torch.float16
+        if not self._can_prefetch_native_plan(device=device, dtype=dtype, allow_training=True):
+            return False
+
+        key = self._native_key(device=device, dtype=dtype)
+        if key in self._native_plan_cache or key in self._native_plan_pending:
+            return True
+
+        plan = self._build_native_plan(device=device, dtype=dtype)
+        self._native_plan_cache[key] = plan
+        self._maybe_drop_native_source_weights(force=True)
+        return True
 
     def enable_lookahead(self, enabled: bool = True):
         self._lookahead_enabled = enabled
@@ -317,17 +352,20 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         self._native_g_idx_plan_cache: tuple[bool, torch.Tensor | None] | None = None
         self._drop_source_weights_after_native_pack = _drop_source_weights_enabled()
         self._native_source_dropped = False
+        self._native_post_initialized = False
 
     def post_init(self):
         super().post_init()
         self.clear_native_cache()
+        self._native_post_initialized = True
+        self._maybe_eager_native_prepack()
 
     def train(self, mode: bool = True):
         if mode and getattr(self, "_native_source_dropped", False):
             raise RuntimeError("KomodoLinear cannot enter training mode after source quant weights are dropped.")
         previous = self.training
         result = super().train(mode=mode)
-        if previous != mode:
+        if previous != mode and mode:
             self.clear_native_cache()
         return result
 
@@ -386,10 +424,12 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         supported, _ = self._native_g_idx_plan()
         return supported
 
-    def _can_prefetch_native_plan(self, *, device: torch.device, dtype: torch.dtype) -> bool:
+    def _can_prefetch_native_plan(
+        self, *, device: torch.device, dtype: torch.dtype, allow_training: bool = False
+    ) -> bool:
         if not _native_int4_enabled() or not _npu_int4_ops_available():
             return False
-        if self.training or dtype != torch.float16 or device.type != "npu":
+        if (self.training and not allow_training) or dtype != torch.float16 or device.type != "npu":
             return False
         if self.bits != 4:
             return False
@@ -554,17 +594,20 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
         self._lookahead_next = None
         self._drop_source_weights_after_native_pack = _drop_source_weights_enabled()
         self._native_source_dropped = False
+        self._native_post_initialized = False
 
     def post_init(self):
         super().post_init()
         self.clear_weight_cache()
+        self._native_post_initialized = True
+        self._maybe_eager_native_prepack()
 
     def train(self, mode: bool = True):
         if mode and getattr(self, "_native_source_dropped", False):
             raise RuntimeError("AwqKomodoLinear cannot enter training mode after source quant weights are dropped.")
         previous = self.training
         result = super().train(mode=mode)
-        if previous != mode:
+        if previous != mode and mode:
             self.clear_weight_cache()
         return result
 
@@ -621,10 +664,12 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
             return False
         return _native_int4_group_size(self.group_size, self.in_features) is not None
 
-    def _can_prefetch_native_plan(self, *, device: torch.device, dtype: torch.dtype) -> bool:
+    def _can_prefetch_native_plan(
+        self, *, device: torch.device, dtype: torch.dtype, allow_training: bool = False
+    ) -> bool:
         if not _native_int4_enabled() or not _npu_int4_ops_available():
             return False
-        if self.training or dtype != torch.float16 or device.type != "npu":
+        if (self.training and not allow_training) or dtype != torch.float16 or device.type != "npu":
             return False
         if self.bits != 4:
             return False

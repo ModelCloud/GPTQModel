@@ -552,6 +552,7 @@ def test_npu_komodo_gptq_matches_torch_baseline(dtype, monkeypatch):
 @pytest.mark.parametrize("dtype", [torch.float16])
 def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
     baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=32).eval()
     candidate = KomodoLinear(
         bits=4,
@@ -569,6 +570,8 @@ def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
     candidate.post_init()
     baseline = baseline_cpu.to(_test_npu_device()).eval()
     candidate = candidate.to(_test_npu_device(), dtype=dtype).eval()
+    assert candidate.native_plan_prepacked(device=_test_npu_device(), dtype=dtype)
+    assert not candidate._native_source_dropped
 
     x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
     with torch.inference_mode():
@@ -625,6 +628,7 @@ def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
 @pytest.mark.parametrize("dtype", [torch.float16])
 def test_npu_komodo_gptq_native_int4_act_order_matches_torch_baseline(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
     baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=32).eval()
     _set_supported_act_order_g_idx(baseline_cpu)
     candidate = KomodoLinear(
@@ -643,6 +647,8 @@ def test_npu_komodo_gptq_native_int4_act_order_matches_torch_baseline(dtype, mon
     candidate.post_init()
     baseline = baseline_cpu.to(_test_npu_device()).eval()
     candidate = candidate.to(_test_npu_device(), dtype=dtype).eval()
+    assert candidate.native_plan_prepacked(device=_test_npu_device(), dtype=dtype)
+    assert not candidate._native_source_dropped
 
     x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
     with torch.inference_mode():
@@ -692,6 +698,12 @@ def test_npu_komodo_gptq_drops_source_after_native_pack(dtype, monkeypatch):
     candidate.post_init()
     baseline = baseline_cpu.to(_test_npu_device()).eval()
     candidate = candidate.to(_test_npu_device(), dtype=dtype).eval()
+    assert candidate._native_source_dropped
+    assert candidate.native_plan_prepacked(device=_test_npu_device(), dtype=dtype)
+    _assert_empty_source_buffers(
+        candidate,
+        ("qweight", "qzeros", "scales", "g_idx", "wf_unsqueeze_zero", "wf_unsqueeze_neg_one"),
+    )
 
     x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
     with torch.inference_mode():
@@ -754,11 +766,14 @@ def test_npu_komodo_awq_matches_torch_baseline(dtype, monkeypatch):
 @pytest.mark.parametrize("dtype", [torch.float16])
 def test_npu_komodo_awq_native_int4_matches_torch_baseline(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
     baseline = _make_awq_like_module(AwqTorchLinear, dtype, group_size=32).to(_test_npu_device()).eval()
     baseline.post_init()
     candidate = _make_awq_like_module(AwqKomodoLinear, dtype, group_size=32).to(_test_npu_device()).eval()
     _copy_matching_buffers(candidate, baseline)
     candidate.post_init()
+    assert candidate.native_plan_prepacked(device=_test_npu_device(), dtype=dtype)
+    assert not candidate._native_source_dropped
 
     x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
     with torch.inference_mode():
@@ -795,12 +810,14 @@ def test_npu_komodo_awq_drops_source_after_native_pack(dtype, monkeypatch):
     candidate = _make_awq_like_module(AwqKomodoLinear, dtype, group_size=32).to(_test_npu_device()).eval()
     _copy_matching_buffers(candidate, baseline)
     candidate.post_init()
+    assert candidate._native_source_dropped
+    assert candidate.native_plan_prepacked(device=_test_npu_device(), dtype=dtype)
+    _assert_empty_source_buffers(candidate, ("qweight", "qzeros", "scales"))
 
     x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())
     with torch.inference_mode():
         expected = baseline(x)
-        assert candidate.prefetch_native_plan(device=x.device, dtype=dtype)
-        assert not candidate._native_source_dropped
+        assert not candidate.prefetch_native_plan(device=x.device, dtype=dtype)
         actual = candidate(x)
         repeat = candidate(x)
         torch.npu.synchronize()

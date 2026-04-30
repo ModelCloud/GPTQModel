@@ -15,10 +15,14 @@ weight caching by default and restricting Komodo inference to FP16.
 - Native NPU int4 is enabled by default. Set
   `GPTQMODEL_KOMODO_NATIVE_INT4=0`, or pass `--no-komodo-native-int4` to the
   benchmark, to force the exact torch-style Komodo fallback for drift checks.
-- Source GPTQ/AWQ buffers can be dropped after native prepack with
-  `GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS=1`, or benchmark option
-  `--komodo-drop-source-weights`. This is inference-only and should be used
-  after the model is already on its final NPU device.
+- Native NPU int4 plans are built eagerly during `post_init()` once a Komodo
+  module is on its final NPU device. Set `GPTQMODEL_KOMODO_EAGER_PREPACK=0` to
+  restore first-forward packing for debugging.
+- Source GPTQ/AWQ buffers are dropped by default after native prepack. Set
+  `GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS=0`, or benchmark option
+  `--no-komodo-drop-source-weights`, to keep source quant buffers for debugging,
+  re-prefetch tests, or fallback comparisons. Source drop is inference-only and
+  should be used after the model is already on its final NPU device.
 - Current performance numbers below compare Torch quantized kernels against
   Komodo native int4 prepack on the same synthetic packed weights with Qwen3.6
   projection sizes, and include a direct fallback/native/prefetch comparison.
@@ -92,8 +96,8 @@ Interpretation:
 
 ## Source Weight Drop
 
-When `GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS=1` is set, each Komodo layer empties
-its source quant buffers after a native plan is cached. GPTQ drops `qweight`,
+By default, each Komodo layer empties its source quant buffers after a native
+plan is cached. GPTQ drops `qweight`,
 `qzeros`, `scales`, `g_idx`, and small unpack helper buffers. AWQ drops
 `qweight`, `qzeros`, and `scales`. The cached native plan remains the only
 inference weight representation for that layer.
