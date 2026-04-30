@@ -33,7 +33,13 @@ public:
         const uint32_t group_size = tiling_->group_size;
         const uint32_t has_bias = tiling_->has_bias;
         const uint32_t zero_offsets = tiling_->zero_offsets;
-        const uint32_t physical_core_idx = static_cast<uint32_t>(GetBlockIdx());
+        uint32_t physical_core_idx = static_cast<uint32_t>(GetBlockIdx());
+        if ASCEND_IS_AIV {
+            const uint32_t task_ratio = static_cast<uint32_t>(GetTaskRation());
+            if (task_ratio > 1) {
+                physical_core_idx /= task_ratio;
+            }
+        }
         const uint32_t scheduled_blocks = static_cast<uint32_t>(GetBlockNum());
         const uint32_t block_dim = tiling_->block_dim != 0 ? tiling_->block_dim : scheduled_blocks;
         if (block_dim == 0) {
@@ -1032,6 +1038,9 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
     GM_ADDR tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    if ASCEND_IS_AIC {
+        return;
+    }
     GET_TILING_DATA(tiling_data, tiling);
     KomodoCannW4A16ScalarKernel op;
     op.Init(x, packed_weight, scales, offsets, bias, y, &tiling_data);

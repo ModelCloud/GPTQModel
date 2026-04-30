@@ -381,6 +381,12 @@ Ascend C custom-op bring-up:
   range fault, so this is a launch/ABI issue rather than scalar math. Do not
   force the current scalar op to mixed launch; the next mixed attempt needs a
   built-in-style AIC/AIV state machine from the start.
+- The scalar kernel now has a neutral mixed-launch guard for the next
+  built-in-style attempt: AIV block IDs are normalized by `GetTaskRation()` when
+  present, and accidental AIC entry returns before touching GM state. The default
+  generated package still launches as AIV-only. An 8-NPU raw-op A/B against the
+  row-pair baseline was flat across `M=1/2/4/8/16` and `K=256/1024`, with the
+  largest measured delta `+0.22%` on `M=2,K=256,N=256`.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

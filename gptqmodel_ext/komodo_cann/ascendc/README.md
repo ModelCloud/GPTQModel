@@ -25,6 +25,10 @@ multi-block experiments exposed sparse/non-contiguous physical AIV block IDs on
 the local 910B runtime, so the device kernel maps `GetBlockIdx()` through
 `physical_id % tiling.block_dim` and then owns a contiguous packed-column range.
 Wider logical ownership such as 32 chunks left unwritten columns on this host.
+If a future generated package enters a mixed AIC/AIV task layout, the scalar
+fallback first normalizes AIV block IDs by `GetTaskRation()` and returns
+immediately on AIC entry. The checked-in package remains AIV-only; this guard is
+only preparation for the staged vector/Cube kernel.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
