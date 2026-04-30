@@ -86,13 +86,6 @@ _EXTENSION_SPECS = (
         unsupported_error=lambda: _resolve_attr("gptqmodel.utils.machete", "machete_runtime_error")(),
     ),
     _ExtensionSpec(
-        name="gptq_gemm",
-        aliases=("gptq-gemm", "gptq_pro", "gptq-pro"),
-        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.gptq_gemm", "_GPTQ_GEMM_TORCH_OPS_EXTENSION"),
-        supported=lambda: _resolve_attr("gptqmodel.utils.gptq_gemm", "_validate_gptq_gemm_device_support")(),
-        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.gptq_gemm", "gptq_gemm_runtime_error")(),
-    ),
-    _ExtensionSpec(
         name="marlin_fp16",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin", "_MARLIN_FP16_TORCH_OPS_EXTENSION"),
