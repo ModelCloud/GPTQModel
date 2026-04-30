@@ -42,6 +42,12 @@ The two-row tail now has the same two-packed-word reuse. In a rechecked NPU0
 median run it reduced `M=2,K=256,N=256,group_size=32` from `1.239 ms` to
 `1.191 ms`, and `M=2,K=1024,N=1024,group_size=32` from `18.734 ms` to
 `17.749 ms` while keeping `M=1` effectively unchanged.
+The four-row path also reuses each FP16 activation load across two adjacent
+packed weight words. Compared with the two-row commit, NPU0 medians improved
+from `53.206 ms` to `51.678 ms` for `M=7,K=1024,N=1024,group_size=64` and from
+`36.833 ms` to `36.688 ms` for `M=5,K=1024,N=1024,group_size=32`; the small
+`M=4,K=256,N=256` median was effectively flat (`1.665 ms` to `1.678 ms`) while
+the 8-NPU smoke passed on all devices.
 
 Build from the repo root:
 

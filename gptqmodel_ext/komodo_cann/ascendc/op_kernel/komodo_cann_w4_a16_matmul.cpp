@@ -350,7 +350,142 @@ private:
         const uint32_t x_offset1 = x_offset0 + in_features;
         const uint32_t x_offset2 = x_offset1 + in_features;
         const uint32_t x_offset3 = x_offset2 + in_features;
-        for (uint32_t packed_col = 0; packed_col < packed_stride; ++packed_col) {
+
+#define KOMODO_INIT_ACC8(prefix, b0, b1, b2, b3, b4, b5, b6, b7) \
+        float prefix##0 = b0; \
+        float prefix##1 = b1; \
+        float prefix##2 = b2; \
+        float prefix##3 = b3; \
+        float prefix##4 = b4; \
+        float prefix##5 = b5; \
+        float prefix##6 = b6; \
+        float prefix##7 = b7
+
+#define KOMODO_ACCUM8(prefix, x_value, d0, d1, d2, d3, d4, d5, d6, d7) \
+        prefix##0 += (x_value) * d0; \
+        prefix##1 += (x_value) * d1; \
+        prefix##2 += (x_value) * d2; \
+        prefix##3 += (x_value) * d3; \
+        prefix##4 += (x_value) * d4; \
+        prefix##5 += (x_value) * d5; \
+        prefix##6 += (x_value) * d6; \
+        prefix##7 += (x_value) * d7
+
+        const uint32_t groups = group_size == 0 ? 1 : in_features / group_size;
+        uint32_t packed_col = 0;
+        for (; packed_col + 1 < packed_stride; packed_col += 2) {
+            const uint32_t n_base0 = packed_col << 3;
+            const uint32_t n_base1 = n_base0 + 8;
+            const float bias00 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0)) : 0.0f;
+            const float bias01 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 1)) : 0.0f;
+            const float bias02 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 2)) : 0.0f;
+            const float bias03 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 3)) : 0.0f;
+            const float bias04 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 4)) : 0.0f;
+            const float bias05 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 5)) : 0.0f;
+            const float bias06 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 6)) : 0.0f;
+            const float bias07 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 7)) : 0.0f;
+            const float bias10 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1)) : 0.0f;
+            const float bias11 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 1)) : 0.0f;
+            const float bias12 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 2)) : 0.0f;
+            const float bias13 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 3)) : 0.0f;
+            const float bias14 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 4)) : 0.0f;
+            const float bias15 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 5)) : 0.0f;
+            const float bias16 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 6)) : 0.0f;
+            const float bias17 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 7)) : 0.0f;
+            KOMODO_INIT_ACC8(acc00, bias00, bias01, bias02, bias03, bias04, bias05, bias06, bias07);
+            KOMODO_INIT_ACC8(acc01, bias10, bias11, bias12, bias13, bias14, bias15, bias16, bias17);
+            KOMODO_INIT_ACC8(acc10, bias00, bias01, bias02, bias03, bias04, bias05, bias06, bias07);
+            KOMODO_INIT_ACC8(acc11, bias10, bias11, bias12, bias13, bias14, bias15, bias16, bias17);
+            KOMODO_INIT_ACC8(acc20, bias00, bias01, bias02, bias03, bias04, bias05, bias06, bias07);
+            KOMODO_INIT_ACC8(acc21, bias10, bias11, bias12, bias13, bias14, bias15, bias16, bias17);
+            KOMODO_INIT_ACC8(acc30, bias00, bias01, bias02, bias03, bias04, bias05, bias06, bias07);
+            KOMODO_INIT_ACC8(acc31, bias10, bias11, bias12, bias13, bias14, bias15, bias16, bias17);
+
+            for (uint32_t group = 0; group < groups; ++group) {
+                const uint32_t k_begin = group_size == 0 ? 0 : group * group_size;
+                const uint32_t k_end = group_size == 0 ? in_features : k_begin + group_size;
+                const uint32_t scale_base0 = group * out_features + n_base0;
+                const uint32_t scale_base1 = scale_base0 + 8;
+                const float scale00 = static_cast<float>(scales_gm_.GetValue(scale_base0));
+                const float scale01 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 1));
+                const float scale02 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 2));
+                const float scale03 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 3));
+                const float scale04 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 4));
+                const float scale05 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 5));
+                const float scale06 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 6));
+                const float scale07 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 7));
+                const float scale10 = static_cast<float>(scales_gm_.GetValue(scale_base1));
+                const float scale11 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 1));
+                const float scale12 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 2));
+                const float scale13 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 3));
+                const float scale14 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 4));
+                const float scale15 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 5));
+                const float scale16 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 6));
+                const float scale17 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 7));
+                const float offset00 = static_cast<float>(offsets_gm_.GetValue(scale_base0));
+                const float offset01 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 1));
+                const float offset02 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 2));
+                const float offset03 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 3));
+                const float offset04 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 4));
+                const float offset05 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 5));
+                const float offset06 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 6));
+                const float offset07 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 7));
+                const float offset10 = static_cast<float>(offsets_gm_.GetValue(scale_base1));
+                const float offset11 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 1));
+                const float offset12 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 2));
+                const float offset13 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 3));
+                const float offset14 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 4));
+                const float offset15 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 5));
+                const float offset16 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 6));
+                const float offset17 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 7));
+
+                for (uint32_t k = k_begin; k < k_end; ++k) {
+                    const float x_value0 = static_cast<float>(x_gm_.GetValue(x_offset0 + k));
+                    const float x_value1 = static_cast<float>(x_gm_.GetValue(x_offset1 + k));
+                    const float x_value2 = static_cast<float>(x_gm_.GetValue(x_offset2 + k));
+                    const float x_value3 = static_cast<float>(x_gm_.GetValue(x_offset3 + k));
+                    const uint32_t word0 =
+                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                    const uint32_t word1 =
+                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col + 1));
+                    const float deq00 = DequantLane(word0, 0, scale00, offset00);
+                    const float deq01 = DequantLane(word0, 1, scale01, offset01);
+                    const float deq02 = DequantLane(word0, 2, scale02, offset02);
+                    const float deq03 = DequantLane(word0, 3, scale03, offset03);
+                    const float deq04 = DequantLane(word0, 4, scale04, offset04);
+                    const float deq05 = DequantLane(word0, 5, scale05, offset05);
+                    const float deq06 = DequantLane(word0, 6, scale06, offset06);
+                    const float deq07 = DequantLane(word0, 7, scale07, offset07);
+                    const float deq10 = DequantLane(word1, 0, scale10, offset10);
+                    const float deq11 = DequantLane(word1, 1, scale11, offset11);
+                    const float deq12 = DequantLane(word1, 2, scale12, offset12);
+                    const float deq13 = DequantLane(word1, 3, scale13, offset13);
+                    const float deq14 = DequantLane(word1, 4, scale14, offset14);
+                    const float deq15 = DequantLane(word1, 5, scale15, offset15);
+                    const float deq16 = DequantLane(word1, 6, scale16, offset16);
+                    const float deq17 = DequantLane(word1, 7, scale17, offset17);
+                    KOMODO_ACCUM8(acc00, x_value0, deq00, deq01, deq02, deq03, deq04, deq05, deq06, deq07);
+                    KOMODO_ACCUM8(acc01, x_value0, deq10, deq11, deq12, deq13, deq14, deq15, deq16, deq17);
+                    KOMODO_ACCUM8(acc10, x_value1, deq00, deq01, deq02, deq03, deq04, deq05, deq06, deq07);
+                    KOMODO_ACCUM8(acc11, x_value1, deq10, deq11, deq12, deq13, deq14, deq15, deq16, deq17);
+                    KOMODO_ACCUM8(acc20, x_value2, deq00, deq01, deq02, deq03, deq04, deq05, deq06, deq07);
+                    KOMODO_ACCUM8(acc21, x_value2, deq10, deq11, deq12, deq13, deq14, deq15, deq16, deq17);
+                    KOMODO_ACCUM8(acc30, x_value3, deq00, deq01, deq02, deq03, deq04, deq05, deq06, deq07);
+                    KOMODO_ACCUM8(acc31, x_value3, deq10, deq11, deq12, deq13, deq14, deq15, deq16, deq17);
+                }
+            }
+
+            StoreRow(row_offset0 + n_base0, acc000, acc001, acc002, acc003, acc004, acc005, acc006, acc007);
+            StoreRow(row_offset0 + n_base1, acc010, acc011, acc012, acc013, acc014, acc015, acc016, acc017);
+            StoreRow(row_offset1 + n_base0, acc100, acc101, acc102, acc103, acc104, acc105, acc106, acc107);
+            StoreRow(row_offset1 + n_base1, acc110, acc111, acc112, acc113, acc114, acc115, acc116, acc117);
+            StoreRow(row_offset2 + n_base0, acc200, acc201, acc202, acc203, acc204, acc205, acc206, acc207);
+            StoreRow(row_offset2 + n_base1, acc210, acc211, acc212, acc213, acc214, acc215, acc216, acc217);
+            StoreRow(row_offset3 + n_base0, acc300, acc301, acc302, acc303, acc304, acc305, acc306, acc307);
+            StoreRow(row_offset3 + n_base1, acc310, acc311, acc312, acc313, acc314, acc315, acc316, acc317);
+        }
+
+        for (; packed_col < packed_stride; ++packed_col) {
             const uint32_t n_base = packed_col << 3;
             const float bias0 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base)) : 0.0f;
             const float bias1 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 1)) : 0.0f;
@@ -393,7 +528,6 @@ private:
             float acc36 = bias6;
             float acc37 = bias7;
 
-            const uint32_t groups = group_size == 0 ? 1 : in_features / group_size;
             for (uint32_t group = 0; group < groups; ++group) {
                 const uint32_t k_begin = group_size == 0 ? 0 : group * group_size;
                 const uint32_t k_end = group_size == 0 ? in_features : k_begin + group_size;
@@ -470,6 +604,9 @@ private:
             StoreRow(row_offset2 + n_base, acc20, acc21, acc22, acc23, acc24, acc25, acc26, acc27);
             StoreRow(row_offset3 + n_base, acc30, acc31, acc32, acc33, acc34, acc35, acc36, acc37);
         }
+
+#undef KOMODO_ACCUM8
+#undef KOMODO_INIT_ACC8
     }
 
     __aicore__ inline void ProcessRowPair(

@@ -289,6 +289,16 @@ Ascend C custom-op bring-up:
   `M=2,K=1024,N=1024,group_size=32`. `M=1` medians stayed unchanged within
   noise, and random CPU-reference checks over group sizes 0, 32, 64, and 128
   stayed below `0.008` max error for the covered small shapes.
+- A four-row two-packed-word micro-tile extended adjacent-output reuse to
+  `M=4..7` decode tails. Relative to the prior two-row commit, NPU0 medians
+  improved from `3.445 ms` to `3.348 ms` for
+  `M=7,K=256,N=256,group_size=64`, from `53.206 ms` to `51.678 ms` for
+  `M=7,K=1024,N=1024,group_size=64`, and from `36.833 ms` to `36.688 ms` for
+  `M=5,K=1024,N=1024,group_size=32`. The small
+  `M=4,K=256,N=256,group_size=32` median stayed flat within timing noise
+  (`1.665 ms` to `1.678 ms`). Deterministic and random CPU-reference checks
+  covered group sizes 0, 32, 64, and 128 with max observed drift below `0.008`,
+  and the 8-NPU smoke passed on all devices.
 - A direct CANN `Matmul<fp16, int4, fp16>` probe was rejected for now. In the
   default msopgen package the kernel still compiled as `VectorCore`, so the
   sentinel Cube path returned zeros because no AIC side was scheduled. Forcing
