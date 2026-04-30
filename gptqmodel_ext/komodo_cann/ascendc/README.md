@@ -27,7 +27,8 @@ partitioning scheme that does not assume block 0 is present.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
-with the 8-lane packed-word loop.
+with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset
+loads to quant-group scope.
 
 Build from the repo root:
 

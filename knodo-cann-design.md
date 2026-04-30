@@ -248,6 +248,11 @@ Ascend C custom-op bring-up:
   from `63.67 ms` on the UB-tile baseline at commit `2e12b84f` to `10.33 ms`
   with the 8-lane packed-word loop. Correctness sweeps remained below `0.003`
   max absolute drift against the CPU dequant reference.
+- Hoisting the eight scale/offset loads out of the inner K loop and reusing them
+  for each quant group reduced the same raw-op timing from `10.33 ms` to
+  `9.22 ms`. This keeps the no-full-dense-materialization contract and reduces
+  repeated GM scale/offset traffic; observed max drift in the mixed smoke was
+  `3.0517578125e-05`.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and
