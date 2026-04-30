@@ -361,6 +361,16 @@ Ascend C custom-op bring-up:
   `0.207 ms` for `M=3,K=256,N=256` and from `0.411 ms` to `0.381 ms` for
   `M=6,K=256,N=256`; the M1 guard stayed flat. Max observed drift was
   `0.00390625`, and symmetric zero-offset M2 stayed exact.
+- Rejected follow-up variants:
+  - Extending the offset hoist to the row-quad path improved direct `M=4`
+    timings by about `5-6%`, but consistently slowed the existing row-pair path
+    by about `2%`. Marking the row-quad helper `noinline` made the row-pair
+    regression much worse at about `17%`, so the variant was reverted.
+  - Extending the zero-offset side-band to all small-row paths improved row-quad
+    timings but regressed M1 nonzero by about `1%` or M2 by more than `6%`
+    depending on how the branch was placed. Keep the validated zero-offset
+    specialization limited to the row-oct path unless a separate small-row
+    kernel can avoid perturbing the nonzero paths.
 - A direct CANN `Matmul<fp16, int4, fp16>` probe was rejected for now. In the
   default msopgen package the kernel still compiled as `VectorCore`, so the
   sentinel Cube path returned zeros because no AIC side was scheduled. Forcing
