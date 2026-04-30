@@ -35,7 +35,8 @@ weight caching by default and restricting Komodo inference to FP16.
   module is on its final NPU device. Set `GPTQMODEL_KOMODO_EAGER_PREPACK=0` to
   restore first-forward packing for debugging. Side-stream prefetch and
   lookahead cover both the regular native plan and the GPTQ group-size 16
-  grouped plan.
+  grouped plan, and lookahead is launched before the current native matmul so
+  the next prepack can overlap current compute.
 - NPU flash attention is eligible for `attn_implementation=auto` when torch-npu
   exposes both `torch.ops.npu.npu_prompt_flash_attention` and
   `torch.ops.npu.npu_incre_flash_attention`. Explicit `attn_implementation`

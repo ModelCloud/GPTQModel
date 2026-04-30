@@ -856,6 +856,7 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         fuse_bias = bias is not None and _fuse_bias_enabled()
         if fuse_bias and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
             bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
+        self._maybe_schedule_lookahead(compute_dtype)
         out = _weight_quant_matmul(
             x_flat,
             packed_weight,
@@ -875,7 +876,6 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             out = self.adapter.apply(x=x_flat, out=out)
         if input_dtype == torch.float32:
             out = out.to(torch.float32)
-        self._maybe_schedule_lookahead(compute_dtype)
         return out
 
     def _native_group16_forward(self, x: torch.Tensor):
@@ -906,6 +906,7 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         group_count = len(packed_groups)
         rows = x_flat.shape[0]
         fused_bias = False
+        self._maybe_schedule_lookahead(compute_dtype)
         if self._can_use_native_group16_grouped(rows=rows, group_count=group_count):
             self._native_group16_last_path = "grouped"
             x_groups = x_flat.reshape(rows, group_count, group_size).transpose(0, 1).contiguous()
@@ -967,7 +968,6 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             out = self.adapter.apply(x=x_flat, out=out)
         if input_dtype == torch.float32:
             out = out.to(torch.float32)
-        self._maybe_schedule_lookahead(compute_dtype)
         return out
 
     def forward(self, x: torch.Tensor):
