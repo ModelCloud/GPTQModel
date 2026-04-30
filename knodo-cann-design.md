@@ -267,6 +267,14 @@ Ascend C custom-op bring-up:
   `4.60 ms` to `3.66 ms`, with max observed drift `0.000244140625`. An 8-NPU
   smoke covered row counts 1-8 and group sizes 0, 32, 64, 96, and 128 with zero
   deterministic error.
+- A CANN profiler sample on `qwen3_6_27b_gptq_down_proj` with `tokens=8`
+  reported the custom kernel as AIV-only with `cube_utilization(%) = 0.0`,
+  confirming that the scalar path is still a staging baseline, not the target
+  Cube-consuming fused design.
+- An eight-row micro-tile for decode-like `rows=8` reduced the raw-op timing
+  from `3.66 ms` to `3.42 ms`, with max observed drift `0.00048828125`. The
+  follow-up 8-NPU smoke covered row counts 1, 2, 3, 4, 5, 7, 8, and 9 plus
+  group sizes 0, 32, 64, 96, and 128 with zero deterministic error.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

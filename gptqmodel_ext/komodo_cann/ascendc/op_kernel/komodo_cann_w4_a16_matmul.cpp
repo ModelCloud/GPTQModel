@@ -39,6 +39,9 @@ public:
 
         const uint32_t packed_stride = out_features >> 3;
         uint32_t m = 0;
+        for (; m + 7 < rows; m += 8) {
+            ProcessRowOct(m, in_features, out_features, group_size, has_bias, packed_stride);
+        }
         for (; m + 3 < rows; m += 4) {
             ProcessRowQuad(m, in_features, out_features, group_size, has_bias, packed_stride);
         }
@@ -111,6 +114,136 @@ private:
 
             StoreRow(row_offset + n_base, acc0, acc1, acc2, acc3, acc4, acc5, acc6, acc7);
         }
+    }
+
+    __aicore__ inline void ProcessRowOct(
+        uint32_t m,
+        uint32_t in_features,
+        uint32_t out_features,
+        uint32_t group_size,
+        uint32_t has_bias,
+        uint32_t packed_stride)
+    {
+        const uint32_t row_offset0 = m * out_features;
+        const uint32_t row_offset1 = row_offset0 + out_features;
+        const uint32_t row_offset2 = row_offset1 + out_features;
+        const uint32_t row_offset3 = row_offset2 + out_features;
+        const uint32_t row_offset4 = row_offset3 + out_features;
+        const uint32_t row_offset5 = row_offset4 + out_features;
+        const uint32_t row_offset6 = row_offset5 + out_features;
+        const uint32_t row_offset7 = row_offset6 + out_features;
+        const uint32_t x_offset0 = m * in_features;
+        const uint32_t x_offset1 = x_offset0 + in_features;
+        const uint32_t x_offset2 = x_offset1 + in_features;
+        const uint32_t x_offset3 = x_offset2 + in_features;
+        const uint32_t x_offset4 = x_offset3 + in_features;
+        const uint32_t x_offset5 = x_offset4 + in_features;
+        const uint32_t x_offset6 = x_offset5 + in_features;
+        const uint32_t x_offset7 = x_offset6 + in_features;
+
+#define KOMODO_INIT_ACC(prefix) \
+        float prefix##0 = bias0; \
+        float prefix##1 = bias1; \
+        float prefix##2 = bias2; \
+        float prefix##3 = bias3; \
+        float prefix##4 = bias4; \
+        float prefix##5 = bias5; \
+        float prefix##6 = bias6; \
+        float prefix##7 = bias7
+
+#define KOMODO_ACCUM_ROW(prefix, x_value) \
+        prefix##0 += (x_value) * deq0; \
+        prefix##1 += (x_value) * deq1; \
+        prefix##2 += (x_value) * deq2; \
+        prefix##3 += (x_value) * deq3; \
+        prefix##4 += (x_value) * deq4; \
+        prefix##5 += (x_value) * deq5; \
+        prefix##6 += (x_value) * deq6; \
+        prefix##7 += (x_value) * deq7
+
+        for (uint32_t packed_col = 0; packed_col < packed_stride; ++packed_col) {
+            const uint32_t n_base = packed_col << 3;
+            const float bias0 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base)) : 0.0f;
+            const float bias1 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 1)) : 0.0f;
+            const float bias2 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 2)) : 0.0f;
+            const float bias3 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 3)) : 0.0f;
+            const float bias4 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 4)) : 0.0f;
+            const float bias5 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 5)) : 0.0f;
+            const float bias6 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 6)) : 0.0f;
+            const float bias7 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 7)) : 0.0f;
+            KOMODO_INIT_ACC(acc0);
+            KOMODO_INIT_ACC(acc1);
+            KOMODO_INIT_ACC(acc2);
+            KOMODO_INIT_ACC(acc3);
+            KOMODO_INIT_ACC(acc4);
+            KOMODO_INIT_ACC(acc5);
+            KOMODO_INIT_ACC(acc6);
+            KOMODO_INIT_ACC(acc7);
+
+            const uint32_t groups = group_size == 0 ? 1 : in_features / group_size;
+            for (uint32_t group = 0; group < groups; ++group) {
+                const uint32_t k_begin = group_size == 0 ? 0 : group * group_size;
+                const uint32_t k_end = group_size == 0 ? in_features : k_begin + group_size;
+                const uint32_t scale_base = group * out_features + n_base;
+                const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
+                const float scale1 = static_cast<float>(scales_gm_.GetValue(scale_base + 1));
+                const float scale2 = static_cast<float>(scales_gm_.GetValue(scale_base + 2));
+                const float scale3 = static_cast<float>(scales_gm_.GetValue(scale_base + 3));
+                const float scale4 = static_cast<float>(scales_gm_.GetValue(scale_base + 4));
+                const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
+                const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
+                const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+                const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));
+                const float offset1 = static_cast<float>(offsets_gm_.GetValue(scale_base + 1));
+                const float offset2 = static_cast<float>(offsets_gm_.GetValue(scale_base + 2));
+                const float offset3 = static_cast<float>(offsets_gm_.GetValue(scale_base + 3));
+                const float offset4 = static_cast<float>(offsets_gm_.GetValue(scale_base + 4));
+                const float offset5 = static_cast<float>(offsets_gm_.GetValue(scale_base + 5));
+                const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
+                const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
+
+                for (uint32_t k = k_begin; k < k_end; ++k) {
+                    const float x_value0 = static_cast<float>(x_gm_.GetValue(x_offset0 + k));
+                    const float x_value1 = static_cast<float>(x_gm_.GetValue(x_offset1 + k));
+                    const float x_value2 = static_cast<float>(x_gm_.GetValue(x_offset2 + k));
+                    const float x_value3 = static_cast<float>(x_gm_.GetValue(x_offset3 + k));
+                    const float x_value4 = static_cast<float>(x_gm_.GetValue(x_offset4 + k));
+                    const float x_value5 = static_cast<float>(x_gm_.GetValue(x_offset5 + k));
+                    const float x_value6 = static_cast<float>(x_gm_.GetValue(x_offset6 + k));
+                    const float x_value7 = static_cast<float>(x_gm_.GetValue(x_offset7 + k));
+                    const uint32_t word =
+                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                    const float deq0 = DequantLane(word, 0, scale0, offset0);
+                    const float deq1 = DequantLane(word, 1, scale1, offset1);
+                    const float deq2 = DequantLane(word, 2, scale2, offset2);
+                    const float deq3 = DequantLane(word, 3, scale3, offset3);
+                    const float deq4 = DequantLane(word, 4, scale4, offset4);
+                    const float deq5 = DequantLane(word, 5, scale5, offset5);
+                    const float deq6 = DequantLane(word, 6, scale6, offset6);
+                    const float deq7 = DequantLane(word, 7, scale7, offset7);
+                    KOMODO_ACCUM_ROW(acc0, x_value0);
+                    KOMODO_ACCUM_ROW(acc1, x_value1);
+                    KOMODO_ACCUM_ROW(acc2, x_value2);
+                    KOMODO_ACCUM_ROW(acc3, x_value3);
+                    KOMODO_ACCUM_ROW(acc4, x_value4);
+                    KOMODO_ACCUM_ROW(acc5, x_value5);
+                    KOMODO_ACCUM_ROW(acc6, x_value6);
+                    KOMODO_ACCUM_ROW(acc7, x_value7);
+                }
+            }
+
+            StoreRow(row_offset0 + n_base, acc00, acc01, acc02, acc03, acc04, acc05, acc06, acc07);
+            StoreRow(row_offset1 + n_base, acc10, acc11, acc12, acc13, acc14, acc15, acc16, acc17);
+            StoreRow(row_offset2 + n_base, acc20, acc21, acc22, acc23, acc24, acc25, acc26, acc27);
+            StoreRow(row_offset3 + n_base, acc30, acc31, acc32, acc33, acc34, acc35, acc36, acc37);
+            StoreRow(row_offset4 + n_base, acc40, acc41, acc42, acc43, acc44, acc45, acc46, acc47);
+            StoreRow(row_offset5 + n_base, acc50, acc51, acc52, acc53, acc54, acc55, acc56, acc57);
+            StoreRow(row_offset6 + n_base, acc60, acc61, acc62, acc63, acc64, acc65, acc66, acc67);
+            StoreRow(row_offset7 + n_base, acc70, acc71, acc72, acc73, acc74, acc75, acc76, acc77);
+        }
+
+#undef KOMODO_ACCUM_ROW
+#undef KOMODO_INIT_ACC
     }
 
     __aicore__ inline void ProcessRowQuad(
