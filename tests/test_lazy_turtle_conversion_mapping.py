@@ -108,6 +108,10 @@ class ErnieFuseAndSplitTextVisionExperts:
         self.concat_dim = concat_dim
 
 
+class FuseGateUp:
+    pass
+
+
 class _WeightConverterStub:
     def __init__(self, source_patterns: str | list[str], target_patterns: str | list[str], operations: list[object]):
         self.source_patterns = [source_patterns] if isinstance(source_patterns, str) else source_patterns
@@ -394,6 +398,55 @@ def test_lazy_turtle_applies_one_to_one_weight_converter_aliases(tmp_path):
             "weight",
         )
         == "model.layers.0.mlp.gate.weight"
+    )
+
+
+def test_lazy_turtle_keeps_split_gate_leaf_name_before_resolving_fused_converter_source(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightConverterStub(
+                source_patterns=[
+                    "mlp.gate_proj.weight",
+                    "mlp.up_proj.weight",
+                ],
+                target_patterns="mlp.gate_up_proj.weight",
+                operations=[FuseGateUp()],
+            )
+        ]
+    )
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "model.layers.0.mlp.gate_up_proj.weight": torch.zeros(4, 2),
+        },
+        hf_conversion_map_reversed=reversed_map,
+    )
+
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "model.layers.0.mlp",
+            "gate_proj.weight",
+        )
+        == "model.layers.0.mlp.gate_proj.weight"
+    )
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.mlp",
+        "gate_proj.weight",
+    ) == (
+        "model.layers.0.mlp.gate_up_proj.weight",
+        None,
+        0,
+        0,
+    )
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.mlp",
+        "up_proj.weight",
+    ) == (
+        "model.layers.0.mlp.gate_up_proj.weight",
+        None,
+        1,
+        0,
     )
 
 

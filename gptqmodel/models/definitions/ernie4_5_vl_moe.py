@@ -16,7 +16,6 @@ from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, get_module, get_module_by_name_prefix, move_to
 from ...utils.offload import offload_to_disk
-from ...utils.structure import print_module_tree
 from .._const import CPU
 from ..base import BaseQModel
 
@@ -263,7 +262,6 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
         inputs_embeds = input_embedder(input_ids)
 
         model_config = getattr(self.model, "config", None)
-        print_module_tree(core_model)
         if pixel_values is not None and hasattr(core_model, "get_image_features"):
             image_outputs = core_model.get_image_features(
                 pixel_values=pixel_values,

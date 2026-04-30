@@ -141,6 +141,7 @@ class EXL3Processor(LoopProcessor):
             sym=True,
             device=module_qcfg.device,
             pack_dtype=module_qcfg.pack_dtype,
+            act_group_aware=False,
         )
 
         task = GPTQ(module=module, qcfg=capture_qcfg)

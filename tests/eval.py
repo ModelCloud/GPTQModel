@@ -163,16 +163,16 @@ def resolve_eval_metric_alias(metric_name: str, metrics: Mapping[str, Any]) -> s
 
 
 def evaluate(
-    model_or_id_or_path: Any = None,
-    tokenizer: Any = None,
-    tasks: Any = None,
-    batch_size: int | str = 1,
-    trust_remote_code: bool = False,
-    output_path: Optional[str] = None,
-    llm_backend: str = "gptqmodel",
-    backend: BACKEND | str | None = BACKEND.AUTO,
-    model_args: Optional[Dict[str, Any]] = None,
-    **args,
+        model_or_id_or_path: Any = None,
+        tokenizer: Any = None,
+        tasks: Any = None,
+        batch_size: int | str = 1,
+        trust_remote_code: bool = False,
+        output_path: Optional[str] = None,
+        llm_backend: str = "gptqmodel",
+        backend: BACKEND | str | None = BACKEND.AUTO,
+        model_args: Optional[Dict[str, Any]] = None,
+        **args,
 ):
     normalized_llm_backend = str(llm_backend).strip().lower()
     if normalized_llm_backend not in {"gptqmodel", "vllm", "sglang"}:
@@ -213,19 +213,19 @@ def evaluate(
 
 
 def run_evalution(
-    *,
-    model_or_id_or_path: Any,
-    tokenizer: Any,
-    tasks: list[str],
-    batch_size: int | str,
-    trust_remote_code: bool,
-    output_path: Optional[str],
+        *,
+        model_or_id_or_path: Any,
+        tokenizer: Any,
+        tasks: list[str],
+        batch_size: int | str,
+        trust_remote_code: bool,
+        output_path: Optional[str],
         llm_backend: str,
-    backend: BACKEND | str | None,
-    model_args: Dict[str, Any],
-    apply_chat_template: bool,
-    gen_kwargs: Any,
-    suite_kwargs: Dict[str, Any],
+        backend: BACKEND | str | None,
+        model_args: Dict[str, Any],
+        apply_chat_template: bool,
+        gen_kwargs: Any,
+        suite_kwargs: Dict[str, Any],
 ) -> dict[str, Any]:
     evalution = import_evalution()
     engine_config, model_config, session = _build_evalution_runtime(
@@ -444,15 +444,15 @@ def _result_tests(result: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _build_evalution_runtime(
-    *,
-    evalution: Any,
-    model_or_id_or_path: Any,
+        *,
+        evalution: Any,
+        model_or_id_or_path: Any,
         llm_backend: str,
-    backend: BACKEND | str | None,
-    batch_size: int | str,
-    trust_remote_code: bool,
-    model_args: Dict[str, Any],
-    tokenizer: Any,
+        backend: BACKEND | str | None,
+        batch_size: int | str,
+        trust_remote_code: bool,
+        model_args: Dict[str, Any],
+        tokenizer: Any,
 ):
     from transformers import PreTrainedModel
 
@@ -582,6 +582,7 @@ def _build_evalution_session_from_model(*, engine: Any, model_config: Any, model
     from evalution.engines.transformers_common import _clone_prepare_tokenizer, _resolve_input_device
     from evalution.engines.transformers_compat import TransformersCompatSession
 
+    wrapper_model = model
     inner_model = getattr(model, "model", model)
     tokenizer = getattr(model, "tokenizer", None)
     if tokenizer is None:
@@ -593,9 +594,9 @@ def _build_evalution_session_from_model(*, engine: Any, model_config: Any, model
         else model_config.trust_remote_code
     )
     requested_attn = (
-        getattr(getattr(inner_model, "config", None), "_attn_implementation", None)
-        or getattr(getattr(inner_model, "config", None), "attn_implementation", None)
-        or engine.attn_implementation
+            getattr(getattr(inner_model, "config", None), "_attn_implementation", None)
+            or getattr(getattr(inner_model, "config", None), "attn_implementation", None)
+            or engine.attn_implementation
     )
     prepare_tokenizer = _clone_prepare_tokenizer(
         tokenizer=tokenizer,
@@ -617,7 +618,10 @@ def _build_evalution_session_from_model(*, engine: Any, model_config: Any, model
     session = TransformersCompatSession(
         config=engine,
         model_config=model_config,
-        model=inner_model,
+        # Keep the GPTQModel wrapper live so custom forward shims for composite
+        # multimodal checkpoints (for example text-only paths on Omni models)
+        # remain active during evalution scoring.
+        model=wrapper_model,
         tokenizer=tokenizer,
         prepare_tokenizer=prepare_tokenizer,
         input_device=_resolve_input_device(inner_model, prefer=engine.device),
@@ -631,13 +635,13 @@ def _build_evalution_session_from_model(*, engine: Any, model_config: Any, model
 
 
 def _build_evalution_suite(
-    *,
-    evalution: Any,
-    task_name: str,
-    apply_chat_template: bool,
-    batch_size: int | None,
-    generation_settings: Dict[str, Any],
-    suite_kwargs: Dict[str, Any],
+        *,
+        evalution: Any,
+        task_name: str,
+        apply_chat_template: bool,
+        batch_size: int | None,
+        generation_settings: Dict[str, Any],
+        suite_kwargs: Dict[str, Any],
 ):
     benchmarks = evalution.benchmarks
     normalized_task = normalize_eval_task_name(task_name)
@@ -727,12 +731,12 @@ def _split_evalution_model_args(model_args: Dict[str, Any]) -> tuple[dict[str, A
     return engine_options, load_kwargs
 
 def _build_sglang_engine_kwargs(
-    *,
-    engine_options: Dict[str, Any],
-    batch_size: int | str,
-    trust_remote_code: bool,
-    padding_side: str,
-    engine_dtype: str | None,
+        *,
+        engine_options: Dict[str, Any],
+        batch_size: int | str,
+        trust_remote_code: bool,
+        padding_side: str,
+        engine_dtype: str | None,
 ) -> Dict[str, Any]:
     context_length = engine_options.get("context_length", engine_options.get("max_model_len"))
     tp_size = engine_options.get("tp_size", engine_options.get("tensor_parallel_size", 1))

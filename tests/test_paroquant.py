@@ -2033,6 +2033,7 @@ def test_paroquant_processor_group_capture_uses_pristine_module_and_clean_inputs
             progress_total_rows,
             force_serial,
             preserve_module_devices,
+            apply_moe_config,
         ):
             del (
                 processor,
@@ -2051,6 +2052,7 @@ def test_paroquant_processor_group_capture_uses_pristine_module_and_clean_inputs
                 progress_total_rows,
                 force_serial,
                 preserve_module_devices,
+                apply_moe_config,
             )
             outputs = []
             for batch_inputs, batch_kwargs in zip(layer_inputs, layer_input_kwargs):

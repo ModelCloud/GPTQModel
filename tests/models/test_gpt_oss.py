@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-
+from gptqmodel import BACKEND
 from model_test import ModelTest
 
 
@@ -21,6 +21,7 @@ class TestGPTOSS(ModelTest):
     EVAL_BATCH_SIZE = 6
     USE_VLLM = False
     ACT_GROUP_AWARE = False
+    LOAD_BACKEND = BACKEND.AUTO
 
     def test_gpt_oss(self):
         self.quantize_and_evaluate()

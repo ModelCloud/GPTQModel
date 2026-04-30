@@ -316,10 +316,11 @@ class ForwardExecutor:
                 ):
                     module_output = None
                     try:
-                        if is_embeddings_module:
-                            module_output = module(*layer_input)
-                        else:
-                            module_output = module(*layer_input, **additional_inputs)
+                        with torch.no_grad():
+                            if is_embeddings_module:
+                                module_output = module(*layer_input)
+                            else:
+                                module_output = module(*layer_input, **additional_inputs)
                     except StopForward:
                         module_output = None
                     finally:
