@@ -765,29 +765,33 @@ private:
                 const float offset16 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 6));
                 const float offset17 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 7));
 
+                float x_sum0 = 0.0f;
+                float x_sum1 = 0.0f;
                 for (uint32_t k = k_begin; k < k_end; ++k) {
                     const float x_value0 = static_cast<float>(x_gm_.GetValue(x_offset0 + k));
                     const float x_value1 = static_cast<float>(x_gm_.GetValue(x_offset1 + k));
+                    x_sum0 += x_value0;
+                    x_sum1 += x_value1;
                     const uint32_t word0 =
                         static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
                     const uint32_t word1 =
                         static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col + 1));
-                    const float deq00 = DequantLane(word0, 0, scale00, offset00);
-                    const float deq01 = DequantLane(word0, 1, scale01, offset01);
-                    const float deq02 = DequantLane(word0, 2, scale02, offset02);
-                    const float deq03 = DequantLane(word0, 3, scale03, offset03);
-                    const float deq04 = DequantLane(word0, 4, scale04, offset04);
-                    const float deq05 = DequantLane(word0, 5, scale05, offset05);
-                    const float deq06 = DequantLane(word0, 6, scale06, offset06);
-                    const float deq07 = DequantLane(word0, 7, scale07, offset07);
-                    const float deq10 = DequantLane(word1, 0, scale10, offset10);
-                    const float deq11 = DequantLane(word1, 1, scale11, offset11);
-                    const float deq12 = DequantLane(word1, 2, scale12, offset12);
-                    const float deq13 = DequantLane(word1, 3, scale13, offset13);
-                    const float deq14 = DequantLane(word1, 4, scale14, offset14);
-                    const float deq15 = DequantLane(word1, 5, scale15, offset15);
-                    const float deq16 = DequantLane(word1, 6, scale16, offset16);
-                    const float deq17 = DequantLane(word1, 7, scale17, offset17);
+                    const float deq00 = DequantLaneNoOffset(word0, 0, scale00);
+                    const float deq01 = DequantLaneNoOffset(word0, 1, scale01);
+                    const float deq02 = DequantLaneNoOffset(word0, 2, scale02);
+                    const float deq03 = DequantLaneNoOffset(word0, 3, scale03);
+                    const float deq04 = DequantLaneNoOffset(word0, 4, scale04);
+                    const float deq05 = DequantLaneNoOffset(word0, 5, scale05);
+                    const float deq06 = DequantLaneNoOffset(word0, 6, scale06);
+                    const float deq07 = DequantLaneNoOffset(word0, 7, scale07);
+                    const float deq10 = DequantLaneNoOffset(word1, 0, scale10);
+                    const float deq11 = DequantLaneNoOffset(word1, 1, scale11);
+                    const float deq12 = DequantLaneNoOffset(word1, 2, scale12);
+                    const float deq13 = DequantLaneNoOffset(word1, 3, scale13);
+                    const float deq14 = DequantLaneNoOffset(word1, 4, scale14);
+                    const float deq15 = DequantLaneNoOffset(word1, 5, scale15);
+                    const float deq16 = DequantLaneNoOffset(word1, 6, scale16);
+                    const float deq17 = DequantLaneNoOffset(word1, 7, scale17);
                     acc000 += x_value0 * deq00;
                     acc001 += x_value0 * deq01;
                     acc002 += x_value0 * deq02;
@@ -821,6 +825,38 @@ private:
                     acc116 += x_value1 * deq16;
                     acc117 += x_value1 * deq17;
                 }
+                acc000 += x_sum0 * offset00 * scale00;
+                acc001 += x_sum0 * offset01 * scale01;
+                acc002 += x_sum0 * offset02 * scale02;
+                acc003 += x_sum0 * offset03 * scale03;
+                acc004 += x_sum0 * offset04 * scale04;
+                acc005 += x_sum0 * offset05 * scale05;
+                acc006 += x_sum0 * offset06 * scale06;
+                acc007 += x_sum0 * offset07 * scale07;
+                acc010 += x_sum0 * offset10 * scale10;
+                acc011 += x_sum0 * offset11 * scale11;
+                acc012 += x_sum0 * offset12 * scale12;
+                acc013 += x_sum0 * offset13 * scale13;
+                acc014 += x_sum0 * offset14 * scale14;
+                acc015 += x_sum0 * offset15 * scale15;
+                acc016 += x_sum0 * offset16 * scale16;
+                acc017 += x_sum0 * offset17 * scale17;
+                acc100 += x_sum1 * offset00 * scale00;
+                acc101 += x_sum1 * offset01 * scale01;
+                acc102 += x_sum1 * offset02 * scale02;
+                acc103 += x_sum1 * offset03 * scale03;
+                acc104 += x_sum1 * offset04 * scale04;
+                acc105 += x_sum1 * offset05 * scale05;
+                acc106 += x_sum1 * offset06 * scale06;
+                acc107 += x_sum1 * offset07 * scale07;
+                acc110 += x_sum1 * offset10 * scale10;
+                acc111 += x_sum1 * offset11 * scale11;
+                acc112 += x_sum1 * offset12 * scale12;
+                acc113 += x_sum1 * offset13 * scale13;
+                acc114 += x_sum1 * offset14 * scale14;
+                acc115 += x_sum1 * offset15 * scale15;
+                acc116 += x_sum1 * offset16 * scale16;
+                acc117 += x_sum1 * offset17 * scale17;
             }
 
             StoreRow(row_offset0 + n_base0, acc000, acc001, acc002, acc003, acc004, acc005, acc006, acc007);
@@ -876,19 +912,23 @@ private:
                 const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
                 const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
 
+                float x_sum0 = 0.0f;
+                float x_sum1 = 0.0f;
                 for (uint32_t k = k_begin; k < k_end; ++k) {
                     const float x_value0 = static_cast<float>(x_gm_.GetValue(x_offset0 + k));
                     const float x_value1 = static_cast<float>(x_gm_.GetValue(x_offset1 + k));
+                    x_sum0 += x_value0;
+                    x_sum1 += x_value1;
                     const uint32_t word =
                         static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
-                    const float deq0 = DequantLane(word, 0, scale0, offset0);
-                    const float deq1 = DequantLane(word, 1, scale1, offset1);
-                    const float deq2 = DequantLane(word, 2, scale2, offset2);
-                    const float deq3 = DequantLane(word, 3, scale3, offset3);
-                    const float deq4 = DequantLane(word, 4, scale4, offset4);
-                    const float deq5 = DequantLane(word, 5, scale5, offset5);
-                    const float deq6 = DequantLane(word, 6, scale6, offset6);
-                    const float deq7 = DequantLane(word, 7, scale7, offset7);
+                    const float deq0 = DequantLaneNoOffset(word, 0, scale0);
+                    const float deq1 = DequantLaneNoOffset(word, 1, scale1);
+                    const float deq2 = DequantLaneNoOffset(word, 2, scale2);
+                    const float deq3 = DequantLaneNoOffset(word, 3, scale3);
+                    const float deq4 = DequantLaneNoOffset(word, 4, scale4);
+                    const float deq5 = DequantLaneNoOffset(word, 5, scale5);
+                    const float deq6 = DequantLaneNoOffset(word, 6, scale6);
+                    const float deq7 = DequantLaneNoOffset(word, 7, scale7);
                     acc00 += x_value0 * deq0;
                     acc01 += x_value0 * deq1;
                     acc02 += x_value0 * deq2;
@@ -906,6 +946,22 @@ private:
                     acc16 += x_value1 * deq6;
                     acc17 += x_value1 * deq7;
                 }
+                acc00 += x_sum0 * offset0 * scale0;
+                acc01 += x_sum0 * offset1 * scale1;
+                acc02 += x_sum0 * offset2 * scale2;
+                acc03 += x_sum0 * offset3 * scale3;
+                acc04 += x_sum0 * offset4 * scale4;
+                acc05 += x_sum0 * offset5 * scale5;
+                acc06 += x_sum0 * offset6 * scale6;
+                acc07 += x_sum0 * offset7 * scale7;
+                acc10 += x_sum1 * offset0 * scale0;
+                acc11 += x_sum1 * offset1 * scale1;
+                acc12 += x_sum1 * offset2 * scale2;
+                acc13 += x_sum1 * offset3 * scale3;
+                acc14 += x_sum1 * offset4 * scale4;
+                acc15 += x_sum1 * offset5 * scale5;
+                acc16 += x_sum1 * offset6 * scale6;
+                acc17 += x_sum1 * offset7 * scale7;
             }
 
             StoreRow(row_offset0 + n_base, acc00, acc01, acc02, acc03, acc04, acc05, acc06, acc07);

@@ -77,6 +77,15 @@ and `M=1,K=1024,N=1024,group_size=64` from `1.457 ms` to `1.312 ms`.
 The large down-proj check `M=1,K=17408,N=5120,group_size=32` improved from
 `127.73 ms` to `116.32 ms`; max drift was `0.0625` with mean drift about
 `1.0e-4`.
+The same offset-hoist pattern is now applied to the two-row path. Against the
+M1-hoist baseline, an 8-NPU raw-op A/B sweep improved
+`M=2,K=256,N=256,group_size=32` from `0.155 ms` to `0.121 ms`,
+`M=2,K=1024,N=1024,group_size=32` from `2.354 ms` to `1.809 ms`, and
+`M=2,K=1024,N=1024,group_size=64` from `2.318 ms` to `1.764 ms`. Mixed tails
+also improved: `M=3,K=256,N=256` from `0.242 ms` to `0.207 ms` and
+`M=6,K=256,N=256` from `0.411 ms` to `0.381 ms`. Max observed drift in this
+sweep was `0.00390625`; symmetric zero-offset M2 stayed exact and M1 stayed
+flat.
 
 Build from the repo root:
 

@@ -352,6 +352,15 @@ Ascend C custom-op bring-up:
   zero-offset M1 cases stayed exact. The Qwen down-proj-shaped
   `M=1,K=17408,N=5120,group_size=32` check improved from `127.73 ms` to
   `116.32 ms` with max drift `0.0625` and mean drift about `1.0e-4`.
+- The row-pair path now uses the same quant-group offset hoist, with a separate
+  activation sum for each of the two rows. Against the M1-hoist baseline, the
+  8-NPU raw-op A/B sweep improved `M=2,K=256,N=256,group_size=32` from
+  `0.155 ms` to `0.121 ms`, `M=2,K=1024,N=1024,group_size=32` from
+  `2.354 ms` to `1.809 ms`, and `M=2,K=1024,N=1024,group_size=64` from
+  `2.318 ms` to `1.764 ms`. Mixed tails improved from `0.242 ms` to
+  `0.207 ms` for `M=3,K=256,N=256` and from `0.411 ms` to `0.381 ms` for
+  `M=6,K=256,N=256`; the M1 guard stayed flat. Max observed drift was
+  `0.00390625`, and symmetric zero-offset M2 stayed exact.
 - A direct CANN `Matmul<fp16, int4, fp16>` probe was rejected for now. In the
   default msopgen package the kernel still compiled as `VectorCore`, so the
   sentinel Cube path returned zeros because no AIC side was scheduled. Forcing
