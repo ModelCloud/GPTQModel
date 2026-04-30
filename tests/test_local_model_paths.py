@@ -353,6 +353,42 @@ def test_gptqmodel_from_quantized_forwards_dtype_kwarg(monkeypatch):
     assert "torch_dtype" not in captured["kwargs"]
 
 
+@pytest.mark.parametrize(
+    "attn_implementation",
+    [None, "auto", "eager", "sdpa", "flash_attention_2"],
+)
+def test_model_loader_normalizes_auto_attn_implementation(attn_implementation):
+    expected = None if attn_implementation == "auto" else attn_implementation
+
+    assert loader._normalize_attn_implementation(attn_implementation) == expected
+
+
+@pytest.mark.parametrize(
+    "device",
+    ["npu", "npu:0", loader.DEVICE.NPU],
+)
+def test_model_loader_treats_npu_as_accelerated_attention_device(device):
+    assert loader._is_accelerated_attention_device(device) is True
+
+
+def test_model_loader_treats_npu_torch_device_as_accelerated_attention_device():
+    try:
+        device = torch.device("npu:0")
+    except (RuntimeError, ValueError):
+        pytest.skip("torch build does not recognize npu devices")
+
+    assert loader._is_accelerated_attention_device(device) is True
+
+
+def test_model_loader_flash_attention_available_uses_npu_ops(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(loader, "_npu_flash_attention_available", lambda: calls.append("npu") or True)
+
+    assert loader._flash_attention_2_available_for_device("npu:0") is True
+    assert calls == ["npu"]
+
+
 def test_model_loader_requires_lazy_turtle_for_offload_to_disk(monkeypatch):
     class FakeConfig:
         def __init__(self):

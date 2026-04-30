@@ -26,7 +26,7 @@ else:
 
 import defuser
 from packaging.version import InvalidVersion, Version
-from transformers import AutoConfig, PretrainedConfig
+from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 
 from ..adapter.adapter import Adapter
@@ -85,6 +85,12 @@ log = setup_logger()
 ATTN_IMPLEMENTATION = "attn_implementation"
 
 
+def _normalize_attn_implementation(attn_implementation: Optional[str]) -> Optional[str]:
+    if attn_implementation == "auto":
+        return None
+    return attn_implementation
+
+
 def _should_print_module_tree() -> bool:
     """Keep expensive module-tree dumps opt-in during model loading."""
 
@@ -119,15 +125,39 @@ def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
 
 
 def _is_accelerated_attention_device(device: object) -> bool:
-    """Return True when the selected device can run CUDA/ROCm flash attention."""
+    """Return True when the selected device can run fused attention."""
 
     if isinstance(device, torch.device):
-        return device.type in {"cuda", "hip"}
+        return device.type in {"cuda", "hip", "npu"}
     if isinstance(device, DEVICE):
-        return device in {DEVICE.CUDA, DEVICE.ROCM}
+        return device in {DEVICE.CUDA, DEVICE.ROCM, DEVICE.NPU}
     if isinstance(device, str):
-        return device in {"cuda", "rocm", "hip"}
+        return device in {"cuda", "rocm", "hip", "npu"} or device.startswith("npu:")
     return False
+
+
+def _npu_flash_attention_available() -> bool:
+    if not HAS_NPU:
+        return False
+    try:
+        npu_ops = torch.ops.npu
+        return hasattr(npu_ops, "npu_prompt_flash_attention") and hasattr(npu_ops, "npu_incre_flash_attention")
+    except (AttributeError, RuntimeError):
+        return False
+
+
+def _flash_attention_2_available_for_device(device: object) -> bool:
+    if isinstance(device, torch.device):
+        if device.type == "npu":
+            return _npu_flash_attention_available()
+    elif isinstance(device, DEVICE):
+        if device == DEVICE.NPU:
+            return _npu_flash_attention_available()
+    elif isinstance(device, str):
+        if device == "npu" or device.startswith("npu:"):
+            return _npu_flash_attention_available()
+
+    return is_flash_attn_2_available()
 
 
 def _resolve_native_gguf_profile(
@@ -443,6 +473,13 @@ def ModelLoader(cls):
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(model_init_kwargs)
         model_init_kwargs_without_internal = dict(model_init_kwargs)
         model_init_kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
+        atten_impl = _normalize_attn_implementation(
+            model_init_kwargs_without_internal.get(ATTN_IMPLEMENTATION, None)
+        )
+        if atten_impl is None:
+            model_init_kwargs_without_internal.pop(ATTN_IMPLEMENTATION, None)
+        else:
+            model_init_kwargs_without_internal[ATTN_IMPLEMENTATION] = atten_impl
 
         tokenizer_trust_remote_code = model_init_kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs_without_internal)
@@ -457,9 +494,7 @@ def ModelLoader(cls):
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         prepare_remote_model_init_compat(model_local_path, config)
 
-        atten_impl = model_init_kwargs.get("attn_implementation", None)
-
-        if atten_impl is not None and atten_impl != "auto":
+        if atten_impl is not None:
             log.info(f"Loader: overriding attn_implementation in config to `{atten_impl}`")
             config._attn_implementation = atten_impl
 
@@ -534,7 +569,7 @@ def ModelLoader(cls):
                 and atten_impl in {None, "auto"}
                 and _is_accelerated_attention_device(resolved_device)
                 and (config.model_type == "qwen3" or _supports_flash_attn_2(config))
-                and is_flash_attn_2_available()
+                and _flash_attention_2_available_for_device(resolved_device)
             ):
                 hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
                 log.info("Loader: Auto enabling flash_attention_2 for dense Bonsai PROFILE.%s.", effective_profile.name)
@@ -805,7 +840,9 @@ def ModelLoader(cls):
         revision = kwargs_without_internal.pop("revision", None)
         subfolder = kwargs_without_internal.pop("subfolder", "")
         commit_hash = kwargs_without_internal.pop("_commit_hash", None)
-        attn_implementation = kwargs_without_internal.pop("attn_implementation", None)
+        attn_implementation = _normalize_attn_implementation(
+            kwargs_without_internal.pop(ATTN_IMPLEMENTATION, None)
+        )
 
         cached_file_kwargs = {
             "cache_dir": cache_dir,
@@ -1056,10 +1093,10 @@ def ModelLoader(cls):
                 supports_flash_attn = None
 
             args = {}
-            if supports_flash_attn and device in [DEVICE.CUDA, DEVICE.ROCM]:
+            if supports_flash_attn and _is_accelerated_attention_device(device):
                 if attn_implementation is not None:
                     args[ATTN_IMPLEMENTATION] = attn_implementation
-                elif is_flash_attn_2_available():
+                elif _flash_attention_2_available_for_device(device):
                     args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
                     log.info("Loader: Auto enabling flash attention2")
             set_dtype_compat(args, dtype)

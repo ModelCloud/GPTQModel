@@ -18,6 +18,9 @@ weight caching by default and restricting Komodo inference to FP16.
 - Native NPU int4 plans are built eagerly during `post_init()` once a Komodo
   module is on its final NPU device. Set `GPTQMODEL_KOMODO_EAGER_PREPACK=0` to
   restore first-forward packing for debugging.
+- NPU flash attention is eligible for `attn_implementation=auto` when torch-npu
+  exposes both prompt and incremental flash-attention ops. Explicit
+  `attn_implementation` values still take precedence.
 - Native prepack is streamed across output columns to reduce temporary HBM
   workspace. `GPTQMODEL_KOMODO_PREPACK_TILE_N` controls the output-column tile
   size, defaults to `1024`, and `0` restores the previous full-width pack.
@@ -61,6 +64,55 @@ Future accelerator benchmarks should use PCI ordering. For full-machine sweeps,
 use `scripts/benchmark_komodo_npu_matrix.py`; it maps one physical NPU per
 process with `ASCEND_RT_VISIBLE_DEVICES=<physical_id>` and uses logical
 `--device 0` inside each worker.
+
+## Generation TPS Baseline
+
+The reusable small-model generation benchmark is:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID ASCEND_RT_VISIBLE_DEVICES=0 \
+GPTQMODEL_KOMODO_NATIVE_INT4=1 \
+GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS=1 \
+python scripts/benchmark_evalution_generation_tps.py \
+  --device npu:0 \
+  --batch-size 1 \
+  --prompt-tokens 128 \
+  --new-tokens 32 \
+  --warmup 1 \
+  --runs 3 \
+  --attn-implementations auto eager flash_attention_2 \
+  --json-output /tmp/evalution_tps_smol_baseline_komodo.json
+```
+
+The script measures prefill with the full prompt, then measures decode by
+feeding one generated token at a time through the KV cache. It reports load
+peak HBM separately from measured inference peak HBM. The direct loaders work
+without Evalution installed; pass `--komodo-loader evalution-gptqmodel` to load
+the Komodo case through Evalution when that package is available.
+
+Baseline models:
+
+| Label | Model path | Loader | Backend |
+|---|---|---|---|
+| `baseline_dense` | `/tmp/gptqmodel_hf/SmolLM2-135M-Instruct` | Transformers | dense |
+| `komodo_gptq` | `/tmp/gptqmodel_quantized/SmolLM2-135M-Instruct-gptq-npu` | GPTQModel | Komodo |
+
+Observed on `npu:0` with batch `1`, prompt `128`, new tokens `32`, warmup `1`,
+and `3` measured runs:
+
+| Label | Requested attn | Effective attn | Prefill tok/s | Decode tok/s | Prefill ms | Decode ms | Load peak GiB | Inference peak GiB |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| baseline_dense | auto | sdpa | 2820.42 | 25.75 | 45.55 | 1244.40 | 0.251 | 0.281 |
+| komodo_gptq | auto | flash_attention_2 | 1948.14 | 16.14 | 65.73 | 1982.45 | 0.122 | 0.188 |
+| baseline_dense | eager | eager | 2474.17 | 21.93 | 51.80 | 1459.15 | 0.255 | 0.270 |
+| komodo_gptq | eager | eager | 1886.63 | 16.29 | 67.95 | 1964.34 | 0.126 | 0.188 |
+| baseline_dense | flash_attention_2 | flash_attention_2 | 2441.57 | 21.07 | 52.52 | 1518.76 | 0.255 | 0.286 |
+| komodo_gptq | flash_attention_2 | flash_attention_2 | 1908.90 | 16.40 | 67.07 | 1952.23 | 0.126 | 0.188 |
+
+This tiny SmolLM2 baseline is currently faster than Komodo end-to-end, even
+though Komodo uses less HBM. That means the next real-model optimization target
+is the decode stack around attention/KV/lm-head and launch overhead, not only
+the quantized linear kernel microbenchmarks.
 
 Fallback and prefetch comparison commands:
 
