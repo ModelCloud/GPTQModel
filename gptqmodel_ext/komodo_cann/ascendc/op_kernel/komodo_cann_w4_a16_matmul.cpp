@@ -64,7 +64,95 @@ private:
     {
         const uint32_t row_offset = m * out_features;
         const uint32_t x_offset = m * in_features;
-        for (uint32_t packed_col = 0; packed_col < packed_stride; ++packed_col) {
+        uint32_t packed_col = 0;
+        for (; packed_col + 1 < packed_stride; packed_col += 2) {
+            const uint32_t n_base0 = packed_col << 3;
+            const uint32_t n_base1 = n_base0 + 8;
+            float acc00 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0)) : 0.0f;
+            float acc01 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 1)) : 0.0f;
+            float acc02 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 2)) : 0.0f;
+            float acc03 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 3)) : 0.0f;
+            float acc04 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 4)) : 0.0f;
+            float acc05 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 5)) : 0.0f;
+            float acc06 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 6)) : 0.0f;
+            float acc07 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base0 + 7)) : 0.0f;
+            float acc10 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1)) : 0.0f;
+            float acc11 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 1)) : 0.0f;
+            float acc12 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 2)) : 0.0f;
+            float acc13 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 3)) : 0.0f;
+            float acc14 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 4)) : 0.0f;
+            float acc15 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 5)) : 0.0f;
+            float acc16 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 6)) : 0.0f;
+            float acc17 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base1 + 7)) : 0.0f;
+
+            const uint32_t groups = group_size == 0 ? 1 : in_features / group_size;
+            for (uint32_t group = 0; group < groups; ++group) {
+                const uint32_t k_begin = group_size == 0 ? 0 : group * group_size;
+                const uint32_t k_end = group_size == 0 ? in_features : k_begin + group_size;
+                const uint32_t scale_base0 = group * out_features + n_base0;
+                const uint32_t scale_base1 = scale_base0 + 8;
+                const float scale00 = static_cast<float>(scales_gm_.GetValue(scale_base0));
+                const float scale01 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 1));
+                const float scale02 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 2));
+                const float scale03 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 3));
+                const float scale04 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 4));
+                const float scale05 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 5));
+                const float scale06 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 6));
+                const float scale07 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 7));
+                const float scale10 = static_cast<float>(scales_gm_.GetValue(scale_base1));
+                const float scale11 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 1));
+                const float scale12 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 2));
+                const float scale13 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 3));
+                const float scale14 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 4));
+                const float scale15 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 5));
+                const float scale16 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 6));
+                const float scale17 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 7));
+                const float offset00 = static_cast<float>(offsets_gm_.GetValue(scale_base0));
+                const float offset01 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 1));
+                const float offset02 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 2));
+                const float offset03 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 3));
+                const float offset04 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 4));
+                const float offset05 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 5));
+                const float offset06 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 6));
+                const float offset07 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 7));
+                const float offset10 = static_cast<float>(offsets_gm_.GetValue(scale_base1));
+                const float offset11 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 1));
+                const float offset12 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 2));
+                const float offset13 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 3));
+                const float offset14 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 4));
+                const float offset15 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 5));
+                const float offset16 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 6));
+                const float offset17 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 7));
+
+                for (uint32_t k = k_begin; k < k_end; ++k) {
+                    const float x_value = static_cast<float>(x_gm_.GetValue(x_offset + k));
+                    const uint32_t word0 =
+                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                    const uint32_t word1 =
+                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col + 1));
+                    acc00 += x_value * DequantLane(word0, 0, scale00, offset00);
+                    acc01 += x_value * DequantLane(word0, 1, scale01, offset01);
+                    acc02 += x_value * DequantLane(word0, 2, scale02, offset02);
+                    acc03 += x_value * DequantLane(word0, 3, scale03, offset03);
+                    acc04 += x_value * DequantLane(word0, 4, scale04, offset04);
+                    acc05 += x_value * DequantLane(word0, 5, scale05, offset05);
+                    acc06 += x_value * DequantLane(word0, 6, scale06, offset06);
+                    acc07 += x_value * DequantLane(word0, 7, scale07, offset07);
+                    acc10 += x_value * DequantLane(word1, 0, scale10, offset10);
+                    acc11 += x_value * DequantLane(word1, 1, scale11, offset11);
+                    acc12 += x_value * DequantLane(word1, 2, scale12, offset12);
+                    acc13 += x_value * DequantLane(word1, 3, scale13, offset13);
+                    acc14 += x_value * DequantLane(word1, 4, scale14, offset14);
+                    acc15 += x_value * DequantLane(word1, 5, scale15, offset15);
+                    acc16 += x_value * DequantLane(word1, 6, scale16, offset16);
+                    acc17 += x_value * DequantLane(word1, 7, scale17, offset17);
+                }
+            }
+
+            StoreRow(row_offset + n_base0, acc00, acc01, acc02, acc03, acc04, acc05, acc06, acc07);
+            StoreRow(row_offset + n_base1, acc10, acc11, acc12, acc13, acc14, acc15, acc16, acc17);
+        }
+        for (; packed_col < packed_stride; ++packed_col) {
             const uint32_t n_base = packed_col << 3;
             float acc0 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base)) : 0.0f;
             float acc1 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base + 1)) : 0.0f;

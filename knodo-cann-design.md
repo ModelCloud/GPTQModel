@@ -275,6 +275,13 @@ Ascend C custom-op bring-up:
   from `3.66 ms` to `3.42 ms`, with max observed drift `0.00048828125`. The
   follow-up 8-NPU smoke covered row counts 1, 2, 3, 4, 5, 7, 8, and 9 plus
   group sizes 0, 32, 64, 96, and 128 with zero deterministic error.
+- A single-row two-packed-word micro-tile then reused each FP16 activation load
+  across sixteen adjacent output channels. Decode timings on NPU0 improved from
+  `1.03 ms` to `0.72 ms` for `M=1,K=256,N=256,group_size=32`, and from
+  `16.73 ms` to `11.42 ms` for `M=1,K=1024,N=1024,group_size=32`. The existing
+  row-oct path stayed essentially unchanged at `3.37 ms` for
+  `M=8,K=256,N=256,group_size=32`, and the 8-NPU smoke passed on all devices
+  with zero error for the deterministic packed-one validation.
 - A direct CANN `Matmul<fp16, int4, fp16>` probe was rejected for now. In the
   default msopgen package the kernel still compiled as `VectorCore`, so the
   sentinel Cube path returned zeros because no AIC side was scheduled. Forcing

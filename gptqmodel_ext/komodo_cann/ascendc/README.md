@@ -34,6 +34,11 @@ INT4 sign extension then reduced the same raw-op timing to `4.60 ms`, and a
 four-row micro-tile reduced it further to `3.66 ms`. The current eight-row
 micro-tile reaches `3.42 ms` for the same shape.
 
+For single-row decode, the scalar baseline also has a two-packed-word micro-tile
+that reuses each FP16 activation load across sixteen adjacent output channels.
+On NPU0 this reduced `M=1,K=256,N=256,group_size=32` from `1.03 ms` to
+`0.72 ms`, and `M=1,K=1024,N=1024,group_size=32` from `16.73 ms` to `11.42 ms`.
+
 Build from the repo root:
 
 ```bash
