@@ -59,6 +59,12 @@ public:
         }
         const uint32_t core_idx = physical_core_idx % block_dim;
 
+#ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
+        if (tiling_->kernel_mode == kKernelModeStagedDequant) {
+            StageWeightTiles(core_idx, in_features, out_features, group_size, zero_offsets);
+        }
+#endif
+
         const uint32_t packed_stride = out_features >> 3;
         const uint32_t packed_per_core = (packed_stride + block_dim - 1) / block_dim;
         const uint32_t packed_begin = core_idx * packed_per_core;
@@ -83,6 +89,86 @@ public:
     }
 
 private:
+#ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
+    __aicore__ inline void StageWeightTiles(
+        uint32_t core_idx,
+        uint32_t in_features,
+        uint32_t out_features,
+        uint32_t group_size,
+        uint32_t zero_offsets)
+    {
+        const uint32_t staging_blocks = tiling_->staging_blocks;
+        const uint32_t staging_slots = tiling_->staging_slots;
+        const uint32_t base_k = tiling_->base_k;
+        const uint32_t base_n = tiling_->base_n;
+        if (tiling_->staging_workspace_bytes == 0 || tiling_->staging_tile_bytes == 0 || staging_blocks == 0 ||
+            staging_slots == 0 || base_k == 0 || base_n == 0 || core_idx >= staging_blocks) {
+            return;
+        }
+
+        const uint32_t k_tiles = CeilDiv(in_features, base_k);
+        const uint32_t n_tiles = CeilDiv(out_features, base_n);
+        const uint32_t total_tasks = k_tiles * n_tiles;
+        const uint32_t tile_elements = tiling_->staging_tile_bytes / sizeof(half);
+        const uint32_t packed_stride = out_features >> 3;
+        for (uint32_t task = core_idx; task < total_tasks; task += staging_blocks) {
+            const uint32_t slot = (task / staging_blocks) % staging_slots;
+            const uint32_t k_tile = task / n_tiles;
+            const uint32_t n_tile = task - k_tile * n_tiles;
+            const uint32_t k_begin = k_tile * base_k;
+            const uint32_t k_end_candidate = k_begin + base_k;
+            const uint32_t k_end = k_end_candidate < in_features ? k_end_candidate : in_features;
+            const uint32_t n_begin = n_tile * base_n;
+            const uint32_t n_end_candidate = n_begin + base_n;
+            const uint32_t n_end = n_end_candidate < out_features ? n_end_candidate : out_features;
+            const uint32_t packed_begin = n_begin >> 3;
+            const uint32_t packed_end = (n_end + 7) >> 3;
+            const uint32_t stage_base = (core_idx * staging_slots + slot) * tile_elements;
+
+            for (uint32_t k = k_begin; k < k_end; ++k) {
+                const uint32_t tile_k = k - k_begin;
+                const uint32_t group = group_size == 0 ? 0 : k / group_size;
+                for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
+                    const uint32_t word =
+                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                    const uint32_t n_base = packed_col << 3;
+                    const uint32_t scale_base = group * out_features + n_base;
+                    const uint32_t tile_n = n_base - n_begin;
+                    StagePackedWord(stage_base + tile_k * base_n + tile_n, word, scale_base, zero_offsets);
+                }
+            }
+        }
+    }
+
+    __aicore__ inline void StagePackedWord(uint32_t stage_offset, uint32_t word, uint32_t scale_base, uint32_t zero_offsets)
+    {
+        const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
+        const float scale1 = static_cast<float>(scales_gm_.GetValue(scale_base + 1));
+        const float scale2 = static_cast<float>(scales_gm_.GetValue(scale_base + 2));
+        const float scale3 = static_cast<float>(scales_gm_.GetValue(scale_base + 3));
+        const float scale4 = static_cast<float>(scales_gm_.GetValue(scale_base + 4));
+        const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
+        const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
+        const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+        const float offset0 = OffsetValue(scale_base, zero_offsets);
+        const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
+        const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
+        const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
+        const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
+        const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
+        const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
+        const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
+        staged_weight_gm_.SetValue(stage_offset, static_cast<half>(DequantLane(word, 0, scale0, offset0)));
+        staged_weight_gm_.SetValue(stage_offset + 1, static_cast<half>(DequantLane(word, 1, scale1, offset1)));
+        staged_weight_gm_.SetValue(stage_offset + 2, static_cast<half>(DequantLane(word, 2, scale2, offset2)));
+        staged_weight_gm_.SetValue(stage_offset + 3, static_cast<half>(DequantLane(word, 3, scale3, offset3)));
+        staged_weight_gm_.SetValue(stage_offset + 4, static_cast<half>(DequantLane(word, 4, scale4, offset4)));
+        staged_weight_gm_.SetValue(stage_offset + 5, static_cast<half>(DequantLane(word, 5, scale5, offset5)));
+        staged_weight_gm_.SetValue(stage_offset + 6, static_cast<half>(DequantLane(word, 6, scale6, offset6)));
+        staged_weight_gm_.SetValue(stage_offset + 7, static_cast<half>(DequantLane(word, 7, scale7, offset7)));
+    }
+#endif
+
     __aicore__ inline void ProcessSingleRow(
         uint32_t m,
         uint32_t in_features,
@@ -1028,6 +1114,13 @@ private:
         const int32_t signed_w = (raw ^ 0x8) - 0x8;
         return static_cast<float>(signed_w) * scale;
     }
+
+#ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
+    __aicore__ inline uint32_t CeilDiv(uint32_t value, uint32_t divisor)
+    {
+        return divisor == 0 ? 0 : (value + divisor - 1) / divisor;
+    }
+#endif
 
     GlobalTensor<half> x_gm_;
     GlobalTensor<int32_t> packed_weight_gm_;

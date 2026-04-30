@@ -403,6 +403,16 @@ Ascend C custom-op bring-up:
   covered rows `1/2/3/4/6/8/16`, group sizes `0/32/64/128`, bias/no-bias, and
   `K` values `256/384/512`; max observed drift against native CANN was
   `0.0078125`.
+- The experimental staged path now has a real AIV producer loop. When compiled
+  with `--experimental-staged-dequant` and triggered by negative `base_n`, AIV
+  owners unpack all assigned `(baseK, baseN)` GPTQ INT4 weight tiles into their
+  bounded ping-pong FP16 staging slots, reusing the same scale/offset formula as
+  the scalar path. The scalar accumulator still produces the user-visible output
+  while the Cube consumer is being wired, so this is a producer validation step,
+  not the final fused kernel. Both default and experimental packages compiled,
+  and an 8-NPU negative-`base_n` smoke with producer writes enabled passed on
+  rows `1/2/3/4/6/8/16`, group sizes `0/32/64/128`, and max native-CANN drift
+  `0.0078125`.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

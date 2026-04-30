@@ -49,6 +49,12 @@ This is a bounded tile-staging hook for the eventual AIV producer / AIC Cube
 consumer state machine. It is not a default cache and it never requests a full
 dense dequantized-weight buffer.
 
+In an experimental build, the staged path now runs the AIV producer loop: each
+logical staging owner unpacks its assigned GPTQ INT4 `(baseK, baseN)` tiles into
+its ping-pong FP16 workspace slots. The scalar path still writes the visible
+output while the AIC consumer is under construction, so this is a bring-up probe
+rather than the final fused kernel.
+
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
 with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset
