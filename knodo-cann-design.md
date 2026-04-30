@@ -361,6 +361,17 @@ Ascend C custom-op bring-up:
   `0.207 ms` for `M=3,K=256,N=256` and from `0.411 ms` to `0.381 ms` for
   `M=6,K=256,N=256`; the M1 guard stayed flat. Max observed drift was
   `0.00390625`, and symmetric zero-offset M2 stayed exact.
+- The row-oct path now hoists nonzero GPTQ offset contributions out of the K
+  loop without touching the existing zero-offset fast path or the smaller-row
+  paths. The AIV fused op still avoids dense dequantized-weight materialization.
+  An 8-NPU one-shard-per-device A/B sweep over `gptq_group_sizes` improved
+  fused group-size cases from `6.8177 ms` to `6.1858 ms` for group 32, from
+  `6.7423 ms` to `6.0609 ms` for group 64, from `6.7174 ms` to `5.9748 ms`
+  for group 128, and from `6.6647 ms` to `5.9162 ms` for full-group. Act-order
+  cases improved from `6.8434 ms` to `6.1966 ms` for group 32 and from
+  `6.7026 ms` to `5.9862 ms` for group 128. The fused geomean speedup was
+  `1.115x`; max abs drift stayed unchanged at `0.015625`. Group-16 cases
+  correctly remained on the native grouped path.
 - Rejected follow-up variants:
   - Extending the offset hoist to the row-quad path improved direct `M=4`
     timings by about `5-6%`, but consistently slowed the existing row-pair path

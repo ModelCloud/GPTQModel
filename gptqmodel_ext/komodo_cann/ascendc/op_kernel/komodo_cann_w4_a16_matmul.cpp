@@ -452,6 +452,16 @@ private:
         prefix##6 += (x_value) * deq6; \
         prefix##7 += (x_value) * deq7
 
+#define KOMODO_APPLY_OFFSET_ROW(prefix, x_sum) \
+        prefix##0 += (x_sum) * offset0 * scale0; \
+        prefix##1 += (x_sum) * offset1 * scale1; \
+        prefix##2 += (x_sum) * offset2 * scale2; \
+        prefix##3 += (x_sum) * offset3 * scale3; \
+        prefix##4 += (x_sum) * offset4 * scale4; \
+        prefix##5 += (x_sum) * offset5 * scale5; \
+        prefix##6 += (x_sum) * offset6 * scale6; \
+        prefix##7 += (x_sum) * offset7 * scale7
+
         for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
             const uint32_t n_base = packed_col << 3;
             const float bias0 = has_bias != 0 ? static_cast<float>(bias_gm_.GetValue(n_base)) : 0.0f;
@@ -484,42 +494,97 @@ private:
                 const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
                 const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
                 const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
-                const float offset0 = OffsetValue(scale_base, zero_offsets);
-                const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
-                const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
-                const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
-                const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
-                const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
-                const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
-                const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
 
-                for (uint32_t k = k_begin; k < k_end; ++k) {
-                    const float x_value0 = static_cast<float>(x_gm_.GetValue(x_offset0 + k));
-                    const float x_value1 = static_cast<float>(x_gm_.GetValue(x_offset1 + k));
-                    const float x_value2 = static_cast<float>(x_gm_.GetValue(x_offset2 + k));
-                    const float x_value3 = static_cast<float>(x_gm_.GetValue(x_offset3 + k));
-                    const float x_value4 = static_cast<float>(x_gm_.GetValue(x_offset4 + k));
-                    const float x_value5 = static_cast<float>(x_gm_.GetValue(x_offset5 + k));
-                    const float x_value6 = static_cast<float>(x_gm_.GetValue(x_offset6 + k));
-                    const float x_value7 = static_cast<float>(x_gm_.GetValue(x_offset7 + k));
-                    const uint32_t word =
-                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
-                    const float deq0 = DequantLane(word, 0, scale0, offset0);
-                    const float deq1 = DequantLane(word, 1, scale1, offset1);
-                    const float deq2 = DequantLane(word, 2, scale2, offset2);
-                    const float deq3 = DequantLane(word, 3, scale3, offset3);
-                    const float deq4 = DequantLane(word, 4, scale4, offset4);
-                    const float deq5 = DequantLane(word, 5, scale5, offset5);
-                    const float deq6 = DequantLane(word, 6, scale6, offset6);
-                    const float deq7 = DequantLane(word, 7, scale7, offset7);
-                    KOMODO_ACCUM_ROW(acc0, x_value0);
-                    KOMODO_ACCUM_ROW(acc1, x_value1);
-                    KOMODO_ACCUM_ROW(acc2, x_value2);
-                    KOMODO_ACCUM_ROW(acc3, x_value3);
-                    KOMODO_ACCUM_ROW(acc4, x_value4);
-                    KOMODO_ACCUM_ROW(acc5, x_value5);
-                    KOMODO_ACCUM_ROW(acc6, x_value6);
-                    KOMODO_ACCUM_ROW(acc7, x_value7);
+                if (zero_offsets != 0) {
+                    for (uint32_t k = k_begin; k < k_end; ++k) {
+                        const float x_value0 = static_cast<float>(x_gm_.GetValue(x_offset0 + k));
+                        const float x_value1 = static_cast<float>(x_gm_.GetValue(x_offset1 + k));
+                        const float x_value2 = static_cast<float>(x_gm_.GetValue(x_offset2 + k));
+                        const float x_value3 = static_cast<float>(x_gm_.GetValue(x_offset3 + k));
+                        const float x_value4 = static_cast<float>(x_gm_.GetValue(x_offset4 + k));
+                        const float x_value5 = static_cast<float>(x_gm_.GetValue(x_offset5 + k));
+                        const float x_value6 = static_cast<float>(x_gm_.GetValue(x_offset6 + k));
+                        const float x_value7 = static_cast<float>(x_gm_.GetValue(x_offset7 + k));
+                        const uint32_t word =
+                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                        const float deq0 = DequantLaneNoOffset(word, 0, scale0);
+                        const float deq1 = DequantLaneNoOffset(word, 1, scale1);
+                        const float deq2 = DequantLaneNoOffset(word, 2, scale2);
+                        const float deq3 = DequantLaneNoOffset(word, 3, scale3);
+                        const float deq4 = DequantLaneNoOffset(word, 4, scale4);
+                        const float deq5 = DequantLaneNoOffset(word, 5, scale5);
+                        const float deq6 = DequantLaneNoOffset(word, 6, scale6);
+                        const float deq7 = DequantLaneNoOffset(word, 7, scale7);
+                        KOMODO_ACCUM_ROW(acc0, x_value0);
+                        KOMODO_ACCUM_ROW(acc1, x_value1);
+                        KOMODO_ACCUM_ROW(acc2, x_value2);
+                        KOMODO_ACCUM_ROW(acc3, x_value3);
+                        KOMODO_ACCUM_ROW(acc4, x_value4);
+                        KOMODO_ACCUM_ROW(acc5, x_value5);
+                        KOMODO_ACCUM_ROW(acc6, x_value6);
+                        KOMODO_ACCUM_ROW(acc7, x_value7);
+                    }
+                } else {
+                    const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));
+                    const float offset1 = static_cast<float>(offsets_gm_.GetValue(scale_base + 1));
+                    const float offset2 = static_cast<float>(offsets_gm_.GetValue(scale_base + 2));
+                    const float offset3 = static_cast<float>(offsets_gm_.GetValue(scale_base + 3));
+                    const float offset4 = static_cast<float>(offsets_gm_.GetValue(scale_base + 4));
+                    const float offset5 = static_cast<float>(offsets_gm_.GetValue(scale_base + 5));
+                    const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
+                    const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
+                    float x_sum0 = 0.0f;
+                    float x_sum1 = 0.0f;
+                    float x_sum2 = 0.0f;
+                    float x_sum3 = 0.0f;
+                    float x_sum4 = 0.0f;
+                    float x_sum5 = 0.0f;
+                    float x_sum6 = 0.0f;
+                    float x_sum7 = 0.0f;
+                    for (uint32_t k = k_begin; k < k_end; ++k) {
+                        const float x_value0 = static_cast<float>(x_gm_.GetValue(x_offset0 + k));
+                        const float x_value1 = static_cast<float>(x_gm_.GetValue(x_offset1 + k));
+                        const float x_value2 = static_cast<float>(x_gm_.GetValue(x_offset2 + k));
+                        const float x_value3 = static_cast<float>(x_gm_.GetValue(x_offset3 + k));
+                        const float x_value4 = static_cast<float>(x_gm_.GetValue(x_offset4 + k));
+                        const float x_value5 = static_cast<float>(x_gm_.GetValue(x_offset5 + k));
+                        const float x_value6 = static_cast<float>(x_gm_.GetValue(x_offset6 + k));
+                        const float x_value7 = static_cast<float>(x_gm_.GetValue(x_offset7 + k));
+                        x_sum0 += x_value0;
+                        x_sum1 += x_value1;
+                        x_sum2 += x_value2;
+                        x_sum3 += x_value3;
+                        x_sum4 += x_value4;
+                        x_sum5 += x_value5;
+                        x_sum6 += x_value6;
+                        x_sum7 += x_value7;
+                        const uint32_t word =
+                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                        const float deq0 = DequantLaneNoOffset(word, 0, scale0);
+                        const float deq1 = DequantLaneNoOffset(word, 1, scale1);
+                        const float deq2 = DequantLaneNoOffset(word, 2, scale2);
+                        const float deq3 = DequantLaneNoOffset(word, 3, scale3);
+                        const float deq4 = DequantLaneNoOffset(word, 4, scale4);
+                        const float deq5 = DequantLaneNoOffset(word, 5, scale5);
+                        const float deq6 = DequantLaneNoOffset(word, 6, scale6);
+                        const float deq7 = DequantLaneNoOffset(word, 7, scale7);
+                        KOMODO_ACCUM_ROW(acc0, x_value0);
+                        KOMODO_ACCUM_ROW(acc1, x_value1);
+                        KOMODO_ACCUM_ROW(acc2, x_value2);
+                        KOMODO_ACCUM_ROW(acc3, x_value3);
+                        KOMODO_ACCUM_ROW(acc4, x_value4);
+                        KOMODO_ACCUM_ROW(acc5, x_value5);
+                        KOMODO_ACCUM_ROW(acc6, x_value6);
+                        KOMODO_ACCUM_ROW(acc7, x_value7);
+                    }
+                    KOMODO_APPLY_OFFSET_ROW(acc0, x_sum0);
+                    KOMODO_APPLY_OFFSET_ROW(acc1, x_sum1);
+                    KOMODO_APPLY_OFFSET_ROW(acc2, x_sum2);
+                    KOMODO_APPLY_OFFSET_ROW(acc3, x_sum3);
+                    KOMODO_APPLY_OFFSET_ROW(acc4, x_sum4);
+                    KOMODO_APPLY_OFFSET_ROW(acc5, x_sum5);
+                    KOMODO_APPLY_OFFSET_ROW(acc6, x_sum6);
+                    KOMODO_APPLY_OFFSET_ROW(acc7, x_sum7);
                 }
             }
 
@@ -534,6 +599,7 @@ private:
         }
 
 #undef KOMODO_ACCUM_ROW
+#undef KOMODO_APPLY_OFFSET_ROW
 #undef KOMODO_INIT_ACC
     }
 

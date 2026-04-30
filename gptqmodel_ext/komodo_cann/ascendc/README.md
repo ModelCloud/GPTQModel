@@ -138,6 +138,13 @@ also improved: `M=3,K=256,N=256` from `0.242 ms` to `0.207 ms` and
 `M=6,K=256,N=256` from `0.411 ms` to `0.381 ms`. Max observed drift in this
 sweep was `0.00390625`; symmetric zero-offset M2 stayed exact and M1 stayed
 flat.
+The eight-row path now applies the same offset-hoist idea only for nonzero GPTQ
+offsets, leaving the existing zero-offset fast path and smaller-row paths
+untouched. In an 8-NPU one-shard-per-device `gptq_group_sizes` fused-op A/B
+sweep, group-size 32/64/128/full improved from `6.8177/6.7423/6.7174/6.6647 ms`
+to `6.1858/6.0609/5.9748/5.9162 ms`; act-order group-size 32/128 improved from
+`6.8434/6.7026 ms` to `6.1966/5.9862 ms`. Max abs drift stayed unchanged at
+`0.015625`.
 
 Build from the repo root:
 
