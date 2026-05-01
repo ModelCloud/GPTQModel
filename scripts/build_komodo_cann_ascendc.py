@@ -143,10 +143,22 @@ def main() -> int:
         action="store_true",
         help=(
             "Compile the guarded Komodo-CANN kernel as a MIX_AIC_1_2 AIC/AIV launch. "
-            "This implies --experimental-cube-consumer."
+            "This implies --experimental-cube-consumer unless --experimental-mixed-aiv-baseline is used."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-mixed-aiv-baseline",
+        action="store_true",
+        help=(
+            "Compile a MIX_AIC_1_2 launch that keeps only the AIV scalar visible-output path. "
+            "This is an isolation probe and does not register the CANN Matmul/KFC consumer."
         ),
     )
     args = parser.parse_args()
+    if args.experimental_mixed_aiv_baseline:
+        if args.experimental_cube_consumer:
+            parser.error("--experimental-mixed-aiv-baseline cannot be combined with --experimental-cube-consumer")
+        args.experimental_mixed_launch = True
 
     output = args.output.resolve()
     if args.clean and output.exists():
@@ -174,10 +186,12 @@ def main() -> int:
     _force_compute_unit(output, args.compute_unit)
     if args.experimental_staged_dequant:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT")
-    if args.experimental_cube_consumer or args.experimental_mixed_launch:
+    if args.experimental_cube_consumer or (args.experimental_mixed_launch and not args.experimental_mixed_aiv_baseline):
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER")
     if args.experimental_mixed_launch:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH")
+    if args.experimental_mixed_aiv_baseline:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_MIXED_AIV_BASELINE")
 
     if args.no_build:
         print(f"Generated project with Komodo-CANN overlay at {output}")

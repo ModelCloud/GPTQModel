@@ -455,21 +455,27 @@ Ascend C custom-op bring-up:
   `12582912`, and total custom workspace `13107200`; this was corrected because
   CANN already reserves system workspace ahead of the user workspace on 910B.
 - The next mixed-launch gate is now explicit and remains opt-in:
-  `--experimental-mixed-launch` implies the Cube-consumer compile define and
-  switches the kernel metadata from default `KERNEL_TYPE_AIV_ONLY` to
+  `--experimental-mixed-launch` implies the Cube-consumer compile define unless
+  the new `--experimental-mixed-aiv-baseline` probe is used. Both modes switch
+  kernel metadata from default `KERNEL_TYPE_AIV_ONLY` to
   `KERNEL_TYPE_MIX_AIC_1_2`. The build helper must coalesce all experimental
   defines into one `add_ops_compile_options` line; separate lines made CANN's
   dynamic compile script keep only the last define. Validation built a default
   control package with binary metadata `coreType=VectorCore`, `core_type=AIV`,
-  and a mixed package with `coreType=MIX`, `taskRation=tilingKey`,
+  and mixed packages with `coreType=MIX`, `taskRation=tilingKey`,
   `intercoreSync=1`, and binary config `coreType=0`.
 - The mixed kernel currently keeps the visible output path on the AIV scalar
-  worker while the AIC branch only registers the local `Matmul` Cube consumer
-  object and returns. This is a launch/topology milestone, not the final fused
-  algorithm. The next runtime milestone is a safe AIC/AIV handshake around the
-  bounded staged tile ring before replacing scalar output with Cube output.
-  The current mixed package still times out after torch-ops JIT extension load,
-  so runtime use stays on the non-mixed staged+Cube baseline.
+  worker. The `--experimental-mixed-aiv-baseline` package skips KFC/Matmul
+  registration and returns immediately on AIC; an 8-NPU smoke on the q-proj
+  shape completed on every device with fused path `fused_w4a16_matmul`, strategy
+  `fused_w4a16_staged_dequant_aic_matmul`, offset `0`, cube workspace `0`, and
+  custom workspace `524288`. This proves MIX launch plus AIV scalar staging is
+  viable.
+- The full mixed Cube-consumer package now calls `REGIST_MATMUL_OBJ` from both
+  AIC and AIV sides because CANN's macro creates both the KFC server and client.
+  It still times out after torch-ops JIT extension load, so the remaining
+  blocker is Matmul/KFC server-client lifecycle rather than basic MIX launch.
+  Runtime use stays on the non-mixed staged+Cube baseline until this is resolved.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

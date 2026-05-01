@@ -1,14 +1,15 @@
 #include "kernel_operator.h"
-#ifdef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
+#if defined(KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER) || defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH)
 #include "lib/matmul_intf.h"
 #endif
 
 using namespace AscendC;
-#ifdef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
+#if defined(KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER) || defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH)
 using namespace matmul;
 #endif
 
-#if defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH) && !defined(KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER)
+#if defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH) && !defined(KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER) && \
+    !defined(KOMODO_CANN_EXPERIMENTAL_MIXED_AIV_BASELINE)
 #error "KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH requires KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER"
 #endif
 
@@ -1279,6 +1280,19 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
     }
 #endif
 #ifdef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
+#ifdef KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH
+    if (workspace == nullptr) {
+        return;
+    }
+    AscendC::SetSysWorkspaceForce(workspace);
+    TPipe cube_pipe;
+    KomodoCannW4A16CubeConsumerProbe cube_probe;
+    TCubeTiling cube_tiling = MakeCubeConsumerTiling(&tiling_data);
+    REGIST_MATMUL_OBJ(&cube_pipe, GetSysWorkSpacePtr(), cube_probe.mm, &cube_tiling);
+    if ASCEND_IS_AIC {
+        return;
+    }
+#else
     if ASCEND_IS_AIC {
         if (workspace == nullptr) {
             return;
@@ -1290,6 +1304,7 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
         REGIST_MATMUL_OBJ(&cube_pipe, GetSysWorkSpacePtr(), cube_probe.mm, &cube_tiling);
         return;
     }
+#endif
 #else
     if ASCEND_IS_AIC {
         return;
