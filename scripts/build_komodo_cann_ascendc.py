@@ -237,7 +237,21 @@ def main() -> int:
             "and --experimental-mixed-launch."
         ),
     )
+    parser.add_argument(
+        "--experimental-tscm-direct-dequant",
+        action="store_true",
+        help=(
+            "Compile the guarded TSCM runtime probe that writes the vector-dequantized B tile into UB "
+            "and copies UB directly to TSCM/NZ, bypassing the staged FP16 GM tile. This implies "
+            "--experimental-staged-dequant, --experimental-cann9-vector-dequant, and "
+            "--experimental-tscm-runtime-handoff."
+        ),
+    )
     args = parser.parse_args()
+    if args.experimental_tscm_direct_dequant:
+        args.experimental_staged_dequant = True
+        args.experimental_cann9_vector_dequant = True
+        args.experimental_tscm_runtime_handoff = True
     if args.experimental_tscm_runtime_handoff:
         args.experimental_tscm_consumer = True
         args.experimental_mixed_launch = True
@@ -299,6 +313,8 @@ def main() -> int:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER")
     if args.experimental_tscm_runtime_handoff:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
+    if args.experimental_tscm_direct_dequant:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
 
     if args.no_build:
         print(f"Generated project with Komodo-CANN overlay at {output}")

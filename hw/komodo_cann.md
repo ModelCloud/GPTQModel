@@ -169,6 +169,12 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   effectively flat (`3.646628 ms` TSCM runtime versus `3.651168 ms` non-runtime
   staged probe), which confirms the handoff is structurally live but not yet a
   speed path while it still stages through GM.
+- Added `--experimental-tscm-direct-dequant`, which fills the B tile in UB with
+  CANN 9 `asc_int42half_sync` vector INT4 decode plus Komodo scale/offset, then
+  copies UB directly to TSCM/NZ with `DataCopy(..., Nd2NzParams)`. This removes
+  the staged FP16 GM tile from the live handoff. The same NPU0 shape matched the
+  CPU reference with `max_abs=0.0`; timing remained flat at `3.655767 ms`, so the
+  speed-relevant follow-up is multi-K direct handoff and overlap.
 - Fixed the scalar fused path's INT4 signed-nibble decode from xor-based
   sign extension to an explicit `raw < 8 ? raw : raw - 16` decode. The previous
   expression miscompiled lane 0 on the local CANN 9 package and produced

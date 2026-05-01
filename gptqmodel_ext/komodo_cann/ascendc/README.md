@@ -131,6 +131,24 @@ it into `/tmp/komodo_cann_tscm_runtime_install`, and ran
 against the non-runtime staged probe (`3.646628 ms` versus `3.651168 ms`), so
 this is a correctness/scheduler proof, not a speed win yet.
 
+The direct-dequant variant removes that staged FP16 GM tile from the same narrow
+handoff:
+
+```bash
+python scripts/build_komodo_cann_ascendc.py \
+  --output /tmp/komodo_cann_w4a16_tscm_direct \
+  --experimental-tscm-direct-dequant
+```
+
+This implies staged-dequant metadata, CANN 9 vector dequant, mixed launch, and
+the TSCM runtime handoff. It fills a bounded UB B tile with `asc_int42half_sync`
+plus Komodo scale/offset, then uses `DataCopy(LocalTensor TSCM, LocalTensor UB,
+Nd2NzParams)` to hand the NZ tile to Cube without writing the FP16 tile through
+GM/L2. Local validation on the same `M=8,K=64,N=8192,group_size=32` shape
+matched the CPU reference with finite output and `max_abs=0.0`; timing was still
+flat at `3.655767 ms`, so the next speed-relevant step is multi-K direct
+handoff and overlap rather than more single-tile tuning.
+
 The next guarded bring-up layer is the Cube consumer scaffold:
 
 ```bash

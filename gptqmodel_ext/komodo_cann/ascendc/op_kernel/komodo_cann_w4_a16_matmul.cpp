@@ -26,6 +26,12 @@ using namespace matmul;
 #error "KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF requires staged dequant, TSCM consumer, and mixed launch"
 #endif
 
+#if defined(KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT) && \
+    (!defined(KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF) || \
+     !defined(KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT))
+#error "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT requires CANN9 vector dequant and TSCM runtime handoff"
+#endif
+
 namespace {
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
 constexpr uint32_t kKernelModeStagedDequant = 1;
@@ -67,6 +73,9 @@ public:
             return false;
         }
         tscm_ready_ = pipe.InitBuffer(b_tscm_, 1, base_k * base_n * sizeof(half));
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
+        direct_dequant_ready_ = pipe.InitBuffer(b_ub_, base_k * base_n * sizeof(half));
+#endif
         return tscm_ready_;
     }
 
@@ -92,6 +101,40 @@ public:
         return b_tscm_local_;
     }
 
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
+    __aicore__ inline LocalTensor<half> GetDirectDequantTile(const KomodoCannW4A16MatmulTilingData* tiling)
+    {
+        return b_ub_.Get<half>(tiling->base_k * tiling->base_n);
+    }
+
+    __aicore__ inline LocalTensor<half> LoadDirectBTileToTscm(
+        const LocalTensor<half>& b_tile,
+        const KomodoCannW4A16MatmulTilingData* tiling)
+    {
+        b_tscm_local_ = b_tscm_.AllocTensor<half>();
+        Nd2NzParams trans_param = {
+            1,
+            static_cast<uint16_t>(tiling->base_k),
+            static_cast<uint16_t>(tiling->base_n),
+            0,
+            static_cast<uint16_t>(tiling->base_n),
+            static_cast<uint16_t>(CeilDivU32(tiling->base_k, 16) * 16),
+            1,
+            0,
+        };
+        PipeBarrier<PIPE_ALL>();
+        DataCopy(b_tscm_local_, b_tile, trans_param);
+        b_tscm_.EnQue(b_tscm_local_);
+        b_tscm_.DeQue();
+        return b_tscm_local_;
+    }
+
+    __aicore__ inline bool DirectDequantReady() const
+    {
+        return direct_dequant_ready_;
+    }
+#endif
+
     __aicore__ inline void SetTensorBTscmProbe(const LocalTensor<half>& b_tile)
     {
         mm.SetTensorB(b_tile);
@@ -111,6 +154,10 @@ private:
     TSCM<TPosition::GM> b_tscm_;
     LocalTensor<half> b_tscm_local_;
     bool tscm_ready_ = false;
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
+    TBuf<TPosition::VECCALC> b_ub_;
+    bool direct_dequant_ready_ = false;
+#endif
 #endif
 };
 
@@ -278,6 +325,24 @@ public:
             const uint32_t packed_end = n_end >> 3;
             const uint32_t stage_base = (core_idx * staging_slots + slot) * tile_elements;
 
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
+            if (!cube_probe.DirectDequantReady()) {
+                return false;
+            }
+            LocalTensor<half> direct_b_tile = cube_probe.GetDirectDequantTile(tiling_);
+            for (uint32_t k = 0; k < in_features; ++k) {
+                const uint32_t group = group_size == 0 ? 0 : k / group_size;
+                for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
+                    const uint32_t word =
+                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                    const uint32_t n_base = packed_col << 3;
+                    const uint32_t scale_base = group * out_features + n_base;
+                    const uint32_t tile_n = n_base - n_begin;
+                    FillDirectBTileWord(direct_b_tile, k * base_n + tile_n, word, scale_base, zero_offsets);
+                }
+            }
+            LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_);
+#else
             for (uint32_t k = 0; k < in_features; ++k) {
                 const uint32_t group = group_size == 0 ? 0 : k / group_size;
                 for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
@@ -289,8 +354,8 @@ public:
                     StagePackedWord(stage_base + k * base_n + tile_n, word, scale_base, zero_offsets);
                 }
             }
-
             LocalTensor<half> b_tscm_tile = cube_probe.LoadStagedBTileToTscm(staged_weight_gm_, stage_base, tiling_);
+#endif
             for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
                 const uint32_t m_begin = m_tile * base_m;
                 const uint32_t m_len_candidate = rows - m_begin;
@@ -309,6 +374,93 @@ public:
 
 private:
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
+    __aicore__ inline void FillDirectBTileWord(
+        LocalTensor<half>& b_tile,
+        uint32_t tile_offset,
+        uint32_t word,
+        uint32_t scale_base,
+        uint32_t zero_offsets)
+    {
+        if (vector_dequant_ready_) {
+            FillDirectBTileWordVector(b_tile, tile_offset, word, scale_base, zero_offsets);
+            return;
+        }
+        const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
+        const float scale1 = static_cast<float>(scales_gm_.GetValue(scale_base + 1));
+        const float scale2 = static_cast<float>(scales_gm_.GetValue(scale_base + 2));
+        const float scale3 = static_cast<float>(scales_gm_.GetValue(scale_base + 3));
+        const float scale4 = static_cast<float>(scales_gm_.GetValue(scale_base + 4));
+        const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
+        const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
+        const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+        const float offset0 = OffsetValue(scale_base, zero_offsets);
+        const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
+        const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
+        const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
+        const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
+        const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
+        const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
+        const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
+        b_tile.SetValue(tile_offset, static_cast<half>(DequantLane(word, 0, scale0, offset0)));
+        b_tile.SetValue(tile_offset + 1, static_cast<half>(DequantLane(word, 1, scale1, offset1)));
+        b_tile.SetValue(tile_offset + 2, static_cast<half>(DequantLane(word, 2, scale2, offset2)));
+        b_tile.SetValue(tile_offset + 3, static_cast<half>(DequantLane(word, 3, scale3, offset3)));
+        b_tile.SetValue(tile_offset + 4, static_cast<half>(DequantLane(word, 4, scale4, offset4)));
+        b_tile.SetValue(tile_offset + 5, static_cast<half>(DequantLane(word, 5, scale5, offset5)));
+        b_tile.SetValue(tile_offset + 6, static_cast<half>(DequantLane(word, 6, scale6, offset6)));
+        b_tile.SetValue(tile_offset + 7, static_cast<half>(DequantLane(word, 7, scale7, offset7)));
+    }
+
+    __aicore__ inline void FillDirectBTileWordVector(
+        LocalTensor<half>& b_tile,
+        uint32_t tile_offset,
+        uint32_t word,
+        uint32_t scale_base,
+        uint32_t zero_offsets)
+    {
+        LocalTensor<uint32_t> packed = vector_packed_ub_.Get<uint32_t>(kCann9VectorDequantPackedWords);
+        LocalTensor<half> dequant = vector_half_ub_.Get<half>(kCann9VectorDequantLanes);
+        packed.SetValue(0, word);
+        asc_int42half_sync(
+            reinterpret_cast<__ubuf__ half*>(dequant.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ int4b_t*>(packed.GetPhyAddr()),
+            static_cast<uint32_t>(kCann9VectorDequantLanes));
+
+        const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
+        const float scale1 = static_cast<float>(scales_gm_.GetValue(scale_base + 1));
+        const float scale2 = static_cast<float>(scales_gm_.GetValue(scale_base + 2));
+        const float scale3 = static_cast<float>(scales_gm_.GetValue(scale_base + 3));
+        const float scale4 = static_cast<float>(scales_gm_.GetValue(scale_base + 4));
+        const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
+        const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
+        const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+        const float offset0 = OffsetValue(scale_base, zero_offsets);
+        const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
+        const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
+        const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
+        const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
+        const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
+        const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
+        const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
+        b_tile.SetValue(tile_offset, static_cast<half>((static_cast<float>(dequant.GetValue(0)) + offset0) * scale0));
+        b_tile.SetValue(
+            tile_offset + 1, static_cast<half>((static_cast<float>(dequant.GetValue(1)) + offset1) * scale1));
+        b_tile.SetValue(
+            tile_offset + 2, static_cast<half>((static_cast<float>(dequant.GetValue(2)) + offset2) * scale2));
+        b_tile.SetValue(
+            tile_offset + 3, static_cast<half>((static_cast<float>(dequant.GetValue(3)) + offset3) * scale3));
+        b_tile.SetValue(
+            tile_offset + 4, static_cast<half>((static_cast<float>(dequant.GetValue(4)) + offset4) * scale4));
+        b_tile.SetValue(
+            tile_offset + 5, static_cast<half>((static_cast<float>(dequant.GetValue(5)) + offset5) * scale5));
+        b_tile.SetValue(
+            tile_offset + 6, static_cast<half>((static_cast<float>(dequant.GetValue(6)) + offset6) * scale6));
+        b_tile.SetValue(
+            tile_offset + 7, static_cast<half>((static_cast<float>(dequant.GetValue(7)) + offset7) * scale7));
+    }
+#endif
+
     __aicore__ inline void StageWeightTiles(
         uint32_t core_idx,
         uint32_t in_features,

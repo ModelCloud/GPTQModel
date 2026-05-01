@@ -364,6 +364,11 @@ Validated 2026-05-01 local checks:
   `max_abs=0.0`; timing was flat versus the non-runtime staged probe
   (`3.646628 ms` versus `3.651168 ms`) because this version still stages the
   dequantized tile through GM before copying it to TSCM.
+- `--experimental-tscm-direct-dequant` validates the public UB-to-TSCM route:
+  CANN 9 vector INT4 decode fills a UB tile, then `DataCopy(LocalTensor TSCM,
+  LocalTensor UB, Nd2NzParams)` performs the NZ handoff to Cube without writing
+  the FP16 B tile through GM/L2. The same NPU0 probe matched with `max_abs=0.0`;
+  timing was `3.655767 ms`, which is still flat on one K tile.
 
 Concrete next implementation order:
 
