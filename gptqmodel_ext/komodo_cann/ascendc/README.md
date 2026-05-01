@@ -431,6 +431,10 @@ passed rows up to 128 for `K=512`, rows up to 96 for `K=768/896`, and improved
 their all-8 means from `2.629267/3.893975/4.523654 ms` to
 `1.371043/2.012148/2.330995 ms`. With the `N=256` and `K=512,N=512` gates
 active, the legacy all-8 sweep passed at `2.483137 ms` mean.
+For `K=512,N=1024`, the narrow tile is only enabled for decode-like
+`rows <= 8`: that subset passed at `1.378790 ms` mean versus `2.638086 ms` for
+`base_n=256`, while `rows=16` timed out in a clean run and rows `32/64/128`
+faulted with AICore `507015`.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

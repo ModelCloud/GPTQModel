@@ -663,6 +663,10 @@ Ascend C custom-op bring-up:
   `2.629267/3.893975/4.523654 ms` to `1.371043/2.012148/2.330995 ms` for
   `K=512/768/896`, respectively. With the `N=256` and `K=512,N=512` gates
   active, the legacy all-8 sweep passed at `2.483137 ms` mean.
+- For `K=512,N=1024`, the narrow tile is only enabled for decode-like
+  `rows <= 8`: that subset passed at `1.378790 ms` mean versus `2.638086 ms`
+  for `base_n=256`, while `rows=16` timed out in a clean run and rows
+  `32/64/128` faulted with AICore `507015`.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows
