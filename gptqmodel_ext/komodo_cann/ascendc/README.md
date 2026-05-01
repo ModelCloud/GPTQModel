@@ -338,6 +338,17 @@ from this source passed NPU0 scalar checks at the validated tile width
 covered rows `1/2/4/8` with worst drift `max_abs=0.015625` and
 `mean_abs=0.0018758773803710938`.
 
+The local-A VecOut runtime path now avoids refilling the large direct B tile for
+every M tile when `rows > base_m`. It keeps the previous A-outer loop for
+single-M-tile decode, but for larger row batches fills each `(K tile, N tile)` B
+tile once and reuses it across all M tiles, paying only the much smaller local-A
+copy per M tile. A CANN 9 local-A package passed an all-8-NPU raw sweep covering
+rows `1/8/16/17/24/31/32/48`, K `384/512/768/896/1024`, N `256/512`, and group
+sizes `32/64/96/128` with worst drift `max_abs=0.015625` and
+`mean_abs=0.001491546630859375`. The pre-change local-A package timed out at
+120 s on the `rows=17,K=512,N=512,group_size=64` timing probe; the new package
+completed the same probe in `3.060030 ms` with `max_abs=0.0078125`.
+
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
 with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset

@@ -269,6 +269,16 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   passed the first three NPU0 shapes, then timed out on
   `M=4,K=512,N=256,group_size=128`. Keep the generic offset-aware direct B fill
   until the exact code-generation or barrier sensitivity is isolated.
+- The local-A VecOut path now reuses each direct B tile across M tiles when
+  `rows > base_m`. The previous loop filled the large dequantized B tile once per
+  M tile; the new loop keeps the single-M-tile order unchanged but switches
+  larger batches to `(K tile, N tile) -> M tile`, trading repeated B dequant for
+  the much smaller local-A copy. A fresh all-8-NPU raw sweep covered rows
+  `1/8/16/17/24/31/32/48`, group sizes `32/64/96/128`, K up to `1024`, and
+  N `256/512`, with worst drift `max_abs=0.015625` and
+  `mean_abs=0.001491546630859375`. The prior local-A package timed out at
+  120 s on `rows=17,K=512,N=512,group_size=64`; the new package ran the same
+  timing probe in `3.060030 ms`.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.

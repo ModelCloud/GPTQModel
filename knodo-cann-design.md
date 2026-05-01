@@ -550,6 +550,16 @@ Ascend C custom-op bring-up:
   package passed NPU0 scalar checks at the standard `base_n=256` tile width with
   positive `base_k=128` and negative `base_k=-128`; the negative-base run
   covered rows `1/2/4/8` with worst drift `max_abs=0.015625`.
+- The local-A VecOut runtime path now has a larger-row scheduling fix: for
+  `rows > base_m`, the loop fills each direct B tile once per `(K tile, N tile)`
+  and reuses it across all M tiles. This avoids the old repeated large B dequant
+  inside the M-tile loop while leaving the already-validated single-M-tile decode
+  order intact. A fresh local-A package passed an all-8-NPU raw sweep over rows
+  `1/8/16/17/24/31/32/48`, group sizes `32/64/96/128`, K up to `1024`, and
+  N `256/512`, with worst drift `max_abs=0.015625` and
+  `mean_abs=0.001491546630859375`. The old local-A package timed out at 120 s on
+  `rows=17,K=512,N=512,group_size=64`; the new package completed the same timing
+  probe in `3.060030 ms` with `max_abs=0.0078125`.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

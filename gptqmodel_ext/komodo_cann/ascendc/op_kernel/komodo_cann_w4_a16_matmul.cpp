@@ -610,10 +610,9 @@ public:
         LocalTensor<half> direct_a_tile = cube_probe.GetLocalATile(tiling_);
         for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
             const uint32_t k_begin = k_tile * tiling_->base_k;
-            for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
-                const uint32_t m_begin = m_tile * base_m;
-                const uint32_t m_len_candidate = rows - m_begin;
-                const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
+            if (m_tiles <= 1) {
+                const uint32_t m_begin = 0;
+                const uint32_t m_len = rows < base_m ? rows : base_m;
                 FillDirectATile(direct_a_tile, m_begin, m_len, k_begin, tiling_->base_k, in_features);
                 PipeBarrier<PIPE_ALL>();
                 for (uint32_t n_tile = core_idx; n_tile < n_tiles; n_tile += staging_blocks) {
@@ -623,6 +622,30 @@ public:
                     const uint32_t packed_end = n_end >> 3;
                     FillDirectBTileKTile(
                         direct_b_tile, k_tile, n_begin, packed_begin, packed_end, packed_stride, zero_offsets);
+                    PipeBarrier<PIPE_ALL>();
+                    cube_probe.mm.SetTensorA(direct_a_tile);
+                    cube_probe.mm.SetTensorB(direct_b_tile);
+                    cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
+                    ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
+                    cube_probe.mm.IterateAll<false>(
+                        y_gm_[m_begin * out_features + n_begin], k_tile != 0, false, true);
+                    cube_probe.mm.WaitIterateAll();
+                }
+                continue;
+            }
+            for (uint32_t n_tile = core_idx; n_tile < n_tiles; n_tile += staging_blocks) {
+                const uint32_t n_begin = n_tile * base_n;
+                const uint32_t n_end = n_begin + base_n;
+                const uint32_t packed_begin = n_begin >> 3;
+                const uint32_t packed_end = n_end >> 3;
+                FillDirectBTileKTile(
+                    direct_b_tile, k_tile, n_begin, packed_begin, packed_end, packed_stride, zero_offsets);
+                PipeBarrier<PIPE_ALL>();
+                for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
+                    const uint32_t m_begin = m_tile * base_m;
+                    const uint32_t m_len_candidate = rows - m_begin;
+                    const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
+                    FillDirectATile(direct_a_tile, m_begin, m_len, k_begin, tiling_->base_k, in_features);
                     PipeBarrier<PIPE_ALL>();
                     cube_probe.mm.SetTensorA(direct_a_tile);
                     cube_probe.mm.SetTensorB(direct_b_tile);
