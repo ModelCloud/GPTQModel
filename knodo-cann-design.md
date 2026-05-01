@@ -509,6 +509,13 @@ Ascend C custom-op bring-up:
   the corresponding host define so the host tiler selects the mixed key, and
   staged/Cube workspace accounting adds CANN's system workspace to Komodo-CANN's
   bounded user workspace before requesting memory from ACLNN.
+- The next guarded attempt to recover multi-row Cube work is
+  `--experimental-vecout-local-a`. Instead of asking Matmul to interpret a
+  strided GM A tile, each AIV owner stages a contiguous `M x baseK` FP16
+  activation tile in VECOUT and gives both A and B to Cube as local operands.
+  This should reduce the current one-Cube-call-per-row behavior for `M>1`; it
+  remains a compile/runtime probe until validated against the row-wise VecOut
+  baseline.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

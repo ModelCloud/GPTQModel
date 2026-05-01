@@ -272,6 +272,22 @@ The current safe implementation therefore launches Cube one row at a time for
 `M>1`; batching rows again is the next performance target after fixing the
 direct vector dequant lane mapping.
 
+The next compile-guarded batching probe stages A locally as well:
+
+```bash
+python scripts/build_komodo_cann_ascendc.py \
+  --output /tmp/komodo_cann_w4a16_vecout_local_a \
+  --experimental-vecout-local-a
+```
+
+This implies the VecOut runtime handoff and changes the Matmul A operand to
+`TPosition::VECOUT`. Each active AIV owner copies the current `M x baseK`
+activation tile into a contiguous UB tile, then reuses it across the output-N
+tiles owned by that core. The goal is to restore multi-row Cube calls without
+the failing GM-stride `SetOrgShape` path. It is intentionally separate from the
+validated row-wise VecOut handoff until runtime checks prove that local-A
+batching is correct and faster for `M>1`.
+
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
 with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset

@@ -244,6 +244,12 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   order is still wrong for this use. Keep the CANN 9 vector conversion active in
   staged probes, but do not enable it for the live fused tile until that mapping
   is isolated.
+- Added a compile-guarded `--experimental-vecout-local-a` batching probe. It
+  implies VecOut runtime handoff, switches Matmul A to `TPosition::VECOUT`, and
+  stages each `M x baseK` activation tile into contiguous UB before reusing it
+  across the output-N tiles owned by that core. This is the current route around
+  the failing GM-stride `SetOrgShape` experiment; keep it behind its own flag
+  until runtime validation proves correctness and speed for `M>1`.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.

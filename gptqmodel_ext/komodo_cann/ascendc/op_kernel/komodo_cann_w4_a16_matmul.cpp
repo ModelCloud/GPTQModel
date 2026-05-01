@@ -44,6 +44,10 @@ using KomodoCannCapiInt4 = ::int4b_t;
 #error "KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF requires staged dequant, CANN9 vector dequant, VECOUT consumer, and mixed launch"
 #endif
 
+#if defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A) && !defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
+#error "KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A requires VecOut runtime handoff"
+#endif
+
 #if defined(KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT) || \
     defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
 #define KOMODO_CANN_EXPERIMENTAL_LOCAL_DIRECT_DEQUANT 1
@@ -67,7 +71,11 @@ __aicore__ inline uint32_t CeilDivU32(uint32_t value, uint32_t divisor)
 #ifdef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
 class KomodoCannW4A16CubeConsumerProbe {
 public:
+#ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A
+    using AType = MatmulType<TPosition::VECOUT, CubeFormat::ND, half>;
+#else
     using AType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
+#endif
 #ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER
     using BType = MatmulType<TPosition::TSCM, CubeFormat::NZ, half, true>;
 #elif defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER)
@@ -206,7 +214,12 @@ private:
             return false;
         }
         direct_dequant_ready_ = pipe.InitBuffer(b_ub_, base_k * base_n * sizeof(half));
+#ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A
+        local_a_ready_ = pipe.InitBuffer(a_ub_, tiling->base_m * base_k * sizeof(half));
+        return direct_dequant_ready_ && local_a_ready_;
+#else
         return direct_dequant_ready_;
+#endif
     }
 
     __aicore__ inline LocalTensor<half> GetDirectDequantTile(const KomodoCannW4A16MatmulTilingData* tiling)
@@ -214,12 +227,28 @@ private:
         return b_ub_.Get<half>(tiling->base_k * tiling->base_n);
     }
 
+#ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A
+    __aicore__ inline LocalTensor<half> GetLocalATile(const KomodoCannW4A16MatmulTilingData* tiling)
+    {
+        return a_ub_.Get<half>(tiling->base_m * tiling->base_k);
+    }
+
+    __aicore__ inline bool LocalAReady() const
+    {
+        return local_a_ready_;
+    }
+#endif
+
     __aicore__ inline bool DirectDequantReady() const
     {
         return direct_dequant_ready_;
     }
 
 private:
+#ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A
+    TBuf<TPosition::VECOUT> a_ub_;
+    bool local_a_ready_ = false;
+#endif
     TBuf<TPosition::VECOUT> b_ub_;
     bool direct_dequant_ready_ = false;
 #endif
@@ -564,10 +593,46 @@ public:
 
         const uint32_t n_tiles = out_features / base_n;
         const uint32_t packed_stride = out_features >> 3;
+#ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A
+        if (!cube_probe.LocalAReady()) {
+            return false;
+        }
+        const uint32_t m_tiles = CeilDivU32(rows, base_m);
+#else
         const uint32_t m_tiles = rows;
+#endif
         const uint32_t k_tiles = in_features / tiling_->base_k;
         const uint32_t zero_offsets = tiling_->zero_offsets;
         LocalTensor<half> direct_b_tile = cube_probe.GetDirectDequantTile(tiling_);
+#ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A
+        LocalTensor<half> direct_a_tile = cube_probe.GetLocalATile(tiling_);
+        for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
+            const uint32_t k_begin = k_tile * tiling_->base_k;
+            for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
+                const uint32_t m_begin = m_tile * base_m;
+                const uint32_t m_len_candidate = rows - m_begin;
+                const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
+                FillDirectATile(direct_a_tile, m_begin, m_len, k_begin, tiling_->base_k, in_features);
+                PipeBarrier<PIPE_ALL>();
+                for (uint32_t n_tile = core_idx; n_tile < n_tiles; n_tile += staging_blocks) {
+                    const uint32_t n_begin = n_tile * base_n;
+                    const uint32_t n_end = n_begin + base_n;
+                    const uint32_t packed_begin = n_begin >> 3;
+                    const uint32_t packed_end = n_end >> 3;
+                    FillDirectBTileKTile(
+                        direct_b_tile, k_tile, n_begin, packed_begin, packed_end, packed_stride, zero_offsets);
+                    PipeBarrier<PIPE_ALL>();
+                    cube_probe.mm.SetTensorA(direct_a_tile);
+                    cube_probe.mm.SetTensorB(direct_b_tile);
+                    cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
+                    ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
+                    cube_probe.mm.IterateAll<false>(
+                        y_gm_[m_begin * out_features + n_begin], k_tile != 0, false, true);
+                    cube_probe.mm.WaitIterateAll();
+                }
+            }
+        }
+#else
         for (uint32_t n_tile = core_idx; n_tile < n_tiles; n_tile += staging_blocks) {
             const uint32_t n_begin = n_tile * base_n;
             const uint32_t n_end = n_begin + base_n;
@@ -590,6 +655,7 @@ public:
                 }
             }
         }
+#endif
         return true;
     }
 #endif
@@ -615,6 +681,25 @@ private:
 
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
 #ifdef KOMODO_CANN_EXPERIMENTAL_LOCAL_DIRECT_DEQUANT
+#ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A
+    __aicore__ inline void FillDirectATile(
+        LocalTensor<half>& a_tile,
+        uint32_t m_begin,
+        uint32_t m_len,
+        uint32_t k_begin,
+        uint32_t base_k,
+        uint32_t in_features)
+    {
+        for (uint32_t m = 0; m < m_len; ++m) {
+            const uint32_t src_base = (m_begin + m) * in_features + k_begin;
+            const uint32_t dst_base = m * base_k;
+            for (uint32_t k = 0; k < base_k; ++k) {
+                a_tile.SetValue(dst_base + k, x_gm_.GetValue(src_base + k));
+            }
+        }
+    }
+#endif
+
 #ifdef KOMODO_CANN_EXPERIMENTAL_LOCAL_DIRECT_MULTIK
     __aicore__ inline void FillDirectBTileKTile(
         LocalTensor<half>& b_tile,

@@ -271,6 +271,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--experimental-vecout-local-a",
+        action="store_true",
+        help=(
+            "Compile the guarded VecOut runtime variant that stages the M x baseK activation tile "
+            "into UB/VECOUT so Cube can process multiple rows per call. This implies "
+            "--experimental-vecout-runtime-handoff."
+        ),
+    )
+    parser.add_argument(
         "--experimental-tscm-consumer",
         action="store_true",
         help=(
@@ -308,6 +317,8 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    if args.experimental_vecout_local_a:
+        args.experimental_vecout_runtime_handoff = True
     if args.experimental_vecout_runtime_handoff:
         args.experimental_staged_dequant = True
         args.experimental_cann9_vector_dequant = True
@@ -386,6 +397,8 @@ def main() -> int:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER")
     if args.experimental_vecout_runtime_handoff:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF")
+    if args.experimental_vecout_local_a:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A")
     if args.experimental_tscm_consumer:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER")
     if args.experimental_tscm_runtime_handoff:
