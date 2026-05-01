@@ -361,6 +361,13 @@ row-wise GM-to-VECOUT `DataCopy` only for `rows >= 32`. Unconditional `DataCopy`
 regressed tiny decode tiles, but the shape gate improved the planner-shaped
 all-8-NPU warmed timing sweep from `4.369839 ms` mean to `4.066544 ms` mean while
 keeping worst drift at `max_abs=0.015625`.
+The direct local-B fill now has a narrower zero-offset branch inside the generic
+tile-fill loop. Unlike the rejected VecOut-only specialization, this keeps the
+same scheduler shape and only skips offset GM loads and offset adds when the
+tiler marks symmetric GPTQ as zero-offset. A CANN 9 local-A package passed the
+legacy all-8-NPU warmed sweep with mean `4.510223 ms`, and the planner-shaped
+sweep improved from `4.066544 ms` to `4.026535 ms`; worst drift stayed
+`max_abs=0.015625`.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

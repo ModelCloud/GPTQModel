@@ -766,39 +766,59 @@ private:
                 const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
                 const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
                 const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
-                const float offset0 = OffsetValue(scale_base, zero_offsets);
-                const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
-                const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
-                const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
-                const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
-                const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
-                const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
-                const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
                 const uint32_t tile_n = n_base - n_begin;
-                for (uint32_t k = group_k_begin; k < group_k_end; ++k) {
-                    const uint32_t tile_k = k - k_begin;
-                    const uint32_t word =
-                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
-                    FillDirectBTileWordValues(
-                        b_tile,
-                        tile_k * base_n + tile_n,
-                        word,
-                        scale0,
-                        scale1,
-                        scale2,
-                        scale3,
-                        scale4,
-                        scale5,
-                        scale6,
-                        scale7,
-                        offset0,
-                        offset1,
-                        offset2,
-                        offset3,
-                        offset4,
-                        offset5,
-                        offset6,
-                        offset7);
+                if (zero_offsets != 0) {
+                    for (uint32_t k = group_k_begin; k < group_k_end; ++k) {
+                        const uint32_t tile_k = k - k_begin;
+                        const uint32_t word =
+                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                        FillDirectBTileWordValuesNoOffset(
+                            b_tile,
+                            tile_k * base_n + tile_n,
+                            word,
+                            scale0,
+                            scale1,
+                            scale2,
+                            scale3,
+                            scale4,
+                            scale5,
+                            scale6,
+                            scale7);
+                    }
+                } else {
+                    const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));
+                    const float offset1 = static_cast<float>(offsets_gm_.GetValue(scale_base + 1));
+                    const float offset2 = static_cast<float>(offsets_gm_.GetValue(scale_base + 2));
+                    const float offset3 = static_cast<float>(offsets_gm_.GetValue(scale_base + 3));
+                    const float offset4 = static_cast<float>(offsets_gm_.GetValue(scale_base + 4));
+                    const float offset5 = static_cast<float>(offsets_gm_.GetValue(scale_base + 5));
+                    const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
+                    const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
+                    for (uint32_t k = group_k_begin; k < group_k_end; ++k) {
+                        const uint32_t tile_k = k - k_begin;
+                        const uint32_t word =
+                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                        FillDirectBTileWordValues(
+                            b_tile,
+                            tile_k * base_n + tile_n,
+                            word,
+                            scale0,
+                            scale1,
+                            scale2,
+                            scale3,
+                            scale4,
+                            scale5,
+                            scale6,
+                            scale7,
+                            offset0,
+                            offset1,
+                            offset2,
+                            offset3,
+                            offset4,
+                            offset5,
+                            offset6,
+                            offset7);
+                    }
                 }
             }
         }
@@ -908,6 +928,29 @@ private:
         b_tile.SetValue(tile_offset + 5, static_cast<half>(DequantLane(word, 5, scale5, offset5)));
         b_tile.SetValue(tile_offset + 6, static_cast<half>(DequantLane(word, 6, scale6, offset6)));
         b_tile.SetValue(tile_offset + 7, static_cast<half>(DequantLane(word, 7, scale7, offset7)));
+    }
+
+    __aicore__ inline void FillDirectBTileWordValuesNoOffset(
+        LocalTensor<half>& b_tile,
+        uint32_t tile_offset,
+        uint32_t word,
+        float scale0,
+        float scale1,
+        float scale2,
+        float scale3,
+        float scale4,
+        float scale5,
+        float scale6,
+        float scale7)
+    {
+        b_tile.SetValue(tile_offset, static_cast<half>(DequantLaneNoOffset(word, 0, scale0)));
+        b_tile.SetValue(tile_offset + 1, static_cast<half>(DequantLaneNoOffset(word, 1, scale1)));
+        b_tile.SetValue(tile_offset + 2, static_cast<half>(DequantLaneNoOffset(word, 2, scale2)));
+        b_tile.SetValue(tile_offset + 3, static_cast<half>(DequantLaneNoOffset(word, 3, scale3)));
+        b_tile.SetValue(tile_offset + 4, static_cast<half>(DequantLaneNoOffset(word, 4, scale4)));
+        b_tile.SetValue(tile_offset + 5, static_cast<half>(DequantLaneNoOffset(word, 5, scale5)));
+        b_tile.SetValue(tile_offset + 6, static_cast<half>(DequantLaneNoOffset(word, 6, scale6)));
+        b_tile.SetValue(tile_offset + 7, static_cast<half>(DequantLaneNoOffset(word, 7, scale7)));
     }
 
     __aicore__ inline void FillDirectBTileWordVector(

@@ -293,6 +293,13 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   slower than the per-row `DataCopy` gate: the legacy all-8-NPU mean regressed to
   `4.808621 ms`, and the planner-shaped mean was `4.145872 ms`. Keep the row-wise
   copy path for now.
+- The accepted zero-offset B-fill follow-up keeps the generic direct local-B
+  scheduler but splits the inner tile fill when the tiler has already marked the
+  shape as symmetric zero-offset. It skips offset GM reads and offset adds in
+  that case without enabling the earlier rejected VecOut-only specialization.
+  The CANN 9 package passed the legacy all-8-NPU warmed sweep with
+  `custom_ms_mean=4.510223` and the planner-shaped warmed sweep with
+  `custom_ms_mean=4.026535`; worst drift stayed `max_abs=0.015625`.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.

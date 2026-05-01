@@ -582,6 +582,14 @@ Ascend C custom-op bring-up:
   but slower than the per-row `DataCopy` gate on both all-8-NPU sweeps
   (`4.808621 ms` legacy mean, `4.145872 ms` planner-shaped mean), so the kernel
   keeps row-wise copies for the gated path.
+- The next accepted local-B pass added a narrow zero-offset split inside the
+  existing direct B-tile fill loop. It does not change the VecOut scheduler shape
+  that timed out in the earlier zero-offset-only specialization; it only avoids
+  per-lane offset GM reads and offset adds when the tiler marks symmetric GPTQ
+  as zero-offset. The CANN 9 package passed the legacy all-8-NPU warmed sweep
+  with custom latency min/mean/max `2.278330/4.510223/8.395375 ms`, and the
+  planner-shaped sweep improved from `4.066544 ms` mean to `4.026535 ms` mean.
+  Worst drift stayed `max_abs=0.015625`.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows
