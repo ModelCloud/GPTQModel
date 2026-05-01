@@ -1,7 +1,7 @@
 # Ascend shell startup for this 910B environment.
 #
 # Install this file as /etc/profile.d/ascend.sh or source it directly from a
-# shell that needs CANN, OPP, torch-npu, ATB, and SiP runtime paths.
+# shell that needs CANN, OPP, torch-npu, and ATB runtime paths.
 
 if [ -n "${CMAKE_PREFIX_PATH}" ]; then
   CMAKE_PREFIX_PATH=$(printf '%s' "${CMAKE_PREFIX_PATH}" | tr ':' '\n' | grep -v -E '^/usr/local/Ascend/cann[/_-]' | tr '\n' ':' | sed 's/:$//')
@@ -18,8 +18,15 @@ if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
   . /usr/local/Ascend/nnal/atb/set_env.sh
 fi
 
-if [ -f /usr/local/Ascend/nnal/asdsip/set_env.sh ]; then
-  . /usr/local/Ascend/nnal/asdsip/set_env.sh
+unset ASDSIP_HOME_PATH
+if [ -n "${LD_LIBRARY_PATH}" ]; then
+  LD_LIBRARY_PATH=$(printf '%s' "${LD_LIBRARY_PATH}" | tr ':' '\n' | grep -v -E '^/usr/local/Ascend/nnal/asdsip(/|$)' | tr '\n' ':' | sed 's/:$//')
+  export LD_LIBRARY_PATH
 fi
+
+# ASDSIP is intentionally disabled for Torch/ATB scenarios.
+# if [ -f /usr/local/Ascend/nnal/asdsip/set_env.sh ]; then
+#   . /usr/local/Ascend/nnal/asdsip/set_env.sh
+# fi
 
 export LD_PRELOAD=/usr/local/Ascend/cann/lib64/libjemalloc.so
