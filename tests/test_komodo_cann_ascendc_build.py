@@ -16,6 +16,26 @@ def _load_build_helper():
     return module
 
 
+def _load_raw_validator():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "validate_komodo_cann_ascendc_raw.py"
+    spec = importlib.util.spec_from_file_location("validate_komodo_cann_ascendc_raw", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_raw_validator_finds_embedded_json_after_cann_warning():
+    validator = _load_raw_validator()
+    text = (
+        "[Warning]: tiling struct [TopkTiling] "
+        '{"device": 7, "rows": 8, "pass": true}\n'
+        "is conflict with one in file topk_tilingdata.h, line 21\n"
+    )
+
+    assert validator._last_json_object(text) == {"device": 7, "rows": 8, "pass": True}
+
+
 def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
     build_helper = _load_build_helper()
     cmake_path = tmp_path / "op_kernel" / "CMakeLists.txt"

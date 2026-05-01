@@ -36,6 +36,25 @@ def _stderr_tail(text: str, lines: int = 40) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
+def _last_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    result: dict[str, Any] | None = None
+    offset = 0
+    while True:
+        start = text.find("{", offset)
+        if start < 0:
+            break
+        try:
+            value, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            offset = start + 1
+            continue
+        if isinstance(value, dict):
+            result = value
+        offset = start + max(end, 1)
+    return result
+
+
 def _apply_custom_opp_env(env: dict[str, str], args: argparse.Namespace) -> None:
     if args.opp_install:
         vendor = Path(args.opp_install).expanduser() / "vendors" / "customize"
@@ -169,19 +188,18 @@ def _run_parent(args: argparse.Namespace) -> int:
             failures.append({"device": device, "case": case, "timeout_s": args.timeout, "stderr_tail": _stderr_tail(stderr)})
             continue
 
-        lines = [line for line in stdout.splitlines() if line.strip()]
-        if proc.returncode != 0 or not lines:
+        result = _last_json_object(stdout)
+        if proc.returncode != 0 or result is None:
             failures.append(
                 {
                     "device": device,
                     "case": case,
                     "returncode": proc.returncode,
-                    "stdout": stdout.strip(),
+                    "stdout_tail": _stderr_tail(stdout),
                     "stderr_tail": _stderr_tail(stderr),
                 }
             )
             continue
-        result = json.loads(lines[-1])
         results.append(result)
         print(json.dumps(result, sort_keys=True), flush=True)
 

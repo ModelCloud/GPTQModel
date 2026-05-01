@@ -377,11 +377,10 @@ Ascend C custom-op bring-up:
     timings by about `5-6%`, but consistently slowed the existing row-pair path
     by about `2%`. Marking the row-quad helper `noinline` made the row-pair
     regression much worse at about `17%`, so the variant was reverted.
-  - Extending the zero-offset side-band to all small-row paths improved row-quad
+  - A branch-heavy small-row zero-offset specialization improved row-quad
     timings but regressed M1 nonzero by about `1%` or M2 by more than `6%`
-    depending on how the branch was placed. Keep the validated zero-offset
-    specialization limited to the row-oct path unless a separate small-row
-    kernel can avoid perturbing the nonzero paths.
+    depending on how the branch was placed. Avoid that separate small-row branch
+    shape; use the generic `OffsetValue(..., zero_offsets)` side band instead.
 - A direct CANN `Matmul<fp16, int4, fp16>` probe was rejected for now. In the
   default msopgen package the kernel still compiled as `VectorCore`, so the
   sentinel Cube path returned zeros because no AIC side was scheduled. Forcing
@@ -546,6 +545,11 @@ Ascend C custom-op bring-up:
   planner now marks every symmetric fused call as zero-offset, including small
   `M<8` calls, while keeping the generic direct B fill rather than the rejected
   zero-offset-only branch.
+- The scalar visible-output fallback now threads the same zero-offset side band
+  into M1/M2/M4 tails instead of only M8. A fresh CANN 9 non-mixed staged/vector
+  package passed NPU0 scalar checks at the standard `base_n=256` tile width with
+  positive `base_k=128` and negative `base_k=-128`; the negative-base run
+  covered rows `1/2/4/8` with worst drift `max_abs=0.015625`.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

@@ -391,6 +391,19 @@ with descriptor, executor, and workspace reuse, the remaining speed work is the
 true Ascend C fused operator that avoids full dequantized FP16 weight
 materialization through GM/L2 and removes the generic ACLNN call boundary.
 
+## Ascend C Raw Validation Notes
+
+The raw Ascend C validation harness now tolerates CANN stdout noise by scanning
+worker output for the last JSON object. This is needed on CANN 9.0.0-beta.2
+because tiling-struct warnings can be emitted on the same line as the worker
+result.
+
+The zero-offset side band is now threaded through the scalar M1/M2/M4 row
+fallbacks, matching the existing M8 zero-offset row path. Validation used a
+fresh CANN 9 non-mixed staged/vector package at the standard `base_n=256` tile
+width: positive `base_k=128` passed rows `1/4/8`, and negative `base_k=-128`
+passed rows `1/2/4/8` with worst `max_abs=0.015625`.
+
 ## CANN Profiling Read
 
 Use the profiling helper for single-shape CANN traces:

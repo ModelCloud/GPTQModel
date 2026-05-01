@@ -328,6 +328,15 @@ worst drift: `max_abs=0.015625`, `mean_abs=0.0024566650390625`.
 The same harness also passed all eight cases with positive `base_k=128`, which
 covers the offset-aware call shape used when the module does not encode the
 zero-offset side band.
+The harness parser now scans worker stdout for the last JSON object instead of
+assuming the result is on a clean final line; CANN 9 can splice tiling warnings
+around the JSON result on stdout.
+The scalar visible-output path now receives the same zero-offset side band for
+M1/M2/M4 tails as the existing M8 path. A non-mixed staged/vector package built
+from this source passed NPU0 scalar checks at the validated tile width
+(`base_n=256`) for positive `base_k=128` and negative `base_k=-128`; the latter
+covered rows `1/2/4/8` with worst drift `max_abs=0.015625` and
+`mean_abs=0.0018758773803710938`.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

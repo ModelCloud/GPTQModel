@@ -366,13 +366,15 @@ public:
             ProcessRowOct(m, in_features, out_features, group_size, has_bias, zero_offsets, packed_begin, packed_end);
         }
         for (; m + 3 < rows; m += 4) {
-            ProcessRowQuad(m, in_features, out_features, group_size, has_bias, packed_begin, packed_end);
+            ProcessRowQuad(
+                m, in_features, out_features, group_size, has_bias, zero_offsets, packed_begin, packed_end);
         }
         for (; m + 1 < rows; m += 2) {
-            ProcessRowPair(m, in_features, out_features, group_size, has_bias, packed_begin, packed_end);
+            ProcessRowPair(m, in_features, out_features, group_size, has_bias, zero_offsets, packed_begin, packed_end);
         }
         if (m < rows) {
-            ProcessSingleRow(m, in_features, out_features, group_size, has_bias, packed_begin, packed_end);
+            ProcessSingleRow(
+                m, in_features, out_features, group_size, has_bias, zero_offsets, packed_begin, packed_end);
         }
     }
 
@@ -1109,6 +1111,7 @@ private:
         uint32_t out_features,
         uint32_t group_size,
         uint32_t has_bias,
+        uint32_t zero_offsets,
         uint32_t packed_begin,
         uint32_t packed_end)
     {
@@ -1158,22 +1161,22 @@ private:
                 const float scale15 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 5));
                 const float scale16 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 6));
                 const float scale17 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 7));
-                const float offset00 = static_cast<float>(offsets_gm_.GetValue(scale_base0));
-                const float offset01 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 1));
-                const float offset02 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 2));
-                const float offset03 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 3));
-                const float offset04 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 4));
-                const float offset05 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 5));
-                const float offset06 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 6));
-                const float offset07 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 7));
-                const float offset10 = static_cast<float>(offsets_gm_.GetValue(scale_base1));
-                const float offset11 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 1));
-                const float offset12 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 2));
-                const float offset13 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 3));
-                const float offset14 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 4));
-                const float offset15 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 5));
-                const float offset16 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 6));
-                const float offset17 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 7));
+                const float offset00 = OffsetValue(scale_base0, zero_offsets);
+                const float offset01 = OffsetValue(scale_base0 + 1, zero_offsets);
+                const float offset02 = OffsetValue(scale_base0 + 2, zero_offsets);
+                const float offset03 = OffsetValue(scale_base0 + 3, zero_offsets);
+                const float offset04 = OffsetValue(scale_base0 + 4, zero_offsets);
+                const float offset05 = OffsetValue(scale_base0 + 5, zero_offsets);
+                const float offset06 = OffsetValue(scale_base0 + 6, zero_offsets);
+                const float offset07 = OffsetValue(scale_base0 + 7, zero_offsets);
+                const float offset10 = OffsetValue(scale_base1, zero_offsets);
+                const float offset11 = OffsetValue(scale_base1 + 1, zero_offsets);
+                const float offset12 = OffsetValue(scale_base1 + 2, zero_offsets);
+                const float offset13 = OffsetValue(scale_base1 + 3, zero_offsets);
+                const float offset14 = OffsetValue(scale_base1 + 4, zero_offsets);
+                const float offset15 = OffsetValue(scale_base1 + 5, zero_offsets);
+                const float offset16 = OffsetValue(scale_base1 + 6, zero_offsets);
+                const float offset17 = OffsetValue(scale_base1 + 7, zero_offsets);
 
                 // Offset is constant within a quant group, so M1 can apply its
                 // contribution once after accumulating the signed INT4 lanes.
@@ -1247,14 +1250,14 @@ private:
                 const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
                 const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
                 const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
-                const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));
-                const float offset1 = static_cast<float>(offsets_gm_.GetValue(scale_base + 1));
-                const float offset2 = static_cast<float>(offsets_gm_.GetValue(scale_base + 2));
-                const float offset3 = static_cast<float>(offsets_gm_.GetValue(scale_base + 3));
-                const float offset4 = static_cast<float>(offsets_gm_.GetValue(scale_base + 4));
-                const float offset5 = static_cast<float>(offsets_gm_.GetValue(scale_base + 5));
-                const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
-                const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
+                const float offset0 = OffsetValue(scale_base, zero_offsets);
+                const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
+                const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
+                const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
+                const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
+                const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
+                const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
+                const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
 
                 // Offset is constant within a quant group, so M1 can apply its
                 // contribution once after accumulating the signed INT4 lanes.
@@ -1408,14 +1411,14 @@ private:
                         KOMODO_ACCUM_ROW(acc7, x_value7);
                     }
                 } else {
-                    const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));
-                    const float offset1 = static_cast<float>(offsets_gm_.GetValue(scale_base + 1));
-                    const float offset2 = static_cast<float>(offsets_gm_.GetValue(scale_base + 2));
-                    const float offset3 = static_cast<float>(offsets_gm_.GetValue(scale_base + 3));
-                    const float offset4 = static_cast<float>(offsets_gm_.GetValue(scale_base + 4));
-                    const float offset5 = static_cast<float>(offsets_gm_.GetValue(scale_base + 5));
-                    const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
-                    const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
+                    const float offset0 = OffsetValue(scale_base, zero_offsets);
+                    const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
+                    const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
+                    const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
+                    const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
+                    const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
+                    const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
+                    const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
                     float x_sum0 = 0.0f;
                     float x_sum1 = 0.0f;
                     float x_sum2 = 0.0f;
@@ -1492,6 +1495,7 @@ private:
         uint32_t out_features,
         uint32_t group_size,
         uint32_t has_bias,
+        uint32_t zero_offsets,
         uint32_t packed_begin,
         uint32_t packed_end)
     {
@@ -1576,22 +1580,22 @@ private:
                 const float scale15 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 5));
                 const float scale16 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 6));
                 const float scale17 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 7));
-                const float offset00 = static_cast<float>(offsets_gm_.GetValue(scale_base0));
-                const float offset01 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 1));
-                const float offset02 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 2));
-                const float offset03 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 3));
-                const float offset04 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 4));
-                const float offset05 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 5));
-                const float offset06 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 6));
-                const float offset07 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 7));
-                const float offset10 = static_cast<float>(offsets_gm_.GetValue(scale_base1));
-                const float offset11 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 1));
-                const float offset12 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 2));
-                const float offset13 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 3));
-                const float offset14 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 4));
-                const float offset15 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 5));
-                const float offset16 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 6));
-                const float offset17 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 7));
+                const float offset00 = OffsetValue(scale_base0, zero_offsets);
+                const float offset01 = OffsetValue(scale_base0 + 1, zero_offsets);
+                const float offset02 = OffsetValue(scale_base0 + 2, zero_offsets);
+                const float offset03 = OffsetValue(scale_base0 + 3, zero_offsets);
+                const float offset04 = OffsetValue(scale_base0 + 4, zero_offsets);
+                const float offset05 = OffsetValue(scale_base0 + 5, zero_offsets);
+                const float offset06 = OffsetValue(scale_base0 + 6, zero_offsets);
+                const float offset07 = OffsetValue(scale_base0 + 7, zero_offsets);
+                const float offset10 = OffsetValue(scale_base1, zero_offsets);
+                const float offset11 = OffsetValue(scale_base1 + 1, zero_offsets);
+                const float offset12 = OffsetValue(scale_base1 + 2, zero_offsets);
+                const float offset13 = OffsetValue(scale_base1 + 3, zero_offsets);
+                const float offset14 = OffsetValue(scale_base1 + 4, zero_offsets);
+                const float offset15 = OffsetValue(scale_base1 + 5, zero_offsets);
+                const float offset16 = OffsetValue(scale_base1 + 6, zero_offsets);
+                const float offset17 = OffsetValue(scale_base1 + 7, zero_offsets);
 
                 for (uint32_t k = k_begin; k < k_end; ++k) {
                     const float x_value0 = static_cast<float>(x_gm_.GetValue(x_offset0 + k));
@@ -1694,14 +1698,14 @@ private:
                 const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
                 const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
                 const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
-                const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));
-                const float offset1 = static_cast<float>(offsets_gm_.GetValue(scale_base + 1));
-                const float offset2 = static_cast<float>(offsets_gm_.GetValue(scale_base + 2));
-                const float offset3 = static_cast<float>(offsets_gm_.GetValue(scale_base + 3));
-                const float offset4 = static_cast<float>(offsets_gm_.GetValue(scale_base + 4));
-                const float offset5 = static_cast<float>(offsets_gm_.GetValue(scale_base + 5));
-                const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
-                const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
+                const float offset0 = OffsetValue(scale_base, zero_offsets);
+                const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
+                const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
+                const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
+                const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
+                const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
+                const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
+                const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
 
                 for (uint32_t k = k_begin; k < k_end; ++k) {
                     const float x_value0 = static_cast<float>(x_gm_.GetValue(x_offset0 + k));
@@ -1769,6 +1773,7 @@ private:
         uint32_t out_features,
         uint32_t group_size,
         uint32_t has_bias,
+        uint32_t zero_offsets,
         uint32_t packed_begin,
         uint32_t packed_end)
     {
@@ -1852,22 +1857,22 @@ private:
                 const float scale15 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 5));
                 const float scale16 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 6));
                 const float scale17 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 7));
-                const float offset00 = static_cast<float>(offsets_gm_.GetValue(scale_base0));
-                const float offset01 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 1));
-                const float offset02 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 2));
-                const float offset03 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 3));
-                const float offset04 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 4));
-                const float offset05 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 5));
-                const float offset06 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 6));
-                const float offset07 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 7));
-                const float offset10 = static_cast<float>(offsets_gm_.GetValue(scale_base1));
-                const float offset11 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 1));
-                const float offset12 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 2));
-                const float offset13 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 3));
-                const float offset14 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 4));
-                const float offset15 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 5));
-                const float offset16 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 6));
-                const float offset17 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 7));
+                const float offset00 = OffsetValue(scale_base0, zero_offsets);
+                const float offset01 = OffsetValue(scale_base0 + 1, zero_offsets);
+                const float offset02 = OffsetValue(scale_base0 + 2, zero_offsets);
+                const float offset03 = OffsetValue(scale_base0 + 3, zero_offsets);
+                const float offset04 = OffsetValue(scale_base0 + 4, zero_offsets);
+                const float offset05 = OffsetValue(scale_base0 + 5, zero_offsets);
+                const float offset06 = OffsetValue(scale_base0 + 6, zero_offsets);
+                const float offset07 = OffsetValue(scale_base0 + 7, zero_offsets);
+                const float offset10 = OffsetValue(scale_base1, zero_offsets);
+                const float offset11 = OffsetValue(scale_base1 + 1, zero_offsets);
+                const float offset12 = OffsetValue(scale_base1 + 2, zero_offsets);
+                const float offset13 = OffsetValue(scale_base1 + 3, zero_offsets);
+                const float offset14 = OffsetValue(scale_base1 + 4, zero_offsets);
+                const float offset15 = OffsetValue(scale_base1 + 5, zero_offsets);
+                const float offset16 = OffsetValue(scale_base1 + 6, zero_offsets);
+                const float offset17 = OffsetValue(scale_base1 + 7, zero_offsets);
 
                 float x_sum0 = 0.0f;
                 float x_sum1 = 0.0f;
@@ -2007,14 +2012,14 @@ private:
                 const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
                 const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
                 const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
-                const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));
-                const float offset1 = static_cast<float>(offsets_gm_.GetValue(scale_base + 1));
-                const float offset2 = static_cast<float>(offsets_gm_.GetValue(scale_base + 2));
-                const float offset3 = static_cast<float>(offsets_gm_.GetValue(scale_base + 3));
-                const float offset4 = static_cast<float>(offsets_gm_.GetValue(scale_base + 4));
-                const float offset5 = static_cast<float>(offsets_gm_.GetValue(scale_base + 5));
-                const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
-                const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
+                const float offset0 = OffsetValue(scale_base, zero_offsets);
+                const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
+                const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
+                const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
+                const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
+                const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
+                const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
+                const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
 
                 float x_sum0 = 0.0f;
                 float x_sum1 = 0.0f;
