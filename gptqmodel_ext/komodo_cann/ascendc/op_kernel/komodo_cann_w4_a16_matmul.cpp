@@ -738,8 +738,8 @@ private:
         uint32_t base_k,
         uint32_t in_features)
     {
-        // Row-wise DataCopy wins on medium/larger local-A tiles but regresses tiny decode tiles.
-        if (tiling_->rows >= 16) {
+        // Row-wise DataCopy wins on medium/larger local-A tiles and row-8 large-K tiles.
+        if (tiling_->rows >= 16 || (tiling_->rows == 8 && in_features >= 1024)) {
             for (uint32_t m = 0; m < m_len; ++m) {
                 const uint32_t src_base = (m_begin + m) * in_features + k_begin;
                 const uint32_t dst_base = m * base_k;
