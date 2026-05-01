@@ -715,6 +715,15 @@ private:
         uint32_t base_k,
         uint32_t in_features)
     {
+        // Row-wise DataCopy wins on larger local-A tiles but regresses tiny decode tiles.
+        if (tiling_->rows >= 48) {
+            for (uint32_t m = 0; m < m_len; ++m) {
+                const uint32_t src_base = (m_begin + m) * in_features + k_begin;
+                const uint32_t dst_base = m * base_k;
+                DataCopy(a_tile[dst_base], x_gm_[src_base], base_k);
+            }
+            return;
+        }
         for (uint32_t m = 0; m < m_len; ++m) {
             const uint32_t src_base = (m_begin + m) * in_features + k_begin;
             const uint32_t dst_base = m * base_k;

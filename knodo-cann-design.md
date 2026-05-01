@@ -573,6 +573,11 @@ Ascend C custom-op bring-up:
   `mean_abs=0.001491546630859375`. The old local-A package timed out at 120 s on
   `rows=17,K=512,N=512,group_size=64`; the new package completed the same timing
   probe in `3.060030 ms` with `max_abs=0.0078125`.
+- The local-A activation tile fill now uses row-wise GM-to-VECOUT `DataCopy` only
+  for `rows >= 48`. Unconditional `DataCopy` was correct but slightly slower on
+  tiny decode tiles; the shape-gated variant passed both all-8-NPU sweeps and
+  improved the planner-shaped warmed mean from `4.369839 ms` to `4.109257 ms`
+  while preserving worst drift `max_abs=0.015625`.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows

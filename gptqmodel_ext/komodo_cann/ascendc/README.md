@@ -356,6 +356,11 @@ sizes `32/64/96/128` with worst drift `max_abs=0.015625` and
 `mean_abs=0.001491546630859375`. The pre-change local-A package timed out at
 120 s on the `rows=17,K=512,N=512,group_size=64` timing probe; the new package
 completed the same probe in `3.060030 ms` with `max_abs=0.0078125`.
+The local-A activation fill now switches from scalar `GetValue`/`SetValue` to
+row-wise GM-to-VECOUT `DataCopy` only for `rows >= 48`. Unconditional `DataCopy`
+regressed tiny decode tiles, but the shape gate improved the planner-shaped
+all-8-NPU warmed timing sweep from `4.369839 ms` mean to `4.109257 ms` mean while
+keeping worst drift at `max_abs=0.015625`.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
