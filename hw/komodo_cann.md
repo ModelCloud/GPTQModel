@@ -270,7 +270,7 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   GM-to-VECOUT `DataCopy` unconditionally. The original all-row `DataCopy` probe
   compiled with CANN 9 but timed out before emitting a result, and a later
   unconditional retry regressed tiny decode tiles. The validated version now gates
-  row-wise `DataCopy` to `rows >= 48`, where larger local-A tiles benefit.
+  row-wise `DataCopy` to `rows >= 32`, where medium/larger local-A tiles benefit.
 - A VecOut-only zero-offset B-fill specialization also failed validation: it
   passed the first three NPU0 shapes, then timed out on
   `M=4,K=512,N=256,group_size=128`. Keep the generic offset-aware direct B fill
@@ -285,10 +285,10 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   `mean_abs=0.001491546630859375`. The prior local-A package timed out at
   120 s on `rows=17,K=512,N=512,group_size=64`; the new package ran the same
   timing probe in `3.060030 ms`.
-- With the `rows >= 48` local-A `DataCopy` gate, the current all-8-NPU
+- With the `rows >= 32` local-A `DataCopy` gate, the current all-8-NPU
   planner-shaped warmed timing sweep improved from `4.369839 ms` mean to
-  `4.109257 ms` mean. The largest gains were the single-large-M tile cases
-  `rows=96/129/160`; worst drift stayed `max_abs=0.015625`.
+  `4.066544 ms` mean. The largest gains were the medium/larger local-A cases
+  `rows=32/96/129/160`; worst drift stayed `max_abs=0.015625`.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.
