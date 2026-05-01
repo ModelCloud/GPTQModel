@@ -296,6 +296,16 @@ Drift versus native CANN was `max_abs=0.0078125` and
 match native for one multi-row case, but it is still not promoted to the
 validated path until a broader shape sweep and timing comparison pass.
 
+The broader follow-up kept one call per process to avoid the earlier benchmark
+hang pattern. A single-device sweep passed five shapes covering rows `1/4/8`,
+group sizes `32/64/128`, K `384/512/1024`, and N `256/512`. An all-8-NPU sweep
+then passed one shape per NPU, including rows `1/2/3/4/7/8`, group sizes
+`32/64/96/128`, K `384/512/768/896/1024`, and N `256/512`, with worst drift
+`max_abs=0.015625` and `mean_abs=0.0024566650390625`. The first A-tile
+optimization attempt replaced scalar A staging with GM-to-VECOUT `DataCopy`;
+that package compiled, but the runtime smoke timed out before the first result,
+so scalar A staging remains the validated local-A implementation.
+
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
 with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset

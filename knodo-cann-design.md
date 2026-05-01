@@ -522,6 +522,16 @@ Ascend C custom-op bring-up:
   `mean_abs=0.0014190673828125` versus native CANN. This confirms the local A+B
   VecOut handoff can execute correctly for one multi-row shape; promotion still
   requires a broader shape sweep and timing comparison.
+- The follow-up validation used one custom/native call per process. A
+  single-device sweep passed five shapes covering rows `1/4/8`, group sizes
+  `32/64/128`, K `384/512/1024`, and N `256/512`; the all-8-NPU sweep passed
+  rows `1/2/3/4/7/8`, group sizes `32/64/96/128`, K
+  `384/512/768/896/1024`, and N `256/512`. Worst observed drift was
+  `max_abs=0.015625` and `mean_abs=0.0024566650390625`.
+- A direct GM-to-VECOUT `DataCopy` replacement for the scalar A-tile staging
+  loop compiled, but the installed package timed out before the first runtime
+  result. Keep scalar local-A staging as the validated path unless a future
+  probe isolates the required queue/barrier semantics for that copy.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

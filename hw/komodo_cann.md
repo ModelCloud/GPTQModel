@@ -256,6 +256,15 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   `max_abs=0.0078125` and `mean_abs=0.0014190673828125`. This is a proof that
   local A+B VecOut handoff can produce correct multi-row output, not yet enough
   evidence to make it default.
+- The broader local-A validation kept each worker to one custom/native call.
+  NPU0 passed five shapes over rows `1/4/8`, group sizes `32/64/128`, and K up
+  to `1024`; the follow-up all-8-NPU sweep passed rows `1/2/3/4/7/8`, group
+  sizes `32/64/96/128`, K `384/512/768/896/1024`, and N `256/512`. Worst drift
+  was `max_abs=0.015625` and `mean_abs=0.0024566650390625`.
+- Do not replace the local-A scalar activation staging loop with direct
+  GM-to-VECOUT `DataCopy` by default. That variant compiled with CANN 9, but the
+  runtime smoke timed out before emitting a result, so it is not validated for
+  the live Matmul handoff.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.
