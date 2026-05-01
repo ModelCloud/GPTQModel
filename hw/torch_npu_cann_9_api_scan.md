@@ -384,6 +384,10 @@ Validated 2026-05-01 local checks:
   `M=8,K=128,N=8192,base_k=128` probe had `max_abs=0.00390625`, mean drift
   `5.9e-7`. Timing is still effectively flat, around `27.89-27.94 ms` for the
   sampled K512/baseK128 shape.
+- Python staged Cube-consumer plans now pick `base_k=128` automatically for
+  `rows <= 16` and `K % 128 == 0`, with `GPTQMODEL_KOMODO_CANN_BASE_K` as an
+  explicit positive-multiple-of-64 override. Producer-only staged plans remain
+  at `base_k=64`.
 
 Concrete next implementation order:
 

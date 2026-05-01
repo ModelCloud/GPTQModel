@@ -179,6 +179,12 @@ UB tile. Local NPU0 checks stayed finite: symmetric `M=8,K=512,N=8192` with
 `27.89-27.94 ms`), so this is still a structural overlap step rather than the
 final throughput target.
 
+Python-side staged Cube-consumer plans now expose the sampled larger tile by
+default for decode-style shapes: when `rows <= 16` and `K` is divisible by 128,
+`base_k` becomes 128 instead of 64. The original C0-sized tile remains available
+with `GPTQMODEL_KOMODO_CANN_BASE_K=64`, and any override must be a positive
+multiple of 64 that divides `K`.
+
 The next guarded bring-up layer is the Cube consumer scaffold:
 
 ```bash

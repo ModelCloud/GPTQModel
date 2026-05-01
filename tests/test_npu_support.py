@@ -146,6 +146,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
 
     assert staged_plan.staged_dequant is True
+    assert staged_plan.base_k == 64
     assert staged_plan.staging_slots == 2
     assert staged_plan.staging_blocks == min(
         staged_plan.vector_cores,
@@ -175,10 +176,22 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
 
     assert cube_plan.staged_dequant is True
     assert cube_plan.cube_consumer is True
+    assert cube_plan.base_k == 128
     assert cube_plan.cube_workspace_bytes == 16 * 1024 * 1024
     assert cube_plan.staging_workspace_offset == 0
     assert cube_plan.custom_workspace_bytes == cube_plan.staging_workspace_bytes
     assert cube_plan.custom_workspace_bytes < cube_plan.in_features * cube_plan.out_features * 2
+
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_BASE_K", "64")
+    override_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=8192,
+        out_features=1024,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+
+    assert override_plan.base_k == 64
 
 
 def test_komodo_cann_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):

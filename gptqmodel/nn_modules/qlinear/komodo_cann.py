@@ -25,6 +25,7 @@ _KOMODO_CANN_PREFETCH_MIN_BYTES_ENV = "GPTQMODEL_KOMODO_CANN_PREFETCH_MIN_BYTES"
 _KOMODO_CANN_ACTIVE_CORES_ENV = "GPTQMODEL_KOMODO_CANN_ACTIVE_CORES"
 _KOMODO_CANN_SPLIT_K_ENV = "GPTQMODEL_KOMODO_CANN_SPLIT_K"
 _KOMODO_CANN_MIN_SPLIT_K_RATIO_ENV = "GPTQMODEL_KOMODO_CANN_MIN_SPLIT_K_RATIO"
+_KOMODO_CANN_BASE_K_ENV = "GPTQMODEL_KOMODO_CANN_BASE_K"
 _KOMODO_CANN_FUSED_ENV = "GPTQMODEL_KOMODO_CANN_FUSED"
 _KOMODO_CANN_FUSED_REQUIRE_ENV = "GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE"
 _KOMODO_CANN_FUSED_OP_ENV = "GPTQMODEL_KOMODO_CANN_FUSED_OP"
@@ -380,6 +381,24 @@ def _komodo_cann_split_k(rows: int, in_features: int, out_features: int, cube_co
     return max(1, split_k)
 
 
+def _komodo_cann_base_k(rows: int, in_features: int, cube_consumer_requested: bool) -> int:
+    raw = os.getenv(_KOMODO_CANN_BASE_K_ENV)
+    if raw is not None:
+        try:
+            value = int(raw)
+        except ValueError as err:
+            raise RuntimeError(f"{_KOMODO_CANN_BASE_K_ENV} must be an integer; got `{raw}`.") from err
+        if value <= 0 or value % 64 != 0:
+            raise RuntimeError(f"{_KOMODO_CANN_BASE_K_ENV} must be a positive multiple of 64; got `{raw}`.")
+        if in_features % value != 0:
+            raise RuntimeError(f"{_KOMODO_CANN_BASE_K_ENV} must divide K={in_features}; got `{raw}`.")
+        return value
+
+    if cube_consumer_requested and rows <= 16 and in_features % 128 == 0:
+        return 128
+    return 64
+
+
 def _komodo_cann_tiling_plan(
     *,
     rows: int,
@@ -391,9 +410,10 @@ def _komodo_cann_tiling_plan(
 ) -> KomodoCannTilingPlan:
     cube_cores, vector_cores, l2_cache_size = _komodo_cann_device_caps(device)
     split_k = _komodo_cann_split_k(rows, in_features, out_features, cube_cores)
+    cube_consumer_requested = _komodo_cann_staged_dequant_enabled() and _komodo_cann_cube_consumer_enabled()
     base_m = 16 if rows <= 16 else min(128, _align_up(rows, 16))
     base_n = min(256, _align_up(out_features, 16))
-    base_k = 64
+    base_k = _komodo_cann_base_k(rows, in_features, cube_consumer_requested)
     n_tiles = _ceil_div(out_features, base_n)
     split_k_shard_k = _ceil_div(in_features, split_k)
     k_tiles_per_split = _ceil_div(split_k_shard_k, base_k)
@@ -409,7 +429,6 @@ def _komodo_cann_tiling_plan(
     scalar_owner_cap = min(vector_cores, max(1, out_features // 8), 8)
     staging_blocks = min(scalar_owner_cap, max(1, n_tiles * split_k))
     staging_workspace_bytes = staging_tile_bytes * staging_slots * staging_blocks
-    cube_consumer_requested = _komodo_cann_staged_dequant_enabled() and _komodo_cann_cube_consumer_enabled()
     cube_workspace_bytes = _KOMODO_CANN_CUBE_WORKSPACE_BYTES if cube_consumer_requested else 0
     custom_workspace_bytes = staging_workspace_bytes
     dense_dequant_bytes = in_features * out_features * 2
@@ -591,6 +610,7 @@ class _KomodoCannPlanMixin:
             os.getenv(_KOMODO_CANN_ACTIVE_CORES_ENV),
             os.getenv(_KOMODO_CANN_SPLIT_K_ENV),
             os.getenv(_KOMODO_CANN_MIN_SPLIT_K_RATIO_ENV),
+            os.getenv(_KOMODO_CANN_BASE_K_ENV),
             os.getenv(_KOMODO_CANN_FUSED_ENV),
             os.getenv(_KOMODO_CANN_FUSED_REQUIRE_ENV),
             os.getenv(_KOMODO_CANN_FUSED_OP_ENV),
