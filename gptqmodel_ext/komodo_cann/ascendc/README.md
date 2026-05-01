@@ -79,7 +79,9 @@ AIV producer writes staged tiles at user-workspace offset `0`, avoiding
 collision with CANN's message queues and UB map. The user tile ring remains
 bounded by the same "smaller than dense dequant" check. The non-mixed
 staged+Cube path is the validated runtime baseline; mixed AIC/AIV launch remains
-experimental and is kept behind `--experimental-mixed-launch`.
+experimental and is kept behind `--experimental-mixed-launch`. Mixed Cube
+registration must call `clearWorkspace(workspace)` before `REGIST_MATMUL_OBJ` so
+the vector-side KFC client sees `WORKSPACE_SYNC_ID`.
 
 To isolate MIX launch from CANN Matmul/KFC registration, build:
 
@@ -93,6 +95,11 @@ python scripts/build_komodo_cann_ascendc.py \
 This keeps the visible output on the AIV scalar path and returns immediately on
 AIC. It is not the target fused kernel; it is the validated scheduler baseline
 for later AIC/Cube handoff work.
+
+The full mixed Cube-consumer build now clears and signals the KFC workspace, then
+registers the Matmul object on both AIC and AIV. It still keeps visible output on
+the AIV scalar baseline; the next target is consuming staged dequant tiles through
+Cube instead of only registering the consumer.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

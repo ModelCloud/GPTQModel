@@ -473,9 +473,18 @@ Ascend C custom-op bring-up:
   viable.
 - The full mixed Cube-consumer package now calls `REGIST_MATMUL_OBJ` from both
   AIC and AIV sides because CANN's macro creates both the KFC server and client.
-  It still times out after torch-ops JIT extension load, so the remaining
-  blocker is Matmul/KFC server-client lifecycle rather than basic MIX launch.
-  Runtime use stays on the non-mixed staged+Cube baseline until this is resolved.
+  The runtime hang was the vector-side macro waiting for `WORKSPACE_SYNC_ID`;
+  explicitly calling `clearWorkspace(workspace)` in the mixed Cube path lets AIC
+  clear the KFC workspace and notify that event before registration. An 8-NPU
+  smoke with `GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER=1` now completes on every
+  device with offset `0`, cube system workspace `16777216`, and custom user
+  workspace `524288`.
+- The full mixed path is still a registration/runtime topology milestone. The
+  visible output remains the AIV scalar baseline while the AIC side registers
+  the Cube consumer and exits through the KFC lifecycle. The next target is to
+  replace the scalar visible-output loop with actual AIV-produced staged tiles
+  consumed by Cube, then wire the Cube result back without full FP16 weight
+  materialization.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

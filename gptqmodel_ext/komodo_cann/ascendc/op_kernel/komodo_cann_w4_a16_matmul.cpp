@@ -1285,6 +1285,7 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
         return;
     }
     AscendC::SetSysWorkspaceForce(workspace);
+    AscendC::clearWorkspace(reinterpret_cast<__gm__ uint8_t*>(workspace));
     TPipe cube_pipe;
     KomodoCannW4A16CubeConsumerProbe cube_probe;
     TCubeTiling cube_tiling = MakeCubeConsumerTiling(&tiling_data);
