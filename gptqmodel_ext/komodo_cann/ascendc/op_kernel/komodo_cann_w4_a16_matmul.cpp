@@ -303,8 +303,8 @@ public:
 #if defined(KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF)
     __aicore__ inline bool TryProcessSingleKTileTscmHandoff(KomodoCannW4A16CubeConsumerProbe& cube_probe)
     {
-        if (!cube_probe.TscmReady() || tiling_->kernel_mode != kKernelModeStagedDequant || tiling_->has_bias != 0 ||
-            tiling_->base_k == 0 || tiling_->base_n == 0 || tiling_->out_features % tiling_->base_n != 0) {
+        if (!cube_probe.TscmReady() || tiling_->kernel_mode != kKernelModeStagedDequant || tiling_->base_k == 0 ||
+            tiling_->base_n == 0 || tiling_->out_features % tiling_->base_n != 0) {
             return false;
         }
 #ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK
@@ -377,6 +377,7 @@ public:
                         cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features + k_begin]);
                         cube_probe.mm.SetTensorB(b_tscm_tile);
                         cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
+                        ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
                         cube_probe.mm.IterateAll(y_gm_[m_begin * out_features + n_begin], k_tile != 0);
                         if (m_tile == 0 && has_next_k_tile) {
                             FillDirectBTileKTile(
@@ -420,6 +421,7 @@ public:
                         cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features + k_begin]);
                         cube_probe.mm.SetTensorB(b_tscm_tile);
                         cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
+                        ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
                         cube_probe.mm.IterateAll(y_gm_[m_begin * out_features + n_begin], k_tile != 0);
                         cube_probe.mm.WaitIterateAll();
                     }
@@ -462,6 +464,7 @@ public:
                 cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features]);
                 cube_probe.mm.SetTensorB(b_tscm_tile);
                 cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
+                ConfigureCubeBiasForKTile(cube_probe, 0, n_begin);
                 cube_probe.mm.IterateAll(y_gm_[m_begin * out_features + n_begin], false);
                 cube_probe.mm.WaitIterateAll();
             }
@@ -472,6 +475,23 @@ public:
 #endif
 
 private:
+#if defined(KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF)
+    __aicore__ inline void ConfigureCubeBiasForKTile(
+        KomodoCannW4A16CubeConsumerProbe& cube_probe,
+        uint32_t k_tile,
+        uint32_t n_begin)
+    {
+        if (tiling_->has_bias == 0) {
+            return;
+        }
+        if (k_tile == 0) {
+            cube_probe.mm.SetBias(bias_gm_[n_begin]);
+        } else {
+            cube_probe.mm.ClearBias();
+        }
+    }
+#endif
+
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
 #ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
 #ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK

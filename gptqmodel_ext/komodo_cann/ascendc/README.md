@@ -118,11 +118,12 @@ python scripts/build_komodo_cann_ascendc.py \
 ```
 
 This implies mixed launch and TSCM consumer. It only handles the deliberately
-safe scheduler subset where the request has one full K tile, no bias, and full
-`base_n` output tiles; unsupported shapes fall back to the scalar visible-output
-path. The purpose is to validate the live AIV staged tile -> TSCM/NZ -> AIC
-Matmul handoff before broadening it to multi-K pipelining and direct dequant
-into TSCM.
+safe scheduler subset where the request has full `base_n` output tiles and the K
+dimension is covered by full `base_k` tiles; unsupported shapes fall back to the
+scalar visible-output path. Fused bias is handled in Cube with CANN's split-K
+pattern: `SetBias` on the first K tile and `ClearBias` on accumulating K tiles.
+The purpose is to validate the live AIV staged tile -> TSCM/NZ -> AIC Matmul
+handoff before broadening it to deeper overlap and direct dequant into TSCM.
 
 Local validation on 2026-05-01 built this path with CANN 9.0.0-beta.2, installed
 it into `/tmp/komodo_cann_tscm_runtime_install`, and ran
@@ -178,6 +179,16 @@ UB tile. Local NPU0 checks stayed finite: symmetric `M=8,K=512,N=8192` with
 `5.9e-7`. Timing remains close to noise (`K=512,base_k=128` sampled around
 `27.89-27.94 ms`), so this is still a structural overlap step rather than the
 final throughput target.
+
+The direct TSCM runtime path now supports fused FP16 bias. It uses CANN's
+standard split-K Matmul pattern: `SetBias` is emitted before the first K tile
+for each output tile, and `ClearBias` is emitted before later accumulating K
+tiles. Local NPU0 validation on 2026-05-01 for
+`M=8,K=128,N=8192,group_size=32,base_k=128` stayed finite with nonzero offsets
+and bias (`max_abs=0.00012207`, `mean_abs=0.00000381`, `mean_ms=7.897985`).
+The paired no-bias nonzero-offset probe stayed finite with `max_abs=0.00003052`
+and `mean_ms=7.899011`. A zero-offset group-32 bias probe matched within
+`max_abs=0.00006104`.
 
 Python-side staged Cube-consumer plans now expose the sampled larger tile by
 default for decode-style shapes: when `rows <= 16` and `K` is divisible by 128,

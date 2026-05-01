@@ -163,11 +163,13 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   staged GM-to-TSCM tile load plus a `SetTensorB(LocalTensor<half>)` probe. This
   is the correct structural route for the AIV dequant tile to AIC Cube handoff.
 - Added `--experimental-tscm-runtime-handoff` as a narrow mixed-launch runtime
-  probe. It handles the conservative one-full-K-tile/no-bias/full-N-tile subset
-  by staging the B tile, copying it to TSCM/NZ, and invoking Cube Matmul for the
-  visible output; unsupported shapes fall back to the scalar path. The broad
-  target remains direct dequant into the TSCM tile with multi-K producer/consumer
-  scheduling.
+  probe. It handles the conservative full-N-tile/full-`base_k` K-tile subset by
+  staging the B tile, copying it to TSCM/NZ, and invoking Cube Matmul for the
+  visible output; unsupported shapes fall back to the scalar path. Fused bias is
+  supported with the same split-K pattern used by CANN Matmul kernels:
+  `SetBias` on the first K tile and `ClearBias` on later accumulating K tiles.
+  The broad target remains direct dequant into the TSCM tile with multi-K
+  producer/consumer scheduling.
 - Validated the runtime probe on NPU0 for `M=8,K=64,N=8192,group_size=32`:
   finite output, `max_abs=0.0` versus CPU reference. The quick A/B timing was
   effectively flat (`3.646628 ms` TSCM runtime versus `3.651168 ms` non-runtime
@@ -195,6 +197,14 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   `M=8,K=128,N=8192,base_k=128` probe had `max_abs=0.00390625` and mean drift
   `5.9e-7`. Timings remained close to run noise, with `K=512,base_k=128` around
   `27.89-27.94 ms`.
+- Added fused-bias support to the direct TSCM runtime path. The kernel now uses
+  CANN Matmul's split-K bias convention: `SetBias` before the first K tile for
+  each output tile and `ClearBias` before later accumulating K tiles. NPU0
+  validation for `M=8,K=128,N=8192,group_size=32,base_k=128` passed with
+  nonzero offsets and FP16 bias (`max_abs=0.00012207`,
+  `mean_abs=0.00000381`, `mean_ms=7.897985`); the paired no-bias probe was
+  finite with `max_abs=0.00003052`, and a zero-offset group-32 bias probe stayed
+  within `max_abs=0.00006104`.
 - Fixed the scalar fused path's INT4 signed-nibble decode from xor-based
   sign extension to an explicit `raw < 8 ? raw : raw - 16` decode. The previous
   expression miscompiled lane 0 on the local CANN 9 package and produced
