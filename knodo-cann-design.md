@@ -536,6 +536,11 @@ Ascend C custom-op bring-up:
   the first three NPU0 shapes, then timed out on
   `M=4,K=512,N=256,group_size=128`. Do not enable that branch without a smaller
   device-side repro; the generic offset-aware fill remains the stable path.
+- Added `scripts/validate_komodo_cann_ascendc_raw.py` to make raw Ascend C
+  package validation reproducible. The first run against the local-A install
+  launched one worker per NPU across all eight devices and reproduced the manual
+  sweep: all eight cases passed with worst drift `max_abs=0.015625` and
+  `mean_abs=0.0024566650390625`.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

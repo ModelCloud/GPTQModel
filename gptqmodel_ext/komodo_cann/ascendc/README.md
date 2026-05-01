@@ -311,6 +311,21 @@ the first three NPU0 shapes, then timed out on the fourth shape
 now; the runtime appears sensitive to this code shape even when the math is
 equivalent.
 
+The reusable raw-op harness for this style of package validation is:
+
+```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+python scripts/validate_komodo_cann_ascendc_raw.py \
+  --bridge-lib /tmp/gptqmodel_komodo_cann_ascendc_vecout_row/dae610bed1a54586/gptqmodel_komodo_cann_ascendc_ops.so \
+  --opp-install /tmp/komodo_cann_vecout_local_a_install \
+  --devices 0,1,2,3,4,5,6,7
+```
+
+It launches one process per listed NPU, applies the custom OPP env, runs one
+custom/native comparison per worker, and emits a JSON summary. The first harness
+run reproduced the manual 8-NPU sweep with all eight cases passing and the same
+worst drift: `max_abs=0.015625`, `mean_abs=0.0024566650390625`.
+
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
 with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset

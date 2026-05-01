@@ -279,6 +279,13 @@ back to older versioned paths. This avoids silently building the Komodo-CANN V3
 or Ascend C bridge against the stale CANN 8.5.1 tree when a stripped shell omits
 the normal Ascend environment variables.
 
+Use `scripts/validate_komodo_cann_ascendc_raw.py` for raw Ascend C package
+smokes. It takes `--bridge-lib`, `--opp-install`, and `--devices`, launches one
+worker per device, and keeps each worker to one custom/native call. The first
+run against `/tmp/komodo_cann_vecout_local_a_install` reproduced the manual
+8-NPU local-A sweep with all eight cases passing and worst drift
+`max_abs=0.015625`, `mean_abs=0.0024566650390625`.
+
 ## aclnn V3 Probe
 
 `scripts/probe_komodo_cann_v3.py` builds
