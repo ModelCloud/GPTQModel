@@ -289,6 +289,10 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   planner-shaped warmed timing sweep improved from `4.369839 ms` mean to
   `4.066544 ms` mean. The largest gains were the medium/larger local-A cases
   `rows=32/96/129/160`; worst drift stayed `max_abs=0.015625`.
+- A follow-up single-call 2D `DataCopyParams` activation copy was correct but
+  slower than the per-row `DataCopy` gate: the legacy all-8-NPU mean regressed to
+  `4.808621 ms`, and the planner-shaped mean was `4.145872 ms`. Keep the row-wise
+  copy path for now.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.

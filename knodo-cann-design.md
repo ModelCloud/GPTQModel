@@ -578,6 +578,10 @@ Ascend C custom-op bring-up:
   tiny decode tiles; the shape-gated variant passed both all-8-NPU sweeps and
   improved the planner-shaped warmed mean from `4.369839 ms` to `4.066544 ms`
   while preserving worst drift `max_abs=0.015625`.
+- A single 2D `DataCopyParams` activation copy was also tested. It was accurate,
+  but slower than the per-row `DataCopy` gate on both all-8-NPU sweeps
+  (`4.808621 ms` legacy mean, `4.145872 ms` planner-shaped mean), so the kernel
+  keeps row-wise copies for the gated path.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows
