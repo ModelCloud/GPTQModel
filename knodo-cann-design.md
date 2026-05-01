@@ -604,6 +604,15 @@ Ascend C custom-op bring-up:
   `DataCopy` timed out on the legacy `rows=24,K=768,N=512,group_size=96` case,
   and a broader `base_m >= 32 || rows >= 31` local-A gate later timed out on
   `rows=16`. Keep the validated `rows >= 32` local-A copy gate.
+- The next accepted fusion over that packed-B stage handles two adjacent packed
+  output columns per zero-offset inner loop. Each K iteration reads two staged
+  int32 packed words, then fills 16 local FP16 B lanes before advancing. Legacy
+  all-8-NPU warmed mean improved from `4.052616 ms` to `3.749311 ms`; the
+  planner-shaped mean improved from `3.651770 ms` to `3.368754 ms`. Accuracy
+  stayed at the existing cap, `max_abs=0.015625`.
+- A strided 2D `DataCopyParams` version of the packed-B stage was rejected. It
+  compiled and passed the legacy all-8-NPU sweep, but slowed the mean to
+  `4.081596 ms`, so the row-wise packed INT4 copy loop remains the faster path.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows

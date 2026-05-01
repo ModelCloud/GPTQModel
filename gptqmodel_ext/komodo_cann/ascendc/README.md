@@ -377,6 +377,14 @@ planner-shaped sweep improved to `3.651770 ms` mean with the same
 `max_abs=0.015625` drift cap. Rejected adjacent probes: `base_k=256` timed out
 as a full planner sweep, and lower local-A `DataCopy` gates below the stable
 `rows >= 32` predicate caused raw-worker timeouts.
+The packed-B path then gained a zero-offset two-packed-column inner loop. It
+loads two adjacent packed words from the staged INT4 tile per K row and fills 16
+local FP16 B lanes before moving to the next packed-column pair. This reduces
+loop overhead without changing the dequantized-weight residency contract.
+All-8-NPU warmed means improved to `3.749311 ms` on the legacy sweep and
+`3.368754 ms` on the planner-shaped sweep, still at `max_abs=0.015625`. A
+strided 2D `DataCopyParams` version of the packed-B stage was accurate but
+slower (`4.081596 ms` legacy mean), so row-wise packed copies remain in use.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

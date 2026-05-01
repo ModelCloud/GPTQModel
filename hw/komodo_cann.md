@@ -308,6 +308,12 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   all-8-NPU warmed sweep improved to `3.651770 ms`; worst drift stayed
   `max_abs=0.015625`. Do not promote `base_k=256` yet: the full planner probe
   timed out before worker output.
+- The next accepted B-dequant fusion processes two adjacent packed columns per
+  staged INT4 row in the zero-offset path, filling 16 local FP16 B lanes per
+  inner-loop iteration. This reduced warmed means to `3.749311 ms` on the
+  legacy sweep and `3.368754 ms` on the planner-shaped sweep with unchanged
+  `max_abs=0.015625`. A strided 2D packed-B `DataCopyParams` probe was accurate
+  but slower (`4.081596 ms` legacy mean), so keep row-wise packed copies.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.
