@@ -416,6 +416,10 @@ regressed the legacy mean to `3.630378 ms`, so it stayed rejected. On the CANN
 sweep and improved mean timing from `3.305584 ms` to `3.261846 ms`; the legacy
 all-8 sweep also passed and moved from `3.645413 ms` to `3.578884 ms`. Worst
 drift remained `max_abs=0.015625`.
+Narrowing the packed-B GM-to-VECCALC copy wait from `PIPE_ALL` to `PIPE_MTE2`
+then passed the same all-8 sweeps and moved the planner mean to `3.256914 ms`
+and the legacy mean to `3.578612 ms`, still with worst drift
+`max_abs=0.015625`.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

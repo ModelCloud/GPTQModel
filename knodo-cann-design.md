@@ -647,6 +647,11 @@ Ascend C custom-op bring-up:
   rejected. The accepted gate improved the all-8 planner sweep from
   `3.305584 ms` to `3.261846 ms`; the legacy all-8 sweep improved from
   `3.645413 ms` to `3.578884 ms`. Worst drift stayed `max_abs=0.015625`.
+- The packed-B GM-to-VECCALC copy wait before local decode now uses
+  `PIPE_MTE2` instead of `PIPE_ALL`. This is the only engine dependency needed
+  before reading the packed UB tile, and it improved the all-8 planner mean to
+  `3.256914 ms` while keeping the legacy mean flat at `3.578612 ms`; worst drift
+  stayed `max_abs=0.015625`.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows

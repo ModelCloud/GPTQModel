@@ -778,7 +778,8 @@ private:
                 packed_weight_gm_[k * packed_stride + packed_begin],
                 packed_cols);
         }
-        PipeBarrier<PIPE_ALL>();
+        // Only the packed GM-to-VECCALC copy must complete before local decode.
+        PipeBarrier<PIPE_MTE2>();
         FillDirectBTileKTileFromPackedValues(
             b_tile, packed_tile, k_tile, n_begin, packed_begin, packed_end, packed_cols, zero_offsets);
     }
