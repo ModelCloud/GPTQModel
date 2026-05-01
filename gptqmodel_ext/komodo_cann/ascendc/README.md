@@ -390,6 +390,11 @@ The local-B handoff barrier after staged dequant is now narrowed from
 pipe barrier before vector reads. This was neutral on the legacy sweep
 (`3.749492 ms` mean) but improved the planner-shaped sweep to `3.364377 ms`
 with unchanged `max_abs=0.015625`.
+The zero-offset staged-B path now also processes four adjacent packed columns per
+inner-loop iteration when a full quartet is available, falling back to the
+validated pair/single paths for tails and nonzero-offset shapes. That reduced
+the all-8-NPU warmed means to `3.645413 ms` on the legacy sweep and
+`3.305584 ms` on the planner-shaped sweep with the same `max_abs=0.015625`.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

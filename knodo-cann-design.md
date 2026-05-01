@@ -618,6 +618,11 @@ Ascend C custom-op bring-up:
   `PIPE_ALL` before vector decode reads. The legacy all-8-NPU warmed sweep was
   neutral at `3.749492 ms`, and the planner-shaped sweep improved from
   `3.368754 ms` to `3.364377 ms`; worst drift stayed `max_abs=0.015625`.
+- The staged-B zero-offset decode loop now has a four-packed-column fast path
+  before the accepted pair/single fallbacks. This keeps the same UB-resident
+  dequant contract and reduces loop overhead for full-width tiles: legacy
+  all-8-NPU warmed mean improved to `3.645413 ms`, and the planner-shaped mean
+  improved to `3.305584 ms`, still with `max_abs=0.015625`.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows

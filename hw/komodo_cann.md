@@ -319,6 +319,11 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   before vector decode reads. This was effectively neutral on the legacy sweep
   (`3.749492 ms`) and improved the planner-shaped sweep to `3.364377 ms` with
   unchanged `max_abs=0.015625`.
+- The zero-offset staged-B inner loop now unrolls to four adjacent packed
+  columns when available, then falls back to the pair/single paths for tails and
+  nonzero-offset shapes. This improved warmed means to `3.645413 ms` on the
+  legacy sweep and `3.305584 ms` on the planner-shaped sweep with unchanged
+  `max_abs=0.015625`.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.

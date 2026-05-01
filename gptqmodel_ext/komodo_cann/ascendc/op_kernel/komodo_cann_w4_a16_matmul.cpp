@@ -805,6 +805,118 @@ private:
             const uint32_t group_k_begin = group_k_begin_candidate < k_begin ? k_begin : group_k_begin_candidate;
             const uint32_t group_k_end = group_k_end_candidate > k_end ? k_end : group_k_end_candidate;
             for (uint32_t packed_col = packed_begin; packed_col < packed_end;) {
+                if (zero_offsets != 0 && packed_col + 3 < packed_end) {
+                    const uint32_t n_base0 = packed_col << 3;
+                    const uint32_t n_base1 = n_base0 + 8;
+                    const uint32_t n_base2 = n_base1 + 8;
+                    const uint32_t n_base3 = n_base2 + 8;
+                    const uint32_t scale_base0 = group * tiling_->out_features + n_base0;
+                    const uint32_t scale_base1 = scale_base0 + 8;
+                    const uint32_t scale_base2 = scale_base1 + 8;
+                    const uint32_t scale_base3 = scale_base2 + 8;
+                    const float scale00 = static_cast<float>(scales_gm_.GetValue(scale_base0));
+                    const float scale01 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 1));
+                    const float scale02 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 2));
+                    const float scale03 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 3));
+                    const float scale04 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 4));
+                    const float scale05 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 5));
+                    const float scale06 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 6));
+                    const float scale07 = static_cast<float>(scales_gm_.GetValue(scale_base0 + 7));
+                    const float scale10 = static_cast<float>(scales_gm_.GetValue(scale_base1));
+                    const float scale11 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 1));
+                    const float scale12 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 2));
+                    const float scale13 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 3));
+                    const float scale14 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 4));
+                    const float scale15 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 5));
+                    const float scale16 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 6));
+                    const float scale17 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 7));
+                    const float scale20 = static_cast<float>(scales_gm_.GetValue(scale_base2));
+                    const float scale21 = static_cast<float>(scales_gm_.GetValue(scale_base2 + 1));
+                    const float scale22 = static_cast<float>(scales_gm_.GetValue(scale_base2 + 2));
+                    const float scale23 = static_cast<float>(scales_gm_.GetValue(scale_base2 + 3));
+                    const float scale24 = static_cast<float>(scales_gm_.GetValue(scale_base2 + 4));
+                    const float scale25 = static_cast<float>(scales_gm_.GetValue(scale_base2 + 5));
+                    const float scale26 = static_cast<float>(scales_gm_.GetValue(scale_base2 + 6));
+                    const float scale27 = static_cast<float>(scales_gm_.GetValue(scale_base2 + 7));
+                    const float scale30 = static_cast<float>(scales_gm_.GetValue(scale_base3));
+                    const float scale31 = static_cast<float>(scales_gm_.GetValue(scale_base3 + 1));
+                    const float scale32 = static_cast<float>(scales_gm_.GetValue(scale_base3 + 2));
+                    const float scale33 = static_cast<float>(scales_gm_.GetValue(scale_base3 + 3));
+                    const float scale34 = static_cast<float>(scales_gm_.GetValue(scale_base3 + 4));
+                    const float scale35 = static_cast<float>(scales_gm_.GetValue(scale_base3 + 5));
+                    const float scale36 = static_cast<float>(scales_gm_.GetValue(scale_base3 + 6));
+                    const float scale37 = static_cast<float>(scales_gm_.GetValue(scale_base3 + 7));
+                    const uint32_t packed_offset0 = packed_col - packed_begin;
+                    const uint32_t packed_offset1 = packed_offset0 + 1;
+                    const uint32_t packed_offset2 = packed_offset1 + 1;
+                    const uint32_t packed_offset3 = packed_offset2 + 1;
+                    const uint32_t tile_n0 = n_base0 - n_begin;
+                    const uint32_t tile_n1 = n_base1 - n_begin;
+                    const uint32_t tile_n2 = n_base2 - n_begin;
+                    const uint32_t tile_n3 = n_base3 - n_begin;
+                    for (uint32_t k = group_k_begin; k < group_k_end; ++k) {
+                        const uint32_t tile_k = k - k_begin;
+                        const uint32_t row_offset = tile_k * packed_cols;
+                        const uint32_t word0 =
+                            static_cast<uint32_t>(packed_tile.GetValue(row_offset + packed_offset0));
+                        const uint32_t word1 =
+                            static_cast<uint32_t>(packed_tile.GetValue(row_offset + packed_offset1));
+                        const uint32_t word2 =
+                            static_cast<uint32_t>(packed_tile.GetValue(row_offset + packed_offset2));
+                        const uint32_t word3 =
+                            static_cast<uint32_t>(packed_tile.GetValue(row_offset + packed_offset3));
+                        FillDirectBTileWordValuesNoOffset(
+                            b_tile,
+                            tile_k * base_n + tile_n0,
+                            word0,
+                            scale00,
+                            scale01,
+                            scale02,
+                            scale03,
+                            scale04,
+                            scale05,
+                            scale06,
+                            scale07);
+                        FillDirectBTileWordValuesNoOffset(
+                            b_tile,
+                            tile_k * base_n + tile_n1,
+                            word1,
+                            scale10,
+                            scale11,
+                            scale12,
+                            scale13,
+                            scale14,
+                            scale15,
+                            scale16,
+                            scale17);
+                        FillDirectBTileWordValuesNoOffset(
+                            b_tile,
+                            tile_k * base_n + tile_n2,
+                            word2,
+                            scale20,
+                            scale21,
+                            scale22,
+                            scale23,
+                            scale24,
+                            scale25,
+                            scale26,
+                            scale27);
+                        FillDirectBTileWordValuesNoOffset(
+                            b_tile,
+                            tile_k * base_n + tile_n3,
+                            word3,
+                            scale30,
+                            scale31,
+                            scale32,
+                            scale33,
+                            scale34,
+                            scale35,
+                            scale36,
+                            scale37);
+                    }
+                    packed_col += 4;
+                    continue;
+                }
                 if (zero_offsets != 0 && packed_col + 1 < packed_end) {
                     const uint32_t n_base0 = packed_col << 3;
                     const uint32_t n_base1 = n_base0 + 8;
