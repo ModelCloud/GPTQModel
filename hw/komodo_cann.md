@@ -285,6 +285,9 @@ worker per device, and keeps each worker to one custom/native call. The first
 run against `/tmp/komodo_cann_vecout_local_a_install` reproduced the manual
 8-NPU local-A sweep with all eight cases passing and worst drift
 `max_abs=0.015625`, `mean_abs=0.0024566650390625`.
+The same harness passed with positive `base_k=128`, so the module planner can
+mark all symmetric GPTQ fused calls as zero-offset while retaining a validated
+positive-`base_k` fallback shape.
 
 ## aclnn V3 Probe
 

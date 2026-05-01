@@ -541,6 +541,11 @@ Ascend C custom-op bring-up:
   launched one worker per NPU across all eight devices and reproduced the manual
   sweep: all eight cases passed with worst drift `max_abs=0.015625` and
   `mean_abs=0.0024566650390625`.
+- The same harness also passed all eight local-A cases with positive
+  `base_k=128`. With both side-band forms validated, the GPTQ Komodo-CANN
+  planner now marks every symmetric fused call as zero-offset, including small
+  `M<8` calls, while keeping the generic direct B fill rather than the rejected
+  zero-offset-only branch.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

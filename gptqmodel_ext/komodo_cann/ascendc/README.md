@@ -325,6 +325,9 @@ It launches one process per listed NPU, applies the custom OPP env, runs one
 custom/native comparison per worker, and emits a JSON summary. The first harness
 run reproduced the manual 8-NPU sweep with all eight cases passing and the same
 worst drift: `max_abs=0.015625`, `mean_abs=0.0024566650390625`.
+The same harness also passed all eight cases with positive `base_k=128`, which
+covers the offset-aware call shape used when the module does not encode the
+zero-offset side band.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
@@ -363,6 +366,11 @@ from `3.214 ms` to `2.964 ms` for `M=8,K=256,N=256,group_size=32`, from
 `6.353 ms` to `5.833 ms` for `M=16,K=256,N=256,group_size=32`, and from
 `50.033 ms` to `45.781 ms` for `M=8,K=1024,N=1024,group_size=32`; M1/M2/M4
 nonzero-offset paths stayed within timing noise.
+For the fused Ascend C path, the planner now marks every symmetric GPTQ call as
+zero-offset, not only `M>=8`. That broader planner side band is validated for
+the local-A VecOut package by the raw 8-NPU sweeps above; it uses the generic
+offset-aware B fill with `OffsetValue(..., zero_offsets)` rather than the
+rejected zero-offset-only specialization.
 With capped 8-owner AIV packed-column parallelism, the same no-dense baseline
 improved by about 85-87% in an 8-NPU raw-op A/B sweep: `M=1,K=256,N=256`
 from `0.713 ms` to `0.099 ms`, `M=8,K=256,N=256` from `2.895 ms` to

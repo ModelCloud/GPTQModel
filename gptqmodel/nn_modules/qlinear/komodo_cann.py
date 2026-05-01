@@ -698,7 +698,7 @@ class KomodoCannLinear(_KomodoCannPlanMixin, KomodoLinear):
         plan = self._cann_plan(
             x_flat,
             native_group_size,
-            zero_offsets=bool(self.sym) and x_flat.shape[0] >= 8,
+            zero_offsets=bool(self.sym),
         )
         if input_perm is not None:
             x_flat = x_flat.index_select(1, input_perm)
