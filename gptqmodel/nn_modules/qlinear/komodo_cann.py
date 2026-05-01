@@ -33,7 +33,8 @@ _KOMODO_CANN_V3_ENV = "GPTQMODEL_KOMODO_CANN_V3"
 _KOMODO_CANN_INNER_PRECISE_ENV = "GPTQMODEL_KOMODO_CANN_INNER_PRECISE"
 _KOMODO_CANN_STAGED_DEQUANT_ENV = "GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT"
 _KOMODO_CANN_CUBE_CONSUMER_ENV = "GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER"
-_KOMODO_CANN_CUBE_WORKSPACE_BYTES = 12 * 1024 * 1024
+# 910B CANN reserves this system workspace before the user workspace returned by GetUserWorkspace().
+_KOMODO_CANN_CUBE_WORKSPACE_BYTES = 16 * 1024 * 1024
 _NPU_PREFETCH_OP_UNSET = object()
 _NPU_PREFETCH_OP = _NPU_PREFETCH_OP_UNSET
 _FUSED_OP_UNSET = object()
@@ -408,12 +409,9 @@ def _komodo_cann_tiling_plan(
     scalar_owner_cap = min(vector_cores, max(1, out_features // 8), 8)
     staging_blocks = min(scalar_owner_cap, max(1, n_tiles * split_k))
     staging_workspace_bytes = staging_tile_bytes * staging_slots * staging_blocks
-    cube_workspace_bytes = (
-        _KOMODO_CANN_CUBE_WORKSPACE_BYTES
-        if _komodo_cann_staged_dequant_enabled() and _komodo_cann_cube_consumer_enabled()
-        else 0
-    )
-    custom_workspace_bytes = staging_workspace_bytes + cube_workspace_bytes
+    cube_consumer_requested = _komodo_cann_staged_dequant_enabled() and _komodo_cann_cube_consumer_enabled()
+    cube_workspace_bytes = _KOMODO_CANN_CUBE_WORKSPACE_BYTES if cube_consumer_requested else 0
+    custom_workspace_bytes = staging_workspace_bytes
     dense_dequant_bytes = in_features * out_features * 2
     staged_dequant = (
         _komodo_cann_staged_dequant_enabled()
@@ -427,8 +425,8 @@ def _komodo_cann_tiling_plan(
         staging_workspace_bytes = 0
         cube_workspace_bytes = 0
         custom_workspace_bytes = 0
-    staging_workspace_offset = cube_workspace_bytes
-    cube_consumer = cube_workspace_bytes > 0
+    staging_workspace_offset = 0
+    cube_consumer = bool(cube_consumer_requested and staged_dequant)
     active_cores = min(cube_cores, max(1, n_tiles * split_k))
     prefetch_enabled = _komodo_cann_prefetch_enabled()
     prefetch_min_bytes = _komodo_cann_prefetch_min_bytes()

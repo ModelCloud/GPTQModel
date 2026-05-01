@@ -175,11 +175,9 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
 
     assert cube_plan.staged_dequant is True
     assert cube_plan.cube_consumer is True
-    assert cube_plan.cube_workspace_bytes == 12 * 1024 * 1024
-    assert cube_plan.staging_workspace_offset == cube_plan.cube_workspace_bytes
-    assert cube_plan.custom_workspace_bytes == (
-        cube_plan.cube_workspace_bytes + cube_plan.staging_workspace_bytes
-    )
+    assert cube_plan.cube_workspace_bytes == 16 * 1024 * 1024
+    assert cube_plan.staging_workspace_offset == 0
+    assert cube_plan.custom_workspace_bytes == cube_plan.staging_workspace_bytes
     assert cube_plan.custom_workspace_bytes < cube_plan.in_features * cube_plan.out_features * 2
 
 

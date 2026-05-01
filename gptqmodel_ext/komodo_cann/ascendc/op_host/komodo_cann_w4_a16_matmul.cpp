@@ -19,7 +19,8 @@ constexpr uint32_t kKernelModeScalar = 0;
 constexpr uint32_t kKernelModeStagedDequant = 1;
 constexpr uint32_t kStagingSlots = 2;
 constexpr uint64_t kStagingAlignmentBytes = 512;
-constexpr uint64_t kCubeSysWorkspaceBytes = 12ULL * 1024ULL * 1024ULL;
+// 910B CANN reserves this system workspace before the user workspace returned by GetUserWorkspace().
+constexpr uint64_t kCubeSysWorkspaceBytes = 16ULL * 1024ULL * 1024ULL;
 
 uint32_t AttrAsU32(const gert::RuntimeAttrs* attrs, size_t index, uint32_t fallback)
 {
@@ -199,7 +200,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
         const uint64_t staging_workspace_bytes = tile_bytes * static_cast<uint64_t>(kStagingSlots) *
             static_cast<uint64_t>(staging_blocks);
         const uint64_t cube_workspace_bytes = cube_workspace_requested != 0 ? kCubeSysWorkspaceBytes : 0;
-        const uint64_t workspace_bytes = cube_workspace_bytes + staging_workspace_bytes;
+        const uint64_t workspace_bytes = staging_workspace_bytes;
         const uint64_t dense_dequant_bytes =
             static_cast<uint64_t>(k64) * static_cast<uint64_t>(n64) * sizeof(uint16_t);
         if (workspace_bytes > 0 && workspace_bytes < dense_dequant_bytes) {
@@ -208,7 +209,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
             tiling.set_staging_slots(kStagingSlots);
             tiling.set_staging_tile_bytes(ClampU64ToU32(tile_bytes));
             tiling.set_staging_workspace_bytes(ClampU64ToU32(staging_workspace_bytes));
-            tiling.set_staging_workspace_offset(ClampU64ToU32(cube_workspace_bytes));
+            tiling.set_staging_workspace_offset(0);
             tiling.set_cube_workspace_bytes(ClampU64ToU32(cube_workspace_bytes));
             size_t* workspaces = context->GetWorkspaceSizes(1);
             if (workspaces == nullptr) {

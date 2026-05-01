@@ -440,18 +440,20 @@ Ascend C custom-op bring-up:
 - The next workspace-layout pass separates CANN Matmul/KFC system workspace
   from the staged FP16 tile ring. `GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER=1`
   now marks the fused call with a negative `split_k` attribute. The host tiler
-  decodes the absolute Split-K value, reserves a leading 12 MiB KFC workspace
-  region, records `staging_workspace_offset`, and only enables the staged path
-  when `cube_workspace + staged_tiles` is still smaller than full dense
-  dequantization. This prevents the AIV dequant producer from overwriting
-  CANN's message queues once the Cube consumer starts running.
-- Validation for the workspace split built both `--experimental-staged-dequant`
-  and `--experimental-staged-dequant --experimental-cube-consumer` packages.
-  Two 8-NPU fused-op smokes used one visible NPU per process on the q-proj
-  shape with `tokens=1`: staged-only reported offset `0` and custom workspace
-  `524288` bytes on all devices, while the Cube-reserved ABI reported offset
-  `12582912`, cube workspace `12582912`, and total custom workspace
-  `13107200` bytes on all devices.
+  decodes the absolute Split-K value and reports the 16 MiB CANN
+  Matmul/KFC system-reserved workspace separately from the staged tile ring.
+  The kernel now calls `GetUserWorkspace(workspace)` and stages FP16 tiles at
+  user-workspace offset `0`, so AIV producer writes do not overlap CANN's
+  message queues once the Cube consumer starts running.
+- Validation for the workspace split built default,
+  `--experimental-staged-dequant --experimental-cube-consumer`, and
+  `--experimental-staged-dequant --experimental-mixed-launch` packages. The
+  non-mixed staged+Cube 8-NPU fused-op smoke used one visible NPU per process on
+  the q-proj shape with `tokens=1`; all devices reported user-workspace offset
+  `0`, cube system workspace `16777216`, and custom user workspace `524288`.
+  The earlier Cube-reserved ABI reported offset `12582912`, cube workspace
+  `12582912`, and total custom workspace `13107200`; this was corrected because
+  CANN already reserves system workspace ahead of the user workspace on 910B.
 - The next mixed-launch gate is now explicit and remains opt-in:
   `--experimental-mixed-launch` implies the Cube-consumer compile define and
   switches the kernel metadata from default `KERNEL_TYPE_AIV_ONLY` to
@@ -466,6 +468,8 @@ Ascend C custom-op bring-up:
   object and returns. This is a launch/topology milestone, not the final fused
   algorithm. The next runtime milestone is a safe AIC/AIV handshake around the
   bounded staged tile ring before replacing scalar output with Cube output.
+  The current mixed package still times out after torch-ops JIT extension load,
+  so runtime use stays on the non-mixed staged+Cube baseline.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

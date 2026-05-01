@@ -65,7 +65,7 @@ public:
         GM_ADDR offsets,
         GM_ADDR bias,
         GM_ADDR y,
-        GM_ADDR workspace,
+        GM_ADDR user_workspace,
         const KomodoCannW4A16MatmulTilingData* tiling)
     {
         x_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(x));
@@ -78,12 +78,12 @@ public:
         y_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(y));
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
         if (tiling->kernel_mode == kKernelModeStagedDequant && tiling->staging_workspace_bytes != 0) {
-            __gm__ uint8_t* workspace_bytes = reinterpret_cast<__gm__ uint8_t*>(workspace);
+            __gm__ uint8_t* workspace_bytes = reinterpret_cast<__gm__ uint8_t*>(user_workspace);
             staged_weight_gm_.SetGlobalBuffer(
                 reinterpret_cast<__gm__ half*>(workspace_bytes + tiling->staging_workspace_offset));
         }
 #else
-        (void)workspace;
+        (void)user_workspace;
 #endif
         tiling_ = tiling;
     }
@@ -1268,8 +1268,21 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 #endif
     GET_TILING_DATA(tiling_data, tiling);
+#ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
+    GM_ADDR user_workspace = workspace;
+    if (tiling_data.kernel_mode == kKernelModeStagedDequant && tiling_data.staging_workspace_bytes != 0) {
+        if (workspace == nullptr) {
+            return;
+        }
+        AscendC::SetSysWorkspaceForce(workspace);
+        user_workspace = AscendC::GetUserWorkspace(workspace);
+    }
+#endif
 #ifdef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
     if ASCEND_IS_AIC {
+        if (workspace == nullptr) {
+            return;
+        }
         AscendC::SetSysWorkspaceForce(workspace);
         TPipe cube_pipe;
         KomodoCannW4A16CubeConsumerProbe cube_probe;
@@ -1283,6 +1296,10 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
     }
 #endif
     KomodoCannW4A16ScalarKernel op;
+#ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
+    op.Init(x, packed_weight, scales, offsets, bias, y, user_workspace, &tiling_data);
+#else
     op.Init(x, packed_weight, scales, offsets, bias, y, workspace, &tiling_data);
+#endif
     op.Process();
 }
