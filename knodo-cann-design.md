@@ -540,6 +540,19 @@ Ascend C custom-op bring-up:
   launched one worker per NPU across all eight devices and reproduced the manual
   sweep: all eight cases passed with worst drift `max_abs=0.015625` and
   `mean_abs=0.0024566650390625`.
+- Extended the same raw harness with `--warmup`/`--iters` timing. Worker JSON now
+  includes `custom_ms`, and the parent summary records min/mean/max custom-op
+  latency plus the timing parameters, so future package A/B checks can use the
+  reproducible eight-worker sweep instead of one-off timing scripts. With
+  `--warmup 1 --iters 2`, the current local-A package passed the established
+  all-8-NPU local-A case file with custom latency min/mean/max
+  `2.284225/4.648382/8.693375 ms` and worst drift `max_abs=0.015625`,
+  `mean_abs=0.001491546630859375`.
+- A repeated-call timing run over the default tiny case set timed out on
+  `rows=3,K=768,N=256,group_size=96` after seven other workers passed. The
+  one-call default correctness path still passed all eight NPUs, so keep repeated
+  timing on the known-good A/B case files until the shape-specific runtime
+  sensitivity is isolated.
 - The same harness also passed all eight local-A cases with positive
   `base_k=128`. With both side-band forms validated, the GPTQ Komodo-CANN
   planner now marks every symmetric fused call as zero-offset, including small

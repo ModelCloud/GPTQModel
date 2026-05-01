@@ -300,6 +300,14 @@ worker per device, and keeps each worker to one custom/native call. The first
 run against `/tmp/komodo_cann_vecout_local_a_install` reproduced the manual
 8-NPU local-A sweep with all eight cases passing and worst drift
 `max_abs=0.015625`, `mean_abs=0.0024566650390625`.
+Set `--warmup` and `--iters` for repeatable timing while preserving the same
+custom/native accuracy check; worker rows include `custom_ms`, and summaries add
+`custom_ms_min`, `custom_ms_mean`, `custom_ms_max`, `warmup`, and `iters`.
+Use `warmup >= 1` for steady-state timing because the first custom-op call
+includes runtime setup. On the current local-A package, an all-8-NPU warmed sweep
+over `/tmp/komodo_cann_local_a_b_reuse_cases.json` passed with custom latency
+min/mean/max `2.284225/4.648382/8.693375 ms` and worst drift
+`max_abs=0.015625`, `mean_abs=0.001491546630859375`.
 The same harness passed with positive `base_k=128`, so the module planner can
 mark all symmetric GPTQ fused calls as zero-offset while retaining a validated
 positive-`base_k` fallback shape.

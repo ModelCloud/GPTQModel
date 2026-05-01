@@ -36,6 +36,28 @@ def test_raw_validator_finds_embedded_json_after_cann_warning():
     assert validator._last_json_object(text) == {"device": 7, "rows": 8, "pass": True}
 
 
+def test_raw_validator_custom_timing_stats():
+    validator = _load_raw_validator()
+
+    assert validator._timing_stats([]) == {
+        "custom_ms_min": None,
+        "custom_ms_mean": None,
+        "custom_ms_max": None,
+    }
+    assert validator._timing_stats(
+        [
+            {"custom_ms": 3.0},
+            {"custom_ms": 1.0},
+            {"custom_ms": 2.0},
+            {"custom_ms": None},
+        ]
+    ) == {
+        "custom_ms_min": 1.0,
+        "custom_ms_mean": 2.0,
+        "custom_ms_max": 3.0,
+    }
+
+
 def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
     build_helper = _load_build_helper()
     cmake_path = tmp_path / "op_kernel" / "CMakeLists.txt"

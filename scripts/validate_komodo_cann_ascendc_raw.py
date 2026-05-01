@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,17 @@ def _case_payload(case: dict[str, Any], args: argparse.Namespace) -> dict[str, A
     return payload
 
 
+def _timing_stats(results: list[dict[str, Any]]) -> dict[str, float | None]:
+    timings = [float(row["custom_ms"]) for row in results if row.get("custom_ms") is not None]
+    if not timings:
+        return {"custom_ms_min": None, "custom_ms_mean": None, "custom_ms_max": None}
+    return {
+        "custom_ms_min": min(timings),
+        "custom_ms_mean": sum(timings) / len(timings),
+        "custom_ms_max": max(timings),
+    }
+
+
 def _worker(args: argparse.Namespace) -> int:
     case = json.loads(args.case_json)
     bridge_lib = Path(args.bridge_lib).expanduser()
@@ -94,6 +106,8 @@ def _worker(args: argparse.Namespace) -> int:
     base_m = int(case["base_m"])
     base_n = int(case["base_n"])
     base_k = int(case["base_k"])
+    warmup = int(args.warmup)
+    iters = int(args.iters)
 
     x = torch.randn((rows, k), device="npu", dtype=torch.float16)
     signed_weight = torch.randint(-8, 8, (k, n), device="npu", dtype=torch.int32).contiguous()
@@ -101,18 +115,31 @@ def _worker(args: argparse.Namespace) -> int:
     scales = torch.full((k // group, n), 0.03125, device="npu", dtype=torch.float16)
     offsets = torch.zeros((k // group, n), device="npu", dtype=torch.float16)
 
-    custom = torch.ops.gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul(
-        x,
-        packed_weight,
-        scales,
-        offsets,
-        None,
-        group,
-        -1,
-        base_m,
-        base_n,
-        base_k,
-    )
+    def custom_call() -> torch.Tensor:
+        return torch.ops.gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul(
+            x,
+            packed_weight,
+            scales,
+            offsets,
+            None,
+            group,
+            -1,
+            base_m,
+            base_n,
+            base_k,
+        )
+
+    for _ in range(warmup):
+        custom_call()
+    torch.npu.synchronize()
+    start = time.perf_counter()
+    custom = None
+    for _ in range(iters):
+        custom = custom_call()
+    torch.npu.synchronize()
+    custom_ms = (time.perf_counter() - start) * 1000.0 / max(1, iters)
+    if custom is None:
+        custom = custom_call()
     native = torch.ops.npu.npu_weight_quant_batchmatmul(
         x,
         packed_weight,
@@ -137,6 +164,7 @@ def _worker(args: argparse.Namespace) -> int:
         "base_m": base_m,
         "base_n": base_n,
         "base_k": base_k,
+        "custom_ms": custom_ms,
         "max_abs": max_abs,
         "mean_abs": mean_abs,
         "pass": max_abs <= args.max_abs and mean_abs <= args.mean_abs,
@@ -163,6 +191,10 @@ def _launch_worker(device: int, case: dict[str, Any], args: argparse.Namespace) 
         str(args.max_abs),
         "--mean-abs",
         str(args.mean_abs),
+        "--warmup",
+        str(args.warmup),
+        "--iters",
+        str(args.iters),
     ]
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
 
@@ -209,8 +241,11 @@ def _run_parent(args: argparse.Namespace) -> int:
         "expected": len(cases),
         "max_abs_max": max((row["max_abs"] for row in results), default=None),
         "mean_abs_max": max((row["mean_abs"] for row in results), default=None),
+        "warmup": args.warmup,
+        "iters": args.iters,
         "failures": failures,
     }
+    summary.update(_timing_stats(results))
     print(json.dumps(summary, sort_keys=True), flush=True)
     if args.summary_json:
         Path(args.summary_json).expanduser().write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -231,10 +266,16 @@ def main() -> int:
     parser.add_argument("--base-k", type=int, default=-128)
     parser.add_argument("--max-abs", type=float, default=0.02)
     parser.add_argument("--mean-abs", type=float, default=0.004)
+    parser.add_argument("--warmup", type=int, default=0, help="Untimed custom-op warmup calls per worker.")
+    parser.add_argument("--iters", type=int, default=1, help="Timed custom-op calls per worker.")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--device", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--case-json", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.warmup < 0:
+        parser.error("--warmup must be >= 0")
+    if args.iters <= 0:
+        parser.error("--iters must be > 0")
 
     if args.worker:
         return _worker(args)

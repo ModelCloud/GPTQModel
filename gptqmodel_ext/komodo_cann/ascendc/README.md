@@ -329,6 +329,10 @@ It launches one process per listed NPU, applies the custom OPP env, runs one
 custom/native comparison per worker, and emits a JSON summary. The first harness
 run reproduced the manual 8-NPU sweep with all eight cases passing and the same
 worst drift: `max_abs=0.015625`, `mean_abs=0.0024566650390625`.
+Pass `--warmup` and `--iters` to turn the same correctness sweep into a compact
+A/B timing probe; each worker reports `custom_ms`, and the parent summary records
+the min/mean/max custom-op latency plus the timing parameters. Use at least one
+warmup for steady-state timing; `warmup=0,iters=1` includes first-call setup.
 The same harness also passed all eight cases with positive `base_k=128`, which
 covers the offset-aware call shape used when the module does not encode the
 zero-offset side band.
