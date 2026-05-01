@@ -399,6 +399,13 @@ def _komodo_cann_base_k(rows: int, in_features: int, cube_consumer_requested: bo
     return 64
 
 
+def _komodo_cann_base_n(out_features: int, cube_consumer_requested: bool) -> int:
+    base_n = min(256, _align_up(out_features, 16))
+    if cube_consumer_requested and out_features == 256:
+        return 128
+    return base_n
+
+
 def _komodo_cann_tiling_plan(
     *,
     rows: int,
@@ -412,7 +419,7 @@ def _komodo_cann_tiling_plan(
     split_k = _komodo_cann_split_k(rows, in_features, out_features, cube_cores)
     cube_consumer_requested = _komodo_cann_staged_dequant_enabled() and _komodo_cann_cube_consumer_enabled()
     base_m = 16 if rows <= 16 else min(128, _align_up(rows, 16))
-    base_n = min(256, _align_up(out_features, 16))
+    base_n = _komodo_cann_base_n(out_features, cube_consumer_requested)
     base_k = _komodo_cann_base_k(rows, in_features, cube_consumer_requested)
     n_tiles = _ceil_div(out_features, base_n)
     split_k_shard_k = _ceil_div(in_features, split_k)

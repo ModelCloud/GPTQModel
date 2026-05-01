@@ -652,6 +652,13 @@ Ascend C custom-op bring-up:
   before reading the packed UB tile, and it improved the all-8 planner mean to
   `3.256914 ms` while keeping the legacy mean flat at `3.578612 ms`; worst drift
   stayed `max_abs=0.015625`.
+- The staged Cube-consumer planner now uses `base_n=128` only for exactly
+  `N=256` shapes. This gives the validated 256-wide cases two output-N tile
+  owners, but keeps `N=512` on `base_n=256` because a global `base_n=128` probe
+  faulted both `K=1024,N=512,rows=8` legacy cases with AICore `507015`. The
+  conservative policy passed the all-8 legacy sweep at `2.636595 ms` mean and
+  the planner-shaped sweep at `2.321646 ms` mean, still with worst drift
+  `max_abs=0.015625`.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows

@@ -420,6 +420,14 @@ Narrowing the packed-B GM-to-VECCALC copy wait from `PIPE_ALL` to `PIPE_MTE2`
 then passed the same all-8 sweeps and moved the planner mean to `3.256914 ms`
 and the legacy mean to `3.578612 ms`, still with worst drift
 `max_abs=0.015625`.
+The planner now uses `base_n=128` for Cube-consumer staged plans with
+`N=256`, while keeping `base_n=256` for `N=512`. This gives the scheduler two
+output-N tile owners on the common 256-wide cases without entering the
+fault-prone wider shape. A global `base_n=128` probe was rejected because both
+`K=1024,N=512,rows=8` legacy cases hit AICore `507015` illegal-instruction
+faults. The conservative `N=256` policy passed the all-8 legacy sweep at
+`2.636595 ms` mean and the planner-shaped sweep at `2.321646 ms` mean, with
+worst drift unchanged at `max_abs=0.015625`.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

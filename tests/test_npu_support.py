@@ -182,6 +182,24 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     assert cube_plan.custom_workspace_bytes == cube_plan.staging_workspace_bytes
     assert cube_plan.custom_workspace_bytes < cube_plan.in_features * cube_plan.out_features * 2
 
+    n256_cube_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=1024,
+        out_features=256,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+    assert n256_cube_plan.base_n == 128
+
+    n512_cube_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=1024,
+        out_features=512,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+    assert n512_cube_plan.base_n == 256
+
     large_row_cube_plan = _komodo_cann_tiling_plan(
         rows=48,
         in_features=8192,
