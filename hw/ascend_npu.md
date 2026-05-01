@@ -4,6 +4,10 @@ This file tracks the Huawei Ascend Extension for PyTorch 7.3.0 support status fo
 PyTorch 2.9.0 `torch.cuda` APIs that have `torch_npu.npu` or `torch.npu`
 equivalents.
 
+For the current local CANN 9.0.0-beta.2 and torch-npu 2.11.0rc1 scan, including
+public/private API additions, deprecations, and CANN 8.5.1 to 9.0.0 header
+deltas, see [torch_npu_cann_9_api_scan.md](torch_npu_cann_9_api_scan.md).
+
 Source:
 
 - Huawei overview: https://www.hiascend.com/document/detail/zh/Pytorch/730/apiref/PyTorchNativeapi/docs/zh/native_apis/pytorch_2-9-0/overview.md

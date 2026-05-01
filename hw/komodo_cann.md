@@ -247,5 +247,6 @@ the default no-prefetch path bypasses that helper completely.
 ## Sources
 
 - Local 910B notes: `hw/ascend_910b.md`
+- Torch-NPU and CANN 9 API scan: `hw/torch_npu_cann_9_api_scan.md`
 - arXiv 2601.16536, "W4A16 Mixed-Precision Matrix Multiplication on Decoupled
   Architecture": https://arxiv.org/abs/2601.16536
