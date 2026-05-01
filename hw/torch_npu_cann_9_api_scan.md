@@ -311,7 +311,7 @@ Public CANN 9 APIs worth using or probing for Komodo-CANN:
 | API area | Local header | 910B relevance | Komodo-CANN action |
 | --- | --- | --- | --- |
 | Vector int4 to FP16 conversion | `asc/include/c_api/vector_compute/vector_compute.h`, `asc/include/c_api/reg_compute/reg_convert.h` | `asc_int42half` and `asc_int4x22half` replace scalar nibble unpack in the AIV dequant producer. | Implemented as a guarded CANN 9 staged producer with `--experimental-cann9-vector-dequant`. The validated 910B route is `asc_int42half_sync`; `asc_int4x22half` remains register/SIMT-adjacent and is not the first 2201 target. |
-| Matmul `VECOUT`/`TSCM` inputs | `asc/include/adv_api/matmul/*` | Official Matmul docs list A/B inputs from `TPosition::VECOUT` and `TPosition::TSCM` on A2, with the per-core tile fully resident in UB/L1. | `--experimental-vecout-consumer` now validates the Matmul template surface with `B_TYPE=TPosition::VECOUT` and a `SetTensorB(LocalTensor<half>)` instantiation. Runtime Cube consumption is still not wired; this remains the closest public API path to avoid writing FP16 tiles through GM/L2. |
+| Matmul `VECOUT`/`TSCM` inputs | `asc/include/adv_api/matmul/*` | Official Matmul docs list A/B inputs from `TPosition::VECOUT` and `TPosition::TSCM` on A2, with the per-core tile fully resident in UB/L1. Local headers show non-TSCM local B copies through Matmul workspace, while TSCM local B passes a TSCM physical address. | `--experimental-vecout-consumer` remains an API probe. `--experimental-tscm-consumer` is now the structural target: `B_TYPE=TPosition::TSCM`, `CubeFormat::NZ`, and a staged GM-to-TSCM tile load plus `SetTensorB(LocalTensor<half>)` probe. |
 | C API Cube data movement | `asc/include/c_api/cube_datamove/cube_datamove.h` | Adds `asc_copy_l12l0a` and `asc_copy_l12l0b` overloads for `int4b_t`, plus explicit GM/L1/L0 movement primitives. | Useful if high-level Matmul cannot consume the staged tile shape directly. Keep behind a CANN 9 experimental build flag. |
 | C API Cube compute | `asc/include/c_api/cube_compute/cube_compute.h` | Adds `asc_mmad_s4` for `int4b_t x int4b_t -> int32_t` on `__NPU_ARCH__ == 2201`. | Not directly suitable for W4A16 because activations are FP16, not INT4. Only probe if we add a separate W4A4/W4A8 or quantized-activation path and accept a larger accuracy contract. |
 | Device cache and sync controls | `asc/include/c_api/cache_ctrl/cache_ctrl.h`, `asc/include/c_api/sync/sync.h` | Exposes data-cache preload, DCCI variants, MTE sync, block-arrive/wait, and data barriers for 2201. | Secondary. Use after the VECOUT/TSCM producer-consumer path exists, to pipeline GM copy, vector dequant, L1/UB handoff, Cube compute, and copy-out. |
@@ -355,13 +355,21 @@ Validated 2026-05-01 local checks:
 - `--experimental-vecout-consumer` also builds with the same CANN 9 package,
   validating the public Matmul B-type and `SetTensorB(LocalTensor<half>)` probe
   but not yet feeding the staged tile to Cube at runtime.
+- Header inspection of `matmul_client.h` shows VECOUT local B uses Matmul
+  workspace copy, while TSCM local B uses `GetTscmAddr`. The next build target is
+  therefore `--experimental-tscm-consumer`, not VECOUT, for the no-full-FP16-GM
+  Cube handoff.
+- `--experimental-tscm-runtime-handoff` builds and runs a narrow live handoff
+  probe. On `M=8,K=64,N=8192,group_size=32` it matched a CPU reference with
+  `max_abs=0.0`; timing was flat versus the non-runtime staged probe
+  (`3.646628 ms` versus `3.651168 ms`) because this version still stages the
+  dequantized tile through GM before copying it to TSCM.
 
 Concrete next implementation order:
 
-1. Replace the current GM/L2 FP16 tile handoff experiment with a Matmul
-   `B_TYPE` of `TPosition::VECOUT` first, then `TPosition::TSCM` if VECOUT
-   cannot satisfy the tile lifetime. The tile must stay bounded and per-core
-   resident; never allocate a full dense dequantized weight matrix.
+1. Replace the current GM/L2 FP16 tile handoff experiment with Matmul
+   `B_TYPE=TPosition::TSCM` and `CubeFormat::NZ`. The tile must stay bounded and
+   per-core resident; never allocate a full dense dequantized weight matrix.
 2. If high-level Matmul cannot express the required B tile, move one layer down
    to the new public `c_api` movement primitives: GM packed INT4 to L1/UB,
    vector dequant in UB, L1/L0B movement, Cube matmul, then Fixpipe/copy-out.

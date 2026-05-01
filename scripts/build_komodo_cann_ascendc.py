@@ -219,10 +219,37 @@ def main() -> int:
             "This implies --experimental-cube-consumer."
         ),
     )
+    parser.add_argument(
+        "--experimental-tscm-consumer",
+        action="store_true",
+        help=(
+            "Compile the guarded Matmul consumer probe with B_TYPE at TPosition::TSCM/CubeFormat::NZ "
+            "and the staged GM-to-TSCM tile handoff helper. This implies --experimental-cube-consumer "
+            "and requires --experimental-staged-dequant."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-tscm-runtime-handoff",
+        action="store_true",
+        help=(
+            "Compile the guarded mixed AIV/AIC runtime probe that stages a single-K B tile, "
+            "copies it to TSCM/NZ, and hands it to Matmul. This implies --experimental-tscm-consumer "
+            "and --experimental-mixed-launch."
+        ),
+    )
     args = parser.parse_args()
+    if args.experimental_tscm_runtime_handoff:
+        args.experimental_tscm_consumer = True
+        args.experimental_mixed_launch = True
     if args.experimental_cann9_vector_dequant and not args.experimental_staged_dequant:
         parser.error("--experimental-cann9-vector-dequant requires --experimental-staged-dequant")
+    if args.experimental_tscm_consumer and not args.experimental_staged_dequant:
+        parser.error("--experimental-tscm-consumer requires --experimental-staged-dequant")
+    if args.experimental_vecout_consumer and args.experimental_tscm_consumer:
+        parser.error("--experimental-vecout-consumer and --experimental-tscm-consumer are mutually exclusive")
     if args.experimental_vecout_consumer:
+        args.experimental_cube_consumer = True
+    if args.experimental_tscm_consumer:
         args.experimental_cube_consumer = True
     if args.experimental_mixed_aiv_baseline:
         if args.experimental_cube_consumer:
@@ -268,6 +295,10 @@ def main() -> int:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT")
     if args.experimental_vecout_consumer:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER")
+    if args.experimental_tscm_consumer:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER")
+    if args.experimental_tscm_runtime_handoff:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
 
     if args.no_build:
         print(f"Generated project with Komodo-CANN overlay at {output}")

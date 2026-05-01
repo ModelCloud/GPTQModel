@@ -126,10 +126,10 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
 - Replace scalar nibble unpack in the staged AIV producer with C API vector
   conversion from packed INT4 to FP16 in UB. Local headers expose
   `asc_int42half` and register-level `asc_int4x22half`.
-- Feed the dequantized B tile to Cube through Matmul `TPosition::VECOUT` first,
-  then `TPosition::TSCM` if the VECOUT lifetime or layout is unsuitable. This is
-  the public high-level API route that can avoid writing FP16 tiles through
-  GM/L2.
+- Feed the dequantized B tile to Cube through Matmul `TPosition::TSCM` with
+  `CubeFormat::NZ`. The local CANN 9 headers show that non-TSCM local B operands
+  are copied through Matmul workspace, while TSCM local B is passed by physical
+  TSCM address to the Cube client.
 - Keep the tile contract per-core resident and bounded. A VECOUT/TSCM tile is a
   producer-consumer handoff, not a persistent dense dequant cache.
 - Use lower-level `asc/include/c_api/cube_datamove` and
@@ -151,8 +151,24 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
 - Added `--experimental-vecout-consumer` as a Matmul template probe with
   `B_TYPE` at `TPosition::VECOUT`. This validates that the public CANN 9 Matmul
   surface accepts the intended UB/VECOUT B operand type and
-  `SetTensorB(LocalTensor<half>)` call on the local 910B toolchain. It does not
-  yet wire the staged tile into Cube at runtime.
+  `SetTensorB(LocalTensor<half>)` call on the local 910B toolchain. Header
+  inspection then showed that this path copies through Matmul workspace, so it
+  is a compile/API probe rather than the final local handoff route.
+- Added `--experimental-tscm-consumer` as the next Matmul template and data-move
+  probe. It switches B to `TPosition::TSCM`/`CubeFormat::NZ` and compiles a
+  staged GM-to-TSCM tile load plus a `SetTensorB(LocalTensor<half>)` probe. This
+  is the correct structural route for the AIV dequant tile to AIC Cube handoff.
+- Added `--experimental-tscm-runtime-handoff` as a narrow mixed-launch runtime
+  probe. It handles the conservative one-full-K-tile/no-bias/full-N-tile subset
+  by staging the B tile, copying it to TSCM/NZ, and invoking Cube Matmul for the
+  visible output; unsupported shapes fall back to the scalar path. The broad
+  target remains direct dequant into the TSCM tile with multi-K producer/consumer
+  scheduling.
+- Validated the runtime probe on NPU0 for `M=8,K=64,N=8192,group_size=32`:
+  finite output, `max_abs=0.0` versus CPU reference. The quick A/B timing was
+  effectively flat (`3.646628 ms` TSCM runtime versus `3.651168 ms` non-runtime
+  staged probe), which confirms the handoff is structurally live but not yet a
+  speed path while it still stages through GM.
 - Fixed the scalar fused path's INT4 signed-nibble decode from xor-based
   sign extension to an explicit `raw < 8 ? raw : raw - 16` decode. The previous
   expression miscompiled lane 0 on the local CANN 9 package and produced

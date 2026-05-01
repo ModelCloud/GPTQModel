@@ -16,16 +16,33 @@ using namespace matmul;
 #error "KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH requires KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER"
 #endif
 
+#if defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER) && defined(KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER)
+#error "KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER and KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER are mutually exclusive"
+#endif
+
+#if defined(KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF) && \
+    (!defined(KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER) || !defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH) || \
+     !defined(KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT))
+#error "KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF requires staged dequant, TSCM consumer, and mixed launch"
+#endif
+
 namespace {
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
 constexpr uint32_t kKernelModeStagedDequant = 1;
 #endif
 
+__aicore__ inline uint32_t CeilDivU32(uint32_t value, uint32_t divisor)
+{
+    return divisor == 0 ? 0 : (value + divisor - 1) / divisor;
+}
+
 #ifdef KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER
 class KomodoCannW4A16CubeConsumerProbe {
 public:
     using AType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
-#ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER
+    using BType = MatmulType<TPosition::TSCM, CubeFormat::NZ, half>;
+#elif defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER)
     using BType = MatmulType<TPosition::VECOUT, CubeFormat::ND, half>;
 #else
     using BType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
@@ -39,6 +56,61 @@ public:
     {
         mm.SetTensorB(b_tile);
     }
+#endif
+
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER
+    __aicore__ inline bool InitTscmBTile(TPipe& pipe, const KomodoCannW4A16MatmulTilingData* tiling)
+    {
+        const uint32_t base_k = tiling->base_k;
+        const uint32_t base_n = tiling->base_n;
+        if (base_k == 0 || base_n == 0) {
+            return false;
+        }
+        tscm_ready_ = pipe.InitBuffer(b_tscm_, 1, base_k * base_n * sizeof(half));
+        return tscm_ready_;
+    }
+
+    __aicore__ inline LocalTensor<half> LoadStagedBTileToTscm(
+        GlobalTensor<half>& staged_weight,
+        uint32_t stage_offset,
+        const KomodoCannW4A16MatmulTilingData* tiling)
+    {
+        b_tscm_local_ = b_tscm_.AllocTensor<half>();
+        Nd2NzParams trans_param = {
+            1,
+            static_cast<uint16_t>(tiling->base_k),
+            static_cast<uint16_t>(tiling->base_n),
+            0,
+            static_cast<uint16_t>(tiling->base_n),
+            static_cast<uint16_t>(CeilDivU32(tiling->base_k, 16) * 16),
+            1,
+            0,
+        };
+        DataCopy(b_tscm_local_, staged_weight[stage_offset], trans_param);
+        b_tscm_.EnQue(b_tscm_local_);
+        b_tscm_.DeQue();
+        return b_tscm_local_;
+    }
+
+    __aicore__ inline void SetTensorBTscmProbe(const LocalTensor<half>& b_tile)
+    {
+        mm.SetTensorB(b_tile);
+    }
+
+    __aicore__ inline void FreeTscmBTile()
+    {
+        b_tscm_.FreeTensor(b_tscm_local_);
+    }
+
+    __aicore__ inline bool TscmReady() const
+    {
+        return tscm_ready_;
+    }
+
+private:
+    TSCM<TPosition::GM> b_tscm_;
+    LocalTensor<half> b_tscm_local_;
+    bool tscm_ready_ = false;
 #endif
 };
 
@@ -158,6 +230,82 @@ public:
             ProcessSingleRow(m, in_features, out_features, group_size, has_bias, packed_begin, packed_end);
         }
     }
+
+#if defined(KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF)
+    __aicore__ inline bool TryProcessSingleKTileTscmHandoff(KomodoCannW4A16CubeConsumerProbe& cube_probe)
+    {
+        if (!cube_probe.TscmReady() || tiling_->kernel_mode != kKernelModeStagedDequant || tiling_->has_bias != 0 ||
+            tiling_->base_k == 0 || tiling_->base_n == 0 || tiling_->in_features != tiling_->base_k ||
+            tiling_->out_features % tiling_->base_n != 0) {
+            return false;
+        }
+
+        const uint32_t rows = tiling_->rows;
+        const uint32_t in_features = tiling_->in_features;
+        const uint32_t out_features = tiling_->out_features;
+        const uint32_t group_size = tiling_->group_size;
+        const uint32_t zero_offsets = tiling_->zero_offsets;
+        const uint32_t base_m = tiling_->base_m;
+        const uint32_t base_n = tiling_->base_n;
+        const uint32_t staging_blocks = tiling_->staging_blocks;
+        const uint32_t staging_slots = tiling_->staging_slots;
+        if (rows == 0 || out_features == 0 || base_m == 0 || staging_blocks == 0 || staging_slots == 0 ||
+            tiling_->staging_tile_bytes == 0 || tiling_->block_dim == 0) {
+            return false;
+        }
+
+        uint32_t physical_core_idx = static_cast<uint32_t>(GetBlockIdx());
+        if ASCEND_IS_AIV {
+            const uint32_t task_ratio = static_cast<uint32_t>(GetTaskRation());
+            if (task_ratio > 1) {
+                physical_core_idx /= task_ratio;
+            }
+        }
+        const uint32_t core_idx = physical_core_idx % tiling_->block_dim;
+        if (core_idx >= staging_blocks) {
+            return true;
+        }
+
+        const uint32_t n_tiles = out_features / base_n;
+        const uint32_t tile_elements = tiling_->staging_tile_bytes / sizeof(half);
+        const uint32_t packed_stride = out_features >> 3;
+        const uint32_t m_tiles = CeilDivU32(rows, base_m);
+        for (uint32_t n_tile = core_idx; n_tile < n_tiles; n_tile += staging_blocks) {
+            const uint32_t slot = (n_tile / staging_blocks) % staging_slots;
+            const uint32_t n_begin = n_tile * base_n;
+            const uint32_t n_end = n_begin + base_n;
+            const uint32_t packed_begin = n_begin >> 3;
+            const uint32_t packed_end = n_end >> 3;
+            const uint32_t stage_base = (core_idx * staging_slots + slot) * tile_elements;
+
+            for (uint32_t k = 0; k < in_features; ++k) {
+                const uint32_t group = group_size == 0 ? 0 : k / group_size;
+                for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
+                    const uint32_t word =
+                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                    const uint32_t n_base = packed_col << 3;
+                    const uint32_t scale_base = group * out_features + n_base;
+                    const uint32_t tile_n = n_base - n_begin;
+                    StagePackedWord(stage_base + k * base_n + tile_n, word, scale_base, zero_offsets);
+                }
+            }
+
+            LocalTensor<half> b_tscm_tile = cube_probe.LoadStagedBTileToTscm(staged_weight_gm_, stage_base, tiling_);
+            for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
+                const uint32_t m_begin = m_tile * base_m;
+                const uint32_t m_len_candidate = rows - m_begin;
+                const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
+                cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features]);
+                cube_probe.mm.SetTensorB(b_tscm_tile);
+                cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
+                cube_probe.mm.IterateAll(y_gm_[m_begin * out_features + n_begin], false);
+                cube_probe.mm.WaitIterateAll();
+            }
+            cube_probe.FreeTscmBTile();
+        }
+        return true;
+    }
+#endif
 
 private:
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
@@ -1378,6 +1526,9 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
     if ASCEND_IS_AIC {
         return;
     }
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF
+    cube_probe.InitTscmBTile(cube_pipe, &tiling_data);
+#endif
 #else
     if ASCEND_IS_AIC {
         if (workspace == nullptr) {
@@ -1401,6 +1552,11 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
     op.Init(x, packed_weight, scales, offsets, bias, y, user_workspace, &tiling_data);
 #else
     op.Init(x, packed_weight, scales, offsets, bias, y, workspace, &tiling_data);
+#endif
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF
+    if (op.TryProcessSingleKTileTscmHandoff(cube_probe)) {
+        return;
+    }
 #endif
     op.Process();
 }

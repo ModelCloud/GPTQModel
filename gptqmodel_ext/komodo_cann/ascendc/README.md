@@ -87,8 +87,49 @@ python scripts/build_komodo_cann_ascendc.py \
 
 This validates the public Matmul template surface and instantiates
 `SetTensorB(LocalTensor<half>)` for a UB/VECOUT B operand, but it is still a
-compile-time consumer probe. The visible runtime path does not yet feed the
-staged UB/L1 tile into Cube; that remains the next fused-kernel step.
+compile-time consumer probe. The CANN 9 Matmul client maps non-TSCM local B
+operands through Matmul workspace, so VECOUT is not the zero-GM/L2 handoff path.
+
+The current local-B handoff target is TSCM/NZ:
+
+```bash
+python scripts/build_komodo_cann_ascendc.py \
+  --output /tmp/komodo_cann_w4a16_tscm_probe \
+  --experimental-staged-dequant \
+  --experimental-cann9-vector-dequant \
+  --experimental-tscm-consumer
+```
+
+This build switches the Matmul B operand to
+`MatmulType<TPosition::TSCM, CubeFormat::NZ, half>` and compiles a staged
+GM-to-TSCM tile load plus a `SetTensorB(LocalTensor<half>)` probe.
+It is still guarded because the scheduler must next connect the AIV producer,
+TSCM/NZ tile lifetime, AIC Cube `IterateAll`, and output ownership without
+falling back to a full dequantized FP16 weight materialization.
+
+There is also a narrower runtime handoff probe:
+
+```bash
+python scripts/build_komodo_cann_ascendc.py \
+  --output /tmp/komodo_cann_w4a16_tscm_runtime \
+  --experimental-staged-dequant \
+  --experimental-cann9-vector-dequant \
+  --experimental-tscm-runtime-handoff
+```
+
+This implies mixed launch and TSCM consumer. It only handles the deliberately
+safe scheduler subset where the request has one full K tile, no bias, and full
+`base_n` output tiles; unsupported shapes fall back to the scalar visible-output
+path. The purpose is to validate the live AIV staged tile -> TSCM/NZ -> AIC
+Matmul handoff before broadening it to multi-K pipelining and direct dequant
+into TSCM.
+
+Local validation on 2026-05-01 built this path with CANN 9.0.0-beta.2, installed
+it into `/tmp/komodo_cann_tscm_runtime_install`, and ran
+`M=8,K=64,N=8192,group_size=32` on NPU0. The output was finite with
+`max_abs=0.0` versus a CPU reference. Timing for that narrow shape was flat
+against the non-runtime staged probe (`3.646628 ms` versus `3.651168 ms`), so
+this is a correctness/scheduler proof, not a speed win yet.
 
 The next guarded bring-up layer is the Cube consumer scaffold:
 

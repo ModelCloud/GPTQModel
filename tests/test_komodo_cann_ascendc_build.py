@@ -35,6 +35,8 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_MIXED_AIV_BASELINE")
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT")
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER")
+    build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER")
+    build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
 
     text = cmake_path.read_text()
     assert text.count("add_ops_compile_options(ALL OPTIONS -DKOMODO_CANN_EXPERIMENTAL_") == 1
@@ -45,7 +47,9 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
         "-DKOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH=1 "
         "-DKOMODO_CANN_EXPERIMENTAL_MIXED_AIV_BASELINE=1 "
         "-DKOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT=1 "
-        "-DKOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER=1)"
+        "-DKOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER=1 "
+        "-DKOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER=1 "
+        "-DKOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1)"
     ) in text
 
 
@@ -62,6 +66,8 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT")
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER")
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT")
+    build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER")
+    build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
 
     text = cmake_path.read_text()
     assert text.count("add_compile_options(-DKOMODO_CANN_EXPERIMENTAL_") == 1
@@ -69,7 +75,9 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
         "add_compile_options("
         "-DKOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT=1 "
         "-DKOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER=1 "
-        "-DKOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT=1)"
+        "-DKOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT=1 "
+        "-DKOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER=1 "
+        "-DKOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1)"
     ) in text
 
 
