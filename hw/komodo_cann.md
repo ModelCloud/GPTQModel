@@ -113,6 +113,61 @@ Next real kernel work should move beyond host-issued prefetch hints and toward
 an Ascend C custom op that can pipeline copy-in, int4 dequant, cube matmul, and
 copy-out inside the device kernel.
 
+## CANN 9 Rescan Impact
+
+The 2026-05-01 torch-npu/CANN rescan did not change the native ACLNN conclusion:
+`aclnnWeightQuantBatchMatmulV3` is useful for ABI and correctness probes, but it
+does not remove the generic executor boundary or the device-side dequant
+materialization problem. The useful new surface for the custom kernel is the
+CANN 9 Ascend C public device API.
+
+The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
+
+- Replace scalar nibble unpack in the staged AIV producer with C API vector
+  conversion from packed INT4 to FP16 in UB. Local headers expose
+  `asc_int42half` and register-level `asc_int4x22half`.
+- Feed the dequantized B tile to Cube through Matmul `TPosition::VECOUT` first,
+  then `TPosition::TSCM` if the VECOUT lifetime or layout is unsuitable. This is
+  the public high-level API route that can avoid writing FP16 tiles through
+  GM/L2.
+- Keep the tile contract per-core resident and bounded. A VECOUT/TSCM tile is a
+  producer-consumer handoff, not a persistent dense dequant cache.
+- Use lower-level `asc/include/c_api/cube_datamove` and
+  `asc/include/c_api/cube_compute` only if high-level Matmul cannot consume the
+  staged tile. `asc_mmad_s4` is not a direct W4A16 solution because it computes
+  `int4b_t x int4b_t -> int32_t`; using it would require quantized activations
+  and a different accuracy contract.
+- Defer `asc_datacache_preload` and explicit MTE/block sync tuning until the
+  UB/L1 producer-consumer path exists and profiler counters show the next
+  bottleneck.
+
+2026-05-01 implementation update:
+
+- Added a guarded CANN 9 staged-dequant producer build flag,
+  `--experimental-cann9-vector-dequant`, which includes public
+  `asc/include/c_api/asc_simd.h` and uses `asc_int42half_sync` to convert packed
+  INT4 to FP16 lanes in UB before applying Komodo scale/offset into the bounded
+  staging tile.
+- Added `--experimental-vecout-consumer` as a Matmul template probe with
+  `B_TYPE` at `TPosition::VECOUT`. This validates that the public CANN 9 Matmul
+  surface accepts the intended UB/VECOUT B operand type on the local 910B
+  toolchain. It does not yet wire the staged tile into Cube at runtime.
+- Fixed the scalar fused path's INT4 signed-nibble decode from xor-based
+  sign extension to an explicit `raw < 8 ? raw : raw - 16` decode. The previous
+  expression miscompiled lane 0 on the local CANN 9 package and produced
+  `inf` outputs in every first lane of an 8-output pack. This blocker made the
+  vector-dequant runtime validation ambiguous until corrected.
+- Validation after the fix:
+  `--experimental-staged-dequant --experimental-cann9-vector-dequant` built on
+  CANN 9.0.0-beta.2 and produced finite controlled output for
+  `M=8,K=1024,N=1024,group_size=32` with `max_abs=7.62939453125e-06`.
+  An 8-NPU one-shard-per-device `gptq_group_sizes` staged sweep kept
+  `max_abs=0.015625` for group-size 32/64/128/full and act-order 32/128; group
+  size 16 still routes through the native group16 CANN path.
+
+The full rescan and public/private API notes are in
+`hw/torch_npu_cann_9_api_scan.md`.
+
 ## aclnn V3 Probe
 
 `scripts/probe_komodo_cann_v3.py` builds

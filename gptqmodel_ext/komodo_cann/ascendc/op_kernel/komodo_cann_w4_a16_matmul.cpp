@@ -2,6 +2,9 @@
 #if defined(KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER) || defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH)
 #include "lib/matmul_intf.h"
 #endif
+#if defined(KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT)
+#include "c_api/asc_simd.h"
+#endif
 
 using namespace AscendC;
 #if defined(KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER) || defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH)
@@ -22,7 +25,11 @@ constexpr uint32_t kKernelModeStagedDequant = 1;
 class KomodoCannW4A16CubeConsumerProbe {
 public:
     using AType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
+#ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER
+    using BType = MatmulType<TPosition::VECOUT, CubeFormat::ND, half>;
+#else
     using BType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
+#endif
     using CType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
     using BiasType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
     Matmul<AType, BType, CType, BiasType> mm;
@@ -82,6 +89,11 @@ public:
             __gm__ uint8_t* workspace_bytes = reinterpret_cast<__gm__ uint8_t*>(user_workspace);
             staged_weight_gm_.SetGlobalBuffer(
                 reinterpret_cast<__gm__ half*>(workspace_bytes + tiling->staging_workspace_offset));
+#ifdef KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT
+            vector_dequant_ready_ =
+                pipe_.InitBuffer(vector_packed_ub_, kCann9VectorDequantPackedBytes) &&
+                pipe_.InitBuffer(vector_half_ub_, kCann9VectorDequantHalfBytes);
+#endif
         }
 #else
         (void)user_workspace;
@@ -194,6 +206,12 @@ private:
 
     __aicore__ inline void StagePackedWord(uint32_t stage_offset, uint32_t word, uint32_t scale_base, uint32_t zero_offsets)
     {
+#ifdef KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT
+        if (vector_dequant_ready_) {
+            StagePackedWordVector(stage_offset, word, scale_base, zero_offsets);
+            return;
+        }
+#endif
         const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
         const float scale1 = static_cast<float>(scales_gm_.GetValue(scale_base + 1));
         const float scale2 = static_cast<float>(scales_gm_.GetValue(scale_base + 2));
@@ -219,6 +237,56 @@ private:
         staged_weight_gm_.SetValue(stage_offset + 6, static_cast<half>(DequantLane(word, 6, scale6, offset6)));
         staged_weight_gm_.SetValue(stage_offset + 7, static_cast<half>(DequantLane(word, 7, scale7, offset7)));
     }
+
+#ifdef KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT
+    __aicore__ inline void StagePackedWordVector(
+        uint32_t stage_offset,
+        uint32_t word,
+        uint32_t scale_base,
+        uint32_t zero_offsets)
+    {
+        LocalTensor<uint32_t> packed = vector_packed_ub_.Get<uint32_t>(kCann9VectorDequantPackedWords);
+        LocalTensor<half> dequant = vector_half_ub_.Get<half>(kCann9VectorDequantLanes);
+        packed.SetValue(0, word);
+        asc_int42half_sync(
+            reinterpret_cast<__ubuf__ half*>(dequant.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ int4b_t*>(packed.GetPhyAddr()),
+            static_cast<uint32_t>(kCann9VectorDequantLanes));
+
+        const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
+        const float scale1 = static_cast<float>(scales_gm_.GetValue(scale_base + 1));
+        const float scale2 = static_cast<float>(scales_gm_.GetValue(scale_base + 2));
+        const float scale3 = static_cast<float>(scales_gm_.GetValue(scale_base + 3));
+        const float scale4 = static_cast<float>(scales_gm_.GetValue(scale_base + 4));
+        const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
+        const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
+        const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+        const float offset0 = OffsetValue(scale_base, zero_offsets);
+        const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
+        const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
+        const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
+        const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
+        const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
+        const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
+        const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
+        staged_weight_gm_.SetValue(
+            stage_offset, static_cast<half>((static_cast<float>(dequant.GetValue(0)) + offset0) * scale0));
+        staged_weight_gm_.SetValue(
+            stage_offset + 1, static_cast<half>((static_cast<float>(dequant.GetValue(1)) + offset1) * scale1));
+        staged_weight_gm_.SetValue(
+            stage_offset + 2, static_cast<half>((static_cast<float>(dequant.GetValue(2)) + offset2) * scale2));
+        staged_weight_gm_.SetValue(
+            stage_offset + 3, static_cast<half>((static_cast<float>(dequant.GetValue(3)) + offset3) * scale3));
+        staged_weight_gm_.SetValue(
+            stage_offset + 4, static_cast<half>((static_cast<float>(dequant.GetValue(4)) + offset4) * scale4));
+        staged_weight_gm_.SetValue(
+            stage_offset + 5, static_cast<half>((static_cast<float>(dequant.GetValue(5)) + offset5) * scale5));
+        staged_weight_gm_.SetValue(
+            stage_offset + 6, static_cast<half>((static_cast<float>(dequant.GetValue(6)) + offset6) * scale6));
+        staged_weight_gm_.SetValue(
+            stage_offset + 7, static_cast<half>((static_cast<float>(dequant.GetValue(7)) + offset7) * scale7));
+    }
+#endif
 #endif
 
     __aicore__ inline void ProcessSingleRow(
@@ -1220,16 +1288,16 @@ private:
     __aicore__ inline float DequantLane(uint32_t word, uint32_t lane, float scale, float offset)
     {
         const uint32_t shift = lane << 2;
-        const int32_t raw = static_cast<int32_t>((word >> shift) & 0xFU);
-        const int32_t signed_w = (raw ^ 0x8) - 0x8;
+        const uint32_t raw = (word >> shift) & 0xFU;
+        const int32_t signed_w = raw < 8U ? static_cast<int32_t>(raw) : static_cast<int32_t>(raw) - 16;
         return (static_cast<float>(signed_w) + offset) * scale;
     }
 
     __aicore__ inline float DequantLaneNoOffset(uint32_t word, uint32_t lane, float scale)
     {
         const uint32_t shift = lane << 2;
-        const int32_t raw = static_cast<int32_t>((word >> shift) & 0xFU);
-        const int32_t signed_w = (raw ^ 0x8) - 0x8;
+        const uint32_t raw = (word >> shift) & 0xFU;
+        const int32_t signed_w = raw < 8U ? static_cast<int32_t>(raw) : static_cast<int32_t>(raw) - 16;
         return static_cast<float>(signed_w) * scale;
     }
 
@@ -1248,6 +1316,16 @@ private:
     GlobalTensor<half> y_gm_;
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
     GlobalTensor<half> staged_weight_gm_;
+#ifdef KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT
+    static constexpr uint32_t kCann9VectorDequantLanes = 8;
+    static constexpr uint32_t kCann9VectorDequantPackedWords = 1;
+    static constexpr uint32_t kCann9VectorDequantPackedBytes = 32;
+    static constexpr uint32_t kCann9VectorDequantHalfBytes = 32;
+    TPipe pipe_;
+    TBuf<TPosition::VECCALC> vector_packed_ub_;
+    TBuf<TPosition::VECCALC> vector_half_ub_;
+    bool vector_dequant_ready_ = false;
+#endif
 #endif
     const KomodoCannW4A16MatmulTilingData* tiling_;
 };

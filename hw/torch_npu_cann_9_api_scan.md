@@ -287,6 +287,93 @@ Custom kernels should still include stable public headers from `asc/include`
 and avoid `asc/impl`, `pkg_inc`, and `internal` paths unless the code is gated
 as an experiment.
 
+## 2026-05-01 Komodo-CANN Rescan
+
+The current rescan confirms the same runtime versions as the first CANN 9 pass:
+
+```text
+torch              2.11.0+cpu
+torch_npu          2.11.0rc1
+torch_npu git      ad99d6c22fe33f0143cce471b7b0be9e16749b23
+CANN               9.0.0.beta2
+SoC                220
+NPU count          8
+torch.ops.npu      340 public names
+```
+
+The important delta versus CANN 8.5.1 is still the public Ascend C device API,
+not the top-level ACLNN API. The rescan found no removed public ACL, ACLNN, or
+Ascend C headers. It did find that CANN 9 adds the entire public `asc/include/c_api`
+tree locally; CANN 8.5.1 did not have this tree on the host.
+
+Public CANN 9 APIs worth using or probing for Komodo-CANN:
+
+| API area | Local header | 910B relevance | Komodo-CANN action |
+| --- | --- | --- | --- |
+| Vector int4 to FP16 conversion | `asc/include/c_api/vector_compute/vector_compute.h`, `asc/include/c_api/reg_compute/reg_convert.h` | `asc_int42half` and `asc_int4x22half` replace scalar nibble unpack in the AIV dequant producer. | Implemented as a guarded CANN 9 staged producer with `--experimental-cann9-vector-dequant`. The validated 910B route is `asc_int42half_sync`; `asc_int4x22half` remains register/SIMT-adjacent and is not the first 2201 target. |
+| Matmul `VECOUT`/`TSCM` inputs | `asc/include/adv_api/matmul/*` | Official Matmul docs list A/B inputs from `TPosition::VECOUT` and `TPosition::TSCM` on A2, with the per-core tile fully resident in UB/L1. | `--experimental-vecout-consumer` now validates the Matmul template surface with `B_TYPE=TPosition::VECOUT`. Runtime Cube consumption is still not wired; this remains the closest public API path to avoid writing FP16 tiles through GM/L2. |
+| C API Cube data movement | `asc/include/c_api/cube_datamove/cube_datamove.h` | Adds `asc_copy_l12l0a` and `asc_copy_l12l0b` overloads for `int4b_t`, plus explicit GM/L1/L0 movement primitives. | Useful if high-level Matmul cannot consume the staged tile shape directly. Keep behind a CANN 9 experimental build flag. |
+| C API Cube compute | `asc/include/c_api/cube_compute/cube_compute.h` | Adds `asc_mmad_s4` for `int4b_t x int4b_t -> int32_t` on `__NPU_ARCH__ == 2201`. | Not directly suitable for W4A16 because activations are FP16, not INT4. Only probe if we add a separate W4A4/W4A8 or quantized-activation path and accept a larger accuracy contract. |
+| Device cache and sync controls | `asc/include/c_api/cache_ctrl/cache_ctrl.h`, `asc/include/c_api/sync/sync.h` | Exposes data-cache preload, DCCI variants, MTE sync, block-arrive/wait, and data barriers for 2201. | Secondary. Use after the VECOUT/TSCM producer-consumer path exists, to pipeline GM copy, vector dequant, L1/UB handoff, Cube compute, and copy-out. |
+| `aclnnWeightQuantBatchMatmulNz` | `aarch64-linux/include/aclnnop/aclnn_weight_quant_batch_matmul_nz.h` | Exported by `libopapi.so`; accepts NZ weights with `int32`, `float`, `float4_e2m1`, and `int4`. This header already existed in local CANN 8.5.1. | Probe as a native fallback only. It does not remove the generic ACLNN boundary and has no torch-npu Python binding in this wheel. |
+| `aclnnTransMatmulWeight` / `aclnnCalculateMatmulWeightSizeV2` | `aarch64-linux/include/aclnnop/aclnn_trans_matmul_weight.h` | Exported by `libopapi.so`; documented for INT8/FP16/BF16 weight transforms, and mentions V2/V3 matmul weight sizing. | Useful for native fallback layout probes, but not the fused custom-kernel target. Verify INT4 behavior at runtime before relying on it. |
+| `aclnnMatmulCompressDequant`, `aclnnQuantMatmulDequant` | `aarch64-linux/include/aclnnop/*compress_dequant*.h`, `*quant_matmul_dequant*.h` | Public and exported; torch-npu exposes matching `npu_matmul_compress_dequant` and `npu_quant_matmul_dequant`. | Not a direct GPTQ W4A16 path. These are INT8/compressed-weight style APIs, so use only for exploratory native baselines. |
+| SIMT API | `asc/include/simt_api/*` | Local C++ SIMT headers are guarded for `__NPU_ARCH__ == 3510 || 5102`; public docs currently target Atlas 350 for many Reg/SIMT entries. | Do not target 910B Komodo-CANN with SIMT first. Prefer 2201 C API vector/cube primitives. |
+
+Private/internal API observations:
+
+- `aarch64-linux/asc/impl` grew from 1025 files in CANN 8.5.1 to 1897 files in
+  CANN 9.0.0-beta.2. The 873 additions include private implementations for the
+  new C API, register-compute conversion, quantization, Matmul tiling, and
+  C310/L300 specializations.
+- Private Matmul tiling code exposes useful intent such as `enableQuantVector`,
+  `TSCM` scale positions, `iterateOrder`, `scheduleType`, and
+  `isEnableChannelSplit`, but these are implementation details. Do not include
+  `asc/impl` paths directly from Komodo-CANN.
+- The public CANN 9 headers themselves sometimes include private implementation
+  headers after defining internal include guards. That is acceptable when the
+  include originates from `asc/include/...`; it is not a license to include the
+  private file directly.
+- torch-npu private bindings such as `_aclnn_reselect_static_kernel`,
+  `_super_kernel_scope_begin`, `_get_cann_version`, `_npu_setOption`, and
+  `_npu_getOption` remain diagnostics or host/runtime controls. They should not
+  be part of the custom fused-kernel ABI.
+
+Validated 2026-05-01 local checks:
+
+- `--experimental-staged-dequant --experimental-cann9-vector-dequant` builds
+  under `/usr/local/Ascend/cann-9.0.0-beta.2` and launches through the
+  repository Ascend C bridge.
+- The scalar fused path needed an explicit signed INT4 decode
+  `raw < 8 ? raw : raw - 16`; the older xor form produced non-finite lane-0
+  output on CANN 9. After this fix, a controlled
+  `M=8,K=1024,N=1024,group_size=32` check stayed finite with
+  `max_abs=7.62939453125e-06`.
+- An 8-NPU one-shard-per-device `gptq_group_sizes` sweep with staged dequant
+  enabled kept `max_abs=0.015625` on group sizes 32/64/128/full and act-order
+  32/128. Group-size 16 cases still route through the native group16 CANN path.
+- `--experimental-vecout-consumer` also builds with the same CANN 9 package,
+  validating the public Matmul B-type probe but not yet feeding the staged tile
+  to Cube at runtime.
+
+Concrete next implementation order:
+
+1. Replace the current GM/L2 FP16 tile handoff experiment with a Matmul
+   `B_TYPE` of `TPosition::VECOUT` first, then `TPosition::TSCM` if VECOUT
+   cannot satisfy the tile lifetime. The tile must stay bounded and per-core
+   resident; never allocate a full dense dequantized weight matrix.
+2. If high-level Matmul cannot express the required B tile, move one layer down
+   to the new public `c_api` movement primitives: GM packed INT4 to L1/UB,
+   vector dequant in UB, L1/L0B movement, Cube matmul, then Fixpipe/copy-out.
+3. Keep `aclnnWeightQuantBatchMatmulV3` and `aclnnWeightQuantBatchMatmulNz` as
+   native CANN fallback probes only. They are useful correctness and layout
+   references, but the measured V3 bridge remains slower than the native
+   torch-npu op and still crosses the generic ACLNN executor boundary.
+4. Delay cache-control tuning until the producer-consumer path is real. Use
+   `asc_datacache_preload`, `asc_sync_mte2`, `asc_sync_mte3`,
+   `asc_sync_block_arrive`, and `asc_sync_block_wait` only inside a measured
+   ping-pong pipeline.
+
 ## CANN 9 Operator Metadata Check
 
 The CANN 9.0.0-beta.2 910B OPP package is installed and has the metadata needed
@@ -323,3 +410,18 @@ metadata under that OPP tree.
   traced to the wheel rather than CANN/OPP, retest against the public 26.0.0
   wheel family for PyTorch 2.10.0 or the matching public wheel once Huawei
   publishes a 2.11 build.
+
+## Rescan References
+
+- Local public Ascend C headers:
+  `/usr/local/Ascend/cann-9.0.0-beta.2/aarch64-linux/asc/include`
+- Local private Ascend C implementation headers:
+  `/usr/local/Ascend/cann-9.0.0-beta.2/aarch64-linux/asc/impl`
+- Local torch-npu package:
+  `/root/ascend910b-py311-torch211/lib/python3.11/site-packages/torch_npu`
+- Official CANN 9 Matmul API notes:
+  https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/900beta2/API/ascendcopapi/atlasascendc_api_07_0614.html
+- Official CANN 9 ACLNN API overview:
+  https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/900beta2/API/aolapi/atlasascendc_api_07_1042.html
+- Official TSCM Matmul scenario note:
+  https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1/opdevg/Ascendcopdevg/atlas_ascendc_10_10024.html

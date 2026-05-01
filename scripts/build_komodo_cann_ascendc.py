@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -16,8 +17,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 OP_IR = REPO_ROOT / "gptqmodel_ext" / "komodo_cann" / "op_ir" / "komodo_cann_w4a16_matmul.json"
 OVERLAY_ROOT = REPO_ROOT / "gptqmodel_ext" / "komodo_cann" / "ascendc"
 DEFAULT_CANN_ROOTS = (
-    Path("/usr/local/Ascend/cann-8.5.1"),
+    Path("/usr/local/Ascend/cann"),
+    Path("/usr/local/Ascend/cann-9.0.0-beta.2"),
     Path("/usr/local/Ascend/ascend-toolkit/latest"),
+    Path("/usr/local/Ascend/ascend-toolkit"),
+    Path("/usr/local/Ascend/cann-8.5.1"),
 )
 
 
@@ -47,6 +51,7 @@ def _find_msopgen(explicit: str | None) -> str:
     if cann_root is not None:
         candidates.extend(
             [
+                cann_root / "bin" / "msopgen",
                 cann_root / "python" / "site-packages" / "bin" / "msopgen",
                 cann_root / "tools" / "msopgen" / "bin" / "msopgen",
             ]
@@ -61,6 +66,39 @@ def _find_msopgen(explicit: str | None) -> str:
     if resolved:
         return resolved
     raise FileNotFoundError("Could not find msopgen. Set MSOPGEN or ASCEND_HOME_PATH.")
+
+
+def _command_for_entrypoint(entrypoint: str) -> list[str]:
+    path = Path(entrypoint)
+    if not path.exists():
+        return [entrypoint]
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(256)
+    except OSError:
+        return [entrypoint]
+    if prefix.startswith(b"#!") and b"python" in prefix.splitlines()[0].lower():
+        return [sys.executable, str(path)]
+    return [entrypoint]
+
+
+def _cann_env(cann_root: Path | None) -> dict[str, str]:
+    env = os.environ.copy()
+    if cann_root is None:
+        return env
+    env.setdefault("ASCEND_HOME_PATH", str(cann_root))
+    python_paths = [
+        cann_root / "python" / "site-packages",
+        cann_root / "opp" / "built-in" / "op_impl" / "ai_core" / "tbe",
+    ]
+    existing = [part for part in env.get("PYTHONPATH", "").split(os.pathsep) if part]
+    for path in reversed(python_paths):
+        path_text = str(path)
+        if path.exists() and path_text not in existing:
+            existing.insert(0, path_text)
+    if existing:
+        env["PYTHONPATH"] = os.pathsep.join(existing)
+    return env
 
 
 def _copy_overlay(output: Path) -> None:
@@ -107,10 +145,21 @@ def _enable_kernel_define(output: Path, define: str) -> None:
             lines[index] = line.replace(")\n", f" {option})\n", 1)
             cmake_path.write_text("".join(lines))
             return
+    cmake9_prefix = "add_compile_options(-DKOMODO_CANN_EXPERIMENTAL_"
+    for index, line in enumerate(lines):
+        if line.startswith(cmake9_prefix):
+            lines[index] = line.replace(")\n", f" {option})\n", 1)
+            cmake_path.write_text("".join(lines))
+            return
     marker = "add_kernels_compile()\n"
-    if marker not in text:
-        raise RuntimeError(f"Could not find `{marker.strip()}` in {cmake_path}.")
-    text = text.replace(marker, f"add_ops_compile_options(ALL OPTIONS {option})\n{marker}", 1)
+    if marker in text:
+        text = text.replace(marker, f"add_ops_compile_options(ALL OPTIONS {option})\n{marker}", 1)
+        cmake_path.write_text(text)
+        return
+    cmake9_marker = "npu_op_kernel_sources("
+    if cmake9_marker not in text:
+        raise RuntimeError(f"Could not find a kernel compile marker in {cmake_path}.")
+    text = text.replace(cmake9_marker, f"add_compile_options({option})\n\n{cmake9_marker}", 1)
     cmake_path.write_text(text)
 
 
@@ -154,7 +203,27 @@ def main() -> int:
             "This is an isolation probe and does not register the CANN Matmul/KFC consumer."
         ),
     )
+    parser.add_argument(
+        "--experimental-cann9-vector-dequant",
+        action="store_true",
+        help=(
+            "Compile the guarded CANN 9 public c_api asc_int42half UB dequant producer. "
+            "Requires --experimental-staged-dequant."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-vecout-consumer",
+        action="store_true",
+        help=(
+            "Compile the guarded Matmul consumer probe with B_TYPE at TPosition::VECOUT. "
+            "This implies --experimental-cube-consumer."
+        ),
+    )
     args = parser.parse_args()
+    if args.experimental_cann9_vector_dequant and not args.experimental_staged_dequant:
+        parser.error("--experimental-cann9-vector-dequant requires --experimental-staged-dequant")
+    if args.experimental_vecout_consumer:
+        args.experimental_cube_consumer = True
     if args.experimental_mixed_aiv_baseline:
         if args.experimental_cube_consumer:
             parser.error("--experimental-mixed-aiv-baseline cannot be combined with --experimental-cube-consumer")
@@ -165,10 +234,12 @@ def main() -> int:
         shutil.rmtree(output)
     output.mkdir(parents=True, exist_ok=True)
 
+    cann_root = args.cann_root or _find_cann_root()
     msopgen = _find_msopgen(args.msopgen)
+    env = _cann_env(cann_root)
     _run(
-        [
-            msopgen,
+        _command_for_entrypoint(msopgen)
+        + [
             "gen",
             "-i",
             str(OP_IR),
@@ -180,7 +251,8 @@ def main() -> int:
             "cpp",
             "-out",
             str(output),
-        ]
+        ],
+        env=env,
     )
     _copy_overlay(output)
     _force_compute_unit(output, args.compute_unit)
@@ -192,6 +264,10 @@ def main() -> int:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH")
     if args.experimental_mixed_aiv_baseline:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_MIXED_AIV_BASELINE")
+    if args.experimental_cann9_vector_dequant:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT")
+    if args.experimental_vecout_consumer:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER")
 
     if args.no_build:
         print(f"Generated project with Komodo-CANN overlay at {output}")
@@ -199,11 +275,6 @@ def main() -> int:
 
     if shutil.which("cmake") is None:
         raise FileNotFoundError("CMake is required by the msopgen build.sh but was not found on PATH.")
-
-    env = os.environ.copy()
-    cann_root = args.cann_root or _find_cann_root()
-    if cann_root is not None:
-        env.setdefault("ASCEND_HOME_PATH", str(cann_root))
 
     build_cmd = ["bash", str(output / "build.sh")]
     if args.target:

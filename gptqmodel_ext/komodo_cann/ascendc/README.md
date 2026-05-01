@@ -55,6 +55,40 @@ its ping-pong FP16 workspace slots. The scalar path still writes the visible
 output while the AIC consumer is under construction, so this is a bring-up probe
 rather than the final fused kernel.
 
+CANN 9 public vector dequant can be compiled into that staged producer with:
+
+```bash
+python scripts/build_komodo_cann_ascendc.py \
+  --output /tmp/komodo_cann_w4a16_cann9_vector \
+  --experimental-staged-dequant \
+  --experimental-cann9-vector-dequant
+```
+
+This path includes `asc/include/c_api/asc_simd.h` and uses
+`asc_int42half_sync` in UB to convert one packed INT4 word into eight FP16 lanes
+before applying Komodo scales and offsets into the bounded staging tile. It is
+guarded because CANN 8 does not expose the public `asc/include/c_api` tree. The
+2026-05-01 CANN 9.0.0-beta.2 rebuild and runtime checks validated that this path
+compiles, launches, and preserves the scalar visible-output accuracy envelope
+after fixing scalar lane-0 signed nibble decode. A controlled
+`M=8,K=1024,N=1024,group_size=32` finite-input check produced finite output with
+`max_abs=7.62939453125e-06`; the 8-NPU `gptq_group_sizes` staged sweep stayed at
+`max_abs=0.015625` for group sizes 32/64/128/full and act-order 32/128.
+
+The CANN 9 Matmul consumer type probe can also switch B to `TPosition::VECOUT`:
+
+```bash
+python scripts/build_komodo_cann_ascendc.py \
+  --output /tmp/komodo_cann_w4a16_vecout_probe \
+  --experimental-staged-dequant \
+  --experimental-cann9-vector-dequant \
+  --experimental-vecout-consumer
+```
+
+This validates the public Matmul template surface for a UB/VECOUT B operand, but
+it is still a compile-time consumer probe. The visible runtime path does not yet
+feed the staged UB/L1 tile into Cube; that remains the next fused-kernel step.
+
 The next guarded bring-up layer is the Cube consumer scaffold:
 
 ```bash
