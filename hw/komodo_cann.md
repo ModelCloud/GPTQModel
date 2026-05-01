@@ -250,6 +250,12 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   across the output-N tiles owned by that core. This is the current route around
   the failing GM-stride `SetOrgShape` experiment; keep it behind its own flag
   until runtime validation proves correctness and speed for `M>1`.
+- The first local-A runtime smoke installed the generated package and passed on
+  NPU0 for `M=4,K=512,N=256,group_size=64` with
+  `base_m=16,base_n=-256,base_k=-128`. Drift versus native CANN was
+  `max_abs=0.0078125` and `mean_abs=0.0014190673828125`. This is a proof that
+  local A+B VecOut handoff can produce correct multi-row output, not yet enough
+  evidence to make it default.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.

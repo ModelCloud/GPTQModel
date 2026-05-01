@@ -288,6 +288,14 @@ the failing GM-stride `SetOrgShape` path. It is intentionally separate from the
 validated row-wise VecOut handoff until runtime checks prove that local-A
 batching is correct and faster for `M>1`.
 
+First local-A runtime smoke on 2026-05-01 installed the generated custom OPP and
+completed a single-shot NPU0 correctness check for
+`M=4,K=512,N=256,group_size=64` with `base_m=16,base_n=-256,base_k=-128`.
+Drift versus native CANN was `max_abs=0.0078125` and
+`mean_abs=0.0014190673828125`. This proves the local-A handoff can execute and
+match native for one multi-row case, but it is still not promoted to the
+validated path until a broader shape sweep and timing comparison pass.
+
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
 with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset

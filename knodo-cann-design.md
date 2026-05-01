@@ -516,6 +516,12 @@ Ascend C custom-op bring-up:
   This should reduce the current one-Cube-call-per-row behavior for `M>1`; it
   remains a compile/runtime probe until validated against the row-wise VecOut
   baseline.
+- The first installed local-A runtime smoke passed on NPU0 for
+  `M=4,K=512,N=256,group_size=64` with
+  `base_m=16,base_n=-256,base_k=-128`, `max_abs=0.0078125`, and
+  `mean_abs=0.0014190673828125` versus native CANN. This confirms the local A+B
+  VecOut handoff can execute correctly for one multi-row shape; promotion still
+  requires a broader shape sweep and timing comparison.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and
