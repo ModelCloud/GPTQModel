@@ -402,7 +402,7 @@ def _komodo_cann_base_k(rows: int, in_features: int, cube_consumer_requested: bo
 def _komodo_cann_base_n(in_features: int, out_features: int, cube_consumer_requested: bool) -> int:
     base_n = min(256, _align_up(out_features, 16))
     if cube_consumer_requested and (
-        out_features == 256 or (in_features == 512 and out_features == 512)
+        out_features == 256 or (out_features == 512 and in_features in {512, 768, 896})
     ):
         return 128
     return base_n

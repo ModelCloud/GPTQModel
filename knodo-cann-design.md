@@ -653,15 +653,16 @@ Ascend C custom-op bring-up:
   `3.256914 ms` while keeping the legacy mean flat at `3.578612 ms`; worst drift
   stayed `max_abs=0.015625`.
 - The staged Cube-consumer planner now uses `base_n=128` for exactly `N=256`
-  shapes and the validated `K=512,N=512` family. This gives those shapes more
-  output-N tile owners, but keeps `K=1024,N=512` on `base_n=256` because a
-  global `base_n=128` probe faulted both rows-8 legacy cases with AICore
-  `507015`. The conservative `N=256` policy passed the all-8 legacy sweep at
-  `2.636595 ms` mean and the planner-shaped sweep at `2.321646 ms` mean, still
-  with worst drift `max_abs=0.015625`. The `K=512,N=512` add-on passed rows
-  `1/4/8/16/32/64/96/128` across groups `32/64/128`, improving its all-8 mean
-  from `2.629267 ms` to `1.371043 ms`. With both gates active, the legacy
-  all-8 sweep passed at `2.483137 ms` mean.
+  shapes and validated `N=512` shapes where `K` is `512`, `768`, or `896`.
+  This gives those shapes more output-N tile owners, but keeps
+  `K=384,N=512` and `K=1024,N=512` on `base_n=256` because those boundaries
+  faulted with AICore `507015` under the narrower tile. The conservative
+  `N=256` policy passed the all-8 legacy sweep at `2.636595 ms` mean and the
+  planner-shaped sweep at `2.321646 ms` mean, still with worst drift
+  `max_abs=0.015625`. The validated `N=512` add-ons improved all-8 means from
+  `2.629267/3.893975/4.523654 ms` to `1.371043/2.012148/2.330995 ms` for
+  `K=512/768/896`, respectively. With the `N=256` and `K=512,N=512` gates
+  active, the legacy all-8 sweep passed at `2.483137 ms` mean.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows

@@ -421,15 +421,16 @@ then passed the same all-8 sweeps and moved the planner mean to `3.256914 ms`
 and the legacy mean to `3.578612 ms`, still with worst drift
 `max_abs=0.015625`.
 The planner now uses `base_n=128` for Cube-consumer staged plans with
-`N=256`, and also for the exact validated `K=512,N=512` family. It keeps
-`K=1024,N=512` on `base_n=256` because a global `base_n=128` probe hit AICore
-`507015` illegal-instruction faults on both legacy rows-8 cases. The
-conservative `N=256` policy passed the all-8 legacy sweep at `2.636595 ms` mean
-and the planner-shaped sweep at `2.321646 ms` mean, with worst drift unchanged
-at `max_abs=0.015625`. The exact `K=512,N=512` add-on passed rows
-`1/4/8/16/32/64/96/128` across groups `32/64/128`, improving the all-8 mean
-from `2.629267 ms` to `1.371043 ms`. With both gates active, the legacy all-8
-sweep passed at `2.483137 ms` mean.
+`N=256`, and also for validated `N=512` shapes where `K` is `512`, `768`, or
+`896`. It keeps `K=384,N=512` and `K=1024,N=512` on `base_n=256` because those
+boundaries hit AICore `507015` illegal-instruction faults with the narrower
+tile. The conservative `N=256` policy passed the all-8 legacy sweep at
+`2.636595 ms` mean and the planner-shaped sweep at `2.321646 ms` mean, with
+worst drift unchanged at `max_abs=0.015625`. The validated `N=512` add-ons
+passed rows up to 128 for `K=512`, rows up to 96 for `K=768/896`, and improved
+their all-8 means from `2.629267/3.893975/4.523654 ms` to
+`1.371043/2.012148/2.330995 ms`. With the `N=256` and `K=512,N=512` gates
+active, the legacy all-8 sweep passed at `2.483137 ms` mean.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

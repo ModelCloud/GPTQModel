@@ -200,6 +200,33 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n512_k512_cube_plan.base_n == 128
 
+    n512_k768_cube_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=768,
+        out_features=512,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+    assert n512_k768_cube_plan.base_n == 128
+
+    n512_k896_cube_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=896,
+        out_features=512,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+    assert n512_k896_cube_plan.base_n == 128
+
+    n512_k384_cube_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=384,
+        out_features=512,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+    assert n512_k384_cube_plan.base_n == 256
+
     n512_k1024_cube_plan = _komodo_cann_tiling_plan(
         rows=8,
         in_features=1024,
