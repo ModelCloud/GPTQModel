@@ -324,6 +324,15 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   nonzero-offset shapes. This improved warmed means to `3.645413 ms` on the
   legacy sweep and `3.305584 ms` on the planner-shaped sweep with unchanged
   `max_abs=0.015625`.
+- A CANN `msprof` PipeUtilization profile of the accepted quartet path on
+  `rows=160,K=512,N=256,group_size=32,base_m=128,base_k=128` reported roughly
+  `2.54 ms` per custom-op launch, `aic_scalar_ratio~=95%`,
+  `aiv_scalar_ratio~=97%`, and Cube utilization around `4%`. The bottleneck is
+  still scalar tile decode/control, not dense FP16 GM materialization. Rejected
+  adjacent probes: row-offset hoisting regressed the legacy mean to
+  `3.666554 ms`, scale UB staging regressed it to `4.125134 ms`, and live
+  zero-offset `asc_int42half_sync` still produced invalid output
+  (`max_abs=Infinity`) while slowing the planner smoke.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.

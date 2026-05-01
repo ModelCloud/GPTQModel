@@ -395,6 +395,15 @@ inner-loop iteration when a full quartet is available, falling back to the
 validated pair/single paths for tails and nonzero-offset shapes. That reduced
 the all-8-NPU warmed means to `3.645413 ms` on the legacy sweep and
 `3.305584 ms` on the planner-shaped sweep with the same `max_abs=0.015625`.
+An `msprof` PipeUtilization run on the accepted quartet path for
+`rows=160,K=512,N=256,group_size=32,base_m=128,base_k=128` showed the custom op
+at about `2.54 ms` per launch, with `aic_scalar_ratio` around `95%`,
+`aiv_scalar_ratio` around `97%`, and Cube utilization around `4%`. Rejected
+follow-ups from that profile pass: hoisting `tile_k * base_n` row offsets
+regressed the legacy mean to `3.666554 ms`; staging scales into a small UB tile
+regressed the legacy mean to `4.125134 ms`; enabling `asc_int42half_sync` for the
+live zero-offset VecOut tile still produced invalid output (`max_abs=Infinity`)
+and was slower on the single planner case.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

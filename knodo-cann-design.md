@@ -623,6 +623,18 @@ Ascend C custom-op bring-up:
   dequant contract and reduces loop overhead for full-width tiles: legacy
   all-8-NPU warmed mean improved to `3.645413 ms`, and the planner-shaped mean
   improved to `3.305584 ms`, still with `max_abs=0.015625`.
+- `msprof` is usable in this environment. A PipeUtilization profile of the
+  accepted quartet path on the `rows=160,K=512,N=256,group_size=32,base_m=128`
+  planner case reported about `2.54 ms` per custom-op launch, with
+  `aic_scalar_ratio` near `95%`, `aiv_scalar_ratio` near `97%`, and Cube
+  utilization near `4%`. This confirms the current fused runtime remains scalar
+  decode/control dominated even though it avoids full dequantized FP16 GM/L2
+  materialization.
+- Rejected profiler-led probes: hoisting the repeated B-tile row offset
+  calculation regressed the legacy all-8-NPU mean to `3.666554 ms`; staging
+  scale rows into a VECCALC UB tile regressed the legacy mean to `4.125134 ms`;
+  and re-enabling `asc_int42half_sync` for the live zero-offset VecOut tile still
+  produced invalid output (`max_abs=Infinity`) and slower single-case timing.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows
