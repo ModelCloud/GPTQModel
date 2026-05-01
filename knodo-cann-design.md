@@ -653,20 +653,24 @@ Ascend C custom-op bring-up:
   `3.256914 ms` while keeping the legacy mean flat at `3.578612 ms`; worst drift
   stayed `max_abs=0.015625`.
 - The staged Cube-consumer planner now uses `base_n=128` for exactly `N=256`
-  shapes and validated `N=512` shapes where `K` is `512`, `768`, or `896`.
-  This gives those shapes more output-N tile owners, but keeps
-  `K=384,N=512` and `K=1024,N=512` on `base_n=256` because those boundaries
-  faulted with AICore `507015` under the narrower tile. The conservative
+  shapes and validated `N=512`/`N=768` shapes where `K` is `512`, `768`, or
+  `896`. This gives those shapes more output-N tile owners, but keeps the
+  adjacent `K=384` and `K=1024` boundaries on `base_n=256` because those
+  boundaries have faulted with AICore `507015` under the narrower tile. The conservative
   `N=256` policy passed the all-8 legacy sweep at `2.636595 ms` mean and the
   planner-shaped sweep at `2.321646 ms` mean, still with worst drift
   `max_abs=0.015625`. The validated `N=512` add-ons improved all-8 means from
   `2.629267/3.893975/4.523654 ms` to `1.371043/2.012148/2.330995 ms` for
   `K=512/768/896`, respectively. With the `N=256` and `K=512,N=512` gates
-  active, the legacy all-8 sweep passed at `2.483137 ms` mean.
+  active, the legacy all-8 sweep passed at `2.483137 ms` mean. The validated
+  `N=768` add-on passed all-8 small-row and planner-shaped larger-row sweeps;
+  the planner-shaped mean improved from `3.414122 ms` at `base_n=256` to
+  `1.773176 ms` at `base_n=128`.
 - For `K=512,N=1024`, the narrow tile is only enabled for decode-like
   `rows <= 8`: that subset passed at `1.378790 ms` mean versus `2.638086 ms`
   for `base_n=256`, while `rows=16` timed out in a clean run and rows
-  `32/64/128` faulted with AICore `507015`.
+  `32/64/128` faulted with AICore `507015`. A `K=768,N=1024,rows<=8` probe
+  also faulted with MTE DDR out-of-range `507015`, so N1024 stays exact to K512.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows

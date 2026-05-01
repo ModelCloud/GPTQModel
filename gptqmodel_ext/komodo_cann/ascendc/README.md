@@ -421,20 +421,24 @@ then passed the same all-8 sweeps and moved the planner mean to `3.256914 ms`
 and the legacy mean to `3.578612 ms`, still with worst drift
 `max_abs=0.015625`.
 The planner now uses `base_n=128` for Cube-consumer staged plans with
-`N=256`, and also for validated `N=512` shapes where `K` is `512`, `768`, or
-`896`. It keeps `K=384,N=512` and `K=1024,N=512` on `base_n=256` because those
-boundaries hit AICore `507015` illegal-instruction faults with the narrower
-tile. The conservative `N=256` policy passed the all-8 legacy sweep at
+`N=256`, and also for validated `N=512` and `N=768` shapes where `K` is `512`,
+`768`, or `896`. It keeps `K=384` and `K=1024` for those N widths on
+`base_n=256` because adjacent boundaries have hit AICore `507015` faults with
+the narrower tile. The conservative `N=256` policy passed the all-8 legacy sweep at
 `2.636595 ms` mean and the planner-shaped sweep at `2.321646 ms` mean, with
 worst drift unchanged at `max_abs=0.015625`. The validated `N=512` add-ons
 passed rows up to 128 for `K=512`, rows up to 96 for `K=768/896`, and improved
 their all-8 means from `2.629267/3.893975/4.523654 ms` to
 `1.371043/2.012148/2.330995 ms`. With the `N=256` and `K=512,N=512` gates
-active, the legacy all-8 sweep passed at `2.483137 ms` mean.
+active, the legacy all-8 sweep passed at `2.483137 ms` mean. The `N=768`
+extension passed all-8 small-row and planner-shaped larger-row sweeps; the
+planner-shaped mean moved from `3.414122 ms` at `base_n=256` to `1.773176 ms`
+at `base_n=128`.
 For `K=512,N=1024`, the narrow tile is only enabled for decode-like
 `rows <= 8`: that subset passed at `1.378790 ms` mean versus `2.638086 ms` for
 `base_n=256`, while `rows=16` timed out in a clean run and rows `32/64/128`
-faulted with AICore `507015`.
+faulted with AICore `507015`. A `K=768,N=1024,rows<=8` probe also faulted with
+an MTE DDR out-of-range `507015`, so the N1024 gate remains exact to K512.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

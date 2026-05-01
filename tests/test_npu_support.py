@@ -236,6 +236,51 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n512_k1024_cube_plan.base_n == 256
 
+    n768_k512_cube_plan = _komodo_cann_tiling_plan(
+        rows=160,
+        in_features=512,
+        out_features=768,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+    assert n768_k512_cube_plan.base_n == 128
+
+    n768_k768_cube_plan = _komodo_cann_tiling_plan(
+        rows=48,
+        in_features=768,
+        out_features=768,
+        group_size=96,
+        device=torch.device("cpu"),
+    )
+    assert n768_k768_cube_plan.base_n == 128
+
+    n768_k896_cube_plan = _komodo_cann_tiling_plan(
+        rows=128,
+        in_features=896,
+        out_features=768,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+    assert n768_k896_cube_plan.base_n == 128
+
+    n768_k384_cube_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=384,
+        out_features=768,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+    assert n768_k384_cube_plan.base_n == 256
+
+    n768_k1024_cube_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=1024,
+        out_features=768,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+    assert n768_k1024_cube_plan.base_n == 256
+
     n1024_k512_decode_cube_plan = _komodo_cann_tiling_plan(
         rows=8,
         in_features=512,
