@@ -76,11 +76,14 @@ Current Python-side Komodo-CANN records this plan per shape:
   `8/17/32/48/64/96/129/160`, per-case planner `base_m`, K `512/1024`, N
   `256/512`, and groups `32/64/128`; worst drift was `max_abs=0.015625` and
   `mean_abs=0.00142669677734375`.
-- The staged Cube-consumer planner uses `base_n=128` for `N=256`, and for
-  validated `N=512`/`N=768` shapes where `K` is `512`, `768`, or `896`.
+- The staged Cube-consumer planner uses `base_n=128` for `N=256`, for validated
+  `N=512`/`N=768` shapes where `K` is `512`, `768`, or `896`, and for
+  validated `N=640` shapes where `K` is `512` or `768`.
   The N768 planner-shaped all-8 sweep improved mean latency from
   `3.414122 ms` at `base_n=256` to `1.773176 ms` at `base_n=128`, with worst
-  drift still `max_abs=0.015625`.
+  drift still `max_abs=0.015625`. The N640 K512/K768 sweep passed at
+  `1.700607 ms` mean; K896/N640 and several N896 probes faulted, so they stay
+  outside the gate.
 - The plan records per-tile packed INT4 bytes, FP16 dequant workspace bytes,
   L0A/L0B/L0C tile bytes, K tiles per Split-K shard, and the number of vector
   dequant tasks. These are the checks the future Ascend C op must satisfy before

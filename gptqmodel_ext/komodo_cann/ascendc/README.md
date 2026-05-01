@@ -421,10 +421,11 @@ then passed the same all-8 sweeps and moved the planner mean to `3.256914 ms`
 and the legacy mean to `3.578612 ms`, still with worst drift
 `max_abs=0.015625`.
 The planner now uses `base_n=128` for Cube-consumer staged plans with
-`N=256`, and also for validated `N=512` and `N=768` shapes where `K` is `512`,
-`768`, or `896`. It keeps `K=384` and `K=1024` for those N widths on
-`base_n=256` because adjacent boundaries have hit AICore `507015` faults with
-the narrower tile. The conservative `N=256` policy passed the all-8 legacy sweep at
+`N=256`, for validated `N=512` and `N=768` shapes where `K` is `512`, `768`, or
+`896`, and for validated `N=640` shapes where `K` is `512` or `768`. It keeps
+`K=384`/`K=1024` for the N512/N768 widths and `K=896,N=640` on `base_n=256`
+because adjacent boundaries have hit AICore `507015` faults with the narrower
+tile. The conservative `N=256` policy passed the all-8 legacy sweep at
 `2.636595 ms` mean and the planner-shaped sweep at `2.321646 ms` mean, with
 worst drift unchanged at `max_abs=0.015625`. The validated `N=512` add-ons
 passed rows up to 128 for `K=512`, rows up to 96 for `K=768/896`, and improved
@@ -433,7 +434,9 @@ their all-8 means from `2.629267/3.893975/4.523654 ms` to
 active, the legacy all-8 sweep passed at `2.483137 ms` mean. The `N=768`
 extension passed all-8 small-row and planner-shaped larger-row sweeps; the
 planner-shaped mean moved from `3.414122 ms` at `base_n=256` to `1.773176 ms`
-at `base_n=128`.
+at `base_n=128`. The `N=640,K=512/768` add-on passed rows up to 160/96,
+respectively, at `1.700607 ms` mean; the `base_n=256` control faulted because
+640 is not divisible by 256 in this runtime handoff.
 For `K=512,N=1024`, the narrow tile is only enabled for decode-like
 `rows <= 8`: that subset passed at `1.378790 ms` mean versus `2.638086 ms` for
 `base_n=256`, while `rows=16` timed out in a clean run and rows `32/64/128`

@@ -403,6 +403,7 @@ def _komodo_cann_base_n(rows: int, in_features: int, out_features: int, cube_con
     base_n = min(256, _align_up(out_features, 16))
     if cube_consumer_requested and (
         out_features == 256
+        or (out_features == 640 and in_features in {512, 768})
         or (out_features in {512, 768} and in_features in {512, 768, 896})
         or (rows <= 8 and in_features == 512 and out_features == 1024)
     ):
