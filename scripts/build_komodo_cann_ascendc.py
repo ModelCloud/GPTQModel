@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -105,6 +106,7 @@ def _copy_overlay(output: Path) -> None:
     for rel in (
         Path("op_host") / "komodo_cann_w4_a16_matmul.cpp",
         Path("op_host") / "komodo_cann_w4_a16_matmul_tiling.h",
+        Path("op_host") / "komodo_cann_w4_a16_matmul_tiling_key.h",
         Path("op_kernel") / "komodo_cann_w4_a16_matmul.cpp",
     ):
         src = OVERLAY_ROOT / rel
@@ -113,6 +115,10 @@ def _copy_overlay(output: Path) -> None:
             raise FileNotFoundError(src)
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+    shutil.copy2(
+        OVERLAY_ROOT / "op_host" / "komodo_cann_w4_a16_matmul_tiling_key.h",
+        output / "op_kernel" / "komodo_cann_w4_a16_matmul_tiling_key.h",
+    )
 
 
 def _force_compute_unit(output: Path, compute_unit: str) -> None:
@@ -136,30 +142,65 @@ def _enable_kernel_define(output: Path, define: str) -> None:
         raise FileNotFoundError(cmake_path)
     text = cmake_path.read_text()
     option = f"-D{define}=1"
-    if option in text:
-        return
-    experimental_prefix = "add_ops_compile_options(ALL OPTIONS -DKOMODO_CANN_EXPERIMENTAL_"
     lines = text.splitlines(keepends=True)
+
+    cmake9_match = re.search(r"^npu_op_kernel_sources\(\s*(\S+)", text, flags=re.MULTILINE)
+    if cmake9_match is not None:
+        target_name = cmake9_match.group(1)
+        cmake9_prefix = "npu_op_kernel_options("
+        for index, line in enumerate(lines):
+            if line.startswith(cmake9_prefix):
+                if option in line:
+                    return
+                lines[index] = line.replace(")\n", f" {option})\n", 1)
+                cmake_path.write_text("".join(lines))
+                return
+        marker = cmake9_match.group(0)
+        text = text.replace(
+            marker,
+            f"npu_op_kernel_options({target_name} ALL OPTIONS {option})\n\n{marker}",
+            1,
+        )
+        cmake_path.write_text(text)
+        return
+
+    experimental_prefix = "add_ops_compile_options(ALL OPTIONS -DKOMODO_CANN_EXPERIMENTAL_"
     for index, line in enumerate(lines):
         if line.startswith(experimental_prefix):
+            if option in line:
+                return
             lines[index] = line.replace(")\n", f" {option})\n", 1)
             cmake_path.write_text("".join(lines))
             return
-    cmake9_prefix = "add_compile_options(-DKOMODO_CANN_EXPERIMENTAL_"
-    for index, line in enumerate(lines):
-        if line.startswith(cmake9_prefix):
-            lines[index] = line.replace(")\n", f" {option})\n", 1)
-            cmake_path.write_text("".join(lines))
-            return
+    if option in text:
+        return
     marker = "add_kernels_compile()\n"
     if marker in text:
         text = text.replace(marker, f"add_ops_compile_options(ALL OPTIONS {option})\n{marker}", 1)
         cmake_path.write_text(text)
         return
-    cmake9_marker = "npu_op_kernel_sources("
-    if cmake9_marker not in text:
-        raise RuntimeError(f"Could not find a kernel compile marker in {cmake_path}.")
-    text = text.replace(cmake9_marker, f"add_compile_options({option})\n\n{cmake9_marker}", 1)
+    raise RuntimeError(f"Could not find a kernel compile marker in {cmake_path}.")
+
+
+def _enable_host_define(output: Path, define: str) -> None:
+    cmake_path = output / "op_host" / "CMakeLists.txt"
+    if not cmake_path.exists():
+        raise FileNotFoundError(cmake_path)
+    text = cmake_path.read_text()
+    option = f"-D{define}=1"
+    if option in text:
+        return
+    prefix = "add_compile_options("
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.startswith(prefix):
+            lines[index] = line.replace(")\n", f" {option})\n", 1)
+            cmake_path.write_text("".join(lines))
+            return
+    marker = "aux_source_directory("
+    if marker not in text:
+        raise RuntimeError(f"Could not find a host compile marker in {cmake_path}.")
+    text = text.replace(marker, f"add_compile_options({option})\n\n{marker}", 1)
     cmake_path.write_text(text)
 
 
@@ -220,6 +261,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--experimental-vecout-runtime-handoff",
+        action="store_true",
+        help=(
+            "Compile the guarded mixed AIV/AIC runtime probe that dequantizes INT4 B tiles into "
+            "UB/VECOUT and hands them to Matmul without materializing a full FP16 weight tile. "
+            "This implies --experimental-staged-dequant, --experimental-cann9-vector-dequant, "
+            "--experimental-vecout-consumer, and --experimental-mixed-launch."
+        ),
+    )
+    parser.add_argument(
         "--experimental-tscm-consumer",
         action="store_true",
         help=(
@@ -257,6 +308,11 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    if args.experimental_vecout_runtime_handoff:
+        args.experimental_staged_dequant = True
+        args.experimental_cann9_vector_dequant = True
+        args.experimental_vecout_consumer = True
+        args.experimental_mixed_launch = True
     if args.experimental_tscm_direct_multik:
         args.experimental_tscm_direct_dequant = True
     if args.experimental_tscm_direct_dequant:
@@ -270,6 +326,13 @@ def main() -> int:
         parser.error("--experimental-cann9-vector-dequant requires --experimental-staged-dequant")
     if args.experimental_tscm_consumer and not args.experimental_staged_dequant:
         parser.error("--experimental-tscm-consumer requires --experimental-staged-dequant")
+    if args.experimental_vecout_runtime_handoff and (
+        args.experimental_tscm_consumer
+        or args.experimental_tscm_runtime_handoff
+        or args.experimental_tscm_direct_dequant
+        or args.experimental_tscm_direct_multik
+    ):
+        parser.error("--experimental-vecout-runtime-handoff cannot be combined with TSCM runtime handoff flags")
     if args.experimental_vecout_consumer and args.experimental_tscm_consumer:
         parser.error("--experimental-vecout-consumer and --experimental-tscm-consumer are mutually exclusive")
     if args.experimental_vecout_consumer:
@@ -314,12 +377,15 @@ def main() -> int:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER")
     if args.experimental_mixed_launch:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH")
+        _enable_host_define(output, "KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH")
     if args.experimental_mixed_aiv_baseline:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_MIXED_AIV_BASELINE")
     if args.experimental_cann9_vector_dequant:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT")
     if args.experimental_vecout_consumer:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER")
+    if args.experimental_vecout_runtime_handoff:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF")
     if args.experimental_tscm_consumer:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER")
     if args.experimental_tscm_runtime_handoff:

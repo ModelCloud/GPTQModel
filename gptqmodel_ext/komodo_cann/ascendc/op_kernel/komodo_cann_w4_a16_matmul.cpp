@@ -1,14 +1,15 @@
 #include "kernel_operator.h"
-#if defined(KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER) || defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH)
 #include "lib/matmul_intf.h"
-#endif
 #if defined(KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT)
 #include "c_api/asc_simd.h"
 #endif
+#include "komodo_cann_w4_a16_matmul_tiling_key.h"
 
 using namespace AscendC;
-#if defined(KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER) || defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH)
 using namespace matmul;
+
+#if defined(KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT)
+using KomodoCannCapiInt4 = ::int4b_t;
 #endif
 
 #if defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH) && !defined(KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER) && \
@@ -37,6 +38,22 @@ using namespace matmul;
 #error "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK requires TSCM direct dequant"
 #endif
 
+#if defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF) && \
+    (!defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER) || !defined(KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH) || \
+     !defined(KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT) || !defined(KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT))
+#error "KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF requires staged dequant, CANN9 vector dequant, VECOUT consumer, and mixed launch"
+#endif
+
+#if defined(KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT) || \
+    defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
+#define KOMODO_CANN_EXPERIMENTAL_LOCAL_DIRECT_DEQUANT 1
+#endif
+
+#if defined(KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK) || \
+    defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
+#define KOMODO_CANN_EXPERIMENTAL_LOCAL_DIRECT_MULTIK 1
+#endif
+
 namespace {
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
 constexpr uint32_t kKernelModeStagedDequant = 1;
@@ -52,7 +69,7 @@ class KomodoCannW4A16CubeConsumerProbe {
 public:
     using AType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
 #ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER
-    using BType = MatmulType<TPosition::TSCM, CubeFormat::NZ, half>;
+    using BType = MatmulType<TPosition::TSCM, CubeFormat::NZ, half, true>;
 #elif defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER)
     using BType = MatmulType<TPosition::VECOUT, CubeFormat::ND, half>;
 #else
@@ -83,7 +100,7 @@ public:
         constexpr uint32_t kTscmSlots = 1;
 #endif
         tscm_ready_ = pipe.InitBuffer(b_tscm_, kTscmSlots, base_k * base_n * sizeof(half));
-#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
+#ifdef KOMODO_CANN_EXPERIMENTAL_LOCAL_DIRECT_DEQUANT
         direct_dequant_ready_ = pipe.InitBuffer(b_ub_, base_k * base_n * sizeof(half));
 #endif
         return tscm_ready_;
@@ -111,12 +128,13 @@ public:
         return b_tscm_local_;
     }
 
-#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
+#ifdef KOMODO_CANN_EXPERIMENTAL_LOCAL_DIRECT_DEQUANT
     __aicore__ inline LocalTensor<half> GetDirectDequantTile(const KomodoCannW4A16MatmulTilingData* tiling)
     {
         return b_ub_.Get<half>(tiling->base_k * tiling->base_n);
     }
 
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
     __aicore__ inline LocalTensor<half> LoadDirectBTileToTscm(
         const LocalTensor<half>& b_tile,
         const KomodoCannW4A16MatmulTilingData* tiling)
@@ -138,6 +156,7 @@ public:
         b_tscm_.DeQue();
         return b_tscm_local_;
     }
+#endif
 
     __aicore__ inline bool DirectDequantReady() const
     {
@@ -147,7 +166,7 @@ public:
 
     __aicore__ inline void SetTensorBTscmProbe(const LocalTensor<half>& b_tile)
     {
-        mm.SetTensorB(b_tile);
+        mm.SetTensorB(b_tile, true);
     }
 
     __aicore__ inline void FreeTscmBTile()
@@ -176,6 +195,34 @@ private:
     bool direct_dequant_ready_ = false;
 #endif
 #endif
+
+#if defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF) && \
+    !defined(KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER)
+    __aicore__ inline bool InitVecoutBTile(TPipe& pipe, const KomodoCannW4A16MatmulTilingData* tiling)
+    {
+        const uint32_t base_k = tiling->base_k;
+        const uint32_t base_n = tiling->base_n;
+        if (base_k == 0 || base_n == 0) {
+            return false;
+        }
+        direct_dequant_ready_ = pipe.InitBuffer(b_ub_, base_k * base_n * sizeof(half));
+        return direct_dequant_ready_;
+    }
+
+    __aicore__ inline LocalTensor<half> GetDirectDequantTile(const KomodoCannW4A16MatmulTilingData* tiling)
+    {
+        return b_ub_.Get<half>(tiling->base_k * tiling->base_n);
+    }
+
+    __aicore__ inline bool DirectDequantReady() const
+    {
+        return direct_dequant_ready_;
+    }
+
+private:
+    TBuf<TPosition::VECOUT> b_ub_;
+    bool direct_dequant_ready_ = false;
+#endif
 };
 
 __aicore__ inline TCubeTiling MakeCubeConsumerTiling(const KomodoCannW4A16MatmulTilingData* tiling)
@@ -184,7 +231,7 @@ __aicore__ inline TCubeTiling MakeCubeConsumerTiling(const KomodoCannW4A16Matmul
     cube_tiling.usedCoreNum = static_cast<int32_t>(tiling->block_dim);
     cube_tiling.M = static_cast<int32_t>(tiling->rows);
     cube_tiling.N = static_cast<int32_t>(tiling->out_features);
-#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK
+#ifdef KOMODO_CANN_EXPERIMENTAL_LOCAL_DIRECT_MULTIK
     const int32_t cube_k = static_cast<int32_t>(tiling->base_k);
 #else
     const int32_t cube_k = static_cast<int32_t>(tiling->in_features);
@@ -330,6 +377,9 @@ public:
             tiling_->staging_tile_bytes == 0 || tiling_->block_dim == 0) {
             return false;
         }
+        if (GetSubBlockIdx() != 0) {
+            return true;
+        }
 
         uint32_t physical_core_idx = static_cast<uint32_t>(GetBlockIdx());
         if ASCEND_IS_AIV {
@@ -375,10 +425,11 @@ public:
                         const uint32_t m_len_candidate = rows - m_begin;
                         const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
                         cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features + k_begin]);
-                        cube_probe.mm.SetTensorB(b_tscm_tile);
+                        cube_probe.mm.SetTensorB(b_tscm_tile, true);
                         cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                         ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
-                        cube_probe.mm.IterateAll(y_gm_[m_begin * out_features + n_begin], k_tile != 0);
+                        cube_probe.mm.IterateAll<false>(
+                            y_gm_[m_begin * out_features + n_begin], k_tile != 0, false, true);
                         if (m_tile == 0 && has_next_k_tile) {
                             FillDirectBTileKTile(
                                 direct_b_tile,
@@ -419,10 +470,11 @@ public:
                         const uint32_t m_len_candidate = rows - m_begin;
                         const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
                         cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features + k_begin]);
-                        cube_probe.mm.SetTensorB(b_tscm_tile);
+                        cube_probe.mm.SetTensorB(b_tscm_tile, true);
                         cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                         ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
-                        cube_probe.mm.IterateAll(y_gm_[m_begin * out_features + n_begin], k_tile != 0);
+                        cube_probe.mm.IterateAll<false>(
+                            y_gm_[m_begin * out_features + n_begin], k_tile != 0, false, true);
                         cube_probe.mm.WaitIterateAll();
                     }
                     cube_probe.FreeTscmBTile(b_tscm_tile);
@@ -457,25 +509,94 @@ public:
             }
             LocalTensor<half> b_tscm_tile = cube_probe.LoadStagedBTileToTscm(staged_weight_gm_, stage_base, tiling_);
 #endif
+#ifndef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK
             for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
                 const uint32_t m_begin = m_tile * base_m;
                 const uint32_t m_len_candidate = rows - m_begin;
                 const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
                 cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features]);
-                cube_probe.mm.SetTensorB(b_tscm_tile);
+                cube_probe.mm.SetTensorB(b_tscm_tile, true);
                 cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                 ConfigureCubeBiasForKTile(cube_probe, 0, n_begin);
-                cube_probe.mm.IterateAll(y_gm_[m_begin * out_features + n_begin], false);
+                cube_probe.mm.IterateAll<false>(y_gm_[m_begin * out_features + n_begin], false, false, true);
                 cube_probe.mm.WaitIterateAll();
             }
             cube_probe.FreeTscmBTile();
+#endif
+        }
+        return true;
+    }
+#endif
+
+#if defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
+    __aicore__ inline bool TryProcessVecoutHandoff(KomodoCannW4A16CubeConsumerProbe& cube_probe)
+    {
+        if (!cube_probe.DirectDequantReady() || tiling_->kernel_mode != kKernelModeStagedDequant ||
+            tiling_->base_k == 0 || tiling_->base_n == 0 || tiling_->out_features % tiling_->base_n != 0 ||
+            tiling_->in_features % tiling_->base_k != 0) {
+            return false;
+        }
+
+        const uint32_t rows = tiling_->rows;
+        const uint32_t in_features = tiling_->in_features;
+        const uint32_t out_features = tiling_->out_features;
+        const uint32_t base_m = tiling_->base_m;
+        const uint32_t base_n = tiling_->base_n;
+        const uint32_t staging_blocks = tiling_->staging_blocks;
+        if (rows == 0 || out_features == 0 || base_m == 0 || staging_blocks == 0 || tiling_->block_dim == 0) {
+            return false;
+        }
+        if (GetSubBlockIdx() != 0) {
+            return true;
+        }
+
+        uint32_t physical_core_idx = static_cast<uint32_t>(GetBlockIdx());
+        if ASCEND_IS_AIV {
+            const uint32_t task_ratio = static_cast<uint32_t>(GetTaskRation());
+            if (task_ratio > 1) {
+                physical_core_idx /= task_ratio;
+            }
+        }
+        const uint32_t core_idx = physical_core_idx % tiling_->block_dim;
+        if (core_idx >= staging_blocks) {
+            return true;
+        }
+
+        const uint32_t n_tiles = out_features / base_n;
+        const uint32_t packed_stride = out_features >> 3;
+        const uint32_t m_tiles = rows;
+        const uint32_t k_tiles = in_features / tiling_->base_k;
+        const uint32_t zero_offsets = tiling_->zero_offsets;
+        LocalTensor<half> direct_b_tile = cube_probe.GetDirectDequantTile(tiling_);
+        for (uint32_t n_tile = core_idx; n_tile < n_tiles; n_tile += staging_blocks) {
+            const uint32_t n_begin = n_tile * base_n;
+            const uint32_t n_end = n_begin + base_n;
+            const uint32_t packed_begin = n_begin >> 3;
+            const uint32_t packed_end = n_end >> 3;
+            for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
+                const uint32_t k_begin = k_tile * tiling_->base_k;
+                FillDirectBTileKTile(direct_b_tile, k_tile, n_begin, packed_begin, packed_end, packed_stride, zero_offsets);
+                PipeBarrier<PIPE_ALL>();
+                for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
+                    const uint32_t m_begin = m_tile;
+                    const uint32_t m_len = 1;
+                    cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features + k_begin]);
+                    cube_probe.mm.SetTensorB(direct_b_tile);
+                    cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
+                    ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
+                    cube_probe.mm.IterateAll<false>(
+                        y_gm_[m_begin * out_features + n_begin], k_tile != 0, false, true);
+                    cube_probe.mm.WaitIterateAll();
+                }
+            }
         }
         return true;
     }
 #endif
 
 private:
-#if defined(KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF)
+#if defined(KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF) || \
+    defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
     __aicore__ inline void ConfigureCubeBiasForKTile(
         KomodoCannW4A16CubeConsumerProbe& cube_probe,
         uint32_t k_tile,
@@ -493,8 +614,8 @@ private:
 #endif
 
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
-#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
-#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK
+#ifdef KOMODO_CANN_EXPERIMENTAL_LOCAL_DIRECT_DEQUANT
+#ifdef KOMODO_CANN_EXPERIMENTAL_LOCAL_DIRECT_MULTIK
     __aicore__ inline void FillDirectBTileKTile(
         LocalTensor<half>& b_tile,
         uint32_t k_tile,
@@ -635,6 +756,7 @@ private:
         float offset6,
         float offset7)
     {
+#ifndef KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF
         if (vector_dequant_ready_) {
             FillDirectBTileWordVectorValues(
                 b_tile,
@@ -658,6 +780,7 @@ private:
                 offset7);
             return;
         }
+#endif
         b_tile.SetValue(tile_offset, static_cast<half>(DequantLane(word, 0, scale0, offset0)));
         b_tile.SetValue(tile_offset + 1, static_cast<half>(DequantLane(word, 1, scale1, offset1)));
         b_tile.SetValue(tile_offset + 2, static_cast<half>(DequantLane(word, 2, scale2, offset2)));
@@ -739,7 +862,7 @@ private:
         packed.SetValue(0, word);
         asc_int42half_sync(
             reinterpret_cast<__ubuf__ half*>(dequant.GetPhyAddr()),
-            reinterpret_cast<__ubuf__ int4b_t*>(packed.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ KomodoCannCapiInt4*>(packed.GetPhyAddr()),
             static_cast<uint32_t>(kCann9VectorDequantLanes));
 
         b_tile.SetValue(tile_offset, static_cast<half>((static_cast<float>(dequant.GetValue(0)) + offset0) * scale0));
@@ -856,7 +979,7 @@ private:
         packed.SetValue(0, word);
         asc_int42half_sync(
             reinterpret_cast<__ubuf__ half*>(dequant.GetPhyAddr()),
-            reinterpret_cast<__ubuf__ int4b_t*>(packed.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ KomodoCannCapiInt4*>(packed.GetPhyAddr()),
             static_cast<uint32_t>(kCann9VectorDequantLanes));
 
         const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
@@ -1937,7 +2060,8 @@ private:
 };
 }  // namespace
 
-extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
+template <int LAUNCH_MODE>
+__global__ __aicore__ void komodo_cann_w4_a16_matmul(
     GM_ADDR x,
     GM_ADDR packed_weight,
     GM_ADDR scales,
@@ -1979,6 +2103,8 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
     }
 #ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF
     cube_probe.InitTscmBTile(cube_pipe, &tiling_data);
+#elif defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
+    cube_probe.InitVecoutBTile(cube_pipe, &tiling_data);
 #endif
 #else
     if ASCEND_IS_AIC {
@@ -2006,6 +2132,10 @@ extern "C" __global__ __aicore__ void komodo_cann_w4_a16_matmul(
 #endif
 #ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF
     if (op.TryProcessSingleKTileTscmHandoff(cube_probe)) {
+        return;
+    }
+#elif defined(KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
+    if (op.TryProcessVecoutHandoff(cube_probe)) {
         return;
     }
 #endif

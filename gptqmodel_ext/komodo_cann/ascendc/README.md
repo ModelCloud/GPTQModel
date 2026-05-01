@@ -242,6 +242,36 @@ registers the Matmul object on both AIC and AIV. It still keeps visible output o
 the AIV scalar baseline; the next target is consuming staged dequant tiles through
 Cube instead of only registering the consumer.
 
+The first runtime local-B Cube handoff that avoids a staged FP16 GM weight tile
+is the guarded VecOut path:
+
+```bash
+python scripts/build_komodo_cann_ascendc.py \
+  --output /tmp/komodo_cann_w4a16_vecout_runtime \
+  --experimental-vecout-runtime-handoff
+```
+
+This flag implies staged dequant metadata, CANN 9 vector-dequant headers,
+`TPosition::VECOUT` B, and mixed AIC/AIV launch. The host selects the generated
+mixed-launch tiling key, requests CANN Matmul system workspace plus the bounded
+user workspace, and the kernel fills one local FP16 B tile from packed INT4
+before passing that local tile to `Matmul::SetTensorB`. It therefore does not
+write a full dequantized FP16 weight matrix through GM/L2. The path currently
+uses scalar direct INT4 decode for the live VecOut tile because the first direct
+`asc_int42half_sync` tile fill produced incorrect lane values; the CANN 9 vector
+conversion remains compiled for staged producer probes and needs a separate
+packing/count/order fix before it can be used in the live fused handoff.
+
+Local validation on 2026-05-01 installed the VecOut runtime package and passed an
+8-NPU one-shape-per-device smoke across group sizes 32/64/128 and rows 1/4/8.
+Observed drift versus native CANN stayed within `max_abs=0.015625` and
+`mean_abs<=0.002598`. Two scheduler details are important: `IterateAll` must be
+called with `waitIterateAll=true` before `WaitIterateAll`, and explicit
+multi-row `SetOrgShape` on this mixed VecOut path caused device error `507057`.
+The current safe implementation therefore launches Cube one row at a time for
+`M>1`; batching rows again is the next performance target after fixing the
+direct vector dequant lane mapping.
+
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
 with the 8-lane packed-word loop, then to `9.22 ms` after hoisting scale/offset

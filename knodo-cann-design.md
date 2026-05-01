@@ -485,6 +485,30 @@ Ascend C custom-op bring-up:
   replace the scalar visible-output loop with actual AIV-produced staged tiles
   consumed by Cube, then wire the Cube result back without full FP16 weight
   materialization.
+- The next pass added `--experimental-vecout-runtime-handoff`, a mixed-launch
+  runtime path that fills a bounded local FP16 B tile from packed INT4 and gives
+  that tile directly to CANN Matmul as `TPosition::VECOUT`. This is the first
+  live Cube path in this tree that avoids writing the dequantized B tile through
+  GM/L2 before Cube consumes it. It is still guarded because the current
+  correctness implementation uses scalar direct INT4 decode for the live tile.
+  Direct `asc_int42half_sync` produced invalid lane values in this context, so
+  the vectorized INT4-to-FP16 mapping remains a follow-up rather than an enabled
+  fast path.
+- VecOut handoff validation on 2026-05-01 used all eight NPUs with one process
+  per NPU and covered rows `1/4/8`, K `384/512/768/1024`, N `256/512`, and group
+  sizes `32/64/128`. The package matched native CANN within
+  `max_abs=0.015625` and `mean_abs<=0.002598`. The important scheduler
+  discoveries were that `WaitIterateAll` must follow an `IterateAll` call with
+  `waitIterateAll=true`, and that explicit multi-row `SetOrgShape` caused
+  device error `507057`. Until the A stride issue is solved, the VecOut path
+  launches Cube one row at a time for `M>1`.
+- CANN 9 generated projects now need template tiling-key metadata copied into
+  both host and kernel overlays. The build helper recognizes generated
+  `npu_op_kernel_sources(...)` CMake and coalesces all experimental defines into
+  one `npu_op_kernel_options(... ALL OPTIONS ...)` line. Mixed-launch builds add
+  the corresponding host define so the host tiler selects the mixed key, and
+  staged/Cube workspace accounting adds CANN's system workspace to Komodo-CANN's
+  bounded user workspace before requesting memory from ACLNN.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

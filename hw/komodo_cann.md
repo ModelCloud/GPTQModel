@@ -217,6 +217,33 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   An 8-NPU one-shard-per-device `gptq_group_sizes` staged sweep kept
   `max_abs=0.015625` for group-size 32/64/128/full and act-order 32/128; group
   size 16 still routes through the native group16 CANN path.
+- Added `--experimental-vecout-runtime-handoff` as the first mixed-launch
+  runtime path that feeds a local FP16 B tile directly to Cube Matmul instead of
+  writing a staged FP16 weight tile through GM/L2. The flag implies staged
+  metadata, CANN 9 device headers, VecOut B, and mixed AIC/AIV launch. It also
+  copies the new template tiling-key header into both generated host and kernel
+  trees so CANN 9 emits the AIV-only and `MIX_AIC_1_2` binaries from one op.
+- Fixed the host workspace accounting for staged/Cube packages: CANN Matmul
+  system workspace and Komodo-CANN user tile workspace are now added together
+  before `SetWorkspaceSizes`. The fused decision still uses only the bounded
+  user staging bytes, so Komodo-CANN does not make a full dense dequantized
+  weight cache the default.
+- VecOut runtime validation on 2026-05-01 passed an 8-NPU smoke with one shape
+  per NPU: rows `1/4/8`, K `384/512/768/1024`, N `256/512`, and group sizes
+  `32/64/128`. Drift against native CANN stayed within `max_abs=0.015625` and
+  `mean_abs<=0.002598`.
+- Two CANN 9 runtime lessons are now captured in code. First,
+  `Matmul::IterateAll<false>(..., waitIterateAll=true)` must be paired with
+  `WaitIterateAll`; using `waitIterateAll=false` either returned before the
+  output was complete or hung on the later wait. Second, explicit multi-row
+  `SetOrgShape` on this mixed VecOut handoff raised device error `507057`, so
+  the current correctness path launches one Cube row at a time for `M>1`.
+- The live VecOut direct tile fill intentionally falls back to scalar INT4 lane
+  decode for now. The direct `asc_int42half_sync` fill compiled but produced
+  wildly incorrect values, which means its input packing, element count, or lane
+  order is still wrong for this use. Keep the CANN 9 vector conversion active in
+  staged probes, but do not enable it for the live fused tile until that mapping
+  is isolated.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.
