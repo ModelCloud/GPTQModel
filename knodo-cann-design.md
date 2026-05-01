@@ -532,6 +532,10 @@ Ascend C custom-op bring-up:
   loop compiled, but the installed package timed out before the first runtime
   result. Keep scalar local-A staging as the validated path unless a future
   probe isolates the required queue/barrier semantics for that copy.
+- A zero-offset-only direct B-fill specialization for VecOut compiled and passed
+  the first three NPU0 shapes, then timed out on
+  `M=4,K=512,N=256,group_size=128`. Do not enable that branch without a smaller
+  device-side repro; the generic offset-aware fill remains the stable path.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

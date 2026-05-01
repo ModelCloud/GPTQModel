@@ -305,6 +305,11 @@ then passed one shape per NPU, including rows `1/2/3/4/7/8`, group sizes
 optimization attempt replaced scalar A staging with GM-to-VECOUT `DataCopy`;
 that package compiled, but the runtime smoke timed out before the first result,
 so scalar A staging remains the validated local-A implementation.
+A later VecOut-only zero-offset B-fill specialization also compiled and passed
+the first three NPU0 shapes, then timed out on the fourth shape
+(`M=4,K=512,N=256,group_size=128`). Keep the generic offset-aware B fill for
+now; the runtime appears sensitive to this code shape even when the math is
+equivalent.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

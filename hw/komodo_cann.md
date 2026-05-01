@@ -265,6 +265,10 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   GM-to-VECOUT `DataCopy` by default. That variant compiled with CANN 9, but the
   runtime smoke timed out before emitting a result, so it is not validated for
   the live Matmul handoff.
+- A VecOut-only zero-offset B-fill specialization also failed validation: it
+  passed the first three NPU0 shapes, then timed out on
+  `M=4,K=512,N=256,group_size=128`. Keep the generic offset-aware direct B fill
+  until the exact code-generation or barrier sensitivity is isolated.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.
