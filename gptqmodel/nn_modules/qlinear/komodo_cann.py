@@ -394,7 +394,7 @@ def _komodo_cann_base_k(rows: int, in_features: int, cube_consumer_requested: bo
             raise RuntimeError(f"{_KOMODO_CANN_BASE_K_ENV} must divide K={in_features}; got `{raw}`.")
         return value
 
-    if cube_consumer_requested and rows <= 16 and in_features % 128 == 0:
+    if cube_consumer_requested and in_features % 128 == 0:
         return 128
     return 64
 

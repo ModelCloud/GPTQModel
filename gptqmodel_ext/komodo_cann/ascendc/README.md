@@ -191,10 +191,14 @@ and `mean_ms=7.899011`. A zero-offset group-32 bias probe matched within
 `max_abs=0.00006104`.
 
 Python-side staged Cube-consumer plans now expose the sampled larger tile by
-default for decode-style shapes: when `rows <= 16` and `K` is divisible by 128,
-`base_k` becomes 128 instead of 64. The original C0-sized tile remains available
-with `GPTQMODEL_KOMODO_CANN_BASE_K=64`, and any override must be a positive
-multiple of 64 that divides `K`.
+default: when `K` is divisible by 128, `base_k` becomes 128 instead of 64. The
+original C0-sized tile remains available with `GPTQMODEL_KOMODO_CANN_BASE_K=64`,
+and any override must be a positive multiple of 64 that divides `K`.
+A plan-shaped local-A sweep validated this broader default on all eight NPUs
+with `base_k=-128`, rows `8/17/32/48/64/96/129/160`, per-case `base_m` values
+matching the Python planner, K `512/1024`, N `256/512`, and groups
+`32/64/128`; worst drift was `max_abs=0.015625` and
+`mean_abs=0.00142669677734375`.
 
 The next guarded bring-up layer is the Cube consumer scaffold:
 

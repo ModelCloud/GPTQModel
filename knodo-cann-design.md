@@ -560,6 +560,12 @@ Ascend C custom-op bring-up:
   `mean_abs=0.001491546630859375`. The old local-A package timed out at 120 s on
   `rows=17,K=512,N=512,group_size=64`; the new package completed the same timing
   probe in `3.060030 ms` with `max_abs=0.0078125`.
+- The Python staged Cube-consumer planner now uses `base_k=128` for every
+  compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
+  local-A raw sweep passed all eight NPUs with rows
+  `8/17/32/48/64/96/129/160`, per-case planner `base_m`, K `512/1024`, N
+  `256/512`, and groups `32/64/128`; worst drift stayed at
+  `max_abs=0.015625`, `mean_abs=0.00142669677734375`.
 - This baseline intentionally avoids writing full dequantized FP16 weights
   through GM/L2. It is slower than the target design, but it creates the real
   custom-op registration, tiling, shape inference, optional bias handling, and

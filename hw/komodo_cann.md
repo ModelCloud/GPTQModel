@@ -66,11 +66,16 @@ Current Python-side Komodo-CANN records this plan per shape:
 - `split_k=1` for balanced shapes and group-size/act-order sweeps.
 - `split_k>1` for decode-like Qwen projections where `rows <= 16`, `K >= 4096`,
   and `K >= 2N`.
-- `base_k=64`, matching the INT4 C0 alignment requirement.
-- Staged Cube-consumer experiments now select `base_k=128` automatically for
-  decode-style `rows <= 16` shapes when `K` is divisible by 128. This reduces
-  direct TSCM handoff count while keeping the FP16 B tile bounded; set
-  `GPTQMODEL_KOMODO_CANN_BASE_K=64` to force the original C0-sized tile.
+- `base_k=64`, matching the INT4 C0 alignment requirement for producer-only
+  staged plans.
+- Staged Cube-consumer experiments now select `base_k=128` automatically when
+  `K` is divisible by 128. This reduces direct TSCM/VecOut handoff count while
+  keeping the FP16 B tile bounded; set `GPTQMODEL_KOMODO_CANN_BASE_K=64` to
+  force the original C0-sized tile.
+  A plan-shaped local-A package sweep passed on all eight NPUs with rows
+  `8/17/32/48/64/96/129/160`, per-case planner `base_m`, K `512/1024`, N
+  `256/512`, and groups `32/64/128`; worst drift was `max_abs=0.015625` and
+  `mean_abs=0.00142669677734375`.
 - The plan records per-tile packed INT4 bytes, FP16 dequant workspace bytes,
   L0A/L0B/L0C tile bytes, K tiles per Split-K shard, and the number of vector
   dequant tasks. These are the checks the future Ascend C op must satisfy before
