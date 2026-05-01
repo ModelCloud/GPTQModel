@@ -314,6 +314,11 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   legacy sweep and `3.368754 ms` on the planner-shaped sweep with unchanged
   `max_abs=0.015625`. A strided 2D packed-B `DataCopyParams` probe was accurate
   but slower (`4.081596 ms` legacy mean), so keep row-wise packed copies.
+- The local-B handoff barrier after staged dequant is now `PIPE_V` instead of
+  `PIPE_ALL`; the packed GM-to-UB staging copy keeps the full pipe barrier
+  before vector decode reads. This was effectively neutral on the legacy sweep
+  (`3.749492 ms`) and improved the planner-shaped sweep to `3.364377 ms` with
+  unchanged `max_abs=0.015625`.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.

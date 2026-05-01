@@ -638,7 +638,7 @@ public:
                         packed_end,
                         packed_stride,
                         zero_offsets);
-                    PipeBarrier<PIPE_ALL>();
+                    PipeBarrier<PIPE_V>();
                     cube_probe.mm.SetTensorA(direct_a_tile);
                     cube_probe.mm.SetTensorB(direct_b_tile);
                     cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
@@ -663,7 +663,7 @@ public:
                     packed_end,
                     packed_stride,
                     zero_offsets);
-                PipeBarrier<PIPE_ALL>();
+                PipeBarrier<PIPE_V>();
                 for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
                     const uint32_t m_begin = m_tile * base_m;
                     const uint32_t m_len_candidate = rows - m_begin;

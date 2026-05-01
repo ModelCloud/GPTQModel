@@ -385,6 +385,11 @@ All-8-NPU warmed means improved to `3.749311 ms` on the legacy sweep and
 `3.368754 ms` on the planner-shaped sweep, still at `max_abs=0.015625`. A
 strided 2D `DataCopyParams` version of the packed-B stage was accurate but
 slower (`4.081596 ms` legacy mean), so row-wise packed copies remain in use.
+The local-B handoff barrier after staged dequant is now narrowed from
+`PIPE_ALL` to `PIPE_V`; the preceding packed GM-to-UB copy still keeps its full
+pipe barrier before vector reads. This was neutral on the legacy sweep
+(`3.749492 ms` mean) but improved the planner-shaped sweep to `3.364377 ms`
+with unchanged `max_abs=0.015625`.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

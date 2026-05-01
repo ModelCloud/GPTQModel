@@ -613,6 +613,11 @@ Ascend C custom-op bring-up:
 - A strided 2D `DataCopyParams` version of the packed-B stage was rejected. It
   compiled and passed the legacy all-8-NPU sweep, but slowed the mean to
   `4.081596 ms`, so the row-wise packed INT4 copy loop remains the faster path.
+- The local-B handoff barrier after packed-B staged dequant is now narrowed to
+  `PIPE_V`, while the earlier GM-to-UB packed tile staging still uses
+  `PIPE_ALL` before vector decode reads. The legacy all-8-NPU warmed sweep was
+  neutral at `3.749492 ms`, and the planner-shaped sweep improved from
+  `3.368754 ms` to `3.364377 ms`; worst drift stayed `max_abs=0.015625`.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows
