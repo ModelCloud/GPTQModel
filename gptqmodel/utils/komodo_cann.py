@@ -15,7 +15,12 @@ _KOMODO_CANN_V3_OPS_NAME = "gptqmodel_komodo_cann_v3_ops"
 _KOMODO_CANN_ASCENDC_OPS_NAME = "gptqmodel_komodo_cann_ascendc_ops"
 _KOMODO_CANN_V3_NAMESPACE = "gptqmodel_komodo_cann"
 _KOMODO_CANN_ASCENDC_NAMESPACE = "gptqmodel_komodo_cann"
-_DEFAULT_CANN_HOME = "/usr/local/Ascend/cann-8.5.1"
+_DEFAULT_CANN_HOME_CANDIDATES = (
+    "/usr/local/Ascend/ascend-toolkit/latest",
+    "/usr/local/Ascend/cann",
+    "/usr/local/Ascend/cann-9.0.0-beta.2",
+    "/usr/local/Ascend/cann-8.5.1",
+)
 
 
 def _komodo_cann_root() -> Path:
@@ -37,7 +42,16 @@ def _torch_npu_root() -> Path:
 
 
 def _cann_root() -> Path:
-    return Path(os.getenv("ASCEND_HOME_PATH", _DEFAULT_CANN_HOME)).expanduser()
+    for env_name in ("ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME"):
+        raw = os.getenv(env_name)
+        if raw:
+            return Path(raw).expanduser()
+
+    for raw in _DEFAULT_CANN_HOME_CANDIDATES:
+        path = Path(raw).expanduser()
+        if path.exists():
+            return path
+    return Path(_DEFAULT_CANN_HOME_CANDIDATES[0]).expanduser()
 
 
 def _cann_arch_root() -> Path:

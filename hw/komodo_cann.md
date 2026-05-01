@@ -273,6 +273,12 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.
 
+The Python JIT bridge now resolves CANN roots from `ASCEND_HOME_PATH`, then
+`ASCEND_TOOLKIT_HOME`, then the installed latest-toolkit symlinks before falling
+back to older versioned paths. This avoids silently building the Komodo-CANN V3
+or Ascend C bridge against the stale CANN 8.5.1 tree when a stripped shell omits
+the normal Ascend environment variables.
+
 ## aclnn V3 Probe
 
 `scripts/probe_komodo_cann_v3.py` builds
