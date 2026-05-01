@@ -635,6 +635,16 @@ Ascend C custom-op bring-up:
   scale rows into a VECCALC UB tile regressed the legacy mean to `4.125134 ms`;
   and re-enabling `asc_int42half_sync` for the live zero-offset VecOut tile still
   produced invalid output (`max_abs=Infinity`) and slower single-case timing.
+- Rejected adjacent handoff/tiling probes: forcing `base_n=512` on N=512 shapes
+  hit AICore `507015` load3d out-of-range faults, and a two-slot VecOut B
+  handoff intended to fill the next B tile while Cube consumed the previous tile
+  timed out the all-8 raw harness before any worker result. Keep `base_n<=256`
+  and the single-B buffer topology for the current runtime baseline.
+- The accepted follow-up keeps the same tile and buffer topology but lowers
+  local-A row-wise `DataCopy` from rows `>=32` to rows `>=16`. The all-8 planner
+  sweep improved from `3.305584 ms` to `3.269260 ms`; the legacy all-8 sweep
+  improved from `3.645413 ms` to `3.624865 ms`. Worst drift stayed
+  `max_abs=0.015625`.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows

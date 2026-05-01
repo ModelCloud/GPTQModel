@@ -404,6 +404,15 @@ regressed the legacy mean to `3.666554 ms`; staging scales into a small UB tile
 regressed the legacy mean to `4.125134 ms`; enabling `asc_int42half_sync` for the
 live zero-offset VecOut tile still produced invalid output (`max_abs=Infinity`)
 and was slower on the single planner case.
+The next tiling and overlap probes stayed bounded but were not all viable:
+`base_n=512` hit AICore `507015` load3d out-of-range faults on N=512 shapes, and
+a two-slot VecOut B handoff intended to overlap B decode with Cube consumption
+timed out the full raw harness before any worker result. The accepted follow-up
+keeps the same tile and buffer topology but lowers local-A row-wise `DataCopy`
+from rows `>=32` to rows `>=16`. On the CANN 9.0.0-beta.2 local-A VecOut package
+this passed the all-8 planner sweep and improved mean timing from `3.305584 ms`
+to `3.269260 ms`; the legacy all-8 sweep also passed and moved from
+`3.645413 ms` to `3.624865 ms`. Worst drift remained `max_abs=0.015625`.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`
