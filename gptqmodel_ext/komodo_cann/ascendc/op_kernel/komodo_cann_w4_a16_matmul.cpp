@@ -33,6 +33,13 @@ public:
     using CType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
     using BiasType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
     Matmul<AType, BType, CType, BiasType> mm;
+
+#ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER
+    __aicore__ inline void SetTensorBLocalProbe(const LocalTensor<half>& b_tile)
+    {
+        mm.SetTensorB(b_tile);
+    }
+#endif
 };
 
 __aicore__ inline TCubeTiling MakeCubeConsumerTiling(const KomodoCannW4A16MatmulTilingData* tiling)

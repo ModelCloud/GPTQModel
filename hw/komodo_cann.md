@@ -150,8 +150,9 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   staging tile.
 - Added `--experimental-vecout-consumer` as a Matmul template probe with
   `B_TYPE` at `TPosition::VECOUT`. This validates that the public CANN 9 Matmul
-  surface accepts the intended UB/VECOUT B operand type on the local 910B
-  toolchain. It does not yet wire the staged tile into Cube at runtime.
+  surface accepts the intended UB/VECOUT B operand type and
+  `SetTensorB(LocalTensor<half>)` call on the local 910B toolchain. It does not
+  yet wire the staged tile into Cube at runtime.
 - Fixed the scalar fused path's INT4 signed-nibble decode from xor-based
   sign extension to an explicit `raw < 8 ? raw : raw - 16` decode. The previous
   expression miscompiled lane 0 on the local CANN 9 package and produced

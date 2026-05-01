@@ -85,9 +85,10 @@ python scripts/build_komodo_cann_ascendc.py \
   --experimental-vecout-consumer
 ```
 
-This validates the public Matmul template surface for a UB/VECOUT B operand, but
-it is still a compile-time consumer probe. The visible runtime path does not yet
-feed the staged UB/L1 tile into Cube; that remains the next fused-kernel step.
+This validates the public Matmul template surface and instantiates
+`SetTensorB(LocalTensor<half>)` for a UB/VECOUT B operand, but it is still a
+compile-time consumer probe. The visible runtime path does not yet feed the
+staged UB/L1 tile into Cube; that remains the next fused-kernel step.
 
 The next guarded bring-up layer is the Cube consumer scaffold:
 
