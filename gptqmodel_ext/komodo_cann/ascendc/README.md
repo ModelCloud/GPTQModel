@@ -166,6 +166,19 @@ with a fresh current-source scalar package for the same shape (`7.132362 ms`
 versus `7.130773 ms`), so this is a correctness and scheduling milestone, not a
 speed path until producer/consumer overlap is added.
 
+The next guarded scheduling pass keeps the small two-tile `base_k=64` case on
+that sequential path, but uses two TSCM B slots plus hoisted scale/offset loads
+when `base_k >= 128` or the shape has at least four K tiles. The second TSCM
+slot lets the AIV side stage tile `i + 1` after launching Cube on tile `i`,
+then waits before issuing the dependent accumulation. The scale/offset hoist
+loads GPTQ group parameters once per group/output pack while filling the direct
+UB tile. Local NPU0 checks stayed finite: symmetric `M=8,K=512,N=8192` with
+`base_k=128` matched the CPU reference with `max_abs=0.0`, and a nonzero-offset
+`M=8,K=128,N=8192,base_k=128` probe had `max_abs=0.00390625` and mean drift
+`5.9e-7`. Timing remains close to noise (`K=512,base_k=128` sampled around
+`27.89-27.94 ms`), so this is still a structural overlap step rather than the
+final throughput target.
+
 The next guarded bring-up layer is the Cube consumer scaffold:
 
 ```bash

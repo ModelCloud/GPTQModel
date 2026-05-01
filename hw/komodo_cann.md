@@ -182,6 +182,15 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   a fresh current-source scalar package for the same shape (`7.132362 ms` versus
   `7.130773 ms`), so the next performance step is still overlapping the vector
   producer with Cube consumption rather than just broadening K coverage.
+- Added a guarded direct multi-K scheduling pass that uses two TSCM B slots and
+  hoisted scale/offset loads for larger direct tiles (`base_k >= 128`) or at
+  least four K tiles. This lets AIV stage the next B tile after launching Cube
+  on the current tile, while preserving the dependency before the next
+  accumulation. NPU0 validation stayed finite: symmetric `M=8,K=512,N=8192` with
+  `base_k=128` matched with `max_abs=0.0`; a nonzero-offset
+  `M=8,K=128,N=8192,base_k=128` probe had `max_abs=0.00390625` and mean drift
+  `5.9e-7`. Timings remained close to run noise, with `K=512,base_k=128` around
+  `27.89-27.94 ms`.
 - Fixed the scalar fused path's INT4 signed-nibble decode from xor-based
   sign extension to an explicit `raw < 8 ? raw : raw - 16` decode. The previous
   expression miscompiled lane 0 on the local CANN 9 package and produced

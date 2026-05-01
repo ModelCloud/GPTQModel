@@ -375,6 +375,15 @@ Validated 2026-05-01 local checks:
   matched the CPU reference with finite output and `max_abs=0.0`. Timing was
   flat versus a fresh current-source scalar package (`7.132362 ms` versus
   `7.130773 ms`), which confirms correctness but not overlap yet.
+- A follow-up direct multi-K scheduling pass allocates two TSCM B slots and
+  hoists scale/offset loads for `base_k >= 128` or `k_tiles >= 4`. This is the
+  first live double-buffered shape of the handoff: stage tile `i + 1` while Cube
+  is working on tile `i`, then wait before the dependent accumulation. NPU0
+  checks stayed finite with `max_abs=0.0` on symmetric
+  `M=8,K=512,N=8192,base_k=128`, and the nonzero-offset
+  `M=8,K=128,N=8192,base_k=128` probe had `max_abs=0.00390625`, mean drift
+  `5.9e-7`. Timing is still effectively flat, around `27.89-27.94 ms` for the
+  sampled K512/baseK128 shape.
 
 Concrete next implementation order:
 

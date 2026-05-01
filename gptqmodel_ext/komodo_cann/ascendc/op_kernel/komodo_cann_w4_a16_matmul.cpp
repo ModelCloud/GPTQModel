@@ -77,7 +77,12 @@ public:
         if (base_k == 0 || base_n == 0) {
             return false;
         }
-        tscm_ready_ = pipe.InitBuffer(b_tscm_, 1, base_k * base_n * sizeof(half));
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK
+        constexpr uint32_t kTscmSlots = 2;
+#else
+        constexpr uint32_t kTscmSlots = 1;
+#endif
+        tscm_ready_ = pipe.InitBuffer(b_tscm_, kTscmSlots, base_k * base_n * sizeof(half));
 #ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
         direct_dequant_ready_ = pipe.InitBuffer(b_ub_, base_k * base_n * sizeof(half));
 #endif
@@ -149,6 +154,13 @@ public:
     {
         b_tscm_.FreeTensor(b_tscm_local_);
     }
+
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK
+    __aicore__ inline void FreeTscmBTile(LocalTensor<half>& b_tile)
+    {
+        b_tscm_.FreeTensor(b_tile);
+    }
+#endif
 
     __aicore__ inline bool TscmReady() const
     {
@@ -350,33 +362,69 @@ public:
             LocalTensor<half> direct_b_tile = cube_probe.GetDirectDequantTile(tiling_);
 #ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK
             const uint32_t k_tiles = in_features / tiling_->base_k;
-            for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
-                const uint32_t k_begin = k_tile * tiling_->base_k;
-                for (uint32_t tile_k = 0; tile_k < tiling_->base_k; ++tile_k) {
-                    const uint32_t k = k_begin + tile_k;
-                    const uint32_t group = group_size == 0 ? 0 : k / group_size;
-                    for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
-                        const uint32_t word =
-                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
-                        const uint32_t n_base = packed_col << 3;
-                        const uint32_t scale_base = group * out_features + n_base;
-                        const uint32_t tile_n = n_base - n_begin;
-                        FillDirectBTileWord(
-                            direct_b_tile, tile_k * base_n + tile_n, word, scale_base, zero_offsets);
+            const bool use_pipelined_fill = tiling_->base_k >= 128 || k_tiles >= 4;
+            if (use_pipelined_fill) {
+                FillDirectBTileKTile(direct_b_tile, 0, n_begin, packed_begin, packed_end, packed_stride, zero_offsets);
+                LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_);
+                for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
+                    const uint32_t k_begin = k_tile * tiling_->base_k;
+                    LocalTensor<half> next_b_tscm_tile;
+                    const bool has_next_k_tile = k_tile + 1 < k_tiles;
+                    for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
+                        const uint32_t m_begin = m_tile * base_m;
+                        const uint32_t m_len_candidate = rows - m_begin;
+                        const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
+                        cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features + k_begin]);
+                        cube_probe.mm.SetTensorB(b_tscm_tile);
+                        cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
+                        cube_probe.mm.IterateAll(y_gm_[m_begin * out_features + n_begin], k_tile != 0);
+                        if (m_tile == 0 && has_next_k_tile) {
+                            FillDirectBTileKTile(
+                                direct_b_tile,
+                                k_tile + 1,
+                                n_begin,
+                                packed_begin,
+                                packed_end,
+                                packed_stride,
+                                zero_offsets);
+                            next_b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_);
+                        }
+                        cube_probe.mm.WaitIterateAll();
+                    }
+                    cube_probe.FreeTscmBTile(b_tscm_tile);
+                    if (has_next_k_tile) {
+                        b_tscm_tile = next_b_tscm_tile;
                     }
                 }
-                LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_);
-                for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
-                    const uint32_t m_begin = m_tile * base_m;
-                    const uint32_t m_len_candidate = rows - m_begin;
-                    const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
-                    cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features + k_begin]);
-                    cube_probe.mm.SetTensorB(b_tscm_tile);
-                    cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
-                    cube_probe.mm.IterateAll(y_gm_[m_begin * out_features + n_begin], k_tile != 0);
-                    cube_probe.mm.WaitIterateAll();
+            } else {
+                for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
+                    const uint32_t k_begin = k_tile * tiling_->base_k;
+                    for (uint32_t tile_k = 0; tile_k < tiling_->base_k; ++tile_k) {
+                        const uint32_t k = k_begin + tile_k;
+                        const uint32_t group = group_size == 0 ? 0 : k / group_size;
+                        for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
+                            const uint32_t word =
+                                static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                            const uint32_t n_base = packed_col << 3;
+                            const uint32_t scale_base = group * out_features + n_base;
+                            const uint32_t tile_n = n_base - n_begin;
+                            FillDirectBTileWord(
+                                direct_b_tile, tile_k * base_n + tile_n, word, scale_base, zero_offsets);
+                        }
+                    }
+                    LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_);
+                    for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
+                        const uint32_t m_begin = m_tile * base_m;
+                        const uint32_t m_len_candidate = rows - m_begin;
+                        const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
+                        cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features + k_begin]);
+                        cube_probe.mm.SetTensorB(b_tscm_tile);
+                        cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
+                        cube_probe.mm.IterateAll(y_gm_[m_begin * out_features + n_begin], k_tile != 0);
+                        cube_probe.mm.WaitIterateAll();
+                    }
+                    cube_probe.FreeTscmBTile(b_tscm_tile);
                 }
-                cube_probe.FreeTscmBTile();
             }
             continue;
 #else
@@ -426,6 +474,77 @@ public:
 private:
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
 #ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK
+    __aicore__ inline void FillDirectBTileKTile(
+        LocalTensor<half>& b_tile,
+        uint32_t k_tile,
+        uint32_t n_begin,
+        uint32_t packed_begin,
+        uint32_t packed_end,
+        uint32_t packed_stride,
+        uint32_t zero_offsets)
+    {
+        const uint32_t base_n = tiling_->base_n;
+        const uint32_t k_begin = k_tile * tiling_->base_k;
+        const uint32_t k_end = k_begin + tiling_->base_k;
+        const uint32_t first_group = tiling_->group_size == 0 ? 0 : k_begin / tiling_->group_size;
+        const uint32_t last_group = tiling_->group_size == 0 ? 0 : (k_end - 1) / tiling_->group_size;
+        for (uint32_t group = first_group; group <= last_group; ++group) {
+            const uint32_t group_k_begin_candidate = tiling_->group_size == 0 ? k_begin : group * tiling_->group_size;
+            const uint32_t group_k_end_candidate =
+                tiling_->group_size == 0 ? k_end : group_k_begin_candidate + tiling_->group_size;
+            const uint32_t group_k_begin = group_k_begin_candidate < k_begin ? k_begin : group_k_begin_candidate;
+            const uint32_t group_k_end = group_k_end_candidate > k_end ? k_end : group_k_end_candidate;
+            for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
+                const uint32_t n_base = packed_col << 3;
+                const uint32_t scale_base = group * tiling_->out_features + n_base;
+                const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
+                const float scale1 = static_cast<float>(scales_gm_.GetValue(scale_base + 1));
+                const float scale2 = static_cast<float>(scales_gm_.GetValue(scale_base + 2));
+                const float scale3 = static_cast<float>(scales_gm_.GetValue(scale_base + 3));
+                const float scale4 = static_cast<float>(scales_gm_.GetValue(scale_base + 4));
+                const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
+                const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
+                const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+                const float offset0 = OffsetValue(scale_base, zero_offsets);
+                const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
+                const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
+                const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
+                const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
+                const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
+                const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
+                const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
+                const uint32_t tile_n = n_base - n_begin;
+                for (uint32_t k = group_k_begin; k < group_k_end; ++k) {
+                    const uint32_t tile_k = k - k_begin;
+                    const uint32_t word =
+                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                    FillDirectBTileWordValues(
+                        b_tile,
+                        tile_k * base_n + tile_n,
+                        word,
+                        scale0,
+                        scale1,
+                        scale2,
+                        scale3,
+                        scale4,
+                        scale5,
+                        scale6,
+                        scale7,
+                        offset0,
+                        offset1,
+                        offset2,
+                        offset3,
+                        offset4,
+                        offset5,
+                        offset6,
+                        offset7);
+                }
+            }
+        }
+    }
+#endif
+
     __aicore__ inline void FillDirectBTileWord(
         LocalTensor<half>& b_tile,
         uint32_t tile_offset,
@@ -453,6 +572,72 @@ private:
         const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
         const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
         const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
+        FillDirectBTileWordValues(
+            b_tile,
+            tile_offset,
+            word,
+            scale0,
+            scale1,
+            scale2,
+            scale3,
+            scale4,
+            scale5,
+            scale6,
+            scale7,
+            offset0,
+            offset1,
+            offset2,
+            offset3,
+            offset4,
+            offset5,
+            offset6,
+            offset7);
+    }
+
+    __aicore__ inline void FillDirectBTileWordValues(
+        LocalTensor<half>& b_tile,
+        uint32_t tile_offset,
+        uint32_t word,
+        float scale0,
+        float scale1,
+        float scale2,
+        float scale3,
+        float scale4,
+        float scale5,
+        float scale6,
+        float scale7,
+        float offset0,
+        float offset1,
+        float offset2,
+        float offset3,
+        float offset4,
+        float offset5,
+        float offset6,
+        float offset7)
+    {
+        if (vector_dequant_ready_) {
+            FillDirectBTileWordVectorValues(
+                b_tile,
+                tile_offset,
+                word,
+                scale0,
+                scale1,
+                scale2,
+                scale3,
+                scale4,
+                scale5,
+                scale6,
+                scale7,
+                offset0,
+                offset1,
+                offset2,
+                offset3,
+                offset4,
+                offset5,
+                offset6,
+                offset7);
+            return;
+        }
         b_tile.SetValue(tile_offset, static_cast<half>(DequantLane(word, 0, scale0, offset0)));
         b_tile.SetValue(tile_offset + 1, static_cast<half>(DequantLane(word, 1, scale1, offset1)));
         b_tile.SetValue(tile_offset + 2, static_cast<half>(DequantLane(word, 2, scale2, offset2)));
@@ -470,14 +655,6 @@ private:
         uint32_t scale_base,
         uint32_t zero_offsets)
     {
-        LocalTensor<uint32_t> packed = vector_packed_ub_.Get<uint32_t>(kCann9VectorDequantPackedWords);
-        LocalTensor<half> dequant = vector_half_ub_.Get<half>(kCann9VectorDequantLanes);
-        packed.SetValue(0, word);
-        asc_int42half_sync(
-            reinterpret_cast<__ubuf__ half*>(dequant.GetPhyAddr()),
-            reinterpret_cast<__ubuf__ int4b_t*>(packed.GetPhyAddr()),
-            static_cast<uint32_t>(kCann9VectorDequantLanes));
-
         const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
         const float scale1 = static_cast<float>(scales_gm_.GetValue(scale_base + 1));
         const float scale2 = static_cast<float>(scales_gm_.GetValue(scale_base + 2));
@@ -494,6 +671,57 @@ private:
         const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
         const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
         const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
+        FillDirectBTileWordVectorValues(
+            b_tile,
+            tile_offset,
+            word,
+            scale0,
+            scale1,
+            scale2,
+            scale3,
+            scale4,
+            scale5,
+            scale6,
+            scale7,
+            offset0,
+            offset1,
+            offset2,
+            offset3,
+            offset4,
+            offset5,
+            offset6,
+            offset7);
+    }
+
+    __aicore__ inline void FillDirectBTileWordVectorValues(
+        LocalTensor<half>& b_tile,
+        uint32_t tile_offset,
+        uint32_t word,
+        float scale0,
+        float scale1,
+        float scale2,
+        float scale3,
+        float scale4,
+        float scale5,
+        float scale6,
+        float scale7,
+        float offset0,
+        float offset1,
+        float offset2,
+        float offset3,
+        float offset4,
+        float offset5,
+        float offset6,
+        float offset7)
+    {
+        LocalTensor<uint32_t> packed = vector_packed_ub_.Get<uint32_t>(kCann9VectorDequantPackedWords);
+        LocalTensor<half> dequant = vector_half_ub_.Get<half>(kCann9VectorDequantLanes);
+        packed.SetValue(0, word);
+        asc_int42half_sync(
+            reinterpret_cast<__ubuf__ half*>(dequant.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ int4b_t*>(packed.GetPhyAddr()),
+            static_cast<uint32_t>(kCann9VectorDequantLanes));
+
         b_tile.SetValue(tile_offset, static_cast<half>((static_cast<float>(dequant.GetValue(0)) + offset0) * scale0));
         b_tile.SetValue(
             tile_offset + 1, static_cast<half>((static_cast<float>(dequant.GetValue(1)) + offset1) * scale1));
