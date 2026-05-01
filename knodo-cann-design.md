@@ -590,6 +590,20 @@ Ascend C custom-op bring-up:
   with custom latency min/mean/max `2.278330/4.510223/8.395375 ms`, and the
   planner-shaped sweep improved from `4.066544 ms` mean to `4.026535 ms` mean.
   Worst drift stayed `max_abs=0.015625`.
+- A follow-up packed-B staging pass now copies the packed INT4 B tile into a
+  bounded UB scratch tile with one contiguous `DataCopy` per K row, then
+  dequantizes from that local int32 tile into the local FP16 B tile. This keeps
+  the no-full-FP16-materialization contract while replacing thousands of scalar
+  packed-weight GM reads per B tile. The first planner-shaped all-8 run had one
+  raw-worker timeout on `rows=96,base_m=96`, but the isolated shape passed on the
+  same NPU in `2.910235 ms` and the full retry passed. Final warmed means:
+  legacy `4.052616 ms`, planner-shaped `3.651770 ms`, worst drift
+  `max_abs=0.015625`.
+- Rejected adjacent probes in the same pass: `base_k=256` timed out before
+  emitting worker output in the full planner sweep, `rows >= 16` local-A
+  `DataCopy` timed out on the legacy `rows=24,K=768,N=512,group_size=96` case,
+  and a broader `base_m >= 32 || rows >= 31` local-A gate later timed out on
+  `rows=16`. Keep the validated `rows >= 32` local-A copy gate.
 - The Python staged Cube-consumer planner now uses `base_k=128` for every
   compatible `K % 128 == 0` shape instead of only `rows <= 16`. A plan-shaped
   local-A raw sweep passed all eight NPUs with rows

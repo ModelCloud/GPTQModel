@@ -368,6 +368,15 @@ tiler marks symmetric GPTQ as zero-offset. A CANN 9 local-A package passed the
 legacy all-8-NPU warmed sweep with mean `4.510223 ms`, and the planner-shaped
 sweep improved from `4.066544 ms` to `4.026535 ms`; worst drift stayed
 `max_abs=0.015625`.
+The next accepted B-read pass stages each packed INT4 B tile into a bounded UB
+scratch tile with row-wise `DataCopy` before filling the local FP16 B tile. This
+does not stage dense FP16 weights through GM/L2; it only replaces scalar packed
+GM reads with contiguous INT4 tile copies inside the fused local-A path. The
+legacy all-8-NPU warmed sweep improved to `4.052616 ms` mean, and the
+planner-shaped sweep improved to `3.651770 ms` mean with the same
+`max_abs=0.015625` drift cap. Rejected adjacent probes: `base_k=256` timed out
+as a full planner sweep, and lower local-A `DataCopy` gates below the stable
+`rows >= 32` predicate caused raw-worker timeouts.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

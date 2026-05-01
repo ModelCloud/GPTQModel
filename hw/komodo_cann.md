@@ -300,6 +300,14 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   The CANN 9 package passed the legacy all-8-NPU warmed sweep with
   `custom_ms_mean=4.510223` and the planner-shaped warmed sweep with
   `custom_ms_mean=4.026535`; worst drift stayed `max_abs=0.015625`.
+- The accepted packed-B staging pass adds a bounded UB scratch tile for the
+  packed INT4 B tile and fills it with row-wise `DataCopy` before scalar
+  dequantization into the local FP16 B tile. This cuts scalar packed-weight GM
+  reads without materializing dequantized FP16 weights in GM/L2. The legacy
+  all-8-NPU warmed mean improved to `4.052616 ms`, and a retry planner-shaped
+  all-8-NPU warmed sweep improved to `3.651770 ms`; worst drift stayed
+  `max_abs=0.015625`. Do not promote `base_k=256` yet: the full planner probe
+  timed out before worker output.
 
 The full rescan and public/private API notes are in
 `hw/torch_npu_cann_9_api_scan.md`.

@@ -216,7 +216,8 @@ private:
         direct_dequant_ready_ = pipe.InitBuffer(b_ub_, base_k * base_n * sizeof(half));
 #ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A
         local_a_ready_ = pipe.InitBuffer(a_ub_, tiling->base_m * base_k * sizeof(half));
-        return direct_dequant_ready_ && local_a_ready_;
+        packed_b_ready_ = pipe.InitBuffer(packed_b_ub_, base_k * (base_n >> 3) * sizeof(int32_t));
+        return direct_dequant_ready_ && local_a_ready_ && packed_b_ready_;
 #else
         return direct_dequant_ready_;
 #endif
@@ -233,9 +234,14 @@ private:
         return a_ub_.Get<half>(tiling->base_m * tiling->base_k);
     }
 
+    __aicore__ inline LocalTensor<int32_t> GetPackedBTile(const KomodoCannW4A16MatmulTilingData* tiling)
+    {
+        return packed_b_ub_.Get<int32_t>(tiling->base_k * (tiling->base_n >> 3));
+    }
+
     __aicore__ inline bool LocalAReady() const
     {
-        return local_a_ready_;
+        return local_a_ready_ && packed_b_ready_;
     }
 #endif
 
@@ -247,7 +253,9 @@ private:
 private:
 #ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A
     TBuf<TPosition::VECOUT> a_ub_;
+    TBuf<TPosition::VECCALC> packed_b_ub_;
     bool local_a_ready_ = false;
+    bool packed_b_ready_ = false;
 #endif
     TBuf<TPosition::VECOUT> b_ub_;
     bool direct_dequant_ready_ = false;
@@ -608,6 +616,7 @@ public:
         LocalTensor<half> direct_b_tile = cube_probe.GetDirectDequantTile(tiling_);
 #ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A
         LocalTensor<half> direct_a_tile = cube_probe.GetLocalATile(tiling_);
+        LocalTensor<int32_t> packed_b_tile = cube_probe.GetPackedBTile(tiling_);
         for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
             const uint32_t k_begin = k_tile * tiling_->base_k;
             if (m_tiles <= 1) {
@@ -620,8 +629,15 @@ public:
                     const uint32_t n_end = n_begin + base_n;
                     const uint32_t packed_begin = n_begin >> 3;
                     const uint32_t packed_end = n_end >> 3;
-                    FillDirectBTileKTile(
-                        direct_b_tile, k_tile, n_begin, packed_begin, packed_end, packed_stride, zero_offsets);
+                    FillDirectBTileKTileFromPackedTile(
+                        direct_b_tile,
+                        packed_b_tile,
+                        k_tile,
+                        n_begin,
+                        packed_begin,
+                        packed_end,
+                        packed_stride,
+                        zero_offsets);
                     PipeBarrier<PIPE_ALL>();
                     cube_probe.mm.SetTensorA(direct_a_tile);
                     cube_probe.mm.SetTensorB(direct_b_tile);
@@ -638,8 +654,15 @@ public:
                 const uint32_t n_end = n_begin + base_n;
                 const uint32_t packed_begin = n_begin >> 3;
                 const uint32_t packed_end = n_end >> 3;
-                FillDirectBTileKTile(
-                    direct_b_tile, k_tile, n_begin, packed_begin, packed_end, packed_stride, zero_offsets);
+                FillDirectBTileKTileFromPackedTile(
+                    direct_b_tile,
+                    packed_b_tile,
+                    k_tile,
+                    n_begin,
+                    packed_begin,
+                    packed_end,
+                    packed_stride,
+                    zero_offsets);
                 PipeBarrier<PIPE_ALL>();
                 for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
                     const uint32_t m_begin = m_tile * base_m;
@@ -729,6 +752,124 @@ private:
             const uint32_t dst_base = m * base_k;
             for (uint32_t k = 0; k < base_k; ++k) {
                 a_tile.SetValue(dst_base + k, x_gm_.GetValue(src_base + k));
+            }
+        }
+    }
+#endif
+
+#ifdef KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A
+    __aicore__ inline void FillDirectBTileKTileFromPackedTile(
+        LocalTensor<half>& b_tile,
+        LocalTensor<int32_t>& packed_tile,
+        uint32_t k_tile,
+        uint32_t n_begin,
+        uint32_t packed_begin,
+        uint32_t packed_end,
+        uint32_t packed_stride,
+        uint32_t zero_offsets)
+    {
+        const uint32_t base_k = tiling_->base_k;
+        const uint32_t packed_cols = packed_end - packed_begin;
+        const uint32_t k_begin = k_tile * base_k;
+        for (uint32_t tile_k = 0; tile_k < base_k; ++tile_k) {
+            const uint32_t k = k_begin + tile_k;
+            DataCopy(
+                packed_tile[tile_k * packed_cols],
+                packed_weight_gm_[k * packed_stride + packed_begin],
+                packed_cols);
+        }
+        PipeBarrier<PIPE_ALL>();
+        FillDirectBTileKTileFromPackedValues(
+            b_tile, packed_tile, k_tile, n_begin, packed_begin, packed_end, packed_cols, zero_offsets);
+    }
+
+    __aicore__ inline void FillDirectBTileKTileFromPackedValues(
+        LocalTensor<half>& b_tile,
+        LocalTensor<int32_t>& packed_tile,
+        uint32_t k_tile,
+        uint32_t n_begin,
+        uint32_t packed_begin,
+        uint32_t packed_end,
+        uint32_t packed_cols,
+        uint32_t zero_offsets)
+    {
+        const uint32_t base_n = tiling_->base_n;
+        const uint32_t k_begin = k_tile * tiling_->base_k;
+        const uint32_t k_end = k_begin + tiling_->base_k;
+        const uint32_t first_group = tiling_->group_size == 0 ? 0 : k_begin / tiling_->group_size;
+        const uint32_t last_group = tiling_->group_size == 0 ? 0 : (k_end - 1) / tiling_->group_size;
+        for (uint32_t group = first_group; group <= last_group; ++group) {
+            const uint32_t group_k_begin_candidate = tiling_->group_size == 0 ? k_begin : group * tiling_->group_size;
+            const uint32_t group_k_end_candidate =
+                tiling_->group_size == 0 ? k_end : group_k_begin_candidate + tiling_->group_size;
+            const uint32_t group_k_begin = group_k_begin_candidate < k_begin ? k_begin : group_k_begin_candidate;
+            const uint32_t group_k_end = group_k_end_candidate > k_end ? k_end : group_k_end_candidate;
+            for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
+                const uint32_t n_base = packed_col << 3;
+                const uint32_t scale_base = group * tiling_->out_features + n_base;
+                const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
+                const float scale1 = static_cast<float>(scales_gm_.GetValue(scale_base + 1));
+                const float scale2 = static_cast<float>(scales_gm_.GetValue(scale_base + 2));
+                const float scale3 = static_cast<float>(scales_gm_.GetValue(scale_base + 3));
+                const float scale4 = static_cast<float>(scales_gm_.GetValue(scale_base + 4));
+                const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
+                const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
+                const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+                const uint32_t packed_offset = packed_col - packed_begin;
+                const uint32_t tile_n = n_base - n_begin;
+                if (zero_offsets != 0) {
+                    for (uint32_t k = group_k_begin; k < group_k_end; ++k) {
+                        const uint32_t tile_k = k - k_begin;
+                        const uint32_t word =
+                            static_cast<uint32_t>(packed_tile.GetValue(tile_k * packed_cols + packed_offset));
+                        FillDirectBTileWordValuesNoOffset(
+                            b_tile,
+                            tile_k * base_n + tile_n,
+                            word,
+                            scale0,
+                            scale1,
+                            scale2,
+                            scale3,
+                            scale4,
+                            scale5,
+                            scale6,
+                            scale7);
+                    }
+                } else {
+                    const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));
+                    const float offset1 = static_cast<float>(offsets_gm_.GetValue(scale_base + 1));
+                    const float offset2 = static_cast<float>(offsets_gm_.GetValue(scale_base + 2));
+                    const float offset3 = static_cast<float>(offsets_gm_.GetValue(scale_base + 3));
+                    const float offset4 = static_cast<float>(offsets_gm_.GetValue(scale_base + 4));
+                    const float offset5 = static_cast<float>(offsets_gm_.GetValue(scale_base + 5));
+                    const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
+                    const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
+                    for (uint32_t k = group_k_begin; k < group_k_end; ++k) {
+                        const uint32_t tile_k = k - k_begin;
+                        const uint32_t word =
+                            static_cast<uint32_t>(packed_tile.GetValue(tile_k * packed_cols + packed_offset));
+                        FillDirectBTileWordValues(
+                            b_tile,
+                            tile_k * base_n + tile_n,
+                            word,
+                            scale0,
+                            scale1,
+                            scale2,
+                            scale3,
+                            scale4,
+                            scale5,
+                            scale6,
+                            scale7,
+                            offset0,
+                            offset1,
+                            offset2,
+                            offset3,
+                            offset4,
+                            offset5,
+                            offset6,
+                            offset7);
+                    }
+                }
             }
         }
     }
