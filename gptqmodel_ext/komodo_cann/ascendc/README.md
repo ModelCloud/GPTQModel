@@ -149,6 +149,23 @@ matched the CPU reference with finite output and `max_abs=0.0`; timing was still
 flat at `3.655767 ms`, so the next speed-relevant step is multi-K direct
 handoff and overlap rather than more single-tile tuning.
 
+The guarded multi-K direct handoff probe broadens that path to shapes where
+`K` is an integer multiple of `base_k`:
+
+```bash
+python scripts/build_komodo_cann_ascendc.py \
+  --output /tmp/komodo_cann_w4a16_tscm_direct_multik \
+  --experimental-tscm-direct-multik
+```
+
+This implies direct dequant and iterates `base_k` TSCM/NZ B tiles while asking
+Cube Matmul to accumulate later K tiles into the existing output tile. Local
+validation on NPU0 with `M=8,K=128,N=8192,group_size=32,base_k=64` matched the
+CPU reference with `max_abs=0.0` and finite output. Timing was effectively tied
+with a fresh current-source scalar package for the same shape (`7.132362 ms`
+versus `7.130773 ms`), so this is a correctness and scheduling milestone, not a
+speed path until producer/consumer overlap is added.
+
 The next guarded bring-up layer is the Cube consumer scaffold:
 
 ```bash

@@ -32,6 +32,11 @@ using namespace matmul;
 #error "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT requires CANN9 vector dequant and TSCM runtime handoff"
 #endif
 
+#if defined(KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK) && \
+    !defined(KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT)
+#error "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK requires TSCM direct dequant"
+#endif
+
 namespace {
 #ifdef KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT
 constexpr uint32_t kKernelModeStagedDequant = 1;
@@ -167,8 +172,13 @@ __aicore__ inline TCubeTiling MakeCubeConsumerTiling(const KomodoCannW4A16Matmul
     cube_tiling.usedCoreNum = static_cast<int32_t>(tiling->block_dim);
     cube_tiling.M = static_cast<int32_t>(tiling->rows);
     cube_tiling.N = static_cast<int32_t>(tiling->out_features);
-    cube_tiling.Ka = static_cast<int32_t>(tiling->in_features);
-    cube_tiling.Kb = static_cast<int32_t>(tiling->in_features);
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK
+    const int32_t cube_k = static_cast<int32_t>(tiling->base_k);
+#else
+    const int32_t cube_k = static_cast<int32_t>(tiling->in_features);
+#endif
+    cube_tiling.Ka = cube_k;
+    cube_tiling.Kb = cube_k;
     cube_tiling.singleCoreM = static_cast<int32_t>(tiling->base_m);
     cube_tiling.singleCoreN = static_cast<int32_t>(tiling->base_n);
     cube_tiling.singleCoreK = static_cast<int32_t>(tiling->base_k);
@@ -282,10 +292,18 @@ public:
     __aicore__ inline bool TryProcessSingleKTileTscmHandoff(KomodoCannW4A16CubeConsumerProbe& cube_probe)
     {
         if (!cube_probe.TscmReady() || tiling_->kernel_mode != kKernelModeStagedDequant || tiling_->has_bias != 0 ||
-            tiling_->base_k == 0 || tiling_->base_n == 0 || tiling_->in_features != tiling_->base_k ||
-            tiling_->out_features % tiling_->base_n != 0) {
+            tiling_->base_k == 0 || tiling_->base_n == 0 || tiling_->out_features % tiling_->base_n != 0) {
             return false;
         }
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK
+        if (tiling_->in_features % tiling_->base_k != 0) {
+            return false;
+        }
+#else
+        if (tiling_->in_features != tiling_->base_k) {
+            return false;
+        }
+#endif
 
         const uint32_t rows = tiling_->rows;
         const uint32_t in_features = tiling_->in_features;
@@ -330,6 +348,38 @@ public:
                 return false;
             }
             LocalTensor<half> direct_b_tile = cube_probe.GetDirectDequantTile(tiling_);
+#ifdef KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK
+            const uint32_t k_tiles = in_features / tiling_->base_k;
+            for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
+                const uint32_t k_begin = k_tile * tiling_->base_k;
+                for (uint32_t tile_k = 0; tile_k < tiling_->base_k; ++tile_k) {
+                    const uint32_t k = k_begin + tile_k;
+                    const uint32_t group = group_size == 0 ? 0 : k / group_size;
+                    for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
+                        const uint32_t word =
+                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                        const uint32_t n_base = packed_col << 3;
+                        const uint32_t scale_base = group * out_features + n_base;
+                        const uint32_t tile_n = n_base - n_begin;
+                        FillDirectBTileWord(
+                            direct_b_tile, tile_k * base_n + tile_n, word, scale_base, zero_offsets);
+                    }
+                }
+                LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_);
+                for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
+                    const uint32_t m_begin = m_tile * base_m;
+                    const uint32_t m_len_candidate = rows - m_begin;
+                    const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
+                    cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features + k_begin]);
+                    cube_probe.mm.SetTensorB(b_tscm_tile);
+                    cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
+                    cube_probe.mm.IterateAll(y_gm_[m_begin * out_features + n_begin], k_tile != 0);
+                    cube_probe.mm.WaitIterateAll();
+                }
+                cube_probe.FreeTscmBTile();
+            }
+            continue;
+#else
             for (uint32_t k = 0; k < in_features; ++k) {
                 const uint32_t group = group_size == 0 ? 0 : k / group_size;
                 for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
@@ -342,6 +392,7 @@ public:
                 }
             }
             LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_);
+#endif
 #else
             for (uint32_t k = 0; k < in_features; ++k) {
                 const uint32_t group = group_size == 0 ? 0 : k / group_size;

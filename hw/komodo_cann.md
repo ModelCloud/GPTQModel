@@ -175,6 +175,13 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   the staged FP16 GM tile from the live handoff. The same NPU0 shape matched the
   CPU reference with `max_abs=0.0`; timing remained flat at `3.655767 ms`, so the
   speed-relevant follow-up is multi-K direct handoff and overlap.
+- Added `--experimental-tscm-direct-multik`, which keeps the direct UB-to-TSCM
+  path but iterates `base_k` B tiles and uses Cube Matmul accumulation for later
+  K tiles. On NPU0, `M=8,K=128,N=8192,group_size=32,base_k=64` matched the CPU
+  reference with finite output and `max_abs=0.0`. It was timing-neutral against
+  a fresh current-source scalar package for the same shape (`7.132362 ms` versus
+  `7.130773 ms`), so the next performance step is still overlapping the vector
+  producer with Cube consumption rather than just broadening K coverage.
 - Fixed the scalar fused path's INT4 signed-nibble decode from xor-based
   sign extension to an explicit `raw < 8 ? raw : raw - 16` decode. The previous
   expression miscompiled lane 0 on the local CANN 9 package and produced

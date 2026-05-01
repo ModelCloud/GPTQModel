@@ -38,6 +38,7 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER")
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
+    build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
 
     text = cmake_path.read_text()
     assert text.count("add_ops_compile_options(ALL OPTIONS -DKOMODO_CANN_EXPERIMENTAL_") == 1
@@ -51,7 +52,8 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
         "-DKOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER=1 "
         "-DKOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER=1 "
         "-DKOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1 "
-        "-DKOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1)"
+        "-DKOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1 "
+        "-DKOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK=1)"
     ) in text
 
 
@@ -71,6 +73,7 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER")
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
+    build_helper._enable_kernel_define(tmp_path, "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
 
     text = cmake_path.read_text()
     assert text.count("add_compile_options(-DKOMODO_CANN_EXPERIMENTAL_") == 1
@@ -81,7 +84,8 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
         "-DKOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT=1 "
         "-DKOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER=1 "
         "-DKOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1 "
-        "-DKOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1)"
+        "-DKOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1 "
+        "-DKOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK=1)"
     ) in text
 
 

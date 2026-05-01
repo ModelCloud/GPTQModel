@@ -247,7 +247,18 @@ def main() -> int:
             "--experimental-tscm-runtime-handoff."
         ),
     )
+    parser.add_argument(
+        "--experimental-tscm-direct-multik",
+        action="store_true",
+        help=(
+            "Compile the guarded TSCM direct-dequant runtime probe for K that is an integer multiple "
+            "of base_k. This iterates K tiles and accumulates into the output. It implies "
+            "--experimental-tscm-direct-dequant."
+        ),
+    )
     args = parser.parse_args()
+    if args.experimental_tscm_direct_multik:
+        args.experimental_tscm_direct_dequant = True
     if args.experimental_tscm_direct_dequant:
         args.experimental_staged_dequant = True
         args.experimental_cann9_vector_dequant = True
@@ -315,6 +326,8 @@ def main() -> int:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
     if args.experimental_tscm_direct_dequant:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
+    if args.experimental_tscm_direct_multik:
+        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
 
     if args.no_build:
         print(f"Generated project with Komodo-CANN overlay at {output}")

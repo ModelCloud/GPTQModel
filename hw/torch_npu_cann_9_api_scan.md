@@ -369,12 +369,19 @@ Validated 2026-05-01 local checks:
   LocalTensor UB, Nd2NzParams)` performs the NZ handoff to Cube without writing
   the FP16 B tile through GM/L2. The same NPU0 probe matched with `max_abs=0.0`;
   timing was `3.655767 ms`, which is still flat on one K tile.
+- `--experimental-tscm-direct-multik` extends the same direct handoff to
+  `K % base_k == 0` by iterating B tiles through TSCM/NZ and accumulating later
+  K tiles in Cube Matmul. On NPU0, `M=8,K=128,N=8192,group_size=32,base_k=64`
+  matched the CPU reference with finite output and `max_abs=0.0`. Timing was
+  flat versus a fresh current-source scalar package (`7.132362 ms` versus
+  `7.130773 ms`), which confirms correctness but not overlap yet.
 
 Concrete next implementation order:
 
-1. Replace the current GM/L2 FP16 tile handoff experiment with Matmul
-   `B_TYPE=TPosition::TSCM` and `CubeFormat::NZ`. The tile must stay bounded and
-   per-core resident; never allocate a full dense dequantized weight matrix.
+1. Add real AIV/AIC overlap to the direct TSCM path: double-buffer B tiles,
+   start dequant for K tile `i + 1` while Cube consumes tile `i`, and keep all
+   staging bounded and per-core resident. Never allocate a full dense
+   dequantized weight matrix.
 2. If high-level Matmul cannot express the required B tile, move one layer down
    to the new public `c_api` movement primitives: GM packed INT4 to L1/UB,
    vector dequant in UB, L1/L0B movement, Cube matmul, then Fixpipe/copy-out.
