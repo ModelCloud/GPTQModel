@@ -14,7 +14,7 @@ import gptqmodel.extension as extension_api
 import gptqmodel.utils.awq as awq_utils
 import gptqmodel.utils.cpp as cpp_utils
 import gptqmodel.utils.exllamav2 as exllamav2_utils
-import gptqmodel.utils.komodo_cann as komodo_cann_utils
+import gptqmodel.utils.cannoe as cannoe_utils
 import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
 import gptqmodel.utils.paroquant as paroquant_utils
@@ -73,7 +73,8 @@ def _install_fake_extensions(monkeypatch):
         "marlin_fp16": _FakeExtension("Marlin fp16"),
         "marlin_bf16": _FakeExtension("Marlin bf16"),
         "paroquant": _FakeExtension("ParoQuant rotation"),
-        "cannoe_v3": _FakeExtension("Cannoe V3"),
+        "cannoe": _FakeExtension("Cannoe V3"),
+        "cannoe_ascendc": _FakeExtension("Cannoe Ascend C"),
     }
 
     monkeypatch.setattr(cpp_utils, "_pack_block_extension", lambda: fakes["pack_block_cpu"])
@@ -88,9 +89,10 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(marlin_utils, "_MARLIN_FP16_TORCH_OPS_EXTENSION", fakes["marlin_fp16"])
     monkeypatch.setattr(marlin_utils, "_MARLIN_BF16_TORCH_OPS_EXTENSION", fakes["marlin_bf16"])
     monkeypatch.setattr(paroquant_utils, "_PAROQUANT_ROTATION_EXTENSION", fakes["paroquant"])
-    monkeypatch.setattr(komodo_cann_utils, "_CANNOE_V3_TORCH_OPS_EXTENSION", fakes["cannoe_v3"])
-    monkeypatch.setattr(komodo_cann_utils, "_KOMODO_CANN_V3_TORCH_OPS_EXTENSION", fakes["cannoe_v3"])
-    monkeypatch.setattr(komodo_cann_utils, "_komodo_cann_v3_supported", lambda: True)
+    monkeypatch.setattr(cannoe_utils, "_CANNOE_V3_TORCH_OPS_EXTENSION", fakes["cannoe"])
+    monkeypatch.setattr(cannoe_utils, "_CANNOE_ASCENDC_TORCH_OPS_EXTENSION", fakes["cannoe_ascendc"])
+    monkeypatch.setattr(cannoe_utils, "_cannoe_v3_supported", lambda: True)
+    monkeypatch.setattr(cannoe_utils, "_cannoe_ascendc_supported", lambda: True)
 
     return fakes
 
@@ -116,7 +118,8 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "marlin_fp16": True,
         "marlin_bf16": True,
         "paroquant": True,
-        "cannoe_v3": True,
+        "cannoe": True,
+        "cannoe_ascendc": True,
     }
     assert all(fake.load_calls == 1 for fake in fakes.values())
 

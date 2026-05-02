@@ -287,7 +287,7 @@ Custom kernels should still include stable public headers from `asc/include`
 and avoid `asc/impl`, `pkg_inc`, and `internal` paths unless the code is gated
 as an experiment.
 
-## 2026-05-01 Komodo-CANN Rescan
+## 2026-05-01 Cannoe Rescan
 
 The current rescan confirms the same runtime versions as the first CANN 9 pass:
 
@@ -306,9 +306,9 @@ not the top-level ACLNN API. The rescan found no removed public ACL, ACLNN, or
 Ascend C headers. It did find that CANN 9 adds the entire public `asc/include/c_api`
 tree locally; CANN 8.5.1 did not have this tree on the host.
 
-Public CANN 9 APIs worth using or probing for Komodo-CANN:
+Public CANN 9 APIs worth using or probing for Cannoe:
 
-| API area | Local header | 910B relevance | Komodo-CANN action |
+| API area | Local header | 910B relevance | Cannoe action |
 | --- | --- | --- | --- |
 | Vector int4 to FP16 conversion | `asc/include/c_api/vector_compute/vector_compute.h`, `asc/include/c_api/reg_compute/reg_convert.h` | `asc_int42half` and `asc_int4x22half` replace scalar nibble unpack in the AIV dequant producer. | Implemented as a guarded CANN 9 staged producer with `--experimental-cann9-vector-dequant`. The validated 910B route is `asc_int42half_sync`; `asc_int4x22half` remains register/SIMT-adjacent and is not the first 2201 target. |
 | Matmul `VECOUT`/`TSCM` inputs | `asc/include/adv_api/matmul/*` | Official Matmul docs list A/B inputs from `TPosition::VECOUT` and `TPosition::TSCM` on A2, with the per-core tile fully resident in UB/L1. Local headers show non-TSCM local B copies through Matmul workspace, while TSCM local B passes a TSCM physical address. | `--experimental-vecout-consumer` remains an API probe. `--experimental-tscm-consumer` is now the structural target: `B_TYPE=TPosition::TSCM`, `CubeFormat::NZ`, and a staged GM-to-TSCM tile load plus `SetTensorB(LocalTensor<half>)` probe. |
@@ -318,7 +318,7 @@ Public CANN 9 APIs worth using or probing for Komodo-CANN:
 | `aclnnWeightQuantBatchMatmulNz` | `aarch64-linux/include/aclnnop/aclnn_weight_quant_batch_matmul_nz.h` | Exported by `libopapi.so`; accepts NZ weights with `int32`, `float`, `float4_e2m1`, and `int4`. This header already existed in local CANN 8.5.1. | Probe as a native fallback only. It does not remove the generic ACLNN boundary and has no torch-npu Python binding in this wheel. |
 | `aclnnTransMatmulWeight` / `aclnnCalculateMatmulWeightSizeV2` | `aarch64-linux/include/aclnnop/aclnn_trans_matmul_weight.h` | Exported by `libopapi.so`; documented for INT8/FP16/BF16 weight transforms, and mentions V2/V3 matmul weight sizing. | Useful for native fallback layout probes, but not the fused custom-kernel target. Verify INT4 behavior at runtime before relying on it. |
 | `aclnnMatmulCompressDequant`, `aclnnQuantMatmulDequant` | `aarch64-linux/include/aclnnop/*compress_dequant*.h`, `*quant_matmul_dequant*.h` | Public and exported; torch-npu exposes matching `npu_matmul_compress_dequant` and `npu_quant_matmul_dequant`. | Not a direct GPTQ W4A16 path. These are INT8/compressed-weight style APIs, so use only for exploratory native baselines. |
-| SIMT API | `asc/include/simt_api/*` | Local C++ SIMT headers are guarded for `__NPU_ARCH__ == 3510 || 5102`; public docs currently target Atlas 350 for many Reg/SIMT entries. | Do not target 910B Komodo-CANN with SIMT first. Prefer 2201 C API vector/cube primitives. |
+| SIMT API | `asc/include/simt_api/*` | Local C++ SIMT headers are guarded for `__NPU_ARCH__ == 3510 || 5102`; public docs currently target Atlas 350 for many Reg/SIMT entries. | Do not target 910B Cannoe with SIMT first. Prefer 2201 C API vector/cube primitives. |
 
 Private/internal API observations:
 
@@ -329,7 +329,7 @@ Private/internal API observations:
 - Private Matmul tiling code exposes useful intent such as `enableQuantVector`,
   `TSCM` scale positions, `iterateOrder`, `scheduleType`, and
   `isEnableChannelSplit`, but these are implementation details. Do not include
-  `asc/impl` paths directly from Komodo-CANN.
+  `asc/impl` paths directly from Cannoe.
 - The public CANN 9 headers themselves sometimes include private implementation
   headers after defining internal include guards. That is acceptable when the
   include originates from `asc/include/...`; it is not a license to include the
@@ -385,7 +385,7 @@ Validated 2026-05-01 local checks:
   `5.9e-7`. Timing is still effectively flat, around `27.89-27.94 ms` for the
   sampled K512/baseK128 shape.
 - Python staged Cube-consumer plans now pick `base_k=128` automatically when
-  `K % 128 == 0`, with `GPTQMODEL_KOMODO_CANN_BASE_K` as an explicit
+  `K % 128 == 0`, with `GPTQMODEL_CANNOE_BASE_K` as an explicit
   positive-multiple-of-64 override. Producer-only staged plans remain at
   `base_k=64`. A plan-shaped local-A sweep validated the broader default across
   all eight NPUs for rows `8/17/32/48/64/96/129/160` with worst drift

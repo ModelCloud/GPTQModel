@@ -1,13 +1,13 @@
-#ifndef KOMODO_CANN_W4_A16_MATMUL_TILING_KEY_H
-#define KOMODO_CANN_W4_A16_MATMUL_TILING_KEY_H
+#ifndef CANNOE_W4_A16_MATMUL_TILING_KEY_H
+#define CANNOE_W4_A16_MATMUL_TILING_KEY_H
 
 #include "ascendc/host_api/tiling/template_argument.h"
 
-constexpr uint64_t kKomodoCannLaunchModeAiv = 0;
-constexpr uint64_t kKomodoCannLaunchModeMixedAicAiv = 1;
+constexpr uint64_t kCannoeLaunchModeAiv = 0;
+constexpr uint64_t kCannoeLaunchModeMixedAicAiv = 1;
 
 ASCENDC_TPL_ARGS_DECL(
-    KomodoCannW4A16Matmul,
+    CannoeW4A16Matmul,
     ASCENDC_TPL_UINT_DECL(LAUNCH_MODE, ASCENDC_TPL_1_BW, ASCENDC_TPL_UI_LIST, 0, 1), );
 
 ASCENDC_TPL_SEL(
@@ -18,4 +18,4 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_KERNEL_TYPE_SEL(ASCENDC_TPL_MIX_AIC_1_2),
         ASCENDC_TPL_UINT_SEL(LAUNCH_MODE, ASCENDC_TPL_UI_LIST, 1), ), );
 
-#endif  // KOMODO_CANN_W4_A16_MATMUL_TILING_KEY_H
+#endif  // CANNOE_W4_A16_MATMUL_TILING_KEY_H

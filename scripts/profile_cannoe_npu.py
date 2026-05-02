@@ -24,7 +24,7 @@ from torch_npu.profiler import (
 )
 
 from gptqmodel.nn_modules.qlinear.komodo import KomodoLinear
-from gptqmodel.nn_modules.qlinear.komodo_cann import CannoeLinear, cannoe_plan_asdict
+from gptqmodel.nn_modules.qlinear.cannoe import CannoeLinear, cannoe_plan_asdict
 from gptqmodel.utils.torch import HAS_NPU
 from scripts.benchmark_komodo_npu_ab import (
     QWEN3_6_27B_GPTQ_CASES,
@@ -152,10 +152,7 @@ def _profile_case(args) -> dict:
     if not HAS_NPU:
         raise RuntimeError("Ascend NPU is required for Cannoe profiling.")
 
-    mode = {
-        "cann": "cannoe",
-        "cann_prefetch": "cannoe_prefetch",
-    }.get(args.mode, args.mode)
+    mode = args.mode
 
     if mode == "plain":
         candidate_cls = KomodoLinear
@@ -230,8 +227,6 @@ def _profile_case(args) -> dict:
         "kernel_top": kernel_top,
         "cannoe_path": getattr(candidate, "_last_cann_path", None),
         "cannoe_plan": cannoe_plan_asdict(getattr(candidate, "_last_cann_plan", None)),
-        "komodo_cann_path": getattr(candidate, "_last_cann_path", None),
-        "komodo_cann_plan": cannoe_plan_asdict(getattr(candidate, "_last_cann_plan", None)),
     }
     summary_path = args.output_dir / f"{mode}_{case.name}_summary.json"
     summary_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -242,7 +237,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Profile plain Komodo vs Cannoe with CANN profiler output.")
     parser.add_argument(
         "--mode",
-        choices=("plain", "cannoe", "cannoe_prefetch", "cann", "cann_prefetch"),
+        choices=("plain", "cannoe", "cannoe_prefetch"),
         default="cannoe",
     )
     parser.add_argument("--case", default="qwen3_6_27b_gptq_down_proj")

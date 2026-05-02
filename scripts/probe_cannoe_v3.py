@@ -11,12 +11,12 @@ import torch
 
 import torch_npu  # noqa: F401
 
-from gptqmodel.utils.komodo_cann import komodo_cann_v3_runtime_error, load_komodo_cann_v3
+from gptqmodel.utils.cannoe import cannoe_v3_runtime_error, load_cannoe_v3
 
 
 def _load_probe():
-    if not load_komodo_cann_v3():
-        raise RuntimeError(komodo_cann_v3_runtime_error() or "Failed to load Komodo-CANN V3 probe.")
+    if not load_cannoe_v3():
+        raise RuntimeError(cannoe_v3_runtime_error() or "Failed to load Cannoe V3 probe.")
 
 
 def _case(*, rows: int, in_features: int, out_features: int, group_size: int, bias: bool):
@@ -44,7 +44,7 @@ def _case(*, rows: int, in_features: int, out_features: int, group_size: int, bi
         bias_tensor,
         group_size,
     )
-    v3 = torch.ops.gptqmodel_komodo_cann.w4a16_matmul(
+    v3 = torch.ops.gptqmodel_cannoe.w4a16_matmul(
         x,
         packed_weight,
         scales,
@@ -73,7 +73,7 @@ def _case(*, rows: int, in_features: int, out_features: int, group_size: int, bi
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Probe aclnnWeightQuantBatchMatmulV3 through a Komodo-CANN torch op.")
+    parser = argparse.ArgumentParser(description="Probe aclnnWeightQuantBatchMatmulV3 through a Cannoe torch op.")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--rows", type=int, default=8)
     parser.add_argument("--in-features", type=int, default=256)

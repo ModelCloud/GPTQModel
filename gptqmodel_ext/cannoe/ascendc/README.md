@@ -1,9 +1,8 @@
 # Cannoe Ascend C Kernel
 
 This directory contains the repository-owned Ascend C implementation for the
-optional Cannoe W4A16 custom operator. Cannoe is the renamed Komodo-CANN kernel;
-the legacy file and package paths remain in place for compatibility. It is
-intentionally separate from plain Komodo and from the
+optional Cannoe W4A16 custom operator. It is intentionally separate from plain
+Komodo and from the
 `aclnnWeightQuantBatchMatmulV3` probe.
 
 The current device kernel is a bring-up baseline for GPTQ W4A16:
@@ -34,7 +33,7 @@ only preparation for the staged vector/Cube kernel.
 
 The fused-kernel bring-up path now has an explicit staged-dequant mode. It is
 off by default. Python enables it only with
-`GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT=1`, and the fused-call ABI encodes that
+`GPTQMODEL_CANNOE_STAGED_DEQUANT=1`, and the fused-call ABI encodes that
 request with a negative `base_n` attribute so existing generated packages keep
 their behavior. The host tiler then requests workspace only when the planned
 ping-pong FP16 tile storage is strictly smaller than a dense `K x N` dequantized
@@ -42,8 +41,8 @@ weight matrix. The current default scalar package therefore still reports zero
 custom-op workspace; an experimental package can be built with:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_staged_op \
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_staged_op \
   --experimental-staged-dequant
 ```
 
@@ -60,8 +59,8 @@ rather than the final fused kernel.
 CANN 9 public vector dequant can be compiled into that staged producer with:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_cann9_vector \
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_cann9_vector \
   --experimental-staged-dequant \
   --experimental-cann9-vector-dequant
 ```
@@ -80,8 +79,8 @@ after fixing scalar lane-0 signed nibble decode. A controlled
 The CANN 9 Matmul consumer type probe can also switch B to `TPosition::VECOUT`:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_vecout_probe \
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_vecout_probe \
   --experimental-staged-dequant \
   --experimental-cann9-vector-dequant \
   --experimental-vecout-consumer
@@ -95,8 +94,8 @@ operands through Matmul workspace, so VECOUT is not the zero-GM/L2 handoff path.
 The current local-B handoff target is TSCM/NZ:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_tscm_probe \
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_tscm_probe \
   --experimental-staged-dequant \
   --experimental-cann9-vector-dequant \
   --experimental-tscm-consumer
@@ -112,8 +111,8 @@ falling back to a full dequantized FP16 weight materialization.
 There is also a narrower runtime handoff probe:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_tscm_runtime \
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_tscm_runtime \
   --experimental-staged-dequant \
   --experimental-cann9-vector-dequant \
   --experimental-tscm-runtime-handoff
@@ -128,7 +127,7 @@ The purpose is to validate the live AIV staged tile -> TSCM/NZ -> AIC Matmul
 handoff before broadening it to deeper overlap and direct dequant into TSCM.
 
 Local validation on 2026-05-01 built this path with CANN 9.0.0-beta.2, installed
-it into `/tmp/komodo_cann_tscm_runtime_install`, and ran
+it into `/tmp/cannoe_tscm_runtime_install`, and ran
 `M=8,K=64,N=8192,group_size=32` on NPU0. The output was finite with
 `max_abs=0.0` versus a CPU reference. Timing for that narrow shape was flat
 against the non-runtime staged probe (`3.646628 ms` versus `3.651168 ms`), so
@@ -138,8 +137,8 @@ The direct-dequant variant removes that staged FP16 GM tile from the same narrow
 handoff:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_tscm_direct \
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_tscm_direct \
   --experimental-tscm-direct-dequant
 ```
 
@@ -156,8 +155,8 @@ The guarded multi-K direct handoff probe broadens that path to shapes where
 `K` is an integer multiple of `base_k`:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_tscm_direct_multik \
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_tscm_direct_multik \
   --experimental-tscm-direct-multik
 ```
 
@@ -194,7 +193,7 @@ and `mean_ms=7.899011`. A zero-offset group-32 bias probe matched within
 
 Python-side staged Cube-consumer plans now expose the sampled larger tile by
 default: when `K` is divisible by 128, `base_k` becomes 128 instead of 64. The
-original C0-sized tile remains available with `GPTQMODEL_KOMODO_CANN_BASE_K=64`,
+original C0-sized tile remains available with `GPTQMODEL_CANNOE_BASE_K=64`,
 and any override must be a positive multiple of 64 that divides `K`.
 A plan-shaped local-A sweep validated this broader default on all eight NPUs
 with `base_k=-128`, rows `8/17/32/48/64/96/129/160`, per-case `base_m` values
@@ -205,20 +204,20 @@ matching the Python planner, K `512/1024`, N `256/512`, and groups
 The next guarded bring-up layer is the Cube consumer scaffold:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_cube_probe \
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_cube_probe \
   --experimental-staged-dequant \
   --experimental-cube-consumer
 ```
 
 This compiles Ascend C `Matmul` registration with a device-local `TCubeTiling`
-constructed from Komodo-CANN's primitive tiling fields. Keep that layout: adding
+constructed from Cannoe's primitive tiling fields. Keep that layout: adding
 `TCubeTiling` directly as nested generated tiling data collides with CANN's
 kernel-side `TCubeTiling` alias. The scaffold is not the runtime default and
 does not yet consume staged INT4-dequant tiles through Cube.
 
 Runtime Cube bring-up uses a second opt-in gate,
-`GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER=1`. When it is combined with staged
+`GPTQMODEL_CANNOE_CUBE_CONSUMER=1`. When it is combined with staged
 dequant, Python passes a negative `split_k` attribute and the host tiler
 records CANN's 16 MiB Matmul/KFC system-reserved workspace separately from the
 user FP16 staged tiles. The kernel calls `GetUserWorkspace(workspace)` and the
@@ -233,8 +232,8 @@ the vector-side KFC client sees `WORKSPACE_SYNC_ID`.
 To isolate MIX launch from CANN Matmul/KFC registration, build:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_mixed_aiv_baseline \
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_mixed_aiv_baseline \
   --experimental-staged-dequant \
   --experimental-mixed-aiv-baseline
 ```
@@ -252,8 +251,8 @@ The first runtime local-B Cube handoff that avoids a staged FP16 GM weight tile
 is the guarded VecOut path:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_vecout_runtime \
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_vecout_runtime \
   --experimental-vecout-runtime-handoff
 ```
 
@@ -281,8 +280,8 @@ direct vector dequant lane mapping.
 The next compile-guarded batching probe stages A locally as well:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_vecout_local_a \
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_vecout_local_a \
   --experimental-vecout-local-a
 ```
 
@@ -321,9 +320,9 @@ The reusable raw-op harness for this style of package validation is:
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-python scripts/validate_komodo_cann_ascendc_raw.py \
-  --bridge-lib /tmp/gptqmodel_komodo_cann_ascendc_vecout_row/dae610bed1a54586/gptqmodel_komodo_cann_ascendc_ops.so \
-  --opp-install /tmp/komodo_cann_vecout_local_a_install \
+python scripts/validate_cannoe_ascendc_raw.py \
+  --bridge-lib /tmp/gptqmodel_cannoe_ascendc_vecout_row/dae610bed1a54586/gptqmodel_cannoe_ascendc_ops.so \
+  --opp-install /tmp/cannoe_vecout_local_a_install \
   --devices 0,1,2,3,4,5,6,7
 ```
 
@@ -446,7 +445,7 @@ faulted with AICore `507015`. A `K=768,N=1024,rows<=8` probe also faulted with
 an MTE DDR out-of-range `507015`, so the N1024 gate remains exact to K512.
 
 The next non-reverse-engineered scheduler pass follows the public CANN W4A16
-basic-block controller more closely by removing Komodo-CANN's fixed eight-owner
+basic-block controller more closely by removing Cannoe's fixed eight-owner
 staging cap. Staged INT4 tile ownership is now bounded by the number of N tiles,
 Split-K shards, and runtime vector cores; workspace is still rejected when it
 would equal or exceed dense FP16 dequantization. This is intended for large-N
@@ -529,11 +528,11 @@ to `6.1858/6.0609/5.9748/5.9162 ms`; act-order group-size 32/128 improved from
 Build from the repo root:
 
 ```bash
-python scripts/build_komodo_cann_ascendc.py \
-  --output /tmp/komodo_cann_w4a16_op
+python scripts/build_cannoe_ascendc.py \
+  --output /tmp/cannoe_w4a16_op
 ```
 
 Use `--no-build` to generate and overlay the project without invoking CMake.
 The helper calls `msopgen` with
-`gptqmodel_ext/komodo_cann/op_ir/komodo_cann_w4a16_matmul.json`, overlays the
+`gptqmodel_ext/cannoe/op_ir/cannoe_w4a16_matmul.json`, overlays the
 files in this directory, and then runs the generated `build.sh`.

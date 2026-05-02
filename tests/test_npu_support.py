@@ -17,14 +17,12 @@ from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.komodo import AwqKomodoLinear, KomodoLinear, _native_int4_enabled
-import gptqmodel.nn_modules.qlinear.komodo_cann as komodo_cann_module
+import gptqmodel.nn_modules.qlinear.cannoe as cannoe_module
 from gptqmodel.nn_modules.qlinear.cannoe import CannoeLinear as PublicCannoeLinear
-from gptqmodel.nn_modules.qlinear.komodo_cann import (
+from gptqmodel.nn_modules.qlinear.cannoe import (
     AwqCannoeLinear,
-    AwqKomodoCannLinear,
     CannoeLinear,
-    KomodoCannLinear,
-    _komodo_cann_tiling_plan,
+    _cannoe_tiling_plan,
 )
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
@@ -58,15 +56,15 @@ def test_komodo_native_int4_default_enabled(monkeypatch):
     assert not _native_int4_enabled()
 
 
-def test_komodo_cann_tiling_plan_uses_split_k_for_decode_large_k(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_SPLIT_K", raising=False)
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_PREFETCH", raising=False)
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", raising=False)
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_V3", raising=False)
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", raising=False)
-    plan = _komodo_cann_tiling_plan(
+def test_cannoe_tiling_plan_uses_split_k_for_decode_large_k(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_CANNOE_ACTIVE_CORES", "24")
+    monkeypatch.delenv("GPTQMODEL_CANNOE_SPLIT_K", raising=False)
+    monkeypatch.delenv("GPTQMODEL_CANNOE_PREFETCH", raising=False)
+    monkeypatch.setenv("GPTQMODEL_CANNOE_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.delenv("GPTQMODEL_CANNOE_FUSED_REQUIRE", raising=False)
+    monkeypatch.delenv("GPTQMODEL_CANNOE_V3", raising=False)
+    monkeypatch.delenv("GPTQMODEL_CANNOE_STAGED_DEQUANT", raising=False)
+    plan = _cannoe_tiling_plan(
         rows=1,
         in_features=8192,
         out_features=1024,
@@ -94,14 +92,14 @@ def test_komodo_cann_tiling_plan_uses_split_k_for_decode_large_k(monkeypatch):
     assert plan.zero_offsets is False
 
 
-def test_komodo_cann_tiling_plan_records_zero_offsets_flag(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", raising=False)
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_V3", raising=False)
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", raising=False)
+def test_cannoe_tiling_plan_records_zero_offsets_flag(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_CANNOE_ACTIVE_CORES", "24")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.delenv("GPTQMODEL_CANNOE_FUSED_REQUIRE", raising=False)
+    monkeypatch.delenv("GPTQMODEL_CANNOE_V3", raising=False)
+    monkeypatch.delenv("GPTQMODEL_CANNOE_STAGED_DEQUANT", raising=False)
 
-    plan = _komodo_cann_tiling_plan(
+    plan = _cannoe_tiling_plan(
         rows=8,
         in_features=256,
         out_features=256,
@@ -113,14 +111,14 @@ def test_komodo_cann_tiling_plan_records_zero_offsets_flag(monkeypatch):
     assert plan.zero_offsets is True
 
 
-def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", raising=False)
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_V3", raising=False)
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", raising=False)
+def test_cannoe_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_CANNOE_ACTIVE_CORES", "24")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.delenv("GPTQMODEL_CANNOE_FUSED_REQUIRE", raising=False)
+    monkeypatch.delenv("GPTQMODEL_CANNOE_V3", raising=False)
+    monkeypatch.delenv("GPTQMODEL_CANNOE_STAGED_DEQUANT", raising=False)
 
-    default_plan = _komodo_cann_tiling_plan(
+    default_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=8192,
         out_features=1024,
@@ -138,9 +136,9 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     assert default_plan.cube_workspace_bytes == 0
     assert default_plan.custom_workspace_bytes == 0
 
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", "1")
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER", raising=False)
-    staged_plan = _komodo_cann_tiling_plan(
+    monkeypatch.setenv("GPTQMODEL_CANNOE_STAGED_DEQUANT", "1")
+    monkeypatch.delenv("GPTQMODEL_CANNOE_CUBE_CONSUMER", raising=False)
+    staged_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=8192,
         out_features=1024,
@@ -167,8 +165,8 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     assert staged_plan.staging_workspace_bytes < staged_plan.in_features * staged_plan.out_features * 2
     assert staged_plan.strategy == "planned_staged_dequant_aic_matmul"
 
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER", "1")
-    cube_plan = _komodo_cann_tiling_plan(
+    monkeypatch.setenv("GPTQMODEL_CANNOE_CUBE_CONSUMER", "1")
+    cube_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=8192,
         out_features=1024,
@@ -184,7 +182,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     assert cube_plan.custom_workspace_bytes == cube_plan.staging_workspace_bytes
     assert cube_plan.custom_workspace_bytes < cube_plan.in_features * cube_plan.out_features * 2
 
-    n256_cube_plan = _komodo_cann_tiling_plan(
+    n256_cube_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=1024,
         out_features=256,
@@ -193,7 +191,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n256_cube_plan.base_n == 128
 
-    n512_k512_cube_plan = _komodo_cann_tiling_plan(
+    n512_k512_cube_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=512,
         out_features=512,
@@ -202,7 +200,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n512_k512_cube_plan.base_n == 128
 
-    n512_k768_cube_plan = _komodo_cann_tiling_plan(
+    n512_k768_cube_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=768,
         out_features=512,
@@ -211,7 +209,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n512_k768_cube_plan.base_n == 128
 
-    n512_k896_cube_plan = _komodo_cann_tiling_plan(
+    n512_k896_cube_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=896,
         out_features=512,
@@ -220,7 +218,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n512_k896_cube_plan.base_n == 128
 
-    n512_k384_cube_plan = _komodo_cann_tiling_plan(
+    n512_k384_cube_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=384,
         out_features=512,
@@ -229,7 +227,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n512_k384_cube_plan.base_n == 256
 
-    n512_k1024_cube_plan = _komodo_cann_tiling_plan(
+    n512_k1024_cube_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=1024,
         out_features=512,
@@ -238,7 +236,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n512_k1024_cube_plan.base_n == 256
 
-    n640_k512_cube_plan = _komodo_cann_tiling_plan(
+    n640_k512_cube_plan = _cannoe_tiling_plan(
         rows=160,
         in_features=512,
         out_features=640,
@@ -247,7 +245,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n640_k512_cube_plan.base_n == 128
 
-    n640_k768_cube_plan = _komodo_cann_tiling_plan(
+    n640_k768_cube_plan = _cannoe_tiling_plan(
         rows=96,
         in_features=768,
         out_features=640,
@@ -256,7 +254,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n640_k768_cube_plan.base_n == 128
 
-    n640_k896_cube_plan = _komodo_cann_tiling_plan(
+    n640_k896_cube_plan = _cannoe_tiling_plan(
         rows=128,
         in_features=896,
         out_features=640,
@@ -265,7 +263,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n640_k896_cube_plan.base_n == 256
 
-    n768_k512_cube_plan = _komodo_cann_tiling_plan(
+    n768_k512_cube_plan = _cannoe_tiling_plan(
         rows=160,
         in_features=512,
         out_features=768,
@@ -274,7 +272,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n768_k512_cube_plan.base_n == 128
 
-    n768_k768_cube_plan = _komodo_cann_tiling_plan(
+    n768_k768_cube_plan = _cannoe_tiling_plan(
         rows=48,
         in_features=768,
         out_features=768,
@@ -283,7 +281,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n768_k768_cube_plan.base_n == 128
 
-    n768_k896_cube_plan = _komodo_cann_tiling_plan(
+    n768_k896_cube_plan = _cannoe_tiling_plan(
         rows=128,
         in_features=896,
         out_features=768,
@@ -292,7 +290,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n768_k896_cube_plan.base_n == 128
 
-    n768_k384_cube_plan = _komodo_cann_tiling_plan(
+    n768_k384_cube_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=384,
         out_features=768,
@@ -301,7 +299,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n768_k384_cube_plan.base_n == 256
 
-    n768_k1024_cube_plan = _komodo_cann_tiling_plan(
+    n768_k1024_cube_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=1024,
         out_features=768,
@@ -310,7 +308,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n768_k1024_cube_plan.base_n == 256
 
-    n1024_k512_decode_cube_plan = _komodo_cann_tiling_plan(
+    n1024_k512_decode_cube_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=512,
         out_features=1024,
@@ -319,7 +317,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n1024_k512_decode_cube_plan.base_n == 128
 
-    n1024_k512_prefill_cube_plan = _komodo_cann_tiling_plan(
+    n1024_k512_prefill_cube_plan = _cannoe_tiling_plan(
         rows=16,
         in_features=512,
         out_features=1024,
@@ -328,7 +326,7 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     )
     assert n1024_k512_prefill_cube_plan.base_n == 256
 
-    large_row_cube_plan = _komodo_cann_tiling_plan(
+    large_row_cube_plan = _cannoe_tiling_plan(
         rows=48,
         in_features=8192,
         out_features=1024,
@@ -339,8 +337,8 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     assert large_row_cube_plan.base_m == 48
     assert large_row_cube_plan.base_k == 128
 
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_BASE_K", "64")
-    override_plan = _komodo_cann_tiling_plan(
+    monkeypatch.setenv("GPTQMODEL_CANNOE_BASE_K", "64")
+    override_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=8192,
         out_features=1024,
@@ -350,7 +348,30 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
 
     assert override_plan.base_k == 64
 
-    wide_staged_plan = _komodo_cann_tiling_plan(
+    monkeypatch.delenv("GPTQMODEL_CANNOE_BASE_K", raising=False)
+    monkeypatch.setenv("GPTQMODEL_CANNOE_BASE_N", "128")
+    base_n_override_plan = _cannoe_tiling_plan(
+        rows=16,
+        in_features=512,
+        out_features=1024,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+
+    assert base_n_override_plan.base_n == 128
+
+    monkeypatch.setenv("GPTQMODEL_CANNOE_BASE_N", "130")
+    with pytest.raises(RuntimeError, match="positive multiple of 16"):
+        _cannoe_tiling_plan(
+            rows=8,
+            in_features=8192,
+            out_features=1024,
+            group_size=32,
+            device=torch.device("cpu"),
+        )
+
+    monkeypatch.delenv("GPTQMODEL_CANNOE_BASE_N", raising=False)
+    wide_staged_plan = _cannoe_tiling_plan(
         rows=8,
         in_features=8192,
         out_features=8192,
@@ -366,27 +387,27 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     assert wide_staged_plan.staging_blocks > 8
 
 
-def test_komodo_cann_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_INNER_PRECISE", raising=False)
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", raising=False)
+def test_cannoe_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_CANNOE_ACTIVE_CORES", "24")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.delenv("GPTQMODEL_CANNOE_INNER_PRECISE", raising=False)
+    monkeypatch.delenv("GPTQMODEL_CANNOE_STAGED_DEQUANT", raising=False)
 
-    liked = _komodo_cann_tiling_plan(
+    liked = _cannoe_tiling_plan(
         rows=1,
         in_features=5120,
         out_features=6144,
         group_size=32,
         device=torch.device("cpu"),
     )
-    narrow_decode = _komodo_cann_tiling_plan(
+    narrow_decode = _cannoe_tiling_plan(
         rows=1,
         in_features=5120,
         out_features=1024,
         group_size=32,
         device=torch.device("cpu"),
     )
-    balanced = _komodo_cann_tiling_plan(
+    balanced = _cannoe_tiling_plan(
         rows=1,
         in_features=4096,
         out_features=4096,
@@ -400,26 +421,21 @@ def test_komodo_cann_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):
 
 
 def test_cannoe_default_fused_op_names_include_msopgen_aliases(monkeypatch):
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", raising=False)
     monkeypatch.delenv("GPTQMODEL_CANNOE_FUSED_OP", raising=False)
-    names = komodo_cann_module._komodo_cann_fused_op_names()
+    names = cannoe_module._cannoe_fused_op_names()
 
     assert "gptqmodel_cannoe.cannoe_w4_a16_matmul" in names
-    assert "gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul" in names
-    assert "npu.komodo_cann_w4_a16_matmul" in names
+    assert "gptqmodel_cannoe.w4a16_matmul" in names
+    assert "npu.cannoe_w4_a16_matmul" in names
 
 
-def test_cannoe_env_aliases_override_legacy_names(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "4")
+def test_cannoe_env_controls_plan(monkeypatch):
     monkeypatch.setenv("GPTQMODEL_CANNOE_ACTIVE_CORES", "12")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "legacy_namespace.legacy_op")
     monkeypatch.setenv("GPTQMODEL_CANNOE_FUSED_OP", "current_namespace.current_op")
     monkeypatch.setenv("GPTQMODEL_CANNOE_STAGED_DEQUANT", "1")
     monkeypatch.setenv("GPTQMODEL_CANNOE_CUBE_CONSUMER", "1")
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", raising=False)
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER", raising=False)
 
-    plan = _komodo_cann_tiling_plan(
+    plan = _cannoe_tiling_plan(
         rows=8,
         in_features=8192,
         out_features=1024,
@@ -432,18 +448,18 @@ def test_cannoe_env_aliases_override_legacy_names(monkeypatch):
     assert plan.vector_cores == 12
     assert plan.staged_dequant is True
     assert plan.cube_consumer is True
-    assert komodo_cann_module._komodo_cann_fused_op_names() == ("current_namespace.current_op",)
+    assert cannoe_module._cannoe_fused_op_names() == ("current_namespace.current_op",)
 
 
-def test_komodo_cann_tiling_plan_requires_registered_fused_op(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED", "1")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", "1")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_V3", raising=False)
+def test_cannoe_tiling_plan_requires_registered_fused_op(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_CANNOE_ACTIVE_CORES", "24")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_FUSED", "1")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_FUSED_REQUIRE", "1")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.delenv("GPTQMODEL_CANNOE_V3", raising=False)
 
     with pytest.raises(RuntimeError, match="fused W4A16 op"):
-        _komodo_cann_tiling_plan(
+        _cannoe_tiling_plan(
             rows=1,
             in_features=8192,
             out_features=1024,
@@ -452,17 +468,17 @@ def test_komodo_cann_tiling_plan_requires_registered_fused_op(monkeypatch):
         )
 
 
-def test_komodo_cann_tiling_plan_reports_v3_autoload_failure(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED", "1")
-    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE", raising=False)
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "missing_namespace.missing_op")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_V3", "1")
-    monkeypatch.setattr(komodo_cann_module, "_try_load_komodo_cann_v3", lambda: False)
-    monkeypatch.setattr(komodo_cann_module, "_FUSED_OP_CACHE", komodo_cann_module._FUSED_OP_UNSET)
-    monkeypatch.setattr(komodo_cann_module, "_FUSED_OP_CACHE_KEY", None)
+def test_cannoe_tiling_plan_reports_v3_autoload_failure(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_CANNOE_ACTIVE_CORES", "24")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_FUSED", "1")
+    monkeypatch.delenv("GPTQMODEL_CANNOE_FUSED_REQUIRE", raising=False)
+    monkeypatch.setenv("GPTQMODEL_CANNOE_FUSED_OP", "missing_namespace.missing_op")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_V3", "1")
+    monkeypatch.setattr(cannoe_module, "_try_load_cannoe_v3", lambda: False)
+    monkeypatch.setattr(cannoe_module, "_FUSED_OP_CACHE", cannoe_module._FUSED_OP_UNSET)
+    monkeypatch.setattr(cannoe_module, "_FUSED_OP_CACHE_KEY", None)
 
-    plan = _komodo_cann_tiling_plan(
+    plan = _cannoe_tiling_plan(
         rows=1,
         in_features=8192,
         out_features=1024,
@@ -895,14 +911,14 @@ def test_npu_explicit_cannoe_selects_gptq_and_awq():
     assert awq_cls is AwqCannoeLinear
 
 
-def test_npu_legacy_komodo_cann_selects_cannoe_aliases():
+def test_npu_generic_cannoe_selects_cannoe_backend():
     gptq_cls = select_quant_linear(
         bits=4,
         group_size=128,
         desc_act=False,
         sym=True,
         device=DEVICE.NPU,
-        backend=BACKEND.KOMODO_CANN,
+        backend=BACKEND.CANNOE,
         format=FORMAT.GPTQ,
         quant_method=METHOD.GPTQ,
         pack_dtype=torch.int32,
@@ -913,14 +929,14 @@ def test_npu_legacy_komodo_cann_selects_cannoe_aliases():
         desc_act=False,
         sym=True,
         device=DEVICE.NPU,
-        backend=BACKEND.KOMODO_CANN,
+        backend=BACKEND.CANNOE,
         format=FORMAT.GEMM,
         quant_method=METHOD.AWQ,
         pack_dtype=torch.int32,
     )
 
-    assert gptq_cls is KomodoCannLinear
-    assert awq_cls is AwqKomodoCannLinear
+    assert gptq_cls is CannoeLinear
+    assert awq_cls is AwqCannoeLinear
 
 
 @pytest.mark.parametrize(
@@ -1376,14 +1392,14 @@ def test_npu_komodo_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("dtype", [torch.float16])
-def test_npu_komodo_cann_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
+def test_npu_cannoe_gptq_native_int4_matches_torch_baseline(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
     monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
     monkeypatch.setenv("GPTQMODEL_KOMODO_PREPACK_TILE_N", "16")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_PREFETCH", "1")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_PREFETCH_MIN_BYTES", "0")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_PREFETCH", "1")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_PREFETCH_MIN_BYTES", "0")
     baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=32).eval()
-    candidate = KomodoCannLinear(
+    candidate = CannoeLinear(
         bits=4,
         group_size=baseline_cpu.requested_group_size,
         sym=baseline_cpu.sym,

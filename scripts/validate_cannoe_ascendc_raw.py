@@ -62,9 +62,9 @@ def _apply_custom_opp_env(env: dict[str, str], args: argparse.Namespace) -> None
         opapi_lib = vendor / "op_api" / "lib" / "libcust_opapi.so"
         env["ASCEND_CUSTOM_OPP_PATH"] = str(vendor) + os.pathsep + env.get("ASCEND_CUSTOM_OPP_PATH", "")
         env["LD_LIBRARY_PATH"] = str(opapi_lib.parent) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
-        env.setdefault("GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB", str(opapi_lib))
+        env.setdefault("GPTQMODEL_CANNOE_ASCENDC_OPAPI_LIB", str(opapi_lib))
     if args.opapi_lib:
-        env["GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB"] = str(Path(args.opapi_lib).expanduser())
+        env["GPTQMODEL_CANNOE_ASCENDC_OPAPI_LIB"] = str(Path(args.opapi_lib).expanduser())
 
 
 def _case_payload(case: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -116,7 +116,7 @@ def _worker(args: argparse.Namespace) -> int:
     offsets = torch.zeros((k // group, n), device="npu", dtype=torch.float16)
 
     def custom_call() -> torch.Tensor:
-        return torch.ops.gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul(
+        return torch.ops.gptqmodel_cannoe.cannoe_w4_a16_matmul(
             x,
             packed_weight,
             scales,
@@ -253,8 +253,8 @@ def _run_parent(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate a Komodo-CANN Ascend C raw custom-op package.")
-    parser.add_argument("--bridge-lib", required=True, help="Path to gptqmodel_komodo_cann_ascendc_ops.so.")
+    parser = argparse.ArgumentParser(description="Validate a Cannoe Ascend C raw custom-op package.")
+    parser.add_argument("--bridge-lib", required=True, help="Path to gptqmodel_cannoe_ascendc_ops.so.")
     parser.add_argument("--opp-install", help="Custom OPP install prefix containing vendors/customize.")
     parser.add_argument("--opapi-lib", help="Explicit libcust_opapi.so path; overrides --opp-install discovery.")
     parser.add_argument("--devices", type=_parse_devices, default=[0], help="Comma-separated physical NPU IDs.")

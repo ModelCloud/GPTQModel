@@ -24,9 +24,9 @@
 
 namespace {
 
-constexpr const char* kExecutorCacheEnv = "GPTQMODEL_KOMODO_CANN_V3_EXECUTOR_CACHE";
-constexpr const char* kWorkspaceCacheEnv = "GPTQMODEL_KOMODO_CANN_V3_WORKSPACE_CACHE";
-constexpr const char* kInnerPreciseEnv = "GPTQMODEL_KOMODO_CANN_INNER_PRECISE";
+constexpr const char* kExecutorCacheEnv = "GPTQMODEL_CANNOE_V3_EXECUTOR_CACHE";
+constexpr const char* kWorkspaceCacheEnv = "GPTQMODEL_CANNOE_V3_WORKSPACE_CACHE";
+constexpr const char* kInnerPreciseEnv = "GPTQMODEL_CANNOE_INNER_PRECISE";
 
 class AclTensorHandle {
 public:
@@ -434,18 +434,6 @@ at::Tensor w4a16_matmul_v3(
 }
 
 }  // namespace
-
-TORCH_LIBRARY_FRAGMENT(gptqmodel_komodo_cann, m)
-{
-    m.def(
-        "w4a16_matmul(Tensor x, Tensor packed_weight, Tensor scales, Tensor offsets, Tensor? bias, "
-        "int group_size, int split_k, int base_m, int base_n, int base_k) -> Tensor");
-}
-
-TORCH_LIBRARY_IMPL(gptqmodel_komodo_cann, PrivateUse1, m)
-{
-    m.impl("w4a16_matmul", &w4a16_matmul_v3);
-}
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_cannoe, m)
 {

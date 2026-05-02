@@ -1,6 +1,6 @@
 [
   {
-    "op": "KomodoCannW4A16Matmul",
+    "op": "CannoeW4A16Matmul",
     "input_desc": [
       {
         "name": "x",

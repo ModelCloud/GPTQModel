@@ -2,23 +2,19 @@
 
 Date: 2026-05-02
 
-Cannoe is the renamed Ascend CANN kernel experiment formerly called
-Komodo-CANN. It remains separate from the plain Komodo backend and runtime path.
-The old `komodo_cann` spellings are compatibility aliases only.
+Cannoe is the Ascend CANN kernel experiment. It remains separate from the plain
+Komodo backend and runtime path.
 
 ## Selection
 
 - GPTQ backend: `BACKEND.GPTQ_CANNOE` / `gptq_cannoe`
 - AWQ backend: `BACKEND.AWQ_CANNOE` / `awq_cannoe`
-- Generic alias: `BACKEND.CANNOE` / `cannoe`
-- Legacy aliases: `BACKEND.GPTQ_KOMODO_CANN`, `BACKEND.AWQ_KOMODO_CANN`,
-  `BACKEND.KOMODO_CANN`, and the old string values.
+- Generic selector: `BACKEND.CANNOE` / `cannoe`
 - Benchmark flag: `scripts/benchmark_komodo_npu_ab.py --cannoe`
 
 The current implementation subclasses the plain Komodo packed int4 plan only as
 a baseline plan format. Runtime dispatch is through `CannoeLinear` and
-`AwqCannoeLinear`, not through `KomodoLinear` or `AwqKomodoLinear`. The old
-`KomodoCannLinear` and `AwqKomodoCannLinear` class names remain aliases.
+`AwqCannoeLinear`, not through `KomodoLinear` or `AwqKomodoLinear`.
 
 ## CANN Prefetch Policy
 
@@ -35,8 +31,8 @@ GPTQMODEL_CANNOE_PREFETCH_MAX_BYTES  # override max bytes per tensor
 GPTQMODEL_CANNOE_PREFETCH_MIN_BYTES  # default: 4MiB
 ```
 
-The legacy `GPTQMODEL_KOMODO_CANN_*` environment names are still accepted when
-the new `GPTQMODEL_CANNOE_*` name is unset.
+Only `GPTQMODEL_CANNOE_*` environment names are accepted for Cannoe-specific
+controls.
 
 On Ascend 910B, the default max prefetch window is derived from reported L2
 cache size and cube-core count:
@@ -68,7 +64,7 @@ dequantizes INT4 weights to FP16, AIC/Cube performs GEMM, Split-K helps when
 the main bottleneck is the extra GM movement of dequantized weights, not the
 INT4-to-FP16 conversion itself.
 
-Current Python-side Komodo-CANN records this plan per shape:
+Current Python-side Cannoe records this plan per shape:
 
 - `split_k=1` for balanced shapes and group-size/act-order sweeps.
 - `split_k>1` for decode-like Qwen projections where `rows <= 16`, `K >= 4096`,
@@ -77,7 +73,7 @@ Current Python-side Komodo-CANN records this plan per shape:
   staged plans.
 - Staged Cube-consumer experiments now select `base_k=128` automatically when
   `K` is divisible by 128. This reduces direct TSCM/VecOut handoff count while
-  keeping the FP16 B tile bounded; set `GPTQMODEL_KOMODO_CANN_BASE_K=64` to
+  keeping the FP16 B tile bounded; set `GPTQMODEL_CANNOE_BASE_K=64` to
   force the original C0-sized tile.
   A plan-shaped local-A package sweep passed on all eight NPUs with rows
   `8/17/32/48/64/96/129/160`, per-case planner `base_m`, K `512/1024`, N
@@ -110,7 +106,7 @@ Current Python-side Komodo-CANN records this plan per shape:
 
 The first steady-state prefetch implementation was slower than plain Komodo on
 the tested synthetic shapes, including Qwen3.6 27B projection-sized cases. That
-is why it now lives behind a separate Komodo-CANN backend instead of an option
+is why it now lives behind a separate Cannoe backend instead of an option
 inside plain Komodo.
 
 Current 8-NPU A/B after the profiler-guided host-path patch on 2026-04-30
@@ -119,13 +115,13 @@ with tile `1024`, FP16, warmup `2`, iters `5`:
 | Case set | Kernel | Source drop | Komodo total ms | Max abs drift |
 |---|---|---:|---:|---:|
 | GPTQ group sizes + act-order | Komodo | 0 | 1.8125 | 0.03125 |
-| GPTQ group sizes + act-order | Komodo-CANN | 0 | 1.9142 | 0.03125 |
+| GPTQ group sizes + act-order | Cannoe | 0 | 1.9142 | 0.03125 |
 | GPTQ group sizes + act-order | Komodo | 1 | 1.6394 | 0.03125 |
-| GPTQ group sizes + act-order | Komodo-CANN | 1 | 1.7173 | 0.03125 |
+| GPTQ group sizes + act-order | Cannoe | 1 | 1.7173 | 0.03125 |
 | Qwen3.6 27B GPTQ projections | Komodo | 0 | 1.2378 | 0.0625 |
-| Qwen3.6 27B GPTQ projections | Komodo-CANN | 0 | 1.3255 | 0.0625 |
+| Qwen3.6 27B GPTQ projections | Cannoe | 0 | 1.3255 | 0.0625 |
 | Qwen3.6 27B GPTQ projections | Komodo | 1 | 1.2979 | 0.0625 |
-| Qwen3.6 27B GPTQ projections | Komodo-CANN | 1 | 1.2861 | 0.0625 |
+| Qwen3.6 27B GPTQ projections | Cannoe | 1 | 1.2861 | 0.0625 |
 
 For Qwen3.6 27B GPTQ projection shapes, the recorded CANN plans used
 `split_k` values `{1, 2, 8}` and vector dequant task counts `{320, 1920, 5440}`
@@ -133,8 +129,8 @@ across the six projection cases.
 
 Current 8-NPU quick sweep:
 
-- `quick_komodo_cann_keep_tile1024`: `0.3650ms`, no prefetch, `split_k=1`.
-- `quick_komodo_cann_prefetch_keep_tile1024`: `0.3804ms`, prefetch enabled.
+- `quick_cannoe_keep_tile1024`: `0.3650ms`, no prefetch, `split_k=1`.
+- `quick_cannoe_prefetch_keep_tile1024`: `0.3804ms`, prefetch enabled.
 - `quick_native_drop_tile1024`: `0.3085ms`.
 - `quick_prefetch_keep_tile1024`: `0.3231ms`.
 
@@ -150,7 +146,7 @@ does not remove the generic executor boundary or the device-side dequant
 materialization problem. The useful new surface for the custom kernel is the
 CANN 9 Ascend C public device API.
 
-The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
+The next Cannoe implementation should prioritize these public CANN 9 paths:
 
 - Replace scalar nibble unpack in the staged AIV producer with C API vector
   conversion from packed INT4 to FP16 in UB. Local headers expose
@@ -249,9 +245,9 @@ The next Komodo-CANN implementation should prioritize these public CANN 9 paths:
   copies the new template tiling-key header into both generated host and kernel
   trees so CANN 9 emits the AIV-only and `MIX_AIC_1_2` binaries from one op.
 - Fixed the host workspace accounting for staged/Cube packages: CANN Matmul
-  system workspace and Komodo-CANN user tile workspace are now added together
+  system workspace and Cannoe user tile workspace are now added together
   before `SetWorkspaceSizes`. The fused decision still uses only the bounded
-  user staging bytes, so Komodo-CANN does not make a full dense dequantized
+  user staging bytes, so Cannoe does not make a full dense dequantized
   weight cache the default.
 - VecOut runtime validation on 2026-05-01 passed an 8-NPU smoke with one shape
   per NPU: rows `1/4/8`, K `384/512/768/1024`, N `256/512`, and group sizes
@@ -359,14 +355,14 @@ The full rescan and public/private API notes are in
 
 The Python JIT bridge now resolves CANN roots from `ASCEND_HOME_PATH`, then
 `ASCEND_TOOLKIT_HOME`, then the installed latest-toolkit symlinks before falling
-back to older versioned paths. This avoids silently building the Komodo-CANN V3
+back to older versioned paths. This avoids silently building the Cannoe V3
 or Ascend C bridge against the stale CANN 8.5.1 tree when a stripped shell omits
 the normal Ascend environment variables.
 
-Use `scripts/validate_komodo_cann_ascendc_raw.py` for raw Ascend C package
+Use `scripts/validate_cannoe_ascendc_raw.py` for raw Ascend C package
 smokes. It takes `--bridge-lib`, `--opp-install`, and `--devices`, launches one
 worker per device, and keeps each worker to one custom/native call. The first
-run against `/tmp/komodo_cann_vecout_local_a_install` reproduced the manual
+run against `/tmp/cannoe_vecout_local_a_install` reproduced the manual
 8-NPU local-A sweep with all eight cases passing and worst drift
 `max_abs=0.015625`, `mean_abs=0.0024566650390625`.
 Set `--warmup` and `--iters` for repeatable timing while preserving the same
@@ -374,7 +370,7 @@ custom/native accuracy check; worker rows include `custom_ms`, and summaries add
 `custom_ms_min`, `custom_ms_mean`, `custom_ms_max`, `warmup`, and `iters`.
 Use `warmup >= 1` for steady-state timing because the first custom-op call
 includes runtime setup. On the current local-A package, an all-8-NPU warmed sweep
-over `/tmp/komodo_cann_local_a_b_reuse_cases.json` passed with custom latency
+over `/tmp/cannoe_local_a_b_reuse_cases.json` passed with custom latency
 min/mean/max `2.284225/4.648382/8.693375 ms` and worst drift
 `max_abs=0.015625`, `mean_abs=0.001491546630859375`.
 The same harness passed with positive `base_k=128`, so the module planner can
@@ -383,9 +379,9 @@ positive-`base_k` fallback shape.
 
 ## aclnn V3 Probe
 
-`scripts/probe_komodo_cann_v3.py` builds
-`gptqmodel_ext/komodo_cann/wq_bmm_v3_probe.cpp`, registers
-`torch.ops.gptqmodel_komodo_cann.w4a16_matmul`, and calls
+`scripts/probe_cannoe_v3.py` builds
+`gptqmodel_ext/cannoe/wq_bmm_v3_probe.cpp`, registers
+`torch.ops.gptqmodel_cannoe.w4a16_matmul`, and calls
 `aclnnWeightQuantBatchMatmulV3` directly with Komodo's packed INT4 weights. The
 probe exposes packed `int32 [K, N / 8]` storage as a logical `ACL_INT4 [K, N]`
 tensor.
@@ -393,17 +389,17 @@ tensor.
 Runtime opt-in:
 
 ```bash
-GPTQMODEL_KOMODO_CANN_V3=1
-GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE=1
-GPTQMODEL_KOMODO_CANN_FUSED_OP=gptqmodel_komodo_cann.w4a16_matmul
+GPTQMODEL_CANNOE_V3=1
+GPTQMODEL_CANNOE_FUSED_REQUIRE=1
+GPTQMODEL_CANNOE_FUSED_OP=gptqmodel_cannoe.w4a16_matmul
 ```
 
 The bridge caches repeatable ACL executors and CANN workspace tensors by
 default. Disable these only for isolation:
 
 ```bash
-GPTQMODEL_KOMODO_CANN_V3_EXECUTOR_CACHE=0
-GPTQMODEL_KOMODO_CANN_V3_WORKSPACE_CACHE=0
+GPTQMODEL_CANNOE_V3_EXECUTOR_CACHE=0
+GPTQMODEL_CANNOE_V3_WORKSPACE_CACHE=0
 ```
 
 Latest local checks:
@@ -412,12 +408,12 @@ Latest local checks:
   native `torch.ops.npu.npu_weight_quant_batchmatmul`.
 - Same shape with FP16 bias: exact match.
 - `M=1,K=4096,N=4096,group_size=128`: exact match in the final single probe.
-- With the probe preloaded, `KomodoCannLinear` selected `fused_w4a16_matmul`
+- With the probe preloaded, `CannoeLinear` selected `fused_w4a16_matmul`
   and matched the torch baseline with `max_abs=0.0009765625`.
 
 ## Inner-Precise Shape Policy
 
-`GPTQMODEL_KOMODO_CANN_INNER_PRECISE` accepts `auto`, `0`, or `1`. The default
+`GPTQMODEL_CANNOE_INNER_PRECISE` accepts `auto`, `0`, or `1`. The default
 is `auto`.
 
 The current auto rule enables `inner_precise=1` only for q-like group-32 decode
@@ -460,23 +456,23 @@ enabled passed 8/8:
 | Case set | Kernel | Source drop | Komodo total ms | Max abs drift | Auto inner=1 |
 |---|---|---:|---:|---:|---|
 | GPTQ group sizes + act-order | Komodo | 0 | 1.7750 | 0.03125 | none |
-| GPTQ group sizes + act-order | Komodo-CANN V3 bridge | 0 | 2.4404 | 0.03125 | none |
+| GPTQ group sizes + act-order | Cannoe V3 bridge | 0 | 2.4404 | 0.03125 | none |
 | GPTQ group sizes + act-order | Komodo | 1 | 1.6649 | 0.03125 | none |
-| GPTQ group sizes + act-order | Komodo-CANN V3 bridge | 1 | 2.4540 | 0.03125 | none |
+| GPTQ group sizes + act-order | Cannoe V3 bridge | 1 | 2.4540 | 0.03125 | none |
 | Qwen3.6 27B GPTQ projections | Komodo | 0 | 1.2569 | 0.0625 | n/a |
-| Qwen3.6 27B GPTQ projections | Komodo-CANN V3 bridge | 0 | 1.6005 | 0.0625 | q-proj |
+| Qwen3.6 27B GPTQ projections | Cannoe V3 bridge | 0 | 1.6005 | 0.0625 | q-proj |
 | Qwen3.6 27B GPTQ projections | Komodo | 1 | 1.2814 | 0.0625 | n/a |
-| Qwen3.6 27B GPTQ projections | Komodo-CANN V3 bridge | 1 | 1.7097 | 0.0625 | q-proj |
+| Qwen3.6 27B GPTQ projections | Cannoe V3 bridge | 1 | 1.7097 | 0.0625 | q-proj |
 
-Earlier 8-NPU A/B with `GPTQMODEL_KOMODO_CANN_V3=1` passed 8/8. The V3 bridge
+Earlier 8-NPU A/B with `GPTQMODEL_CANNOE_V3=1` passed 8/8. The V3 bridge
 was correct but slower than the current native CANN path:
 
 | Case set | Kernel | Source drop | Komodo total ms | Max abs drift |
 |---|---|---:|---:|---:|
-| GPTQ group sizes + act-order | Komodo-CANN V3 bridge | 0 | 2.5008 | 0.03125 |
-| GPTQ group sizes + act-order | Komodo-CANN V3 bridge | 1 | 2.5408 | 0.03125 |
-| Qwen3.6 27B GPTQ projections | Komodo-CANN V3 bridge | 0 | 1.6629 | 0.0625 |
-| Qwen3.6 27B GPTQ projections | Komodo-CANN V3 bridge | 1 | 1.9257 | 0.0625 |
+| GPTQ group sizes + act-order | Cannoe V3 bridge | 0 | 2.5008 | 0.03125 |
+| GPTQ group sizes + act-order | Cannoe V3 bridge | 1 | 2.5408 | 0.03125 |
+| Qwen3.6 27B GPTQ projections | Cannoe V3 bridge | 0 | 1.6629 | 0.0625 |
+| Qwen3.6 27B GPTQ projections | Cannoe V3 bridge | 1 | 1.9257 | 0.0625 |
 
 This confirms V3 API access, but it is still a raw CANN op call boundary. Even
 with descriptor, executor, and workspace reuse, the remaining speed work is the
@@ -502,8 +498,8 @@ Use the profiling helper for single-shape CANN traces:
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0 \
-python scripts/profile_komodo_cann_npu.py \
-  --mode cann \
+python scripts/profile_cannoe_npu.py \
+  --mode cannoe \
   --case qwen3_6_27b_gptq_down_proj \
   --profiler-level level1 \
   --aic-metrics PipeUtilization

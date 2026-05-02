@@ -39,10 +39,10 @@ LOOP_MODES = (
 QUICK_MODES = (
     ("fallback", ("--no-komodo-native-int4",)),
     ("native_keep", ("--komodo-native-int4", "--no-komodo-drop-source-weights")),
-    ("komodo_cann_keep", ("--komodo-native-int4", "--no-komodo-drop-source-weights", "--komodo-cann")),
+    ("cannoe_keep", ("--komodo-native-int4", "--no-komodo-drop-source-weights", "--cannoe")),
     (
-        "komodo_cann_prefetch_keep",
-        ("--komodo-native-int4", "--no-komodo-drop-source-weights", "--komodo-cann", "--komodo-cann-prefetch"),
+        "cannoe_prefetch_keep",
+        ("--komodo-native-int4", "--no-komodo-drop-source-weights", "--cannoe", "--cannoe-prefetch"),
     ),
     ("native_drop", ("--komodo-native-int4", "--komodo-drop-source-weights")),
     ("prefetch_keep", ("--komodo-native-int4", "--komodo-prefetch-native-plan", "--no-komodo-drop-source-weights")),
@@ -112,8 +112,8 @@ def _build_tasks(args, output_dir: Path, devices: list[int]) -> list[MatrixTask]
 
     if not args.skip_ab:
         ab_modes = [("native", ())]
-        if args.include_komodo_cann_ab:
-            ab_modes.append(("komodo_cann", ("--komodo-cann",)))
+        if args.include_cannoe_ab:
+            ab_modes.append(("cannoe", ("--cannoe",)))
         for cases in AB_CASE_SETS:
             for tile in args.tiles:
                 for mode_name, mode_flags in ab_modes:
@@ -357,7 +357,7 @@ def main() -> None:
     parser.add_argument("--iters", type=int, default=2)
     parser.add_argument("--stabilize-scale", type=float, default=0.001)
     parser.add_argument("--include-memory", action="store_true")
-    parser.add_argument("--include-komodo-cann-ab", action="store_true")
+    parser.add_argument("--include-cannoe-ab", action="store_true")
     parser.add_argument("--skip-unit", action="store_true")
     parser.add_argument("--skip-ab", action="store_true")
     parser.add_argument("--skip-loop", action="store_true")

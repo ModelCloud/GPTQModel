@@ -1,5 +1,5 @@
-#include "komodo_cann_w4_a16_matmul_tiling.h"
-#include "komodo_cann_w4_a16_matmul_tiling_key.h"
+#include "cannoe_w4_a16_matmul_tiling.h"
+#include "cannoe_w4_a16_matmul_tiling_key.h"
 #include "register/op_def_registry.h"
 #include "tiling/platform/platform_ascendc.h"
 
@@ -136,7 +136,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     }
     const uint32_t total_outputs = static_cast<uint32_t>(total_outputs64);
 
-    KomodoCannW4A16MatmulTilingData tiling;
+    CannoeW4A16MatmulTilingData tiling;
     tiling.set_rows(static_cast<uint32_t>(rows64));
     tiling.set_in_features(static_cast<uint32_t>(k64));
     tiling.set_out_features(static_cast<uint32_t>(n64));
@@ -184,7 +184,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_staging_workspace_bytes(0);
     tiling.set_staging_workspace_offset(0);
     tiling.set_cube_workspace_bytes(0);
-    uint64_t tiling_key = GET_TPL_TILING_KEY(kKomodoCannLaunchModeAiv);
+    uint64_t tiling_key = GET_TPL_TILING_KEY(kCannoeLaunchModeAiv);
 
     if (AttrIsNegative(attrs, kAttrBaseN) != 0 && requested_base_n != 0 && requested_base_k != 0) {
         const uint32_t n_tiles = CeilDivU32(static_cast<uint32_t>(n64), requested_base_n);
@@ -212,8 +212,8 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
             tiling.set_staging_workspace_bytes(ClampU64ToU32(staging_workspace_bytes));
             tiling.set_staging_workspace_offset(0);
             tiling.set_cube_workspace_bytes(ClampU64ToU32(cube_workspace_bytes));
-#ifdef KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH
-            tiling_key = GET_TPL_TILING_KEY(kKomodoCannLaunchModeMixedAicAiv);
+#ifdef CANNOE_EXPERIMENTAL_MIXED_LAUNCH
+            tiling_key = GET_TPL_TILING_KEY(kCannoeLaunchModeMixedAicAiv);
 #endif
             size_t* workspaces = context->GetWorkspaceSizes(1);
             if (workspaces == nullptr) {
@@ -256,9 +256,9 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext* context)
 }  // namespace ge
 
 namespace ops {
-class KomodoCannW4A16Matmul : public OpDef {
+class CannoeW4A16Matmul : public OpDef {
 public:
-    explicit KomodoCannW4A16Matmul(const char* name) : OpDef(name)
+    explicit CannoeW4A16Matmul(const char* name) : OpDef(name)
     {
         this->Input("x")
             .ParamType(REQUIRED)
@@ -302,5 +302,5 @@ public:
     }
 };
 
-OP_ADD(KomodoCannW4A16Matmul);
+OP_ADD(CannoeW4A16Matmul);
 }  // namespace ops

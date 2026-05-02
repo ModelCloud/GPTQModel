@@ -23,10 +23,10 @@ from gptqmodel.nn_modules.qlinear.komodo import (
     _drop_source_weights_enabled,
     _native_int4_enabled,
 )
-from gptqmodel.nn_modules.qlinear.komodo_cann import (
+from gptqmodel.nn_modules.qlinear.cannoe import (
     AwqCannoeLinear,
     CannoeLinear,
-    _komodo_cann_prefetch_enabled,
+    _cannoe_prefetch_enabled,
     cannoe_plan_asdict,
 )
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -402,14 +402,11 @@ def _run_case(
         "candidate": candidate.__class__.__name__,
         "komodo_kernel": "cannoe" if cannoe else "komodo",
         "cannoe_plan": cannoe_plan_asdict(getattr(candidate, "_last_cann_plan", None)),
-        "komodo_cann_plan": cannoe_plan_asdict(getattr(candidate, "_last_cann_plan", None)),
         "cannoe_path": getattr(candidate, "_last_cann_path", None),
-        "komodo_cann_path": getattr(candidate, "_last_cann_path", None),
         "komodo_dequant_cache": cache_dequantized,
         "komodo_native_int4": native_int4,
         "komodo_prefetch_native_plan": prefetch_native_plan,
-        "cannoe_prefetch": bool(_komodo_cann_prefetch_enabled()) if cannoe else False,
-        "komodo_cann_prefetch": bool(_komodo_cann_prefetch_enabled()) if cannoe else False,
+        "cannoe_prefetch": bool(_cannoe_prefetch_enabled()) if cannoe else False,
         "komodo_drop_source_weights": drop_source_weights,
         "komodo_source_dropped": bool(getattr(candidate, "_native_source_dropped", False)),
         "komodo_prefetched": prefetched,
@@ -504,33 +501,19 @@ def main() -> None:
         help="Use the separate Cannoe CANN kernel class instead of the plain Komodo kernel.",
     )
     parser.add_argument(
-        "--komodo-cann",
-        dest="cannoe",
-        action="store_true",
-        help="Legacy alias for --cannoe.",
-    )
-    parser.add_argument(
         "--cannoe-prefetch",
         dest="cannoe_prefetch",
         action="store_true",
         help="Enable Cannoe host-issued npu_prefetch probes. Only applies with --cannoe.",
     )
     parser.add_argument(
-        "--komodo-cann-prefetch",
-        dest="cannoe_prefetch",
-        action="store_true",
-        help="Legacy alias for --cannoe-prefetch.",
-    )
-    parser.add_argument(
         "--cannoe-prefetch-max-bytes",
-        "--komodo-cann-prefetch-max-bytes",
         dest="cannoe_prefetch_max_bytes",
         type=int,
         help="Override GPTQMODEL_CANNOE_PREFETCH_MAX_BYTES for the Cannoe kernel.",
     )
     parser.add_argument(
         "--cannoe-prefetch-min-bytes",
-        "--komodo-cann-prefetch-min-bytes",
         dest="cannoe_prefetch_min_bytes",
         type=int,
         help="Override GPTQMODEL_CANNOE_PREFETCH_MIN_BYTES for the Cannoe kernel.",
@@ -589,7 +572,7 @@ def main() -> None:
     os.environ["GPTQMODEL_KOMODO_CACHE_WEIGHTS"] = "1" if args.komodo_cache_dequantized else "0"
     native_int4 = _native_int4_enabled()
     cannoe = bool(args.cannoe)
-    cannoe_prefetch = bool(_komodo_cann_prefetch_enabled()) if cannoe else False
+    cannoe_prefetch = bool(_cannoe_prefetch_enabled()) if cannoe else False
     drop_source_weights = _drop_source_weights_enabled()
 
     torch.npu.set_device(args.device)
@@ -633,7 +616,7 @@ def main() -> None:
                 repeat_ms=result["komodo_repeat_ms"],
                 prepack_ms=result["komodo_prepack_ms"],
                 kernel=result["komodo_kernel"],
-                cann_prefetch=result["komodo_cann_prefetch"],
+                cann_prefetch=result["cannoe_prefetch"],
                 drop_source=result["komodo_source_dropped"],
                 max_abs=result["drift"]["max_abs"],
                 max_rel=result["drift"]["max_rel"],
@@ -671,11 +654,8 @@ def main() -> None:
             "cannoe_prefetch": bool(cannoe_prefetch),
             "komodo_native_int4": bool(native_int4),
             "komodo_prefetch_native_plan": bool(args.komodo_prefetch_native_plan),
-            "komodo_cann_prefetch": bool(cannoe_prefetch),
             "cannoe_prefetch_max_bytes": args.cannoe_prefetch_max_bytes,
             "cannoe_prefetch_min_bytes": args.cannoe_prefetch_min_bytes,
-            "komodo_cann_prefetch_max_bytes": args.cannoe_prefetch_max_bytes,
-            "komodo_cann_prefetch_min_bytes": args.cannoe_prefetch_min_bytes,
             "komodo_drop_source_weights": bool(drop_source_weights),
             "komodo_dequant_cache": bool(args.komodo_cache_dequantized),
             "mode": mode,

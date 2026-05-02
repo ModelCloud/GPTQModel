@@ -101,25 +101,25 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.paroquant", "_PAROQUANT_ROTATION_EXTENSION"),
     ),
     _ExtensionSpec(
-        name="cannoe_v3",
-        aliases=("komodo_cann_v3", "komodo_cann", "komodo_v3"),
+        name="cannoe",
+        aliases=(),
         resolve=lambda: _resolve_extension_attr(
-            "gptqmodel.utils.komodo_cann", "_CANNOE_V3_TORCH_OPS_EXTENSION"
+            "gptqmodel.utils.cannoe", "_CANNOE_V3_TORCH_OPS_EXTENSION"
         ),
-        supported=lambda: _resolve_attr("gptqmodel.utils.komodo_cann", "_komodo_cann_v3_supported")(),
+        supported=lambda: _resolve_attr("gptqmodel.utils.cannoe", "_cannoe_v3_supported")(),
         unsupported_error=lambda: _resolve_attr(
-            "gptqmodel.utils.komodo_cann", "cannoe_v3_environment_error"
+            "gptqmodel.utils.cannoe", "cannoe_v3_environment_error"
         )(),
     ),
     _ExtensionSpec(
         name="cannoe_ascendc",
-        aliases=("komodo_cann_ascendc", "komodo_cann_custom", "komodo_cann_ascend"),
+        aliases=(),
         resolve=lambda: _resolve_extension_attr(
-            "gptqmodel.utils.komodo_cann", "_CANNOE_ASCENDC_TORCH_OPS_EXTENSION"
+            "gptqmodel.utils.cannoe", "_CANNOE_ASCENDC_TORCH_OPS_EXTENSION"
         ),
-        supported=lambda: _resolve_attr("gptqmodel.utils.komodo_cann", "_komodo_cann_ascendc_supported")(),
+        supported=lambda: _resolve_attr("gptqmodel.utils.cannoe", "_cannoe_ascendc_supported")(),
         unsupported_error=lambda: _resolve_attr(
-            "gptqmodel.utils.komodo_cann", "cannoe_ascendc_environment_error"
+            "gptqmodel.utils.cannoe", "cannoe_ascendc_environment_error"
         )(),
     ),
 )

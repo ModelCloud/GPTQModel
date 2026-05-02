@@ -1,7 +1,7 @@
 #include "register/tilingdata_base.h"
 
 namespace optiling {
-BEGIN_TILING_DATA_DEF(KomodoCannW4A16MatmulTilingData)
+BEGIN_TILING_DATA_DEF(CannoeW4A16MatmulTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, rows);
   TILING_DATA_FIELD_DEF(uint32_t, in_features);
   TILING_DATA_FIELD_DEF(uint32_t, out_features);
@@ -28,5 +28,5 @@ BEGIN_TILING_DATA_DEF(KomodoCannW4A16MatmulTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, l0c_bytes);
 END_TILING_DATA_DEF;
 
-REGISTER_TILING_DATA_CLASS(KomodoCannW4A16Matmul, KomodoCannW4A16MatmulTilingData)
+REGISTER_TILING_DATA_CLASS(CannoeW4A16Matmul, CannoeW4A16MatmulTilingData)
 }  // namespace optiling

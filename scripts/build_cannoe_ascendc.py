@@ -15,8 +15,8 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OP_IR = REPO_ROOT / "gptqmodel_ext" / "komodo_cann" / "op_ir" / "komodo_cann_w4a16_matmul.json"
-OVERLAY_ROOT = REPO_ROOT / "gptqmodel_ext" / "komodo_cann" / "ascendc"
+OP_IR = REPO_ROOT / "gptqmodel_ext" / "cannoe" / "op_ir" / "cannoe_w4a16_matmul.json"
+OVERLAY_ROOT = REPO_ROOT / "gptqmodel_ext" / "cannoe" / "ascendc"
 DEFAULT_CANN_ROOTS = (
     Path("/usr/local/Ascend/cann"),
     Path("/usr/local/Ascend/cann-9.0.0-beta.2"),
@@ -24,6 +24,68 @@ DEFAULT_CANN_ROOTS = (
     Path("/usr/local/Ascend/ascend-toolkit"),
     Path("/usr/local/Ascend/cann-8.5.1"),
 )
+CANNOE_PUBLIC_STRATEGIES: dict[str, tuple[str, ...]] = {
+    "manual": (),
+    "staged-vector": (
+        "experimental_staged_dequant",
+        "experimental_cann9_vector_dequant",
+    ),
+    "vecout-local-a": (
+        "experimental_vecout_local_a",
+    ),
+    "tscm-direct-multik": (
+        "experimental_tscm_direct_multik",
+    ),
+}
+
+
+def _apply_strategy_flags(args: argparse.Namespace) -> None:
+    strategy = getattr(args, "strategy", "manual")
+    if strategy not in CANNOE_PUBLIC_STRATEGIES:
+        raise ValueError(f"Unknown Cannoe strategy: {strategy}")
+    for flag in CANNOE_PUBLIC_STRATEGIES[strategy]:
+        setattr(args, flag, True)
+
+
+def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    _apply_strategy_flags(args)
+    if args.experimental_vecout_local_a:
+        args.experimental_vecout_runtime_handoff = True
+    if args.experimental_vecout_runtime_handoff:
+        args.experimental_staged_dequant = True
+        args.experimental_cann9_vector_dequant = True
+        args.experimental_vecout_consumer = True
+        args.experimental_mixed_launch = True
+    if args.experimental_tscm_direct_multik:
+        args.experimental_tscm_direct_dequant = True
+    if args.experimental_tscm_direct_dequant:
+        args.experimental_staged_dequant = True
+        args.experimental_cann9_vector_dequant = True
+        args.experimental_tscm_runtime_handoff = True
+    if args.experimental_tscm_runtime_handoff:
+        args.experimental_tscm_consumer = True
+        args.experimental_mixed_launch = True
+    if args.experimental_cann9_vector_dequant and not args.experimental_staged_dequant:
+        parser.error("--experimental-cann9-vector-dequant requires --experimental-staged-dequant")
+    if args.experimental_tscm_consumer and not args.experimental_staged_dequant:
+        parser.error("--experimental-tscm-consumer requires --experimental-staged-dequant")
+    if args.experimental_vecout_runtime_handoff and (
+        args.experimental_tscm_consumer
+        or args.experimental_tscm_runtime_handoff
+        or args.experimental_tscm_direct_dequant
+        or args.experimental_tscm_direct_multik
+    ):
+        parser.error("--experimental-vecout-runtime-handoff cannot be combined with TSCM runtime handoff flags")
+    if args.experimental_vecout_consumer and args.experimental_tscm_consumer:
+        parser.error("--experimental-vecout-consumer and --experimental-tscm-consumer are mutually exclusive")
+    if args.experimental_vecout_consumer:
+        args.experimental_cube_consumer = True
+    if args.experimental_tscm_consumer:
+        args.experimental_cube_consumer = True
+    if args.experimental_mixed_aiv_baseline:
+        if args.experimental_cube_consumer:
+            parser.error("--experimental-mixed-aiv-baseline cannot be combined with --experimental-cube-consumer")
+        args.experimental_mixed_launch = True
 
 
 def _find_cann_root() -> Path | None:
@@ -104,10 +166,10 @@ def _cann_env(cann_root: Path | None) -> dict[str, str]:
 
 def _copy_overlay(output: Path) -> None:
     for rel in (
-        Path("op_host") / "komodo_cann_w4_a16_matmul.cpp",
-        Path("op_host") / "komodo_cann_w4_a16_matmul_tiling.h",
-        Path("op_host") / "komodo_cann_w4_a16_matmul_tiling_key.h",
-        Path("op_kernel") / "komodo_cann_w4_a16_matmul.cpp",
+        Path("op_host") / "cannoe_w4_a16_matmul.cpp",
+        Path("op_host") / "cannoe_w4_a16_matmul_tiling.h",
+        Path("op_host") / "cannoe_w4_a16_matmul_tiling_key.h",
+        Path("op_kernel") / "cannoe_w4_a16_matmul.cpp",
     ):
         src = OVERLAY_ROOT / rel
         dst = output / rel
@@ -116,8 +178,8 @@ def _copy_overlay(output: Path) -> None:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
     shutil.copy2(
-        OVERLAY_ROOT / "op_host" / "komodo_cann_w4_a16_matmul_tiling_key.h",
-        output / "op_kernel" / "komodo_cann_w4_a16_matmul_tiling_key.h",
+        OVERLAY_ROOT / "op_host" / "cannoe_w4_a16_matmul_tiling_key.h",
+        output / "op_kernel" / "cannoe_w4_a16_matmul_tiling_key.h",
     )
 
 
@@ -164,7 +226,7 @@ def _enable_kernel_define(output: Path, define: str) -> None:
         cmake_path.write_text(text)
         return
 
-    experimental_prefix = "add_ops_compile_options(ALL OPTIONS -DKOMODO_CANN_EXPERIMENTAL_"
+    experimental_prefix = "add_ops_compile_options(ALL OPTIONS -DCANNOE_EXPERIMENTAL_"
     for index, line in enumerate(lines):
         if line.startswith(experimental_prefix):
             if option in line:
@@ -218,6 +280,12 @@ def main() -> int:
     parser.add_argument("--compute-unit", default="ascend910b", help="ASCEND_COMPUTE_UNIT for generated CMake.")
     parser.add_argument("--clean", action="store_true", help="Remove the output directory before generating.")
     parser.add_argument("--no-build", action="store_true", help="Only run msopgen and overlay repo sources.")
+    parser.add_argument(
+        "--strategy",
+        choices=tuple(CANNOE_PUBLIC_STRATEGIES),
+        default="manual",
+        help="Named Cannoe public-API strategy that expands to the required experimental flags.",
+    )
     parser.add_argument(
         "--experimental-staged-dequant",
         action="store_true",
@@ -317,43 +385,7 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
-    if args.experimental_vecout_local_a:
-        args.experimental_vecout_runtime_handoff = True
-    if args.experimental_vecout_runtime_handoff:
-        args.experimental_staged_dequant = True
-        args.experimental_cann9_vector_dequant = True
-        args.experimental_vecout_consumer = True
-        args.experimental_mixed_launch = True
-    if args.experimental_tscm_direct_multik:
-        args.experimental_tscm_direct_dequant = True
-    if args.experimental_tscm_direct_dequant:
-        args.experimental_staged_dequant = True
-        args.experimental_cann9_vector_dequant = True
-        args.experimental_tscm_runtime_handoff = True
-    if args.experimental_tscm_runtime_handoff:
-        args.experimental_tscm_consumer = True
-        args.experimental_mixed_launch = True
-    if args.experimental_cann9_vector_dequant and not args.experimental_staged_dequant:
-        parser.error("--experimental-cann9-vector-dequant requires --experimental-staged-dequant")
-    if args.experimental_tscm_consumer and not args.experimental_staged_dequant:
-        parser.error("--experimental-tscm-consumer requires --experimental-staged-dequant")
-    if args.experimental_vecout_runtime_handoff and (
-        args.experimental_tscm_consumer
-        or args.experimental_tscm_runtime_handoff
-        or args.experimental_tscm_direct_dequant
-        or args.experimental_tscm_direct_multik
-    ):
-        parser.error("--experimental-vecout-runtime-handoff cannot be combined with TSCM runtime handoff flags")
-    if args.experimental_vecout_consumer and args.experimental_tscm_consumer:
-        parser.error("--experimental-vecout-consumer and --experimental-tscm-consumer are mutually exclusive")
-    if args.experimental_vecout_consumer:
-        args.experimental_cube_consumer = True
-    if args.experimental_tscm_consumer:
-        args.experimental_cube_consumer = True
-    if args.experimental_mixed_aiv_baseline:
-        if args.experimental_cube_consumer:
-            parser.error("--experimental-mixed-aiv-baseline cannot be combined with --experimental-cube-consumer")
-        args.experimental_mixed_launch = True
+    _resolve_experimental_flags(args, parser)
 
     output = args.output.resolve()
     if args.clean and output.exists():
@@ -383,30 +415,30 @@ def main() -> int:
     _copy_overlay(output)
     _force_compute_unit(output, args.compute_unit)
     if args.experimental_staged_dequant:
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_STAGED_DEQUANT")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_STAGED_DEQUANT")
     if args.experimental_cube_consumer or (args.experimental_mixed_launch and not args.experimental_mixed_aiv_baseline):
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_CUBE_CONSUMER")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_CUBE_CONSUMER")
     if args.experimental_mixed_launch:
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH")
-        _enable_host_define(output, "KOMODO_CANN_EXPERIMENTAL_MIXED_LAUNCH")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_MIXED_LAUNCH")
+        _enable_host_define(output, "CANNOE_EXPERIMENTAL_MIXED_LAUNCH")
     if args.experimental_mixed_aiv_baseline:
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_MIXED_AIV_BASELINE")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_MIXED_AIV_BASELINE")
     if args.experimental_cann9_vector_dequant:
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_CANN9_VECTOR_DEQUANT")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_CANN9_VECTOR_DEQUANT")
     if args.experimental_vecout_consumer:
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_VECOUT_CONSUMER")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_VECOUT_CONSUMER")
     if args.experimental_vecout_runtime_handoff:
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF")
     if args.experimental_vecout_local_a:
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_VECOUT_LOCAL_A")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A")
     if args.experimental_tscm_consumer:
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_CONSUMER")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_CONSUMER")
     if args.experimental_tscm_runtime_handoff:
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
     if args.experimental_tscm_direct_dequant:
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
     if args.experimental_tscm_direct_multik:
-        _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
 
     if args.no_build:
         print(f"Generated project with Cannoe overlay at {output}")

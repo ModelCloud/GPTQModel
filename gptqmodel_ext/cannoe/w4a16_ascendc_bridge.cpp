@@ -20,7 +20,7 @@
 
 namespace {
 
-constexpr const char* kCustomOpApiLibEnv = "GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB";
+constexpr const char* kCustomOpApiLibEnv = "GPTQMODEL_CANNOE_ASCENDC_OPAPI_LIB";
 constexpr const char* kCustomOpApiLibName = "libcust_opapi.so";
 
 using GetWorkspaceFn = aclnnStatus (*)(
@@ -126,8 +126,8 @@ AscendcApi& load_api()
     }
 
     state.get_workspace =
-        reinterpret_cast<GetWorkspaceFn>(checked_dlsym(state.handle, "aclnnKomodoCannW4A16MatmulGetWorkspaceSize"));
-    state.run = reinterpret_cast<RunFn>(checked_dlsym(state.handle, "aclnnKomodoCannW4A16Matmul"));
+        reinterpret_cast<GetWorkspaceFn>(checked_dlsym(state.handle, "aclnnCannoeW4A16MatmulGetWorkspaceSize"));
+    state.run = reinterpret_cast<RunFn>(checked_dlsym(state.handle, "aclnnCannoeW4A16Matmul"));
     return state;
 }
 
@@ -225,7 +225,7 @@ void check_inputs(
     }
 }
 
-at::Tensor komodo_cann_w4_a16_matmul(
+at::Tensor cannoe_w4_a16_matmul(
     const at::Tensor& x,
     const at::Tensor& packed_weight,
     const at::Tensor& scales,
@@ -275,8 +275,8 @@ at::Tensor komodo_cann_w4_a16_matmul(
         y_acl.get(),
         &workspace_size,
         &executor);
-    TORCH_CHECK(status == OK, "aclnnKomodoCannW4A16MatmulGetWorkspaceSize failed with status ", status);
-    TORCH_CHECK(executor != nullptr, "aclnnKomodoCannW4A16MatmulGetWorkspaceSize returned a null executor.");
+    TORCH_CHECK(status == OK, "aclnnCannoeW4A16MatmulGetWorkspaceSize failed with status ", status);
+    TORCH_CHECK(executor != nullptr, "aclnnCannoeW4A16MatmulGetWorkspaceSize returned a null executor.");
 
     at::Tensor workspace;
     void* workspace_ptr = nullptr;
@@ -288,43 +288,23 @@ at::Tensor komodo_cann_w4_a16_matmul(
     aclrtStream stream = c10_npu::getCurrentNPUStream(x.device().index()).stream(false);
     auto acl_call = [&api, workspace_ptr, workspace_size, executor, stream]() -> int {
         const aclnnStatus run_status = api.run(workspace_ptr, workspace_size, executor, stream);
-        TORCH_CHECK(run_status == OK, "aclnnKomodoCannW4A16Matmul failed with status ", run_status);
+        TORCH_CHECK(run_status == OK, "aclnnCannoeW4A16Matmul failed with status ", run_status);
         return static_cast<int>(run_status);
     };
-    at_npu::native::OpCommand::RunOpApiV2("aclnnKomodoCannW4A16Matmul", acl_call);
+    at_npu::native::OpCommand::RunOpApiV2("aclnnCannoeW4A16Matmul", acl_call);
     return y;
 }
 
 }  // namespace
-
-TORCH_LIBRARY_FRAGMENT(gptqmodel_komodo_cann, m)
-{
-    m.def(
-        "komodo_cann_w4_a16_matmul(Tensor x, Tensor packed_weight, Tensor scales, Tensor offsets, Tensor? bias, "
-        "int group_size, int split_k, int base_m, int base_n, int base_k) -> Tensor");
-    m.def(
-        "cannoe_w4_a16_matmul(Tensor x, Tensor packed_weight, Tensor scales, Tensor offsets, Tensor? bias, "
-        "int group_size, int split_k, int base_m, int base_n, int base_k) -> Tensor");
-}
-
-TORCH_LIBRARY_IMPL(gptqmodel_komodo_cann, PrivateUse1, m)
-{
-    m.impl("komodo_cann_w4_a16_matmul", &komodo_cann_w4_a16_matmul);
-    m.impl("cannoe_w4_a16_matmul", &komodo_cann_w4_a16_matmul);
-}
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_cannoe, m)
 {
     m.def(
         "cannoe_w4_a16_matmul(Tensor x, Tensor packed_weight, Tensor scales, Tensor offsets, Tensor? bias, "
         "int group_size, int split_k, int base_m, int base_n, int base_k) -> Tensor");
-    m.def(
-        "komodo_cann_w4_a16_matmul(Tensor x, Tensor packed_weight, Tensor scales, Tensor offsets, Tensor? bias, "
-        "int group_size, int split_k, int base_m, int base_n, int base_k) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_cannoe, PrivateUse1, m)
 {
-    m.impl("cannoe_w4_a16_matmul", &komodo_cann_w4_a16_matmul);
-    m.impl("komodo_cann_w4_a16_matmul", &komodo_cann_w4_a16_matmul);
+    m.impl("cannoe_w4_a16_matmul", &cannoe_w4_a16_matmul);
 }
