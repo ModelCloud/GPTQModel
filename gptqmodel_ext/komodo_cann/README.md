@@ -1,10 +1,14 @@
-# Komodo-CANN Fused Op Contract
+# Cannoe Fused Op Contract
 
 This directory contains the repository-side contract for the optional
-Komodo-CANN fused W4A16 Ascend C operator.
+Cannoe fused W4A16 Ascend C operator. Cannoe is the renamed Komodo-CANN kernel;
+old `komodo_cann` torch-op names and env vars remain compatibility aliases.
 
 The Python runtime looks for one of these torch operators:
 
+- `torch.ops.gptqmodel_cannoe.cannoe_w4_a16_matmul`
+- `torch.ops.gptqmodel_cannoe.w4a16_matmul`
+- `torch.ops.npu.cannoe_w4_a16_matmul`
 - `torch.ops.gptqmodel_komodo_cann.w4a16_matmul`
 - `torch.ops.gptqmodel_komodo_cann.komodo_cann_w4a16_matmul`
 - `torch.ops.gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul`
@@ -61,13 +65,13 @@ silently fall back to `npu_weight_quant_batchmatmul`.
 not the final fused Ascend C kernel: it proves the repo can access V3 with
 Komodo's existing packed INT4 tensors.
 
-Komodo-CANN can auto-load this bridge when requested:
+Cannoe can auto-load this bridge when requested:
 
 ```bash
-GPTQMODEL_KOMODO_CANN_V3=1 \
-GPTQMODEL_KOMODO_CANN_FUSED_REQUIRE=1 \
-GPTQMODEL_KOMODO_CANN_FUSED_OP=gptqmodel_komodo_cann.w4a16_matmul \
-python scripts/profile_komodo_cann_npu.py --mode cann --iters 3 --warmup 1
+GPTQMODEL_CANNOE_V3=1 \
+GPTQMODEL_CANNOE_FUSED_REQUIRE=1 \
+GPTQMODEL_CANNOE_FUSED_OP=gptqmodel_cannoe.w4a16_matmul \
+python scripts/profile_komodo_cann_npu.py --mode cannoe --iters 3 --warmup 1
 ```
 
 The managed extension can also be built explicitly:
@@ -75,7 +79,7 @@ The managed extension can also be built explicitly:
 ```bash
 python - <<'PY'
 from gptqmodel import extension
-extension.load("komodo_cann_v3")
+extension.load("cannoe_v3")
 PY
 ```
 

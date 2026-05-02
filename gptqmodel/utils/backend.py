@@ -21,7 +21,8 @@ class BACKEND(str, Enum):
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
     GPTQ_KOMODO = "gptq_komodo"  # Ascend NPU fused-style cached int4 kernel
-    GPTQ_KOMODO_CANN = "gptq_komodo_cann"  # Ascend CANN kernel experiment
+    GPTQ_CANNOE = "gptq_cannoe"  # Ascend CANN kernel experiment
+    GPTQ_KOMODO_CANN = "gptq_komodo_cann"  # Legacy name for GPTQ_CANNOE
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
 
@@ -42,7 +43,8 @@ class BACKEND(str, Enum):
     AWQ_MACHETE = "awq_machete"
     AWQ_MARLIN = "awq_marlin"
     AWQ_KOMODO = "awq_komodo"  # Ascend NPU fused-style cached int4 kernel
-    AWQ_KOMODO_CANN = "awq_komodo_cann"  # Ascend CANN kernel experiment
+    AWQ_CANNOE = "awq_cannoe"  # Ascend CANN kernel experiment
+    AWQ_KOMODO_CANN = "awq_komodo_cann"  # Legacy name for AWQ_CANNOE
     AWQ_EXLLAMA_V2 = "awq_exllama_v2"
 
     # ParoQuant kernels
@@ -77,6 +79,7 @@ class BACKEND(str, Enum):
     MACHETE = "machete"
     MARLIN = "marlin"
     KOMODO = "komodo"
+    CANNOE = "cannoe"
     KOMODO_CANN = "komodo_cann"
     BITBLAS = "bitblas"
     GEMM = "gemm"
@@ -107,7 +110,8 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.MACHETE: BACKEND.GPTQ_MACHETE,
         BACKEND.MARLIN: BACKEND.GPTQ_MARLIN,
         BACKEND.KOMODO: BACKEND.GPTQ_KOMODO,
-        BACKEND.KOMODO_CANN: BACKEND.GPTQ_KOMODO_CANN,
+        BACKEND.CANNOE: BACKEND.GPTQ_CANNOE,
+        BACKEND.KOMODO_CANN: BACKEND.GPTQ_CANNOE,
         BACKEND.BITBLAS: BACKEND.GPTQ_BITBLAS,
     },
     "awq": {
@@ -126,7 +130,8 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.MACHETE: BACKEND.AWQ_MACHETE,
         BACKEND.MARLIN: BACKEND.AWQ_MARLIN,
         BACKEND.KOMODO: BACKEND.AWQ_KOMODO,
-        BACKEND.KOMODO_CANN: BACKEND.AWQ_KOMODO_CANN,
+        BACKEND.CANNOE: BACKEND.AWQ_CANNOE,
+        BACKEND.KOMODO_CANN: BACKEND.AWQ_CANNOE,
         BACKEND.EXLLAMA_V2: BACKEND.AWQ_EXLLAMA_V2,
     },
     "paroquant": {
@@ -139,6 +144,11 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.EXLLAMA_V3: BACKEND.EXL3_EXLLAMA_V3,
         BACKEND.TORCH: BACKEND.EXL3_TORCH,
     },
+}
+
+_CANONICAL_BACKEND_ALIASES = {
+    BACKEND.GPTQ_KOMODO_CANN: BACKEND.GPTQ_CANNOE,
+    BACKEND.AWQ_KOMODO_CANN: BACKEND.AWQ_CANNOE,
 }
 
 _PROFILE_BY_INDEX = {
@@ -175,10 +185,12 @@ def normalize_backend(
     else:
         raise TypeError(f"backend must be a string or BACKEND, got `{type(backend)}`")
 
+    resolved = _CANONICAL_BACKEND_ALIASES.get(resolved, resolved)
     method = _normalize_method(quant_method)
     if method is None:
         return resolved
-    return _LEGACY_BACKEND_BY_METHOD.get(method, {}).get(resolved, resolved)
+    resolved = _LEGACY_BACKEND_BY_METHOD.get(method, {}).get(resolved, resolved)
+    return _CANONICAL_BACKEND_ALIASES.get(resolved, resolved)
 
 
 def normalize_profile(profile: Optional[Union[str, int, PROFILE]]) -> PROFILE:

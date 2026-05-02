@@ -11,16 +11,41 @@ import torch
 from .cpp import TorchOpsJitExtension, default_jit_cflags, default_torch_ops_build_root
 
 
-_KOMODO_CANN_V3_OPS_NAME = "gptqmodel_komodo_cann_v3_ops"
-_KOMODO_CANN_ASCENDC_OPS_NAME = "gptqmodel_komodo_cann_ascendc_ops"
-_KOMODO_CANN_V3_NAMESPACE = "gptqmodel_komodo_cann"
-_KOMODO_CANN_ASCENDC_NAMESPACE = "gptqmodel_komodo_cann"
+_KOMODO_CANN_V3_OPS_NAME = "gptqmodel_cannoe_v3_ops"
+_KOMODO_CANN_ASCENDC_OPS_NAME = "gptqmodel_cannoe_ascendc_ops"
+_KOMODO_CANN_V3_NAMESPACE = "gptqmodel_cannoe"
+_KOMODO_CANN_ASCENDC_NAMESPACE = "gptqmodel_cannoe"
+_CANNOE_ENV_BY_LEGACY = {
+    "GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB": "GPTQMODEL_CANNOE_ASCENDC_OPAPI_LIB",
+    "GPTQMODEL_KOMODO_CANN_ASCENDC_BUILD_ROOT": "GPTQMODEL_CANNOE_ASCENDC_BUILD_ROOT",
+    "GPTQMODEL_KOMODO_CANN_ASCENDC_FORCE_REBUILD": "GPTQMODEL_CANNOE_ASCENDC_FORCE_REBUILD",
+    "GPTQMODEL_KOMODO_CANN_ASCENDC_VERBOSE": "GPTQMODEL_CANNOE_ASCENDC_VERBOSE",
+    "GPTQMODEL_KOMODO_CANN_V3_BUILD_ROOT": "GPTQMODEL_CANNOE_V3_BUILD_ROOT",
+    "GPTQMODEL_KOMODO_CANN_V3_FORCE_REBUILD": "GPTQMODEL_CANNOE_V3_FORCE_REBUILD",
+    "GPTQMODEL_KOMODO_CANN_V3_VERBOSE": "GPTQMODEL_CANNOE_V3_VERBOSE",
+}
 _DEFAULT_CANN_HOME_CANDIDATES = (
     "/usr/local/Ascend/ascend-toolkit/latest",
     "/usr/local/Ascend/cann",
     "/usr/local/Ascend/cann-9.0.0-beta.2",
     "/usr/local/Ascend/cann-8.5.1",
 )
+
+
+def _cannoe_env(legacy_name: str) -> str | None:
+    current_name = _CANNOE_ENV_BY_LEGACY.get(legacy_name, legacy_name)
+    value = os.getenv(current_name)
+    if value is not None:
+        return value
+    return os.getenv(legacy_name)
+
+
+def _sync_cannoe_env_aliases() -> None:
+    for legacy_name, current_name in _CANNOE_ENV_BY_LEGACY.items():
+        if os.getenv(legacy_name) is None:
+            value = os.getenv(current_name)
+            if value is not None:
+                os.environ[legacy_name] = value
 
 
 def _komodo_cann_root() -> Path:
@@ -94,7 +119,7 @@ def _komodo_cann_ascendc_extra_ldflags() -> list[str]:
 
 
 def _find_komodo_cann_ascendc_opapi_lib() -> Path | None:
-    explicit = os.getenv("GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB")
+    explicit = _cannoe_env("GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB")
     if explicit:
         path = Path(explicit).expanduser()
         return path if path.exists() else None
@@ -118,15 +143,15 @@ def komodo_cann_v3_environment_error() -> str:
     try:
         torch_npu_root = _torch_npu_root()
     except Exception as exc:  # pragma: no cover - depends on optional torch_npu package
-        return f"Komodo-CANN V3 failed to import torch_npu: {exc}"
+        return f"Cannoe V3 failed to import torch_npu: {exc}"
 
     if not hasattr(torch, "npu"):
-        return "Komodo-CANN V3 requires a Torch-NPU runtime."
+        return "Cannoe V3 requires a Torch-NPU runtime."
     try:
         if not torch.npu.is_available():
-            return "Komodo-CANN V3 requires an available NPU device."
+            return "Cannoe V3 requires an available NPU device."
     except Exception as exc:  # pragma: no cover - depends on Torch-NPU runtime
-        return f"Komodo-CANN V3 failed to query NPU availability: {exc}"
+        return f"Cannoe V3 failed to query NPU availability: {exc}"
 
     cann_arch_root = _cann_arch_root()
     required_paths = (
@@ -138,7 +163,7 @@ def komodo_cann_v3_environment_error() -> str:
     )
     missing = [str(path) for path in required_paths if not path.exists()]
     if missing:
-        return "Komodo-CANN V3 missing required files: " + ", ".join(missing)
+        return "Cannoe V3 missing required files: " + ", ".join(missing)
     return ""
 
 
@@ -146,15 +171,15 @@ def komodo_cann_ascendc_environment_error() -> str:
     try:
         torch_npu_root = _torch_npu_root()
     except Exception as exc:  # pragma: no cover - depends on optional torch_npu package
-        return f"Komodo-CANN Ascend C failed to import torch_npu: {exc}"
+        return f"Cannoe Ascend C failed to import torch_npu: {exc}"
 
     if not hasattr(torch, "npu"):
-        return "Komodo-CANN Ascend C requires a Torch-NPU runtime."
+        return "Cannoe Ascend C requires a Torch-NPU runtime."
     try:
         if not torch.npu.is_available():
-            return "Komodo-CANN Ascend C requires an available NPU device."
+            return "Cannoe Ascend C requires an available NPU device."
     except Exception as exc:  # pragma: no cover - depends on Torch-NPU runtime
-        return f"Komodo-CANN Ascend C failed to query NPU availability: {exc}"
+        return f"Cannoe Ascend C failed to query NPU availability: {exc}"
 
     cann_arch_root = _cann_arch_root()
     required_paths = (
@@ -166,13 +191,13 @@ def komodo_cann_ascendc_environment_error() -> str:
     )
     missing = [str(path) for path in required_paths if not path.exists()]
     if missing:
-        return "Komodo-CANN Ascend C missing required files: " + ", ".join(missing)
+        return "Cannoe Ascend C missing required files: " + ", ".join(missing)
 
     opapi_lib = _find_komodo_cann_ascendc_opapi_lib()
     if opapi_lib is None:
         return (
-            "Komodo-CANN Ascend C requires libcust_opapi.so from the built custom OPP. "
-            "Source the package set_env.bash or set GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB."
+            "Cannoe Ascend C requires libcust_opapi.so from the built custom OPP. "
+            "Source the package set_env.bash or set GPTQMODEL_CANNOE_ASCENDC_OPAPI_LIB."
         )
     return ""
 
@@ -191,8 +216,8 @@ _KOMODO_CANN_V3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     required_ops=("w4a16_matmul",),
     sources=_komodo_cann_v3_sources,
     build_root_env="GPTQMODEL_KOMODO_CANN_V3_BUILD_ROOT",
-    default_build_root=lambda: default_torch_ops_build_root("komodo_cann_v3"),
-    display_name="Komodo-CANN V3",
+    default_build_root=lambda: default_torch_ops_build_root("cannoe_v3"),
+    display_name="Cannoe V3",
     extra_cflags=_komodo_cann_v3_extra_cflags,
     extra_include_paths=_komodo_cann_v3_include_paths,
     extra_ldflags=_komodo_cann_v3_extra_ldflags,
@@ -206,11 +231,11 @@ _KOMODO_CANN_V3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
 _KOMODO_CANN_ASCENDC_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_KOMODO_CANN_ASCENDC_OPS_NAME,
     namespace=_KOMODO_CANN_ASCENDC_NAMESPACE,
-    required_ops=("komodo_cann_w4_a16_matmul",),
+    required_ops=("cannoe_w4_a16_matmul",),
     sources=_komodo_cann_ascendc_sources,
     build_root_env="GPTQMODEL_KOMODO_CANN_ASCENDC_BUILD_ROOT",
-    default_build_root=lambda: default_torch_ops_build_root("komodo_cann_ascendc"),
-    display_name="Komodo-CANN Ascend C",
+    default_build_root=lambda: default_torch_ops_build_root("cannoe_ascendc"),
+    display_name="Cannoe Ascend C",
     extra_cflags=_komodo_cann_v3_extra_cflags,
     extra_include_paths=_komodo_cann_v3_include_paths,
     extra_ldflags=_komodo_cann_ascendc_extra_ldflags,
@@ -222,6 +247,7 @@ _KOMODO_CANN_ASCENDC_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
 
 
 def load_komodo_cann_v3() -> bool:
+    _sync_cannoe_env_aliases()
     if not _komodo_cann_v3_supported():
         _KOMODO_CANN_V3_TORCH_OPS_EXTENSION._last_error = komodo_cann_v3_environment_error()
         return False
@@ -229,12 +255,14 @@ def load_komodo_cann_v3() -> bool:
 
 
 def load_komodo_cann_ascendc() -> bool:
+    _sync_cannoe_env_aliases()
     if not _komodo_cann_ascendc_supported():
         _KOMODO_CANN_ASCENDC_TORCH_OPS_EXTENSION._last_error = komodo_cann_ascendc_environment_error()
         return False
-    if not os.getenv("GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB"):
+    if not _cannoe_env("GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB"):
         opapi_lib = _find_komodo_cann_ascendc_opapi_lib()
         if opapi_lib is not None:
+            os.environ["GPTQMODEL_CANNOE_ASCENDC_OPAPI_LIB"] = str(opapi_lib)
             os.environ["GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB"] = str(opapi_lib)
     return _KOMODO_CANN_ASCENDC_TORCH_OPS_EXTENSION.load()
 
@@ -255,17 +283,39 @@ def clear_komodo_cann_ascendc_extension_cache() -> None:
     _KOMODO_CANN_ASCENDC_TORCH_OPS_EXTENSION.clear_cache()
 
 
+_CANNOE_ASCENDC_TORCH_OPS_EXTENSION = _KOMODO_CANN_ASCENDC_TORCH_OPS_EXTENSION
+_CANNOE_V3_TORCH_OPS_EXTENSION = _KOMODO_CANN_V3_TORCH_OPS_EXTENSION
+cannoe_ascendc_environment_error = komodo_cann_ascendc_environment_error
+cannoe_ascendc_runtime_error = komodo_cann_ascendc_runtime_error
+cannoe_v3_environment_error = komodo_cann_v3_environment_error
+cannoe_v3_runtime_error = komodo_cann_v3_runtime_error
+clear_cannoe_ascendc_extension_cache = clear_komodo_cann_ascendc_extension_cache
+clear_cannoe_v3_extension_cache = clear_komodo_cann_v3_extension_cache
+load_cannoe_ascendc = load_komodo_cann_ascendc
+load_cannoe_v3 = load_komodo_cann_v3
+
+
 __all__ = [
+    "_CANNOE_ASCENDC_TORCH_OPS_EXTENSION",
+    "_CANNOE_V3_TORCH_OPS_EXTENSION",
     "_KOMODO_CANN_ASCENDC_TORCH_OPS_EXTENSION",
     "_KOMODO_CANN_V3_TORCH_OPS_EXTENSION",
     "_komodo_cann_ascendc_supported",
     "_komodo_cann_v3_supported",
+    "cannoe_ascendc_environment_error",
+    "cannoe_ascendc_runtime_error",
+    "cannoe_v3_environment_error",
+    "cannoe_v3_runtime_error",
+    "clear_cannoe_ascendc_extension_cache",
+    "clear_cannoe_v3_extension_cache",
     "clear_komodo_cann_ascendc_extension_cache",
     "clear_komodo_cann_v3_extension_cache",
     "komodo_cann_ascendc_environment_error",
     "komodo_cann_ascendc_runtime_error",
     "komodo_cann_v3_environment_error",
     "komodo_cann_v3_runtime_error",
+    "load_cannoe_ascendc",
+    "load_cannoe_v3",
     "load_komodo_cann_ascendc",
     "load_komodo_cann_v3",
 ]

@@ -9,7 +9,6 @@ from dataclasses import asdict, dataclass
 import torch
 
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
 from .komodo import (
     AwqKomodoLinear,
     KomodoLinear,
@@ -36,6 +35,28 @@ _KOMODO_CANN_STAGED_DEQUANT_ENV = "GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT"
 _KOMODO_CANN_CUBE_CONSUMER_ENV = "GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER"
 # 910B CANN reserves this system workspace before the user workspace returned by GetUserWorkspace().
 _KOMODO_CANN_CUBE_WORKSPACE_BYTES = 16 * 1024 * 1024
+_CANNOE_ENV_BY_LEGACY = {
+    _KOMODO_CANN_PREFETCH_ENV: "GPTQMODEL_CANNOE_PREFETCH",
+    _KOMODO_CANN_PREFETCH_MAX_BYTES_ENV: "GPTQMODEL_CANNOE_PREFETCH_MAX_BYTES",
+    _KOMODO_CANN_PREFETCH_MIN_BYTES_ENV: "GPTQMODEL_CANNOE_PREFETCH_MIN_BYTES",
+    _KOMODO_CANN_ACTIVE_CORES_ENV: "GPTQMODEL_CANNOE_ACTIVE_CORES",
+    _KOMODO_CANN_SPLIT_K_ENV: "GPTQMODEL_CANNOE_SPLIT_K",
+    _KOMODO_CANN_MIN_SPLIT_K_RATIO_ENV: "GPTQMODEL_CANNOE_MIN_SPLIT_K_RATIO",
+    _KOMODO_CANN_BASE_K_ENV: "GPTQMODEL_CANNOE_BASE_K",
+    _KOMODO_CANN_FUSED_ENV: "GPTQMODEL_CANNOE_FUSED",
+    _KOMODO_CANN_FUSED_REQUIRE_ENV: "GPTQMODEL_CANNOE_FUSED_REQUIRE",
+    _KOMODO_CANN_FUSED_OP_ENV: "GPTQMODEL_CANNOE_FUSED_OP",
+    _KOMODO_CANN_ASCENDC_ENV: "GPTQMODEL_CANNOE_ASCENDC",
+    _KOMODO_CANN_V3_ENV: "GPTQMODEL_CANNOE_V3",
+    _KOMODO_CANN_INNER_PRECISE_ENV: "GPTQMODEL_CANNOE_INNER_PRECISE",
+    _KOMODO_CANN_STAGED_DEQUANT_ENV: "GPTQMODEL_CANNOE_STAGED_DEQUANT",
+    _KOMODO_CANN_CUBE_CONSUMER_ENV: "GPTQMODEL_CANNOE_CUBE_CONSUMER",
+    "GPTQMODEL_KOMODO_CANN_ASCENDC_BUILD_ROOT": "GPTQMODEL_CANNOE_ASCENDC_BUILD_ROOT",
+    "GPTQMODEL_KOMODO_CANN_ASCENDC_FORCE_REBUILD": "GPTQMODEL_CANNOE_ASCENDC_FORCE_REBUILD",
+    "GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB": "GPTQMODEL_CANNOE_ASCENDC_OPAPI_LIB",
+    "GPTQMODEL_KOMODO_CANN_V3_BUILD_ROOT": "GPTQMODEL_CANNOE_V3_BUILD_ROOT",
+    "GPTQMODEL_KOMODO_CANN_V3_FORCE_REBUILD": "GPTQMODEL_CANNOE_V3_FORCE_REBUILD",
+}
 _NPU_PREFETCH_OP_UNSET = object()
 _NPU_PREFETCH_OP = _NPU_PREFETCH_OP_UNSET
 _FUSED_OP_UNSET = object()
@@ -43,6 +64,11 @@ _FUSED_OP_CACHE = _FUSED_OP_UNSET
 _FUSED_OP_CACHE_KEY = None
 _FUSED_OP_LAST_ERROR = ""
 _DEFAULT_FUSED_OP_NAMES = (
+    "gptqmodel_cannoe.cannoe_w4_a16_matmul",
+    "gptqmodel_cannoe.w4a16_matmul",
+    "npu.cannoe_w4_a16_matmul",
+    "npu.gptqmodel_cannoe_w4_a16_matmul",
+    "gptqmodel_komodo_cann.cannoe_w4_a16_matmul",
     "gptqmodel_komodo_cann.w4a16_matmul",
     "gptqmodel_komodo_cann.komodo_cann_w4a16_matmul",
     "gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul",
@@ -50,6 +76,29 @@ _DEFAULT_FUSED_OP_NAMES = (
     "npu.komodo_cann_w4a16_matmul",
     "npu.komodo_cann_w4_a16_matmul",
 )
+
+
+def _cannoe_env_name(legacy_name: str) -> str:
+    return _CANNOE_ENV_BY_LEGACY.get(legacy_name, legacy_name)
+
+
+def _cannoe_env(legacy_name: str) -> str | None:
+    current_name = _cannoe_env_name(legacy_name)
+    current_value = os.getenv(current_name)
+    if current_value is not None:
+        return current_value
+    return os.getenv(legacy_name)
+
+
+def _cannoe_env_flag(legacy_name: str, default: bool = False) -> bool:
+    value = _cannoe_env(legacy_name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _cannoe_env_values(*legacy_names: str) -> tuple[str | None, ...]:
+    return tuple(_cannoe_env(name) for name in legacy_names)
 
 
 @dataclass(frozen=True)
@@ -98,13 +147,13 @@ class KomodoCannTilingPlan:
 
 
 def _parse_positive_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
+    raw = _cannoe_env(name)
     if raw is None:
         return default
     try:
         value = int(raw)
     except ValueError as err:
-        raise RuntimeError(f"{name} must be an integer; got `{raw}`.") from err
+        raise RuntimeError(f"{_cannoe_env_name(name)} must be an integer; got `{raw}`.") from err
     return value if value > 0 else default
 
 
@@ -117,35 +166,35 @@ def _align_up(value: int, alignment: int) -> int:
 
 
 def _komodo_cann_prefetch_enabled() -> bool:
-    return env_flag(_KOMODO_CANN_PREFETCH_ENV, default=False)
+    return _cannoe_env_flag(_KOMODO_CANN_PREFETCH_ENV, default=False)
 
 
 def _komodo_cann_fused_enabled() -> bool:
-    return env_flag(_KOMODO_CANN_FUSED_ENV, default=True)
+    return _cannoe_env_flag(_KOMODO_CANN_FUSED_ENV, default=True)
 
 
 def _komodo_cann_fused_required() -> bool:
-    return env_flag(_KOMODO_CANN_FUSED_REQUIRE_ENV, default=False)
+    return _cannoe_env_flag(_KOMODO_CANN_FUSED_REQUIRE_ENV, default=False)
 
 
 def _komodo_cann_v3_enabled() -> bool:
-    return env_flag(_KOMODO_CANN_V3_ENV, default=False)
+    return _cannoe_env_flag(_KOMODO_CANN_V3_ENV, default=False)
 
 
 def _komodo_cann_staged_dequant_enabled() -> bool:
-    return env_flag(_KOMODO_CANN_STAGED_DEQUANT_ENV, default=False)
+    return _cannoe_env_flag(_KOMODO_CANN_STAGED_DEQUANT_ENV, default=False)
 
 
 def _komodo_cann_cube_consumer_enabled() -> bool:
-    return env_flag(_KOMODO_CANN_CUBE_CONSUMER_ENV, default=False)
+    return _cannoe_env_flag(_KOMODO_CANN_CUBE_CONSUMER_ENV, default=False)
 
 
 def _komodo_cann_ascendc_enabled() -> bool:
-    return env_flag(_KOMODO_CANN_ASCENDC_ENV, default=False)
+    return _cannoe_env_flag(_KOMODO_CANN_ASCENDC_ENV, default=False)
 
 
 def _komodo_cann_inner_precise(rows: int, in_features: int, out_features: int, group_size: int) -> int:
-    raw = os.getenv(_KOMODO_CANN_INNER_PRECISE_ENV)
+    raw = _cannoe_env(_KOMODO_CANN_INNER_PRECISE_ENV)
     if raw is None or raw.strip().lower() == "auto":
         if (
             rows <= 16
@@ -159,14 +208,14 @@ def _komodo_cann_inner_precise(rows: int, in_features: int, out_features: int, g
     try:
         value = int(raw)
     except ValueError as err:
-        raise RuntimeError(f"{_KOMODO_CANN_INNER_PRECISE_ENV} must be 0 or 1; got `{raw}`.") from err
+        raise RuntimeError(f"{_cannoe_env_name(_KOMODO_CANN_INNER_PRECISE_ENV)} must be 0 or 1; got `{raw}`.") from err
     if value not in (0, 1):
-        raise RuntimeError(f"{_KOMODO_CANN_INNER_PRECISE_ENV} must be 0 or 1; got `{raw}`.")
+        raise RuntimeError(f"{_cannoe_env_name(_KOMODO_CANN_INNER_PRECISE_ENV)} must be 0 or 1; got `{raw}`.")
     return value
 
 
 def _komodo_cann_fused_op_names() -> tuple[str, ...]:
-    raw = os.getenv(_KOMODO_CANN_FUSED_OP_ENV)
+    raw = _cannoe_env(_KOMODO_CANN_FUSED_OP_ENV)
     if raw is None:
         return _DEFAULT_FUSED_OP_NAMES
     names = tuple(name.strip() for name in raw.split(",") if name.strip())
@@ -174,12 +223,12 @@ def _komodo_cann_fused_op_names() -> tuple[str, ...]:
 
 
 def _komodo_cann_prefetch_max_bytes(device: torch.device) -> int:
-    raw = os.getenv(_KOMODO_CANN_PREFETCH_MAX_BYTES_ENV)
+    raw = _cannoe_env(_KOMODO_CANN_PREFETCH_MAX_BYTES_ENV)
     if raw is not None:
         try:
             return int(raw)
         except ValueError as err:
-            raise RuntimeError(f"{_KOMODO_CANN_PREFETCH_MAX_BYTES_ENV} must be an integer; got `{raw}`.") from err
+            raise RuntimeError(f"{_cannoe_env_name(_KOMODO_CANN_PREFETCH_MAX_BYTES_ENV)} must be an integer; got `{raw}`.") from err
 
     try:
         props = torch.npu.get_device_properties(device)
@@ -195,13 +244,13 @@ def _komodo_cann_prefetch_max_bytes(device: torch.device) -> int:
 
 
 def _komodo_cann_prefetch_min_bytes() -> int:
-    raw = os.getenv(_KOMODO_CANN_PREFETCH_MIN_BYTES_ENV)
+    raw = _cannoe_env(_KOMODO_CANN_PREFETCH_MIN_BYTES_ENV)
     if raw is None:
         return 4 * 1024 * 1024
     try:
         return int(raw)
     except ValueError as err:
-        raise RuntimeError(f"{_KOMODO_CANN_PREFETCH_MIN_BYTES_ENV} must be an integer; got `{raw}`.") from err
+        raise RuntimeError(f"{_cannoe_env_name(_KOMODO_CANN_PREFETCH_MIN_BYTES_ENV)} must be an integer; got `{raw}`.") from err
 
 
 def _npu_prefetch_op():
@@ -270,13 +319,15 @@ def _komodo_cann_fused_op():
     names = _komodo_cann_fused_op_names()
     cache_key = (
         names,
-        os.getenv(_KOMODO_CANN_ASCENDC_ENV),
-        os.getenv("GPTQMODEL_KOMODO_CANN_ASCENDC_BUILD_ROOT"),
-        os.getenv("GPTQMODEL_KOMODO_CANN_ASCENDC_FORCE_REBUILD"),
-        os.getenv("GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB"),
-        os.getenv(_KOMODO_CANN_V3_ENV),
-        os.getenv("GPTQMODEL_KOMODO_CANN_V3_BUILD_ROOT"),
-        os.getenv("GPTQMODEL_KOMODO_CANN_V3_FORCE_REBUILD"),
+        *_cannoe_env_values(
+            _KOMODO_CANN_ASCENDC_ENV,
+            "GPTQMODEL_KOMODO_CANN_ASCENDC_BUILD_ROOT",
+            "GPTQMODEL_KOMODO_CANN_ASCENDC_FORCE_REBUILD",
+            "GPTQMODEL_KOMODO_CANN_ASCENDC_OPAPI_LIB",
+            _KOMODO_CANN_V3_ENV,
+            "GPTQMODEL_KOMODO_CANN_V3_BUILD_ROOT",
+            "GPTQMODEL_KOMODO_CANN_V3_FORCE_REBUILD",
+        ),
     )
     if _FUSED_OP_CACHE is not _FUSED_OP_UNSET and _FUSED_OP_CACHE_KEY == cache_key:
         return _FUSED_OP_CACHE
@@ -323,7 +374,7 @@ def _komodo_cann_fused_status(group_size: int) -> tuple[bool, bool, bool, str | 
             names = ", ".join(_komodo_cann_fused_op_names())
             suffix = f" Last fused loader error: {_FUSED_OP_LAST_ERROR}" if _FUSED_OP_LAST_ERROR else ""
             raise RuntimeError(
-                "Komodo-CANN fused W4A16 op was required but no registered torch op was found. "
+                "Cannoe fused W4A16 op was required but no registered torch op was found. "
                 f"Checked: {names}.{suffix}"
             )
         if _komodo_cann_ascendc_enabled():
@@ -339,7 +390,7 @@ def _komodo_cann_fused_status(group_size: int) -> tuple[bool, bool, bool, str | 
 
 
 def _komodo_cann_device_caps(device: torch.device) -> tuple[int, int, int]:
-    override_cores = os.getenv(_KOMODO_CANN_ACTIVE_CORES_ENV)
+    override_cores = _cannoe_env(_KOMODO_CANN_ACTIVE_CORES_ENV)
     try:
         props = torch.npu.get_device_properties(device)
         cube_cores = int(getattr(props, "cube_core_num", 0) or 0)
@@ -353,19 +404,20 @@ def _komodo_cann_device_caps(device: torch.device) -> tuple[int, int, int]:
     if override_cores is not None:
         try:
             cube_cores = int(override_cores)
+            vector_cores = cube_cores
         except ValueError as err:
-            raise RuntimeError(f"{_KOMODO_CANN_ACTIVE_CORES_ENV} must be an integer; got `{override_cores}`.") from err
+            raise RuntimeError(f"{_cannoe_env_name(_KOMODO_CANN_ACTIVE_CORES_ENV)} must be an integer; got `{override_cores}`.") from err
 
     return max(1, cube_cores), max(1, vector_cores), max(0, l2_cache_size)
 
 
 def _komodo_cann_split_k(rows: int, in_features: int, out_features: int, cube_cores: int) -> int:
-    raw = os.getenv(_KOMODO_CANN_SPLIT_K_ENV)
+    raw = _cannoe_env(_KOMODO_CANN_SPLIT_K_ENV)
     if raw is not None:
         try:
             return max(1, int(raw))
         except ValueError as err:
-            raise RuntimeError(f"{_KOMODO_CANN_SPLIT_K_ENV} must be an integer; got `{raw}`.") from err
+            raise RuntimeError(f"{_cannoe_env_name(_KOMODO_CANN_SPLIT_K_ENV)} must be an integer; got `{raw}`.") from err
 
     min_ratio = _parse_positive_int_env(_KOMODO_CANN_MIN_SPLIT_K_RATIO_ENV, 2)
     if rows > 16 or in_features < 4096 or in_features < out_features * min_ratio:
@@ -382,16 +434,16 @@ def _komodo_cann_split_k(rows: int, in_features: int, out_features: int, cube_co
 
 
 def _komodo_cann_base_k(rows: int, in_features: int, cube_consumer_requested: bool) -> int:
-    raw = os.getenv(_KOMODO_CANN_BASE_K_ENV)
+    raw = _cannoe_env(_KOMODO_CANN_BASE_K_ENV)
     if raw is not None:
         try:
             value = int(raw)
         except ValueError as err:
-            raise RuntimeError(f"{_KOMODO_CANN_BASE_K_ENV} must be an integer; got `{raw}`.") from err
+            raise RuntimeError(f"{_cannoe_env_name(_KOMODO_CANN_BASE_K_ENV)} must be an integer; got `{raw}`.") from err
         if value <= 0 or value % 64 != 0:
-            raise RuntimeError(f"{_KOMODO_CANN_BASE_K_ENV} must be a positive multiple of 64; got `{raw}`.")
+            raise RuntimeError(f"{_cannoe_env_name(_KOMODO_CANN_BASE_K_ENV)} must be a positive multiple of 64; got `{raw}`.")
         if in_features % value != 0:
-            raise RuntimeError(f"{_KOMODO_CANN_BASE_K_ENV} must divide K={in_features}; got `{raw}`.")
+            raise RuntimeError(f"{_cannoe_env_name(_KOMODO_CANN_BASE_K_ENV)} must divide K={in_features}; got `{raw}`.")
         return value
 
     if cube_consumer_requested and in_features % 128 == 0:
@@ -438,7 +490,7 @@ def _komodo_cann_tiling_plan(
     l0c_tile_bytes = base_m * base_n * 4
     staging_slots = 2
     staging_tile_bytes = _align_up(dequant_fp16_tile_bytes, 512)
-    scalar_owner_cap = min(vector_cores, max(1, out_features // 8), 8)
+    scalar_owner_cap = min(vector_cores, max(1, out_features // 8))
     staging_blocks = min(scalar_owner_cap, max(1, n_tiles * split_k))
     staging_workspace_bytes = staging_tile_bytes * staging_slots * staging_blocks
     cube_workspace_bytes = _KOMODO_CANN_CUBE_WORKSPACE_BYTES if cube_consumer_requested else 0
@@ -525,6 +577,9 @@ def komodo_cann_plan_asdict(plan: KomodoCannTilingPlan | None) -> dict | None:
     return asdict(plan)
 
 
+cannoe_plan_asdict = komodo_cann_plan_asdict
+
+
 def _komodo_cann_prefetch(plan: KomodoCannTilingPlan, *tensors: torch.Tensor | None) -> None:
     prefetch_op = _npu_prefetch_op()
     if prefetch_op is None:
@@ -557,7 +612,7 @@ def _komodo_cann_fused_matmul(
     resolved = _komodo_cann_fused_op()
     if resolved is None:
         if _komodo_cann_fused_required():
-            raise RuntimeError("Komodo-CANN fused W4A16 op disappeared after planning.")
+            raise RuntimeError("Cannoe fused W4A16 op disappeared after planning.")
         return None
 
     _, op = resolved
@@ -616,21 +671,23 @@ class _KomodoCannPlanMixin:
         zero_offsets: bool = False,
     ) -> KomodoCannTilingPlan:
         env_key = (
-            os.getenv(_KOMODO_CANN_PREFETCH_ENV),
-            os.getenv(_KOMODO_CANN_PREFETCH_MAX_BYTES_ENV),
-            os.getenv(_KOMODO_CANN_PREFETCH_MIN_BYTES_ENV),
-            os.getenv(_KOMODO_CANN_ACTIVE_CORES_ENV),
-            os.getenv(_KOMODO_CANN_SPLIT_K_ENV),
-            os.getenv(_KOMODO_CANN_MIN_SPLIT_K_RATIO_ENV),
-            os.getenv(_KOMODO_CANN_BASE_K_ENV),
-            os.getenv(_KOMODO_CANN_FUSED_ENV),
-            os.getenv(_KOMODO_CANN_FUSED_REQUIRE_ENV),
-            os.getenv(_KOMODO_CANN_FUSED_OP_ENV),
-            os.getenv(_KOMODO_CANN_ASCENDC_ENV),
-            os.getenv(_KOMODO_CANN_V3_ENV),
-            os.getenv(_KOMODO_CANN_INNER_PRECISE_ENV),
-            os.getenv(_KOMODO_CANN_STAGED_DEQUANT_ENV),
-            os.getenv(_KOMODO_CANN_CUBE_CONSUMER_ENV),
+            *_cannoe_env_values(
+                _KOMODO_CANN_PREFETCH_ENV,
+                _KOMODO_CANN_PREFETCH_MAX_BYTES_ENV,
+                _KOMODO_CANN_PREFETCH_MIN_BYTES_ENV,
+                _KOMODO_CANN_ACTIVE_CORES_ENV,
+                _KOMODO_CANN_SPLIT_K_ENV,
+                _KOMODO_CANN_MIN_SPLIT_K_RATIO_ENV,
+                _KOMODO_CANN_BASE_K_ENV,
+                _KOMODO_CANN_FUSED_ENV,
+                _KOMODO_CANN_FUSED_REQUIRE_ENV,
+                _KOMODO_CANN_FUSED_OP_ENV,
+                _KOMODO_CANN_ASCENDC_ENV,
+                _KOMODO_CANN_V3_ENV,
+                _KOMODO_CANN_INNER_PRECISE_ENV,
+                _KOMODO_CANN_STAGED_DEQUANT_ENV,
+                _KOMODO_CANN_CUBE_CONSUMER_ENV,
+            ),
         )
         hot_key = (x_flat.device, x_flat.shape[0], group_size, bool(zero_offsets), env_key)
         if getattr(self, "_cann_hot_plan_key", None) == hot_key:
@@ -663,10 +720,10 @@ class _KomodoCannPlanMixin:
         return cached
 
 
-class KomodoCannLinear(_KomodoCannPlanMixin, KomodoLinear):
-    """Ascend CANN experiment based on Komodo's packed int4 plan."""
+class CannoeLinear(_KomodoCannPlanMixin, KomodoLinear):
+    """Cannoe Ascend CANN experiment based on Komodo's packed int4 plan."""
 
-    SUPPORTS_BACKENDS = [BACKEND.GPTQ_KOMODO_CANN]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_CANNOE, BACKEND.GPTQ_KOMODO_CANN]
     SUPPORTS_METHODS = KomodoLinear.SUPPORTS_METHODS
     SUPPORTS_FORMATS = {fmt: 0 for fmt in KomodoLinear.SUPPORTS_FORMATS}
     SUPPORTS_BITS = KomodoLinear.SUPPORTS_BITS
@@ -684,10 +741,10 @@ class KomodoCannLinear(_KomodoCannPlanMixin, KomodoLinear):
     SUPPORTS_ADAPTERS = KomodoLinear.SUPPORTS_ADAPTERS
     SUPPORTS_DTYPES = KomodoLinear.SUPPORTS_DTYPES
     REQUIRES_FORMAT_V2 = KomodoLinear.REQUIRES_FORMAT_V2
-    QUANT_TYPE = "komodo_cann"
+    QUANT_TYPE = "cannoe"
 
     def __init__(self, *args, **kwargs):
-        kwargs.setdefault("backend", BACKEND.GPTQ_KOMODO_CANN)
+        kwargs.setdefault("backend", BACKEND.GPTQ_CANNOE)
         super().__init__(*args, **kwargs)
         self._cann_plan_cache: dict = {}
         self._cann_hot_plan_key = None
@@ -853,10 +910,10 @@ class KomodoCannLinear(_KomodoCannPlanMixin, KomodoLinear):
         return out
 
 
-class AwqKomodoCannLinear(_KomodoCannPlanMixin, AwqKomodoLinear):
-    """Ascend CANN experiment based on Komodo's AWQ packed int4 plan."""
+class AwqCannoeLinear(_KomodoCannPlanMixin, AwqKomodoLinear):
+    """AWQ Cannoe Ascend CANN experiment based on Komodo's packed int4 plan."""
 
-    SUPPORTS_BACKENDS = [BACKEND.AWQ_KOMODO_CANN]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_CANNOE, BACKEND.AWQ_KOMODO_CANN]
     SUPPORTS_METHODS = AwqKomodoLinear.SUPPORTS_METHODS
     SUPPORTS_FORMATS = {fmt: 0 for fmt in AwqKomodoLinear.SUPPORTS_FORMATS}
     SUPPORTS_BITS = AwqKomodoLinear.SUPPORTS_BITS
@@ -874,10 +931,10 @@ class AwqKomodoCannLinear(_KomodoCannPlanMixin, AwqKomodoLinear):
     SUPPORTS_ADAPTERS = AwqKomodoLinear.SUPPORTS_ADAPTERS
     SUPPORTS_DTYPES = AwqKomodoLinear.SUPPORTS_DTYPES
     REQUIRES_FORMAT_V2 = AwqKomodoLinear.REQUIRES_FORMAT_V2
-    QUANT_TYPE = "awq_komodo_cann"
+    QUANT_TYPE = "awq_cannoe"
 
     def __init__(self, *args, **kwargs):
-        kwargs.setdefault("backend", BACKEND.AWQ_KOMODO_CANN)
+        kwargs.setdefault("backend", BACKEND.AWQ_CANNOE)
         super().__init__(*args, **kwargs)
         self._cann_plan_cache: dict = {}
         self._cann_hot_plan_key = None
@@ -939,9 +996,18 @@ class AwqKomodoCannLinear(_KomodoCannPlanMixin, AwqKomodoLinear):
         return output.reshape(original_shape)
 
 
+KomodoCannLinear = CannoeLinear
+AwqKomodoCannLinear = AwqCannoeLinear
+CannoeTilingPlan = KomodoCannTilingPlan
+
+
 __all__ = [
+    "AwqCannoeLinear",
     "AwqKomodoCannLinear",
+    "CannoeLinear",
+    "CannoeTilingPlan",
     "KomodoCannLinear",
     "KomodoCannTilingPlan",
+    "cannoe_plan_asdict",
     "komodo_cann_plan_asdict",
 ]

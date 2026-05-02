@@ -15,8 +15,13 @@ def test_legacy_komodo_backend_normalizes_by_quant_method():
 
 
 def test_legacy_komodo_cann_backend_normalizes_by_quant_method():
-    assert normalize_backend(BACKEND.KOMODO_CANN, quant_method=METHOD.GPTQ) == BACKEND.GPTQ_KOMODO_CANN
-    assert normalize_backend(BACKEND.KOMODO_CANN, quant_method=METHOD.AWQ) == BACKEND.AWQ_KOMODO_CANN
+    assert normalize_backend(BACKEND.KOMODO_CANN, quant_method=METHOD.GPTQ) == BACKEND.GPTQ_CANNOE
+    assert normalize_backend(BACKEND.KOMODO_CANN, quant_method=METHOD.AWQ) == BACKEND.AWQ_CANNOE
+
+
+def test_cannoe_backend_normalizes_by_quant_method():
+    assert normalize_backend(BACKEND.CANNOE, quant_method=METHOD.GPTQ) == BACKEND.GPTQ_CANNOE
+    assert normalize_backend(BACKEND.CANNOE, quant_method=METHOD.AWQ) == BACKEND.AWQ_CANNOE
 
 
 def test_removed_backend_names_are_rejected():
@@ -47,7 +52,9 @@ def test_name_based_lookup_accepts_canonical_member_names():
     assert normalize_backend("GPTQ_MARLIN") == BACKEND.GPTQ_MARLIN
     assert normalize_backend("AWQ_GEMM_TRITON") == BACKEND.AWQ_GEMM_TRITON
     assert normalize_backend("GPTQ_KOMODO") == BACKEND.GPTQ_KOMODO
-    assert normalize_backend("GPTQ_KOMODO_CANN") == BACKEND.GPTQ_KOMODO_CANN
+    assert normalize_backend("GPTQ_CANNOE") == BACKEND.GPTQ_CANNOE
+    assert normalize_backend("GPTQ_KOMODO_CANN") == BACKEND.GPTQ_CANNOE
+    assert normalize_backend("AWQ_KOMODO_CANN") == BACKEND.AWQ_CANNOE
 
 
 @pytest.mark.parametrize(

@@ -24,7 +24,7 @@ from torch_npu.profiler import (
 )
 
 from gptqmodel.nn_modules.qlinear.komodo import KomodoLinear
-from gptqmodel.nn_modules.qlinear.komodo_cann import KomodoCannLinear, komodo_cann_plan_asdict
+from gptqmodel.nn_modules.qlinear.komodo_cann import CannoeLinear, cannoe_plan_asdict
 from gptqmodel.utils.torch import HAS_NPU
 from scripts.benchmark_komodo_npu_ab import (
     QWEN3_6_27B_GPTQ_CASES,
@@ -150,17 +150,22 @@ def _profiler_experimental_config(args):
 
 def _profile_case(args) -> dict:
     if not HAS_NPU:
-        raise RuntimeError("Ascend NPU is required for Komodo-CANN profiling.")
+        raise RuntimeError("Ascend NPU is required for Cannoe profiling.")
 
-    if args.mode == "plain":
+    mode = {
+        "cann": "cannoe",
+        "cann_prefetch": "cannoe_prefetch",
+    }.get(args.mode, args.mode)
+
+    if mode == "plain":
         candidate_cls = KomodoLinear
-        os.environ["GPTQMODEL_KOMODO_CANN_PREFETCH"] = "0"
-    elif args.mode == "cann":
-        candidate_cls = KomodoCannLinear
-        os.environ["GPTQMODEL_KOMODO_CANN_PREFETCH"] = "0"
-    elif args.mode == "cann_prefetch":
-        candidate_cls = KomodoCannLinear
-        os.environ["GPTQMODEL_KOMODO_CANN_PREFETCH"] = "1"
+        os.environ["GPTQMODEL_CANNOE_PREFETCH"] = "0"
+    elif mode == "cannoe":
+        candidate_cls = CannoeLinear
+        os.environ["GPTQMODEL_CANNOE_PREFETCH"] = "0"
+    elif mode == "cannoe_prefetch":
+        candidate_cls = CannoeLinear
+        os.environ["GPTQMODEL_CANNOE_PREFETCH"] = "1"
     else:
         raise ValueError(f"Unsupported mode `{args.mode}`.")
 
@@ -211,7 +216,7 @@ def _profile_case(args) -> dict:
     kernel_top = _aggregate_kernel_csv(kernel_csv)[: args.top_n]
 
     payload = {
-        "mode": args.mode,
+        "mode": mode,
         "case": case.name,
         "device": str(device),
         "dtype": args.dtype,
@@ -223,17 +228,23 @@ def _profile_case(args) -> dict:
         "profiler_dir": str(profiler_dir),
         "operator_top": operator_top,
         "kernel_top": kernel_top,
+        "cannoe_path": getattr(candidate, "_last_cann_path", None),
+        "cannoe_plan": cannoe_plan_asdict(getattr(candidate, "_last_cann_plan", None)),
         "komodo_cann_path": getattr(candidate, "_last_cann_path", None),
-        "komodo_cann_plan": komodo_cann_plan_asdict(getattr(candidate, "_last_cann_plan", None)),
+        "komodo_cann_plan": cannoe_plan_asdict(getattr(candidate, "_last_cann_plan", None)),
     }
-    summary_path = args.output_dir / f"{args.mode}_{case.name}_summary.json"
+    summary_path = args.output_dir / f"{mode}_{case.name}_summary.json"
     summary_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return payload
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Profile plain Komodo vs Komodo-CANN with CANN profiler output.")
-    parser.add_argument("--mode", choices=("plain", "cann", "cann_prefetch"), default="cann")
+    parser = argparse.ArgumentParser(description="Profile plain Komodo vs Cannoe with CANN profiler output.")
+    parser.add_argument(
+        "--mode",
+        choices=("plain", "cannoe", "cannoe_prefetch", "cann", "cann_prefetch"),
+        default="cannoe",
+    )
     parser.add_argument("--case", default="qwen3_6_27b_gptq_down_proj")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--dtype", choices=("fp16",), default="fp16")
@@ -254,7 +265,7 @@ def main() -> None:
     parser.add_argument("--l2-cache", action="store_true")
     parser.add_argument("--record-op-args", action="store_true")
     parser.add_argument("--op-attr", action="store_true")
-    parser.add_argument("--output-dir", type=Path, default=Path("/tmp/komodo_cann_profile"))
+    parser.add_argument("--output-dir", type=Path, default=Path("/tmp/cannoe_profile"))
     args = parser.parse_args()
 
     payload = _profile_case(args)

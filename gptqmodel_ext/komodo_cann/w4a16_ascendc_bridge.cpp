@@ -121,7 +121,7 @@ AscendcApi& load_api()
     state.handle = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
     if (state.handle == nullptr) {
         state.error = dl_error();
-        TORCH_CHECK(false, "Failed to load Komodo-CANN Ascend C op API library `", lib, "`: ", state.error,
+        TORCH_CHECK(false, "Failed to load Cannoe Ascend C op API library `", lib, "`: ", state.error,
                     ". Source the custom OPP set_env.bash or set ", kCustomOpApiLibEnv, ".");
     }
 
@@ -152,7 +152,7 @@ aclDataType to_acl_dtype(at::ScalarType dtype)
         case at::kByte:
             return ACL_UINT8;
         default:
-            TORCH_CHECK(false, "Unsupported dtype for Komodo-CANN Ascend C bridge: ", dtype);
+            TORCH_CHECK(false, "Unsupported dtype for Cannoe Ascend C bridge: ", dtype);
     }
 }
 
@@ -162,7 +162,7 @@ AclTensorHandle make_acl_tensor(
     const std::vector<int64_t>& logical_sizes,
     const std::vector<int64_t>& logical_strides)
 {
-    TORCH_CHECK(tensor.numel() > 0, "Komodo-CANN Ascend C bridge does not support empty tensors.");
+    TORCH_CHECK(tensor.numel() > 0, "Cannoe Ascend C bridge does not support empty tensors.");
     aclTensor* acl_tensor = aclCreateTensor(
         logical_sizes.data(),
         static_cast<uint64_t>(logical_sizes.size()),
@@ -173,7 +173,7 @@ AclTensorHandle make_acl_tensor(
         logical_sizes.data(),
         static_cast<uint64_t>(logical_sizes.size()),
         const_cast<void*>(tensor.const_data_ptr()));
-    TORCH_CHECK(acl_tensor != nullptr, "aclCreateTensor failed in Komodo-CANN Ascend C bridge.");
+    TORCH_CHECK(acl_tensor != nullptr, "aclCreateTensor failed in Cannoe Ascend C bridge.");
     return AclTensorHandle(acl_tensor);
 }
 
@@ -200,28 +200,28 @@ void check_inputs(
     int64_t group_size,
     int64_t out_features)
 {
-    TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1, "Komodo-CANN Ascend C bridge expects x on NPU.");
+    TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1, "Cannoe Ascend C bridge expects x on NPU.");
     TORCH_CHECK(
         packed_weight.device() == x.device() && scales.device() == x.device() && offsets.device() == x.device(),
-        "Komodo-CANN Ascend C bridge expects x, packed_weight, scales, and offsets on the same NPU.");
-    TORCH_CHECK(x.scalar_type() == at::kHalf, "Komodo-CANN Ascend C bridge expects FP16 activations.");
-    TORCH_CHECK(packed_weight.scalar_type() == at::kInt, "Komodo-CANN Ascend C bridge expects INT32 packed weights.");
-    TORCH_CHECK(scales.scalar_type() == at::kHalf, "Komodo-CANN Ascend C bridge expects FP16 scales.");
-    TORCH_CHECK(offsets.scalar_type() == at::kHalf, "Komodo-CANN Ascend C bridge expects FP16 offsets.");
-    TORCH_CHECK(x.dim() == 2, "Komodo-CANN Ascend C bridge expects flat 2D activations.");
-    TORCH_CHECK(packed_weight.dim() == 2, "Komodo-CANN Ascend C bridge expects packed_weight [K, N / 8].");
-    TORCH_CHECK(scales.dim() == 2 && offsets.dim() == 2, "Komodo-CANN Ascend C bridge expects 2D scales/offsets.");
-    TORCH_CHECK(packed_weight.size(0) == x.size(1), "Komodo-CANN Ascend C packed K must match activation K.");
-    TORCH_CHECK(packed_weight.size(1) * 8 == out_features, "Komodo-CANN Ascend C packed N/8 must match scales N.");
-    TORCH_CHECK(offsets.sizes() == scales.sizes(), "Komodo-CANN Ascend C scales and offsets must have same shape.");
-    TORCH_CHECK(group_size == 0 || group_size >= 32, "Komodo-CANN Ascend C supports group_size 0 or >= 32.");
-    TORCH_CHECK(group_size == 0 || x.size(1) % group_size == 0, "Komodo-CANN Ascend C K must divide group_size.");
+        "Cannoe Ascend C bridge expects x, packed_weight, scales, and offsets on the same NPU.");
+    TORCH_CHECK(x.scalar_type() == at::kHalf, "Cannoe Ascend C bridge expects FP16 activations.");
+    TORCH_CHECK(packed_weight.scalar_type() == at::kInt, "Cannoe Ascend C bridge expects INT32 packed weights.");
+    TORCH_CHECK(scales.scalar_type() == at::kHalf, "Cannoe Ascend C bridge expects FP16 scales.");
+    TORCH_CHECK(offsets.scalar_type() == at::kHalf, "Cannoe Ascend C bridge expects FP16 offsets.");
+    TORCH_CHECK(x.dim() == 2, "Cannoe Ascend C bridge expects flat 2D activations.");
+    TORCH_CHECK(packed_weight.dim() == 2, "Cannoe Ascend C bridge expects packed_weight [K, N / 8].");
+    TORCH_CHECK(scales.dim() == 2 && offsets.dim() == 2, "Cannoe Ascend C bridge expects 2D scales/offsets.");
+    TORCH_CHECK(packed_weight.size(0) == x.size(1), "Cannoe Ascend C packed K must match activation K.");
+    TORCH_CHECK(packed_weight.size(1) * 8 == out_features, "Cannoe Ascend C packed N/8 must match scales N.");
+    TORCH_CHECK(offsets.sizes() == scales.sizes(), "Cannoe Ascend C scales and offsets must have same shape.");
+    TORCH_CHECK(group_size == 0 || group_size >= 32, "Cannoe Ascend C supports group_size 0 or >= 32.");
+    TORCH_CHECK(group_size == 0 || x.size(1) % group_size == 0, "Cannoe Ascend C K must divide group_size.");
     const int64_t expected_groups = group_size == 0 ? 1 : x.size(1) / group_size;
-    TORCH_CHECK(scales.size(0) == expected_groups, "Komodo-CANN Ascend C scales group count mismatch.");
+    TORCH_CHECK(scales.size(0) == expected_groups, "Cannoe Ascend C scales group count mismatch.");
     if (bias.has_value()) {
-        TORCH_CHECK(bias->device() == x.device(), "Komodo-CANN Ascend C bridge expects bias on the same NPU.");
-        TORCH_CHECK(bias->scalar_type() == at::kHalf, "Komodo-CANN Ascend C bridge expects FP16 bias.");
-        TORCH_CHECK(bias->dim() == 1 && bias->size(0) == out_features, "Komodo-CANN Ascend C bias must be [N].");
+        TORCH_CHECK(bias->device() == x.device(), "Cannoe Ascend C bridge expects bias on the same NPU.");
+        TORCH_CHECK(bias->scalar_type() == at::kHalf, "Cannoe Ascend C bridge expects FP16 bias.");
+        TORCH_CHECK(bias->dim() == 1 && bias->size(0) == out_features, "Cannoe Ascend C bias must be [N].");
     }
 }
 
@@ -302,9 +302,29 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_komodo_cann, m)
     m.def(
         "komodo_cann_w4_a16_matmul(Tensor x, Tensor packed_weight, Tensor scales, Tensor offsets, Tensor? bias, "
         "int group_size, int split_k, int base_m, int base_n, int base_k) -> Tensor");
+    m.def(
+        "cannoe_w4_a16_matmul(Tensor x, Tensor packed_weight, Tensor scales, Tensor offsets, Tensor? bias, "
+        "int group_size, int split_k, int base_m, int base_n, int base_k) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_komodo_cann, PrivateUse1, m)
 {
+    m.impl("komodo_cann_w4_a16_matmul", &komodo_cann_w4_a16_matmul);
+    m.impl("cannoe_w4_a16_matmul", &komodo_cann_w4_a16_matmul);
+}
+
+TORCH_LIBRARY_FRAGMENT(gptqmodel_cannoe, m)
+{
+    m.def(
+        "cannoe_w4_a16_matmul(Tensor x, Tensor packed_weight, Tensor scales, Tensor offsets, Tensor? bias, "
+        "int group_size, int split_k, int base_m, int base_n, int base_k) -> Tensor");
+    m.def(
+        "komodo_cann_w4_a16_matmul(Tensor x, Tensor packed_weight, Tensor scales, Tensor offsets, Tensor? bias, "
+        "int group_size, int split_k, int base_m, int base_n, int base_k) -> Tensor");
+}
+
+TORCH_LIBRARY_IMPL(gptqmodel_cannoe, PrivateUse1, m)
+{
+    m.impl("cannoe_w4_a16_matmul", &komodo_cann_w4_a16_matmul);
     m.impl("komodo_cann_w4_a16_matmul", &komodo_cann_w4_a16_matmul);
 }

@@ -81,7 +81,7 @@ aclDataType to_acl_dtype(at::ScalarType dtype)
         case at::kByte:
             return ACL_UINT8;
         default:
-            TORCH_CHECK(false, "Unsupported dtype for Komodo-CANN V3 probe: ", dtype);
+            TORCH_CHECK(false, "Unsupported dtype for Cannoe V3 probe: ", dtype);
     }
 }
 
@@ -91,7 +91,7 @@ AclTensorHandle make_acl_tensor(
     const std::vector<int64_t>& logical_sizes,
     const std::vector<int64_t>& logical_strides)
 {
-    TORCH_CHECK(tensor.numel() > 0, "Komodo-CANN V3 probe does not support empty tensors.");
+    TORCH_CHECK(tensor.numel() > 0, "Cannoe V3 probe does not support empty tensors.");
     aclTensor* acl_tensor = aclCreateTensor(
         logical_sizes.data(),
         static_cast<uint64_t>(logical_sizes.size()),
@@ -102,7 +102,7 @@ AclTensorHandle make_acl_tensor(
         logical_sizes.data(),
         static_cast<uint64_t>(logical_sizes.size()),
         const_cast<void*>(tensor.const_data_ptr()));
-    TORCH_CHECK(acl_tensor != nullptr, "aclCreateTensor failed in Komodo-CANN V3 probe.");
+    TORCH_CHECK(acl_tensor != nullptr, "aclCreateTensor failed in Cannoe V3 probe.");
     return AclTensorHandle(acl_tensor);
 }
 
@@ -399,15 +399,15 @@ at::Tensor w4a16_matmul_v3(
     (void)base_n;
     (void)base_k;
 
-    TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1, "Komodo-CANN V3 probe expects x on NPU.");
+    TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1, "Cannoe V3 probe expects x on NPU.");
     TORCH_CHECK(
         packed_weight.device() == x.device() && scales.device() == x.device() && offsets.device() == x.device(),
-        "Komodo-CANN V3 probe expects x, packed_weight, scales, and offsets on the same NPU.");
-    TORCH_CHECK(x.scalar_type() == at::kHalf, "Komodo-CANN V3 probe expects FP16 activations.");
-    TORCH_CHECK(scales.scalar_type() == at::kHalf, "Komodo-CANN V3 probe expects FP16 antiquant scales.");
-    TORCH_CHECK(offsets.scalar_type() == at::kHalf, "Komodo-CANN V3 probe expects FP16 antiquant offsets.");
-    TORCH_CHECK(x.dim() == 2, "Komodo-CANN V3 probe currently expects flat 2D activations.");
-    TORCH_CHECK(packed_weight.dim() == 2, "Komodo-CANN V3 probe expects a 2D int4-packed weight.");
+        "Cannoe V3 probe expects x, packed_weight, scales, and offsets on the same NPU.");
+    TORCH_CHECK(x.scalar_type() == at::kHalf, "Cannoe V3 probe expects FP16 activations.");
+    TORCH_CHECK(scales.scalar_type() == at::kHalf, "Cannoe V3 probe expects FP16 antiquant scales.");
+    TORCH_CHECK(offsets.scalar_type() == at::kHalf, "Cannoe V3 probe expects FP16 antiquant offsets.");
+    TORCH_CHECK(x.dim() == 2, "Cannoe V3 probe currently expects flat 2D activations.");
+    TORCH_CHECK(packed_weight.dim() == 2, "Cannoe V3 probe expects a 2D int4-packed weight.");
 
     c10_npu::OptionalNPUGuard guard(x.device());
 
@@ -417,10 +417,10 @@ at::Tensor w4a16_matmul_v3(
     at::Tensor offsets_arg = offsets.is_contiguous() ? offsets : offsets.contiguous();
     c10::optional<at::Tensor> bias_arg = bias;
     if (bias_arg.has_value()) {
-        TORCH_CHECK(bias_arg->device() == x.device(), "Komodo-CANN V3 probe expects bias on the same NPU.");
+        TORCH_CHECK(bias_arg->device() == x.device(), "Cannoe V3 probe expects bias on the same NPU.");
         TORCH_CHECK(
             bias_arg->scalar_type() == at::kHalf || bias_arg->scalar_type() == at::kFloat,
-            "Komodo-CANN V3 probe expects FP16 or FP32 bias.");
+            "Cannoe V3 probe expects FP16 or FP32 bias.");
         if (!bias_arg->is_contiguous()) {
             bias_arg = bias_arg->contiguous();
         }
@@ -443,6 +443,18 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_komodo_cann, m)
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_komodo_cann, PrivateUse1, m)
+{
+    m.impl("w4a16_matmul", &w4a16_matmul_v3);
+}
+
+TORCH_LIBRARY_FRAGMENT(gptqmodel_cannoe, m)
+{
+    m.def(
+        "w4a16_matmul(Tensor x, Tensor packed_weight, Tensor scales, Tensor offsets, Tensor? bias, "
+        "int group_size, int split_k, int base_m, int base_n, int base_k) -> Tensor");
+}
+
+TORCH_LIBRARY_IMPL(gptqmodel_cannoe, PrivateUse1, m)
 {
     m.impl("w4a16_matmul", &w4a16_matmul_v3);
 }

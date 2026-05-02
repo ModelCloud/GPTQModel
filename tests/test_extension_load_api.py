@@ -73,7 +73,7 @@ def _install_fake_extensions(monkeypatch):
         "marlin_fp16": _FakeExtension("Marlin fp16"),
         "marlin_bf16": _FakeExtension("Marlin bf16"),
         "paroquant": _FakeExtension("ParoQuant rotation"),
-        "komodo_cann_v3": _FakeExtension("Komodo-CANN V3"),
+        "cannoe_v3": _FakeExtension("Cannoe V3"),
     }
 
     monkeypatch.setattr(cpp_utils, "_pack_block_extension", lambda: fakes["pack_block_cpu"])
@@ -88,7 +88,8 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(marlin_utils, "_MARLIN_FP16_TORCH_OPS_EXTENSION", fakes["marlin_fp16"])
     monkeypatch.setattr(marlin_utils, "_MARLIN_BF16_TORCH_OPS_EXTENSION", fakes["marlin_bf16"])
     monkeypatch.setattr(paroquant_utils, "_PAROQUANT_ROTATION_EXTENSION", fakes["paroquant"])
-    monkeypatch.setattr(komodo_cann_utils, "_KOMODO_CANN_V3_TORCH_OPS_EXTENSION", fakes["komodo_cann_v3"])
+    monkeypatch.setattr(komodo_cann_utils, "_CANNOE_V3_TORCH_OPS_EXTENSION", fakes["cannoe_v3"])
+    monkeypatch.setattr(komodo_cann_utils, "_KOMODO_CANN_V3_TORCH_OPS_EXTENSION", fakes["cannoe_v3"])
     monkeypatch.setattr(komodo_cann_utils, "_komodo_cann_v3_supported", lambda: True)
 
     return fakes
@@ -115,7 +116,7 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "marlin_fp16": True,
         "marlin_bf16": True,
         "paroquant": True,
-        "komodo_cann_v3": True,
+        "cannoe_v3": True,
     }
     assert all(fake.load_calls == 1 for fake in fakes.values())
 

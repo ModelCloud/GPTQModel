@@ -18,8 +18,11 @@ from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.komodo import AwqKomodoLinear, KomodoLinear, _native_int4_enabled
 import gptqmodel.nn_modules.qlinear.komodo_cann as komodo_cann_module
+from gptqmodel.nn_modules.qlinear.cannoe import CannoeLinear as PublicCannoeLinear
 from gptqmodel.nn_modules.qlinear.komodo_cann import (
+    AwqCannoeLinear,
     AwqKomodoCannLinear,
+    CannoeLinear,
     KomodoCannLinear,
     _komodo_cann_tiling_plan,
 )
@@ -151,7 +154,6 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     assert staged_plan.staging_blocks == min(
         staged_plan.vector_cores,
         max(1, staged_plan.out_features // 8),
-        8,
         (staged_plan.out_features // staged_plan.base_n) * staged_plan.split_k,
     )
     assert staged_plan.staging_tile_bytes == staged_plan.base_k * staged_plan.base_n * 2
@@ -348,6 +350,21 @@ def test_komodo_cann_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
 
     assert override_plan.base_k == 64
 
+    wide_staged_plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=8192,
+        out_features=8192,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+
+    assert wide_staged_plan.staging_blocks == min(
+        wide_staged_plan.vector_cores,
+        max(1, wide_staged_plan.out_features // 8),
+        (wide_staged_plan.out_features // wide_staged_plan.base_n) * wide_staged_plan.split_k,
+    )
+    assert wide_staged_plan.staging_blocks > 8
+
 
 def test_komodo_cann_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "24")
@@ -382,12 +399,40 @@ def test_komodo_cann_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):
     assert balanced.inner_precise == 0
 
 
-def test_komodo_cann_default_fused_op_names_include_msopgen_snake_case(monkeypatch):
+def test_cannoe_default_fused_op_names_include_msopgen_aliases(monkeypatch):
     monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", raising=False)
+    monkeypatch.delenv("GPTQMODEL_CANNOE_FUSED_OP", raising=False)
     names = komodo_cann_module._komodo_cann_fused_op_names()
 
+    assert "gptqmodel_cannoe.cannoe_w4_a16_matmul" in names
     assert "gptqmodel_komodo_cann.komodo_cann_w4_a16_matmul" in names
     assert "npu.komodo_cann_w4_a16_matmul" in names
+
+
+def test_cannoe_env_aliases_override_legacy_names(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_ACTIVE_CORES", "4")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_ACTIVE_CORES", "12")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_CANN_FUSED_OP", "legacy_namespace.legacy_op")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_FUSED_OP", "current_namespace.current_op")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_STAGED_DEQUANT", "1")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_CUBE_CONSUMER", "1")
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_STAGED_DEQUANT", raising=False)
+    monkeypatch.delenv("GPTQMODEL_KOMODO_CANN_CUBE_CONSUMER", raising=False)
+
+    plan = _komodo_cann_tiling_plan(
+        rows=8,
+        in_features=8192,
+        out_features=1024,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+
+    assert PublicCannoeLinear is CannoeLinear
+    assert plan.cube_cores == 12
+    assert plan.vector_cores == 12
+    assert plan.staged_dequant is True
+    assert plan.cube_consumer is True
+    assert komodo_cann_module._komodo_cann_fused_op_names() == ("current_namespace.current_op",)
 
 
 def test_komodo_cann_tiling_plan_requires_registered_fused_op(monkeypatch):
@@ -822,7 +867,35 @@ def test_npu_explicit_komodo_selects_gptq_and_awq():
     assert awq_cls is AwqKomodoLinear
 
 
-def test_npu_explicit_komodo_cann_selects_gptq_and_awq():
+def test_npu_explicit_cannoe_selects_gptq_and_awq():
+    gptq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.NPU,
+        backend=BACKEND.CANNOE,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+    awq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.NPU,
+        backend=BACKEND.CANNOE,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert gptq_cls is CannoeLinear
+    assert awq_cls is AwqCannoeLinear
+
+
+def test_npu_legacy_komodo_cann_selects_cannoe_aliases():
     gptq_cls = select_quant_linear(
         bits=4,
         group_size=128,
@@ -1326,7 +1399,7 @@ def test_npu_komodo_cann_gptq_native_int4_matches_torch_baseline(dtype, monkeypa
     candidate.post_init()
     baseline = baseline_cpu.to(_test_npu_device()).eval()
     candidate = candidate.to(_test_npu_device(), dtype=dtype).eval()
-    assert candidate.backend == BACKEND.GPTQ_KOMODO_CANN
+    assert candidate.backend == BACKEND.GPTQ_CANNOE
     assert candidate.native_plan_prepacked(device=_test_npu_device(), dtype=dtype)
 
     x = torch.randn(2, 3, baseline.in_features, dtype=dtype, device=_test_npu_device())

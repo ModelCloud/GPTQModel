@@ -85,8 +85,7 @@ uint32_t PickBlockDim(uint32_t packed_words, uint32_t aiv_cores)
     if (packed_words <= 1 || aiv_cores == 0) {
         return 1;
     }
-    uint32_t block_dim = packed_words < aiv_cores ? packed_words : aiv_cores;
-    return block_dim < 8 ? block_dim : 8;
+    return packed_words < aiv_cores ? packed_words : aiv_cores;
 }
 }  // namespace
 

@@ -24,10 +24,10 @@ from gptqmodel.nn_modules.qlinear.komodo import (
     _native_int4_enabled,
 )
 from gptqmodel.nn_modules.qlinear.komodo_cann import (
-    AwqKomodoCannLinear,
-    KomodoCannLinear,
+    AwqCannoeLinear,
+    CannoeLinear,
     _komodo_cann_prefetch_enabled,
-    komodo_cann_plan_asdict,
+    cannoe_plan_asdict,
 )
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -325,12 +325,12 @@ def _run_case(
     cache_dequantized: bool,
     native_int4: bool,
     prefetch_native_plan: bool,
-    komodo_cann: bool,
+    cannoe: bool,
     drop_source_weights: bool,
 ) -> dict:
     dtype = _dtype(case.dtype)
-    gptq_candidate_cls = KomodoCannLinear if komodo_cann else KomodoLinear
-    awq_candidate_cls = AwqKomodoCannLinear if komodo_cann else AwqKomodoLinear
+    gptq_candidate_cls = CannoeLinear if cannoe else KomodoLinear
+    awq_candidate_cls = AwqCannoeLinear if cannoe else AwqKomodoLinear
     if case.method == "gptq":
         baseline, candidate = _make_gptq_pair(
             case,
@@ -400,13 +400,16 @@ def _run_case(
         "device": str(device),
         "baseline": baseline.__class__.__name__,
         "candidate": candidate.__class__.__name__,
-        "komodo_kernel": "komodo_cann" if komodo_cann else "komodo",
-        "komodo_cann_plan": komodo_cann_plan_asdict(getattr(candidate, "_last_cann_plan", None)),
+        "komodo_kernel": "cannoe" if cannoe else "komodo",
+        "cannoe_plan": cannoe_plan_asdict(getattr(candidate, "_last_cann_plan", None)),
+        "komodo_cann_plan": cannoe_plan_asdict(getattr(candidate, "_last_cann_plan", None)),
+        "cannoe_path": getattr(candidate, "_last_cann_path", None),
         "komodo_cann_path": getattr(candidate, "_last_cann_path", None),
         "komodo_dequant_cache": cache_dequantized,
         "komodo_native_int4": native_int4,
         "komodo_prefetch_native_plan": prefetch_native_plan,
-        "komodo_cann_prefetch": bool(_komodo_cann_prefetch_enabled()) if komodo_cann else False,
+        "cannoe_prefetch": bool(_komodo_cann_prefetch_enabled()) if cannoe else False,
+        "komodo_cann_prefetch": bool(_komodo_cann_prefetch_enabled()) if cannoe else False,
         "komodo_drop_source_weights": drop_source_weights,
         "komodo_source_dropped": bool(getattr(candidate, "_native_source_dropped", False)),
         "komodo_prefetched": prefetched,
@@ -495,24 +498,42 @@ def main() -> None:
         help="When native int4 is active, prebuild the packed NPU plan on a side stream before first forward.",
     )
     parser.add_argument(
-        "--komodo-cann",
+        "--cannoe",
+        dest="cannoe",
         action="store_true",
-        help="Use the separate Komodo-CANN kernel class instead of the plain Komodo kernel.",
+        help="Use the separate Cannoe CANN kernel class instead of the plain Komodo kernel.",
+    )
+    parser.add_argument(
+        "--komodo-cann",
+        dest="cannoe",
+        action="store_true",
+        help="Legacy alias for --cannoe.",
+    )
+    parser.add_argument(
+        "--cannoe-prefetch",
+        dest="cannoe_prefetch",
+        action="store_true",
+        help="Enable Cannoe host-issued npu_prefetch probes. Only applies with --cannoe.",
     )
     parser.add_argument(
         "--komodo-cann-prefetch",
+        dest="cannoe_prefetch",
         action="store_true",
-        help="Enable Komodo-CANN host-issued npu_prefetch probes. Only applies with --komodo-cann.",
+        help="Legacy alias for --cannoe-prefetch.",
     )
     parser.add_argument(
+        "--cannoe-prefetch-max-bytes",
         "--komodo-cann-prefetch-max-bytes",
+        dest="cannoe_prefetch_max_bytes",
         type=int,
-        help="Override GPTQMODEL_KOMODO_CANN_PREFETCH_MAX_BYTES for the Komodo-CANN kernel.",
+        help="Override GPTQMODEL_CANNOE_PREFETCH_MAX_BYTES for the Cannoe kernel.",
     )
     parser.add_argument(
+        "--cannoe-prefetch-min-bytes",
         "--komodo-cann-prefetch-min-bytes",
+        dest="cannoe_prefetch_min_bytes",
         type=int,
-        help="Override GPTQMODEL_KOMODO_CANN_PREFETCH_MIN_BYTES for the Komodo-CANN kernel.",
+        help="Override GPTQMODEL_CANNOE_PREFETCH_MIN_BYTES for the Cannoe kernel.",
     )
     parser.add_argument(
         "--komodo-drop-source-weights",
@@ -559,16 +580,16 @@ def main() -> None:
         os.environ["GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"] = "1"
     elif args.komodo_drop_source_weights is False:
         os.environ["GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"] = "0"
-    if args.komodo_cann_prefetch:
-        os.environ["GPTQMODEL_KOMODO_CANN_PREFETCH"] = "1"
-    if args.komodo_cann_prefetch_max_bytes is not None:
-        os.environ["GPTQMODEL_KOMODO_CANN_PREFETCH_MAX_BYTES"] = str(args.komodo_cann_prefetch_max_bytes)
-    if args.komodo_cann_prefetch_min_bytes is not None:
-        os.environ["GPTQMODEL_KOMODO_CANN_PREFETCH_MIN_BYTES"] = str(args.komodo_cann_prefetch_min_bytes)
+    if args.cannoe_prefetch:
+        os.environ["GPTQMODEL_CANNOE_PREFETCH"] = "1"
+    if args.cannoe_prefetch_max_bytes is not None:
+        os.environ["GPTQMODEL_CANNOE_PREFETCH_MAX_BYTES"] = str(args.cannoe_prefetch_max_bytes)
+    if args.cannoe_prefetch_min_bytes is not None:
+        os.environ["GPTQMODEL_CANNOE_PREFETCH_MIN_BYTES"] = str(args.cannoe_prefetch_min_bytes)
     os.environ["GPTQMODEL_KOMODO_CACHE_WEIGHTS"] = "1" if args.komodo_cache_dequantized else "0"
     native_int4 = _native_int4_enabled()
-    komodo_cann = bool(args.komodo_cann)
-    cann_prefetch = bool(_komodo_cann_prefetch_enabled()) if komodo_cann else False
+    cannoe = bool(args.cannoe)
+    cannoe_prefetch = bool(_komodo_cann_prefetch_enabled()) if cannoe else False
     drop_source_weights = _drop_source_weights_enabled()
 
     torch.npu.set_device(args.device)
@@ -593,7 +614,7 @@ def main() -> None:
             cache_dequantized=args.komodo_cache_dequantized,
             native_int4=native_int4,
             prefetch_native_plan=args.komodo_prefetch_native_plan,
-            komodo_cann=komodo_cann,
+            cannoe=cannoe,
             drop_source_weights=drop_source_weights,
         )
         for index, case in enumerate(cases)
@@ -646,12 +667,15 @@ def main() -> None:
         payload = {
             "pid": os.getpid(),
             "device": str(device),
-            "komodo_kernel": "komodo_cann" if komodo_cann else "komodo",
+            "komodo_kernel": "cannoe" if cannoe else "komodo",
+            "cannoe_prefetch": bool(cannoe_prefetch),
             "komodo_native_int4": bool(native_int4),
             "komodo_prefetch_native_plan": bool(args.komodo_prefetch_native_plan),
-            "komodo_cann_prefetch": bool(cann_prefetch),
-            "komodo_cann_prefetch_max_bytes": args.komodo_cann_prefetch_max_bytes,
-            "komodo_cann_prefetch_min_bytes": args.komodo_cann_prefetch_min_bytes,
+            "komodo_cann_prefetch": bool(cannoe_prefetch),
+            "cannoe_prefetch_max_bytes": args.cannoe_prefetch_max_bytes,
+            "cannoe_prefetch_min_bytes": args.cannoe_prefetch_min_bytes,
+            "komodo_cann_prefetch_max_bytes": args.cannoe_prefetch_max_bytes,
+            "komodo_cann_prefetch_min_bytes": args.cannoe_prefetch_min_bytes,
             "komodo_drop_source_weights": bool(drop_source_weights),
             "komodo_dequant_cache": bool(args.komodo_cache_dequantized),
             "mode": mode,

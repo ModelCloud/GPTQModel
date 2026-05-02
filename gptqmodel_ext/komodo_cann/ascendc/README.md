@@ -1,8 +1,10 @@
-# Komodo-CANN Ascend C Kernel
+# Cannoe Ascend C Kernel
 
 This directory contains the repository-owned Ascend C implementation for the
-optional Komodo-CANN W4A16 custom operator. It is intentionally separate from
-plain Komodo and from the `aclnnWeightQuantBatchMatmulV3` probe.
+optional Cannoe W4A16 custom operator. Cannoe is the renamed Komodo-CANN kernel;
+the legacy file and package paths remain in place for compatibility. It is
+intentionally separate from plain Komodo and from the
+`aclnnWeightQuantBatchMatmulV3` probe.
 
 The current device kernel is a bring-up baseline for GPTQ W4A16:
 
@@ -20,8 +22,8 @@ stays live, and it writes only the final output columns. This is not yet the
 final high-throughput Cube-tiled design; it is the custom-op baseline needed
 before replacing the scalar accumulation loop with Cube tile consumption.
 
-The host tiler caps scalar launch ownership at `blockDim <= 8`. Earlier
-multi-block experiments exposed sparse/non-contiguous physical AIV block IDs on
+The host tiler no longer applies the old fixed eight-owner scalar launch cap.
+Earlier multi-block experiments exposed sparse/non-contiguous physical AIV block IDs on
 the local 910B runtime, so the device kernel maps `GetBlockIdx()` through
 `physical_id % tiling.block_dim` and then owns a contiguous packed-column range.
 Wider logical ownership such as 32 chunks left unwritten columns on this host.
@@ -442,6 +444,14 @@ For `K=512,N=1024`, the narrow tile is only enabled for decode-like
 `base_n=256`, while `rows=16` timed out in a clean run and rows `32/64/128`
 faulted with AICore `507015`. A `K=768,N=1024,rows<=8` probe also faulted with
 an MTE DDR out-of-range `507015`, so the N1024 gate remains exact to K512.
+
+The next non-reverse-engineered scheduler pass follows the public CANN W4A16
+basic-block controller more closely by removing Komodo-CANN's fixed eight-owner
+staging cap. Staged INT4 tile ownership is now bounded by the number of N tiles,
+Split-K shards, and runtime vector cores; workspace is still rejected when it
+would equal or exceed dense FP16 dequantization. This is intended for large-N
+Cube-consumer probes where eight AIV owners serialized too much packed-B tile
+production.
 
 Validated raw-op timing on NPU0 for `M=8,K=256,N=256,group_size=32,bias=True`
 improved from `63.67 ms` on the initial UB dequant-tile baseline to `10.33 ms`

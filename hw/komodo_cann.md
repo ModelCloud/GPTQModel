@@ -1,24 +1,28 @@
-# Komodo-CANN Kernel Notes
+# Cannoe Kernel Notes
 
-Date: 2026-04-30
+Date: 2026-05-02
 
-Komodo-CANN is a separate Ascend CANN kernel experiment. It does not change the
-plain Komodo backend or its runtime path.
+Cannoe is the renamed Ascend CANN kernel experiment formerly called
+Komodo-CANN. It remains separate from the plain Komodo backend and runtime path.
+The old `komodo_cann` spellings are compatibility aliases only.
 
 ## Selection
 
-- GPTQ backend: `BACKEND.GPTQ_KOMODO_CANN` / `gptq_komodo_cann`
-- AWQ backend: `BACKEND.AWQ_KOMODO_CANN` / `awq_komodo_cann`
-- Generic alias: `BACKEND.KOMODO_CANN` / `komodo_cann`
-- Benchmark flag: `scripts/benchmark_komodo_npu_ab.py --komodo-cann`
+- GPTQ backend: `BACKEND.GPTQ_CANNOE` / `gptq_cannoe`
+- AWQ backend: `BACKEND.AWQ_CANNOE` / `awq_cannoe`
+- Generic alias: `BACKEND.CANNOE` / `cannoe`
+- Legacy aliases: `BACKEND.GPTQ_KOMODO_CANN`, `BACKEND.AWQ_KOMODO_CANN`,
+  `BACKEND.KOMODO_CANN`, and the old string values.
+- Benchmark flag: `scripts/benchmark_komodo_npu_ab.py --cannoe`
 
 The current implementation subclasses the plain Komodo packed int4 plan only as
-a baseline plan format. Runtime dispatch is through `KomodoCannLinear` and
-`AwqKomodoCannLinear`, not through `KomodoLinear` or `AwqKomodoLinear`.
+a baseline plan format. Runtime dispatch is through `CannoeLinear` and
+`AwqCannoeLinear`, not through `KomodoLinear` or `AwqKomodoLinear`. The old
+`KomodoCannLinear` and `AwqKomodoCannLinear` class names remain aliases.
 
 ## CANN Prefetch Policy
 
-Komodo-CANN can issue CANN `torch.ops.npu.npu_prefetch` hints for eligible
+Cannoe can issue CANN `torch.ops.npu.npu_prefetch` hints for eligible
 activation, packed int4 weight, scale, offset, and fused-bias tensors before the
 native quantized matmul. This is off by default because host-issued prefetch
 probes regressed the steady-state microbenchmarks.
@@ -26,10 +30,13 @@ probes regressed the steady-state microbenchmarks.
 Environment controls:
 
 ```bash
-GPTQMODEL_KOMODO_CANN_PREFETCH=1          # enable Komodo-CANN prefetch probe
-GPTQMODEL_KOMODO_CANN_PREFETCH_MAX_BYTES  # override max bytes per tensor
-GPTQMODEL_KOMODO_CANN_PREFETCH_MIN_BYTES  # default: 4MiB
+GPTQMODEL_CANNOE_PREFETCH=1          # enable Cannoe prefetch probe
+GPTQMODEL_CANNOE_PREFETCH_MAX_BYTES  # override max bytes per tensor
+GPTQMODEL_CANNOE_PREFETCH_MIN_BYTES  # default: 4MiB
 ```
+
+The legacy `GPTQMODEL_KOMODO_CANN_*` environment names are still accepted when
+the new `GPTQMODEL_CANNOE_*` name is unset.
 
 On Ascend 910B, the default max prefetch window is derived from reported L2
 cache size and cube-core count:
@@ -88,6 +95,11 @@ Current Python-side Komodo-CANN records this plan per shape:
   L0A/L0B/L0C tile bytes, K tiles per Split-K shard, and the number of vector
   dequant tasks. These are the checks the future Ascend C op must satisfy before
   it writes any dequantized FP16 tile to GM/L2.
+- The Python planner and Ascend C host tiler no longer cap staged tile owners at
+  eight. Public CANN W4A16 source uses core-grid ownership over the N/M block
+  space rather than a fixed eight-owner staging limit, so large-N staged/Cube
+  experiments can now use up to the runtime vector-core count while still
+  bounding workspace below dense FP16 dequantization.
 - `strategy=planned_split_k_aiv_dequant_aic_matmul` means the shape is a
   candidate for the future Ascend C op. Runtime still uses the native quantized
   matmul fallback until that custom op lands.

@@ -210,8 +210,8 @@ def _run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | N
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate and build the Komodo-CANN Ascend C custom op.")
-    parser.add_argument("--output", type=Path, default=Path("/tmp/komodo_cann_w4a16_op"))
+    parser = argparse.ArgumentParser(description="Generate and build the Cannoe Ascend C custom op.")
+    parser.add_argument("--output", type=Path, default=Path("/tmp/cannoe_w4a16_op"))
     parser.add_argument("--msopgen", default=None)
     parser.add_argument("--cann-root", type=Path, default=None)
     parser.add_argument("--target", default=None, help="Optional generated build.sh target, for example install.")
@@ -221,18 +221,18 @@ def main() -> int:
     parser.add_argument(
         "--experimental-staged-dequant",
         action="store_true",
-        help="Compile guarded staged-dequant workspace hooks for Komodo-CANN fused-kernel bring-up.",
+        help="Compile guarded staged-dequant workspace hooks for Cannoe fused-kernel bring-up.",
     )
     parser.add_argument(
         "--experimental-cube-consumer",
         action="store_true",
-        help="Compile guarded Matmul/Cube consumer registration for Komodo-CANN fused-kernel bring-up.",
+        help="Compile guarded Matmul/Cube consumer registration for Cannoe fused-kernel bring-up.",
     )
     parser.add_argument(
         "--experimental-mixed-launch",
         action="store_true",
         help=(
-            "Compile the guarded Komodo-CANN kernel as a MIX_AIC_1_2 AIC/AIV launch. "
+            "Compile the guarded Cannoe kernel as a MIX_AIC_1_2 AIC/AIV launch. "
             "This implies --experimental-cube-consumer unless --experimental-mixed-aiv-baseline is used."
         ),
     )
@@ -409,7 +409,7 @@ def main() -> int:
         _enable_kernel_define(output, "KOMODO_CANN_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
 
     if args.no_build:
-        print(f"Generated project with Komodo-CANN overlay at {output}")
+        print(f"Generated project with Cannoe overlay at {output}")
         return 0
 
     if shutil.which("cmake") is None:
@@ -419,7 +419,7 @@ def main() -> int:
     if args.target:
         build_cmd.append(args.target)
     _run(build_cmd, cwd=output, env=env)
-    print(f"Built Komodo-CANN Ascend C project at {output}")
+    print(f"Built Cannoe Ascend C project at {output}")
     return 0
 
 
