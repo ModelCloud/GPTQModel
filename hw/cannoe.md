@@ -492,6 +492,32 @@ fresh CANN 9 non-mixed staged/vector package at the standard `base_n=256` tile
 width: positive `base_k=128` passed rows `1/4/8`, and negative `base_k=-128`
 passed rows `1/2/4/8` with worst `max_abs=0.015625`.
 
+## Native CANN Bias Fusion
+
+The 2026-05-03 two-NPU pass used only physical NPUs `0,1` after the device
+limit changed. A forced prepack-tile sweep did not justify a broader tile
+policy change: Qwen3.6-35B-A3B GPTQ tile `256` and Qwen3.6-27B AWQ tile `1536`
+both looked promising in one sweep, but paired repeats across NPU0/NPU1 lost on
+average. Keep the current auto tile rules.
+
+AWQ Cannoe can fuse FP16 bias into `npu_weight_quant_batchmatmul`, but the
+benefit is shape-sensitive. Group-32 Qwen3.6-27B AWQ got faster with fused bias
+but widened the drift envelope (`max_abs` moved from `1.0` to `2.0` on the
+synthetic projection benchmark), so Cannoe keeps group-32 AWQ bias unfused by
+default.
+
+Group-128 Qwen3.6-35B-A3B AWQ validated cleanly and is now fused by default:
+
+| Case set | Mode | Runs | Mean Cannoe total ms | Paired new/old | Max abs drift |
+|---|---|---:|---:|---:|---:|
+| Qwen3.6-35B-A3B AWQ | old unfused bias | 6 | 1.011527 | 1.0000 | 1.0 |
+| Qwen3.6-35B-A3B AWQ | group-128 fused bias | 6 | 0.842399 | 0.8338 | 1.0 |
+| Qwen3.6-27B AWQ | old unfused bias | 2 | 1.214885 | 1.0000 | 1.0 |
+| Qwen3.6-27B AWQ | group-32 gated unfused | 2 | 1.236357 | 1.0189 | 1.0 |
+
+Dense dequantized weight caching remained disabled throughout
+(`GPTQMODEL_KOMODO_CACHE_WEIGHTS=0`).
+
 ## CANN Profiling Read
 
 Use the profiling helper for single-shape CANN traces:

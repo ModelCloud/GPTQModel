@@ -1059,6 +1059,11 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
                 self._cann_native_hot_device = None
                 self._cann_native_hot_plan = None
         output = None
+        bias = self.bias
+        # Group-32 AWQ probes showed a wider drift envelope when CANN fused bias.
+        fuse_bias = bias is not None and _fuse_bias_enabled() and native_group_size == 128
+        if fuse_bias and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
+            bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
         if plan.fused_available:
             output = _cannoe_fused_matmul(
                 plan=plan,
@@ -1067,12 +1072,12 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
                 scales=scales,
                 offsets=offsets,
                 group_size=native_group_size,
-                bias=None,
+                bias=bias if fuse_bias else None,
             )
         if output is None:
             self._last_cann_path = "native_weight_quant_batchmatmul"
             if plan.prefetch_enabled:
-                _cannoe_prefetch(plan, x_flat, packed_weight, scales, offsets)
+                _cannoe_prefetch(plan, x_flat, packed_weight, scales, offsets, bias if fuse_bias else None)
             matmul_op = _npu_weight_quant_op()
             if plan.inner_precise == 0:
                 output = matmul_op(
@@ -1082,7 +1087,7 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
                     offsets,
                     None,
                     None,
-                    None,
+                    bias if fuse_bias else None,
                     native_group_size,
                 )
             else:
@@ -1093,14 +1098,14 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
                     offsets,
                     None,
                     None,
-                    None,
+                    bias if fuse_bias else None,
                     native_group_size,
                     int(plan.inner_precise),
                 )
         else:
             self._last_cann_path = "fused_w4a16_matmul"
 
-        if self.bias is not None:
+        if self.bias is not None and not fuse_bias:
             bias = self.bias
             if bias.device != output.device or bias.dtype != output.dtype:
                 bias = bias.to(device=output.device, dtype=output.dtype)
