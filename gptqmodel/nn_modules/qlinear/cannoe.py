@@ -38,6 +38,8 @@ _CANNOE_CUBE_CONSUMER_ENV = "GPTQMODEL_CANNOE_CUBE_CONSUMER"
 _CANNOE_CUBE_WORKSPACE_BYTES = 16 * 1024 * 1024
 _NPU_PREFETCH_OP_UNSET = object()
 _NPU_PREFETCH_OP = _NPU_PREFETCH_OP_UNSET
+_NPU_WEIGHT_QUANT_OP_UNSET = object()
+_NPU_WEIGHT_QUANT_OP = _NPU_WEIGHT_QUANT_OP_UNSET
 _FUSED_OP_UNSET = object()
 _FUSED_OP_CACHE = _FUSED_OP_UNSET
 _FUSED_OP_CACHE_KEY = None
@@ -226,6 +228,13 @@ def _npu_prefetch_op():
     except (AttributeError, RuntimeError):
         _NPU_PREFETCH_OP = None
     return _NPU_PREFETCH_OP
+
+
+def _npu_weight_quant_op():
+    global _NPU_WEIGHT_QUANT_OP
+    if _NPU_WEIGHT_QUANT_OP is _NPU_WEIGHT_QUANT_OP_UNSET:
+        _NPU_WEIGHT_QUANT_OP = torch.ops.npu.npu_weight_quant_batchmatmul
+    return _NPU_WEIGHT_QUANT_OP
 
 
 def _resolve_torch_op(qualified_name: str):
@@ -616,7 +625,19 @@ def _cannoe_weight_quant_matmul(
     group_size: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.ops.npu.npu_weight_quant_batchmatmul(
+    op = _npu_weight_quant_op()
+    if plan.inner_precise == 0:
+        return op(
+            x,
+            weight,
+            scales,
+            offsets,
+            None,
+            None,
+            bias,
+            group_size,
+        )
+    return op(
         x,
         weight,
         scales,
@@ -636,8 +657,11 @@ class _CannoePlanMixin:
         result = super().clear_native_cache()
         if hasattr(self, "_cann_plan_cache"):
             self._cann_plan_cache.clear()
+            self._cann_hot_plan_fast_key = None
             self._cann_hot_plan_key = None
             self._cann_hot_plan = None
+            self._cann_native_hot_device = None
+            self._cann_native_hot_plan = None
         return result
 
     def _cann_plan(
@@ -646,6 +670,10 @@ class _CannoePlanMixin:
         group_size: int,
         zero_offsets: bool = False,
     ) -> CannoeTilingPlan:
+        fast_key = (x_flat.device, x_flat.shape[0], group_size, bool(zero_offsets))
+        if getattr(self, "_cann_hot_plan_fast_key", None) == fast_key:
+            return self._cann_hot_plan
+
         env_key = (
             *_cannoe_env_values(
                 _CANNOE_PREFETCH_ENV,
@@ -691,6 +719,7 @@ class _CannoePlanMixin:
                 zero_offsets=zero_offsets,
             )
             self._cann_plan_cache[key] = cached
+        self._cann_hot_plan_fast_key = fast_key
         self._cann_hot_plan_key = hot_key
         self._cann_hot_plan = cached
         self._last_cann_plan = cached
@@ -724,8 +753,11 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         kwargs.setdefault("backend", BACKEND.GPTQ_CANNOE)
         super().__init__(*args, **kwargs)
         self._cann_plan_cache: dict = {}
+        self._cann_hot_plan_fast_key = None
         self._cann_hot_plan_key = None
         self._cann_hot_plan = None
+        self._cann_native_hot_device = None
+        self._cann_native_hot_plan = None
         self._last_cann_plan: CannoeTilingPlan | None = None
         self._last_cann_path: str | None = None
 
@@ -741,11 +773,26 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         packed_weight, scales, offsets, native_group_size, input_perm = self._native_plan(
             device=x_flat.device, dtype=compute_dtype
         )
-        plan = self._cann_plan(
-            x_flat,
-            native_group_size,
-            zero_offsets=bool(self.sym),
-        )
+        zero_offsets = bool(self.sym)
+        plan = self._cann_native_hot_plan
+        if (
+            plan is None
+            or self._cann_native_hot_device != x_flat.device
+            or plan.rows != x_flat.shape[0]
+            or plan.group_size != native_group_size
+            or plan.zero_offsets != zero_offsets
+        ):
+            plan = self._cann_plan(
+                x_flat,
+                native_group_size,
+                zero_offsets=zero_offsets,
+            )
+            if not plan.fused_available and not plan.prefetch_enabled:
+                self._cann_native_hot_device = x_flat.device
+                self._cann_native_hot_plan = plan
+            else:
+                self._cann_native_hot_device = None
+                self._cann_native_hot_plan = None
         if input_perm is not None:
             x_flat = x_flat.index_select(1, input_perm)
         bias = self.bias
@@ -753,28 +800,45 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         if fuse_bias and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
             bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
         self._maybe_schedule_lookahead(compute_dtype)
-        out = _cannoe_fused_matmul(
-            plan=plan,
-            x=x_flat,
-            packed_weight=packed_weight,
-            scales=scales,
-            offsets=offsets,
-            group_size=native_group_size,
-            bias=bias if fuse_bias else None,
-        )
-        if out is None:
-            self._last_cann_path = "native_weight_quant_batchmatmul"
-            if plan.prefetch_enabled:
-                _cannoe_prefetch(plan, x_flat, packed_weight, scales, offsets, bias if fuse_bias else None)
-            out = _cannoe_weight_quant_matmul(
+        out = None
+        if plan.fused_available:
+            out = _cannoe_fused_matmul(
                 plan=plan,
                 x=x_flat,
-                weight=packed_weight,
+                packed_weight=packed_weight,
                 scales=scales,
                 offsets=offsets,
                 group_size=native_group_size,
                 bias=bias if fuse_bias else None,
             )
+        if out is None:
+            self._last_cann_path = "native_weight_quant_batchmatmul"
+            if plan.prefetch_enabled:
+                _cannoe_prefetch(plan, x_flat, packed_weight, scales, offsets, bias if fuse_bias else None)
+            matmul_op = _npu_weight_quant_op()
+            if plan.inner_precise == 0:
+                out = matmul_op(
+                    x_flat,
+                    packed_weight,
+                    scales,
+                    offsets,
+                    None,
+                    None,
+                    bias if fuse_bias else None,
+                    native_group_size,
+                )
+            else:
+                out = matmul_op(
+                    x_flat,
+                    packed_weight,
+                    scales,
+                    offsets,
+                    None,
+                    None,
+                    bias if fuse_bias else None,
+                    native_group_size,
+                    int(plan.inner_precise),
+                )
         else:
             self._last_cann_path = "fused_w4a16_matmul"
         out = out.reshape(out_shape)
@@ -914,8 +978,11 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
         kwargs.setdefault("backend", BACKEND.AWQ_CANNOE)
         super().__init__(*args, **kwargs)
         self._cann_plan_cache: dict = {}
+        self._cann_hot_plan_fast_key = None
         self._cann_hot_plan_key = None
         self._cann_hot_plan = None
+        self._cann_native_hot_device = None
+        self._cann_native_hot_plan = None
         self._last_cann_plan: CannoeTilingPlan | None = None
         self._last_cann_path: str | None = None
 
@@ -932,28 +999,60 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
             x_flat = x_flat.contiguous()
 
         packed_weight, scales, offsets, native_group_size, _ = self._native_plan(device=device, dtype=compute_dtype)
-        plan = self._cann_plan(x_flat, native_group_size)
-        output = _cannoe_fused_matmul(
-            plan=plan,
-            x=x_flat,
-            packed_weight=packed_weight,
-            scales=scales,
-            offsets=offsets,
-            group_size=native_group_size,
-            bias=None,
-        )
+        plan = self._cann_native_hot_plan
+        if (
+            plan is None
+            or self._cann_native_hot_device != x_flat.device
+            or plan.rows != x_flat.shape[0]
+            or plan.group_size != native_group_size
+            or plan.zero_offsets
+        ):
+            plan = self._cann_plan(x_flat, native_group_size)
+            if not plan.fused_available and not plan.prefetch_enabled:
+                self._cann_native_hot_device = x_flat.device
+                self._cann_native_hot_plan = plan
+            else:
+                self._cann_native_hot_device = None
+                self._cann_native_hot_plan = None
+        output = None
+        if plan.fused_available:
+            output = _cannoe_fused_matmul(
+                plan=plan,
+                x=x_flat,
+                packed_weight=packed_weight,
+                scales=scales,
+                offsets=offsets,
+                group_size=native_group_size,
+                bias=None,
+            )
         if output is None:
             self._last_cann_path = "native_weight_quant_batchmatmul"
             if plan.prefetch_enabled:
                 _cannoe_prefetch(plan, x_flat, packed_weight, scales, offsets)
-            output = _cannoe_weight_quant_matmul(
-                plan=plan,
-                x=x_flat,
-                weight=packed_weight,
-                scales=scales,
-                offsets=offsets,
-                group_size=native_group_size,
-            )
+            matmul_op = _npu_weight_quant_op()
+            if plan.inner_precise == 0:
+                output = matmul_op(
+                    x_flat,
+                    packed_weight,
+                    scales,
+                    offsets,
+                    None,
+                    None,
+                    None,
+                    native_group_size,
+                )
+            else:
+                output = matmul_op(
+                    x_flat,
+                    packed_weight,
+                    scales,
+                    offsets,
+                    None,
+                    None,
+                    None,
+                    native_group_size,
+                    int(plan.inner_precise),
+                )
         else:
             self._last_cann_path = "fused_w4a16_matmul"
 
