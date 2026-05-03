@@ -29,6 +29,14 @@ from ...quantization.fallback_smooth import smooth_block
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
+from .komodo import (
+    _assert_fp16_inference_input,
+    _native_int4_enabled,
+    _native_prepack_tile_n,
+    _npu_int4_ops_available,
+    _packed_weight_empty_like_tile,
+    _weight_quant_matmul,
+)
 
 
 try:
@@ -94,6 +102,8 @@ _GGUF_SIGN_ONLY_LUT = (
     np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="little").astype(np.int8) * 2 - 1
 )
 _GGUF_SIGN_ONLY_TORCH_LUT: dict[str, torch.Tensor] = {}
+_GGUF_Q4_0_NATIVE_GROUP_SIZE = 32
+_GGUF_Q4_0_NATIVE_PACK_FACTOR = 8
 
 
 def _normalize_gguf_bits(bits) -> tuple[GGUFBits, str]:
@@ -730,6 +740,10 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self.gguf_fused_autotune_warmup = self.GGUF_FUSED_AUTOTUNE_WARMUP
         self.gguf_fused_autotune_iters = self.GGUF_FUSED_AUTOTUNE_ITERS
         self.gguf_fused_autotune_margin = self.GGUF_FUSED_AUTOTUNE_MARGIN
+        self._native_q4_0_plan_cache: dict[
+            tuple[torch.device, torch.dtype],
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, int],
+        ] = {}
 
         super().__init__(
             bits=int(bits_spec),
@@ -772,7 +786,12 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             self.bias = None
 
     def clear_weight_cache(self) -> None:
-        return None
+        self._native_q4_0_plan_cache.clear()
+
+    def _apply(self, fn):
+        result = super()._apply(fn)
+        self.clear_weight_cache()
+        return result
 
     def post_init(self):
         self.clear_weight_cache()
@@ -1156,6 +1175,102 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
         return torch.matmul(x_flat, weight)
 
+    def _can_use_native_q4_0(self, x_flat: torch.Tensor) -> bool:
+        if not _native_int4_enabled() or not _npu_int4_ops_available():
+            return False
+        if self.training or x_flat.requires_grad or x_flat.device.type != "npu":
+            return False
+        if x_flat.dtype != torch.float16 or x_flat.shape[-1] != self.in_features:
+            return False
+        if self.gguf_tensor_qtype != "Q4_0":
+            return False
+        if self.padded_in_features != self.in_features:
+            return False
+        return self.out_features % _GGUF_Q4_0_NATIVE_PACK_FACTOR == 0
+
+    def _build_native_q4_0_plan(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        if self.gguf_tensor_qtype != "Q4_0":
+            raise RuntimeError("GGUF native int4 plan is only available for q4_0 tensors.")
+        if self.padded_in_features != self.in_features:
+            raise RuntimeError("GGUF native int4 plan requires in_features to match padded_in_features.")
+        if self.out_features % _GGUF_Q4_0_NATIVE_PACK_FACTOR != 0:
+            raise RuntimeError(
+                "GGUF native int4 plan requires out_features to be divisible by "
+                f"{_GGUF_Q4_0_NATIVE_PACK_FACTOR}; got {self.out_features}."
+            )
+
+        blocks, _, _ = self._reshape_blocks(device=device)
+        tile_n = _native_prepack_tile_n(self.out_features, _GGUF_Q4_0_NATIVE_PACK_FACTOR)
+        packed_weight = None
+        scale_tiles: list[torch.Tensor] = []
+
+        for start in range(0, self.out_features, tile_n):
+            width = min(tile_n, self.out_features - start)
+            block_tile = blocks.narrow(0, start, width)
+            scales = block_tile[..., :2].contiguous().view(torch.float16).squeeze(-1)
+            scale_tiles.append(scales.transpose(0, 1).to(device=device, dtype=dtype).contiguous())
+
+            qs = block_tile[..., 2:]
+            low = torch.bitwise_and(qs, 0x0F)
+            high = _torch_right_shift(qs, 4)
+            codes = torch.cat((low, high), dim=-1).to(torch.int32)
+            signed_weight = (
+                codes.sub(8)
+                .permute(1, 2, 0)
+                .reshape(self.in_features, width)
+                .contiguous()
+            )
+            packed_tile = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
+            if packed_weight is None:
+                packed_weight = _packed_weight_empty_like_tile(
+                    packed_tile,
+                    self.out_features,
+                    _GGUF_Q4_0_NATIVE_PACK_FACTOR,
+                )
+            packed_weight.narrow(
+                1,
+                start // _GGUF_Q4_0_NATIVE_PACK_FACTOR,
+                width // _GGUF_Q4_0_NATIVE_PACK_FACTOR,
+            ).copy_(packed_tile)
+
+        if packed_weight is None:
+            raise RuntimeError("GGUF native int4 plan requested for an empty weight.")
+
+        scales = torch.cat(scale_tiles, dim=1) if len(scale_tiles) > 1 else scale_tiles[0]
+        offsets = torch.zeros_like(scales)
+        return packed_weight, scales, offsets, _GGUF_Q4_0_NATIVE_GROUP_SIZE
+
+    def _native_q4_0_plan(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        key = (torch.device(device), dtype)
+        cached = self._native_q4_0_plan_cache.get(key)
+        if cached is not None:
+            return cached
+
+        plan = self._build_native_q4_0_plan(device=device, dtype=dtype)
+        self._native_q4_0_plan_cache[key] = plan
+        return plan
+
+    def _forward_native_q4_0(self, x_flat: torch.Tensor) -> torch.Tensor:
+        _assert_fp16_inference_input(x_flat, self.__class__.__name__)
+        if not x_flat.is_contiguous():
+            x_flat = x_flat.contiguous()
+
+        packed_weight, scales, offsets, group_size = self._native_q4_0_plan(
+            device=x_flat.device,
+            dtype=torch.float16,
+        )
+        return _weight_quant_matmul(x_flat, packed_weight, scales, offsets, group_size)
+
     def _forward_fused_k(self, x_flat: torch.Tensor) -> torch.Tensor:
         target_dtype = x_flat.dtype
         blocks, _, num_blocks = self._reshape_blocks(device=x_flat.device)
@@ -1197,7 +1312,9 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
 
-        if self._should_use_fused_k_forward(x_flat):
+        if self._can_use_native_q4_0(x_flat):
+            output = self._forward_native_q4_0(x_flat)
+        elif self._should_use_fused_k_forward(x_flat):
             output = self._forward_fused_k(x_flat)
         else:
             output = self._forward_dequant_matmul(x_flat)

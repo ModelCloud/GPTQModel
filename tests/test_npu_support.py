@@ -644,8 +644,8 @@ def _make_awq_module(dtype: torch.dtype) -> AwqTorchLinear:
     return module.eval()
 
 
-def _make_paro_module(dtype: torch.dtype) -> ParoLinear:
-    module = _make_awq_like_module(ParoLinear, dtype, seed=350, krot=1)
+def _make_paro_module(dtype: torch.dtype, **kwargs) -> ParoLinear:
+    module = _make_awq_like_module(ParoLinear, dtype, seed=350, krot=1, **kwargs)
     theta = torch.linspace(-0.15, 0.15, module.in_features // 2, dtype=module.theta.dtype).view_as(module.theta)
     channel_scales = torch.linspace(0.95, 1.05, module.in_features, dtype=module.channel_scales.dtype).view_as(
         module.channel_scales
@@ -959,7 +959,7 @@ def test_npu_explicit_komodo_rejects_bfloat16_dtype(quant_method, fmt):
         )
 
 
-def test_npu_auto_selects_paroquant_torch_dense_fallback():
+def test_npu_auto_selects_paroquant_native_runtime():
     qlinear_cls = select_quant_linear(
         bits=4,
         group_size=128,
@@ -973,6 +973,7 @@ def test_npu_auto_selects_paroquant_torch_dense_fallback():
     )
 
     assert qlinear_cls is ParoLinear
+    assert issubclass(qlinear_cls, AwqKomodoLinear)
 
 
 def test_npu_auto_selects_gguf_torch():
@@ -1683,12 +1684,75 @@ def test_npu_torch_paro_forward_matches_cpu(dtype):
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16])
+def test_npu_paroquant_uses_komodo_native_int4_after_rotation(dtype, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_PREPACK_TILE_N", "16")
+    baseline_cpu = _make_paro_module(dtype, group_size=32).eval()
+    candidate = copy.deepcopy(baseline_cpu).to(_test_npu_device(), dtype=dtype).eval()
+    assert candidate.native_plan_prepacked(device=_test_npu_device(), dtype=dtype)
+
+    x_cpu = torch.randn(2, 3, baseline_cpu.in_features, dtype=dtype)
+    x = x_cpu.to(_test_npu_device())
+    with torch.inference_mode():
+        expected = baseline_cpu(x_cpu)
+        original_forward_dense = candidate._forward_dense
+        try:
+            candidate._forward_dense = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("Expected ParoQuant NPU native int4 path, but dense fallback was used.")
+            )
+            actual = candidate(x)
+            repeat = candidate(x)
+            torch.npu.synchronize()
+        finally:
+            candidate._forward_dense = original_forward_dense
+
+    torch.testing.assert_close(actual.cpu(), expected, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(repeat.cpu(), expected, atol=2e-2, rtol=2e-2)
+    assert (x.device, dtype) in candidate._native_plan_cache
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("bits", ["q1_0", "q4_0", "q4_k_m", "q5_k_m", "q6_k", "q8_0"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_npu_torch_gguf_forward_matches_cpu_without_fallback(bits, dtype):
     module = _make_gguf_module(bits, dtype)
     x_cpu = torch.randn(2, 3, module.in_features, dtype=dtype)
     _assert_npu_forward_matches_cpu(module, x_cpu, atol=8e-3, rtol=8e-3)
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("dtype", [torch.float16])
+def test_npu_torch_gguf_q4_0_uses_native_int4(dtype, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
+    monkeypatch.setenv("GPTQMODEL_KOMODO_PREPACK_TILE_N", "16")
+    baseline_cpu = _make_gguf_module("q4_0", dtype).eval()
+    candidate = copy.deepcopy(baseline_cpu).to(_test_npu_device(), dtype=dtype).eval()
+
+    x_cpu = torch.randn(2, 3, baseline_cpu.in_features, dtype=dtype)
+    x = x_cpu.to(_test_npu_device())
+    with torch.inference_mode():
+        expected = baseline_cpu(x_cpu)
+        original_dense = candidate._forward_dequant_matmul
+        original_fused = candidate._forward_fused_k
+        try:
+            candidate._forward_dequant_matmul = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("Expected GGUF q4_0 NPU native int4 path, but dense fallback was used.")
+            )
+            candidate._forward_fused_k = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("Expected GGUF q4_0 NPU native int4 path, but fused fallback was used.")
+            )
+            actual = candidate(x)
+            repeat = candidate(x)
+            torch.npu.synchronize()
+        finally:
+            candidate._forward_dequant_matmul = original_dense
+            candidate._forward_fused_k = original_fused
+
+    torch.testing.assert_close(actual.cpu(), expected, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(repeat.cpu(), expected, atol=2e-2, rtol=2e-2)
+    assert (x.device, dtype) in candidate._native_q4_0_plan_cache
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")

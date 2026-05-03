@@ -6,7 +6,7 @@
 # https://arxiv.org/html/2511.10645v2
 # https://github.com/z-lab/paroquant
 
-"""ParoQuant CUDA-backed quantized linear layer."""
+"""ParoQuant quantized linear layer with CUDA and NPU fast paths."""
 
 from __future__ import annotations
 
@@ -17,12 +17,11 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.paroquant import apply_paroquant_rotation, build_identity_rotation_buffers, is_identity_rotation
 from .gemm_awq import FP32_ACCUM, _awq_cuda_gemm_forward
-from .torch_awq import AwqTorchLinear
+from .komodo import AwqKomodoLinear, _assert_fp16_inference_input, _weight_quant_matmul
 
 
 # Rotated activations benchmark faster with a shallower K split than generic AWQ.
@@ -38,7 +37,7 @@ _PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE = env_flag(
 )
 
 
-class ParoLinear(AwqTorchLinear):
+class ParoLinear(AwqKomodoLinear):
     """Run ParoQuant inference by rotating inputs and reusing AWQ packed GEMM."""
 
     SUPPORTS_BACKENDS = [BACKEND.PAROQUANT_CUDA]
@@ -171,6 +170,29 @@ class ParoLinear(AwqTorchLinear):
         self._runtime_theta = None
         self._runtime_channel_scales = None
 
+    def _apply(self, fn):
+        result = super()._apply(fn)
+        self._clear_rotation_runtime_cache()
+        self._rotation_identity = is_identity_rotation(self.theta, self.channel_scales)
+        return result
+
+    def _maybe_eager_native_prepack(self) -> bool:
+        if self.scales is not None and self.scales.dtype != torch.float16:
+            return False
+        return super()._maybe_eager_native_prepack()
+
+    def _can_prefetch_native_plan(
+        self, *, device: torch.device, dtype: torch.dtype, allow_training: bool = False
+    ) -> bool:
+        if dtype != torch.float16 or (self.scales is not None and self.scales.dtype != torch.float16):
+            return False
+        return super()._can_prefetch_native_plan(device=device, dtype=dtype, allow_training=allow_training)
+
+    def _can_use_native_int4(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
+        if x.dtype != torch.float16 or (self.scales is not None and self.scales.dtype != torch.float16):
+            return False
+        return super()._can_use_native_int4(x, compute_dtype)
+
     def _ensure_runtime_dtype(self, device: torch.device, dtype: torch.dtype) -> None:
         if self.scales is not None and (self.scales.device != device or self.scales.dtype != dtype or not self.scales.is_contiguous()):
             self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
@@ -217,20 +239,45 @@ class ParoLinear(AwqTorchLinear):
 
     def _forward_dense(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Fallback reference path: dequantize AWQ weights and run dense matmul."""
-        weight = dequantize_gemm(
-            qweight=self.qweight,
-            qzeros=self.qzeros,
-            scales=self.scales,
-            bits=self.bits,
-            group_size=self.group_size,
-        )
-        if weight.dtype != x_flat.dtype or weight.device != x_flat.device:
-            weight = weight.to(device=x_flat.device, dtype=x_flat.dtype)
+        input_dtype = x_flat.dtype
+        compute_dtype = input_dtype if input_dtype in (torch.float16, torch.bfloat16) else torch.float16
+        if x_flat.dtype != compute_dtype or not x_flat.is_contiguous():
+            x_flat = x_flat.to(dtype=compute_dtype).contiguous()
+
+        self._ensure_runtime_dtype(device=x_flat.device, dtype=compute_dtype)
+        weight = self._dequantized_weight(device=x_flat.device, dtype=compute_dtype)
 
         out = torch.matmul(x_flat, weight)
         if self.bias is not None:
-            out = out + self.bias.to(device=x_flat.device, dtype=x_flat.dtype)
+            out = out + self.bias.to(device=x_flat.device, dtype=compute_dtype)
+        if out.dtype != input_dtype:
+            out = out.to(dtype=input_dtype)
         return out
+
+    def _forward_npu_native(self, rotated_flat: torch.Tensor, original_shape: torch.Size, adapter_input: torch.Tensor):
+        """Run rotated activations through Komodo's native NPU AWQ int4 path."""
+        _assert_fp16_inference_input(rotated_flat, self.__class__.__name__)
+        compute_dtype = torch.float16
+        if rotated_flat.dtype != compute_dtype or not rotated_flat.is_contiguous():
+            rotated_flat = rotated_flat.to(dtype=compute_dtype).contiguous()
+
+        packed_weight, scales, offsets, native_group_size, _ = self._native_plan(
+            device=rotated_flat.device,
+            dtype=compute_dtype,
+        )
+        out = _weight_quant_matmul(rotated_flat, packed_weight, scales, offsets, native_group_size)
+
+        if self.bias is not None:
+            bias = self.bias
+            if bias.device != out.device or bias.dtype != out.dtype:
+                bias = bias.to(device=out.device, dtype=out.dtype)
+            out = out + bias
+
+        if self.adapter:
+            out = self.adapter.apply(x=adapter_input, out=out)
+
+        self._maybe_schedule_lookahead(compute_dtype)
+        return out.reshape(original_shape)
 
     def _forward_cuda_awq_kernel(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
         """Fast path that feeds rotated activations into the AWQ CUDA GEMM kernel."""
@@ -283,6 +330,10 @@ class ParoLinear(AwqTorchLinear):
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
         rotated = self._rotate_inputs(x_flat)
+
+        compute_dtype = torch.float16
+        if self._can_use_native_int4(rotated, compute_dtype):
+            return self._forward_npu_native(rotated, original_shape, x_flat)
 
         out = self._forward_cuda_awq_kernel(rotated)
         if out is None:
