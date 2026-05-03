@@ -168,6 +168,9 @@ class _KomodoNativePlanMixin:
     def _native_key(self, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
         return torch.device(device), dtype
 
+    def _native_prepack_tile_n(self) -> int:
+        return _native_prepack_tile_n(self.out_features, self.pack_factor)
+
     def native_plan_prepacked(self, *, device: torch.device | None = None, dtype: torch.dtype = torch.float16) -> bool:
         if device is None:
             device = self.runtime_device()
@@ -680,7 +683,7 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         if input_perm_cpu is not None:
             input_perm = input_perm_cpu.to(device=device, non_blocking=self.g_idx.device.type == "cpu")
 
-        tile_n = _native_prepack_tile_n(self.out_features, self.pack_factor)
+        tile_n = self._native_prepack_tile_n()
         packed_weight = None
         for start in range(0, self.out_features, tile_n):
             width = min(tile_n, self.out_features - start)
@@ -729,7 +732,7 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
 
         group_size = 16
         group_count = self.in_features // group_size
-        tile_n = _native_prepack_tile_n(self.out_features, self.pack_factor)
+        tile_n = self._native_prepack_tile_n()
         packed_stack = None
 
         for start in range(0, self.out_features, tile_n):
@@ -1140,7 +1143,7 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
     def _build_native_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativePlan:
         max_val = (1 << self.bits) - 1
 
-        tile_n = _native_prepack_tile_n(self.out_features, self.pack_factor)
+        tile_n = self._native_prepack_tile_n()
         packed_weight = None
         izeros_tiles = []
         for start in range(0, self.out_features, tile_n):

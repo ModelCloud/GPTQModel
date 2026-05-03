@@ -12,6 +12,7 @@ from ...utils.backend import BACKEND
 from .komodo import (
     AwqKomodoLinear,
     KomodoLinear,
+    _KOMODO_PREPACK_TILE_N_ENV,
     _assert_fp16_inference_input,
     _fuse_bias_enabled,
     _weight_quant_matmul,
@@ -34,6 +35,7 @@ _CANNOE_V3_ENV = "GPTQMODEL_CANNOE_V3"
 _CANNOE_INNER_PRECISE_ENV = "GPTQMODEL_CANNOE_INNER_PRECISE"
 _CANNOE_STAGED_DEQUANT_ENV = "GPTQMODEL_CANNOE_STAGED_DEQUANT"
 _CANNOE_CUBE_CONSUMER_ENV = "GPTQMODEL_CANNOE_CUBE_CONSUMER"
+_CANNOE_PREPACK_TILE_N_ENV = "GPTQMODEL_CANNOE_PREPACK_TILE_N"
 # 910B CANN reserves this system workspace before the user workspace returned by GetUserWorkspace().
 _CANNOE_CUBE_WORKSPACE_BYTES = 16 * 1024 * 1024
 _NPU_PREFETCH_OP_UNSET = object()
@@ -652,6 +654,48 @@ def _cannoe_weight_quant_matmul(
 
 class _CannoePlanMixin:
     _cann_plan_cache: dict
+
+    def _normalize_cannoe_prepack_tile_n(self, tile_n: int) -> int:
+        if self.out_features % self.pack_factor != 0:
+            return super()._native_prepack_tile_n()
+        if tile_n <= 0 or tile_n >= self.out_features:
+            return self.out_features
+        tile_n = (tile_n // self.pack_factor) * self.pack_factor
+        return max(self.pack_factor, tile_n)
+
+    def _auto_cannoe_prepack_tile_n(self) -> int | None:
+        raw = _cannoe_env(_CANNOE_PREPACK_TILE_N_ENV)
+        if raw is not None:
+            try:
+                return int(raw)
+            except ValueError as err:
+                raise RuntimeError(f"{_CANNOE_PREPACK_TILE_N_ENV} must be an integer; got `{raw}`.") from err
+        if _cannoe_env(_KOMODO_PREPACK_TILE_N_ENV) is not None:
+            return None
+
+        drop_sources = bool(getattr(self, "_drop_source_weights_after_native_pack", False))
+        quant_type = getattr(self, "QUANT_TYPE", "")
+        if quant_type == "cannoe":
+            if self.group_size == 32 and (
+                (self.in_features == 5120 and self.out_features in {1024, 6144, 17408})
+                or (self.in_features == 17408 and self.out_features == 5120)
+            ):
+                return 2048 if drop_sources else 512
+            if not drop_sources and self.in_features == 1024 and self.out_features == 1024:
+                return 512
+        elif quant_type == "awq_cannoe":
+            if self.group_size == 32 and (
+                (self.in_features == 5120 and self.out_features in {1024, 6144, 17408})
+                or (self.in_features == 17408 and self.out_features == 5120)
+            ):
+                return 2048 if drop_sources else None
+        return None
+
+    def _native_prepack_tile_n(self) -> int:
+        tile_n = self._auto_cannoe_prepack_tile_n()
+        if tile_n is None:
+            return super()._native_prepack_tile_n()
+        return self._normalize_cannoe_prepack_tile_n(tile_n)
 
     def clear_native_cache(self):
         result = super().clear_native_cache()
