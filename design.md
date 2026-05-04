@@ -1,21 +1,26 @@
-# Cannoe Design and Optimization Log
+# Kernel Design and Optimization Log
 
 Date: 2026-04-30
 
-This file records the Cannoe hotspot work and the design contract for the
-next real speed step: a fused Ascend C W4A16 matmul path that consumes INT4
-weight tiles inside the device kernel instead of materializing full FP16 dense
-weights in GM/L2.
+This file records kernel implementation design rules and optimization history.
+The quantization memory contract applies to every quantized kernel backend in
+this repository, including Komodo, Cannoe, Marlin/Machete-style kernels, and any
+future fused implementation.
+
+The current detailed hotspot log is Cannoe-specific because that is where the
+latest Ascend C W4A16 work is happening. The global contract below is not
+Cannoe-specific.
 
 The file and backend use the canonical `cannoe` name.
 
 ## Non-Negotiable Quantization Contract
 
-Cannoe must never cache a fully dequantized dense weight matrix for reuse by a
-later forward operation. Under no circumstances should a `K x N` FP16/BF16
-dequantized weight copy become persistent model state, a default runtime cache,
-or a hidden optimization. Doing so defeats the premise of quantization: weights
-are supposed to remain resident in a smaller VRAM footprint.
+Quantized kernel implementations must never cache a fully dequantized dense
+weight matrix for reuse by a later forward operation. Under no circumstances
+should a `K x N` FP16/BF16 dequantized weight copy become persistent model
+state, a default runtime cache, or a hidden optimization. Doing so defeats the
+premise of quantization: weights are supposed to remain resident in a smaller
+VRAM footprint.
 
 The acceptable hierarchy is:
 
@@ -31,7 +36,7 @@ The acceptable hierarchy is:
 Quantization is not just a pure-speed feature. The goal is useful speed while
 preserving the massive VRAM reduction from quantized resident weights. Any
 optimization that wins latency by keeping dense dequantized weights around by
-default is a regression, not a Cannoe success.
+default is a regression, not a kernel success.
 
 ## Current State
 
