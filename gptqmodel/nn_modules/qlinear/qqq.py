@@ -454,50 +454,10 @@ class QQQTorchLinear(QQQLinear):
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.QQQ_TORCH)
         super().__init__(*args, **kwargs)
-        self._torch_weight_cache: dict[
-            tuple[torch.device, torch.dtype],
-            tuple[tuple, torch.Tensor, torch.Tensor],
-        ] = {}
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         return True, None
-
-    def _apply(self, fn):
-        result = super()._apply(fn)
-        self.clear_weight_cache()
-        return result
-
-    def post_init(self):
-        super().post_init()
-        self.clear_weight_cache()
-
-    def pack(self, linear: torch.nn.Module, scales: torch.Tensor, s_extra=None):
-        result = super().pack(linear, scales, s_extra)
-        self.clear_weight_cache()
-        return result
-
-    def clear_weight_cache(self) -> None:
-        if hasattr(self, "_torch_weight_cache"):
-            self._torch_weight_cache.clear()
-
-    def _torch_weight_cache_signature(self) -> tuple:
-        signature = []
-        for name in ("B", "s_channel", "s_group"):
-            tensor = getattr(self, name, None)
-            if tensor is None:
-                signature.append(None)
-                continue
-            signature.append(
-                (
-                    tensor.data_ptr(),
-                    tuple(tensor.shape),
-                    tensor.device,
-                    tensor.dtype,
-                    tensor._version,
-                )
-            )
-        return tuple(signature)
 
     def _unpack_weight_codes(self) -> torch.Tensor:
         unpacked = _unpack_uint4(self.B)
@@ -524,12 +484,6 @@ class QQQTorchLinear(QQQLinear):
     def _dequantize_weight_for_torch(self, *, device: torch.device | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         target_device = self.B.device if device is None else torch.device(device)
         target_dtype = torch.float32
-        cache_key = (target_device, target_dtype)
-        signature = self._torch_weight_cache_signature()
-        cached = self._torch_weight_cache.get(cache_key)
-        if cached is not None and cached[0] == signature:
-            return cached[1], cached[2]
-
         codes = self._unpack_weight_codes()
         s_channel = self._unpermute_scales(self.s_channel, self._scale_perm_single_i).to(torch.float32)
 
@@ -550,8 +504,6 @@ class QQQTorchLinear(QQQLinear):
         if s_channel.device != target_device or s_channel.dtype != target_dtype or not s_channel.is_contiguous():
             s_channel = s_channel.to(device=target_device, dtype=target_dtype).contiguous()
 
-        if not self.training:
-            self._torch_weight_cache[cache_key] = (signature, weight.detach(), s_channel.detach())
         return weight, s_channel
 
     def forward(self, A):

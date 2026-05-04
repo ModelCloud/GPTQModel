@@ -1220,7 +1220,6 @@ def test_npu_komodo_gptq_matches_torch_baseline(dtype, monkeypatch):
 def test_npu_komodo_gptq_group16_uses_packed_native_without_dense_cache_by_default(dtype, desc_act, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
     monkeypatch.delenv("GPTQMODEL_KOMODO_NATIVE_GROUP16", raising=False)
-    monkeypatch.delenv("GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE", raising=False)
     monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
     baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=16).eval()
     if desc_act:
@@ -1277,10 +1276,10 @@ def test_npu_komodo_gptq_group16_uses_packed_native_without_dense_cache_by_defau
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("dtype", [torch.float16])
-def test_npu_komodo_gptq_group16_uses_exact_cached_fallback_when_enabled(dtype, monkeypatch):
+def test_npu_komodo_gptq_group16_does_not_cache_dense_fallback(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_GROUP16", "0")
-    monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE", "1")
+    monkeypatch.setenv("GPTQ_TORCH_CACHE_WEIGHTS", "1")
     monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
     baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=16).eval()
     candidate = KomodoLinear(
@@ -1311,7 +1310,7 @@ def test_npu_komodo_gptq_group16_uses_exact_cached_fallback_when_enabled(dtype, 
     torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
     torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
     assert candidate._native_plan_cache == {}
-    assert dtype in candidate._cached_weights
+    assert candidate._cached_weights == {}
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
@@ -1570,7 +1569,7 @@ def test_npu_komodo_awq_matches_torch_baseline(dtype, monkeypatch):
 
     torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
     torch.testing.assert_close(repeat.cpu(), expected.cpu(), atol=5e-3, rtol=5e-3)
-    assert candidate._cached_weights == {}
+    assert not hasattr(candidate, "_cached_weights")
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
@@ -1781,7 +1780,7 @@ def test_npu_torch_qqq_forward_matches_cpu_without_fallback(group_size, dtype, c
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("group_size", [-1, 128])
-def test_npu_torch_qqq_reuses_cached_runtime_weight(group_size):
+def test_npu_torch_qqq_does_not_cache_full_runtime_weight(group_size):
     module_cpu = _make_qqq_module(torch.float16, group_size)
     module_npu = copy.deepcopy(module_cpu).to(_test_npu_device()).eval()
     x_cpu = torch.randn(2, 3, module_cpu.in_features, dtype=torch.float16)
@@ -1790,20 +1789,10 @@ def test_npu_torch_qqq_reuses_cached_runtime_weight(group_size):
         expected = module_cpu(x_cpu)
         x = x_cpu.to(_test_npu_device())
         actual = module_npu(x)
+        repeat = module_npu(x)
         torch.npu.synchronize()
 
-    assert (x.device, torch.float32) in module_npu._torch_weight_cache
-    original_unpack = module_npu._unpack_weight_codes
-    try:
-        module_npu._unpack_weight_codes = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("Expected QQQTorchLinear to reuse cached runtime weight.")
-        )
-        with torch.inference_mode():
-            repeat = module_npu(x)
-            torch.npu.synchronize()
-    finally:
-        module_npu._unpack_weight_codes = original_unpack
-
+    assert not hasattr(module_npu, "_torch_weight_cache")
     torch.testing.assert_close(actual.cpu(), expected, atol=5e-2, rtol=5e-2)
     torch.testing.assert_close(repeat.cpu(), expected, atol=5e-2, rtol=5e-2)
 
@@ -1831,7 +1820,7 @@ def test_npu_exllamav3_torch_forward_matches_cpu_without_aicpu_sort(capfd):
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
-def test_npu_exllamav3_torch_reuses_runtime_weight_cache():
+def test_npu_exllamav3_torch_does_not_cache_full_runtime_weight():
     module_cpu = _make_exllamav3_torch_module()
     module_npu = _make_exllamav3_torch_module(device=_test_npu_device())
     x_cpu = torch.randn(2, 3, module_cpu.in_features, dtype=torch.float16)
@@ -1842,11 +1831,12 @@ def test_npu_exllamav3_torch_reuses_runtime_weight_cache():
         actual = module_npu(x)
         torch.npu.synchronize()
 
-    assert (x.device, torch.float16) in module_npu._runtime_weight_cache
-
     with torch.inference_mode():
         repeat = module_npu(x)
         torch.npu.synchronize()
 
+    assert not hasattr(module_npu, "_inner_weight_fp32")
+    assert not hasattr(module_npu, "_weight_fp32")
+    assert not hasattr(module_npu, "_runtime_weight_cache")
     torch.testing.assert_close(actual.cpu(), expected, atol=5e-2, rtol=5e-2)
     torch.testing.assert_close(repeat.cpu(), expected, atol=5e-2, rtol=5e-2)

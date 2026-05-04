@@ -17,9 +17,6 @@ from .torch import TorchLinear, _right_shift_unpack
 from .torch_awq import AwqTorchLinear
 
 
-_KOMODO_CACHE_ENV = "GPTQMODEL_KOMODO_CACHE_WEIGHTS"
-# Dense dequantized weight caching is opt-in only. The Marlin-like path should
-# keep weights quantized/prepacked, not persist a dense dequantized copy.
 # Native int4 is the default Komodo path. Set GPTQMODEL_KOMODO_NATIVE_INT4=0
 # to force the exact torch-style fallback when investigating numerical drift.
 _KOMODO_NATIVE_INT4_ENV = "GPTQMODEL_KOMODO_NATIVE_INT4"
@@ -31,7 +28,6 @@ _KOMODO_NATIVE_GROUP16_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16"
 _KOMODO_NATIVE_GROUP16_GROUPED_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED"
 _KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16_GROUPED_MAX_ELEMENTS"
 _KOMODO_NATIVE_GROUP16_FUSE_BIAS_MAX_N_ENV = "GPTQMODEL_KOMODO_NATIVE_GROUP16_FUSE_BIAS_MAX_N"
-_KOMODO_NATIVE_FALLBACK_CACHE_ENV = "GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE"
 _NativePlan = tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor | None]
 _NativeGroup16Plan = tuple[
     tuple[torch.Tensor, ...],
@@ -87,10 +83,6 @@ def _native_group16_fuse_bias_max_n() -> int:
         return int(raw)
     except ValueError as err:
         raise RuntimeError(f"{_KOMODO_NATIVE_GROUP16_FUSE_BIAS_MAX_N_ENV} must be an integer; got `{raw}`.") from err
-
-
-def _native_fallback_cache_enabled() -> bool:
-    return env_flag(_KOMODO_NATIVE_FALLBACK_CACHE_ENV, default=False)
 
 
 def _native_int4_group_size(group_size: int, in_features: int) -> int | None:
@@ -253,8 +245,6 @@ class _KomodoNativePlanMixin:
             tensor = getattr(self, name, None)
             if isinstance(tensor, torch.Tensor):
                 setattr(self, name, tensor.detach().new_empty((0,)))
-        if hasattr(self, "_cached_weights"):
-            self._cached_weights.clear()
         self._native_source_dropped = True
 
     def _maybe_eager_native_prepack(self) -> bool:
@@ -493,7 +483,7 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        self.enable_weight_cache(env_flag(_KOMODO_CACHE_ENV, default=False))
+        self.enable_weight_cache(False)
         self._native_plan_cache: dict[tuple[torch.device, torch.dtype], _NativePlan] = {}
         self._native_group16_plan_cache: dict[tuple[torch.device, torch.dtype], _NativeGroup16Plan] = {}
         self._native_plan_pending: dict[
@@ -657,22 +647,6 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             return False
         supported, _ = self._native_group16_g_idx_plan()
         return supported
-
-    def _can_cache_native_fallback(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
-        if not _native_int4_enabled() or not _native_fallback_cache_enabled():
-            return False
-        if self.training or x.requires_grad or x.device.type != "npu":
-            return False
-        if compute_dtype != torch.float16:
-            return False
-        if self.bits != 4 or x.shape[-1] != self.in_features:
-            return False
-        if getattr(self, "_native_source_dropped", False):
-            return False
-        if not self._native_source_available():
-            return False
-        supported, _ = self._native_g_idx_plan()
-        return not supported
 
     def _build_native_plan(self, *, device: torch.device, dtype: torch.dtype) -> _NativePlan:
         supported, input_perm_cpu = self._native_g_idx_plan()
@@ -980,13 +954,11 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
             return self._native_forward(x)
         if self._can_use_native_group16(x, compute_dtype):
             return self._native_group16_forward(x)
-        if self._can_cache_native_fallback(x, compute_dtype):
-            self.enable_weight_cache(True)
         return super().forward(x)
 
 
 class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
-    """Ascend NPU AWQ int4 kernel with optional dense fallback caching."""
+    """Ascend NPU AWQ int4 kernel with packed native-plan caching."""
 
     _native_source_buffer_names = ("qweight", "qzeros", "scales")
 
@@ -1039,8 +1011,6 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        self._cache_enabled = env_flag(_KOMODO_CACHE_ENV, default=False)
-        self._cached_weights: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
         self._native_plan_cache: dict[tuple[torch.device, torch.dtype], _NativePlan] = {}
         self._native_plan_pending: dict[
             tuple[torch.device, torch.dtype], tuple[torch.npu.Stream, torch.npu.Event, _NativePlan]
@@ -1067,25 +1037,10 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
             self.clear_weight_cache()
         return result
 
-    def enable_weight_cache(self, enabled: bool = True):
-        self._cache_enabled = enabled
-        if not enabled:
-            self.clear_weight_cache()
-        return self
-
     def clear_weight_cache(self):
-        self._cached_weights.clear()
         self.clear_native_cache()
 
-    def _cached_weight_key(self, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
-        return torch.device(device), dtype
-
     def _dequantized_weight(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        key = self._cached_weight_key(device=device, dtype=dtype)
-        cached = self._cached_weights.get(key)
-        if cached is not None and cached.device == device and cached.dtype == dtype:
-            return cached
-
         weight = dequantize_gemm(
             qweight=self.qweight,
             qzeros=self.qzeros,
@@ -1095,9 +1050,6 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
         )
         if weight.dtype != dtype or weight.device != device or not weight.is_contiguous():
             weight = weight.to(device=device, dtype=dtype).contiguous()
-
-        if self._cache_enabled and not self.training:
-            self._cached_weights[key] = weight.detach()
         return weight
 
     def _can_use_native_int4(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:

@@ -188,14 +188,6 @@ class ExllamaV3TorchLinear(nn.Module):
         self.tensor_storage = tensor_storage or {}
 
         self.weight = torch.zeros((1,), dtype=torch.float16, device="meta")
-        self._cache_signature: Optional[tuple[Any, ...]] = None
-        self._inner_weight_fp32: Optional[torch.Tensor] = None
-        self._weight_fp32: Optional[torch.Tensor] = None
-        self._runtime_weight_cache: dict[
-            tuple[torch.device, torch.dtype],
-            tuple[tuple[Any, ...], torch.Tensor],
-        ] = {}
-
         if tensors is not None:
             for buffer_name in _EXL3_BUFFER_NAMES:
                 tensor = tensors.get(buffer_name)
@@ -232,32 +224,8 @@ class ExllamaV3TorchLinear(nn.Module):
             tensors=tensors,
         )
 
-    def _current_signature(self) -> tuple[Any, ...]:
-        trellis = getattr(self, "trellis", None)
-        if trellis is None or trellis.device.type == "meta":
-            return ("meta",)
-
-        signature: list[Any] = [str(trellis.device)]
-        for buffer_name in _EXL3_BUFFER_NAMES:
-            tensor = getattr(self, buffer_name, None)
-            if tensor is None:
-                signature.append(None)
-                continue
-            signature.append((tensor.data_ptr(), tuple(tensor.shape), str(tensor.dtype)))
-        return tuple(signature)
-
-    def _drop_cache(self) -> None:
-        self._cache_signature = None
-        self._inner_weight_fp32 = None
-        self._weight_fp32 = None
-        self._runtime_weight_cache.clear()
-
-    def _apply(self, fn):
-        self._drop_cache()
-        return super()._apply(fn)
-
     def post_init(self) -> None:
-        self._drop_cache()
+        return None
 
     def _codebook_name(self) -> str:
         if getattr(self, "mcg", None) is not None:
@@ -330,10 +298,6 @@ class ExllamaV3TorchLinear(nn.Module):
         if trellis.device.type == "meta":
             raise RuntimeError(f"EXL3 module `{self.name}` has not been materialized from checkpoint tensors yet.")
 
-        signature = self._current_signature()
-        if self._inner_weight_fp32 is not None and self._cache_signature == signature:
-            return self._inner_weight_fp32
-
         encoded = self._unpack_indices()
         lut = _codebook_lut(self._codebook_name(), trellis.device.type, trellis.device.index)
         decoded = lut[encoded]
@@ -345,10 +309,7 @@ class ExllamaV3TorchLinear(nn.Module):
             tiles_k * 16, tiles_n * 16
         )
 
-        self._cache_signature = signature
-        self._inner_weight_fp32 = inner.contiguous().to(torch.float32)
-        self._weight_fp32 = None
-        return self._inner_weight_fp32
+        return inner.contiguous().to(torch.float32)
 
     def get_inner_weight_tensor(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         inner = self._ensure_inner_weight_fp32()
@@ -358,33 +319,20 @@ class ExllamaV3TorchLinear(nn.Module):
         return inner.to(dtype=target_dtype)
 
     def _ensure_weight_fp32(self) -> torch.Tensor:
-        signature = self._current_signature()
-        if self._weight_fp32 is not None and self._cache_signature == signature:
-            return self._weight_fp32
-
         inner = self._ensure_inner_weight_fp32().clone()
         inner = _apply_hadamard_left(inner)
         inner *= getattr(self, "suh").to(dtype=torch.float32).unsqueeze(1)
         inner = _apply_hadamard_right(inner)
         inner *= getattr(self, "svh").to(dtype=torch.float32).unsqueeze(0)
 
-        self._weight_fp32 = inner.contiguous()
-        return self._weight_fp32
+        return inner.contiguous()
 
     def get_weight_tensor(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         weight = self._ensure_weight_fp32()
         target_dtype = dtype or self._runtime_weight_dtype()
         if weight.dtype == target_dtype:
             return weight
-        signature = self._current_signature()
-        key = (weight.device, target_dtype)
-        cached = self._runtime_weight_cache.get(key)
-        if cached is not None and cached[0] == signature:
-            return cached[1]
-
-        runtime_weight = weight.to(dtype=target_dtype).contiguous()
-        self._runtime_weight_cache[key] = (signature, runtime_weight.detach())
-        return runtime_weight
+        return weight.to(dtype=target_dtype).contiguous()
 
     def get_bias_tensor(self) -> torch.Tensor | None:
         return getattr(self, "bias", None)

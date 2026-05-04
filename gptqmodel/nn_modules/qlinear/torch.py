@@ -404,7 +404,7 @@ class TorchLinear(PackableQuantLinear):
         return out
 
     def _maybe_get_cached_weights(self, x: torch.Tensor):
-        if not self._cache_enabled or self.training:
+        if not self._cache_enabled or self.training or not self._dense_weight_cache_allowed(x.device):
             return None
         cached = self._cached_weights.get(x.dtype)
         if cached is not None:
@@ -415,9 +415,14 @@ class TorchLinear(PackableQuantLinear):
         return None
 
     def _update_cached_weights(self, weights: torch.Tensor):
-        if not self._cache_enabled or self.training:
+        if not self._cache_enabled or self.training or not self._dense_weight_cache_allowed(weights.device):
             return
         self._cached_weights[weights.dtype] = weights.detach()
+
+    def _dense_weight_cache_allowed(self, device: torch.device) -> bool:
+        # NPU paths must keep weights quantized or natively packed instead of
+        # persisting a dense dequantized f16/f32 matrix.
+        return torch.device(device).type != "npu"
 
     def _consume_prefetched_weights(self, dtype: torch.dtype, device: torch.device = None):
         if not self._lookahead_enabled or self.training:
