@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 from pathlib import Path
 
 
@@ -57,6 +58,32 @@ def test_raw_validator_custom_timing_stats():
         "custom_ms_mean": 2.0,
         "custom_ms_max": 3.0,
     }
+
+
+def test_raw_validator_quiet_cann_env_defaults_preserve_overrides():
+    validator = _load_raw_validator()
+    env = {"ASCEND_GLOBAL_LOG_LEVEL": "2"}
+
+    validator._apply_quiet_cann_env(env)
+
+    assert env["ASCEND_GLOBAL_LOG_LEVEL"] == "2"
+    assert env["ASCEND_SLOG_PRINT_TO_STDOUT"] == "0"
+
+
+def test_raw_validator_emit_json_result_to_saved_fd():
+    validator = _load_raw_validator()
+    read_fd, write_fd = os.pipe()
+    try:
+        validator._emit_json_result({"device": 0, "pass": True}, write_fd)
+        os.close(write_fd)
+        write_fd = -1
+        payload = os.read(read_fd, 4096).decode("utf-8")
+    finally:
+        os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
+
+    assert validator._last_json_object(payload) == {"device": 0, "pass": True}
 
 
 def test_enable_kernel_define_coalesces_experimental_options(tmp_path):

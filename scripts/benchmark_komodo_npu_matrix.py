@@ -89,6 +89,7 @@ def _add_task(
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "PYTHONUNBUFFERED": "1",
         "ASCEND_GLOBAL_LOG_LEVEL": "3",
+        "ASCEND_SLOG_PRINT_TO_STDOUT": "0",
         "ASCEND_RT_VISIBLE_DEVICES": str(physical_device),
         "GPTQMODEL_TEST_NPU_DEVICE": "npu:0",
     }

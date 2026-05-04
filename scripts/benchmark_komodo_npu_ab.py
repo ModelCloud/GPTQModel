@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+os.environ.setdefault("ASCEND_GLOBAL_LOG_LEVEL", "3")
+os.environ.setdefault("ASCEND_SLOG_PRINT_TO_STDOUT", "0")
 
 import torch
 import torch.nn as nn

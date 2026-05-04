@@ -56,6 +56,33 @@ def _last_json_object(text: str) -> dict[str, Any] | None:
     return result
 
 
+def _apply_quiet_cann_env(env: dict[str, str]) -> None:
+    env.setdefault("ASCEND_GLOBAL_LOG_LEVEL", "3")
+    env.setdefault("ASCEND_SLOG_PRINT_TO_STDOUT", "0")
+
+
+def _enable_quiet_process_output(enabled: bool) -> int | None:
+    if not enabled:
+        return None
+    _apply_quiet_cann_env(os.environ)
+    result_fd = os.dup(1)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+    finally:
+        os.close(devnull_fd)
+    return result_fd
+
+
+def _emit_json_result(result: dict[str, Any], result_fd: int | None) -> None:
+    line = json.dumps(result, sort_keys=True) + "\n"
+    if result_fd is None:
+        print(line, end="", flush=True)
+    else:
+        os.write(result_fd, line.encode("utf-8"))
+
+
 def _apply_custom_opp_env(env: dict[str, str], args: argparse.Namespace) -> None:
     if args.opp_install:
         vendor = Path(args.opp_install).expanduser() / "vendors" / "customize"
@@ -87,6 +114,25 @@ def _timing_stats(results: list[dict[str, Any]]) -> dict[str, float | None]:
 
 
 def _worker(args: argparse.Namespace) -> int:
+    result_fd = _enable_quiet_process_output(not args.no_quiet_cann_logs)
+    try:
+        return _worker_impl(args, result_fd)
+    except Exception as err:
+        _emit_json_result(
+            {
+                "device": int(args.device),
+                "error": f"{type(err).__name__}: {err}",
+                "pass": False,
+            },
+            result_fd,
+        )
+        return 2
+    finally:
+        if result_fd is not None:
+            os.close(result_fd)
+
+
+def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
     case = json.loads(args.case_json)
     bridge_lib = Path(args.bridge_lib).expanduser()
     if not bridge_lib.exists():
@@ -169,13 +215,15 @@ def _worker(args: argparse.Namespace) -> int:
         "mean_abs": mean_abs,
         "pass": max_abs <= args.max_abs and mean_abs <= args.mean_abs,
     }
-    print(json.dumps(result, sort_keys=True), flush=True)
+    _emit_json_result(result, result_fd)
     return 0 if result["pass"] else 2
 
 
 def _launch_worker(device: int, case: dict[str, Any], args: argparse.Namespace) -> subprocess.Popen[str]:
     env = os.environ.copy()
     _apply_custom_opp_env(env, args)
+    if not args.no_quiet_cann_logs:
+        _apply_quiet_cann_env(env)
     env["ASCEND_RT_VISIBLE_DEVICES"] = str(device)
     cmd = [
         sys.executable,
@@ -196,6 +244,8 @@ def _launch_worker(device: int, case: dict[str, Any], args: argparse.Namespace) 
         "--iters",
         str(args.iters),
     ]
+    if args.no_quiet_cann_logs:
+        cmd.append("--no-quiet-cann-logs")
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
 
 
@@ -268,6 +318,11 @@ def main() -> int:
     parser.add_argument("--mean-abs", type=float, default=0.004)
     parser.add_argument("--warmup", type=int, default=0, help="Untimed custom-op warmup calls per worker.")
     parser.add_argument("--iters", type=int, default=1, help="Timed custom-op calls per worker.")
+    parser.add_argument(
+        "--no-quiet-cann-logs",
+        action="store_true",
+        help="Do not suppress noisy CANN registration warnings in worker subprocesses.",
+    )
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--device", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--case-json", help=argparse.SUPPRESS)
