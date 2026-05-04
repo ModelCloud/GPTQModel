@@ -539,6 +539,18 @@ AWQ BF16 was deliberately not enabled in this pass. It ran fast, but synthetic
 Qwen3.6 AWQ BF16 checks widened max-abs drift to `8.0-16.0`, so AWQ Cannoe
 remains FP16-only until there is a tighter BF16 path.
 
+Follow-up bias-cast caching removed the repeated BF16-bias to FP16 conversion
+before each native CANN call. Same-device repeats kept the same drift envelope
+and improved BF16 GPTQ totals:
+
+| Case set | Before cache ms | Cached ms | Change | Max abs drift |
+|---|---:|---:|---:|---:|
+| Qwen3.6-27B GPTQ BF16 | 1.475314 | 1.337074 / 1.409206 | 4.5-9.4% faster | 0.5 |
+| Qwen3.6-35B-A3B GPTQ BF16 | 1.480676 | 1.267482 / 1.268626 | 14.3-14.4% faster | 0.25 |
+
+The FP16 GPTQ group-size/act-order regression stayed clean on NPU1:
+`1.485786ms`, max abs drift `0.03125`.
+
 ## CANN Profiling Read
 
 Use the profiling helper for single-shape CANN traces:

@@ -706,6 +706,8 @@ class _CannoePlanMixin:
 
     def clear_native_cache(self):
         result = super().clear_native_cache()
+        if hasattr(self, "_cann_bias_cache"):
+            self._cann_bias_cache.clear()
         if hasattr(self, "_cann_plan_cache"):
             self._cann_plan_cache.clear()
             self._cann_hot_plan_fast_key = None
@@ -714,6 +716,31 @@ class _CannoePlanMixin:
             self._cann_native_hot_device = None
             self._cann_native_hot_plan = None
         return result
+
+    def _cannoe_bias(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+        bias = self.bias
+        if bias is None:
+            return None
+        device = torch.device(device)
+        if bias.device == device and bias.dtype == dtype and bias.is_contiguous():
+            return bias
+
+        cache = getattr(self, "_cann_bias_cache", None)
+        if cache is None:
+            cache = {}
+            self._cann_bias_cache = cache
+        key = (device, dtype)
+        cached = cache.get(key)
+        if (
+            cached is None
+            or cached.device != device
+            or cached.dtype != dtype
+            or cached.shape != bias.shape
+            or not cached.is_contiguous()
+        ):
+            cached = bias.to(device=device, dtype=dtype).contiguous()
+            cache[key] = cached
+        return cached
 
     def _cann_plan(
         self,
@@ -809,6 +836,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         self._cann_hot_plan = None
         self._cann_native_hot_device = None
         self._cann_native_hot_plan = None
+        self._cann_bias_cache: dict = {}
         self._last_cann_plan: CannoeTilingPlan | None = None
         self._last_cann_path: str | None = None
 
@@ -846,10 +874,8 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
                 self._cann_native_hot_plan = None
         if input_perm is not None:
             x_flat = x_flat.index_select(1, input_perm)
-        bias = self.bias
-        fuse_bias = bias is not None and _fuse_bias_enabled()
-        if fuse_bias and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
-            bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
+        fuse_bias = self.bias is not None and _fuse_bias_enabled()
+        bias = self._cannoe_bias(device=x_flat.device, dtype=x_flat.dtype) if fuse_bias else None
         self._maybe_schedule_lookahead(compute_dtype)
         out = None
         if plan.fused_available:
@@ -895,9 +921,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         out = out.reshape(out_shape)
 
         if self.bias is not None and not fuse_bias:
-            bias = self.bias
-            if bias.device != out.device or bias.dtype != out.dtype:
-                bias = bias.to(device=out.device, dtype=out.dtype)
+            bias = self._cannoe_bias(device=out.device, dtype=out.dtype)
             out.add_(bias)
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
@@ -1045,6 +1069,7 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
         self._cann_hot_plan = None
         self._cann_native_hot_device = None
         self._cann_native_hot_plan = None
+        self._cann_bias_cache: dict = {}
         self._last_cann_plan: CannoeTilingPlan | None = None
         self._last_cann_path: str | None = None
 
@@ -1077,11 +1102,9 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
                 self._cann_native_hot_device = None
                 self._cann_native_hot_plan = None
         output = None
-        bias = self.bias
         # Group-32 AWQ probes showed a wider drift envelope when CANN fused bias.
-        fuse_bias = bias is not None and _fuse_bias_enabled() and native_group_size == 128
-        if fuse_bias and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
-            bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
+        fuse_bias = self.bias is not None and _fuse_bias_enabled() and native_group_size == 128
+        bias = self._cannoe_bias(device=x_flat.device, dtype=x_flat.dtype) if fuse_bias else None
         if plan.fused_available:
             output = _cannoe_fused_matmul(
                 plan=plan,
@@ -1124,9 +1147,7 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
             self._last_cann_path = "fused_w4a16_matmul"
 
         if self.bias is not None and not fuse_bias:
-            bias = self.bias
-            if bias.device != output.device or bias.dtype != output.dtype:
-                bias = bias.to(device=output.device, dtype=output.dtype)
+            bias = self._cannoe_bias(device=output.device, dtype=output.dtype)
             output = output + bias
 
         if self.adapter:
