@@ -54,6 +54,13 @@ _DEFAULT_FUSED_OP_NAMES = (
 )
 
 
+def _assert_fp16_or_bf16_inference_input(x: torch.Tensor, module_name: str) -> None:
+    if x.dtype not in (torch.float16, torch.bfloat16):
+        raise RuntimeError(
+            f"{module_name} currently supports torch.float16 or torch.bfloat16 inference on NPU; got {x.dtype}."
+        )
+
+
 def _cannoe_env(env_name: str) -> str | None:
     return os.getenv(env_name)
 
@@ -789,7 +796,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
     SUPPORTS_PLATFORM = KomodoLinear.SUPPORTS_PLATFORM
     SUPPORTS_PACK_DTYPES = KomodoLinear.SUPPORTS_PACK_DTYPES
     SUPPORTS_ADAPTERS = KomodoLinear.SUPPORTS_ADAPTERS
-    SUPPORTS_DTYPES = KomodoLinear.SUPPORTS_DTYPES
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
     REQUIRES_FORMAT_V2 = KomodoLinear.REQUIRES_FORMAT_V2
     QUANT_TYPE = "cannoe"
 
@@ -806,7 +813,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         self._last_cann_path: str | None = None
 
     def _native_forward(self, x: torch.Tensor):
-        _assert_fp16_inference_input(x, self.__class__.__name__)
+        _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
         input_dtype = x.dtype
         compute_dtype = torch.float16
         out_shape = x.shape[:-1] + (self.out_features,)
@@ -894,12 +901,12 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             out.add_(bias)
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
-        if input_dtype == torch.float32:
-            out = out.to(torch.float32)
+        if out.dtype != input_dtype:
+            out = out.to(dtype=input_dtype)
         return out
 
     def _native_group16_forward(self, x: torch.Tensor):
-        _assert_fp16_inference_input(x, self.__class__.__name__)
+        _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
         input_dtype = x.dtype
         compute_dtype = torch.float16
         out_shape = x.shape[:-1] + (self.out_features,)
@@ -990,9 +997,20 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             out.add_(bias)
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
-        if input_dtype == torch.float32:
-            out = out.to(torch.float32)
+        if out.dtype != input_dtype:
+            out = out.to(dtype=input_dtype)
         return out
+
+    def forward(self, x: torch.Tensor):
+        _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
+        compute_dtype = torch.float16
+        if self._can_use_native_int4(x, compute_dtype):
+            return self._native_forward(x)
+        if self._can_use_native_group16(x, compute_dtype):
+            return self._native_group16_forward(x)
+        if x.dtype == torch.bfloat16:
+            raise RuntimeError("CannoeLinear bfloat16 inference requires the native int4 NPU path.")
+        return super().forward(x)
 
 
 class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):

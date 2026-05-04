@@ -518,6 +518,27 @@ Group-128 Qwen3.6-35B-A3B AWQ validated cleanly and is now fused by default:
 Dense dequantized weight caching remained disabled throughout
 (`GPTQMODEL_KOMODO_CACHE_WEIGHTS=0`).
 
+## GPTQ BF16 Decode Support
+
+The 2026-05-04 two-NPU pass enabled BF16 inputs for GPTQ Cannoe only. CANN
+9.0.0 `npu_weight_quant_batchmatmul` still rejects BF16 activations/scales for
+the int4 path, so Cannoe casts BF16 activations to FP16 for the native CANN
+call and casts the result back to BF16. This keeps the fast native packed-int4
+path available for BF16 decode-shaped GPTQ layers without enabling dense
+dequantized weight caching.
+
+Validated with physical NPUs `0,1` and `GPTQMODEL_KOMODO_CACHE_WEIGHTS=0`:
+
+| Case set | Dtype | NPU | Cannoe total ms | Speedup vs Torch reference | Max abs drift | Min cosine |
+|---|---|---:|---:|---:|---:|---:|
+| Qwen3.6-27B GPTQ | BF16 | 0 | 1.475314 | 91.65x | 0.5 | 0.999995589 |
+| Qwen3.6-35B-A3B GPTQ | BF16 | 1 | 1.480676 | 4.77x | 0.25 | 0.999994993 |
+| GPTQ group sizes + act-order | FP16 | 0/1 | 1.527064 mean | 3.50x mean | 0.03125 | unchanged |
+
+AWQ BF16 was deliberately not enabled in this pass. It ran fast, but synthetic
+Qwen3.6 AWQ BF16 checks widened max-abs drift to `8.0-16.0`, so AWQ Cannoe
+remains FP16-only until there is a tighter BF16 path.
+
 ## CANN Profiling Read
 
 Use the profiling helper for single-shape CANN traces:
