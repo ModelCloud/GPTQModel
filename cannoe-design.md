@@ -9,6 +9,30 @@ weights in GM/L2.
 
 The file and backend use the canonical `cannoe` name.
 
+## Non-Negotiable Quantization Contract
+
+Cannoe must never cache a fully dequantized dense weight matrix for reuse by a
+later forward operation. Under no circumstances should a `K x N` FP16/BF16
+dequantized weight copy become persistent model state, a default runtime cache,
+or a hidden optimization. Doing so defeats the premise of quantization: weights
+are supposed to remain resident in a smaller VRAM footprint.
+
+The acceptable hierarchy is:
+
+1. Store weights in quantized form for the lifetime of the model.
+2. If a fallback requires dense dequantization, materialize only the temporary
+   values needed for the current forward operation and release them immediately.
+3. Prefer block-wise, row-wise, or tile-wise dequantization that overlaps data
+   movement, dequantization, and matmul.
+4. The target design is a fused kernel where AIV/vector work dequantizes small
+   INT4 tiles directly into the staging level consumed by AIC/Cube matmul, never
+   writing a full dense dequantized weight matrix through GM/L2.
+
+Quantization is not just a pure-speed feature. The goal is useful speed while
+preserving the massive VRAM reduction from quantized resident weights. Any
+optimization that wins latency by keeping dense dequantized weights around by
+default is a regression, not a Cannoe success.
+
 ## Current State
 
 Cannoe is a separate backend, not a mode inside plain Komodo.
