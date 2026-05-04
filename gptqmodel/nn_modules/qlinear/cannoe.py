@@ -706,8 +706,6 @@ class _CannoePlanMixin:
 
     def clear_native_cache(self):
         result = super().clear_native_cache()
-        if hasattr(self, "_cann_bias_cache"):
-            self._cann_bias_cache.clear()
         if hasattr(self, "_cann_plan_cache"):
             self._cann_plan_cache.clear()
             self._cann_hot_plan_fast_key = None
@@ -725,22 +723,12 @@ class _CannoePlanMixin:
         if bias.device == device and bias.dtype == dtype and bias.is_contiguous():
             return bias
 
-        cache = getattr(self, "_cann_bias_cache", None)
-        if cache is None:
-            cache = {}
-            self._cann_bias_cache = cache
-        key = (device, dtype)
-        cached = cache.get(key)
-        if (
-            cached is None
-            or cached.device != device
-            or cached.dtype != dtype
-            or cached.shape != bias.shape
-            or not cached.is_contiguous()
-        ):
-            cached = bias.to(device=device, dtype=dtype).contiguous()
-            cache[key] = cached
-        return cached
+        normalized = bias.to(device=device, dtype=dtype).contiguous()
+        if isinstance(bias, torch.nn.Parameter):
+            self.bias = torch.nn.Parameter(normalized, requires_grad=bias.requires_grad)
+        else:
+            self.bias = normalized
+        return normalized
 
     def _cann_plan(
         self,
@@ -836,7 +824,6 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         self._cann_hot_plan = None
         self._cann_native_hot_device = None
         self._cann_native_hot_plan = None
-        self._cann_bias_cache: dict = {}
         self._last_cann_plan: CannoeTilingPlan | None = None
         self._last_cann_path: str | None = None
 
@@ -1069,7 +1056,6 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
         self._cann_hot_plan = None
         self._cann_native_hot_device = None
         self._cann_native_hot_plan = None
-        self._cann_bias_cache: dict = {}
         self._last_cann_plan: CannoeTilingPlan | None = None
         self._last_cann_path: str | None = None
 
