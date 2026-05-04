@@ -32,6 +32,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 log = setup_logger()
+_CACHE_DEQUANTIZED_WEIGHTS_ENV = "GPTQ_CACHE_DEQUANTIZED_WEIGHTS"
 
 
 def _right_shift_unpack(values: torch.Tensor, shifts: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -175,7 +176,7 @@ class TorchLinear(PackableQuantLinear):
         self._zeros_cache_state = None
         self._stream_dequant_streams = {}
         self._stream_workspace = {}
-        self._cache_enabled = bool(int(os.environ.get("GPTQ_TORCH_CACHE_WEIGHTS", "0")))
+        self._cache_enabled = bool(int(os.environ.get(_CACHE_DEQUANTIZED_WEIGHTS_ENV, "0")))
         triton_flag = os.environ.get("GPTQ_TORCH_TRITON_DEQUANT")
         if triton_flag is None:
             self._triton_dequant_enabled = _TRITON_DEQUANT_AVAILABLE

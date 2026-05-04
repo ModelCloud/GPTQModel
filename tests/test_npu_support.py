@@ -1279,7 +1279,7 @@ def test_npu_komodo_gptq_group16_uses_packed_native_without_dense_cache_by_defau
 def test_npu_komodo_gptq_group16_does_not_cache_dense_fallback(dtype, monkeypatch):
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
     monkeypatch.setenv("GPTQMODEL_KOMODO_NATIVE_GROUP16", "0")
-    monkeypatch.setenv("GPTQ_TORCH_CACHE_WEIGHTS", "1")
+    monkeypatch.setenv("GPTQ_CACHE_DEQUANTIZED_WEIGHTS", "1")
     monkeypatch.setenv("GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS", "0")
     baseline_cpu = _make_gptq_module(bits=4, dtype=dtype, group_size=16).eval()
     candidate = KomodoLinear(

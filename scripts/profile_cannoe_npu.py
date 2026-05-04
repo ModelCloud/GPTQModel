@@ -168,7 +168,7 @@ def _profile_case(args) -> dict:
 
     os.environ["GPTQMODEL_KOMODO_NATIVE_INT4"] = "1"
     os.environ["GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"] = "0"
-    os.environ["GPTQMODEL_KOMODO_CACHE_WEIGHTS"] = "0"
+    os.environ["GPTQ_CACHE_DEQUANTIZED_WEIGHTS"] = "0"
     os.environ["GPTQMODEL_KOMODO_PREPACK_TILE_N"] = str(args.tile_n)
 
     torch.npu.set_device(args.device)

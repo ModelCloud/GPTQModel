@@ -249,7 +249,7 @@ def main() -> None:
     os.environ["GPTQMODEL_KOMODO_NATIVE_INT4"] = "1"
     os.environ["GPTQMODEL_KOMODO_EAGER_PREPACK"] = "1"
     os.environ["GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"] = "1" if args.drop_source else "0"
-    os.environ["GPTQMODEL_KOMODO_CACHE_WEIGHTS"] = "0"
+    os.environ["GPTQ_CACHE_DEQUANTIZED_WEIGHTS"] = "0"
     os.environ["GPTQMODEL_KOMODO_PREPACK_TILE_N"] = str(args.tile_n)
 
     torch.npu.set_device(args.device)

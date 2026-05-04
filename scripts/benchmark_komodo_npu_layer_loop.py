@@ -142,7 +142,7 @@ def _run(args) -> dict:
     else:
         os.environ["GPTQMODEL_KOMODO_NATIVE_INT4"] = "1"
     os.environ["GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS"] = "1" if args.mode.endswith("_drop") else "0"
-    os.environ["GPTQMODEL_KOMODO_CACHE_WEIGHTS"] = "0"
+    os.environ["GPTQ_CACHE_DEQUANTIZED_WEIGHTS"] = "0"
 
     dtype = _dtype(args.dtype)
     cases = _cases(args.model, args.method, args.dtype)

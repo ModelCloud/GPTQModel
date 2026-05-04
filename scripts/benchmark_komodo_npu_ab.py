@@ -569,7 +569,7 @@ def main() -> None:
         os.environ["GPTQMODEL_CANNOE_PREFETCH_MAX_BYTES"] = str(args.cannoe_prefetch_max_bytes)
     if args.cannoe_prefetch_min_bytes is not None:
         os.environ["GPTQMODEL_CANNOE_PREFETCH_MIN_BYTES"] = str(args.cannoe_prefetch_min_bytes)
-    os.environ["GPTQMODEL_KOMODO_CACHE_WEIGHTS"] = "1" if args.komodo_cache_dequantized else "0"
+    os.environ["GPTQ_CACHE_DEQUANTIZED_WEIGHTS"] = "1" if args.komodo_cache_dequantized else "0"
     native_int4 = _native_int4_enabled()
     cannoe = bool(args.cannoe)
     cannoe_prefetch = bool(_cannoe_prefetch_enabled()) if cannoe else False

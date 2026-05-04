@@ -516,7 +516,7 @@ Group-128 Qwen3.6-35B-A3B AWQ validated cleanly and is now fused by default:
 | Qwen3.6-27B AWQ | group-32 gated unfused | 2 | 1.236357 | 1.0189 | 1.0 |
 
 Dense dequantized weight caching remained disabled throughout
-(`GPTQMODEL_KOMODO_CACHE_WEIGHTS=0`).
+(`GPTQ_CACHE_DEQUANTIZED_WEIGHTS=0`).
 
 ## GPTQ BF16 Decode Support
 
@@ -527,7 +527,7 @@ call and casts the result back to BF16. This keeps the fast native packed-int4
 path available for BF16 decode-shaped GPTQ layers without enabling dense
 dequantized weight caching.
 
-Validated with physical NPUs `0,1` and `GPTQMODEL_KOMODO_CACHE_WEIGHTS=0`:
+Validated with physical NPUs `0,1` and `GPTQ_CACHE_DEQUANTIZED_WEIGHTS=0`:
 
 | Case set | Dtype | NPU | Cannoe total ms | Speedup vs Torch reference | Max abs drift | Min cosine |
 |---|---|---:|---:|---:|---:|---:|
