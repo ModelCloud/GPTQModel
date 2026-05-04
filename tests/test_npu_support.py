@@ -1780,6 +1780,35 @@ def test_npu_torch_qqq_forward_matches_cpu_without_fallback(group_size, dtype, c
 
 
 @pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+@pytest.mark.parametrize("group_size", [-1, 128])
+def test_npu_torch_qqq_reuses_cached_runtime_weight(group_size):
+    module_cpu = _make_qqq_module(torch.float16, group_size)
+    module_npu = copy.deepcopy(module_cpu).to(_test_npu_device()).eval()
+    x_cpu = torch.randn(2, 3, module_cpu.in_features, dtype=torch.float16)
+
+    with torch.inference_mode():
+        expected = module_cpu(x_cpu)
+        x = x_cpu.to(_test_npu_device())
+        actual = module_npu(x)
+        torch.npu.synchronize()
+
+    assert (x.device, torch.float32) in module_npu._torch_weight_cache
+    original_unpack = module_npu._unpack_weight_codes
+    try:
+        module_npu._unpack_weight_codes = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Expected QQQTorchLinear to reuse cached runtime weight.")
+        )
+        with torch.inference_mode():
+            repeat = module_npu(x)
+            torch.npu.synchronize()
+    finally:
+        module_npu._unpack_weight_codes = original_unpack
+
+    torch.testing.assert_close(actual.cpu(), expected, atol=5e-2, rtol=5e-2)
+    torch.testing.assert_close(repeat.cpu(), expected, atol=5e-2, rtol=5e-2)
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 def test_npu_exllamav3_torch_forward_matches_cpu_without_aicpu_sort(capfd):
     module_cpu = _make_exllamav3_torch_module()
     module_npu = _make_exllamav3_torch_module(device=_test_npu_device())
@@ -1799,3 +1828,25 @@ def test_npu_exllamav3_torch_forward_matches_cpu_without_aicpu_sort(capfd):
     assert "AiCpu" not in combined_output
     assert not any(marker in combined_output for marker in NPU_CPU_FALLBACK_MARKERS)
     torch.testing.assert_close(y_npu.cpu(), y_cpu, atol=5e-2, rtol=5e-2)
+
+
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
+def test_npu_exllamav3_torch_reuses_runtime_weight_cache():
+    module_cpu = _make_exllamav3_torch_module()
+    module_npu = _make_exllamav3_torch_module(device=_test_npu_device())
+    x_cpu = torch.randn(2, 3, module_cpu.in_features, dtype=torch.float16)
+
+    with torch.inference_mode():
+        expected = module_cpu(x_cpu)
+        x = x_cpu.to(_test_npu_device())
+        actual = module_npu(x)
+        torch.npu.synchronize()
+
+    assert (x.device, torch.float16) in module_npu._runtime_weight_cache
+
+    with torch.inference_mode():
+        repeat = module_npu(x)
+        torch.npu.synchronize()
+
+    torch.testing.assert_close(actual.cpu(), expected, atol=5e-2, rtol=5e-2)
+    torch.testing.assert_close(repeat.cpu(), expected, atol=5e-2, rtol=5e-2)

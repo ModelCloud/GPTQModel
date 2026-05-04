@@ -191,6 +191,10 @@ class ExllamaV3TorchLinear(nn.Module):
         self._cache_signature: Optional[tuple[Any, ...]] = None
         self._inner_weight_fp32: Optional[torch.Tensor] = None
         self._weight_fp32: Optional[torch.Tensor] = None
+        self._runtime_weight_cache: dict[
+            tuple[torch.device, torch.dtype],
+            tuple[tuple[Any, ...], torch.Tensor],
+        ] = {}
 
         if tensors is not None:
             for buffer_name in _EXL3_BUFFER_NAMES:
@@ -246,6 +250,7 @@ class ExllamaV3TorchLinear(nn.Module):
         self._cache_signature = None
         self._inner_weight_fp32 = None
         self._weight_fp32 = None
+        self._runtime_weight_cache.clear()
 
     def _apply(self, fn):
         self._drop_cache()
@@ -371,7 +376,15 @@ class ExllamaV3TorchLinear(nn.Module):
         target_dtype = dtype or self._runtime_weight_dtype()
         if weight.dtype == target_dtype:
             return weight
-        return weight.to(dtype=target_dtype)
+        signature = self._current_signature()
+        key = (weight.device, target_dtype)
+        cached = self._runtime_weight_cache.get(key)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
+        runtime_weight = weight.to(dtype=target_dtype).contiguous()
+        self._runtime_weight_cache[key] = (signature, runtime_weight.detach())
+        return runtime_weight
 
     def get_bias_tensor(self) -> torch.Tensor | None:
         return getattr(self, "bias", None)
