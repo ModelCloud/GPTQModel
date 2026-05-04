@@ -29,8 +29,8 @@ weight caching by default and restricting Komodo inference to FP16.
   a bias-only group tensor. `GPTQMODEL_KOMODO_NATIVE_GROUP16_FUSE_BIAS_MAX_N`
   controls the width cutoff and defaults to `2048`.
 - Unsupported native int4 layouts use the exact Torch fallback. Dense
-  dequantized fallback weight caching stays off by default, but can be enabled
-  for debugging with `GPTQMODEL_KOMODO_NATIVE_FALLBACK_CACHE=1`.
+  dequantized fallback weight caching is disabled for NPU paths; do not use full
+  f16/f32 dequantized weight caches for benchmark claims.
 - Native NPU int4 plans are built eagerly during `post_init()` once a Komodo
   module is on its final NPU device. Set `GPTQMODEL_KOMODO_EAGER_PREPACK=0` to
   restore first-forward packing for debugging. Side-stream prefetch and
@@ -73,6 +73,7 @@ Default mode: `native_int4_prepack`, no dense dequantized cache.
 Command shape:
 
 ```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID ASCEND_RT_VISIBLE_DEVICES=6 \
 python scripts/benchmark_komodo_npu_ab.py \
   --cases qwen3_6_27b_all \
   --dtype fp16 \
@@ -83,9 +84,10 @@ python scripts/benchmark_komodo_npu_ab.py \
   --iters 5
 ```
 
-Future accelerator benchmarks should use PCI ordering. For full-machine sweeps,
-use `scripts/benchmark_komodo_npu_matrix.py`; it maps one physical NPU per
-process with `ASCEND_RT_VISIBLE_DEVICES=<physical_id>` and uses logical
+Future accelerator benchmarks should use PCI ordering. On this host, use only
+physical NPUs 6 and 7 for new benchmark claims. For full-machine sweeps on other
+hosts, use `scripts/benchmark_komodo_npu_matrix.py`; it maps one physical NPU
+per process with `ASCEND_RT_VISIBLE_DEVICES=<physical_id>` and uses logical
 `--device 0` inside each worker.
 
 ## Generation TPS Baseline
@@ -93,7 +95,7 @@ process with `ASCEND_RT_VISIBLE_DEVICES=<physical_id>` and uses logical
 The reusable small-model generation benchmark is:
 
 ```bash
-CUDA_DEVICE_ORDER=PCI_BUS_ID ASCEND_RT_VISIBLE_DEVICES=0 \
+CUDA_DEVICE_ORDER=PCI_BUS_ID ASCEND_RT_VISIBLE_DEVICES=6 \
 GPTQMODEL_KOMODO_NATIVE_INT4=1 \
 GPTQMODEL_KOMODO_DROP_SOURCE_WEIGHTS=1 \
 python scripts/benchmark_evalution_generation_tps.py \
@@ -211,7 +213,7 @@ By default this runs the same 78-task matrix used for the 2026-04-30
 validation: one Komodo NPU test subset per physical NPU, Qwen3.6 projection
 A/B sweeps across prepack tile sizes and source-drop modes, layer-loop
 decode-style simulations across fallback/native/lookahead/prefetch modes, and
-quick fallback/native/dequant-cache comparisons. Add `--include-memory` to add
+quick fallback/native/no-dense-cache comparisons. Add `--include-memory` to add
 the cold load/prepack peak-memory sweep.
 
 The 8-NPU run on this host completed with `78 passed, 0 failed` in `396.6s`.
@@ -244,7 +246,7 @@ tile split.
 The checked-in cold prepack memory benchmark is:
 
 ```bash
-CUDA_DEVICE_ORDER=PCI_BUS_ID ASCEND_RT_VISIBLE_DEVICES=0 \
+CUDA_DEVICE_ORDER=PCI_BUS_ID ASCEND_RT_VISIBLE_DEVICES=6 \
 python scripts/benchmark_komodo_npu_prepack_memory.py \
   --device 0 \
   --cases qwen3_6_27b_gptq \

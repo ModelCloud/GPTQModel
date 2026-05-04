@@ -561,7 +561,7 @@ The FP16 GPTQ group-size/act-order regression stayed clean on NPU1:
 Use the profiling helper for single-shape CANN traces:
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=0 \
+CUDA_DEVICE_ORDER=PCI_BUS_ID ASCEND_RT_VISIBLE_DEVICES=6 \
 python scripts/profile_cannoe_npu.py \
   --mode cannoe \
   --case qwen3_6_27b_gptq_down_proj \
