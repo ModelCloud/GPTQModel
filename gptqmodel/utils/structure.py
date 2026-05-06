@@ -1684,9 +1684,22 @@ class LazyTurtle:
         # leaf like `gate_proj.weight` should keep its own logical name.
         for fused_rel_name, expert_index, split_index, split_dim in self._fused_checkpoint_requests(rel_name):
             for candidate_path in self._candidate_module_paths(module_path, allow_empty=True):
-                candidate_name = self._join_tensor_name(candidate_path, fused_rel_name)
-                if candidate_name in self._weight_map:
-                    return candidate_name, expert_index, split_index, split_dim
+                # Text-only shells can run under `model.layers.*` while their
+                # checkpoint still stores fused experts under
+                # `model.language_model.layers.*`. Apply the same runtime->
+                # checkpoint alias expansion here that direct tensor lookups use,
+                # otherwise defused expert leaves stay on meta because
+                # `gate_proj/up_proj/down_proj` never find the fused source.
+                for aliased_path in self._all_runtime_to_checkpoint_candidates(candidate_path):
+                    candidate_name = self._join_tensor_name(aliased_path, fused_rel_name)
+                    fused_candidates = self._all_runtime_to_checkpoint_candidates(candidate_name)
+                    for fused_candidate in tuple(fused_candidates):
+                        for alias in self._module_tree_name_aliases(fused_candidate):
+                            if alias not in fused_candidates:
+                                fused_candidates.append(alias)
+                    for fused_candidate in fused_candidates:
+                        if fused_candidate in self._weight_map:
+                            return fused_candidate, expert_index, split_index, split_dim
         return None, None, None, None
 
     @staticmethod
