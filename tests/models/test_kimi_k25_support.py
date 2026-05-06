@@ -19,6 +19,7 @@ class Test(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     TRUST_REMOTE_CODE = True
+    USE_FLASH_ATTN = False
     # TODO, update scores
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
