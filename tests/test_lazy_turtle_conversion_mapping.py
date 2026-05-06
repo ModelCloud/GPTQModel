@@ -14,6 +14,7 @@ from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGP
 from gptqmodel.models.definitions.mixtral import MixtralQModel
 from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
+from gptqmodel.models.definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel
 from gptqmodel.utils import structure as structure_module
 from gptqmodel.utils.structure import LazyTurtle
 
@@ -80,6 +81,12 @@ class _Qwen2_5_VLDummyModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace(model_type="qwen2_5_vl")
+
+
+class _Qwen3_5_MoeTextDummyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="qwen3_5_moe_text")
 
 
 class _WeightRenamingStub:
@@ -701,6 +708,35 @@ def test_lazy_turtle_keeps_module_tree_alias_resolution_for_mixtral(tmp_path):
         )
         == "model.layers.0.block_sparse_moe.experts.0.w1.weight"
     )
+
+
+def test_lazy_turtle_resolves_fused_qwen3_5_moe_text_experts_through_language_model_prefix(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map({"model.language_model": "model"})
+    assert reversed_map is not None
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "model.language_model.layers.0.mlp.experts.gate_up_proj": torch.zeros(2, 4, 2),
+            "model.language_model.layers.0.mlp.experts.down_proj": torch.zeros(2, 2, 2),
+        },
+        module_tree=Qwen3_5_MoeTextQModel.module_tree,
+        hf_conversion_map_reversed=reversed_map,
+        target_model=_Qwen3_5_MoeTextDummyModel(),
+    )
+
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.mlp.experts.0.gate_proj",
+        "weight",
+    ) == ("model.language_model.layers.0.mlp.experts.gate_up_proj", 0, 0, 1)
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.mlp.experts.1.up_proj",
+        "weight",
+    ) == ("model.language_model.layers.0.mlp.experts.gate_up_proj", 1, 1, 1)
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.mlp.experts.1.down_proj",
+        "weight",
+    ) == ("model.language_model.layers.0.mlp.experts.down_proj", 1, None, None)
 
 
 @pytest.mark.parametrize(

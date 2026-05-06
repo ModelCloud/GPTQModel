@@ -166,9 +166,13 @@ TRANSFORMERS_SUPPORTS_QWEN3_5 = Version(TRANSFORMERS_VERSION) >= Version("5.2.0"
 if TRANSFORMERS_SUPPORTS_QWEN3_5:
     from .definitions.qwen3_5 import Qwen3_5QModel  # noqa: E402
     from .definitions.qwen3_5_moe import Qwen3_5_MoeQModel  # noqa: E402
+    from .definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel  # noqa: E402
+    from .definitions.qwen3_5_text import Qwen3_5TextQModel  # noqa: E402
 else:
     Qwen3_5QModel = None
     Qwen3_5_MoeQModel = None
+    Qwen3_5_MoeTextQModel = None
+    Qwen3_5TextQModel = None
 
 
 MODEL_MAP = {
@@ -293,10 +297,11 @@ MODEL_MAP = {
 
 if Qwen3_5QModel is not None:
     MODEL_MAP["qwen3_5"] = Qwen3_5QModel
-    MODEL_MAP["qwen3_5_text"] = Qwen3_5QModel
+    MODEL_MAP["qwen3_5_text"] = Qwen3_5TextQModel
 
 if Qwen3_5_MoeQModel is not None:
     MODEL_MAP["qwen3_5_moe"] = Qwen3_5_MoeQModel
+    MODEL_MAP["qwen3_5_moe_text"] = Qwen3_5_MoeTextQModel
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
@@ -411,6 +416,25 @@ def _hide_unsupported_quantization_config_for_lm_eval(model):
 
 def _get_config_load_kwargs(kwargs: dict) -> dict:
     return get_hf_gguf_load_kwargs(kwargs)
+
+
+def _normalize_supported_model_type(config) -> str:
+    model_type = config.model_type.lower()
+    config_class_name = type(config).__name__
+
+    if model_type == "qwen3_5":
+        if config_class_name == "Qwen3_5TextConfig":
+            return "qwen3_5_text"
+        if not hasattr(config, "text_config") and not hasattr(config, "vision_config"):
+            return "qwen3_5_text"
+
+    if model_type == "qwen3_5_moe":
+        if config_class_name == "Qwen3_5MoeTextConfig":
+            return "qwen3_5_moe_text"
+        if not hasattr(config, "text_config") and not hasattr(config, "vision_config"):
+            return "qwen3_5_moe_text"
+
+    return model_type
 
 
 def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_load_kwargs):
