@@ -48,7 +48,6 @@ class Test(ModelTest):
             "evalution_batch_size": "auto",
             "evalution_model_args": {
                 "dtype": "bfloat16",
-                "attn_implementation": "paged|flash_attention_2",
                 "device": "cuda:0",
             },
             "evalution_suite_kwargs": {
