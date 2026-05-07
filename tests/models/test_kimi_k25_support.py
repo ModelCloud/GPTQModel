@@ -9,6 +9,8 @@ from model_test import ModelTest
 
 
 class Test(ModelTest):
+    # Isolate this test from global fast-layer env overrides.
+    FAST_LAYER_COUNT_ENV = "GPTQMODEL_FAST_LAYER_COUNT_KIMI_K25"
     # Keep one stable saved checkpoint so eval-only repro runs can reuse the exact post-quant model.
     SAVE_PATH = os.environ.get(
         "GPTQMODEL_KIMI_2_5_SAVE_PATH",
@@ -20,6 +22,7 @@ class Test(ModelTest):
     DATASET_CONCAT_SIZE = 2048
     TRUST_REMOTE_CODE = True
     USE_FLASH_ATTN = False
+    OFFLOAD_TO_DISK = False
     # TODO, update scores
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
@@ -48,6 +51,7 @@ class Test(ModelTest):
             "evalution_batch_size": "auto",
             "evalution_model_args": {
                 "dtype": "bfloat16",
+                "attn_implementation": "auto",
                 "device": "cuda:0",
             },
             "evalution_suite_kwargs": {

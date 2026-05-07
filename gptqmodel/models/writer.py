@@ -20,6 +20,7 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
+from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
 from ..quantization.config import (
@@ -60,11 +61,9 @@ from ..utils.model import (
     make_quant,
     streaming_state_dict_to_shards,
 )
-from ..utils.structure import alias_all_from_turtle_if_meta
+from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
-from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
-
 
 log = setup_logger()
 
@@ -101,6 +100,104 @@ def _parse_split_by(value: Optional[str]) -> Optional[str]:
     if normalized not in SUPPORTED_SPLIT_BY:
         raise ValueError(f"Unsupported split_by value: {value}. Supported values: None, 'layer'.")
     return normalized
+
+
+def _materialize_remaining_meta_params_from_turtle(model: torch.nn.Module, turtle_model) -> int:
+    """Best-effort fallback for meta params that survive normal turtle sync."""
+
+    if (
+            turtle_model is None
+            or not hasattr(turtle_model, "_resolve_checkpoint_tensor_source")
+            or not hasattr(turtle_model, "_weight_map")
+            or not hasattr(turtle_model, "model_local_path")
+    ):
+        return 0
+
+    restored = 0
+    pending_by_shard: Dict[str, List[tuple[str, str, str, torch.nn.Parameter, Optional[int], Optional[int], Optional[int]]]] = {}
+
+    for full_name, param in list(model.named_parameters()):
+        if not (getattr(param, "is_meta", False) or param.device.type == "meta"):
+            continue
+
+        module_path, leaf = full_name.rsplit(".", 1)
+        resolved_name, expert_index, split_index, split_dim = turtle_model._resolve_checkpoint_tensor_source(module_path, leaf)
+        if resolved_name is None:
+            continue
+        shard = turtle_model._weight_map.get(resolved_name)
+        if shard is None:
+            continue
+        pending_by_shard.setdefault(shard, []).append(
+            (resolved_name, module_path, leaf, param, expert_index, split_index, split_dim)
+        )
+
+    for shard, entries in pending_by_shard.items():
+        shard_path = os.path.join(turtle_model.model_local_path, shard)
+        unique_names = {name for name, _module_path, _leaf, _param, _expert_index, _split_index, _split_dim in entries}
+
+        try:
+            with safe_open(shard_path, framework="pt", device="cpu") as handler:
+                tensors = {name: handler.get_tensor(name) for name in unique_names}
+        except RuntimeError as exc:
+            log.warn("Model save: skipping shard `%s` during meta materialization due to runtime error: %s", shard, exc)
+            continue
+
+        for tensor_name, module_path, leaf, param, expert_index, split_index, split_dim in entries:
+            source = tensors.get(tensor_name)
+            if source is None:
+                continue
+            target = source
+            if expert_index is not None:
+                if expert_index >= target.shape[0]:
+                    continue
+                target = target.narrow(0, expert_index, 1).squeeze(0)
+            if split_index is not None and split_dim is not None:
+                if target.shape[split_dim] % 2 != 0:
+                    continue
+                chunk = target.shape[split_dim] // 2
+                target = target.narrow(split_dim, split_index * chunk, chunk)
+            if target.dtype != param.dtype:
+                target = target.to(dtype=param.dtype)
+            if tuple(target.shape) != tuple(param.shape):
+                continue
+            module = model.get_submodule(module_path)
+            replacement = torch.nn.Parameter(target.detach().clone(), requires_grad=param.requires_grad)
+            setattr(module, leaf, replacement)
+            restored += 1
+
+    return restored
+
+
+def _materialize_meta_layers_from_turtle(model: torch.nn.Module, turtle_model) -> int:
+    if turtle_model is None or not hasattr(turtle_model, "materialize_submodule"):
+        return 0
+
+    layer_paths = set()
+    for full_name, param in model.named_parameters():
+        if not (getattr(param, "is_meta", False) or param.device.type == "meta"):
+            continue
+        parts = full_name.split(".")
+        if "layers" in parts:
+            i = parts.index("layers")
+            if i + 1 < len(parts):
+                layer_paths.add(".".join(parts[: i + 2]))
+
+    materialized = 0
+    for path in sorted(layer_paths):
+        try:
+            submodule = model.get_submodule(path)
+            alias_from_turtle_for_submodule(
+                target_model=model,
+                turtle_model=turtle_model,
+                target_submodule=submodule,
+                device=torch.device("cpu"),
+                non_blocking=False,
+            )
+            materialized += 1
+        except Exception as exc:
+            log.warn("Model save: failed to materialize meta layer `%s` from turtle: %s", path, exc)
+
+    return materialized
 
 
 def _cleanup_saved_weight_files(
@@ -658,6 +755,12 @@ def ModelWriter(cls):
         # Due to shell/turtle state, we need to sync the modules from turtle to shell
         if not self.load_quantized_model:
             alias_all_from_turtle_if_meta(shell_model=self.model, turtle_model=self.turtle_model)
+            materialized_layers = _materialize_meta_layers_from_turtle(self.model, self.turtle_model)
+            if materialized_layers:
+                log.info("Model save: materialized %s meta layer modules from turtle source.", materialized_layers)
+            restored_meta = _materialize_remaining_meta_params_from_turtle(self.model, self.turtle_model)
+            if restored_meta:
+                log.info("Model save: materialized %s remaining meta params from turtle source.", restored_meta)
 
         offload_root = self.quantize_config.offload_to_disk_path if getattr(self.quantize_config, "offload_to_disk", False) else None
         state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
