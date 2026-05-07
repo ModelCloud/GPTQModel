@@ -84,5 +84,6 @@ from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .mistral3 import Mistral3GPTQ
 from .afmoe import AfMoeQModel
 from .glm4v import Glm4vGPTQ
+from .glm4v_moe import Glm4vMoeQModel
 from .voxtral import VoxtralGPTQ
 from .glm4_moe_lite import Glm4MoeLiteQModel

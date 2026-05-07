@@ -930,15 +930,31 @@ class LazyTurtle:
         materialized = 0
         param_cache: Dict[tuple[str, torch.dtype, bool], nn.Parameter] = {}
         buffer_cache: Dict[tuple[str, torch.dtype], torch.Tensor] = {}
+        modules = list(shell_model.named_modules())
+        progress = log.pb(range(len(modules))).manual().set(show_left_steps=False)
+        progress.title(f"Syncing lazy checkpoint writes ({len(modules)} modules)")
+        progress.subtitle("Preparing module writes")
+        progress.draw(force=True)
 
-        with self._lock, torch.inference_mode():
-            for qname, shell_sub in list(shell_model.named_modules()):
-                materialized += self._materialize_direct_meta_tensors(
-                    shell_sub=shell_sub,
-                    module_path=qname,
-                    param_cache=param_cache,
-                    buffer_cache=buffer_cache,
-                )
+        try:
+            with self._lock, torch.inference_mode():
+                for idx, (qname, shell_sub) in enumerate(modules):
+                    module_label = qname or "<root>"
+                    progress.current_iter_step = idx
+                    progress.subtitle(f"Writing {module_label} ({idx + 1}/{len(modules)})")
+                    progress.draw()
+                    synced = self._materialize_direct_meta_tensors(
+                        shell_sub=shell_sub,
+                        module_path=qname,
+                        param_cache=param_cache,
+                        buffer_cache=buffer_cache,
+                    )
+                    materialized += synced
+                    progress.current_iter_step = idx + 1
+                    progress.subtitle(f"Wrote {module_label} (+{synced}, total {materialized})")
+                    progress.draw()
+        finally:
+            progress.close()
 
         if tie_after and hasattr(shell_model, "tie_weights") and getattr(shell_model.config, "tie_word_embeddings", False):
             try:
