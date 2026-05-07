@@ -22,6 +22,7 @@ class Test(ModelTest):
     DATASET_CONCAT_SIZE = 2048
     TRUST_REMOTE_CODE = True
     USE_FLASH_ATTN = False
+    # TODO, offload is unable to fix by now
     OFFLOAD_TO_DISK = False
     # TODO, update scores
     EVAL_TASKS_SLOW = {
