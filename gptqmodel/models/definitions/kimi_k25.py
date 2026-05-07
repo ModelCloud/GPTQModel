@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from ...utils.model import get_module
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ...utils.model import get_module
 
 
 class KimiK25QModel(BaseQModel):
@@ -44,11 +44,13 @@ class KimiK25QModel(BaseQModel):
 
     @classmethod
     def get_base_modules(cls, model):
+        base_modules = super().get_base_modules(model)
         prefix, core_model = cls._resolve_multimodal_layout(model)
-        base_modules = []
         for name, _ in core_model.named_children():
             if name != "language_model":
-                base_modules.append(f"{prefix}.{name}" if prefix else name)
+                module_name = f"{prefix}.{name}" if prefix else name
+                if module_name not in base_modules:
+                    base_modules.append(module_name)
         return base_modules
 
     @classmethod

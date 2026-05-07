@@ -116,6 +116,47 @@ def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
     return False
 
 
+def _iter_nested_pretrained_configs(config: PretrainedConfig):
+    """Yield config and all nested PretrainedConfig nodes once."""
+
+    stack = [config]
+    visited = set()
+
+    while stack:
+        cur = stack.pop()
+        if not isinstance(cur, PretrainedConfig):
+            continue
+
+        node_id = id(cur)
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        yield cur
+
+        for value in vars(cur).values():
+            if isinstance(value, PretrainedConfig):
+                stack.append(value)
+            elif isinstance(value, dict):
+                for sub in value.values():
+                    if isinstance(sub, PretrainedConfig):
+                        stack.append(sub)
+            elif isinstance(value, (list, tuple, set)):
+                for sub in value:
+                    if isinstance(sub, PretrainedConfig):
+                        stack.append(sub)
+
+
+def _override_attn_implementation(config: PretrainedConfig, attn_implementation: str) -> None:
+    """Apply attention implementation override to root and nested configs."""
+
+    for sub_config in _iter_nested_pretrained_configs(config):
+        try:
+            sub_config._attn_implementation = attn_implementation
+        except Exception:
+            # Some remote configs may expose read-only wrappers; ignore safely.
+            pass
+
+
 def _is_accelerated_attention_device(device: object) -> bool:
     """Return True when the selected device can run CUDA/ROCm flash attention."""
 
@@ -459,7 +500,7 @@ def ModelLoader(cls):
 
         if atten_impl is not None and atten_impl != "auto":
             log.info(f"Loader: overriding attn_implementation in config to `{atten_impl}`")
-            config._attn_implementation = atten_impl
+            _override_attn_implementation(config, atten_impl)
 
         resolved_device = normalize_device_device_map(device, device_map)
         resolved_device = auto_select_device(resolved_device, backend)
