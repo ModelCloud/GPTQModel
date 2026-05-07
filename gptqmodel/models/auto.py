@@ -99,6 +99,7 @@ from .definitions.glm import GlmQModel  # noqa: E402
 from .definitions.glm4_moe import GLM4MoEGPTQ  # noqa: E402
 from .definitions.glm4_moe_lite import Glm4MoeLiteQModel  # noqa: E402
 from .definitions.glm4v import Glm4vGPTQ  # noqa: E402
+from .definitions.glm4v_moe import Glm4vMoeQModel  # noqa: E402
 from .definitions.glm_moe_dsa import GlmMoeDsaQModel  # noqa: E402
 from .definitions.glm_ocr import GlmOCRGPTQ  # noqa: E402
 from .definitions.glmasr import GlmASRGPTQ  # noqa: E402
@@ -195,6 +196,7 @@ MODEL_MAP = {
     "glm": GlmQModel,
     "glm4": GlmQModel,
     "glm4v": Glm4vGPTQ,
+    "glm4v_moe": Glm4vMoeQModel,
     "glmasr": GlmASRGPTQ,
     "glm_ocr": GlmOCRGPTQ,
     "glm4_moe": GLM4MoEGPTQ,
