@@ -1689,8 +1689,14 @@ def _write_tensor_bytes(out, tensor: torch.Tensor, dtype: torch.dtype) -> None:
     if dtype is torch.bfloat16:
         view = tensor.view(torch.int16)
         out.write(view.numpy().tobytes())
-    else:
+        return
+
+    try:
         out.write(tensor.numpy().tobytes())
+    except TypeError:
+        # PyTorch float8 dtypes and some future storage dtypes may not expose a NumPy bridge.
+        # Fall back to the raw byte view so safetensors still receives the exact tensor payload.
+        out.write(tensor.view(torch.uint8).numpy().tobytes())
 
 
 def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str, str]) -> int:
