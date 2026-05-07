@@ -20,6 +20,11 @@ from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
+from gptqmodel.utils.structure import (
+    LazyTurtle,
+    alias_all_from_turtle_if_meta,
+    alias_from_turtle_for_submodule,
+)
 import gptqmodel.utils.structure as structure_module
 
 
