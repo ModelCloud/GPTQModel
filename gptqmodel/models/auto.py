@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# ruff: noqa: I001
 
 from __future__ import annotations
 
@@ -116,6 +117,7 @@ from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
 from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
+from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
 from .definitions.laguna import LagunaQModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
 from .definitions.llada2 import LLaDA2MoeQModel
@@ -182,6 +184,7 @@ MODEL_MAP = {
     "brumby": BrumbyQModel,
     "gpt_neo": GptNeoQModel,
     "kimi_k2": DeepSeekV3QModel, # 100% DeepSeekV3QModel clone
+    "kimi_k25": KimiK25QModel,
     "klear": KlearQModel,
     "laguna": LagunaQModel,
     "gpt_neox": GPTNeoXQModel,
