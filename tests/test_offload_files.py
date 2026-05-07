@@ -5,6 +5,7 @@
 
 import json
 import struct
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,10 +20,14 @@ from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
-from gptqmodel.utils.structure import (
-    LazyTurtle,
-    alias_all_from_turtle_if_meta,
-    alias_from_turtle_for_submodule,
+import gptqmodel.utils.structure as structure_module
+
+LazyTurtle = structure_module.LazyTurtle
+alias_all_from_turtle_if_meta = (
+    structure_module.alias_all_from_turtle_if_meta
+)
+alias_from_turtle_for_submodule = (
+    structure_module.alias_from_turtle_for_submodule
 )
 
 
@@ -1471,6 +1476,80 @@ def test_alias_all_from_lazy_turtle_restores_direct_meta_tensors(tmp_path):
 
     torch.testing.assert_close(shell_model.block.dt_bias, source_model.block.dt_bias)
     torch.testing.assert_close(shell_model.block.dt_scale, source_model.block.dt_scale)
+
+
+def test_sync_all_meta_reports_logbar_progress(monkeypatch):
+    class _FakeProgress:
+        def __init__(self):
+            self.current_iter_step = 0
+            self.titles = []
+            self.subtitles = []
+            self.draw_calls = []
+            self.closed = False
+
+        def manual(self):
+            return self
+
+        def set(self, **_kwargs):
+            return self
+
+        def title(self, value):
+            self.titles.append(value)
+            return self
+
+        def subtitle(self, value):
+            self.subtitles.append(value)
+            return self
+
+        def draw(self, force: bool = False):
+            self.draw_calls.append((self.current_iter_step, force))
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class _FakeLogger:
+        def __init__(self):
+            self.progress = _FakeProgress()
+            self.iterable = None
+
+        def pb(self, iterable, *, output_interval=None):
+            del output_interval
+            self.iterable = list(iterable)
+            return self.progress
+
+        def info(self, *_args, **_kwargs):
+            return None
+
+    shell_model = _HybridWrapper(width=8)
+    turtle = LazyTurtle.__new__(LazyTurtle)
+    turtle._lock = threading.RLock()
+
+    fake_logger = _FakeLogger()
+    visited_modules = []
+
+    def _fake_materialize(self, *, module_path, **_kwargs):
+        del self, _kwargs
+        visited_modules.append(module_path)
+        return 1
+
+    monkeypatch.setattr(structure_module, "log", fake_logger)
+    monkeypatch.setattr(LazyTurtle, "_materialize_direct_meta_tensors", _fake_materialize)
+
+    materialized = turtle.sync_all_meta(shell_model=shell_model, tie_after=False)
+
+    assert materialized == 3
+    assert visited_modules == ["", "block", "block.inner"]
+    assert fake_logger.iterable == [0, 1, 2]
+    assert fake_logger.progress.titles == ["Syncing lazy checkpoint writes (3 modules)"]
+    assert fake_logger.progress.subtitles[0] == "Preparing module writes"
+    assert "Writing <root> (1/3)" in fake_logger.progress.subtitles
+    assert "Writing block (2/3)" in fake_logger.progress.subtitles
+    assert "Writing block.inner (3/3)" in fake_logger.progress.subtitles
+    assert fake_logger.progress.subtitles[-1] == "Wrote block.inner (+1, total 3)"
+    assert fake_logger.progress.draw_calls[0] == (0, True)
+    assert fake_logger.progress.draw_calls[-1] == (3, False)
+    assert fake_logger.progress.closed is True
 
 
 def test_streaming_state_dict_pads_safetensors_header_to_8_bytes(tmp_path):
