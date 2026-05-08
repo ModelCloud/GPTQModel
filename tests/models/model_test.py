@@ -236,7 +236,6 @@ class ModelTest(unittest.TestCase):
 
     INFERENCE_PROMPT = "The capital city of France is named"
     INFERENCE_RESULT_KEYWORDS = ["paris"]
-    DISABLE_NATIVE_BASELINE_FALLBACK = True
     GENERATE_EVAL_SIZE_MIN = 128
     GENERATE_EVAL_SIZE_MAX = 128
     APPLY_CHAT_TEMPLATE = False
@@ -2054,8 +2053,6 @@ class ModelTest(unittest.TestCase):
                     f"(allowed [{negative_pct}-{positive_pct}%])"
                 )
                 if passed:
-                    continue
-                if self.DISABLE_NATIVE_BASELINE_FALLBACK:
                     continue
                 if self._maybe_accept_current_native_baseline(
                     task_name=task_name,
