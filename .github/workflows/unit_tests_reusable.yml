@@ -60,7 +60,7 @@ env:
   UV_TORCH_BACKEND: cu130
   TORCH_VERSION: 2.11.0
   PYTHON_VERSION: 3.13
-  UV_PYTHON: python3.13
+  UV_PYTHON: 3.13
   MODEL_TEST_MODE: ${{ inputs.model_test_mode || 'fast' }}
   MODEL_TEST_GPU_COUNT: '1'
   DEFUSER_GIT_URL: git+https://github.com/modelcloud/Defuser.git
