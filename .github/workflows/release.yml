@@ -88,7 +88,7 @@ jobs:
       - name: Activate uv env
         run: |
           echo "::group::-- dust uv cache dir --"
-            dust $(uv cache dir)
+            dust $(uv cache dir) || true
           echo "::endgroup::"
 
           bash .github/scripts/ci_unit_activate_uv_env.sh \
