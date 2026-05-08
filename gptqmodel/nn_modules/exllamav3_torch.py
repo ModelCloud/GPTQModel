@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import struct
 from functools import lru_cache
 from typing import Any, Dict, Optional
 
@@ -25,17 +26,7 @@ _EXL3_LOP3_MASK = 0x8FFF8FFF
 _EXL3_LOP3_BIAS = 0x3B603B60
 
 
-def _half_scalar_from_bits(bits: int) -> float:
-    return float(torch.tensor([bits], dtype=torch.uint16).view(torch.float16).item())
-
-
-_EXL3_MUL1_INV = _half_scalar_from_bits(0x1EEE)
-_EXL3_MUL1_BIAS = _half_scalar_from_bits(0xC931)
-
-
-@lru_cache(maxsize=None)
-def _tensor_core_perm(device_type: str, device_index: int | None) -> torch.Tensor:
-    device = torch.device(device_type, device_index)
+def _tensor_core_perm_values() -> list[int]:
     perm = [0] * 256
     for t in range(32):
         r0 = (t % 4) * 2
@@ -52,13 +43,47 @@ def _tensor_core_perm(device_type: str, device_index: int | None) -> torch.Tenso
         perm[t * 8 + 5] = r1 * 16 + c1
         perm[t * 8 + 6] = r2 * 16 + c1
         perm[t * 8 + 7] = r3 * 16 + c1
-    return torch.tensor(perm, dtype=torch.long, device=device)
+    return perm
+
+
+def _inverse_perm_values(perm: list[int]) -> list[int]:
+    inv = [0] * len(perm)
+    for index, value in enumerate(perm):
+        inv[value] = index
+    return inv
+
+
+def _half_scalar_from_bits(bits: int) -> float:
+    # Convert a uint16 bit pattern to its IEEE-754 binary16 (float16) value
+    # without allocating a torch tensor. The previous implementation used
+    # ``torch.tensor([bits], dtype=torch.uint16).view(torch.float16).item()``
+    # at module import, which fails under a meta-device preload context with
+    # ``RuntimeError: Tensor.item() cannot be called on meta tensors``. The
+    # transformers AWQ pathway (``replace_with_awq_linear``) imports
+    # ``gptqmodel.quantization`` inside ``with torch.device('meta'):``, which
+    # triggered the failure for any GPTQ load on transformers >= 5.6.
+    #
+    # ``struct`` format ``<e`` is IEEE-754 binary16 little-endian and matches
+    # ``torch.float16``'s byte layout on all supported platforms (x86_64 /
+    # aarch64). The conversion is bit-equivalent to the tensor-based path.
+    packed = struct.pack("<H", int(bits) & 0xFFFF)
+    return float(struct.unpack("<e", packed)[0])
+
+
+_EXL3_MUL1_INV = _half_scalar_from_bits(0x1EEE)
+_EXL3_MUL1_BIAS = _half_scalar_from_bits(0xC931)
+
+
+@lru_cache(maxsize=None)
+def _tensor_core_perm(device_type: str, device_index: int | None) -> torch.Tensor:
+    device = torch.device(device_type, device_index)
+    return torch.tensor(_tensor_core_perm_values(), dtype=torch.long, device=device)
 
 
 @lru_cache(maxsize=None)
 def _tensor_core_perm_i(device_type: str, device_index: int | None) -> torch.Tensor:
-    perm = _tensor_core_perm(device_type, device_index)
-    return torch.argsort(perm)
+    device = torch.device(device_type, device_index)
+    return torch.tensor(_inverse_perm_values(_tensor_core_perm_values()), dtype=torch.long, device=device)
 
 
 @lru_cache(maxsize=None)

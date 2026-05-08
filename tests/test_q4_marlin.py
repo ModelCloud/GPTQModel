@@ -44,6 +44,8 @@ class TestQ4Marlin(ModelTest):
 
             # # 4-bit, act_order==True, group_size=128
             "/monster/data/model/gemma-1.1-2b-it-GPTQ",
+            # quantize by transformers, format is gptq_v2
+            "/monster/data/model/Llama-3.2-1B-Instruct-HF-GPTQV2",
         ]
     )
     def test_generation(self, model_id):

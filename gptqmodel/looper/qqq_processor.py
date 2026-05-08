@@ -12,12 +12,14 @@ from torch.nn import Module
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
+from ..models._const import DEVICE
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..nn_modules.qlinear.qqq import QQQLinear
+from ..nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 from ..quantization.config import METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.fallback import normalize_fallback
 from ..quantization.qqq import QQQ
+from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.model import create_quant_module, find_modules, move_to, pack_module
 from ..utils.torch import CPU
@@ -56,6 +58,16 @@ class QQQProcessor(LoopProcessor):
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
+
+    def _quant_linear_kernel(self):
+        device = self.qcfg.device
+        if isinstance(device, DEVICE):
+            return (QQQTorchLinear, BACKEND.QQQ_TORCH) if device == DEVICE.NPU else (QQQLinear, BACKEND.QQQ)
+        if isinstance(device, torch.device):
+            return (QQQTorchLinear, BACKEND.QQQ_TORCH) if device.type == "npu" else (QQQLinear, BACKEND.QQQ)
+        if isinstance(device, str) and device.split(":")[0].lower() == "npu":
+            return QQQTorchLinear, BACKEND.QQQ_TORCH
+        return QQQLinear, BACKEND.QQQ
 
     def set_calibration_dataset(self, calibration_dataset):
         """Rejects dataset replacement because QQQ capture is fixed at construction."""
@@ -252,6 +264,7 @@ class QQQProcessor(LoopProcessor):
 
         layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
+        quant_linear_cls, backend = self._quant_linear_kernel()
 
         # replace module with quantized module
         with log_time_block(
@@ -261,7 +274,7 @@ class QQQProcessor(LoopProcessor):
         ):
             create_quant_module(
                 name=module.full_name,
-                linear_cls=QQQLinear,
+                linear_cls=quant_linear_cls,
                 bits=self.qcfg.runtime_bits,
                 desc_act=self.qcfg.desc_act,
                 dynamic=self.qcfg.dynamic,
@@ -273,13 +286,14 @@ class QQQProcessor(LoopProcessor):
                 lm_head_name=model.lm_head,
                 pack_dtype=self.qcfg.pack_dtype,
                 format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
+                backend=backend,
                 register_buffers=False,
             )
 
         # pack module
         qModules = {
             name: submodule
-            for name, submodule in find_modules(model.model, [QQQLinear]).items()
+            for name, submodule in find_modules(model.model, [quant_linear_cls]).items()
             if name == module.full_name
         }
         with log_time_block(
@@ -294,7 +308,7 @@ class QQQProcessor(LoopProcessor):
                 q_zeros=q_zeros,
                 q_g_idx=q_g_idx,
                 layers=layers,
-                quant_linear_cls=QQQLinear,
+                quant_linear_cls=quant_linear_cls,
                 lock=self.lock,
                 q_scales_extra=q_scales_extra,
                 quantize_config=self.qcfg,

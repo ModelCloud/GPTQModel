@@ -19,7 +19,6 @@ import transformers
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.structure import LazyTurtle, print_module_tree
 
-
 if ensure_modelscope_available():
     from modelscope import snapshot_download
 else:
@@ -27,7 +26,7 @@ else:
 
 import defuser
 from packaging.version import InvalidVersion, Version
-from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 
 from ..adapter.adapter import Adapter
@@ -45,6 +44,7 @@ from ..utils.hf import (
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
     has_native_transformers_causallm_support,
+    load_hf_tokenizer,
     normalize_hf_config_compat,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
@@ -75,7 +75,7 @@ from ..utils.model import (
     make_quant,
     simple_dispatch_model,
 )
-from ._const import DEVICE, normalize_device
+from ._const import DEVICE, HAS_NPU, normalize_device
 
 
 log = setup_logger()
@@ -473,8 +473,9 @@ def ModelLoader(cls):
             # Align config metadata with the dtype we will materialize weights in.
             set_hf_config_dtype(config, dtype)
 
-        tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer = load_hf_tokenizer(
             model_local_path,
+            model_config=config,
             trust_remote_code=tokenizer_trust_remote_code,
             **_get_tokenizer_load_kwargs(model_init_kwargs),
         )
@@ -913,8 +914,9 @@ def ModelLoader(cls):
 
         qcfg.calculate_bits_per_weight()
 
-        tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer = load_hf_tokenizer(
             model_local_path,
+            model_config=config,
             trust_remote_code=tokenizer_trust_remote_code,
             **hf_gguf_load_kwargs,
         )
@@ -1161,6 +1163,11 @@ def ModelLoader(cls):
                     device_strs = [f"xpu:{i}" for i in range(num_gpus)]
                 else:
                     raise RuntimeError("XPU is not available")
+            elif device == DEVICE.NPU:
+                if HAS_NPU:
+                    device_strs = [f"npu:{i}" for i in range(num_gpus)]
+                else:
+                    raise RuntimeError("NPU is not available")
             else:
                 device_strs = ["cpu"] * num_gpus
 
@@ -1311,6 +1318,8 @@ def ModelLoader(cls):
                 num_gpus = torch.cuda.device_count()
             elif device is DEVICE.XPU:
                 num_gpus = torch.xpu.device_count()
+            elif device is DEVICE.NPU:
+                num_gpus = torch.npu.device_count()
             device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
         else:
             device_map = dict(explicit_device_map)
@@ -1412,8 +1421,6 @@ def ModelLoader(cls):
         if load_checkpoint_in_model and backend not in [
             BACKEND.GPTQ_MACHETE,
             BACKEND.AWQ_MACHETE,
-            BACKEND.GPTQ_MARLIN,
-            BACKEND.AWQ_MARLIN,
             BACKEND.GPTQ_BITBLAS,
             BACKEND.AWQ_BITBLAS,
         ]:

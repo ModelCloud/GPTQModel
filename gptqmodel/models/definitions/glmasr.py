@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from transformers import AutoModel
+
 from ..base import BaseQModel
 
 

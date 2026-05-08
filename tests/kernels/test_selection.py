@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from collections import OrderedDict
+
 import pytest
 import torch
 
@@ -97,6 +99,47 @@ def _force_auto_candidates_valid(monkeypatch, method, fmt):
             "cached_validate_once",
             classmethod(lambda qlinear_cls: (True, None)),
         )
+
+
+def test_auto_select_normalizes_torch_device_before_device_prefilter(monkeypatch):
+    class CudaKernel:
+        SUPPORTS_DEVICES = [DEVICE.CUDA]
+
+        @classmethod
+        def validate(cls, **_):
+            return True, None
+
+    class AnyDeviceKernel:
+        SUPPORTS_DEVICES = [DEVICE.ALL]
+
+        @classmethod
+        def validate(cls, **_):
+            return True, None
+
+    monkeypatch.setitem(
+        AUTO_BACKEND_KERNEL_MAPPING[METHOD.QQQ],
+        FORMAT.QQQ,
+        OrderedDict(
+            [
+                (BACKEND.QQQ, CudaKernel),
+                (BACKEND.QQQ_TORCH, AnyDeviceKernel),
+            ]
+        ),
+    )
+
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=torch.device("cuda:0"),
+        backend=BACKEND.AUTO,
+        format=FORMAT.QQQ,
+        quant_method=METHOD.QQQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is CudaKernel
 
 
 CASES = []

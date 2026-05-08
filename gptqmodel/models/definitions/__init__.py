@@ -24,6 +24,7 @@ from .exaone import ExaOneQModel
 from .exaone4 import Exaone4QModel
 from .ernie4_5 import Ernie4_5QModel
 from .ernie4_5_moe import Ernie4_5_MoeQModel
+from .ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
 from .gemma2 import Gemma2QModel
 from .gemma3 import Gemma3QModel
 from .gemma3n import Gemma3nForConditionalGenerationGPTQ, Gemma3nTextQModel
@@ -42,6 +43,7 @@ from .hymba import HymbaQModel
 from .instella import InstellaQModel
 from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
+from .internvl_chat import InternVLChatQModel
 from .llama4 import Llama4QModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel
@@ -75,11 +77,13 @@ from .pangu_alpha import PanguAlphaQModel
 from .longcat_flash import LongCatFlashQModel
 from .apertus import ApertusQModel
 from .klear import KlearQModel
+from .laguna import LagunaQModel
 from .llava_qwen2 import LlavaQwen2QModel
 from .nemotron_h import NemotronHQModel
 from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .mistral3 import Mistral3GPTQ
 from .afmoe import AfMoeQModel
 from .glm4v import Glm4vGPTQ
+from .glm4v_moe import Glm4vMoeQModel
 from .voxtral import VoxtralGPTQ
 from .glm4_moe_lite import Glm4MoeLiteQModel

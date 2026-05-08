@@ -30,7 +30,7 @@ from .. import DEBUG_ON
 from ..utils import torch as torch_utils
 from ..utils.ctx import ctx
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_empty_cache_any
+from ..utils.torch import HAS_NPU, torch_empty_cache_any
 
 
 log = setup_logger()
@@ -93,10 +93,12 @@ def _coerce_device(d: DeviceLike) -> torch.device:
             return torch.device("cuda", d)
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             return torch.device("xpu", d)
+        if HAS_NPU:
+            return torch.device("npu", d)
         if _mps_available():
             return torch.device("mps")
         return torch.device("cpu")
-    # Accept strings like 'cuda:0', 'xpu:1', 'cpu', 'mps'
+    # Accept strings like 'cuda:0', 'xpu:1', 'npu:2', 'cpu', 'mps'
     return torch.device(d)
 
 
@@ -115,6 +117,10 @@ def _device_ctx(dev: torch.device):
         target = dev if dev.index is not None else "xpu"
         with torch.xpu.device(target):
             yield
+    elif dev.type == "npu" and HAS_NPU:
+        target = dev if dev.index is not None else "npu"
+        with torch.npu.device(target):
+            yield
     else:
         yield
 
@@ -130,6 +136,9 @@ def _activate_thread_device(dev: torch.device):
     elif dev.type == "xpu" and hasattr(torch, "xpu"):
         target = dev if dev.index is not None else "xpu"
         torch.xpu.set_device(target)
+    elif dev.type == "npu" and HAS_NPU:
+        target = dev if dev.index is not None else "npu"
+        torch.npu.set_device(target)
     # mps/cpu: nothing to pin
 
 
@@ -604,6 +613,7 @@ class DeviceThreadPool:
         *,
         include_cuda: bool = True,
         include_xpu: bool = True,
+        include_npu: bool = True,
         include_mps: bool = True,
         include_cpu: bool = True,
         inference_mode: bool = False,
@@ -623,10 +633,12 @@ class DeviceThreadPool:
                 - 'mps': N                -> N workers for MPS (single device)
                 - 'cuda:per': N           -> N workers per CUDA index
                 - 'xpu:per': N            -> N workers per XPU index
+                - 'npu:per': N            -> N workers per NPU index
                 - 'cuda:<i>': N           -> override for specific CUDA index
                 - 'xpu:<i>': N            -> override for specific XPU index
+                - 'npu:<i>': N            -> override for specific NPU index
                 - '<alias>:<parent>': N   -> virtual pool sharing locks with parent device
-                  (CUDA parents must include an explicit index, e.g. 'alias:cuda:0')
+                  (CUDA/NPU parents must include an explicit index, e.g. 'alias:cuda:0')
               Unspecified devices default to 1 worker each.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
             warmups: optional mapping from device family (e.g. 'cuda') to a
@@ -652,6 +664,9 @@ class DeviceThreadPool:
             if include_xpu and hasattr(torch, "xpu") and torch.xpu.is_available():
                 for i in range(torch.xpu.device_count()):
                     discovered.append(torch.device("xpu", i))
+            if include_npu and HAS_NPU:
+                for i in range(torch.npu.device_count()):
+                    discovered.append(torch.device("npu", i))
             if include_mps and _mps_available():
                 discovered.append(torch.device("mps"))
             if include_cpu:
@@ -722,11 +737,11 @@ class DeviceThreadPool:
                 base_workers[raw_key] = count
             else:
                 _, parent_key = alias_info
-                if parent_key.startswith("cuda"):
+                if parent_key.startswith("cuda") or parent_key.startswith("npu"):
                     parts = parent_key.split(":")
                     if len(parts) < 2 or not parts[1].isdigit():
                         raise ValueError(
-                            f"Virtual pool '{raw_key}' must target a concrete CUDA index (e.g. 'alias:cuda:0'); got '{parent_key}'"
+                            f"Virtual pool '{raw_key}' must target a concrete accelerator index (e.g. 'alias:cuda:0'); got '{parent_key}'"
                         )
                 virtual_workers[raw_key] = (parent_key, count)
 
@@ -747,7 +762,7 @@ class DeviceThreadPool:
         # Eagerly build workers, locks, inflight tracking, and counters.
         for d in devices:
             dev = _coerce_device(d)
-            if dev.type not in ("cuda", "xpu", "mps", "cpu"):
+            if dev.type not in ("cuda", "xpu", "npu", "mps", "cpu"):
                 continue
             key = self._key(dev)
             if key in self._devices_by_key:
@@ -760,7 +775,7 @@ class DeviceThreadPool:
             self._inflight_cv[key] = threading.Condition()
             self._last_gc_done_per_device[key] = 0
             self._physical_children[key] = {key}
-            if dev.type in ("cuda", "xpu", "mps"):
+            if dev.type in ("cuda", "xpu", "npu", "mps"):
                 self._gc_done_physical[key] = 0
                 self._last_gc_done_physical[key] = 0
 
@@ -781,9 +796,9 @@ class DeviceThreadPool:
             parent_dev = self._devices_by_key.get(parent_key)
             if parent_dev is None:
                 raise ValueError(f"Virtual pool '{v_key}' references unknown parent '{parent_key}'")
-            if parent_dev.type == "cuda" and parent_dev.index is None:
+            if parent_dev.type in ("cuda", "npu") and parent_dev.index is None:
                 raise ValueError(
-                    f"Virtual pool '{v_key}' requires an indexed CUDA parent device (e.g. '{v_key}:cuda:0'); got '{parent_key}'"
+                    f"Virtual pool '{v_key}' requires an indexed accelerator parent device (e.g. '{v_key}:cuda:0'); got '{parent_key}'"
                 )
             parent_group = self._worker_groups.get(parent_key, [])
             parent_budget = len(parent_group)
@@ -821,7 +836,7 @@ class DeviceThreadPool:
 
         # Start janitor if enabled and there exists at least one accelerator.
         if self._empty_cache_every_n > 0 and any(
-            self._devices_by_key[k].type in ("cuda", "xpu", "mps") for k in self._ordered_keys
+            self._devices_by_key[k].type in ("cuda", "xpu", "npu", "mps") for k in self._ordered_keys
         ):
             self._janitor = threading.Thread(
                 target=self._janitor_loop, name="DP-Janitor", daemon=True
@@ -843,7 +858,7 @@ class DeviceThreadPool:
         if not isinstance(key, str) or ":" not in key:
             return None
         head, tail = key.split(":", 1)
-        if head in {"cuda", "xpu", "mps", "cpu"}:
+        if head in {"cuda", "xpu", "npu", "mps", "cpu"}:
             return None
         if not tail:
             return None
@@ -915,11 +930,11 @@ class DeviceThreadPool:
         worker_specs: List[Tuple[str, str, int]] = []
         for raw_dev in devices:
             dev = _coerce_device(raw_dev)
-            if dev.type not in ("cuda", "xpu", "mps", "cpu"):
+            if dev.type not in ("cuda", "xpu", "npu", "mps", "cpu"):
                 continue
             if dev.type == "cpu" and not pin_cpu_workers:
                 continue
-            if dev.type in ("cuda", "xpu", "mps") and not pin_accelerator_workers:
+            if dev.type in ("cuda", "xpu", "npu", "mps") and not pin_accelerator_workers:
                 continue
             key = self._key(dev)
             n_workers = int(max(1, self._resolve_workers_for_device(dev, worker_table)))
@@ -930,7 +945,7 @@ class DeviceThreadPool:
             return {}
 
         def _priority(dev_type: str) -> int:
-            if dev_type in ("cuda", "xpu"):
+            if dev_type in ("cuda", "xpu", "npu"):
                 return 0
             if dev_type == "mps":
                 return 1
@@ -1531,6 +1546,11 @@ class DeviceThreadPool:
             if idx is None:
                 return None
             return f"xpu:{idx}"
+        if dev.type == "npu":
+            idx = dev.index
+            if idx is None:
+                return None
+            return f"npu:{idx}"
         return None
 
     def _query_device_vram_gib(self, key: str) -> Optional[float]:
@@ -1639,7 +1659,7 @@ class DeviceThreadPool:
             if (
                 dev is not None
                 and self._empty_cache_every_n > 0
-                and dev.type in ("cuda", "xpu", "mps")
+                and dev.type in ("cuda", "xpu", "npu", "mps")
             ):
                 physical_key = self._physical_key(key)
                 current = self._gc_done_physical.get(physical_key, 0) + 1
@@ -1773,8 +1793,8 @@ class DeviceThreadPool:
             w = snap["workers"].get(k, 0)
             infl = snap["inflight"].get(k, 0)
             done = snap["per_done"].get(k, 0)
-            accel = "Y" if t in ("cuda", "xpu", "mps") else "N"
-            if thr > 0 and t in ("cuda", "xpu", "mps"):
+            accel = "Y" if t in ("cuda", "xpu", "npu", "mps") else "N"
+            if thr > 0 and t in ("cuda", "xpu", "npu", "mps"):
                 rem = thr - (done % thr) if (done % thr) != 0 else 0
                 nextgc = "now" if rem == 0 and done > 0 else str(rem)
             else:
@@ -1821,6 +1841,14 @@ class DeviceThreadPool:
             if hasattr(torch, "xpu") and hasattr(torch.xpu, "synchronize"):
                 with torch.xpu.device(dev.index):
                     torch.xpu.synchronize()
+        # NPU
+        for key in self._ordered_keys:
+            dev = self._devices_by_key[key]
+            if dev.type != "npu":
+                continue
+            if HAS_NPU:
+                with torch.npu.device(dev.index):
+                    torch.npu.synchronize()
         # MPS
         has_mps_device = any(self._devices_by_key[k].type == "mps" for k in self._ordered_keys)
         if has_mps_device and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
@@ -2025,7 +2053,7 @@ class DeviceThreadPool:
                 if physical in seen_targets:
                     continue
                 dev = self._devices_by_key.get(physical)
-                if dev is None or dev.type not in ("cuda", "xpu", "mps"):
+                if dev is None or dev.type not in ("cuda", "xpu", "npu", "mps"):
                     continue
                 if physical not in self._locks:
                     continue
@@ -2041,7 +2069,7 @@ class DeviceThreadPool:
 
             for key in sweep_targets:
                 dev = self._devices_by_key.get(key)
-                if dev is None or dev.type not in ("cuda", "xpu", "mps"):
+                if dev is None or dev.type not in ("cuda", "xpu", "npu", "mps"):
                     skipped_devices.append(key)
                     continue
                 lk = self._locks.get(key)

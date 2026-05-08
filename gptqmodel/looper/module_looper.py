@@ -1276,6 +1276,7 @@ class ModuleLooper():
                 return
 
             keep = self._get_processor_mask(processor)
+            preserve_batch_keep_mask = getattr(processor, "preserve_batch_keep_mask", False)
 
             timer = getattr(self.gptq_model, "quant_region_timer", None)
             start = time.perf_counter() if timer else None
@@ -1285,7 +1286,9 @@ class ModuleLooper():
             try:
                 if isinstance(inputs, (tuple, list)) and len(inputs) > 0 and torch.is_tensor(inputs[0]):
                     x = inputs[0]
-                    if keep is not None and x.dim() >= 3:
+                    # GPTQ needs the original [B, S, H] activations so it can
+                    # apply each sample's keep-mask without losing batch boundaries.
+                    if not preserve_batch_keep_mask and keep is not None and x.dim() >= 3:
                         xk = apply_keep_mask_bt(x, keep)
                         if isinstance(inputs, tuple):
                             new_inputs = (xk,) + tuple(inputs[1:])
@@ -1300,13 +1303,23 @@ class ModuleLooper():
             try:
                 if isinstance(output, (tuple, list)) and len(output) > 0:
                     y0 = output[0]
-                    if torch.is_tensor(y0) and keep is not None and y0.dim() >= 3:
+                    if (
+                        not preserve_batch_keep_mask
+                        and torch.is_tensor(y0)
+                        and keep is not None
+                        and y0.dim() >= 3
+                    ):
                         yk = apply_keep_mask_bt(y0, keep)
                         if isinstance(output, tuple):
                             new_output = (yk,) + tuple(output[1:])
                         else:
                             new_output = [yk] + list(output[1:] )
-                elif torch.is_tensor(output) and keep is not None and output.dim() >= 3:
+                elif (
+                    not preserve_batch_keep_mask
+                    and torch.is_tensor(output)
+                    and keep is not None
+                    and output.dim() >= 3
+                ):
                     new_output = apply_keep_mask_bt(output, keep)
             except Exception:
                 new_output = output
@@ -1336,6 +1349,7 @@ class ModuleLooper():
 
             # Get mask using TLS (thread-safe)
             keep = self._get_processor_mask(processor)
+            preserve_batch_keep_mask = getattr(processor, "preserve_batch_keep_mask", False)
 
             timer = getattr(self.gptq_model, "quant_region_timer", None)
             start = time.perf_counter() if timer else None
@@ -1345,7 +1359,7 @@ class ModuleLooper():
             try:
                 if isinstance(inputs, (tuple, list)) and len(inputs) > 0 and torch.is_tensor(inputs[0]):
                     x = inputs[0]
-                    if keep is not None and x.dim() >= 3:
+                    if not preserve_batch_keep_mask and keep is not None and x.dim() >= 3:
                         xk = apply_keep_mask_bt(x, keep)
                         if isinstance(inputs, tuple):
                             new_inputs = (xk,) + tuple(inputs[1:])

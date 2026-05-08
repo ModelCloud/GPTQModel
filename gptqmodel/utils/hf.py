@@ -19,6 +19,7 @@ from accelerate import init_empty_weights
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
+    AutoTokenizer,
     GenerationConfig,
     PreTrainedConfig,
     PreTrainedModel,
@@ -33,7 +34,6 @@ from ..nn_modules.qlinear.gguf import (
     _is_prism_q1_0_g128,
 )
 from ..utils import _MONKEY_PATCH_LOCK, internal_gguf
-
 
 # Compatibility wrapper for no_init_weights across different transformers versions
 # transformers >= 5.0.0: from transformers.initialization import no_init_weights
@@ -59,6 +59,7 @@ __all__ = [
     "normalize_model_id_or_path_for_hf_gguf",
     "resolve_trust_remote_code",
     "set_hf_config_dtype",
+    "load_hf_tokenizer",
     "load_tokenizer",
 ]
 
@@ -875,6 +876,53 @@ def _patch_transformers_remote_code_compat() -> None:
             # during init, but newer transformers dropped the default attribute.
             PreTrainedModel.is_parallelizable = False
 
+        if not hasattr(PreTrainedModel, "get_head_mask"):
+            def get_head_mask(self, head_mask, num_hidden_layers, is_attention_chunked: bool = False):
+                # transformers 5.x removed this helper from PreTrainedModel,
+                # but many older trust_remote_code decoder implementations
+                # still call `self.get_head_mask(...)` from `forward()`.
+                #
+                # Legacy behavior:
+                # - `None` means no masking and expands to `[None] * n_layers`
+                # - 1D masks are `[num_heads]` and must be broadcast to every
+                #   layer
+                # - 2D masks are `[num_hidden_layers, num_heads]` and must be
+                #   expanded to the 5D attention-mask shape expected by old
+                #   attention blocks
+                #
+                # Keeping this compat shim at the base-class level is safer
+                # than patching each remote model individually because many
+                # pre-transformers-5 architectures shared the same contract.
+                if head_mask is None:
+                    return [None] * num_hidden_layers
+
+                if head_mask.dim() == 1:
+                    # [num_heads] -> [num_hidden_layers, batch, num_heads, seq, seq]
+                    head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+                    head_mask = head_mask.expand(num_hidden_layers, -1, -1, -1, -1)
+                elif head_mask.dim() == 2:
+                    # [num_hidden_layers, num_heads] -> [num_hidden_layers, batch, num_heads, seq, seq]
+                    head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
+                else:
+                    raise ValueError(
+                        f"head_mask must have dim 1 or 2, but got shape {tuple(head_mask.shape)}."
+                    )
+
+                target_dtype = getattr(self, "dtype", None)
+                if isinstance(target_dtype, torch.dtype):
+                    # Match the model compute dtype to avoid dtype promotion or
+                    # precision mismatches inside legacy attention kernels.
+                    head_mask = head_mask.to(dtype=target_dtype)
+
+                if is_attention_chunked:
+                    # Older chunked-attention implementations expect one extra
+                    # axis for chunk broadcasting.
+                    head_mask = head_mask.unsqueeze(-1)
+
+                return head_mask
+
+            PreTrainedModel.get_head_mask = get_head_mask
+
         if not getattr(PreTrainedModel, "_gptqmodel_missing_all_tied_weights_patch", False):
             original_getattr = PreTrainedModel.__getattr__
 
@@ -990,6 +1038,12 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
     rope_scaling = getattr(config, "rope_scaling", None)
     if not isinstance(rope_scaling, dict):
         return
+    if not rope_scaling:
+        # Some remote config classes materialize an empty dict here, while
+        # legacy model code treats any dict as "scaled RoPE enabled" and then
+        # directly indexes mandatory fields like `factor`.
+        config.rope_scaling = None
+        return
 
     if model_type != "instella" and rope_scaling.get("rope_type") == "default" and set(rope_scaling).issubset({"rope_type", "rope_theta"}):
         # transformers 5.x materializes default RoPE metadata into
@@ -998,11 +1052,18 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
         config.rope_scaling = None
         return
 
+    if "factor" not in rope_scaling:
+        rope_scaling = dict(rope_scaling)
+        rope_scaling["factor"] = 1.0
+
     if "type" in rope_scaling:
+        config.rope_scaling = rope_scaling
         return
 
     rope_type = rope_scaling.get("rope_type")
     if rope_type is None:
+        if "factor" not in rope_scaling:
+            config.rope_scaling = None
         return
 
     rope_scaling = dict(rope_scaling)
@@ -1080,12 +1141,49 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
     speech_module = sys.modules.get(f"{module_root}.speech_conformer_encoder")
     remote_module = sys.modules.get(model_cls.__module__)
     ovis_config_module = sys.modules.get(f"{module_root}.configuration_ovis")
+    intern_vit_module = sys.modules.get(f"{module_root}.modeling_intern_vit")
     outer_model_cls = model_cls if isinstance(model_cls, type) else None
     input_mode_enum = getattr(remote_module, "InputMode", None) if remote_module is not None else None
 
     with _MONKEY_PATCH_LOCK:
         if outer_model_cls is not None:
             try_patch_legacy_flash_attn_flag(outer_model_cls)
+
+        if getattr(config, "model_type", None) == "internvl_chat" and intern_vit_module is not None:
+            encoder_cls = getattr(intern_vit_module, "InternVisionEncoder", None)
+            layer_cls = getattr(intern_vit_module, "InternVisionEncoderLayer", None)
+            module_nn = getattr(intern_vit_module, "nn", None)
+            if (
+                encoder_cls is not None
+                and layer_cls is not None
+                and module_nn is not None
+                and not getattr(encoder_cls, "_gptqmodel_meta_dpr_patch", False)
+            ):
+                def encoder_init_compat(self, encoder_config):
+                    module_nn.Module.__init__(self)
+                    self.config = encoder_config
+
+                    num_hidden_layers = int(getattr(encoder_config, "num_hidden_layers", 0) or 0)
+                    drop_path_rate = float(getattr(encoder_config, "drop_path_rate", 0.0) or 0.0)
+                    dpr = (
+                        torch.linspace(
+                            0,
+                            drop_path_rate,
+                            num_hidden_layers,
+                            device="cpu",
+                            dtype=torch.float32,
+                        ).tolist()
+                        if num_hidden_layers > 0
+                        else []
+                    )
+
+                    self.layers = module_nn.ModuleList(
+                        [layer_cls(encoder_config, dpr[idx]) for idx in range(num_hidden_layers)]
+                    )
+                    self.gradient_checkpointing = True
+
+                encoder_cls.__init__ = encoder_init_compat
+                encoder_cls._gptqmodel_meta_dpr_patch = True
 
         if config.model_type == "minicpmv" or config.model_type == "minicpmo":
             vision_model_cls = getattr(
@@ -1301,6 +1399,75 @@ def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
     return Tokenicer.load(tokenizer_or_path, model_config=model_config, **kwargs)
 
 
+def load_hf_tokenizer(
+        tokenizer_or_path,
+        *,
+        model_config: Any = None,
+        trust_remote_code: bool = False,
+        **kwargs,
+):
+    auto_tokenizer_exc = None
+    try:
+        # Preferred path: let transformers perform its normal tokenizer
+        # resolution. This keeps behavior identical for native tokenizers and
+        # for remote-code tokenizers that are still compatible with the
+        # installed transformers release.
+        return AutoTokenizer.from_pretrained(
+            tokenizer_or_path,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
+    except AttributeError as exc:
+        # Narrow fallback for legacy trust_remote_code repositories. On
+        # transformers 5.x, some old repos no longer resolve to a tokenizer
+        # class inside AutoTokenizer and instead fail with
+        # `None.from_pretrained(...)`. Only intercept that specific compat
+        # break; all other exceptions should propagate unchanged.
+        if not trust_remote_code or "from_pretrained" not in str(exc):
+            raise
+        auto_tokenizer_exc = exc
+
+    auto_map = getattr(model_config, "auto_map", None) or {}
+    # Old repositories often still expose an authoritative dynamic tokenizer
+    # reference in `config.auto_map`, even when the higher-level
+    # AutoTokenizer registry no longer reaches it.
+    class_ref = auto_map.get("AutoTokenizer")
+    if isinstance(class_ref, (list, tuple)):
+        # HF stores tokenizer refs as [slow, fast]. Prefer the fast tokenizer
+        # when present, otherwise use the slow one.
+        class_ref = class_ref[1] if len(class_ref) > 1 and class_ref[1] is not None else class_ref[0]
+
+    if not isinstance(class_ref, str):
+        raise auto_tokenizer_exc
+
+    from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+    tokenizer_cls = get_class_from_dynamic_module(class_ref, str(tokenizer_or_path), **kwargs)
+    original_init = getattr(tokenizer_cls, "__init__", None)
+    if callable(original_init) and not getattr(tokenizer_cls, "_gptqmodel_legacy_init_compat", False):
+        def patched_init(self, *init_args, **init_kwargs):
+            # Some legacy tokenizers assign `bos/eos/pad/..._token_id` before
+            # they call `PreTrainedTokenizer.__init__()`. In transformers 5.x
+            # those assignments now go through base-class attribute handling,
+            # which expects `_special_tokens_map` to already exist. Creating
+            # the storage eagerly preserves the old constructor order without
+            # modifying the upstream repository code.
+            if not hasattr(self, "_special_tokens_map"):
+                object.__setattr__(self, "_special_tokens_map", {})
+            return original_init(self, *init_args, **init_kwargs)
+
+        tokenizer_cls.__init__ = patched_init
+        # Avoid wrapping the same dynamically imported class multiple times in
+        # a long-running process.
+        tokenizer_cls._gptqmodel_legacy_init_compat = True
+    tokenizer_cls.register_for_auto_class()
+    return tokenizer_cls.from_pretrained(
+        tokenizer_or_path,
+        trust_remote_code=trust_remote_code,
+        **kwargs,
+    )
+
+
 
 _patch_transformers_remote_code_compat()
 
@@ -1391,7 +1558,7 @@ def autofix_hf_generation_config(cfg: GenerationConfig):
 
 
 def sanitize_model_config(config):
-    if config.model_type == "chatglm" and hasattr(config, "max_length"):
+    if getattr(config, "model_type", None) == "chatglm" and hasattr(config, "max_length"):
         # max_length can only be stored in generation_config.
         # see _normalize_chatglm_remote_code_config_compat()
         del config.attribute_map["max_length"]

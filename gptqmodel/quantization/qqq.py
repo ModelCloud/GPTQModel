@@ -18,6 +18,7 @@ from ..quantization.quantizer import HF_OPTIMUM
 from ..utils import setup_logger
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gptq import get_number_of_rows_and_cols
+from .npu_linalg import npu_inverse_cholesky_factor
 
 
 DEBUG = False
@@ -520,9 +521,12 @@ class QQQ:
         fallback_configured = threshold_raw is not None
 
         try:
-            H = torch.linalg.cholesky(H)
-            H = torch.cholesky_inverse(H)
-            H = torch.linalg.cholesky(H, upper=True)
+            if H.device.type == "npu":
+                H = npu_inverse_cholesky_factor(H)
+            else:
+                H = torch.linalg.cholesky(H)
+                H = torch.cholesky_inverse(H)
+                H = torch.linalg.cholesky(H, upper=True)
             Hinv = H
         except Exception:
             fallback_requested = should_use_fallback(

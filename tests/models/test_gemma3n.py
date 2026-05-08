@@ -6,7 +6,7 @@
 from model_test import ModelTest
 
 
-class TestGemma(ModelTest):
+class TestGemma3N(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gemma-3n-E2B-it" # "google/gemma-3n-E2B-it"
     NATIVE_ARC_CHALLENGE_ACC = 0.4308
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4556
@@ -18,6 +18,6 @@ class TestGemma(ModelTest):
     USE_FLASH_ATTN = False
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
-    def test_gemma(self):
+    def test_gemma_3n(self):
         self.quantize_and_evaluate()
 

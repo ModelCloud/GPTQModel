@@ -64,7 +64,6 @@ class FalconMambaQModel(BaseQModel):
         self._restore_falcon_mamba_rms_buffers(self.model)
 
     def monkey_patch(self):
-        from gptqmodel.nn_modules.qlinear import BaseQuantLinear
         from transformers.models.falcon_mamba.modeling_falcon_mamba import (
             causal_conv1d_fn,
             causal_conv1d_update,
@@ -73,6 +72,8 @@ class FalconMambaQModel(BaseQModel):
             selective_scan_fn,
             selective_state_update,
         )
+
+        from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
         is_fast_path_available = all(
             (

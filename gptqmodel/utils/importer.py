@@ -22,7 +22,7 @@ from ..utils.logger import setup_logger
 from . import BACKEND
 from .backend import normalize_backend
 from .rocm import IS_ROCM
-from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
+from .torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU
 
 
 ACCELERATE_DEVICE_MAP_KEYWORDS = {"auto", "balanced", "sequential"}
@@ -296,6 +296,8 @@ def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> 
             device = DEVICE.CUDA
         elif HAS_XPU:
             device = DEVICE.XPU
+        elif HAS_NPU:
+            device = DEVICE.NPU
         elif HAS_MPS:
             device = DEVICE.MPS
         else:
@@ -427,7 +429,7 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        device: DEVICE,
+        device: Optional[Union[DEVICE, str, int, torch.device]],
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         quant_method: METHOD = METHOD.GPTQ,
@@ -444,6 +446,10 @@ def select_quant_linear(
     if isinstance(quant_method, str):
         quant_method = METHOD(quant_method.lower())
     backend = normalize_backend(backend, quant_method=quant_method)
+    if device is not None:
+        device = normalize_device(device)
+        if device == DEVICE.CUDA and IS_ROCM:
+            device = DEVICE.ROCM
 
     bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
 
@@ -468,6 +474,10 @@ def select_quant_linear(
         global message_logged
         # Suppose all quant linears in the model should have the same backend.
         for k, cls in allow_quant_linears:
+            if DEVICE.ALL not in cls.SUPPORTS_DEVICES and device is not None and device not in cls.SUPPORTS_DEVICES:
+                if os.environ.get("DEBUG"):
+                    log.info(f"skip {k} for unsupported device `{device}`")
+                continue
             validate, err = cls.validate(
                 bits=bits,
                 group_size=group_size,

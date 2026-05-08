@@ -87,19 +87,6 @@ def compute_memory_used_pct(device):
         * 100
     )
     return memory_pct
-
-
-def get_best_device():
-    if torch.backends.mps.is_available():
-        return "mps"
-    elif torch.cuda.is_available():
-        return "cuda:0"
-    elif torch.xpu.is_available():
-        return "xpu:0"
-    else:
-        return "cpu"
-
-
 def get_lowest_memory_device_index():
     device = None
     curr_device_memory_pct = 0

@@ -14,6 +14,7 @@ from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGP
 from gptqmodel.models.definitions.mixtral import MixtralQModel
 from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
+from gptqmodel.models.definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel
 from gptqmodel.utils import structure as structure_module
 from gptqmodel.utils.structure import LazyTurtle
 
@@ -82,11 +83,47 @@ class _Qwen2_5_VLDummyModel(nn.Module):
         self.config = SimpleNamespace(model_type="qwen2_5_vl")
 
 
+class _Qwen3_5_MoeTextDummyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="qwen3_5_moe_text")
+
+
 class _WeightRenamingStub:
     def __init__(self, source_pattern: str, target_pattern: str):
         self.source_patterns = [source_pattern]
         self.target_patterns = [target_pattern]
         self.operations = []
+
+
+# Minimal operation stubs: LazyTurtle only inspects operation names and small
+# attributes, so tests do not need to import Transformers internals.
+class Transpose:
+    def __init__(self, dim0: int = 0, dim1: int = 1):
+        self.dim0 = dim0
+        self.dim1 = dim1
+
+
+class Chunk:
+    def __init__(self, dim: int = 0):
+        self.dim = dim
+
+
+class ErnieFuseAndSplitTextVisionExperts:
+    def __init__(self, stack_dim: int = 0, concat_dim: int = 1):
+        self.stack_dim = stack_dim
+        self.concat_dim = concat_dim
+
+
+class FuseGateUp:
+    pass
+
+
+class _WeightConverterStub:
+    def __init__(self, source_patterns: str | list[str], target_patterns: str | list[str], operations: list[object]):
+        self.source_patterns = [source_patterns] if isinstance(source_patterns, str) else source_patterns
+        self.target_patterns = [target_patterns] if isinstance(target_patterns, str) else target_patterns
+        self.operations = operations
 
 
 class _ConvertibleCheckpointModel(nn.Module):
@@ -227,6 +264,20 @@ def _assert_gemma3_alias_resolution(turtle: LazyTurtle) -> None:
     assert turtle._resolve_checkpoint_tensor_name("lm_head", "weight") == "language_model.lm_head.weight"
 
 
+def _assert_gemma3_shell_vision_alias_resolution(turtle: LazyTurtle) -> None:
+    assert (
+        turtle._resolve_checkpoint_module_path("model.vision_tower.embeddings")
+        == "vision_tower.vision_model.embeddings"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "model.vision_tower.embeddings",
+            "patch_embedding.weight",
+        )
+        == "vision_tower.vision_model.embeddings.patch_embedding.weight"
+    )
+
+
 def _assert_qwen2_vl_alias_resolution(turtle: LazyTurtle) -> None:
     assert turtle._resolve_checkpoint_module_path("model.language_model") == "model"
     assert turtle._resolve_checkpoint_module_path("model.visual") == "visual"
@@ -301,6 +352,189 @@ def test_lazy_turtle_applies_reversed_weight_renamings_with_capturing_groups(tmp
     )
 
     assert turtle._resolve_checkpoint_tensor_name("timm_model.backbone.conv", "weight") == "backbone.conv.weight"
+
+
+def test_lazy_turtle_applies_reversed_weight_renamings_inside_module_relative_name(tmp_path):
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "model.resampler_model.spatial_linear.3.weight": torch.zeros(2),
+        },
+        hf_conversion_map_reversed=[
+            SimpleNamespace(
+                source_patterns=["spatial_linear.ln"],
+                target_patterns=["spatial_linear.3"],
+                operations=[],
+            )
+        ],
+    )
+
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "model.resampler_model",
+            "spatial_linear.ln.weight",
+        )
+        == "model.resampler_model.spatial_linear.3.weight"
+    )
+
+
+def test_lazy_turtle_applies_one_to_one_weight_converter_aliases(tmp_path):
+    # Transpose converters still need a runtime->checkpoint key alias; shape
+    # handling is verified later during tensor materialization.
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightConverterStub(
+                source_patterns="mlp.gate.weight",
+                target_patterns="mlp.text_moe.gate.weight",
+                operations=[Transpose(dim0=0, dim1=1)],
+            )
+        ]
+    )
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "model.layers.0.mlp.gate.weight": torch.zeros(4, 2),
+        },
+        hf_conversion_map_reversed=reversed_map,
+    )
+
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "model.layers.0.mlp.text_moe.gate",
+            "weight",
+        )
+        == "model.layers.0.mlp.gate.weight"
+    )
+
+
+def test_lazy_turtle_keeps_split_gate_leaf_name_before_resolving_fused_converter_source(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightConverterStub(
+                source_patterns=[
+                    "mlp.gate_proj.weight",
+                    "mlp.up_proj.weight",
+                ],
+                target_patterns="mlp.gate_up_proj.weight",
+                operations=[FuseGateUp()],
+            )
+        ]
+    )
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "model.layers.0.mlp.gate_up_proj.weight": torch.zeros(4, 2),
+        },
+        hf_conversion_map_reversed=reversed_map,
+    )
+
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "model.layers.0.mlp",
+            "gate_proj.weight",
+        )
+        == "model.layers.0.mlp.gate_proj.weight"
+    )
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.mlp",
+        "gate_proj.weight",
+    ) == (
+        "model.layers.0.mlp.gate_up_proj.weight",
+        None,
+        0,
+        0,
+    )
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.mlp",
+        "up_proj.weight",
+    ) == (
+        "model.layers.0.mlp.gate_up_proj.weight",
+        None,
+        1,
+        0,
+    )
+
+
+def test_lazy_turtle_preserves_chunk_weight_converter_split_info(tmp_path):
+    # Chunk maps multiple runtime tensors to slices of the same checkpoint key.
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightConverterStub(
+                source_patterns="mlp.moe_statics.e_score_correction_bias",
+                target_patterns=[
+                    "mlp.text_moe.gate.moe_statics.e_score_correction_bias",
+                    "mlp.vision_moe.gate.moe_statics.e_score_correction_bias",
+                ],
+                operations=[Chunk(dim=0)],
+            )
+        ]
+    )
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "model.layers.0.mlp.moe_statics.e_score_correction_bias": torch.zeros(2, 4),
+        },
+        hf_conversion_map_reversed=reversed_map,
+    )
+
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.mlp.vision_moe.gate.moe_statics",
+        "e_score_correction_bias",
+    ) == (
+        "model.layers.0.mlp.moe_statics.e_score_correction_bias",
+        None,
+        1,
+        0,
+    )
+
+
+def test_lazy_turtle_resolves_ernie_text_vision_defused_experts_from_converter(tmp_path):
+    # ERNIE VL stores experts as one checkpoint list; runtime exposes separate
+    # text and vision expert lists.
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightConverterStub(
+                source_patterns=[
+                    "experts.*.gate_proj.weight",
+                    "experts.*.up_proj.weight",
+                ],
+                target_patterns=[
+                    "text_moe.experts.gate_up_proj",
+                    "vision_moe.experts.gate_up_proj",
+                ],
+                operations=[ErnieFuseAndSplitTextVisionExperts(stack_dim=0, concat_dim=1)],
+            )
+        ]
+    )
+
+    checkpoint_tensors = {}
+    for index in range(4):
+        checkpoint_tensors[f"model.layers.0.mlp.experts.{index}.gate_proj.weight"] = torch.zeros(2, 2)
+        checkpoint_tensors[f"model.layers.0.mlp.experts.{index}.up_proj.weight"] = torch.zeros(2, 2)
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        checkpoint_tensors,
+        hf_conversion_map_reversed=reversed_map,
+    )
+
+    assert (
+        turtle._resolve_checkpoint_tensor_source(
+            "model.layers.0.mlp.text_moe.experts.1.gate_proj",
+            "weight",
+        )[0]
+        == "model.layers.0.mlp.experts.1.gate_proj.weight"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_source(
+            "model.layers.0.mlp.vision_moe.experts.1.up_proj",
+            "weight",
+        )[0]
+        == "model.layers.0.mlp.experts.3.up_proj.weight"
+    )
 
 
 def test_lazy_turtle_uses_transformers_checkpoint_conversion_mapping_for_gemma3(tmp_path, monkeypatch):
@@ -431,6 +665,33 @@ def test_base_qmodel_prefers_manual_hf_conversion_map_reversed(tmp_path, monkeyp
     _assert_gemma3_alias_resolution(turtle)
 
 
+def test_gemma3_definition_hf_conversion_map_reversed_fixes_shell_vision_paths(tmp_path):
+    resolved_hf = Gemma3ForConditionalGenerationGPTQ.resolve_hf_conversion_map_reversed(
+        target_model=_Gemma3DummyModel()
+    )
+
+    assert resolved_hf is not None
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "vision_tower.vision_model.embeddings.patch_embedding.weight": torch.zeros(2, 2),
+        },
+        module_tree=Gemma3ForConditionalGenerationGPTQ.module_tree,
+        hf_conversion_map_reversed=resolved_hf,
+        target_model=_Gemma3DummyModel(),
+    )
+
+    _assert_gemma3_shell_vision_alias_resolution(turtle)
+
+    resolved_hf[0].source_patterns[0] = r"^mutated\.runtime\.(.+)$"
+    resolved_hf_again = Gemma3ForConditionalGenerationGPTQ.resolve_hf_conversion_map_reversed(
+        target_model=_Gemma3DummyModel()
+    )
+    assert resolved_hf_again is not None
+    assert resolved_hf_again[0].source_patterns[0] == r"^model\.vision_tower\.(?!vision_model\.)(.+)$"
+
+
 def test_lazy_turtle_keeps_module_tree_alias_resolution_for_mixtral(tmp_path):
     turtle = _build_lazy_turtle(
         tmp_path,
@@ -447,6 +708,35 @@ def test_lazy_turtle_keeps_module_tree_alias_resolution_for_mixtral(tmp_path):
         )
         == "model.layers.0.block_sparse_moe.experts.0.w1.weight"
     )
+
+
+def test_lazy_turtle_resolves_fused_qwen3_5_moe_text_experts_through_language_model_prefix(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map({"model.language_model": "model"})
+    assert reversed_map is not None
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "model.language_model.layers.0.mlp.experts.gate_up_proj": torch.zeros(2, 4, 2),
+            "model.language_model.layers.0.mlp.experts.down_proj": torch.zeros(2, 2, 2),
+        },
+        module_tree=Qwen3_5_MoeTextQModel.module_tree,
+        hf_conversion_map_reversed=reversed_map,
+        target_model=_Qwen3_5_MoeTextDummyModel(),
+    )
+
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.mlp.experts.0.gate_proj",
+        "weight",
+    ) == ("model.language_model.layers.0.mlp.experts.gate_up_proj", 0, 0, 1)
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.mlp.experts.1.up_proj",
+        "weight",
+    ) == ("model.language_model.layers.0.mlp.experts.gate_up_proj", 1, 1, 1)
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.mlp.experts.1.down_proj",
+        "weight",
+    ) == ("model.language_model.layers.0.mlp.experts.down_proj", 1, None, None)
 
 
 @pytest.mark.parametrize(

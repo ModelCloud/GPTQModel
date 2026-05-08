@@ -54,46 +54,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check-vm:
-    runs-on: [ self-hosted, linux ]
-    container:
-      image: modelcloud/gptqmodel:alpine-ci-v1
-    outputs:
-      ip: ${{ steps.get_ip.outputs.ip }}
-      run_id: ${{ steps.get_ip.outputs.run_id }}
-    if: ${{ inputs.github_vm == false }}
-    steps:
-      - name: Checkout Codes
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
-
-      - name: Print env
-        run: |
-          echo "event name: ${{ github.event_name }}"
-          echo "repo: ${{ env.repo }}"
-          echo "ref: ${{ env.ref }}"
-          echo "upload_release: ${{ inputs.upload_release }}"
-          echo "upload_pypi: ${{ inputs.upload_pypi }}"
-
-      - name: Select server
-        id: get_ip
-        run: |
-          bash .github/scripts/ci_write_runner_outputs.sh "$RUNNER" "${{ github.run_id }}"
-
   release-source:
     permissions:
       contents: write
     runs-on: [ self-hosted, xeon5 ]
-    needs:
-      - check-vm
     if: ${{ inputs.github_vm == false }}
+    env:
+      UV_TORCH_BACKEND: cu130
+      TORCH_VERSION: 2.11.0
+      PYTHON_VERSION: 3.14
+      UV_PYTHON: 3.14
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:130-ubuntu24.04_0415
+      image: 10.0.13.31:5000/nvidia/cuda:130-ubuntu24.04_0415
       volumes:
         - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
-        - /monster/ci/uv:/opt/uv
+        - /github/workspace/uv:/opt/uv
+        - /github/workspace/tmp:/opt/uv/tmp
+        - /monster/ci/uv/python:/opt/uv/python
+        - /monster/ci/uv/cache/python:/opt/uv/cache/python
+        - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
+        - /monster/ci/uv/uv:/opt/uv/uv
+        - /monster/ci/uv/uvx:/opt/uv/uvx
+        - /monster/ci/uv/env:/opt/uv/env
+        - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
+        - /monster/ci/env:/opt/env
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
@@ -101,12 +85,26 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
+      - name: Activate uv env
+        run: |
+          echo "::group::-- dust uv cache dir --"
+            dust $(uv cache dir)
+          echo "::endgroup::"
+
+          bash .github/scripts/ci_unit_activate_uv_env.sh \
+            "gptqmodel_py314t_release_source" \
+            130 \
+            "${{ env.TORCH_VERSION }}" \
+            "${{ github.run_id }}" \
+            "${{ github.run_attempt }}"
+
       - name: Setup release env
         run: |
-          export UV_PYTHON=3.14
-          echo "UV_PYTHON=3.14" >> "$GITHUB_ENV"
+          echo "::group::-- uv envs --"
+            printenv | grep UV
+          echo "::endgroup::"
 
-          env_name="gptqmodel_py314_release_source"
+          env_name="gptqmodel_py314t_release_source"
           /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Run shared release source flow

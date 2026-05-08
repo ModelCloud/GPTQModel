@@ -10,6 +10,8 @@ from typing import Dict, Generator, Iterable, Tuple
 import torch
 import torch.nn as nn
 
+from .torch import HAS_NPU
+
 
 # ---------- ANSI COLORS ----------
 RESET   = "\033[0m"
@@ -304,7 +306,7 @@ def _run_backend_gc(dev: torch.device) -> bool:
         if dev.type == "mps" and hasattr(torch, "mps"):
             torch.mps.empty_cache()  # type: ignore[attr-defined]
             return True
-        if dev.type == "npu" and hasattr(torch, "npu"):
+        if dev.type == "npu" and HAS_NPU:
             torch.npu.empty_cache()  # type: ignore[attr-defined]
             return True
         return False
@@ -326,4 +328,3 @@ def format_bytes(n: int) -> str:
         if x < 1024 or u == units[-1]:
             return f"{x:.2f} {u}"
         x /= 1024.0
-

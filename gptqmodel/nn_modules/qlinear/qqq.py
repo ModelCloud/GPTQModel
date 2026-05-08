@@ -24,6 +24,25 @@ from ...utils.rocm import IS_ROCM
 log = setup_logger()
 
 
+_INT4_DIVISORS = (1, 16, 256, 4096, 65536, 1048576, 16777216, 268435456)
+
+
+def _invert_permutation(values) -> torch.Tensor:
+    inverse = [0] * len(values)
+    for index, value in enumerate(values):
+        inverse[int(value)] = index
+    return torch.tensor(inverse, dtype=torch.long)
+
+
+def _unpack_uint4(packed: torch.Tensor) -> torch.Tensor:
+    packed_i64 = packed.to(torch.int64)
+    packed_u32 = torch.where(packed_i64 < 0, packed_i64 + (1 << 32), packed_i64)
+    divisors = torch.tensor(_INT4_DIVISORS, dtype=torch.int64, device=packed.device)
+    quotients = torch.floor_divide(packed_u32.unsqueeze(-1), divisors)
+    lanes = quotients - torch.floor_divide(quotients, 16) * 16
+    return lanes.reshape(packed.shape[0], packed.shape[1] * 8)
+
+
 def mul(
     A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16
 ):
@@ -160,7 +179,14 @@ class QQQLinear(GroupedQuantLinear):
                 self.bias = None
 
 
-        self._perm, self._scale_perm, self._scale_perm_single = self._get_perms()
+        (
+            self._perm,
+            self._perm_i,
+            self._scale_perm,
+            self._scale_perm_i,
+            self._scale_perm_single,
+            self._scale_perm_single_i,
+        ) = self._get_perms()
 
         # auto-optimize on post init
         # self.optimize()
@@ -188,13 +214,16 @@ class QQQLinear(GroupedQuantLinear):
             interleave = np.array([0, 2, 4, 6, 1, 3, 5, 7])
         perm = perm.reshape((-1, 8))[:, interleave].ravel()
         perm = torch.from_numpy(perm)
+        perm_i = _invert_permutation(perm.tolist())
         scale_perm = []
         for i in range(8):
             scale_perm.extend([i + 8 * j for j in range(8)])
+        scale_perm_i = _invert_permutation(scale_perm)
         scale_perm_single = []
         for i in range(4):
             scale_perm_single.extend([2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
-        return perm, scale_perm, scale_perm_single
+        scale_perm_single_i = _invert_permutation(scale_perm_single)
+        return perm, perm_i, scale_perm, scale_perm_i, scale_perm_single, scale_perm_single_i
 
     # def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
     #     if self.optimized:
@@ -400,4 +429,103 @@ class QQQLinear(GroupedQuantLinear):
         return D.to(dtype=A_dtype)
 
 
-__all__ = ["QQQLinear"]
+class QQQTorchLinear(QQQLinear):
+    SUPPORTS_BACKENDS = [BACKEND.QQQ_TORCH]
+    SUPPORTS_METHODS = [METHOD.QQQ]
+    SUPPORTS_FORMATS = {FORMAT.QQQ: 90}
+    SUPPORTS_BITS = [4]
+    SUPPORTS_GROUP_SIZE = [-1, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = [Lora]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    REQUIRES_FORMAT_V2 = False
+    QUANT_TYPE = "qqq"
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("backend", BACKEND.QQQ_TORCH)
+        super().__init__(*args, **kwargs)
+
+    @classmethod
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        return True, None
+
+    def _unpack_weight_codes(self) -> torch.Tensor:
+        unpacked = _unpack_uint4(self.B)
+        perm_i = self._perm_i.to(device=unpacked.device)
+        unpacked = unpacked.reshape(-1, self._perm_i.numel())[:, perm_i].reshape(
+            self.in_features // self.tile,
+            self.out_features * self.tile,
+        )
+        return (
+            unpacked.reshape(
+                self.in_features // self.tile,
+                self.out_features // self.tile,
+                self.tile,
+                self.tile,
+            )
+            .permute(0, 2, 1, 3)
+            .reshape(self.in_features, self.out_features)
+        )
+
+    def _unpermute_scales(self, scales: torch.Tensor, inverse_perm: torch.Tensor) -> torch.Tensor:
+        inverse_perm = inverse_perm.to(device=scales.device)
+        return scales.reshape(-1, inverse_perm.numel())[:, inverse_perm].reshape(scales.shape)
+
+    def _dequantize_weight_for_torch(self) -> tuple[torch.Tensor, torch.Tensor]:
+        codes = self._unpack_weight_codes()
+        s_channel = self._unpermute_scales(self.s_channel, self._scale_perm_single_i).to(torch.float32)
+
+        if self.group_size != self.in_features:
+            s_group = self._unpermute_scales(self.s_group, self._scale_perm_i).to(torch.float32)
+            group_idx = torch.floor_divide(
+                torch.arange(self.in_features, dtype=torch.int64, device=codes.device),
+                self.group_size,
+            )
+            weight = (codes.to(torch.float32) - 8.0) * s_group[group_idx]
+            weight = weight.round().clamp(-128, 127)
+        else:
+            signed = torch.where(codes >= 8, codes - 16, codes)
+            weight = signed.to(torch.float32) * 16.0
+
+        return weight, s_channel
+
+    def forward(self, A):
+        if A.shape[0] == 0:
+            return torch.empty((0, self.out_features), dtype=A.dtype, device=A.device)
+
+        A_dtype = A.dtype
+        if A.dtype != torch.float16:
+            A = A.to(dtype=torch.float16)
+
+        out_shape = A.shape[:-1] + (self.out_features,)
+        A = A.reshape(-1, A.shape[-1])
+        quant_A, s1 = self.dynamic_quant(A)
+        weight, s_channel = self._dequantize_weight_for_torch()
+        accum = torch.matmul(quant_A.to(torch.float32), weight.to(device=A.device, dtype=torch.float32))
+        accum = accum * s1
+        accum = accum * s_channel.to(device=A.device, dtype=torch.float32)
+        D = accum.to(dtype=A.dtype).reshape(out_shape)
+
+        if self.bias is not None:
+            bias = self.bias
+            if bias.device != D.device or bias.dtype != D.dtype:
+                bias = bias.to(device=D.device, dtype=D.dtype)
+            D.add_(bias)
+
+        if self.adapter:
+            D = self.adapter.apply(x=A, out=D)
+
+        return D.to(dtype=A_dtype)
+
+
+__all__ = ["QQQLinear", "QQQTorchLinear"]

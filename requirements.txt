@@ -19,4 +19,4 @@ datasets>=3.6.0
 pyarrow>=21.0
 dill>=0.3.8
 torchao>=0.16.0
-defuser>=0.0.20
+defuser>=0.0.21

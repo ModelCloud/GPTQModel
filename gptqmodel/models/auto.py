@@ -10,7 +10,6 @@ from contextlib import contextmanager
 
 from ..utils.logger import setup_logger
 
-
 log = setup_logger()
 
 ASCII_LOGO = r"""
@@ -87,6 +86,7 @@ from .definitions.dots1 import Dots1QModel  # noqa: E402
 from .definitions.dream import DreamQModel  # noqa: E402
 from .definitions.ernie4_5 import Ernie4_5QModel  # noqa: E402
 from .definitions.ernie4_5_moe import Ernie4_5_MoeQModel  # noqa: E402
+from .definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel  # noqa: E402
 from .definitions.exaone import ExaOneQModel  # noqa: E402
 from .definitions.exaone4 import Exaone4QModel  # noqa: E402
 from .definitions.falcon_h1 import FalconH1QModel  # noqa: E402
@@ -96,12 +96,13 @@ from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel
 from .definitions.gemma3n import Gemma3nForConditionalGenerationGPTQ, Gemma3nTextQModel  # noqa: E402
 from .definitions.gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel  # noqa: E402
 from .definitions.glm import GlmQModel  # noqa: E402
-from .definitions.glmasr import GlmASRGPTQ  # noqa: E402
-from .definitions.glm_ocr import GlmOCRGPTQ  # noqa: E402
 from .definitions.glm4_moe import GLM4MoEGPTQ  # noqa: E402
 from .definitions.glm4_moe_lite import Glm4MoeLiteQModel  # noqa: E402
 from .definitions.glm4v import Glm4vGPTQ  # noqa: E402
+from .definitions.glm4v_moe import Glm4vMoeQModel  # noqa: E402
 from .definitions.glm_moe_dsa import GlmMoeDsaQModel  # noqa: E402
+from .definitions.glm_ocr import GlmOCRGPTQ  # noqa: E402
+from .definitions.glmasr import GlmASRGPTQ  # noqa: E402
 from .definitions.gpt2 import GPT2QModel  # noqa: E402
 from .definitions.gpt_bigcode import GptBigCodeQModel  # noqa: E402
 from .definitions.gpt_neo import GptNeoQModel  # noqa: E402
@@ -114,7 +115,9 @@ from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
+from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
+from .definitions.laguna import LagunaQModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
 from .definitions.llada2 import LLaDA2MoeQModel
 from .definitions.llama import LlamaQModel  # noqa: E402
@@ -134,6 +137,7 @@ from .definitions.mobilellm import MobileLLMQModel  # noqa: E402
 from .definitions.moss import MossQModel  # noqa: E402
 from .definitions.mpt import MptQModel  # noqa: E402
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
+from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
 from .definitions.ovis2 import Ovis2QModel  # noqa: E402
@@ -163,9 +167,13 @@ TRANSFORMERS_SUPPORTS_QWEN3_5 = Version(TRANSFORMERS_VERSION) >= Version("5.2.0"
 if TRANSFORMERS_SUPPORTS_QWEN3_5:
     from .definitions.qwen3_5 import Qwen3_5QModel  # noqa: E402
     from .definitions.qwen3_5_moe import Qwen3_5_MoeQModel  # noqa: E402
+    from .definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel  # noqa: E402
+    from .definitions.qwen3_5_text import Qwen3_5TextQModel  # noqa: E402
 else:
     Qwen3_5QModel = None
     Qwen3_5_MoeQModel = None
+    Qwen3_5_MoeTextQModel = None
+    Qwen3_5TextQModel = None
 
 
 MODEL_MAP = {
@@ -176,6 +184,7 @@ MODEL_MAP = {
     "gpt_neo": GptNeoQModel,
     "kimi_k2": DeepSeekV3QModel, # 100% DeepSeekV3QModel clone
     "klear": KlearQModel,
+    "laguna": LagunaQModel,
     "gpt_neox": GPTNeoXQModel,
     "gptj": GptJQModel,
     "gpt2": GPT2QModel,
@@ -187,6 +196,7 @@ MODEL_MAP = {
     "glm": GlmQModel,
     "glm4": GlmQModel,
     "glm4v": Glm4vGPTQ,
+    "glm4v_moe": Glm4vMoeQModel,
     "glmasr": GlmASRGPTQ,
     "glm_ocr": GlmOCRGPTQ,
     "glm4_moe": GLM4MoEGPTQ,
@@ -203,6 +213,7 @@ MODEL_MAP = {
     "baichuan": BaiChuanQModel,
     "internlm": InternLMQModel,
     "internlm2": InternLM2QModel,
+    "internvl_chat": InternVLChatQModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone
     "yi": LlamaQModel, # 100% llama clone
@@ -269,12 +280,16 @@ MODEL_MAP = {
     "gpt_pangu": PanguAlphaQModel,
     "ernie4_5": Ernie4_5QModel,
     "ernie4_5_moe": Ernie4_5_MoeQModel,
+    "ernie4_5_moe_vl": Ernie4_5_VLMoeQModel, # Backward Compatibility alias
+    "ernie4_5_vl_moe": Ernie4_5_VLMoeQModel,
     "seed_oss": LlamaQModel, # 100% llama clone
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
     "llava_qwen2": LlavaQwen2QModel,
     "nemotron_h": NemotronHQModel,
+    "nemotronh_nano_omni_reasoning_v3": NemotronOmniQModel,
     "bailing_moe": BailingMoeQModel,
+    "bailing_hybrid": BailingMoeQModel,
     "lfm2_moe": LFM2MoeQModel,
     "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
@@ -284,10 +299,11 @@ MODEL_MAP = {
 
 if Qwen3_5QModel is not None:
     MODEL_MAP["qwen3_5"] = Qwen3_5QModel
-    MODEL_MAP["qwen3_5_text"] = Qwen3_5QModel
+    MODEL_MAP["qwen3_5_text"] = Qwen3_5TextQModel
 
 if Qwen3_5_MoeQModel is not None:
     MODEL_MAP["qwen3_5_moe"] = Qwen3_5_MoeQModel
+    MODEL_MAP["qwen3_5_moe_text"] = Qwen3_5_MoeTextQModel
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
@@ -402,6 +418,25 @@ def _hide_unsupported_quantization_config_for_lm_eval(model):
 
 def _get_config_load_kwargs(kwargs: dict) -> dict:
     return get_hf_gguf_load_kwargs(kwargs)
+
+
+def _normalize_supported_model_type(config) -> str:
+    model_type = config.model_type.lower()
+    config_class_name = type(config).__name__
+
+    if model_type == "qwen3_5":
+        if config_class_name == "Qwen3_5TextConfig":
+            return "qwen3_5_text"
+        if not hasattr(config, "text_config") and not hasattr(config, "vision_config"):
+            return "qwen3_5_text"
+
+    if model_type == "qwen3_5_moe":
+        if config_class_name == "Qwen3_5MoeTextConfig":
+            return "qwen3_5_moe_text"
+        if not hasattr(config, "text_config") and not hasattr(config, "vision_config"):
+            return "qwen3_5_moe_text"
+
+    return model_type
 
 
 def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_load_kwargs):

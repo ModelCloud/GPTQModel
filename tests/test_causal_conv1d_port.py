@@ -4,8 +4,8 @@
 import torch
 import torch.nn.functional as F
 
-import causal_conv1d
 import gptqmodel.hf_kernels.mamba_ssm as local_mamba_ssm
+from gptqmodel.hf_kernels import causal_conv1d
 
 
 def test_causal_conv1d_fn_matches_grouped_conv_without_seq_idx():

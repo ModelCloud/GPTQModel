@@ -6,6 +6,7 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -25,6 +26,7 @@ from gptqmodel.adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KE
 from gptqmodel.utils.logger import render_table  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from tests.eval import evaluate, format_eval_result_table  # noqa: E402
+
 
 log = LogBar.shared()
 

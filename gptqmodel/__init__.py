@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
-
+import sys
 
 # isort: off
 from ._banner import get_startup_banner  # noqa: E402
@@ -142,6 +142,8 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
         local_causal_conv1d = _resolve_local_kernel_module("causal-conv1d")
         if local_causal_conv1d is not None:
             hub_kernels._KERNEL_MODULE_MAPPING["causal-conv1d"] = local_causal_conv1d
+            # Keep legacy imports working after moving the local port under gptqmodel.hf_kernels.
+            sys.modules.setdefault("causal_conv1d", local_causal_conv1d)
         if hasattr(hf_integrations, "lazy_load_kernel"):
             hf_integrations.lazy_load_kernel = _lazy_load_kernel_with_local_causal_conv1d
         hub_kernels._gptqmodel_local_causal_conv1d_kernel = True
@@ -173,6 +175,7 @@ def _build_device_thread_pool():
         workers={
             "cuda:per": 4,
             "xpu:per": 1,
+            "npu:per": 1,
             "mps": 8,
             "cpu": min(12, max(1, (os.cpu_count() or 1) + 1 // 2)),  # count + 1, fixed pool size > 1 check when count=3
             "model_loader:cpu": 2,

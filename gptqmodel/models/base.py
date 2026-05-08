@@ -772,12 +772,25 @@ class BaseQModel(nn.Module):
 
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):
+            quant_device = self.quantize_config.device
+            if isinstance(quant_device, DEVICE):
+                quant_device_type = quant_device.type
+            elif isinstance(quant_device, torch.device):
+                quant_device_type = quant_device.type
+            else:
+                quant_device_type = str(quant_device).split(":")[0].lower()
+
             if export_quant_method == METHOD.AWQ:
+                if quant_device_type == "npu" and format_code != FORMAT.GEMM:
+                    raise ValueError(
+                        "NPU AWQ quantization requires FORMAT.GEMM so the AwqTorchLinear runtime can run on NPU; "
+                        f"actual format is `{format_code}`."
+                    )
                 if format_code == FORMAT.GEMM:
                     # Weight-only RTN->AWQ export should stay on the portable torch kernel.
                     preferred_backend = (
                         BACKEND.AWQ_TORCH
-                        if self.quantize_config.uses_weight_only_lifecycle()
+                        if self.quantize_config.uses_weight_only_lifecycle() or quant_device_type == "npu"
                         else BACKEND.AWQ_GEMM
                     )
                 elif format_code == FORMAT.BITBLAS:
@@ -789,7 +802,7 @@ class BaseQModel(nn.Module):
                 else:
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
             elif self.quantize_config.method == METHOD.QQQ:
-                preferred_backend = BACKEND.QQQ
+                preferred_backend = BACKEND.QQQ_TORCH if quant_device_type == "npu" else BACKEND.QQQ
             elif self.quantize_config.method == METHOD.PARO:
                 preferred_backend = BACKEND.PAROQUANT_CUDA
             elif self.quantize_config.method == METHOD.EXL3:
@@ -2930,8 +2943,8 @@ class BaseQModel(nn.Module):
         def _find_parents(module, possible_names):
             found = set()
             for n, _ in module.named_children():
-                l = n.lower()
-                if any(k in l for k in possible_names):
+                lowered_name = n.lower()
+                if any(k in lowered_name for k in possible_names):
                     found.add(n)
             return found
 

@@ -4,9 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch  # noqa: E402
+from model_test import ModelTest
 
 from gptqmodel import BACKEND
-from model_test import ModelTest
 
 
 class TestFalcon(ModelTest):
