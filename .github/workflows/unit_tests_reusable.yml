@@ -130,7 +130,8 @@ jobs:
             "${{ inputs.check_vm_cuda_version }}" \
             "${{ env.TORCH_VERSION }}" \
             "${{ github.run_id }}" \
-            "${{ github.run_attempt }}"
+            "${{ github.run_attempt }}" \
+            "unit_test_env_${{ github.run_id }}_${{ github.run_attempt }}"
 
       - name: Setup uv env
         run: |
