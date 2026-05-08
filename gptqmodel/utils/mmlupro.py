@@ -219,6 +219,8 @@ def mmlupro(model: PreTrainedModel,
             seed: int = 12345,
             max_samples: int | None = None):
     random.seed(seed)
+    if save_dir == "results":
+        save_dir = str(Path("logs") / "mmlupro" / "results")
     os.makedirs(save_dir, exist_ok=True)
     model_name = os.path.basename(model.config.name_or_path)
     if not os.path.isabs(global_record_file) and os.path.dirname(global_record_file) == "":
