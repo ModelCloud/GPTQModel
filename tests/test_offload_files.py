@@ -18,7 +18,7 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
 from gptqmodel.utils.logger import render_table
-from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
+from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards, TensorSource
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
 import gptqmodel.utils.structure as structure_module
 
@@ -1595,6 +1595,34 @@ def test_streaming_state_dict_pads_safetensors_header_to_8_bytes(tmp_path):
 
     with safe_open(str(shard_path), framework="pt", device="cpu") as handler:
         torch.testing.assert_close(handler.get_tensor("weight"), model.weight.detach())
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
+def test_streaming_state_dict_to_shards_writes_float8_tensors(tmp_path):
+
+    tensor = torch.randn(8, 16, dtype=torch.float32).to(torch.float8_e4m3fn)
+    state_dict = {
+       "fp8_weight": TensorSource(
+            name="fp8_weight",
+            torch_dtype=tensor.dtype,
+            shape=tuple(tensor.shape),
+            source=tensor,
+       ),
+    }
+    expected_files, _, _ = streaming_state_dict_to_shards(
+        state_dict,
+        save_dir=str(tmp_path),
+        model_base_name="model",
+        single_file_name="model.safetensors",
+        metadata={},
+        max_shard_size=None,
+    )
+    shard_path = tmp_path / expected_files[0]
+    with safe_open(str(shard_path), framework="pt", device="cpu") as handler:
+        saved = handler.get_tensor("fp8_weight")
+
+    assert saved.dtype is torch.float8_e4m3fn
+    assert torch.equal(saved.view(torch.uint8), tensor.view(torch.uint8))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for offload rematerialization test")

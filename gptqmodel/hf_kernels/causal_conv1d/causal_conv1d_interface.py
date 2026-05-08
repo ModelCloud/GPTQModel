@@ -22,10 +22,10 @@ def _seq_idx_pad_value(seq_idx: torch.Tensor):
 
 
 def _causal_conv1d_seq_idx_ref(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    seq_idx: torch.Tensor,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        seq_idx: torch.Tensor,
 ) -> torch.Tensor:
     batch, dim, seqlen = x.shape
     _, width = weight.shape
@@ -41,14 +41,14 @@ def _causal_conv1d_seq_idx_ref(
 
 
 def causal_conv1d_fn(
-    x,
-    weight,
-    bias=None,
-    seq_idx=None,
-    initial_states=None,
-    return_final_states=False,
-    final_states_out=None,
-    activation=None,
+        x,
+        weight,
+        bias=None,
+        seq_idx=None,
+        initial_states=None,
+        return_final_states=False,
+        final_states_out=None,
+        activation=None,
 ):
     """
     x: (batch, dim, seqlen)
@@ -98,13 +98,13 @@ def causal_conv1d_fn(
 
 
 def causal_conv1d_update(
-    x,
-    conv_state,
-    weight,
-    bias=None,
-    activation=None,
-    cache_seqlens=None,
-    conv_state_indices=None,
+        x,
+        conv_state,
+        weight,
+        bias=None,
+        activation=None,
+        cache_seqlens=None,
+        conv_state_indices=None,
 ):
     """
     x: (batch, dim) or (batch, dim, seqlen)
