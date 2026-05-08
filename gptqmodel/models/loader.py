@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import os
+import shutil
 import time
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
@@ -237,6 +238,43 @@ def _is_meta_shell_build_error(exc: Exception) -> bool:
     # during __init__, which breaks when the shell is built on the meta device.
     message = str(exc)
     return "cannot be called on meta tensors" in message and ".item()" in message
+
+
+def _is_broken_transformers_dynamic_module_error(exc: Exception) -> bool:
+    if not isinstance(exc, FileNotFoundError):
+        return False
+    missing_path = str(getattr(exc, "filename", "") or exc)
+    return "transformers_modules" in missing_path and missing_path.endswith(".py")
+
+
+def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_path: str, **kwargs):
+    try:
+        return loader.from_pretrained(model_local_path, **kwargs)
+    except Exception as exc:
+        if not _is_broken_transformers_dynamic_module_error(exc):
+            raise
+
+        missing_path = str(getattr(exc, "filename", "") or "")
+        missing_name = os.path.basename(missing_path)
+        source_path = os.path.join(model_local_path, missing_name)
+        if missing_path and os.path.isfile(source_path):
+            os.makedirs(os.path.dirname(missing_path), exist_ok=True)
+            shutil.copy2(source_path, missing_path)
+            log.warn(
+                "Loader: repaired missing dynamic-module file by copying `%s` -> `%s`.",
+                source_path,
+                missing_path,
+            )
+
+        retry_kwargs = dict(kwargs)
+        retry_kwargs["force_download"] = True
+        log.warn(
+            "Loader: detected broken transformers dynamic-module cache while loading `%s`; "
+            "retrying once with force_download=True: %s",
+            model_local_path,
+            exc,
+        )
+        return loader.from_pretrained(model_local_path, **retry_kwargs)
 
 
 def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
@@ -578,7 +616,12 @@ def ModelLoader(cls):
                 hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
                 log.info("Loader: Auto enabling flash_attention_2 for dense Bonsai PROFILE.%s.", effective_profile.name)
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
-            model = cls.loader.from_pretrained(model_local_path, config=config, **hf_model_init_kwargs)
+            model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                cls.loader,
+                model_local_path,
+                config=config,
+                **hf_model_init_kwargs,
+            )
             model._model_init_kwargs = hf_model_init_kwargs
             _maybe_print_module_tree(model=model)
 
@@ -676,7 +719,8 @@ def ModelLoader(cls):
                 fallback_init_kwargs = model_init_kwargs_without_internal.copy()
                 fallback_init_kwargs.pop("device_map", None)
                 fallback_init_kwargs["low_cpu_mem_usage"] = False
-                model = cls.loader.from_pretrained(
+                model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                    cls.loader,
                     model_local_path,
                     config=config,
                     **fallback_init_kwargs,
@@ -716,7 +760,8 @@ def ModelLoader(cls):
                 )
         else:
             log.info("Loader: loading model directly to CPU (not using meta device or turtle_model)")
-            model = cls.loader.from_pretrained(
+            model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                cls.loader,
                 model_local_path,
                 config=config,
                 **model_init_kwargs_without_internal,
