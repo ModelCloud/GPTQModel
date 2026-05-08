@@ -39,7 +39,7 @@ class NemotronHQModel(BaseQModel):
             mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined, selective_state_update = None, None, None
 
         if is_causal_conv1d_available():
-            from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+            from gptqmodel.hf_kernels.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
         else:
             causal_conv1d_update, causal_conv1d_fn = None, None
 
