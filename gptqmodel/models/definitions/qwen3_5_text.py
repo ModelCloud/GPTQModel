@@ -16,6 +16,11 @@ class Qwen3_5TextQModel(Qwen3QModel):
 
     rotary_embedding = "model.rotary_emb"
 
+    # Preserve auxiliary MTP/draft-head tensors when present.
+    # Dense text-only Qwen3.5/Qwen3.6 models can ship mtp.* tensors in
+    # auxiliary safetensors files.
+    out_of_model_tensors = {"prefixes": ["mtp"]}
+
     module_tree = [
         "model",
         "layers",
