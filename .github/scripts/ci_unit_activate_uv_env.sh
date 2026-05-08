@@ -10,7 +10,7 @@ bootstrap_env_name="${6:-unit_test_env}"
 
 echo "-- loading unit test's config --"
 source /opt/uv/setup_uv_venv.sh "$bootstrap_env_name"
-uv pip install requests packaging -U
+uv pip install requests packaging pyyaml -U
 
 env_output="$(python3 .github/scripts/ci_workflow.py resolve-env \
   --group tests \
