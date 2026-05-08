@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 05/08/2026 7.1.0-dev `main`: ✨ Added `Zamba` and `Zamba2` model support with native module-tree mapping and local HF kernel fallback support for offline/local model loading.
 * 05/07/2026 7.1.0-dev `main`: ✨ Added `GLM-4.5V`, and `GLM-4.6V` model support.
 * 04/29/2026 7.1.0-dev `main`: ✨ Added PoolSideAI `Laguna` model support for fused Laguna MoE checkpoints. Added `ERNIE 4.5 VL MoE`, `Ling-2.6-flash` and NVIDIA `Nemotron 3 Nano Omni` model support.
 * 04/28/2026 [7.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.0.0): 🚀 Added Huawei Ascend NPU support through native torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3. Added `internvl_chat`, `gemma3n`, `GLM-OCR`, `GLM-ASR`, and `falcon_mamba` model support.
@@ -259,9 +260,11 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | ERNIE 4.5 / MoE / VL MoE | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V     | ✅ | PanGu-α                 | ✅ |
 | XVERSE                   | ✅ | Brumby                          | ✅ | Hymba            | ✅ | Mistral           | ✅ | Qwen 1/2/3/3.5          | ✅ |
 | MiniMax M2               | ✅ | AfMoE                           | ✅ | Bailing-MoE      | ✅ | LFM2-MoE          | ✅ | Marin                   | ✅ |
-| InternVL Chat            | ✅ | Laguna                          | ✅ |                  |   |                   |   |                         |   |
+| InternVL Chat            | ✅ | Laguna                          | ✅ | Zamba / Zamba2   | ✅ |                   |   |                         |   |
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
+
+`Zamba` and `Zamba2` are supported through the native HF architectures. GPT-QModel maps both pure Mamba layers and hybrid shared-transformer layers, and prefers local `causal-conv1d` / `mamba-ssm` kernel ports before falling back to remote HF hub kernels, which keeps local/offline model paths working.
 
 
 ## Platform and HW Support 
