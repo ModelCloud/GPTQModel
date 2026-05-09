@@ -245,19 +245,19 @@ jobs:
       matrix:
         include:
           - name: Test pypi pip
-            env_name: pypi_pip_env
+            env_name: pypi_pip_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'true'
             install_cmd: pip install gptqmodel torch -U
           - name: Test pypi uv
-            env_name: pypi_uv_env
+            env_name: pypi_uv_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'false'
             install_cmd: uv pip install gptqmodel torch -U
           - name: Test local pip
-            env_name: local_pip_env
+            env_name: local_pip_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'true'
             install_cmd: pip install . torch -U
           - name: Test local uv
-            env_name: local_uv_env
+            env_name: local_uv_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'false'
             install_cmd: uv pip install . torch -U
     steps:

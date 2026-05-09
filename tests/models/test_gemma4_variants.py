@@ -31,8 +31,6 @@ def _ensure_local_model_dir(local_path: str, repo_id: str) -> str:
 class _Gemma4VariantModelTest(ModelTest):
     """Shared Gemma 4 model-test harness tuned for fast variant coverage."""
 
-    # Allow the harness to refresh expectations from the current native model when these baselines drift.
-    DISABLE_NATIVE_BASELINE_FALLBACK = False
     TRUST_REMOTE_CODE = False
     TORCH_DTYPE = "bfloat16"
     # Gemma 4 full-attention layers expand to 512-dim heads, which FlashAttention cannot execute.
