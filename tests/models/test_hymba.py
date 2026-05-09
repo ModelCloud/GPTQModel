@@ -27,6 +27,7 @@ class TestHymba(ModelTest):
     DESC_ACT = False
     OFFLOAD_TO_DISK = False # FIXME the issue where hymba does not work with OFFLOAD_TO_DISK=True
     LOAD_BACKEND = BACKEND.AUTO
+    USE_FLASH_ATTN = True
 
 
     def test_hymba(self):

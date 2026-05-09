@@ -1022,6 +1022,14 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
     model_type = getattr(config, "model_type", None)
     model_type_lower = model_type.lower() if isinstance(model_type, str) else None
 
+    if model_type_lower == "hymba":
+        # hymba uses Flex by default;
+        # however, `modeling_hymba` has not yet been adapted to support the latest version of PyTorch Flex.
+        # Therefore, we are applying a patch here to switch to flash_attention_2 or sdpa.
+        if getattr(config, 'attn_implementation_new', None) == "flex":
+            from transformers.utils import is_flash_attn_2_available
+            config.attn_implementation_new = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
+
     if model_type_lower == "dream" or model_type == "brumby":
         import transformers.modeling_rope_utils as rope_utils
         # dream remote models expect "default"
