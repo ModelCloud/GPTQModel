@@ -231,6 +231,12 @@ class BaseQModel(nn.Module):
     # some models have broken attention mask codes so we need to only use batch 1 with no masks
     support_batch_quantize = True
 
+    # Whether this model should publish a layer's KV tuple into the shared
+    # replay cache even when that same layer does not consume `kv_last_layer`.
+    # Models like "hymba" need some layers to write KV for later layers even if
+    # the current layer itself does not consume `kv_last_layer`.
+    write_shared_kv_cache = False
+
     # allow models to define optional notes that output messages to users that want to use this model
     # list of supported keys: [ "notes" = print the notes value on model load ]
     info: Dict[str, str] = {}

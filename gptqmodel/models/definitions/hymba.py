@@ -11,6 +11,7 @@ class HymbaQModel(BaseQModel):
     supports_desc_act = [False]
     require_trust_remote_code = True
     require_monkeypatch = True
+    write_shared_kv_cache = True
     require_pkgs = ["tiktoken>=0.7.0",
                             "sentencepiece>=0.2.0",
                             "protobuf>=5.28.3",

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-
+from gptqmodel import BACKEND
 from model_test import ModelTest
 
 
@@ -25,6 +25,8 @@ class TestHymba(ModelTest):
     # Hymba currently tests that DESC_ACT=False to get better results.
     # If DESC_ACT=False, the output will be terrible.
     DESC_ACT = False
+    OFFLOAD_TO_DISK = False
+    LOAD_BACKEND = BACKEND.AUTO
 
 
     def test_hymba(self):
