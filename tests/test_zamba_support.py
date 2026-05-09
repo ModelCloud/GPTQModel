@@ -3,7 +3,6 @@
 
 from types import SimpleNamespace
 
-import gptqmodel  # noqa: F401
 import torch
 from transformers.models.zamba.configuration_zamba import ZambaConfig
 from transformers.models.zamba.modeling_zamba import ZambaForCausalLM

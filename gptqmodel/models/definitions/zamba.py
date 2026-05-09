@@ -1,7 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-from itertools import cycle
-
 from ...utils.model import move_to
 from ..base import BaseQModel
 
