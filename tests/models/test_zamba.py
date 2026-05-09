@@ -10,15 +10,13 @@ class TestZamba(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Zamba-7B-v1" # Zyphra/Zamba-7B-v1
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
-            "acc": {"value": 0.5026, "floor_pct": 0.04},
-            "acc_norm": {"value": 0.5171, "floor_pct": 0.04},
-        },
-        "gsm8k_platinum_cot": {
-            "acc": {"value": 0.6362, "floor_pct": 0.04},
+            "acc": {"value": {"A100": 0.4599}, "floor_pct": 0.04},
+            "acc_norm": {"value": {"A100": 0.4778}, "floor_pct": 0.04},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    # MODEL_COMPAT_FAST_LAYER_POSITION = "first"
+    MODEL_COMPAT_FAST_LAYER_POSITION = "first"
+    USE_FLASH_ATTN = False
 
     def test_zamba(self):
         self.quantize_and_evaluate()

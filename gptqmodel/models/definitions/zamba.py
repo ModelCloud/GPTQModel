@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+from itertools import cycle
 
 from ...utils.model import move_to
 from ..base import BaseQModel
@@ -7,7 +8,7 @@ from ..base import BaseQModel
 
 class ZambaQModel(BaseQModel):
     layer_modules_strict = False
-    # require_monkeypatch = True
+    require_monkeypatch = True
     require_pkgs = ["mamba_ssm>=2.3.1", "causal_conv1d>=1.2.0"]
 
     pre_lm_head_norm_module = "lm_head"
@@ -23,12 +24,6 @@ class ZambaQModel(BaseQModel):
             "mamba_decoder": {
                 "input_layernorm": ("input_layernorm:!",),
                 "mamba": ("in_proj:0", "out_proj:1"),
-            },
-            "shared_transf": {
-                "input_layernorm": ("input_layernorm:!",),
-                "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-                "pre_ff_layernorm": ("pre_ff_layernorm:!",),
-                "feed_forward": ("gate_proj:0", "up_proj:0", "down_proj:1"),
             },
         },
     ]
@@ -76,7 +71,7 @@ class ZambaQModel(BaseQModel):
                 )
             )
 
-            if is_fast_path_available and "cuda" in self.x_proj_weight.device.type:
+            if is_fast_path_available and "cuda" in hidden_states.device.type:
                 return self.cuda_kernels_forward(hidden_states, cache_params, attention_mask=attention_mask)
 
             return self.slow_forward(hidden_states, cache_params, attention_mask=attention_mask)
@@ -97,3 +92,31 @@ class ZambaQModel(BaseQModel):
             for mixer in candidates:
                 if mixer.__class__.__name__ == "ZambaMambaMixer":
                     type(mixer).forward = forward
+
+    # def after_model_load(self, model, load_quantized_model):
+    #     print("model", model.model._tied_weights_keys)
+    #
+    #     zamba_model = model.model
+    #     tied_weights_keys = {}
+    #     unique_hybrid_blocks = []
+    #     for layer_id, layer_type in enumerate(zamba_model.layers_block_type):
+    #         prefix_pattern = f"layers.{layer_id}.shared_transf"
+    #
+    #         # Zamba ties Hybrid module weights by repeating blocks after every
+    #         # `num_mem_blocks`. So if `num_mem_blocks=2`, the blocks looks like
+    #         # [1, 2, 1, 2, 1, 2] where all "ones" share the same set of weights.
+    #         if (
+    #                 not isinstance(unique_hybrid_blocks, list)
+    #                 or len(unique_hybrid_blocks) >= zamba_model.config.num_mem_blocks
+    #         ):
+    #             if isinstance(unique_hybrid_blocks, list):
+    #                 unique_hybrid_blocks = cycle(unique_hybrid_blocks)
+    #             target_pattern = next(unique_hybrid_blocks)
+    #             tied_weights_keys.update({prefix_pattern: target_pattern})
+    #         else:
+    #             # Store source patterns to which the subsequent modules will be tied
+    #             unique_hybrid_blocks.append(prefix_pattern)
+    #
+    #     zamba_model._tied_weights_keys = tied_weights_keys
+    #
+    #     return model

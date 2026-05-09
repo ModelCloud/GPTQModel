@@ -7,7 +7,7 @@ from ..base import BaseQModel
 
 class Zamba2QModel(BaseQModel):
     layer_modules_strict = False
-    # require_monkeypatch = True
+    require_monkeypatch = True
     require_pkgs = ["mamba_ssm>=2.3.1", "causal_conv1d>=1.2.0"]
 
     pre_lm_head_norm_module = "lm_head"
@@ -23,12 +23,6 @@ class Zamba2QModel(BaseQModel):
             "mamba_decoder": {
                 "input_layernorm": ("input_layernorm:!",),
                 "mamba": ("in_proj:0", "out_proj:1"),
-            },
-            "shared_transformer": {
-                "input_layernorm": ("input_layernorm:!",),
-                "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-                "pre_ff_layernorm": ("pre_ff_layernorm:!",),
-                "feed_forward": ("gate_up_proj:0", "down_proj:1"),
             },
         },
     ]
