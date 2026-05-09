@@ -21,7 +21,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     GenerationConfig,
-    PreTrainedConfig,
     PreTrainedModel,
 )
 
@@ -41,7 +40,14 @@ from ..utils import _MONKEY_PATCH_LOCK, internal_gguf
 try:
     from transformers.initialization import no_init_weights
 except ImportError:
-    from transformers.modeling_utils import no_init_weights
+    from transformers.modeling_utils import no_init_weights# Compatibility wrapper for no_init_weights across different transformers versions
+
+# transformers >= 5.0.0: from transformers import PreTrainedConfig
+# transformers < 5.0.0: from transformers import PretrainedConfig
+try:
+    from transformers import PreTrainedConfig
+except ImportError:
+    from transformers import PretrainedConfig
 
 from ..utils.logger import setup_logger
 
@@ -1233,6 +1239,31 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
                     support_tokenizer_types.append("TokenizersBackend")
                     formatter_cls.support_tokenizer_types = support_tokenizer_types
                 formatter_cls._gptqmodel_tokenizer_backend_patch = True
+
+        if getattr(config, "model_type", None) == "hymba" and remote_module is not None:
+            rotary_cls = getattr(remote_module, "LlamaRotaryEmbedding", None)
+            attention_cls = getattr(remote_module, "HymbaAttention", None)
+            if (
+                rotary_cls is not None
+                and attention_cls is not None
+                and not getattr(attention_cls, "_gptqmodel_init_rope_meta_patch", False)
+            ):
+                def hymba_init_rope_compat(self):
+                    # Hymba remote code hard-codes CUDA here, which forces a
+                    # meta->real-device materialization during __init__ under
+                    # transformers 5.x. Keep the device is None until HF
+                    # finishes model loading and device placement.
+                    device = None
+
+                    self.rotary_emb = rotary_cls(
+                        config=self.config,
+                        dim=self.kq_head_dim,
+                        base=self.rope_theta,
+                        device=device,
+                    )
+
+                attention_cls._init_rope = hymba_init_rope_compat
+                attention_cls._gptqmodel_init_rope_meta_patch = True
 
         if getattr(config, "model_type", None) != "phi4mm":
             return
