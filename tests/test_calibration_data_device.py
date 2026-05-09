@@ -26,7 +26,6 @@ import torch.nn as nn
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization import QuantizeConfig
 
-
 # Model path for integration tests - can be overridden via environment variable
 _INTEGRATION_MODEL_ID = os.environ.get(
     "GPTQMODEL_TEST_MODEL_ID",
@@ -1315,6 +1314,42 @@ class TestCalibrationDataDeviceIntegration:
         loaded = GPTQModel.load(save_path)
         assert loaded is not None
         self._cleanup_model(loaded)
+
+
+def test_run_input_capture_replaces_out_of_range_input_ids():
+    class MinimalModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = nn.Embedding(8, 4)
+            self.config = types.SimpleNamespace(model_type="test")
+            self.captured_input_ids = None
+
+        def get_input_embeddings(self):
+            return self.embed
+
+        def forward(self, input_ids=None, attention_mask=None, **kwargs):
+            self.captured_input_ids = input_ids
+            return self.embed(input_ids)
+
+    class FakeGPTQModel:
+        run_input_capture = BaseQModel.run_input_capture
+        _sanitize_input_ids_for_embeddings = BaseQModel._sanitize_input_ids_for_embeddings
+
+        def __init__(self):
+            self.model = MinimalModel()
+            self.tokenizer = None
+            self.INPUT_EMBEDDING_EXTRA_ARGS = None
+
+    instance = FakeGPTQModel()
+    example = {
+        "input_ids": torch.tensor([[1, 2, 99, -3]], dtype=torch.long),
+        "attention_mask": torch.ones((1, 4), dtype=torch.long),
+    }
+
+    instance.run_input_capture(example, use_cache=False, data_device=torch.device("cpu"))
+
+    assert instance.model.captured_input_ids is not None
+    assert instance.model.captured_input_ids.tolist() == [[1, 2, 0, 0]]
 
     @pytest.mark.skipif(
         torch.cuda.device_count() < 2,
