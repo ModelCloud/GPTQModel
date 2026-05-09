@@ -47,7 +47,7 @@ except ImportError:
 try:
     from transformers import PreTrainedConfig
 except ImportError:
-    from transformers import PretrainedConfig
+    from transformers import PretrainedConfig as PreTrainedConfig
 
 from ..utils.logger import setup_logger
 
