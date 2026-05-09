@@ -131,7 +131,7 @@ jobs:
             "${{ env.TORCH_VERSION }}" \
             "${{ github.run_id }}" \
             "${{ github.run_attempt }}" \
-            "unit_test_${{ matrix.test_script }}_${{ github.run_id }}_${{ github.run_attempt }}"
+            "unit_test_${{ matrix.test_script }}"
 
       - name: Setup uv env
         run: |
