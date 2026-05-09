@@ -92,31 +92,3 @@ class ZambaQModel(BaseQModel):
             for mixer in candidates:
                 if mixer.__class__.__name__ == "ZambaMambaMixer":
                     type(mixer).forward = forward
-
-    # def after_model_load(self, model, load_quantized_model):
-    #     print("model", model.model._tied_weights_keys)
-    #
-    #     zamba_model = model.model
-    #     tied_weights_keys = {}
-    #     unique_hybrid_blocks = []
-    #     for layer_id, layer_type in enumerate(zamba_model.layers_block_type):
-    #         prefix_pattern = f"layers.{layer_id}.shared_transf"
-    #
-    #         # Zamba ties Hybrid module weights by repeating blocks after every
-    #         # `num_mem_blocks`. So if `num_mem_blocks=2`, the blocks looks like
-    #         # [1, 2, 1, 2, 1, 2] where all "ones" share the same set of weights.
-    #         if (
-    #                 not isinstance(unique_hybrid_blocks, list)
-    #                 or len(unique_hybrid_blocks) >= zamba_model.config.num_mem_blocks
-    #         ):
-    #             if isinstance(unique_hybrid_blocks, list):
-    #                 unique_hybrid_blocks = cycle(unique_hybrid_blocks)
-    #             target_pattern = next(unique_hybrid_blocks)
-    #             tied_weights_keys.update({prefix_pattern: target_pattern})
-    #         else:
-    #             # Store source patterns to which the subsequent modules will be tied
-    #             unique_hybrid_blocks.append(prefix_pattern)
-    #
-    #     zamba_model._tied_weights_keys = tied_weights_keys
-    #
-    #     return model
