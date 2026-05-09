@@ -9,12 +9,45 @@ import json
 import math
 import os
 import time
+import traceback
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-os.environ.setdefault("ASCEND_GLOBAL_LOG_LEVEL", "3")
-os.environ.setdefault("ASCEND_SLOG_PRINT_TO_STDOUT", "0")
+_QUIET_CANN_LOGS_ENV = "GPTQMODEL_BENCHMARK_QUIET_CANN_LOGS"
+
+
+def _quiet_cann_logs_enabled() -> bool:
+    raw = os.getenv(_QUIET_CANN_LOGS_ENV)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _enable_quiet_cann_logs() -> int | None:
+    os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    os.environ.setdefault("ASCEND_GLOBAL_LOG_LEVEL", "3")
+    os.environ.setdefault("ASCEND_SLOG_PRINT_TO_STDOUT", "0")
+    if not _quiet_cann_logs_enabled():
+        return None
+
+    result_fd = os.dup(1)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+    finally:
+        os.close(devnull_fd)
+    return result_fd
+
+
+_RESULT_FD = _enable_quiet_cann_logs()
+
+
+def _emit_line(line: str) -> None:
+    if _RESULT_FD is None:
+        print(line, flush=True)
+    else:
+        os.write(_RESULT_FD, (line + "\n").encode("utf-8"))
 
 import torch
 import torch.nn as nn
@@ -586,7 +619,7 @@ def main() -> None:
         if index % args.num_shards == args.shard_index
     ]
     if not cases:
-        print(json.dumps({"device": str(device), "cases": 0}))
+        _emit_line(json.dumps({"device": str(device), "cases": 0}))
         return
 
     results = [
@@ -607,7 +640,7 @@ def main() -> None:
     mode = _mode_name(native_int4=native_int4, cache_dequantized=args.komodo_cache_dequantized)
 
     for result in results:
-        print(
+        _emit_line(
             "{name} {device} mode={mode} baseline={baseline_ms:.4f}ms komodo={komodo_ms:.4f}ms "
             "speedup={speedup:.3f}x first={first_ms:.4f}ms repeat={repeat_ms:.4f}ms "
             "prepack={prepack_ms:.4f}ms kernel={kernel} cann_prefetch={cann_prefetch} drop_source={drop_source} "
@@ -631,7 +664,7 @@ def main() -> None:
     max_abs = max(result["drift"]["max_abs"] for result in results)
     max_rel = max(result["drift"]["max_rel"] for result in results)
     measured_loop_seconds = (total_baseline_ms + total_komodo_ms) * max(1, args.iters) / 1000.0
-    print(
+    _emit_line(
         "TOTAL cases={count} mode={mode} baseline_sum={baseline:.4f}ms "
         "komodo_sum={komodo:.4f}ms speedup={speedup:.3f}x "
         "max_abs={max_abs:.6g} max_rel={max_rel:.6g} prefetch={prefetch} measured_loop={loop:.4f}s".format(
@@ -677,4 +710,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        if _RESULT_FD is not None:
+            os.write(_RESULT_FD, traceback.format_exc().encode("utf-8"))
+        raise
+    finally:
+        if _RESULT_FD is not None:
+            os.close(_RESULT_FD)

@@ -168,6 +168,29 @@ def _cannoe_ascendc_enabled() -> bool:
     return _cannoe_env_flag(_CANNOE_ASCENDC_ENV, default=False)
 
 
+def _cannoe_native_tuning_requested() -> bool:
+    return any(
+        _cannoe_env(name) is not None
+        for name in (
+            _CANNOE_PREFETCH_ENV,
+            _CANNOE_ACTIVE_CORES_ENV,
+            _CANNOE_SPLIT_K_ENV,
+            _CANNOE_MIN_SPLIT_K_RATIO_ENV,
+            _CANNOE_BASE_N_ENV,
+            _CANNOE_BASE_K_ENV,
+            _CANNOE_FUSED_ENV,
+            _CANNOE_FUSED_REQUIRE_ENV,
+            _CANNOE_FUSED_OP_ENV,
+            _CANNOE_ASCENDC_ENV,
+            _CANNOE_V3_ENV,
+            _CANNOE_INNER_PRECISE_ENV,
+            _CANNOE_STAGED_DEQUANT_ENV,
+            _CANNOE_CUBE_CONSUMER_ENV,
+            _CANNOE_PREPACK_TILE_N_ENV,
+        )
+    )
+
+
 def _cannoe_inner_precise(rows: int, in_features: int, out_features: int, group_size: int) -> int:
     raw = _cannoe_env(_CANNOE_INNER_PRECISE_ENV)
     if raw is None or raw.strip().lower() == "auto":
@@ -671,6 +694,9 @@ class _CannoePlanMixin:
         return max(self.pack_factor, tile_n)
 
     def _auto_cannoe_prepack_tile_n(self) -> int | None:
+        if getattr(self, "_cannoe_plain_native_passthrough", False):
+            return None
+
         raw = _cannoe_env(_CANNOE_PREPACK_TILE_N_ENV)
         if raw is not None:
             try:
@@ -707,6 +733,10 @@ class _CannoePlanMixin:
     def clear_native_cache(self):
         result = super().clear_native_cache()
         if hasattr(self, "_cann_plan_cache"):
+            self._cannoe_native_tuning_requested = _cannoe_native_tuning_requested()
+            self._cannoe_plain_native_passthrough = not self._cannoe_native_tuning_requested
+            self._cannoe_plain_native_fast_ready = False
+            self._cannoe_plain_native_group16_fast_ready = False
             self._cann_plan_cache.clear()
             self._cann_hot_plan_fast_key = None
             self._cann_hot_plan_key = None
@@ -826,6 +856,12 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         self._cann_native_hot_plan = None
         self._last_cann_plan: CannoeTilingPlan | None = None
         self._last_cann_path: str | None = None
+        self._cannoe_native_tuning_requested = _cannoe_native_tuning_requested()
+        self._cannoe_plain_native_passthrough = not self._cannoe_native_tuning_requested
+        self._cannoe_plain_native_fast_ready = False
+        self._cannoe_plain_native_group16_fast_ready = False
+        if self._cannoe_plain_native_passthrough:
+            self.forward = self._plain_native_forward
 
     def _native_forward(self, x: torch.Tensor):
         _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
@@ -1016,12 +1052,49 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
         compute_dtype = torch.float16
         if self._can_use_native_int4(x, compute_dtype):
+            if x.dtype == torch.float16 and not self._cannoe_native_tuning_requested:
+                self._last_cann_path = "plain_native_forward"
+                self._last_cann_plan = None
+                if self._cannoe_plain_native_passthrough:
+                    return KomodoLinear._native_forward(self, x)
+                self._cannoe_plain_native_passthrough = True
+                try:
+                    return KomodoLinear._native_forward(self, x)
+                finally:
+                    self._cannoe_plain_native_passthrough = False
             return self._native_forward(x)
         if self._can_use_native_group16(x, compute_dtype):
             return self._native_group16_forward(x)
         if x.dtype == torch.bfloat16:
             raise RuntimeError("CannoeLinear bfloat16 inference requires the native int4 NPU path.")
         return super().forward(x)
+
+    def _plain_native_forward(self, x: torch.Tensor):
+        if x.dtype == torch.float16:
+            if self._cannoe_plain_native_group16_fast_ready:
+                return KomodoLinear._native_group16_forward(self, x)
+            if self._cannoe_plain_native_fast_ready:
+                return KomodoLinear._native_forward(self, x)
+            if self.group_size != 16 and self._can_use_native_int4(x, torch.float16):
+                self._cannoe_plain_native_fast_ready = True
+                self._last_cann_path = "plain_native_bound"
+                self._last_cann_plan = None
+                return KomodoLinear._native_forward(self, x)
+            if self._can_use_native_group16(x, torch.float16):
+                self._cannoe_plain_native_group16_fast_ready = True
+                self._last_cann_path = "plain_native_group16_bound"
+                self._last_cann_plan = None
+                return KomodoLinear._native_group16_forward(self, x)
+            return KomodoLinear.forward(self, x)
+
+        _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
+        if x.dtype == torch.bfloat16:
+            if self._can_use_native_int4(x, torch.float16):
+                return self._native_forward(x)
+            if self._can_use_native_group16(x, torch.float16):
+                return self._native_group16_forward(x)
+            raise RuntimeError("CannoeLinear bfloat16 inference requires the native int4 NPU path.")
+        raise RuntimeError(f"CannoeLinear supports only torch.float16 or torch.bfloat16 inference; got {x.dtype}.")
 
 
 class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
