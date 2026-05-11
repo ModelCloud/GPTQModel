@@ -11,6 +11,7 @@ import json
 import logging
 import shutil
 from collections import defaultdict
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple
 
@@ -90,6 +91,72 @@ def normalize_device(device: Optional[str]) -> Optional[str]:
     if dev.index is None:
         return "cuda:0"
     return f"cuda:{dev.index}"
+
+
+class _ShardTensorLookup:
+    """Resolve tensors by name across sharded safetensors using the HF weight map."""
+
+    def __init__(
+        self,
+        *,
+        model_path: Path,
+        device: str,
+        weight_map: Optional[dict],
+    ) -> None:
+        self.model_path = model_path
+        self.device = device
+        self.weight_map = weight_map or {}
+        self._stack = ExitStack()
+        self._readers: Dict[str, object] = {}
+        self._keys: Dict[str, set[str]] = {}
+
+    def close(self) -> None:
+        self._stack.close()
+        self._readers.clear()
+        self._keys.clear()
+
+    def _reader_for_shard(self, shard_name: str):
+        reader = self._readers.get(shard_name)
+        if reader is None:
+            # Keep cross-shard readers open while one dequantization pass runs.
+            reader = self._stack.enter_context(
+                safe_open(self.model_path / shard_name, framework="pt", device=self.device)
+            )
+            self._readers[shard_name] = reader
+            self._keys[shard_name] = set(reader.keys())
+        return reader
+
+    def has_tensor(
+        self,
+        key: str,
+        *,
+        local_reader=None,
+        local_keys: Optional[set[str]] = None,
+    ) -> bool:
+        if local_reader is not None and local_keys is not None and key in local_keys:
+            return True
+        shard_name = self.weight_map.get(key)
+        if shard_name is None:
+            return False
+        reader = self._reader_for_shard(shard_name)
+        return key in self._keys[shard_name] and reader is not None
+
+    def get_tensor(
+        self,
+        key: str,
+        *,
+        local_reader=None,
+        local_keys: Optional[set[str]] = None,
+    ) -> torch.Tensor:
+        if local_reader is not None and local_keys is not None and key in local_keys:
+            return local_reader.get_tensor(key)
+        shard_name = self.weight_map.get(key)
+        if shard_name is None:
+            raise KeyError(key)
+        reader = self._reader_for_shard(shard_name)
+        if key not in self._keys[shard_name]:
+            raise KeyError(key)
+        return reader.get_tensor(key)
 
 
 def _get_compressed_tensors_dependencies() -> dict:
@@ -243,6 +310,48 @@ def resolve_block_size(config: dict) -> Optional[Tuple[int, int]]:
     if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
         return int(block_size[0]), int(block_size[1])
     return None
+
+
+def _expected_block_grid_shape(
+    weight_shape: Tuple[int, int],
+    block_shape: Tuple[int, int],
+) -> Tuple[int, int]:
+    rows, cols = weight_shape
+    block_rows, block_cols = block_shape
+    return (
+        (rows + block_rows - 1) // block_rows,
+        (cols + block_cols - 1) // block_cols,
+    )
+
+
+def _expand_padded_block_scale(
+    scale_tensor: Optional[torch.Tensor],
+    *,
+    weight_shape: Tuple[int, int],
+    block_shape: Optional[Tuple[int, int]],
+) -> Optional[torch.Tensor]:
+    """Expand block-grid FP8 scales to dense elementwise scales when edge blocks are padded."""
+
+    if not isinstance(scale_tensor, torch.Tensor):
+        return None
+    if scale_tensor.ndim != 2 or len(weight_shape) != 2 or block_shape is None:
+        return scale_tensor
+
+    rows, cols = weight_shape
+    blocks_r, blocks_c = scale_tensor.shape
+    if (blocks_r, blocks_c) == (rows, cols):
+        return scale_tensor
+
+    block_rows, block_cols = block_shape
+    expected_grid = _expected_block_grid_shape(weight_shape, block_shape)
+    if (blocks_r, blocks_c) != expected_grid:
+        return scale_tensor
+
+    # Some checkpoints store one scale per padded block and rely on the final
+    # block being cropped back to the real tensor shape during dequantization.
+    expanded = scale_tensor.repeat_interleave(block_rows, dim=0)
+    expanded = expanded.repeat_interleave(block_cols, dim=1)
+    return expanded[:rows, :cols].contiguous()
 
 
 def infer_block_shape(weight_shape: Tuple[int, int], scale_tensor: torch.Tensor) -> Tuple[int, int]:
@@ -619,6 +728,7 @@ def convert_fp8_shard(
     *,
     block_shape: Optional[Tuple[int, int]],
     scale_semantics: str = "heuristic",
+    tensor_lookup: Optional[_ShardTensorLookup] = None,
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     reader_keys = set(reader.keys())
@@ -628,18 +738,26 @@ def convert_fp8_shard(
             scale_key = key + "_scale_inv"
             scale_tensor = None
             scale_inv = None
-            if scale_key in reader_keys:
+            if tensor_lookup is not None and tensor_lookup.has_tensor(
+                scale_key, local_reader=reader, local_keys=reader_keys
+            ):
                 # GPTQModel-native FP8 checkpoints persist inverse scales under
                 # the historical `weight_scale_inv` suffix.
-                scale_inv = reader.get_tensor(scale_key)
+                scale_inv = tensor_lookup.get_tensor(
+                    scale_key, local_reader=reader, local_keys=reader_keys
+                )
                 LOG.debug("Using scale_inv tensor '%s' for FP8 weight '%s'", scale_key, key)
             else:
                 # Some native FP8 checkpoints (for example DeepSeek V4) store
                 # direct scales as `<module>.scale` instead of `weight_scale_inv`.
                 scale_key = key[:-len(".weight")] + ".scale"
-                if scale_key not in reader_keys:
+                if tensor_lookup is None or not tensor_lookup.has_tensor(
+                    scale_key, local_reader=reader, local_keys=reader_keys
+                ):
                     raise KeyError(f"Missing FP8 scale tensor for {key}")
-                scale_tensor = reader.get_tensor(scale_key)
+                scale_tensor = tensor_lookup.get_tensor(
+                    scale_key, local_reader=reader, local_keys=reader_keys
+                )
                 LOG.debug("Using scale tensor '%s' for FP8 weight '%s'", scale_key, key)
 
             rows, cols = tensor.shape
@@ -664,16 +782,44 @@ def convert_fp8_shard(
             block_rows, block_cols = effective_block
             if block_rows <= 0 or block_cols <= 0:
                 raise ValueError(f"Inferred invalid block size {effective_block} for {key}")
-            if rows % block_rows != 0 or cols % block_cols != 0:
+            partial_block_grid = _expected_block_grid_shape((rows, cols), effective_block)
+            block_source = scale_inv if scale_inv is not None else scale_tensor
+            block_source_shape = tuple(block_source.shape) if isinstance(block_source, torch.Tensor) else None
+            allows_partial_edge_blocks = block_source_shape == partial_block_grid
+            if (rows % block_rows != 0 or cols % block_cols != 0) and not allows_partial_edge_blocks:
                 raise ValueError(
                     f"Tensor {key} shape {tensor.shape} incompatible with block size {effective_block}"
+                )
+            if allows_partial_edge_blocks and (rows % block_rows != 0 or cols % block_cols != 0):
+                # Accept checkpoints that pad only the scale grid, not the weight.
+                LOG.debug(
+                    "Allowing partial edge blocks for weight '%s': shape=%s block=%s scale_grid=%s",
+                    key,
+                    tuple(tensor.shape),
+                    effective_block,
+                    block_source_shape,
                 )
 
             scale_arg = scale_tensor
             scale_inv_arg = scale_inv
+            scale_arg = _expand_padded_block_scale(
+                scale_arg,
+                weight_shape=(rows, cols),
+                block_shape=effective_block,
+            )
+            scale_inv_arg = _expand_padded_block_scale(
+                scale_inv_arg,
+                weight_shape=(rows, cols),
+                block_shape=effective_block,
+            )
             if scale_semantics == "inverse" and scale_inv is not None:
                 scale_arg = torch.reciprocal(scale_inv.to(torch.float32))
                 scale_inv_arg = None
+                scale_arg = _expand_padded_block_scale(
+                    scale_arg,
+                    weight_shape=(rows, cols),
+                    block_shape=effective_block,
+                )
             deq = dequantize_fp8(
                 tensor,
                 scale=scale_arg,
@@ -687,7 +833,18 @@ def convert_fp8_shard(
             continue
         elif key.endswith(".scale"):
             weight_key = key[:-len(".scale")] + ".weight"
-            if weight_key in reader_keys and reader.get_tensor(weight_key).dtype in _FLOAT8_DTYPES:
+            if tensor_lookup is not None and tensor_lookup.has_tensor(
+                weight_key, local_reader=reader, local_keys=reader_keys
+            ):
+                weight_tensor = tensor_lookup.get_tensor(
+                    weight_key, local_reader=reader, local_keys=reader_keys
+                )
+                if weight_tensor.dtype in _FLOAT8_DTYPES:
+                    # Mirror the `_scale_inv` handling so exported BF16 checkpoints
+                    # keep only dense weights, not FP8 reconstruction metadata.
+                    LOG.debug("Dropping auxiliary FP8 tensor '%s' after dequantization", key)
+                    continue
+            elif weight_key in reader_keys and reader.get_tensor(weight_key).dtype in _FLOAT8_DTYPES:
                 # Mirror the `_scale_inv` handling so exported BF16 checkpoints
                 # keep only dense weights, not FP8 reconstruction metadata.
                 LOG.debug("Dropping auxiliary FP8 tensor '%s' after dequantization", key)
@@ -1045,6 +1202,15 @@ def dequantize_model(
 
     weight_map: Dict[str, str] = {}
     total_size = 0
+    tensor_lookup = (
+        _ShardTensorLookup(
+            model_path=model_path,
+            device=open_device,
+            weight_map=index.get("weight_map", {}) if isinstance(index, dict) else None,
+        )
+        if fmt == "fp8"
+        else None
+    )
 
     try:
         for idx, filename in enumerate(files):
@@ -1057,6 +1223,7 @@ def dequantize_model(
                         target_dtype,
                         block_shape=block_shape,
                         scale_semantics=fp8_scale_semantics,
+                        tensor_lookup=tensor_lookup,
                     )
             elif fmt == "bitsandbytes":
                 with safe_open(path, framework="pt", device=open_device) as reader:
@@ -1085,11 +1252,17 @@ def dequantize_model(
             else:
                 raise ValueError(f"Unsupported format {fmt}")
 
-            save_file(tensors, str(output_path / filename))
-            weight_map.update({str(name): filename for name in tensors})
-            total_size += sum(t.element_size() * t.numel() for t in tensors.values())
+            if tensors:
+                save_file(tensors, str(output_path / filename))
+                weight_map.update({str(name): filename for name in tensors})
+                total_size += sum(t.element_size() * t.numel() for t in tensors.values())
+            else:
+                # Auxiliary-only shards disappear once dense weights are emitted elsewhere.
+                LOG.debug("Skipping empty output shard '%s' after dequantization", filename)
             pb.subtitle(filename).next().draw()
     finally:
+        if tensor_lookup is not None:
+            tensor_lookup.close()
         pb.close()
 
     if index is not None:
