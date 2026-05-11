@@ -1103,9 +1103,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             out = out_acc.to(dtype=compute_dtype).reshape(out_shape)
 
         if self.bias is not None and not fused_bias:
-            bias = self.bias
-            if bias.device != out.device or bias.dtype != out.dtype:
-                bias = bias.to(device=out.device, dtype=out.dtype)
+            bias = self._cannoe_bias(device=out.device, dtype=out.dtype)
             out.add_(bias)
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
@@ -1207,10 +1205,8 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         )
         if input_perm is not None:
             x_flat = x_flat.index_select(1, input_perm)
-        bias = self.bias
-        fuse_bias = bias is not None and self._cannoe_plain_native_fuse_bias
-        if fuse_bias and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
-            bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
+        fuse_bias = self.bias is not None and self._cannoe_plain_native_fuse_bias
+        bias = self._cannoe_bias(device=x_flat.device, dtype=x_flat.dtype) if fuse_bias else None
         if self._lookahead_enabled and self._lookahead_next is not None and not self.training:
             self._maybe_schedule_lookahead(torch.float16)
         out = self._cannoe_plain_native_matmul()(
@@ -1224,9 +1220,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             native_group_size,
         ).reshape(out_shape)
         if self.bias is not None and not fuse_bias:
-            bias = self.bias
-            if bias.device != out.device or bias.dtype != out.dtype:
-                bias = bias.to(device=out.device, dtype=out.dtype)
+            bias = self._cannoe_bias(device=out.device, dtype=out.dtype)
             out.add_(bias)
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
@@ -1318,9 +1312,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             out = out_acc.to(dtype=torch.float16).reshape(out_shape)
 
         if self.bias is not None and not fused_bias:
-            bias = self.bias
-            if bias.device != out.device or bias.dtype != out.dtype:
-                bias = bias.to(device=out.device, dtype=out.dtype)
+            bias = self._cannoe_bias(device=out.device, dtype=out.dtype)
             out.add_(bias)
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
