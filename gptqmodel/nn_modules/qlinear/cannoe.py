@@ -36,6 +36,7 @@ _CANNOE_INNER_PRECISE_ENV = "GPTQMODEL_CANNOE_INNER_PRECISE"
 _CANNOE_STAGED_DEQUANT_ENV = "GPTQMODEL_CANNOE_STAGED_DEQUANT"
 _CANNOE_CUBE_CONSUMER_ENV = "GPTQMODEL_CANNOE_CUBE_CONSUMER"
 _CANNOE_PREPACK_TILE_N_ENV = "GPTQMODEL_CANNOE_PREPACK_TILE_N"
+_CANNOE_BF16_NATIVE_ENV = "GPTQMODEL_CANNOE_BF16_NATIVE"
 # 910B CANN reserves this system workspace before the user workspace returned by GetUserWorkspace().
 _CANNOE_CUBE_WORKSPACE_BYTES = 16 * 1024 * 1024
 _NPU_PREFETCH_OP_UNSET = object()
@@ -748,8 +749,11 @@ class _CannoePlanMixin:
             self._cannoe_plain_native_group16_fast_ready = False
             self._cannoe_plain_native_bf16_fast_ready = False
             self._cannoe_plain_native_bf16_group16_fast_ready = False
+            self._cannoe_plain_native_bf16_direct_fast_ready = False
             self._cannoe_plain_native_plan_key = None
             self._cannoe_plain_native_plan = None
+            self._cannoe_plain_native_bf16_plan_key = None
+            self._cannoe_plain_native_bf16_plan = None
             self._cannoe_plain_native_matmul_op = None
             self._cannoe_plain_native_grouped_matmul_op = None
             self._cannoe_plain_native_fuse_bias = _fuse_bias_enabled()
@@ -881,8 +885,11 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         self._cannoe_plain_native_group16_fast_ready = False
         self._cannoe_plain_native_bf16_fast_ready = False
         self._cannoe_plain_native_bf16_group16_fast_ready = False
+        self._cannoe_plain_native_bf16_direct_fast_ready = False
         self._cannoe_plain_native_plan_key = None
         self._cannoe_plain_native_plan = None
+        self._cannoe_plain_native_bf16_plan_key = None
+        self._cannoe_plain_native_bf16_plan = None
         self._cannoe_plain_native_matmul_op = None
         self._cannoe_plain_native_grouped_matmul_op = None
         self._cannoe_plain_native_fuse_bias = _fuse_bias_enabled()
@@ -903,6 +910,26 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         plan = self._native_plan(device=device, dtype=dtype)
         self._cannoe_plain_native_plan_key = key
         self._cannoe_plain_native_plan = plan
+        return plan
+
+    def _cannoe_plain_native_bf16_plan_for(self, *, device: torch.device):
+        key = self._native_key(device=device, dtype=torch.bfloat16)
+        if self._cannoe_plain_native_bf16_plan_key == key:
+            return self._cannoe_plain_native_bf16_plan
+
+        packed_weight, scales, offsets, native_group_size, input_perm = self._cannoe_plain_native_plan_for(
+            device=device,
+            dtype=torch.float16,
+        )
+        plan = (
+            packed_weight,
+            scales.to(dtype=torch.bfloat16).contiguous(),
+            offsets.to(dtype=torch.bfloat16).contiguous(),
+            native_group_size,
+            input_perm,
+        )
+        self._cannoe_plain_native_bf16_plan_key = key
+        self._cannoe_plain_native_bf16_plan = plan
         return plan
 
     def _cannoe_plain_native_matmul(self):
@@ -927,6 +954,20 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         self._cannoe_plain_native_group16_grouped_key = key
         self._cannoe_plain_native_group16_grouped = grouped
         return grouped
+
+    def _cannoe_plain_native_bf16_direct_candidate(self, *, rows: int) -> bool:
+        raw = _cannoe_env(_CANNOE_BF16_NATIVE_ENV)
+        if raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}:
+            return False
+        if raw is not None and raw.strip().lower() in {"1", "true", "yes", "on"}:
+            return self.group_size != 16
+
+        return (
+            self.group_size != 16
+            and rows <= 16
+            and self.in_features <= 8192
+            and self.out_features <= 8192
+        )
 
     def _native_forward(self, x: torch.Tensor):
         _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
@@ -1154,11 +1195,20 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
 
         _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
         if x.dtype == torch.bfloat16:
+            if self._cannoe_plain_native_bf16_direct_fast_ready:
+                return self._plain_native_bf16_direct_forward(x)
             if self._cannoe_plain_native_bf16_group16_fast_ready:
                 return self._plain_native_bf16_group16_forward(x)
             if self._cannoe_plain_native_bf16_fast_ready:
                 return self._plain_native_bf16_forward(x)
             if self.group_size != 16 and self._can_use_native_int4(x, torch.float16):
+                rows = x.reshape(-1, x.shape[-1]).shape[0]
+                if self._cannoe_plain_native_bf16_direct_candidate(rows=rows):
+                    self._cannoe_plain_native_bf16_direct_fast_ready = True
+                    self._last_cann_path = "plain_native_bf16_direct_bound"
+                    self._last_cann_plan = None
+                    self.forward = self._plain_native_bf16_direct_forward_checked
+                    return self._plain_native_bf16_direct_forward(x)
                 self._cannoe_plain_native_bf16_fast_ready = True
                 self._last_cann_path = "plain_native_bf16_bound"
                 self._last_cann_plan = None
@@ -1186,6 +1236,11 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
     def _plain_native_bf16_forward_checked(self, x: torch.Tensor):
         if x.dtype == torch.bfloat16:
             return self._plain_native_bf16_forward(x)
+        return self._plain_native_forward(x)
+
+    def _plain_native_bf16_direct_forward_checked(self, x: torch.Tensor):
+        if x.dtype == torch.bfloat16:
+            return self._plain_native_bf16_direct_forward(x)
         return self._plain_native_forward(x)
 
     def _plain_native_bf16_group16_forward_checked(self, x: torch.Tensor):
@@ -1312,6 +1367,38 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             out = out_acc.to(dtype=torch.float16).reshape(out_shape)
 
         if self.bias is not None and not fused_bias:
+            bias = self._cannoe_bias(device=out.device, dtype=out.dtype)
+            out.add_(bias)
+        if self.adapter:
+            out = self.adapter.apply(x=x_flat, out=out)
+        return out
+
+    def _plain_native_bf16_direct_forward(self, x: torch.Tensor):
+        out_shape = x.shape[:-1] + (self.out_features,)
+        x_flat = x.reshape(-1, x.shape[-1])
+        if not x_flat.is_contiguous():
+            x_flat = x_flat.contiguous()
+
+        packed_weight, scales, offsets, native_group_size, input_perm = self._cannoe_plain_native_bf16_plan_for(
+            device=x_flat.device,
+        )
+        if input_perm is not None:
+            x_flat = x_flat.index_select(1, input_perm)
+        fuse_bias = self.bias is not None and self._cannoe_plain_native_fuse_bias
+        bias = self._cannoe_bias(device=x_flat.device, dtype=torch.float32) if fuse_bias else None
+        if self._lookahead_enabled and self._lookahead_next is not None and not self.training:
+            self._maybe_schedule_lookahead(torch.float16)
+        out = self._cannoe_plain_native_matmul()(
+            x_flat,
+            packed_weight,
+            scales,
+            offsets,
+            None,
+            None,
+            bias if fuse_bias else None,
+            native_group_size,
+        ).reshape(out_shape)
+        if self.bias is not None and not fuse_bias:
             bias = self._cannoe_bias(device=out.device, dtype=out.dtype)
             out.add_(bias)
         if self.adapter:
