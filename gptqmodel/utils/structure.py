@@ -755,6 +755,9 @@ class LazyTurtle:
             if hf_conversion_map_reversed is not None
             else self.infer_hf_conversion_map_reversed(target_model=target_model)
         )
+        self._base_model_prefix = getattr(target_model, "base_model_prefix", None)
+        if not isinstance(self._base_model_prefix, str) or not self._base_model_prefix:
+            self._base_model_prefix = None
         alias_items = self._normalize_runtime_to_checkpoint_renamings(conversion_aliases)
         self._runtime_to_checkpoint_renamings = tuple(alias_items)
         self._runtime_to_checkpoint_converters = self._normalize_runtime_to_checkpoint_converters(conversion_aliases)
@@ -1377,14 +1380,53 @@ class LazyTurtle:
         if not name:
             return [name]
 
-        candidates: list[str] = [name]
-        renamed = name
-        # Apply the reversed HF renaming chain once, in order, just like
-        # `transformers.rename_source_key()` walks WeightRenaming rules.
-        for renaming in self._runtime_to_checkpoint_renamings:
-            renamed, _ = renaming.rename_source_key(renamed)
-        if renamed and renamed not in candidates:
-            candidates.append(renamed)
+        candidates: list[str] = []
+        seen: set[str] = set()
+        base_prefix = self._base_model_prefix
+
+        def add(candidate: str) -> None:
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+
+        def add_with_base_prefix_variants(candidate: str) -> None:
+            add(candidate)
+            if not base_prefix:
+                return
+            prefix = f"{base_prefix}."
+            if candidate.startswith(prefix):
+                stripped = candidate[len(prefix):]
+                add(stripped)
+            else:
+                add(f"{prefix}{candidate}")
+
+        # Start with the runtime name as-is plus its base-prefix variant so
+        # rules authored in bare namespaces (e.g. `layers.*`) can still match
+        # shell paths rooted at `model.layers.*`, and vice versa.
+        add_with_base_prefix_variants(name)
+
+        # Apply the reversed HF renaming chain once in both directions:
+        # 1) declared order
+        # 2) reverse order
+        #
+        # Some model families (e.g. DeepSeek-V4) build a runtime key through
+        # multiple forward renamings where a generic rule runs before a more
+        # specific one. Inversion must therefore also try the opposite order
+        # to recover checkpoint keys reliably.
+        initial_candidates = list(candidates)
+
+        def apply_chain(name_in: str, renamings: list[_LazyWeightRenaming]) -> str:
+            renamed = name_in
+            for renaming in renamings:
+                renamed, _ = renaming.rename_source_key(renamed)
+            return renamed
+
+        forward_chain = list(self._runtime_to_checkpoint_renamings)
+        reverse_chain = list(reversed(self._runtime_to_checkpoint_renamings))
+        for candidate in initial_candidates:
+            add_with_base_prefix_variants(apply_chain(candidate, forward_chain))
+            add_with_base_prefix_variants(apply_chain(candidate, reverse_chain))
+
         return candidates
 
     def _converter_direct_alias_candidates(self, name: str) -> list[str]:
