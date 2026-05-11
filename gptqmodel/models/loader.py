@@ -6,15 +6,14 @@
 from __future__ import annotations
 
 import copy
+import numpy as np
 import os
 import time
+import torch
+import transformers
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
 from typing import Dict, List, Optional, Union
-
-import numpy as np
-import torch
-import transformers
 
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.structure import LazyTurtle, print_module_tree
@@ -26,7 +25,7 @@ else:
 
 import defuser
 from packaging.version import InvalidVersion, Version
-from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 
 from ..adapter.adapter import Adapter
