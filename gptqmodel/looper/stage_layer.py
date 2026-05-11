@@ -272,7 +272,7 @@ def _replay_layer_outputs(
             shared_kv_cache_dict=shared_kv_cache_dict,
             layer_index=layer_index,
             need_outputs=True,
-            reuse_kv=False,
+            reuse_kv=getattr(module, "reuse_kv", False),
             progress_pb=replay_pb,
             progress_title=replay_msg,
             progress_stage="Forward replay",

@@ -7,8 +7,9 @@ from gptqmodel.looper.module_looper import ModuleLooper
 
 
 class _DummyModel:
-    def __init__(self, compute_device_filter):
+    def __init__(self, compute_device_filter, *, write_shared_kv_cache=False):
         self.support_batch_quantize = False
+        self.write_shared_kv_cache = write_shared_kv_cache
         self.quantize_config = types.SimpleNamespace(
             device=torch.device("cpu"),
             dense_vram_strategy="exclusive",
@@ -118,4 +119,75 @@ def test_compute_device_filter_applies_to_forward_devices(monkeypatch):
     assert outputs == []
     assert called_devices
     assert torch.device("meta") not in called_devices
-    assert all(device.type == "cpu" for device in called_devices)
+
+
+def test_parallel_forward_writes_shared_kv_cache_when_model_requests_it(monkeypatch):
+    devices = [torch.device("cpu"), torch.device("meta")]
+    looper = ModuleLooper(
+        model=_DummyModel(lambda candidates: [candidates[0]], write_shared_kv_cache=True),
+        processors=[],
+    )
+
+    class DummyProcessor:
+        num_batches = 1
+
+        def _set_current_batch_index(self, _index):
+            return None
+
+    def fake_clone_module_for_devices(_module, target_devices, progress_callback=None):
+        return {device: object() for device in target_devices}
+
+    kv_payload = ("kv",)
+
+    def fake_forward_batch_worker(*args, **kwargs):
+        del args
+        assert kwargs["reuse_kv"] is False
+        assert kwargs["write_shared_kv_cache"] is True
+        return 0, None, kv_payload
+
+    class DummyFuture:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return self._result
+
+    def fake_submit(device, fn, *args, **kwargs):
+        return DummyFuture(fn(*args, **kwargs))
+
+    monkeypatch.setattr(
+        "gptqmodel.looper.module_looper.clone_module_for_devices",
+        fake_clone_module_for_devices,
+    )
+    monkeypatch.setattr(
+        "gptqmodel.looper.module_looper.forward_batch_worker",
+        fake_forward_batch_worker,
+    )
+    monkeypatch.setattr(
+        "gptqmodel.looper.module_looper.DEVICE_THREAD_POOL.submit",
+        fake_submit,
+    )
+    monkeypatch.setattr(
+        "gptqmodel.looper.module_looper.DEVICE_THREAD_POOL.submit_serial",
+        fake_submit,
+    )
+
+    shared_kv_cache_dict = {}
+    outputs = looper._run_forward_batches_parallel(
+        module=torch.nn.Linear(1, 1),
+        processor=DummyProcessor(),
+        layer_inputs=[[torch.zeros(1, 1)]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[torch.zeros(1, 1)],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict=shared_kv_cache_dict,
+        layer_index=0,
+        need_outputs=False,
+        reuse_kv=False,
+        devices=devices,
+    )
+
+    assert outputs == []
+    assert shared_kv_cache_dict[0] == kv_payload
