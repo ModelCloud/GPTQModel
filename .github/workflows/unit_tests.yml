@@ -69,7 +69,7 @@ env:
   TORCH_VERSION: 2.11.0
   # vllm doesn't support 3.14
   PYTHON_VERSION: 3.13
-  UV_PYTHON: python3.13
+  UV_PYTHON: 3.13
   # PYTHON_GIL: 0 // test libs don't support yet
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py,models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   MODEL_TEST_MODE: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
@@ -245,19 +245,19 @@ jobs:
       matrix:
         include:
           - name: Test pypi pip
-            env_name: pypi_pip_env
+            env_name: pypi_pip_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'true'
             install_cmd: pip install gptqmodel torch -U
           - name: Test pypi uv
-            env_name: pypi_uv_env
+            env_name: pypi_uv_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'false'
             install_cmd: uv pip install gptqmodel torch -U
           - name: Test local pip
-            env_name: local_pip_env
+            env_name: local_pip_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'true'
             install_cmd: pip install . torch -U
           - name: Test local uv
-            env_name: local_uv_env
+            env_name: local_uv_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'false'
             install_cmd: uv pip install . torch -U
     steps:

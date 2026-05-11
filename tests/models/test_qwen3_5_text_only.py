@@ -16,10 +16,27 @@ class TestQwen3_5(ModelTest):
             "acc": {"value": 0.6092, "floor_pct": 0.04},
             "acc_norm": {"value": 0.6143, "floor_pct": 0.04},
         },
+        ######################################################################
+        # ⚠️  IMPORTANT NOTE (GSM8K_PLATINUM_COT)
+        #
+        # For SOME models (e.g. qwen3_moe, Qwen3.5-9B):
+        #
+        #   - apply_chat_template MUST be set to False
+        #   - Otherwise, GSM8K_PLATINUM_COT scores will be SEVERELY degraded
+        #
+        # Empirical comparison (Qwen3.5-9B as an example):
+        #   - apply_chat_template = False  → score = 0.8991
+        #   - apply_chat_template = True   → score = 0.0438 (broken)
+        #
+        # Conclusion:
+        #   GSM8K_PLATINUM_COT should NOT use chat templates for certain models,
+        #   as lead to unreliable evaluation results.
+        #
+        ######################################################################
         "gsm8k_platinum_cot": {
-            "chat_template": True,
+            "chat_template": False,
             "acc,num": {
-                "value": 0.3871,
+                "value": 0.8991,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.04,
             },

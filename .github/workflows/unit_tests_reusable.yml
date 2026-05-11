@@ -60,7 +60,7 @@ env:
   UV_TORCH_BACKEND: cu130
   TORCH_VERSION: 2.11.0
   PYTHON_VERSION: 3.13
-  UV_PYTHON: python3.13
+  UV_PYTHON: 3.13
   MODEL_TEST_MODE: ${{ inputs.model_test_mode || 'fast' }}
   MODEL_TEST_GPU_COUNT: '1'
   DEFUSER_GIT_URL: git+https://github.com/modelcloud/Defuser.git
@@ -122,7 +122,7 @@ jobs:
       - name: Activate uv env
         run: |
           echo "::group::-- dust uv cache dir --"
-            dust $(uv cache dir)
+            dust $(uv cache dir) || true
           echo "::endgroup::"
 
           bash .github/scripts/ci_unit_activate_uv_env.sh \
@@ -130,7 +130,8 @@ jobs:
             "${{ inputs.check_vm_cuda_version }}" \
             "${{ env.TORCH_VERSION }}" \
             "${{ github.run_id }}" \
-            "${{ github.run_attempt }}"
+            "${{ github.run_attempt }}" \
+            "unit_test_${{ matrix.test_script }}"
 
       - name: Setup uv env
         run: |
@@ -247,5 +248,5 @@ jobs:
           rm -rf "${{ env.VIRTUAL_ENV }}"
 
           echo "::group::-- dust uv cache dir --"
-            dust $(uv cache dir)
+            dust $(uv cache dir) || true
           echo "::endgroup::"

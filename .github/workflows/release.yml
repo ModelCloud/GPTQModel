@@ -88,7 +88,7 @@ jobs:
       - name: Activate uv env
         run: |
           echo "::group::-- dust uv cache dir --"
-            dust $(uv cache dir)
+            dust $(uv cache dir) || true
           echo "::endgroup::"
 
           bash .github/scripts/ci_unit_activate_uv_env.sh \
@@ -96,7 +96,8 @@ jobs:
             130 \
             "${{ env.TORCH_VERSION }}" \
             "${{ github.run_id }}" \
-            "${{ github.run_attempt }}"
+            "${{ github.run_attempt }}" \
+            "unit_test_env_${{ github.run_id }}_${{ github.run_attempt }}"
 
       - name: Setup release env
         run: |

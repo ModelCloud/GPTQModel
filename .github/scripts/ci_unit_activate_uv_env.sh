@@ -6,10 +6,11 @@ cuda_version="${2:?cuda_version is required}"
 torch_version="${3:?torch_version is required}"
 run_id="${4:?run_id is required}"
 run_attempt="${5:?run_attempt is required}"
+bootstrap_env_name="${6:-unit_test_env}"
 
 echo "-- loading unit test's config --"
-source /opt/uv/setup_uv_venv.sh unit_test_env
-uv pip install requests packaging -U
+source /opt/uv/setup_uv_venv.sh "$bootstrap_env_name"
+uv pip install requests packaging pyyaml -U
 
 env_output="$(python3 .github/scripts/ci_workflow.py resolve-env \
   --group tests \
@@ -45,9 +46,12 @@ echo "torch extensions dir: $GPTQMODEL_TORCH_EXTENSIONS_DIR"
 echo "-- ls -ahl /opt/uv/venvs before --"
 ls -ahl /opt/uv/venvs
 
-target="/opt/uv/tmp/${ENV_NAME}_$(date +%s)"
-mkdir -p "$target"
-mv /opt/uv/venvs/* "$target"/ || true
+# Only reset the current job's env; do not touch other shared envs.
+current_env_dir="/opt/uv/venvs/${ENV_NAME}"
+if [[ -d "$current_env_dir" ]]; then
+  echo "-- removing current env only: $current_env_dir --"
+  rm -rf "$current_env_dir"
+fi
 
 echo "-- ls -ahl /opt/uv/venvs after --"
 ls -ahl /opt/uv/venvs
