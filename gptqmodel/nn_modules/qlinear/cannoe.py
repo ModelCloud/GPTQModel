@@ -739,6 +739,9 @@ class _CannoePlanMixin:
             self._cannoe_plain_native_group16_fast_ready = False
             self._cannoe_plain_native_bf16_fast_ready = False
             self._cannoe_plain_native_bf16_group16_fast_ready = False
+            self._cannoe_plain_native_plan_key = None
+            self._cannoe_plain_native_plan = None
+            self._cannoe_update_plain_native_binding()
             self._cann_plan_cache.clear()
             self._cann_hot_plan_fast_key = None
             self._cann_hot_plan_key = None
@@ -864,8 +867,24 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         self._cannoe_plain_native_group16_fast_ready = False
         self._cannoe_plain_native_bf16_fast_ready = False
         self._cannoe_plain_native_bf16_group16_fast_ready = False
+        self._cannoe_plain_native_plan_key = None
+        self._cannoe_plain_native_plan = None
+        self._cannoe_update_plain_native_binding()
+
+    def _cannoe_update_plain_native_binding(self) -> None:
         if self._cannoe_plain_native_passthrough:
             self.forward = self._plain_native_forward
+        else:
+            self.__dict__.pop("forward", None)
+
+    def _cannoe_plain_native_plan_for(self, *, device: torch.device, dtype: torch.dtype):
+        key = self._native_key(device=device, dtype=dtype)
+        if self._cannoe_plain_native_plan_key == key:
+            return self._cannoe_plain_native_plan
+        plan = self._native_plan(device=device, dtype=dtype)
+        self._cannoe_plain_native_plan_key = key
+        self._cannoe_plain_native_plan = plan
+        return plan
 
     def _native_forward(self, x: torch.Tensor):
         _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
@@ -1078,12 +1097,12 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             if self._cannoe_plain_native_group16_fast_ready:
                 return KomodoLinear._native_group16_forward(self, x)
             if self._cannoe_plain_native_fast_ready:
-                return KomodoLinear._native_forward(self, x)
+                return self._plain_native_fp16_forward(x)
             if self.group_size != 16 and self._can_use_native_int4(x, torch.float16):
                 self._cannoe_plain_native_fast_ready = True
                 self._last_cann_path = "plain_native_bound"
                 self._last_cann_plan = None
-                return KomodoLinear._native_forward(self, x)
+                return self._plain_native_fp16_forward(x)
             if self._can_use_native_group16(x, torch.float16):
                 self._cannoe_plain_native_group16_fast_ready = True
                 self._last_cann_path = "plain_native_group16_bound"
@@ -1110,8 +1129,42 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             raise RuntimeError("CannoeLinear bfloat16 inference requires the native int4 NPU path.")
         raise RuntimeError(f"CannoeLinear supports only torch.float16 or torch.bfloat16 inference; got {x.dtype}.")
 
+    def _plain_native_fp16_forward(self, x: torch.Tensor):
+        out_shape = x.shape[:-1] + (self.out_features,)
+        x_flat = x.reshape(-1, x.shape[-1])
+        if not x_flat.is_contiguous():
+            x_flat = x_flat.contiguous()
+
+        packed_weight, scales, offsets, native_group_size, input_perm = self._cannoe_plain_native_plan_for(
+            device=x_flat.device,
+            dtype=torch.float16,
+        )
+        if input_perm is not None:
+            x_flat = x_flat.index_select(1, input_perm)
+        bias = self.bias
+        fuse_bias = bias is not None and _fuse_bias_enabled()
+        if fuse_bias and (bias.device != x_flat.device or bias.dtype != x_flat.dtype):
+            bias = bias.to(device=x_flat.device, dtype=x_flat.dtype)
+        self._maybe_schedule_lookahead(torch.float16)
+        out = _weight_quant_matmul(
+            x_flat,
+            packed_weight,
+            scales,
+            offsets,
+            native_group_size,
+            bias=bias if fuse_bias else None,
+        ).reshape(out_shape)
+        if self.bias is not None and not fuse_bias:
+            bias = self.bias
+            if bias.device != out.device or bias.dtype != out.dtype:
+                bias = bias.to(device=out.device, dtype=out.dtype)
+            out.add_(bias)
+        if self.adapter:
+            out = self.adapter.apply(x=x_flat, out=out)
+        return out
+
     def _plain_native_bf16_forward(self, x: torch.Tensor):
-        out = KomodoLinear._native_forward(self, x.to(dtype=torch.float16))
+        out = self._plain_native_fp16_forward(x.to(dtype=torch.float16))
         return out.to(dtype=torch.bfloat16)
 
     def _plain_native_bf16_group16_forward(self, x: torch.Tensor):
