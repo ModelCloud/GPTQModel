@@ -126,6 +126,109 @@ _REAL_GLM4_MOE_CONFIG = {
     "vocab_size": 256,
 }
 
+_REAL_QWEN3_5_CONFIG = {
+    # Based on a real Qwen3.5 config.json, reduced for a fast unit test.
+    "architectures": ["Qwen3_5ForConditionalGeneration"],
+    "dtype": "bfloat16",
+    "model_type": "qwen3_5",
+    "image_token_id": 1,
+    "video_token_id": 2,
+    "vision_start_token_id": 3,
+    "vision_end_token_id": 4,
+    "tie_word_embeddings": False,
+    "transformers_version": "5.5.0",
+    "text_config": {
+        "dtype": "bfloat16",
+        "model_type": "qwen3_5_text",
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": None,
+        "eos_token_id": 5,
+        "hidden_act": "silu",
+        "hidden_size": 64,
+        "initializer_range": 0.02,
+        "head_dim": 16,
+        "intermediate_size": 128,
+        "layer_types": ["full_attention"],
+        "linear_conv_kernel_dim": 4,
+        "linear_key_head_dim": 16,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_value_head_dim": 16,
+        "max_position_embeddings": 256,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 1,
+        "num_hidden_layers": 1,
+        "output_router_logits": False,
+        "pad_token_id": 5,
+        "partial_rotary_factor": 0.25,
+        "rms_norm_eps": 1e-6,
+        "rope_parameters": {
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 10_000,
+            "rope_type": "default",
+        },
+        "tie_word_embeddings": False,
+        "use_cache": True,
+        "vocab_size": 256,
+    },
+    "vision_config": {
+        "model_type": "qwen3_5_vision",
+        "depth": 1,
+        "dtype": "bfloat16",
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_size": 32,
+        "in_channels": 3,
+        "initializer_range": 0.02,
+        "intermediate_size": 64,
+        "num_heads": 4,
+        "num_position_embeddings": 64,
+        "out_hidden_size": 64,
+        "patch_size": 4,
+        "spatial_merge_size": 1,
+        "temporal_patch_size": 2,
+    },
+}
+
+_REAL_QWEN3_5_TEXT_CONFIG = {
+    # Based on a real Qwen3.5 text-only config.json, reduced for a fast unit test.
+    "architectures": ["Qwen3_5MoeForCausalLM"],
+    "dtype": "bfloat16",
+    "model_type": "qwen3_5_text",
+    "tie_word_embeddings": False,
+    "transformers_version": "5.5.0",
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "bos_token_id": None,
+    "eos_token_id": 5,
+    "hidden_act": "silu",
+    "hidden_size": 64,
+    "initializer_range": 0.02,
+    "head_dim": 16,
+    "intermediate_size": 128,
+    "layer_types": ["full_attention"],
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 16,
+    "linear_num_key_heads": 2,
+    "linear_num_value_heads": 4,
+    "linear_value_head_dim": 16,
+    "max_position_embeddings": 256,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 1,
+    "num_hidden_layers": 1,
+    "output_router_logits": False,
+    "pad_token_id": 5,
+    "partial_rotary_factor": 0.25,
+    "rms_norm_eps": 1e-6,
+    "rope_parameters": {
+        "partial_rotary_factor": 0.25,
+        "rope_theta": 10_000,
+        "rope_type": "default",
+    },
+    "use_cache": True,
+    "vocab_size": 256,
+}
+
 _REAL_QWEN3_5_MOE_CONFIG = {
     # Based on a real Qwen3.5-MoE config.json, reduced for a fast unit test.
     "architectures": ["Qwen3_5MoeForConditionalGeneration"],
@@ -194,6 +297,48 @@ _REAL_QWEN3_5_MOE_CONFIG = {
     },
 }
 
+_REAL_QWEN3_5_MOE_TEXT_CONFIG = {
+    # Based on a real Qwen3.5 MOE text-only config.json, reduced for a fast unit test.
+    "architectures": ["Qwen3_5ForCausalLM"],
+    "dtype": "bfloat16",
+    "model_type": "qwen3_5_moe_text",
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "bos_token_id": None,
+    "eos_token_id": 5,
+    "hidden_act": "silu",
+    "hidden_size": 64,
+    "initializer_range": 0.02,
+    "head_dim": 16,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 1,
+    "num_hidden_layers": 1,
+    "num_experts": 2,
+    "num_experts_per_tok": 1,
+    "moe_intermediate_size": 32,
+    "shared_expert_intermediate_size": 32,
+    "layer_types": ["full_attention"],
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 16,
+    "linear_num_key_heads": 2,
+    "linear_num_value_heads": 4,
+    "linear_value_head_dim": 16,
+    "max_position_embeddings": 256,
+    "output_router_logits": False,
+    "pad_token_id": 5,
+    "partial_rotary_factor": 0.25,
+    "rms_norm_eps": 1e-6,
+    "rope_parameters": {
+        "partial_rotary_factor": 0.25,
+        "rope_theta": 10_000,
+        "rope_type": "default",
+    },
+    "router_aux_loss_coef": 0.001,
+    "tie_word_embeddings": False,
+    "use_cache": True,
+    "vocab_size": 256,
+}
+
 
 class _DummyModel:
     def __init__(self):
@@ -238,10 +383,23 @@ def _write_real_glm4_moe_config(model_dir):
         json.dump(_REAL_GLM4_MOE_CONFIG, handle)
 
 
+def _write_real_qwen3_5_config(model_dir):
+    with open(os.path.join(model_dir, "config.json"), "w", encoding="utf-8") as handle:
+        json.dump(_REAL_QWEN3_5_CONFIG, handle)
+
+
+def _write_real_qwen3_5_text_config(model_dir):
+    with open(os.path.join(model_dir, "config.json"), "w", encoding="utf-8") as handle:
+        json.dump(_REAL_QWEN3_5_TEXT_CONFIG, handle)
+
+
 def _write_real_qwen3_5_moe_config(model_dir):
     with open(os.path.join(model_dir, "config.json"), "w", encoding="utf-8") as handle:
         json.dump(_REAL_QWEN3_5_MOE_CONFIG, handle)
 
+def _write_real_qwen3_5_moe_text_config(model_dir):
+    with open(os.path.join(model_dir, "config.json"), "w", encoding="utf-8") as handle:
+        json.dump(_REAL_QWEN3_5_MOE_TEXT_CONFIG, handle)
 
 def _build_writer_from_real_model_config(model_local_path, expected_out_of_model_tensors, monkeypatch=None):
     model_definition = check_and_get_model_definition(model_local_path, trust_remote_code=False)
@@ -288,14 +446,15 @@ def _build_writer_from_real_qwen3_5_moe_config(model_local_path, monkeypatch):
 
 
 def _patch_streaming(monkeypatch, shard_count=1):
-    def _fake_streaming_state_dict_to_shards(state_dict, save_dir, model_base_name, single_file_name, metadata, *_args, **_kwargs):
+    def _fake_streaming_state_dict_to_shards(state_dict, save_dir, model_base_name, single_file_name, metadata, *_args,
+                                             **_kwargs):
         expected_files = []
         tensor_to_filename = {}
         for idx in range(shard_count):
             if shard_count == 1:
                 shard_name = "model.safetensors"
             else:
-                shard_name = f"{model_base_name}-{idx+1:05d}-of-{shard_count:05d}.safetensors"
+                shard_name = f"{model_base_name}-{idx + 1:05d}-of-{shard_count:05d}.safetensors"
             file_path = os.path.join(save_dir, shard_name)
             tensor_data = {
                 name: ts.source if isinstance(ts, TensorSource) else ts
@@ -382,7 +541,7 @@ def test_merge_prefixed_tensors_with_multiple_shards(tmp_path, monkeypatch):
     original_dir.mkdir()
 
     for shard_idx in range(2):
-        shard_name = f"model-{shard_idx+1:05d}-of-00002.safetensors"
+        shard_name = f"model-{shard_idx + 1:05d}-of-00002.safetensors"
         save_file(
             {
                 "model.weight": torch.zeros(1),
@@ -482,42 +641,40 @@ def test_copy_existing_file_with_glm4_moe(tmp_path, monkeypatch):
     assert saved_config["model_type"] == "glm4_moe"
 
 
-def test_merge_prefixed_tensors_with_qwen3_5_moe(tmp_path, monkeypatch):
+def _test_copy_existing_file(tmp_path, monkeypatch, model_type):
     original_dir = tmp_path / "original"
     original_dir.mkdir()
-    _write_real_qwen3_5_moe_config(str(original_dir))
 
-    shard_a_name = "model-00001-of-00002.safetensors"
-    shard_b_name = "model-00002-of-00002.safetensors"
+    out_of_model_tensors = None
+    if model_type == "qwen3_5":
+        _write_real_qwen3_5_config(str(original_dir))
+        from gptqmodel.models.auto import Qwen3_5QModel
+        out_of_model_tensors = Qwen3_5QModel.out_of_model_tensors
+    elif model_type == "qwen3_5_text":
+        _write_real_qwen3_5_text_config(str(original_dir))
+        from gptqmodel.models.auto import Qwen3_5TextQModel
+        out_of_model_tensors = Qwen3_5TextQModel.out_of_model_tensors
+    elif model_type == "qwen3_5_moe":
+        _write_real_qwen3_5_moe_config(str(original_dir))
+        from gptqmodel.models.auto import Qwen3_5_MoeQModel
+        out_of_model_tensors = Qwen3_5_MoeQModel.out_of_model_tensors
+    elif model_type == "qwen3_5_moe_text":
+        _write_real_qwen3_5_moe_text_config(str(original_dir))
+        from gptqmodel.models.auto import Qwen3_5_MoeTextQModel
+        out_of_model_tensors = Qwen3_5_MoeTextQModel.out_of_model_tensors
+    else:
+        raise ValueError(f"Unkown model_type: {model_type}")
 
-    save_file(
-        {
-            "base.weight": torch.zeros(1),
-            "mtp.fc.weight": torch.ones(2),
-        },
-        str(original_dir / shard_a_name),
+    mtp_file = original_dir / "mtp.safetensors"
+    save_file({"mtp.linear.weight": torch.ones(1)}, str(mtp_file))
+
+    from gptqmodel.models.auto import Qwen3_5TextQModel
+
+    writer = _build_writer_from_real_model_config(
+        str(original_dir),
+        expected_out_of_model_tensors=out_of_model_tensors,
+        monkeypatch=monkeypatch,
     )
-    save_file(
-        {
-            "model.layers.0.weight": torch.full((1,), 2.0),
-            "mtp.model.layers.0.weight": torch.full((3,), 3.0),
-        },
-        str(original_dir / shard_b_name),
-    )
-
-    with open(original_dir / "model.safetensors.index.json", "w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "metadata": {"total_size": 0},
-                "weight_map": {
-                    "mtp.fc.weight": shard_a_name,
-                    "mtp.model.layers.0.weight": shard_b_name,
-                },
-            },
-            handle,
-        )
-
-    writer = _build_writer_from_real_qwen3_5_moe_config(str(original_dir), monkeypatch=monkeypatch)
     state_dict_data = {"model.weight": _tensor_source("model.weight", torch.zeros(1))}
 
     _patch_basic_env(monkeypatch, state_dict_data)
@@ -530,8 +687,21 @@ def test_merge_prefixed_tensors_with_qwen3_5_moe(tmp_path, monkeypatch):
 
     with safe_open(save_dir / "model.safetensors", framework="pt", device="cpu") as handle:
         keys = set(handle.keys())
-    assert {"mtp.fc.weight", "mtp.model.layers.0.weight"} <= keys
+    assert {"mtp.linear.weight"} <= keys
 
     with open(save_dir / "config.json", "r", encoding="utf-8") as handle:
         saved_config = json.load(handle)
-    assert saved_config["model_type"] == "qwen3_5_moe"
+    assert saved_config["model_type"] == model_type
+
+
+def test_copy_existing_file_with_qwen3_5(tmp_path, monkeypatch):
+    _test_copy_existing_file(tmp_path, monkeypatch, "qwen3_5")
+
+def test_copy_existing_file_with_qwen3_5_text(tmp_path, monkeypatch):
+    _test_copy_existing_file(tmp_path, monkeypatch, "qwen3_5_text")
+
+def test_merge_prefixed_tensors_with_qwen3_5_moe(tmp_path, monkeypatch):
+    _test_copy_existing_file(tmp_path, monkeypatch, "qwen3_5_moe")
+
+def test_merge_prefixed_tensors_with_qwen3_5_moe_text(tmp_path, monkeypatch):
+    _test_copy_existing_file(tmp_path, monkeypatch, "qwen3_5_moe_text")
