@@ -161,6 +161,8 @@ from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.voxtral import VoxtralGPTQ  # noqa: E402
 from .definitions.xverse import XverseQModel  # noqa: E402
+from .definitions.zamba import ZambaQModel  # noqa: E402
+from .definitions.zamba2 import Zamba2QModel  # noqa: E402
 
 
 TRANSFORMERS_SUPPORTS_QWEN3_5 = Version(TRANSFORMERS_VERSION) >= Version("5.2.0")
@@ -277,6 +279,8 @@ MODEL_MAP = {
     "instella": InstellaQModel,
     "mimo": MimoQModel,
     "falcon_h1": FalconH1QModel,
+    "zamba": ZambaQModel,
+    "zamba2": Zamba2QModel,
     "gpt_pangu": PanguAlphaQModel,
     "ernie4_5": Ernie4_5QModel,
     "ernie4_5_moe": Ernie4_5_MoeQModel,
