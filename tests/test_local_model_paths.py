@@ -1,18 +1,16 @@
 import copy
 import json
-from types import SimpleNamespace
-
 import pytest
 import torch
-from safetensors.torch import save_file
-from transformers import GenerationConfig
-
 from gptqmodel.models import GPTQModel, auto, loader
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.utils import BACKEND, PROFILE
 from gptqmodel.utils import model as model_utils
 from gptqmodel.utils.hf import INTERNAL_HF_GGUF_FILE_KWARG
 from gptqmodel.utils.structure import LazyTurtle
+from safetensors.torch import save_file
+from transformers import GenerationConfig
+from types import SimpleNamespace
 
 
 def test_load_treats_missing_absolute_path_as_local(monkeypatch):
@@ -420,7 +418,7 @@ def test_model_loader_requires_lazy_turtle_for_offload_to_disk(monkeypatch):
     monkeypatch.setattr(loader, "auto_dtype", lambda *_args, **_kwargs: torch.float16)
     monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: base_config)
-    monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(loader, "load_hf_tokenizer", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("gptqmodel.utils.hf.build_shell_model", fake_build_shell_model)
     monkeypatch.setattr(loader.defuser, "convert_model", fake_convert_model)
     monkeypatch.setattr(loader.LazyTurtle, "maybe_create", classmethod(lambda cls, **_kwargs: None))
@@ -521,7 +519,7 @@ def test_model_loader_uses_lazy_turtle_for_local_safetensors(monkeypatch, tmp_pa
     monkeypatch.setattr(loader, "auto_dtype", lambda *_args, **_kwargs: torch.float16)
     monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: base_config)
-    monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(loader, "load_hf_tokenizer", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("gptqmodel.utils.hf.build_shell_model", fake_build_shell_model)
     monkeypatch.setattr(loader.defuser, "convert_model", fake_convert_model)
 
@@ -592,7 +590,7 @@ def test_model_loader_from_pretrained_forwards_dtype_kwarg(monkeypatch):
     monkeypatch.setattr(loader, "check_versions", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(loader, "get_model_local_path", lambda *_args, **_kwargs: "/tmp/fake-model")
     monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: FakeConfig())
-    monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(loader, "load_hf_tokenizer", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(loader.defuser, "replace_fused_blocks", lambda *_args, **_kwargs: None)
 
@@ -670,8 +668,8 @@ def test_model_loader_from_pretrained_normalizes_direct_gguf_path(monkeypatch):
         lambda *_args, **kwargs: config_calls.append(kwargs) or FakeConfig(),
     )
     monkeypatch.setattr(
-        loader.AutoTokenizer,
-        "from_pretrained",
+        loader,
+        "load_hf_tokenizer",
         lambda *_args, **kwargs: tokenizer_calls.append(kwargs) or object(),
     )
     monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
@@ -767,8 +765,8 @@ def test_model_loader_from_pretrained_native_bonsai_fast_profiles_use_dense_path
         lambda *_args, **kwargs: config_calls.append(kwargs) or FakeConfig(),
     )
     monkeypatch.setattr(
-        loader.AutoTokenizer,
-        "from_pretrained",
+        loader,
+        "load_hf_tokenizer",
         lambda *_args, **kwargs: tokenizer_calls.append(kwargs) or object(),
     )
     monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
@@ -876,8 +874,8 @@ def test_model_loader_from_pretrained_native_bonsai_fast_auto_enables_fa2_on_cud
         lambda *_args, **_kwargs: FakeConfig(),
     )
     monkeypatch.setattr(
-        loader.AutoTokenizer,
-        "from_pretrained",
+        loader,
+        "load_hf_tokenizer",
         lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
@@ -978,8 +976,8 @@ def test_model_loader_from_pretrained_native_bonsai_fast_keeps_explicit_attn_imp
         lambda *_args, **_kwargs: FakeConfig(),
     )
     monkeypatch.setattr(
-        loader.AutoTokenizer,
-        "from_pretrained",
+        loader,
+        "load_hf_tokenizer",
         lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
@@ -1065,8 +1063,8 @@ def test_model_loader_from_pretrained_native_bonsai_low_memory_redirects_with_ba
         lambda *_args, **kwargs: config_calls.append(kwargs) or FakeConfig(),
     )
     monkeypatch.setattr(
-        loader.AutoTokenizer,
-        "from_pretrained",
+        loader,
+        "load_hf_tokenizer",
         lambda *_args, **kwargs: tokenizer_calls.append(kwargs) or object(),
     )
     monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
@@ -1161,7 +1159,7 @@ def test_model_loader_falls_back_when_meta_shell_build_hits_meta_tensor_item(mon
     monkeypatch.setattr(loader, "auto_dtype", lambda *_args, **_kwargs: torch.float16)
     monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: base_config)
-    monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(loader, "load_hf_tokenizer", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("gptqmodel.utils.hf.build_shell_model", fake_build_shell_model)
     monkeypatch.setattr(loader.defuser, "convert_model", fake_convert_model)
 
