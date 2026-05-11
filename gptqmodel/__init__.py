@@ -110,9 +110,11 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
         return
 
     with _MONKEY_PATCH_LOCK:
+        if not hasattr(hf_integrations, "lazy_load_kernel"):
+            return
+
         if getattr(hub_kernels, "_gptqmodel_local_causal_conv1d_kernel", False):
-            if hasattr(hf_integrations, "lazy_load_kernel"):
-                hf_integrations.lazy_load_kernel = hub_kernels.lazy_load_kernel
+            hf_integrations.lazy_load_kernel = hub_kernels.lazy_load_kernel
             return
 
         original_lazy_load_kernel = hub_kernels.lazy_load_kernel
