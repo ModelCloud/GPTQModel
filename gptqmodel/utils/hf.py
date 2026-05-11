@@ -1663,11 +1663,51 @@ def build_shell_model(
     pb = log.spinner(title="Model loading...", interval=0.1)
     try:
         with init_empty_weights(include_buffers=True):
-            shell = loader.from_config(
-                config,
-                trust_remote_code=trust_remote_code,
-                **init_kwargs
-            )
+            try:
+                shell = loader.from_config(
+                    config,
+                    trust_remote_code=trust_remote_code,
+                    **init_kwargs
+                )
+            except FileNotFoundError as exc:
+                # Some trust_remote_code caches can become stale (missing
+                # generated files like transformers_v*__configuration_*.py).
+                # Try to recreate known compatibility shims, then refresh once.
+                missing_path = str(exc)
+                if (
+                    trust_remote_code
+                    and "transformers_modules" in missing_path
+                    and "No such file or directory" in missing_path
+                ):
+                    missing_file = None
+                    # Parse "...: '/path/to/file.py'" from OSError message.
+                    if "'" in missing_path:
+                        parts = missing_path.split("'")
+                        if len(parts) >= 2:
+                            missing_file = parts[1]
+
+                    if (
+                        missing_file
+                        and missing_file.endswith("__configuration_llama.py")
+                        and not os.path.exists(missing_file)
+                    ):
+                        os.makedirs(os.path.dirname(missing_file), exist_ok=True)
+                        with open(missing_file, "w", encoding="utf-8") as fp:
+                            fp.write("from transformers.models.llama.configuration_llama import *\n")
+
+                    auto_map = getattr(config, "auto_map", None) or {}
+                    class_ref = auto_map.get("AutoModelForCausalLM")
+                    if isinstance(class_ref, str):
+                        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+                        get_class_from_dynamic_module(class_ref, str(getattr(config, "_name_or_path", "")), force_download=True)
+
+                    shell = loader.from_config(
+                        config,
+                        trust_remote_code=trust_remote_code,
+                        **init_kwargs,
+                    )
+                else:
+                    raise
     finally:
         pb.close()
 
