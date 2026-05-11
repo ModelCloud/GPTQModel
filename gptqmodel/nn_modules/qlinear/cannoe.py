@@ -42,6 +42,8 @@ _NPU_PREFETCH_OP_UNSET = object()
 _NPU_PREFETCH_OP = _NPU_PREFETCH_OP_UNSET
 _NPU_WEIGHT_QUANT_OP_UNSET = object()
 _NPU_WEIGHT_QUANT_OP = _NPU_WEIGHT_QUANT_OP_UNSET
+_NPU_GROUPED_MATMUL_OP_UNSET = object()
+_NPU_GROUPED_MATMUL_OP = _NPU_GROUPED_MATMUL_OP_UNSET
 _FUSED_OP_UNSET = object()
 _FUSED_OP_CACHE = _FUSED_OP_UNSET
 _FUSED_OP_CACHE_KEY = None
@@ -267,6 +269,13 @@ def _npu_weight_quant_op():
     if _NPU_WEIGHT_QUANT_OP is _NPU_WEIGHT_QUANT_OP_UNSET:
         _NPU_WEIGHT_QUANT_OP = torch.ops.npu.npu_weight_quant_batchmatmul
     return _NPU_WEIGHT_QUANT_OP
+
+
+def _npu_grouped_matmul_op():
+    global _NPU_GROUPED_MATMUL_OP
+    if _NPU_GROUPED_MATMUL_OP is _NPU_GROUPED_MATMUL_OP_UNSET:
+        _NPU_GROUPED_MATMUL_OP = torch.ops.npu.npu_grouped_matmul
+    return _NPU_GROUPED_MATMUL_OP
 
 
 def _resolve_torch_op(qualified_name: str):
@@ -742,7 +751,10 @@ class _CannoePlanMixin:
             self._cannoe_plain_native_plan_key = None
             self._cannoe_plain_native_plan = None
             self._cannoe_plain_native_matmul_op = None
+            self._cannoe_plain_native_grouped_matmul_op = None
             self._cannoe_plain_native_fuse_bias = _fuse_bias_enabled()
+            self._cannoe_plain_native_group16_grouped_key = None
+            self._cannoe_plain_native_group16_grouped = False
             self._cannoe_update_plain_native_binding()
             self._cann_plan_cache.clear()
             self._cann_hot_plan_fast_key = None
@@ -872,7 +884,10 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         self._cannoe_plain_native_plan_key = None
         self._cannoe_plain_native_plan = None
         self._cannoe_plain_native_matmul_op = None
+        self._cannoe_plain_native_grouped_matmul_op = None
         self._cannoe_plain_native_fuse_bias = _fuse_bias_enabled()
+        self._cannoe_plain_native_group16_grouped_key = None
+        self._cannoe_plain_native_group16_grouped = False
         self._cannoe_update_plain_native_binding()
 
     def _cannoe_update_plain_native_binding(self) -> None:
@@ -896,6 +911,22 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             matmul_op = _npu_weight_quant_op()
             self._cannoe_plain_native_matmul_op = matmul_op
         return matmul_op
+
+    def _cannoe_plain_native_grouped_matmul(self):
+        matmul_op = self._cannoe_plain_native_grouped_matmul_op
+        if matmul_op is None:
+            matmul_op = _npu_grouped_matmul_op()
+            self._cannoe_plain_native_grouped_matmul_op = matmul_op
+        return matmul_op
+
+    def _cannoe_plain_native_group16_uses_grouped(self, *, rows: int, group_count: int) -> bool:
+        key = (rows, group_count)
+        if self._cannoe_plain_native_group16_grouped_key == key:
+            return self._cannoe_plain_native_group16_grouped
+        grouped = self._can_use_native_group16_grouped(rows=rows, group_count=group_count)
+        self._cannoe_plain_native_group16_grouped_key = key
+        self._cannoe_plain_native_group16_grouped = grouped
+        return grouped
 
     def _native_forward(self, x: torch.Tensor):
         _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
@@ -1106,7 +1137,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
     def _plain_native_forward(self, x: torch.Tensor):
         if x.dtype == torch.float16:
             if self._cannoe_plain_native_group16_fast_ready:
-                return KomodoLinear._native_group16_forward(self, x)
+                return self._plain_native_group16_forward(x)
             if self._cannoe_plain_native_fast_ready:
                 return self._plain_native_fp16_forward(x)
             if self.group_size != 16 and self._can_use_native_int4(x, torch.float16):
@@ -1120,7 +1151,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
                 self._last_cann_path = "plain_native_group16_bound"
                 self._last_cann_plan = None
                 self.forward = self._plain_native_group16_forward_checked
-                return KomodoLinear._native_group16_forward(self, x)
+                return self._plain_native_group16_forward(x)
             return KomodoLinear.forward(self, x)
 
         _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
@@ -1151,7 +1182,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
 
     def _plain_native_group16_forward_checked(self, x: torch.Tensor):
         if x.dtype == torch.float16:
-            return KomodoLinear._native_group16_forward(self, x)
+            return self._plain_native_group16_forward(x)
         return self._plain_native_forward(x)
 
     def _plain_native_bf16_forward_checked(self, x: torch.Tensor):
@@ -1201,12 +1232,106 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             out = self.adapter.apply(x=x_flat, out=out)
         return out
 
+    def _plain_native_group16_forward(self, x: torch.Tensor):
+        out_shape = x.shape[:-1] + (self.out_features,)
+        x_flat = x.reshape(-1, x.shape[-1])
+        if not x_flat.is_contiguous():
+            x_flat = x_flat.contiguous()
+
+        (
+            packed_groups,
+            scale_groups,
+            offset_groups,
+            packed_stack,
+            scale_stack,
+            offset_stack,
+            bias_stack,
+            input_perm,
+        ) = self._native_group16_plan(device=x_flat.device, dtype=torch.float16)
+        if input_perm is not None:
+            x_flat = x_flat.index_select(1, input_perm)
+
+        group_size = 16
+        group_count = len(packed_groups)
+        rows = x_flat.shape[0]
+        fused_bias = False
+        if self._lookahead_enabled and self._lookahead_next is not None and not self.training:
+            self._maybe_schedule_lookahead(torch.float16)
+        if self._cannoe_plain_native_group16_uses_grouped(rows=rows, group_count=group_count):
+            self._native_group16_last_path = "grouped"
+            x_groups = x_flat.reshape(rows, group_count, group_size).transpose(0, 1).contiguous()
+            group_list = self._native_group16_group_list(
+                device=x_flat.device,
+                rows=rows,
+                group_count=group_count,
+            )
+            fused_bias = bias_stack is not None and self._cannoe_plain_native_fuse_bias
+            out_groups = self._cannoe_plain_native_grouped_matmul()(
+                [x_groups.reshape(rows * group_count, group_size)],
+                [packed_stack],
+                bias=[bias_stack] if fused_bias else None,
+                antiquant_scale=[scale_stack],
+                antiquant_offset=[offset_stack],
+                group_list=group_list,
+                split_item=2,
+                group_type=0,
+                group_list_type=1,
+            )[0]
+            out = out_groups.reshape(group_count, rows, self.out_features).sum(0).reshape(out_shape)
+        elif rows == 1:
+            self._native_group16_last_path = "loop_narrow"
+            out_acc = None
+            matmul_op = self._cannoe_plain_native_matmul()
+            for group_idx in range(group_count):
+                x_group = x_flat.narrow(1, group_idx * group_size, group_size)
+                if not x_group.is_contiguous():
+                    x_group = x_group.contiguous()
+                partial = matmul_op(
+                    x_group,
+                    packed_groups[group_idx],
+                    scale_groups[group_idx],
+                    offset_groups[group_idx],
+                    None,
+                    None,
+                    None,
+                    0,
+                ).to(torch.float32)
+                out_acc = partial if out_acc is None else out_acc.add_(partial)
+            out = out_acc.to(dtype=torch.float16).reshape(out_shape)
+        else:
+            self._native_group16_last_path = "loop"
+            out_acc = None
+            matmul_op = self._cannoe_plain_native_matmul()
+            x_groups = x_flat.reshape(x_flat.shape[0], group_count, group_size).transpose(0, 1).contiguous()
+            for group_idx in range(group_count):
+                partial = matmul_op(
+                    x_groups[group_idx],
+                    packed_groups[group_idx],
+                    scale_groups[group_idx],
+                    offset_groups[group_idx],
+                    None,
+                    None,
+                    None,
+                    0,
+                ).to(torch.float32)
+                out_acc = partial if out_acc is None else out_acc.add_(partial)
+            out = out_acc.to(dtype=torch.float16).reshape(out_shape)
+
+        if self.bias is not None and not fused_bias:
+            bias = self.bias
+            if bias.device != out.device or bias.dtype != out.dtype:
+                bias = bias.to(device=out.device, dtype=out.dtype)
+            out.add_(bias)
+        if self.adapter:
+            out = self.adapter.apply(x=x_flat, out=out)
+        return out
+
     def _plain_native_bf16_forward(self, x: torch.Tensor):
         out = self._plain_native_fp16_forward(x.to(dtype=torch.float16))
         return out.to(dtype=torch.bfloat16)
 
     def _plain_native_bf16_group16_forward(self, x: torch.Tensor):
-        out = KomodoLinear._native_group16_forward(self, x.to(dtype=torch.float16))
+        out = self._plain_native_group16_forward(x.to(dtype=torch.float16))
         return out.to(dtype=torch.bfloat16)
 
 
