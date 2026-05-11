@@ -16,6 +16,8 @@ class Qwen3_5_MoeTextQModel(Qwen3MoeQModel):
 
     rotary_embedding = "model.rotary_emb"
 
+    out_of_model_tensors = {"prefixes": ["mtp"]}
+
     module_tree = [
         "model",
         "layers",
