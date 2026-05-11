@@ -1059,9 +1059,49 @@ def ModelLoader(cls):
                     log.info("Loader: Auto enabling flash attention2")
             set_dtype_compat(args, dtype)
 
-            model = cls.loader.from_config(
-                config, trust_remote_code=trust_remote_code, **args
-            )
+            try:
+                model = cls.loader.from_config(
+                    config, trust_remote_code=trust_remote_code, **args
+                )
+            except FileNotFoundError as exc:
+                # trust_remote_code dynamic-module caches can be incomplete for
+                # legacy Deci files; rebuild missing shim + refresh once.
+                missing_path = str(exc)
+                if (
+                    trust_remote_code
+                    and "transformers_modules" in missing_path
+                    and "No such file or directory" in missing_path
+                ):
+                    missing_file = None
+                    if "'" in missing_path:
+                        parts = missing_path.split("'")
+                        if len(parts) >= 2:
+                            missing_file = parts[1]
+
+                    if (
+                        missing_file
+                        and missing_file.endswith("__configuration_llama.py")
+                        and not os.path.exists(missing_file)
+                    ):
+                        os.makedirs(os.path.dirname(missing_file), exist_ok=True)
+                        with open(missing_file, "w", encoding="utf-8") as fp:
+                            fp.write("from transformers.models.llama.configuration_llama import *\n")
+
+                    auto_map = getattr(config, "auto_map", None) or {}
+                    class_ref = auto_map.get("AutoModelForCausalLM")
+                    if isinstance(class_ref, str):
+                        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+                        get_class_from_dynamic_module(
+                            class_ref,
+                            str(getattr(config, "_name_or_path", "")),
+                            force_download=True,
+                        )
+
+                    model = cls.loader.from_config(
+                        config, trust_remote_code=trust_remote_code, **args
+                    )
+                else:
+                    raise
             defuser.convert_model(model, cleanup_original=True)
             model.checkpoint_file_name = model_save_name
             if native_gguf_qspec is not None:
