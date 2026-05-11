@@ -1078,6 +1078,14 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
     if rope_type is None:
         if "factor" not in rope_scaling:
             config.rope_scaling = None
+            return
+        # Some remote-code repos (e.g. MiniCPM variants) now surface
+        # `rope_scaling={"factor": ...}` after transformers normalization.
+        # Legacy model code expects `rope_scaling["type"]` to exist whenever
+        # `rope_scaling` is a dict.
+        rope_scaling = dict(rope_scaling)
+        rope_scaling["type"] = "linear"
+        config.rope_scaling = rope_scaling
         return
 
     rope_scaling = dict(rope_scaling)
@@ -1114,7 +1122,9 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # legacy RoPE fields or nothing but a default `rope_theta`.
     _normalize_rope_parameters_config_compat(config)
 
-    if not trust_remote_code:
+    auto_map = getattr(config, "auto_map", None) or {}
+    has_remote_automap = isinstance(auto_map.get("AutoModelForCausalLM"), str)
+    if not trust_remote_code and not has_remote_automap:
         return
 
     _patch_transformers_remote_code_compat()
@@ -1124,6 +1134,10 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # also reset `rope_parameters` back to None. Re-apply the RoPE backfill
     # after remote-code field cleanup so from_config() sees stable metadata.
     _normalize_rope_parameters_config_compat(config)
+    # Re-apply remote-code field aliases after RoPE parameter backfill, since
+    # some config classes synchronize `rope_scaling` from `rope_parameters` and
+    # can drop legacy keys like `rope_scaling["type"]`.
+    _normalize_remote_code_config_compat(config)
 
 
 def prepare_remote_code_compat(config: Any) -> None:
