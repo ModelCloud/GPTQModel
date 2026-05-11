@@ -755,6 +755,8 @@ class _CannoePlanMixin:
             self._cannoe_plain_native_fuse_bias = _fuse_bias_enabled()
             self._cannoe_plain_native_group16_grouped_key = None
             self._cannoe_plain_native_group16_grouped = False
+            self._cannoe_plain_native_group16_group_list_key = None
+            self._cannoe_plain_native_group16_group_list = None
             self._cannoe_update_plain_native_binding()
             self._cann_plan_cache.clear()
             self._cann_hot_plan_fast_key = None
@@ -888,6 +890,8 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         self._cannoe_plain_native_fuse_bias = _fuse_bias_enabled()
         self._cannoe_plain_native_group16_grouped_key = None
         self._cannoe_plain_native_group16_grouped = False
+        self._cannoe_plain_native_group16_group_list_key = None
+        self._cannoe_plain_native_group16_group_list = None
         self._cannoe_update_plain_native_binding()
 
     def _cannoe_update_plain_native_binding(self) -> None:
@@ -927,6 +931,15 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         self._cannoe_plain_native_group16_grouped_key = key
         self._cannoe_plain_native_group16_grouped = grouped
         return grouped
+
+    def _cannoe_plain_native_group16_group_list_for(self, *, rows: int, group_count: int) -> list[int]:
+        key = (rows, group_count)
+        if self._cannoe_plain_native_group16_group_list_key == key:
+            return self._cannoe_plain_native_group16_group_list
+        group_list = [int(rows)] * int(group_count)
+        self._cannoe_plain_native_group16_group_list_key = key
+        self._cannoe_plain_native_group16_group_list = group_list
+        return group_list
 
     def _native_forward(self, x: torch.Tensor):
         _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
@@ -1053,11 +1066,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         if self._can_use_native_group16_grouped(rows=rows, group_count=group_count):
             self._native_group16_last_path = "grouped"
             x_groups = x_flat.reshape(rows, group_count, group_size).transpose(0, 1).contiguous()
-            group_list = self._native_group16_group_list(
-                device=x_flat.device,
-                rows=rows,
-                group_count=group_count,
-            )
+            group_list = self._cannoe_plain_native_group16_group_list_for(rows=rows, group_count=group_count)
             fused_bias = bias_stack is not None and _fuse_bias_enabled()
             out_groups = torch.ops.npu.npu_grouped_matmul(
                 [x_groups.reshape(rows * group_count, group_size)],
