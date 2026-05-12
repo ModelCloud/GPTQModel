@@ -52,7 +52,7 @@ class HookedConv1D(transformers.Conv1D):
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
 
-        if output.device != original_device:
+        if output.device != original_device and not bool(getattr(output, "is_meta", False)):
             output = output.to(device=original_device)
         return output
 
@@ -114,7 +114,7 @@ class HookedConv1d(torch.nn.Conv1d):
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
-        if output.device != original_device:
+        if output.device != original_device and not bool(getattr(output, "is_meta", False)):
             output = output.to(device=original_device)
         return output
 
@@ -177,7 +177,7 @@ class HookedConv2d(torch.nn.Conv2d):
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
-        if output.device != original_device:
+        if output.device != original_device and not bool(getattr(output, "is_meta", False)):
             output = output.to(device=original_device)
         return output
 
@@ -208,7 +208,7 @@ class HookedTransformerConv1D(transformers.Conv1D):
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
-        if output.device != original_device:
+        if output.device != original_device and not bool(getattr(output, "is_meta", False)):
             output = output.to(device=original_device)
         return output
 
@@ -241,14 +241,28 @@ class HookedLinear(torch.nn.Linear):
             weight_device=target_device,
             input_device=original_device,
         )
+        if bool(getattr(self.weight, "is_meta", False)):
+            out_device = original_device if getattr(original_device, "type", None) != "meta" else torch.device("cpu")
+            return torch.zeros(
+                (*input.shape[:-1], self.out_features),
+                device=out_device,
+                dtype=input.dtype,
+            )
         if original_device != target_device:
-            input = input.to(device=target_device)
+            if bool(getattr(input, "is_meta", False)):
+                input = torch.zeros(
+                    input.shape,
+                    device=target_device,
+                    dtype=input.dtype,
+                )
+            else:
+                input = input.to(device=target_device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
-        if output.device != original_device:
+        if output.device != original_device and not bool(getattr(output, "is_meta", False)):
             output = output.to(device=original_device)
         return output
 

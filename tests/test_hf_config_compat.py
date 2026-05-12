@@ -152,6 +152,19 @@ def test_normalize_hf_config_compat_preserves_rope_parameters_after_remote_clean
     assert config.rope_parameters["rope_theta"] == 10000.0
 
 
+def test_normalize_hf_config_compat_keeps_minimax_rope_parameters():
+    config_cls = getattr(transformers, "MiniMaxConfig", None)
+    if config_cls is None:
+        pytest.skip("MiniMaxConfig unavailable in this transformers version")
+
+    config = config_cls()
+    normalize_hf_config_compat(config, trust_remote_code=True)
+
+    assert isinstance(config.rope_parameters, dict)
+    assert config.rope_parameters.get("rope_type") is not None
+    assert config.rope_parameters.get("rope_theta") is not None
+
+
 def test_normalize_hf_config_compat_restores_sliding_window_cache_alias(monkeypatch):
     monkeypatch.delattr(cache_utils, "SlidingWindowCache", raising=False)
 

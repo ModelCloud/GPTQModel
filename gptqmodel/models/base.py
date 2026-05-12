@@ -1789,6 +1789,10 @@ class BaseQModel(nn.Module):
             return module
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
+        # Some offloaded/lazy MoE paths intentionally keep untouched experts on
+        # meta. Forcing a module-wide `.to(CPU)` would fail for those tensors.
+        if _module_has_meta_tensors(module):
+            return module
         #return self.offload_to_disk(module=module)
         return move_to(module, device=CPU)
 

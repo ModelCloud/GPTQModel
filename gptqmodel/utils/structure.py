@@ -1931,7 +1931,12 @@ class LazyTurtle:
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
         modules_by_name = dict(target_model.named_modules())
+        # Buffers can be intentionally absent from checkpoints when they are
+        # constructor-derived (for example, decay tables / rotary helpers).
+        # We collect them first, then rebuild them from a lightweight template
+        # module after shard-backed tensors are materialized.
         missing_nonpersistent_buffers: list[tuple[str, str]] = []
+        missing_persistent_buffers: list[tuple[str, str]] = []
 
         grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
         for rel_name in t_params:
@@ -1968,6 +1973,9 @@ class LazyTurtle:
                 t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
                 non_persistent = leaf in getattr(t_parent, "_non_persistent_buffers_set", set())
                 if non_persistent:
+                    # Non-persistent buffers are often runtime caches. If they
+                    # are meta or placed on another device, we still need a
+                    # real tensor before replay/quantization.
                     if (
                         getattr(target_buffer, "is_meta", False)
                         or target_buffer.device.type == "meta"
@@ -1976,8 +1984,11 @@ class LazyTurtle:
                         missing_nonpersistent_buffers.append((rel_name, leaf))
                     continue
                 if getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
-                    if leaf in getattr(t_parent, "_buffers", {}):
-                        del t_parent._buffers[leaf]
+                    # Persistent buffers that remain meta cannot be deleted:
+                    # downstream modules may read them in forward (MiniMax
+                    # query/key decay tables are one such example). Queue them
+                    # for constructor-template restoration.
+                    missing_persistent_buffers.append((rel_name, leaf))
                 continue
             grouped_names.setdefault(shard, []).append(("buffer", rel_name, full_name, expert_index, split_index, split_dim))
 
@@ -2107,6 +2118,18 @@ class LazyTurtle:
             missing_nonpersistent_buffers=missing_nonpersistent_buffers,
             device=device,
         )
+        self._restore_missing_persistent_buffers(
+            target_model=target_model,
+            target_submodule=target_submodule,
+            t_bufs=t_bufs,
+            missing_persistent_buffers=missing_persistent_buffers,
+            device=device,
+        )
+        self._restore_missing_meta_parameters(
+            target_model=target_model,
+            target_submodule=target_submodule,
+            device=device,
+        )
 
     def _build_nonpersistent_buffer_template(
         self,
@@ -2186,7 +2209,20 @@ class LazyTurtle:
         missing_nonpersistent_buffers: list[tuple[str, str]],
         device: torch.device,
     ) -> None:
-        """Restore constructor-owned buffers that are intentionally absent from checkpoints."""
+        """
+        Restore constructor-owned non-persistent buffers absent from checkpoints.
+
+        Why this exists:
+        - Some model implementations generate helper buffers at init-time and
+          do not serialize them.
+        - During lazy loading these helpers may remain on meta, which breaks
+          real forward passes during quantization replay.
+
+        Strategy:
+        - Reuse an already materialized buffer if available.
+        - Otherwise instantiate a CPU template module and copy the target leaf
+          buffer from it, then move/cast to the active device.
+        """
 
         owner_templates: Dict[str, Optional[nn.Module]] = {}
         for rel_name, leaf in missing_nonpersistent_buffers:
@@ -2220,6 +2256,107 @@ class LazyTurtle:
             materialized = source_buffer.to(device=device, dtype=target_dtype)
             owner_module.register_buffer(leaf, materialized, persistent=False)
             t_bufs[rel_name] = materialized
+
+    def _restore_missing_persistent_buffers(
+        self,
+        *,
+        target_model: nn.Module,
+        target_submodule: nn.Module,
+        t_bufs: Dict[str, torch.Tensor],
+        missing_persistent_buffers: list[tuple[str, str]],
+        device: torch.device,
+    ) -> None:
+        """
+        Restore constructor-owned persistent buffers absent from checkpoints.
+
+        Difference from non-persistent path:
+        - These buffers are marked persistent by the module and are typically
+          considered part of the module's state layout.
+        - Missing entries still happen when upstream checkpoints choose not to
+          serialize deterministic constructor products.
+
+        We recover values via constructor templates so later code can safely
+        assume the attributes exist and are concrete (non-meta).
+        """
+
+        owner_templates: Dict[str, Optional[nn.Module]] = {}
+        for rel_name, leaf in missing_persistent_buffers:
+            parent_rel_path, _, _ = rel_name.rpartition(".")
+            owner_module = target_submodule if not parent_rel_path else dict(target_submodule.named_modules()).get(parent_rel_path)
+            if owner_module is None:
+                continue
+
+            current_buffer = t_bufs.get(rel_name)
+            if (
+                current_buffer is not None
+                and not getattr(current_buffer, "is_meta", False)
+                and current_buffer.device.type != "meta"
+            ):
+                source_buffer = current_buffer.detach()
+            else:
+                if parent_rel_path not in owner_templates:
+                    owner_templates[parent_rel_path] = self._build_nonpersistent_buffer_template(
+                        owner_module=owner_module,
+                        target_model=target_model,
+                    )
+                template = owner_templates[parent_rel_path]
+                if template is None:
+                    continue
+                source_buffer = dict(template.named_buffers(recurse=False)).get(leaf)
+                if source_buffer is None:
+                    continue
+                source_buffer = source_buffer.detach()
+
+            target_dtype = source_buffer.dtype if current_buffer is None else current_buffer.dtype
+            materialized = source_buffer.to(device=device, dtype=target_dtype)
+            owner_module.register_buffer(leaf, materialized, persistent=True)
+            t_bufs[rel_name] = materialized
+
+    def _restore_missing_meta_parameters(
+        self,
+        *,
+        target_model: nn.Module,
+        target_submodule: nn.Module,
+        device: torch.device,
+    ) -> None:
+        """
+        Restore constructor-owned parameters that are absent from checkpoints.
+
+        This is a narrow safety net for parameters that remain meta after shard
+        materialization. Most parameters should come from checkpoints; this path
+        only fills init-only or omitted leaves to prevent device/meta crashes.
+        """
+
+        owner_templates: Dict[str, Optional[nn.Module]] = {}
+        for rel_name, param in list(target_submodule.named_parameters(recurse=True)):
+            if not _is_meta_tensor(param):
+                continue
+
+            parent_rel_path, _, leaf = rel_name.rpartition(".")
+            owner_module = target_submodule if not parent_rel_path else dict(target_submodule.named_modules()).get(parent_rel_path)
+            if owner_module is None:
+                continue
+
+            if parent_rel_path not in owner_templates:
+                owner_templates[parent_rel_path] = self._build_nonpersistent_buffer_template(
+                    owner_module=owner_module,
+                    target_model=target_model,
+                )
+            template = owner_templates[parent_rel_path]
+            source_param = None if template is None else dict(template.named_parameters(recurse=False)).get(leaf)
+            if source_param is not None:
+                source = source_param.detach().to(device=device, dtype=param.dtype)
+            elif owner_module.__class__.__name__ == "MiniMaxRMSNorm" and leaf == "weight":
+                # MiniMaxRMSNorm.weight may be omitted in some checkpoints. HF
+                # init path sets it to ones, so we reproduce that default to
+                # keep semantics consistent while avoiding a meta tensor at
+                # multiplication time in RMSNorm.forward().
+                source = torch.ones(param.shape, device=device, dtype=param.dtype)
+            else:
+                continue
+
+            restored = nn.Parameter(source, requires_grad=param.requires_grad)
+            owner_module.register_parameter(leaf, restored)
 
     def _materialize_direct_meta_tensors(
         self,

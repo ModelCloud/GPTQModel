@@ -1059,7 +1059,7 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
         config.rope_scaling = None
         return
 
-    if model_type != "instella" and rope_scaling.get("rope_type") == "default" and set(rope_scaling).issubset({"rope_type", "rope_theta"}):
+    if model_type not in {"instella", "minimax"} and rope_scaling.get("rope_type") == "default" and set(rope_scaling).issubset({"rope_type", "rope_theta"}):
         # transformers 5.x materializes default RoPE metadata into
         # `rope_scaling`, but older remote MiniCPM code treats any dict here
         # as a scaled-RoPE config and expects an explicit `factor`.
@@ -1138,6 +1138,10 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # some config classes synchronize `rope_scaling` from `rope_parameters` and
     # can drop legacy keys like `rope_scaling["type"]`.
     _normalize_remote_code_config_compat(config)
+    # Keep RoPE metadata stable after the final remote-code field pass, because
+    # some config classes may clear `rope_parameters` when `rope_scaling` is
+    # normalized.
+    _normalize_rope_parameters_config_compat(config)
 
 
 def prepare_remote_code_compat(config: Any) -> None:

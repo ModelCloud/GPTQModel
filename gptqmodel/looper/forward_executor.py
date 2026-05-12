@@ -64,6 +64,12 @@ class ForwardExecutor:
         total_rows = max(total_rows, 1)
         return total_batches, batch_row_counts, total_rows
 
+    @staticmethod
+    def _materialize_meta_tensor(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+        if bool(getattr(tensor, "is_meta", False)):
+            return torch.zeros(tensor.shape, device=device, dtype=tensor.dtype)
+        return tensor
+
     def _moe_forward_context(
         self,
         *,
@@ -255,7 +261,12 @@ class ForwardExecutor:
                 # Capture input device before moving - used for output placement
                 input_device = layer_inputs[batch_idx][0].device if layer_inputs[batch_idx] else cur_layer_device
 
-                layer_input = [nested_move_to(inp, device=exec_device) for inp in layer_inputs[batch_idx]]
+                layer_input = [
+                    self._materialize_meta_tensor(nested_move_to(inp, device=exec_device), exec_device)
+                    if isinstance(inp, torch.Tensor)
+                    else nested_move_to(inp, device=exec_device)
+                    for inp in layer_inputs[batch_idx]
+                ]
 
                 raw_mask = attention_masks[batch_idx]
                 attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=exec_device)
@@ -267,8 +278,10 @@ class ForwardExecutor:
 
                 self.looper._set_processor_mask(processor, keep_mask)
                 additional_inputs: Dict[str, Optional[torch.Tensor]] = {}
+                module_type_name = type(module).__name__.lower()
+                is_minimax_layer = "minimax" in module_type_name
                 if self.looper.support_batch_quantize and attn_tensor is not None:
-                    additional_inputs["attention_mask"] = attn_tensor
+                    additional_inputs["attention_mask"] = keep_mask if is_minimax_layer else attn_tensor
                 else:
                     additional_inputs["attention_mask"] = None
 
