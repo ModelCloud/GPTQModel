@@ -8,7 +8,6 @@ import sys
 
 import torch
 
-
 TESTS_MODELS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if TESTS_MODELS_ROOT not in sys.path:
     sys.path.insert(0, TESTS_MODELS_ROOT)
@@ -67,6 +66,7 @@ class TestLlama3_2_ExllamaV3(ModelTest):
     TORCH_DTYPE = torch.float16
     QUANT_BACKEND = BACKEND.EXLLAMA_V3
     LOAD_BACKEND = BACKEND.EXLLAMA_V3
+    MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
     def test_llama3_2_exllamav3(self):
         self.quantize_and_evaluate()
