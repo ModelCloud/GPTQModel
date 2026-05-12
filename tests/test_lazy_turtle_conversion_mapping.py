@@ -12,6 +12,7 @@ from torch import nn
 
 from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ
 from gptqmodel.models.definitions.mixtral import MixtralQModel
+from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
 from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel
@@ -89,6 +90,79 @@ class _Qwen3_5_MoeTextDummyModel(nn.Module):
         self.config = SimpleNamespace(model_type="qwen3_5_moe_text")
 
 
+class _DeepseekV4DummyModel(nn.Module):
+    base_model_prefix = "model"
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="deepseek_v4")
+
+
+class _ExpertParamShell(nn.Module):
+    def __init__(self, num_experts: int = 2, hidden_dim: int = 4, intermediate_dim: int = 3):
+        super().__init__()
+        self.gate_up_proj = nn.Parameter(
+            torch.empty(num_experts, 2 * intermediate_dim, hidden_dim, device="meta"),
+            requires_grad=False,
+        )
+        self.down_proj = nn.Parameter(
+            torch.empty(num_experts, hidden_dim, intermediate_dim, device="meta"),
+            requires_grad=False,
+        )
+
+
+class _MlpShell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.experts = _ExpertParamShell()
+
+
+class _LayerShell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = _MlpShell()
+
+
+class _DeepseekV4Shell(nn.Module):
+    base_model_prefix = "model"
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="deepseek_v4")
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([_LayerShell()])
+
+
+class _DefusedExpertLeaf(nn.Module):
+    def __init__(self, hidden_dim: int = 4, intermediate_dim: int = 3):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False, device="meta")
+        self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False, device="meta")
+        self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False, device="meta")
+
+
+class _DefusedMlpShell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.experts = nn.ModuleList([_DefusedExpertLeaf()])
+
+
+class _DefusedLayerShell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = _DefusedMlpShell()
+
+
+class _DeepseekV4DefusedShell(nn.Module):
+    base_model_prefix = "model"
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="deepseek_v4")
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([_DefusedLayerShell()])
+
+
 class _WeightRenamingStub:
     def __init__(self, source_pattern: str, target_pattern: str):
         self.source_patterns = [source_pattern]
@@ -105,6 +179,16 @@ class Transpose:
 
 
 class Chunk:
+    def __init__(self, dim: int = 0):
+        self.dim = dim
+
+
+class MergeModulelist:
+    def __init__(self, dim: int = 0):
+        self.dim = dim
+
+
+class Concatenate:
     def __init__(self, dim: int = 0):
         self.dim = dim
 
@@ -604,6 +688,211 @@ def test_lazy_turtle_uses_transformers_checkpoint_conversion_mapping_for_qwen2_5
 
     assert observed_model_types == ["qwen2_5_vl"]
     _assert_qwen2_vl_alias_resolution(turtle)
+
+
+def test_lazy_turtle_matches_bare_deepseek_v4_rules_with_model_prefix_shell_paths(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightRenamingStub(
+                r"^layers\.(\d+)\.self_attn\.attn_sink$",
+                r"layers.\1.self_attn.sinks",
+            )
+        ]
+    )
+    assert reversed_map is not None
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "model.layers.0.self_attn.attn_sink": torch.zeros(128),
+        },
+        hf_conversion_map_reversed=reversed_map,
+        target_model=_DeepseekV4DummyModel(),
+    )
+
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "model.layers.0.self_attn",
+            "sinks",
+        )
+        == "model.layers.0.self_attn.attn_sink"
+    )
+
+
+def test_lazy_turtle_handles_deepseek_v4_composed_renaming_order_for_attn_sinks(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightRenamingStub(
+                r"^layers\.(\d+)\.attn\.",
+                r"layers.\1.self_attn.",
+            ),
+            _WeightRenamingStub(
+                r"^layers\.(\d+)\.self_attn\.attn_sink$",
+                r"layers.\1.self_attn.sinks",
+            ),
+        ]
+    )
+    assert reversed_map is not None
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            # Real DeepSeek-V4 checkpoints can land here after composed
+            # conversion rules: attn -> self_attn, then attn_sink -> sinks.
+            "model.layers.0.attn.attn_sink": torch.zeros(128),
+        },
+        hf_conversion_map_reversed=reversed_map,
+        target_model=_DeepseekV4DummyModel(),
+    )
+
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "model.layers.0.self_attn",
+            "sinks",
+        )
+        == "model.layers.0.attn.attn_sink"
+    )
+
+
+def test_lazy_turtle_resolves_deepseek_v4_compressor_indexer_projection_aliases(tmp_path):
+    checkpoint_tensors = {
+        "model.layers.0.self_attn.compressor.wkv.weight": torch.zeros(4, 4),
+        "model.layers.0.self_attn.compressor.wgate.weight": torch.zeros(4, 4),
+        "model.layers.0.self_attn.indexer.compressor.wkv.weight": torch.zeros(4, 4),
+        "model.layers.0.self_attn.indexer.compressor.wgate.weight": torch.zeros(4, 4),
+        "model.layers.0.self_attn.indexer.compressor.wq_b.weight": torch.zeros(4, 4),
+        "model.layers.0.self_attn.indexer.compressor.norm.weight": torch.zeros(4),
+        "model.layers.0.self_attn.indexer.compressor.ape": torch.zeros(4),
+    }
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        checkpoint_tensors,
+        target_model=_DeepseekV4DummyModel(),
+    )
+
+    module_path = "model.layers.0.self_attn"
+    assert (
+        turtle._resolve_checkpoint_tensor_name(module_path, "compressor.kv_proj.weight")
+        == "model.layers.0.self_attn.compressor.wkv.weight"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(module_path, "compressor.gate_proj.weight")
+        == "model.layers.0.self_attn.compressor.wgate.weight"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(module_path, "compressor.indexer.kv_proj.weight")
+        == "model.layers.0.self_attn.indexer.compressor.wkv.weight"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(module_path, "compressor.indexer.gate_proj.weight")
+        == "model.layers.0.self_attn.indexer.compressor.wgate.weight"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(module_path, "compressor.indexer.q_b_proj.weight")
+        == "model.layers.0.self_attn.indexer.compressor.wq_b.weight"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(module_path, "compressor.indexer.kv_norm.weight")
+        == "model.layers.0.self_attn.indexer.compressor.norm.weight"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(module_path, "compressor.indexer.position_bias")
+        == "model.layers.0.self_attn.indexer.compressor.ape"
+    )
+
+
+def test_lazy_turtle_materializes_deepseek_v4_fused_expert_params_from_w123_checkpoint(tmp_path):
+    pytest.skip(
+        "DeepSeek-V4 now relies on Defuser-defused experts; fused gate_up/down converter materialization is not used."
+    )
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightConverterStub(
+                source_patterns=["experts.*.w1.weight", "experts.*.w3.weight"],
+                target_patterns=["experts.gate_up_proj"],
+                operations=[MergeModulelist(dim=0), Concatenate(dim=1)],
+            ),
+            _WeightConverterStub(
+                source_patterns=["experts.*.w2.weight"],
+                target_patterns=["experts.down_proj"],
+                operations=[MergeModulelist(dim=0)],
+            ),
+        ]
+    )
+    assert reversed_map is not None
+
+    checkpoint_tensors = {
+        "model.layers.0.mlp.experts.0.w1.weight": torch.arange(12, dtype=torch.float32).reshape(3, 4),
+        "model.layers.0.mlp.experts.0.w3.weight": torch.arange(12, 24, dtype=torch.float32).reshape(3, 4),
+        "model.layers.0.mlp.experts.1.w1.weight": torch.arange(24, 36, dtype=torch.float32).reshape(3, 4),
+        "model.layers.0.mlp.experts.1.w3.weight": torch.arange(36, 48, dtype=torch.float32).reshape(3, 4),
+        "model.layers.0.mlp.experts.0.w2.weight": torch.arange(12, dtype=torch.float32).reshape(4, 3),
+        "model.layers.0.mlp.experts.1.w2.weight": torch.arange(12, 24, dtype=torch.float32).reshape(4, 3),
+    }
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        checkpoint_tensors,
+        hf_conversion_map_reversed=reversed_map,
+        target_model=_DeepseekV4DummyModel(),
+    )
+
+    shell = _DeepseekV4Shell()
+    target_submodule = shell.model.layers[0].mlp
+    turtle._copy_checkpoint_tensors_into_submodule(
+        target_model=shell,
+        target_submodule=target_submodule,
+        module_path="model.layers.0.mlp",
+        device=torch.device("cpu"),
+        recurse=True,
+        non_blocking=False,
+    )
+
+    gate_up = target_submodule.experts.gate_up_proj
+    down = target_submodule.experts.down_proj
+    assert gate_up.device.type != "meta"
+    assert down.device.type != "meta"
+    assert tuple(gate_up.shape) == (2, 6, 4)
+    assert tuple(down.shape) == (2, 4, 3)
+    assert torch.equal(gate_up[0, :3], checkpoint_tensors["model.layers.0.mlp.experts.0.w1.weight"])
+    assert torch.equal(gate_up[0, 3:], checkpoint_tensors["model.layers.0.mlp.experts.0.w3.weight"])
+    assert torch.equal(gate_up[1, :3], checkpoint_tensors["model.layers.0.mlp.experts.1.w1.weight"])
+    assert torch.equal(gate_up[1, 3:], checkpoint_tensors["model.layers.0.mlp.experts.1.w3.weight"])
+    assert torch.equal(down[0], checkpoint_tensors["model.layers.0.mlp.experts.0.w2.weight"])
+    assert torch.equal(down[1], checkpoint_tensors["model.layers.0.mlp.experts.1.w2.weight"])
+
+
+def test_lazy_turtle_materializes_defused_deepseek_v4_expert_linears_from_w123_aliases(tmp_path):
+    checkpoint_tensors = {
+        "model.layers.0.mlp.experts.0.w1.weight": torch.arange(12, dtype=torch.float32).reshape(3, 4),
+        "model.layers.0.mlp.experts.0.w3.weight": torch.arange(12, 24, dtype=torch.float32).reshape(3, 4),
+        "model.layers.0.mlp.experts.0.w2.weight": torch.arange(12, dtype=torch.float32).reshape(4, 3),
+    }
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        checkpoint_tensors,
+        module_tree=DeepSeekV4QModel.module_tree,
+        target_model=_DeepseekV4DummyModel(),
+    )
+
+    shell = _DeepseekV4DefusedShell()
+    target_submodule = shell.model.layers[0].mlp
+    turtle._copy_checkpoint_tensors_into_submodule(
+        target_model=shell,
+        target_submodule=target_submodule,
+        module_path="model.layers.0.mlp",
+        device=torch.device("cpu"),
+        recurse=True,
+        non_blocking=False,
+    )
+
+    expert = target_submodule.experts[0]
+    assert expert.gate_proj.weight.device.type != "meta"
+    assert expert.up_proj.weight.device.type != "meta"
+    assert expert.down_proj.weight.device.type != "meta"
+    assert torch.equal(expert.gate_proj.weight, checkpoint_tensors["model.layers.0.mlp.experts.0.w1.weight"])
+    assert torch.equal(expert.up_proj.weight, checkpoint_tensors["model.layers.0.mlp.experts.0.w3.weight"])
+    assert torch.equal(expert.down_proj.weight, checkpoint_tensors["model.layers.0.mlp.experts.0.w2.weight"])
 
 
 def test_lazy_turtle_falls_back_to_legacy_checkpoint_conversion_mapping(tmp_path, monkeypatch):

@@ -592,21 +592,54 @@ class _LazyWeightRenaming:
         return []
 
     @staticmethod
-    def _process_target_pattern(pattern: str) -> tuple[str, str | None]:
+    def _extract_capturing_groups(pattern: str) -> list[str]:
+        groups: list[str] = []
+        stack: list[tuple[int, bool]] = []
+        escaped = False
+        in_char_class = False
+
+        for index, ch in enumerate(pattern):
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == "[" and not in_char_class:
+                in_char_class = True
+                continue
+            if ch == "]" and in_char_class:
+                in_char_class = False
+                continue
+            if in_char_class:
+                continue
+
+            if ch == "(":
+                is_capturing = not (index + 1 < len(pattern) and pattern[index + 1] == "?")
+                stack.append((index, is_capturing))
+                continue
+
+            if ch == ")" and stack:
+                start, is_capturing = stack.pop()
+                if is_capturing:
+                    groups.append(pattern[start : index + 1])
+
+        return groups
+
+    @classmethod
+    def _process_target_pattern(cls, pattern: str) -> tuple[str, list[str]]:
         # Mirror HF reverse-mapping prep: strip anchors/lookarounds, then turn
-        # the first capturing group into a reusable `\1` placeholder.
+        # capturing groups into reusable backreference placeholders.
         pattern = pattern.removeprefix("^")
         pattern = pattern.removesuffix("$")
         pattern = re.sub(r"\(\?.+?\)?\)", "", pattern)
         pattern = pattern.replace(r"\.", ".")
 
-        capturing_group_match = re.search(r"\(.+?\)", pattern)
-        captured_group = None
-        if capturing_group_match:
-            captured_group = capturing_group_match.group(0)
-            pattern = pattern.replace(captured_group, r"\1", 1)
+        captured_groups = cls._extract_capturing_groups(pattern)
+        for group_index, captured_group in enumerate(captured_groups, start=1):
+            pattern = pattern.replace(captured_group, fr"\{group_index}", 1)
 
-        return pattern, captured_group
+        return pattern, captured_groups
 
     @staticmethod
     def _process_source_pattern(source_pattern: str, target_pattern: str) -> str:
@@ -620,31 +653,42 @@ class _LazyWeightRenaming:
         # Derive the regex lazily so the object only stores the original
         # source/target patterns, not cached match state.
         processed_targets: list[str] = []
-        target_capturing_groups: list[str] = []
+        target_capturing_groups: list[list[str]] = []
         for pattern in self.target_patterns:
-            processed_pattern, captured_group = self._process_target_pattern(pattern)
+            processed_pattern, captured_groups = self._process_target_pattern(pattern)
             processed_targets.append(processed_pattern)
-            if captured_group is not None:
-                target_capturing_groups.append(captured_group)
+            target_capturing_groups.append(captured_groups)
 
-        unique_capturing_groups = set(target_capturing_groups)
+        unique_capturing_groups = {
+            tuple(captured_groups)
+            for captured_groups in target_capturing_groups
+            if captured_groups
+        }
         if len(unique_capturing_groups) > 1:
             raise ValueError(
                 f"Multiple different capturing groups found in target_patterns: {unique_capturing_groups}. "
                 f"All target patterns must use the same capturing group pattern."
             )
-        unique_capturing_group = unique_capturing_groups.pop() if unique_capturing_groups else None
+        unique_capturing_groups_seq = list(unique_capturing_groups.pop()) if unique_capturing_groups else []
 
         processed_sources: list[str] = []
         for i, pattern in enumerate(self.source_patterns):
             processed_pattern = pattern
-            if r"\1" in processed_pattern:
-                if unique_capturing_group is None:
+            backrefs = {int(match) for match in re.findall(r"\\(\d+)", processed_pattern)}
+            if backrefs:
+                if not unique_capturing_groups_seq:
                     raise ValueError(
                         f"Source pattern '{pattern}' contains \\1 backreference, but no capturing groups "
                         f"found in target_patterns."
                     )
-                processed_pattern = processed_pattern.replace(r"\1", unique_capturing_group, 1)
+                max_index = max(backrefs)
+                if max_index > len(unique_capturing_groups_seq):
+                    raise ValueError(
+                        f"Source pattern '{pattern}' references \\{max_index}, but target_patterns only "
+                        f"define {len(unique_capturing_groups_seq)} capturing group(s)."
+                    )
+                for group_index, captured_group in enumerate(unique_capturing_groups_seq, start=1):
+                    processed_pattern = processed_pattern.replace(fr"\{group_index}", captured_group)
             processed_pattern = self._process_source_pattern(processed_pattern, self.target_patterns[i])
             processed_sources.append(processed_pattern)
 
@@ -666,9 +710,19 @@ class _LazyWeightRenaming:
         matching_group_name = next(name for name, val in match_object.groupdict().items() if val is not None)
         source_pattern_that_matched = self.source_patterns[int(matching_group_name[1:])]
         replacement = processed_targets[0]
-        if r"\1" in replacement:
-            replaced_group_idx = compiled_sources.groupindex[matching_group_name] + 1
-            replacement = replacement.replace(r"\1", match_object.group(replaced_group_idx))
+        if re.search(r"\\\d", replacement):
+            group_start = compiled_sources.groupindex[matching_group_name]
+            max_group_index = len(match_object.groups())
+            replacement = re.sub(
+                r"\\(\d+)",
+                lambda m: (
+                    match_object.group(group_start + int(m.group(1)))
+                    if (group_start + int(m.group(1))) <= max_group_index
+                    and match_object.group(group_start + int(m.group(1))) is not None
+                    else m.group(0)
+                ),
+                replacement,
+            )
         renamed_key = source_key.replace(match_object.group(0), replacement, 1)
         return renamed_key, source_pattern_that_matched
 
@@ -1415,18 +1469,25 @@ class LazyTurtle:
         # to recover checkpoint keys reliably.
         initial_candidates = list(candidates)
 
-        def apply_chain(name_in: str, renamings: list[_LazyWeightRenaming]) -> str:
-            renamed = name_in
+        def apply_chain(name_in: str, renamings: list[_LazyWeightRenaming]) -> None:
+            states: list[str] = [name_in]
+            seen_states: set[str] = {name_in}
+            add_with_base_prefix_variants(name_in)
             for renaming in renamings:
-                renamed, _ = renaming.rename_source_key(renamed)
-            return renamed
+                current_states = list(states)
+                for state in current_states:
+                    renamed, _ = renaming.rename_source_key(state)
+                    if renamed == state or renamed in seen_states:
+                        continue
+                    seen_states.add(renamed)
+                    states.append(renamed)
+                    add_with_base_prefix_variants(renamed)
 
         forward_chain = list(self._runtime_to_checkpoint_renamings)
         reverse_chain = list(reversed(self._runtime_to_checkpoint_renamings))
         for candidate in initial_candidates:
-            add_with_base_prefix_variants(apply_chain(candidate, forward_chain))
-            add_with_base_prefix_variants(apply_chain(candidate, reverse_chain))
-
+            apply_chain(candidate, forward_chain)
+            apply_chain(candidate, reverse_chain)
         return candidates
 
     def _converter_direct_alias_candidates(self, name: str) -> list[str]:
@@ -1684,41 +1745,74 @@ class LazyTurtle:
         rel_name: str,
     ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
         combined_name = self._join_tensor_name(module_path, rel_name)
+
+        # Converter patterns may reference fused runtime names (e.g. `experts.gate_up_proj`)
+        # while the shell path is already defused (`experts.<idx>.gate_proj.weight`).
+        # Build both candidates so reversed conversion rules can still resolve to
+        # checkpoint keys such as `experts.*.w1.weight / w3.weight / w2.weight`.
+        runtime_candidates: list[tuple[str, Optional[int], Optional[int], Optional[int]]] = [
+            (combined_name, None, None, None)
+        ]
+        for fused_rel_name, expert_index, split_index, split_dim in self._fused_checkpoint_requests(rel_name):
+            fused_name = self._join_tensor_name(module_path, fused_rel_name)
+            fused_candidate = (fused_name, expert_index, split_index, split_dim)
+            if fused_candidate not in runtime_candidates:
+                runtime_candidates.append(fused_candidate)
+
         for converter in self._runtime_to_checkpoint_converters:
             if "ErnieFuseAndSplitTextVisionExperts" in converter.operation_names:
                 continue
 
             for source_index, runtime_pattern in enumerate(converter.source_patterns):
-                if len(converter.target_patterns) == 1:
-                    checkpoint_pattern = converter.target_patterns[0]
-                elif source_index < len(converter.target_patterns):
-                    checkpoint_pattern = converter.target_patterns[source_index]
-                else:
-                    continue
-
-                renamed, matched_pattern = _LazyWeightRenaming(
-                    runtime_pattern,
-                    checkpoint_pattern,
-                ).rename_source_key(combined_name)
-                if matched_pattern is None or renamed == combined_name:
-                    continue
-
-                split_index = None
-                split_dim = None
-                if converter.operation_names[:1] == ("Chunk",) and len(converter.source_patterns) > 1:
-                    # Chunk converters share one checkpoint tensor across
-                    # multiple runtime tensors; preserve the selected slice.
-                    split_index = source_index
-                    split_dim = getattr(converter.operations[0], "dim", 0)
-
-                for candidate in self._runtime_to_checkpoint_alias_candidates(renamed):
-                    if self._resolve_fused_tensor_metadata_from_resolved_name(
-                        runtime_name=combined_name,
-                        checkpoint_name=candidate,
-                    )[0] is not None:
+                for runtime_name, fused_expert_index, fused_split_index, fused_split_dim in runtime_candidates:
+                    selected_source_index = source_index
+                    if len(converter.target_patterns) == 1:
+                        checkpoint_pattern = converter.target_patterns[0]
+                    elif (
+                        len(converter.source_patterns) == 1
+                        and fused_split_index is not None
+                        and fused_split_index < len(converter.target_patterns)
+                    ):
+                        # Reversed merge+concat style mappings (e.g. DeepSeek-V4
+                        # w1/w3 -> gate_up_proj) expose one runtime fused source
+                        # pattern and multiple checkpoint targets. Use the defused
+                        # split index (gate=0, up=1) to pick the right checkpoint
+                        # pattern for the current leaf tensor.
+                        selected_source_index = fused_split_index
+                        checkpoint_pattern = converter.target_patterns[fused_split_index]
+                    elif source_index < len(converter.target_patterns):
+                        checkpoint_pattern = converter.target_patterns[source_index]
+                    else:
                         continue
-                    if candidate in self._weight_map:
-                        return candidate, None, split_index, split_dim
+
+                    renamed, matched_pattern = _LazyWeightRenaming(
+                        runtime_pattern,
+                        checkpoint_pattern,
+                    ).rename_source_key(runtime_name)
+                    if matched_pattern is None or renamed == runtime_name:
+                        continue
+
+                    split_index = None
+                    split_dim = None
+                    if converter.operation_names[:1] == ("Chunk",) and len(converter.source_patterns) > 1:
+                        # Chunk converters share one checkpoint tensor across
+                        # multiple runtime tensors; preserve the selected slice.
+                        split_index = selected_source_index
+                        split_dim = getattr(converter.operations[0], "dim", 0)
+
+                    renamed_variants = [renamed]
+                    if "*" in renamed and fused_expert_index is not None:
+                        renamed_variants.insert(0, renamed.replace("*", str(fused_expert_index), 1))
+
+                    for renamed_variant in renamed_variants:
+                        for candidate in self._runtime_to_checkpoint_alias_candidates(renamed_variant):
+                            if self._resolve_fused_tensor_metadata_from_resolved_name(
+                                runtime_name=runtime_name,
+                                checkpoint_name=candidate,
+                            )[0] is not None:
+                                continue
+                            if candidate in self._weight_map:
+                                return candidate, None, split_index, split_dim
 
         return None, None, None, None
 
