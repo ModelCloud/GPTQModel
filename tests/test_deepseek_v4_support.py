@@ -1,7 +1,5 @@
 from types import SimpleNamespace
 
-import pytest
-
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
 
