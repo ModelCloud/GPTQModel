@@ -1418,8 +1418,109 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
+    def _resolve_visible_strategy_devices(self, configured_devices, *, label: str):
+        """
+        Clamp explicit dense/MoE strategy device pools to what this test process can actually use.
+
+        Why this exists:
+        - Several real-model regression tests hard-code multi-GPU pools such as
+          ``["cuda:0"]`` for dense layers and ``["cuda:1", ..., "cuda:5"]`` for experts.
+        - In CI or ad-hoc local runs, the same test may execute with fewer visible GPUs,
+          or with CUDA completely unavailable for the quantization worker process.
+        - ``ModuleLooper`` intentionally validates that explicit strategy pools are a strict
+          subset of its resolved quant device pool. That runtime validation is correct and
+          should stay strict, because it protects real execution from silently targeting an
+          impossible device.
+
+        Test-side policy:
+        - When the process still has visible CUDA devices, trim the configured list down to
+          the visible subset so a test written for 6 GPUs can still run on 1-2 GPUs.
+        - When none of the configured CUDA devices are visible but CUDA is present, fall back
+          to ``["cuda:0"]`` so the test keeps a deterministic single-device execution path.
+        - When the process has no visible CUDA quant devices at all, drop the explicit CUDA
+          pool entirely by returning ``None``. This lets the runtime fall back to its default
+          device pool instead of failing early on a guaranteed subset mismatch such as
+          ``['cuda:0']`` vs ``['cpu']``.
+        """
+        if not configured_devices:
+            return configured_devices
+
+        normalized_devices = [str(device) for device in configured_devices]
+        has_cuda_device = any(device.startswith("cuda:") or device == "cuda" for device in normalized_devices)
+
+        try:
+            # ``device_count()`` is the most direct signal for the CUDA indices that this
+            # process can address. Avoid gating on ``is_available()`` here because some test
+            # environments report partial CUDA state in ways that are less useful than the
+            # raw visible-device count for pool reconciliation.
+            visible_cuda_count = torch.cuda.device_count()
+        except Exception:
+            visible_cuda_count = 0
+
+        if visible_cuda_count <= 0:
+            # If the test requested CUDA-only strategy pools but this process resolved no CUDA
+            # quant devices, forwarding the explicit list would force ModuleLooper to compare
+            # e.g. ``['cuda:0']`` against ``['cpu']`` and fail immediately. Returning ``None``
+            # intentionally means "do not pin the strategy pool here; let runtime defaults
+            # decide based on the actual quant device pool".
+            if has_cuda_device:
+                log.warn(
+                    "%s %s requires CUDA devices, but this test process has no visible CUDA quant devices; "
+                    "dropping the explicit strategy device pool.",
+                    label,
+                    configured_devices,
+                )
+                return None
+            return normalized_devices
+
+        visible_devices = {f"cuda:{idx}" for idx in range(visible_cuda_count)}
+        resolved = []
+        missing = []
+        for device_name in normalized_devices:
+            if device_name in visible_devices:
+                resolved.append(device_name)
+            else:
+                missing.append(device_name)
+
+        if not missing:
+            # Fast path: every configured device is usable in the current process.
+            return resolved
+
+        if resolved:
+            # Partial overlap: preserve the explicit intent as much as possible, but remove
+            # out-of-range devices so tests authored for larger GPU hosts still run on a
+            # smaller visible subset.
+            log.warn(
+                "%s contains devices not visible to this test process; using visible subset %s instead of %s",
+                label,
+                resolved,
+                configured_devices,
+            )
+            return resolved
+
+        fallback = ["cuda:0"]
+        # No overlap but CUDA exists. Keep the test on a deterministic visible GPU rather than
+        # dropping to ``None`` here, because in this branch we still have a valid CUDA pool and
+        # the original test intent was explicitly "run this strategy on CUDA".
+        log.warn(
+            "%s %s does not intersect the visible CUDA devices %s; falling back to %s",
+            label,
+            configured_devices,
+            sorted(visible_devices),
+            fallback,
+        )
+        return fallback
+
     def _build_quantize_config(self):
         format_family = resolve_quant_format(self.FORMAT, self.METHOD)
+        dense_vram_strategy_devices = self._resolve_visible_strategy_devices(
+            self.DENSE_VRAM_STRATEGY_DEVICES,
+            label="dense_vram_strategy_devices",
+        )
+        moe_vram_strategy_devices = self._resolve_visible_strategy_devices(
+            self.MOE_VRAM_STRATEGY_DEVICES,
+            label="moe_vram_strategy_devices",
+        )
 
         if self.WEIGHT_ONLY is None:
             if self.METHOD == METHOD.BITSANDBYTES:
@@ -1430,9 +1531,9 @@ class ModelTest(unittest.TestCase):
                     compress_statistics=self.BNB_COMPRESS_STATISTICS,
                     adapter=self.EORA,
                     dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
-                    dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+                    dense_vram_strategy_devices=dense_vram_strategy_devices,
                     moe_vram_strategy=self.MOE_VRAM_STRATEGY,
-                    moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
+                    moe_vram_strategy_devices=moe_vram_strategy_devices,
                     dynamic=self.DYNAMIC,
                     moe=self.MOE_CONFIG,
                     offload_to_disk=self.OFFLOAD_TO_DISK,
@@ -1447,9 +1548,9 @@ class ModelTest(unittest.TestCase):
                     opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
                     adapter=self.EORA,
                     dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
-                    dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+                    dense_vram_strategy_devices=dense_vram_strategy_devices,
                     moe_vram_strategy=self.MOE_VRAM_STRATEGY,
-                    moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
+                    moe_vram_strategy_devices=moe_vram_strategy_devices,
                     dynamic=self.DYNAMIC,
                     moe=self.MOE_CONFIG,
                     offload_to_disk=self.OFFLOAD_TO_DISK,
@@ -1465,9 +1566,9 @@ class ModelTest(unittest.TestCase):
                     adapter=self.EORA,
                     pack_impl="cpu",
                     dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
-                    dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+                    dense_vram_strategy_devices=dense_vram_strategy_devices,
                     moe_vram_strategy=self.MOE_VRAM_STRATEGY,
-                    moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
+                    moe_vram_strategy_devices=moe_vram_strategy_devices,
                     dynamic=self.DYNAMIC,
                     moe=self.MOE_CONFIG,
                     smoother=self.WEIGHT_ONLY.smooth,
@@ -1480,9 +1581,9 @@ class ModelTest(unittest.TestCase):
                     adapter=self.EORA,
                     pack_impl="cpu",
                     dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
-                    dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+                    dense_vram_strategy_devices=dense_vram_strategy_devices,
                     moe_vram_strategy=self.MOE_VRAM_STRATEGY,
-                    moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
+                    moe_vram_strategy_devices=moe_vram_strategy_devices,
                     dynamic=self.DYNAMIC,
                     moe=self.MOE_CONFIG,
                     smoother=self.WEIGHT_ONLY.smooth,
@@ -1497,9 +1598,9 @@ class ModelTest(unittest.TestCase):
                 adapter=self.EORA,
                 pack_impl="cpu",
                 dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
-                dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+                dense_vram_strategy_devices=dense_vram_strategy_devices,
                 moe_vram_strategy=self.MOE_VRAM_STRATEGY,
-                moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
+                moe_vram_strategy_devices=moe_vram_strategy_devices,
                 dynamic=self.DYNAMIC,
                 moe=self.MOE_CONFIG,
                 smooth=self.WEIGHT_ONLY.smooth,
@@ -1519,9 +1620,9 @@ class ModelTest(unittest.TestCase):
             adapter=self.EORA,
             pack_impl="cpu",
             dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
-            dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
+            dense_vram_strategy_devices=dense_vram_strategy_devices,
             moe_vram_strategy=self.MOE_VRAM_STRATEGY,
-            moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
+            moe_vram_strategy_devices=moe_vram_strategy_devices,
             damp_percent=self.DAMP_PERCENT,
             mse=self.MSE,
             dynamic=self.DYNAMIC,
