@@ -7,8 +7,8 @@ from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
 from gptqmodel.models.definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
 from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
-from gptqmodel.models.definitions.minicpm_v import MiniCPMVQModel
-from gptqmodel.models.definitions.minicpm_v_4_6 import MiniCPMV4_6QModel
+from gptqmodel.models.definitions.minicpmv import MiniCPMVQModel
+from gptqmodel.models.definitions.minicpmv_4_6 import MiniCPMV4_6QModel
 from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.qwen3_vl import Qwen3_VLQModel
