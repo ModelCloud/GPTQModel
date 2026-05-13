@@ -21,6 +21,7 @@ import time
 from concurrent.futures import as_completed
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+import defuser
 from defuser.modeling.replace_modules import materialize_model
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
@@ -36,7 +37,7 @@ from ..looper.qqq_processor import QQQProcessor
 from ..utils.device import get_device, get_device_new
 from ..utils.looper_helpers import normalize_device_like
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
-from ..utils.model import find_modules, get_module
+from ..utils.model import _module_has_meta_tensors, find_modules, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
@@ -128,6 +129,38 @@ def _should_empty_cache_after_sync_finalize(
     if not getattr(looper.gptq_model.quantize_config, "offload_to_disk", False):
         return False
     return any(isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks)
+
+
+def _materialize_remaining_meta_submodules(
+    looper: "ModuleLooper",
+    *,
+    module: torch.nn.Module,
+    device: torch.device,
+) -> torch.nn.Module:
+    """Best-effort materialization for any submodule that still carries meta tensors."""
+    if not _module_has_meta_tensors(module):
+        return module
+
+    # Process deeper modules first so parent wrappers observe materialized children.
+    names = [name for name, _ in module.named_modules() if name]
+    names.sort(key=lambda n: n.count("."), reverse=True)
+
+    for name in names:
+        try:
+            submodule = get_module(module, name)
+        except Exception:
+            continue
+        if not isinstance(submodule, torch.nn.Module):
+            continue
+        if not _module_has_meta_tensors(submodule):
+            continue
+        looper.gptq_model.shell_module_materialize(
+            target_submodule=submodule,
+            device=device,
+            role="forward",
+        )
+
+    return module
 
 
 def _processor_needs_pristine_group_clone(processor) -> bool:
@@ -475,12 +508,6 @@ def run_layer_stage(
             if needs_group_pristine:
                 pristine_group_module = copy.deepcopy(module) if needs_pristine_group_clone else None
 
-            replace_module_with_hooked_legacy(
-                module,
-                quant_lm_head=looper.gptq_model.quantize_config.lm_head,
-                skip_module_paths=hook_skip_modules,
-            )
-
             layers[layer_index] = module
 
             if layers_prefix:
@@ -488,12 +515,60 @@ def run_layer_stage(
             else:
                 layer_descriptor = str(layer_index)
 
+        # Materialize the original shell modules first; hooking wrappers before
+        # this can prevent defuser materialization from resolving lazy weights.
         materialize_model(module)
+        if _module_has_meta_tensors(module):
+            materialize_device = normalize_device_like(looper.gptq_model.quantize_config.device) or CPU
+            module = looper.gptq_model.shell_module_materialize(
+                target_submodule=module,
+                device=materialize_device,
+                role="forward",
+            )
+            module = _materialize_remaining_meta_submodules(
+                looper,
+                module=module,
+                device=materialize_device,
+            )
+            layers[layer_index] = module
+
+        # LazyTurtle materializes checkpoint tensors by runtime module path.
+        # Defuser conversion can mutate those paths/projections before all shell
+        # tensors are resolved, leaving newly introduced parameters on meta.
+        # Keep conversion for eager-loaded models, but skip during lazy shell
+        # quantization where checkpoint-backed materialization is authoritative.
+        if (
+            looper.gptq_model.turtle_model is None
+            and not getattr(module, "_gptqmodel_defuser_converted", False)
+        ):
+            defuser.convert_model(module, cleanup_original=False)
+            setattr(module, "_gptqmodel_defuser_converted", True)
+
+        replace_module_with_hooked_legacy(
+            module,
+            quant_lm_head=looper.gptq_model.quantize_config.lm_head,
+            skip_module_paths=hook_skip_modules,
+        )
 
         cur_layer_device = get_device(module)
         if getattr(cur_layer_device, "type", None) == "meta":
             # Lazy shell layers can stay meta until a later subset stage materializes them.
             cur_layer_device = normalize_device_like(looper.gptq_model.quantize_config.device) or CPU
+        if getattr(cur_layer_device, "type", None) == "cpu":
+            quant_devices = getattr(looper, "_quant_devices", None) or []
+            # Keep replay on an accelerator when quant device policy resolved one;
+            # otherwise large attention replays can silently fall back to CPU.
+            accel_device = next(
+                (
+                    normalize_device_like(device)
+                    for device in quant_devices
+                    if (normalize_device_like(device) is not None and normalize_device_like(device).type != "cpu")
+                ),
+                None,
+            )
+            if accel_device is not None:
+                module.to(accel_device)
+                cur_layer_device = accel_device
         full = find_modules(module, name=looper.gptq_model.lm_head if is_lm_head_module else "")
 
         for p_index, processor in enumerate(looper.processors):

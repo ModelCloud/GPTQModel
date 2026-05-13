@@ -52,6 +52,16 @@ class HookedConv1D(transformers.Conv1D):
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
 
+        # `meta` is a shape-only device and cannot receive real tensor data.
+        # During shell/offload flows, some replay paths may pass meta inputs
+        # while weights execute on a materialized device (e.g. CPU/CUDA).
+        # In that case, keep the computed output on its real device.
+        if original_device.type == "meta":
+            return output
+        if original_device.type == "meta" or output.device.type == "meta":
+            return output
+        if original_device.type == "meta" or output.device.type == "meta":
+            return output
         if output.device != original_device:
             output = output.to(device=original_device)
         return output
@@ -248,6 +258,8 @@ class HookedLinear(torch.nn.Linear):
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+        if original_device.type == "meta" or output.device.type == "meta":
+            return output
         if output.device != original_device:
             output = output.to(device=original_device)
         return output

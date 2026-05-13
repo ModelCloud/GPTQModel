@@ -249,10 +249,17 @@ def _module_has_meta_tensors(module: nn.Module) -> bool:
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None):
     if isinstance(obj, nn.Module) and _module_has_meta_tensors(obj):
         if not accelerate.utils.has_offloaded_params(obj):
-            raise NotImplementedError(
-                "Cannot move a module that still contains meta tensors without offload hooks. "
-                "Materialize it first before calling move_to()."
-            )
+            # Some quant/offload paths can leave non-participating leaves on meta.
+            # Best-effort move concrete tensors and keep meta placeholders as-is.
+            for _, param in obj.named_parameters(recurse=True):
+                if getattr(param, "is_meta", False) or param.device.type == "meta":
+                    continue
+                param.data = param.data.to(device=device, dtype=dtype, non_blocking=False)
+            for _, buf in obj.named_buffers(recurse=True):
+                if getattr(buf, "is_meta", False) or buf.device.type == "meta":
+                    continue
+                buf.data = buf.data.to(device=device, dtype=dtype, non_blocking=False)
+            return obj
 
         # Accelerate disk-offloaded modules keep meta placeholders until they are
         # explicitly restored, so materialize those leaves before the device move.

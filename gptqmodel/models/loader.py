@@ -63,6 +63,7 @@ from ..utils.logger import setup_logger
 from ..utils.machete import _validate_machete_device_support
 from ..utils.marlin import _marlin_capability_supported, _validate_marlin_device_support
 from ..utils.model import (
+    _module_has_meta_tensors,
     auto_dtype,
     convert_gptq_v1_to_v2_format,
     find_config_seq_len,
@@ -642,12 +643,18 @@ def ModelLoader(cls):
                 )
                 if getattr(model, "config", None) is config:
                     model.config = copy.deepcopy(config)
-                defuser.convert_model(model, cleanup_original=False)
+                if _module_has_meta_tensors(model):
+                    log.info("Loader: defuser.convert_model deferred until layer materialization (meta shell detected)")
+                else:
+                    defuser.convert_model(model, cleanup_original=False)
                 model._model_init_kwargs = fallback_init_kwargs
                 _maybe_print_module_tree(model=model)
                 turtle_model = None
             else:
-                defuser.convert_model(model, cleanup_original=False)
+                if _module_has_meta_tensors(model):
+                    log.info("Loader: defuser.convert_model deferred until layer materialization (meta shell detected)")
+                else:
+                    defuser.convert_model(model, cleanup_original=False)
                 shell_model_init_kwargs = dict(model_init_kwargs_without_internal)
                 shell_model_init_kwargs.update(hf_gguf_load_kwargs)
                 model._model_init_kwargs = shell_model_init_kwargs
@@ -682,7 +689,10 @@ def ModelLoader(cls):
             )
             if getattr(model, "config", None) is config:
                 model.config = copy.deepcopy(config)
-            defuser.convert_model(model, cleanup_original=False)
+            if _module_has_meta_tensors(model):
+                log.info("Loader: defuser.convert_model deferred until layer materialization (meta shell detected)")
+            else:
+                defuser.convert_model(model, cleanup_original=False)
             direct_model_init_kwargs = dict(model_init_kwargs_without_internal)
             direct_model_init_kwargs.update(hf_gguf_load_kwargs)
             model._model_init_kwargs = direct_model_init_kwargs

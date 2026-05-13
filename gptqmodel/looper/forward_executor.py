@@ -268,7 +268,13 @@ class ForwardExecutor:
                 self.looper._set_processor_mask(processor, keep_mask)
                 additional_inputs: Dict[str, Optional[torch.Tensor]] = {}
                 if self.looper.support_batch_quantize and attn_tensor is not None:
-                    additional_inputs["attention_mask"] = attn_tensor
+                    # Some architectures expect a 2D keep-mask ([B, S]) instead of
+                    # a broadcasted 4D mask during layer replay.
+                    if self.looper.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT and keep_mask is not None:
+                        required_dtype = getattr(self.looper.gptq_model, "ATTENTION_MASKS_DTYPE", torch.bool)
+                        additional_inputs["attention_mask"] = keep_mask.to(dtype=required_dtype)
+                    else:
+                        additional_inputs["attention_mask"] = attn_tensor
                 else:
                     additional_inputs["attention_mask"] = None
 

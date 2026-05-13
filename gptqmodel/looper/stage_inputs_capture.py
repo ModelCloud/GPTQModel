@@ -195,14 +195,11 @@ class StageInputsCapture:
         # TODO: why data_device sometimes set to cuda (self.gptq_model.quantize_config.device) and sometimes to CPU (cur_layer_device)?
         try:
             for batch_index, example in enumerate(calibration_data, start=1):
-                if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
-                    data_device = self.gptq_model.quantize_config.device
-                else:
-                    data_device = (
-                        self.gptq_model.quantize_config.device
-                        if "pixel_values" in example.keys()
-                        else cur_layer_device
-                    )
+                data_device = (
+                    self.gptq_model.quantize_config.device
+                    if "pixel_values" in example.keys()
+                    else cur_layer_device
+                )
                 example = self.gptq_model.move_input_capture_example(example, data_device)
                 try:
                     with ctx(

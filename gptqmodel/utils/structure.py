@@ -1931,7 +1931,7 @@ class LazyTurtle:
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
         modules_by_name = dict(target_model.named_modules())
-        missing_nonpersistent_buffers: list[tuple[str, str]] = []
+        missing_template_buffers: list[tuple[str, str, bool]] = []
 
         grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
         for rel_name in t_params:
@@ -1967,17 +1967,12 @@ class LazyTurtle:
             if shard is None:
                 t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
                 non_persistent = leaf in getattr(t_parent, "_non_persistent_buffers_set", set())
-                if non_persistent:
-                    if (
-                        getattr(target_buffer, "is_meta", False)
-                        or target_buffer.device.type == "meta"
-                        or target_buffer.device != device
-                    ):
-                        missing_nonpersistent_buffers.append((rel_name, leaf))
-                    continue
-                if getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
-                    if leaf in getattr(t_parent, "_buffers", {}):
-                        del t_parent._buffers[leaf]
+                if (
+                    getattr(target_buffer, "is_meta", False)
+                    or target_buffer.device.type == "meta"
+                    or target_buffer.device != device
+                ):
+                    missing_template_buffers.append((rel_name, leaf, not non_persistent))
                 continue
             grouped_names.setdefault(shard, []).append(("buffer", rel_name, full_name, expert_index, split_index, split_dim))
 
@@ -2100,13 +2095,33 @@ class LazyTurtle:
                                 source = source.to(dtype=target_buffer.dtype)
                             target_buffer.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
 
-        self._restore_missing_nonpersistent_buffers(
+        self._restore_missing_template_buffers(
             target_model=target_model,
             target_submodule=target_submodule,
             t_bufs=t_bufs,
-            missing_nonpersistent_buffers=missing_nonpersistent_buffers,
+            missing_template_buffers=missing_template_buffers,
             device=device,
         )
+
+        # Some runtimes expose fused projection names (e.g. qkv/gate_up) that
+        # are not present verbatim in checkpoint shards. Resolve any remaining
+        # meta tensors via direct/meta synthesis pass before returning.
+        param_cache: Dict[tuple[str, Optional[int], Optional[int], Optional[int], torch.dtype, bool], nn.Parameter] = {}
+        buffer_cache: Dict[tuple[str, Optional[int], Optional[int], Optional[int], torch.dtype], torch.Tensor] = {}
+        local_names = [name for name, _ in target_submodule.named_modules() if name]
+        local_names.sort(key=lambda item: item.count("."), reverse=True)
+        local_names.append("")
+        for local_name in local_names:
+            shell_sub = target_submodule if not local_name else dict(target_submodule.named_modules()).get(local_name)
+            if shell_sub is None:
+                continue
+            shell_path = module_path if not local_name else f"{module_path}.{local_name}"
+            self._materialize_direct_meta_tensors(
+                shell_sub=shell_sub,
+                module_path=shell_path,
+                param_cache=param_cache,
+                buffer_cache=buffer_cache,
+            )
 
     def _build_nonpersistent_buffer_template(
         self,
@@ -2177,19 +2192,19 @@ class LazyTurtle:
             )
             return None
 
-    def _restore_missing_nonpersistent_buffers(
+    def _restore_missing_template_buffers(
         self,
         *,
         target_model: nn.Module,
         target_submodule: nn.Module,
         t_bufs: Dict[str, torch.Tensor],
-        missing_nonpersistent_buffers: list[tuple[str, str]],
+        missing_template_buffers: list[tuple[str, str, bool]],
         device: torch.device,
     ) -> None:
-        """Restore constructor-owned buffers that are intentionally absent from checkpoints."""
+        """Restore constructor-owned buffers that are absent from checkpoints."""
 
         owner_templates: Dict[str, Optional[nn.Module]] = {}
-        for rel_name, leaf in missing_nonpersistent_buffers:
+        for rel_name, leaf, persistent in missing_template_buffers:
             parent_rel_path, _, _ = rel_name.rpartition(".")
             owner_module = target_submodule if not parent_rel_path else dict(target_submodule.named_modules()).get(parent_rel_path)
             if owner_module is None:
@@ -2218,7 +2233,7 @@ class LazyTurtle:
 
             target_dtype = source_buffer.dtype if current_buffer is None else current_buffer.dtype
             materialized = source_buffer.to(device=device, dtype=target_dtype)
-            owner_module.register_buffer(leaf, materialized, persistent=False)
+            owner_module.register_buffer(leaf, materialized, persistent=persistent)
             t_bufs[rel_name] = materialized
 
     def _materialize_direct_meta_tensors(
@@ -2231,54 +2246,184 @@ class LazyTurtle:
     ) -> int:
         synced = 0
 
+        def _resolve_first_existing_weight(*names: str) -> Optional[torch.Tensor]:
+            for candidate in names:
+                if not candidate:
+                    continue
+                shard = self._weight_map.get(candidate)
+                if shard is None:
+                    continue
+                source_path = os.path.join(self.model_local_path, shard)
+                with safe_open(source_path, framework="pt", device="cpu") as handler:
+                    return handler.get_tensor(candidate)
+            return None
+
+        def _synthesize_runtime_param(module_path: str, rel_name: str, target_shape: tuple[int, ...]) -> Optional[torch.Tensor]:
+            full_runtime_name = self._join_tensor_name(module_path, rel_name)
+            aliased_runtime_names = self._all_runtime_to_checkpoint_candidates(full_runtime_name)
+            module_leaf = module_path.rsplit(".", 1)[-1] if module_path else ""
+
+            # Build qkv from legacy q/k/v checkpoint projections when combined qkv is absent.
+            if rel_name == "weight" and module_leaf == "qkv_proj":
+                for runtime_name in aliased_runtime_names:
+                    prefix, _, _ = runtime_name.rpartition(".qkv_proj.weight")
+                    if not prefix:
+                        continue
+                    q = _resolve_first_existing_weight(
+                        *self._all_runtime_to_checkpoint_candidates(f"{prefix}.q_proj.weight")
+                    )
+                    k = _resolve_first_existing_weight(
+                        *self._all_runtime_to_checkpoint_candidates(f"{prefix}.k_proj.weight")
+                    )
+                    v = _resolve_first_existing_weight(
+                        *self._all_runtime_to_checkpoint_candidates(f"{prefix}.v_proj.weight")
+                    )
+                    if q is None or k is None or v is None:
+                        continue
+                    if k.shape[0] != q.shape[0]:
+                        if q.shape[0] % k.shape[0] != 0:
+                            continue
+                        k = k.repeat_interleave(q.shape[0] // k.shape[0], dim=0)
+                    if v.shape[0] != q.shape[0]:
+                        if q.shape[0] % v.shape[0] != 0:
+                            continue
+                        v = v.repeat_interleave(q.shape[0] // v.shape[0], dim=0)
+                    fused = torch.cat([q, k, v], dim=0).contiguous()
+                    if tuple(fused.shape) == target_shape:
+                        return fused
+                return None
+
+            # Align HF `o_proj` naming with runtime `out_proj` when needed.
+            if rel_name == "weight" and module_leaf == "out_proj":
+                for runtime_name in aliased_runtime_names:
+                    candidate = runtime_name.replace(".out_proj.weight", ".o_proj.weight")
+                    tensor = _resolve_first_existing_weight(
+                        candidate,
+                        *self._all_runtime_to_checkpoint_candidates(candidate),
+                    )
+                    if tensor is not None and tuple(tensor.shape) == target_shape:
+                        return tensor.contiguous()
+                return None
+
+            # Some checkpoints expose per-head norms while runtime expects one combined norm.
+            if rel_name == "weight" and module_leaf == "norm":
+                for runtime_name in aliased_runtime_names:
+                    qn = runtime_name.replace(".norm.weight", ".q_norm.weight")
+                    kn = runtime_name.replace(".norm.weight", ".k_norm.weight")
+                    q_tensor = _resolve_first_existing_weight(qn, *self._all_runtime_to_checkpoint_candidates(qn))
+                    k_tensor = _resolve_first_existing_weight(kn, *self._all_runtime_to_checkpoint_candidates(kn))
+                    source = q_tensor if q_tensor is not None else k_tensor
+                    if source is not None and tuple(source.shape) == target_shape:
+                        return source.contiguous()
+                return None
+
+            # Legacy MiniMax checkpoints do not carry output_gate; materialize deterministic zeros.
+            if rel_name == "weight" and module_leaf == "output_gate":
+                return torch.zeros(target_shape, dtype=torch.float32)
+
+            # Build fused MoE projections from per-expert w1/w2/w3 tensors.
+            if rel_name in {"gate_up_proj", "down_proj"} and module_leaf == "experts" and len(target_shape) == 3:
+                expert_count = target_shape[0]
+                prefix, _, _ = full_runtime_name.rpartition(f".{rel_name}")
+                if not prefix:
+                    return None
+                checkpoint_prefix = prefix.replace(".mlp.experts", ".block_sparse_moe.experts")
+                fused_rows = []
+                for expert_idx in range(expert_count):
+                    base = f"{checkpoint_prefix}.{expert_idx}"
+                    if rel_name == "gate_up_proj":
+                        w1 = _resolve_first_existing_weight(
+                            base + ".w1.weight",
+                            *self._all_runtime_to_checkpoint_candidates(base + ".w1.weight"),
+                        )
+                        w3 = _resolve_first_existing_weight(
+                            base + ".w3.weight",
+                            *self._all_runtime_to_checkpoint_candidates(base + ".w3.weight"),
+                        )
+                        if w1 is None or w3 is None:
+                            return None
+                        fused_rows.append(torch.cat([w1, w3], dim=0).contiguous())
+                    else:
+                        w2 = _resolve_first_existing_weight(
+                            base + ".w2.weight",
+                            *self._all_runtime_to_checkpoint_candidates(base + ".w2.weight"),
+                        )
+                        if w2 is None:
+                            return None
+                        fused_rows.append(w2.contiguous())
+                fused = torch.stack(fused_rows, dim=0).contiguous()
+                if tuple(fused.shape) == target_shape:
+                    return fused
+                return None
+
+            return None
+
         with torch.inference_mode():
             for name, shell_param in dict(shell_sub.named_parameters(recurse=False)).items():
                 if not _is_meta_tensor(shell_param):
                     continue
 
                 full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, name)
+                source_param = None
                 if full_name is None:
-                    continue
-                shard = self._weight_map.get(full_name)
-                if shard is None:
-                    raise RuntimeError(self._materialization_issue_message(
-                        phase="direct-meta sync",
-                        kind="param",
-                        module_path=module_path,
-                        rel_name=name,
-                        reason="checkpoint tensor mapping resolved to a missing shard",
-                        full_name=full_name,
-                        target_shape=tuple(shell_param.shape),
-                        expert_index=expert_index,
-                        split_index=split_index,
-                        split_dim=split_dim,
-                    ))
+                    source_param = _synthesize_runtime_param(module_path, name, tuple(shell_param.shape))
+                    if source_param is None:
+                        if module_path.endswith(("qkv_proj", "out_proj", "output_gate", "norm", "experts")):
+                            log.debug(
+                                "LazyTurtle synth miss: module_path=%s rel=%s shape=%s",
+                                module_path,
+                                name,
+                                tuple(shell_param.shape),
+                            )
+                        continue
+                    if module_path.endswith(("qkv_proj", "out_proj", "output_gate", "norm", "experts")):
+                        log.debug(
+                            "LazyTurtle synth hit: module_path=%s rel=%s out_shape=%s",
+                            module_path,
+                            name,
+                            tuple(source_param.shape),
+                        )
+                else:
+                    shard = self._weight_map.get(full_name)
+                    if shard is None:
+                        raise RuntimeError(self._materialization_issue_message(
+                            phase="direct-meta sync",
+                            kind="param",
+                            module_path=module_path,
+                            rel_name=name,
+                            reason="checkpoint tensor mapping resolved to a missing shard",
+                            full_name=full_name,
+                            target_shape=tuple(shell_param.shape),
+                            expert_index=expert_index,
+                            split_index=split_index,
+                            split_dim=split_dim,
+                        ))
 
-                source_path = os.path.join(self.model_local_path, shard)
-                with safe_open(source_path, framework="pt", device="cpu") as handler:
-                    checkpoint_param = handler.get_tensor(full_name)
-                source_param = self._transform_checkpoint_tensor(
-                    checkpoint_param,
-                    expert_index=expert_index,
-                    split_index=split_index,
-                    split_dim=split_dim,
-                    expected_shape=tuple(shell_param.shape),
-                    prefer_transposed=getattr(shell_sub, "is_transposed", None),
-                )
-                if source_param is None:
-                    raise RuntimeError(self._materialization_issue_message(
-                        phase="direct-meta sync",
-                        kind="param",
-                        module_path=module_path,
-                        rel_name=name,
-                        reason="checkpoint tensor could not be reshaped into the target layout",
-                        full_name=full_name,
-                        source_shape=tuple(checkpoint_param.shape),
-                        target_shape=tuple(shell_param.shape),
+                    source_path = os.path.join(self.model_local_path, shard)
+                    with safe_open(source_path, framework="pt", device="cpu") as handler:
+                        checkpoint_param = handler.get_tensor(full_name)
+                    source_param = self._transform_checkpoint_tensor(
+                        checkpoint_param,
                         expert_index=expert_index,
                         split_index=split_index,
                         split_dim=split_dim,
-                    ))
+                        expected_shape=tuple(shell_param.shape),
+                        prefer_transposed=getattr(shell_sub, "is_transposed", None),
+                    )
+                    if source_param is None:
+                        raise RuntimeError(self._materialization_issue_message(
+                            phase="direct-meta sync",
+                            kind="param",
+                            module_path=module_path,
+                            rel_name=name,
+                            reason="checkpoint tensor could not be reshaped into the target layout",
+                            full_name=full_name,
+                            source_shape=tuple(checkpoint_param.shape),
+                            target_shape=tuple(shell_param.shape),
+                            expert_index=expert_index,
+                            split_index=split_index,
+                            split_dim=split_dim,
+                        ))
 
                 if shell_param.shape != source_param.shape:
                     raise RuntimeError(self._materialization_issue_message(
@@ -2295,7 +2440,8 @@ class LazyTurtle:
                         split_dim=split_dim,
                     ))
 
-                cache_key = (full_name, expert_index, split_index, split_dim, shell_param.dtype, shell_param.requires_grad)
+                cache_name = full_name or f"__synth__:{module_path}.{name}"
+                cache_key = (cache_name, expert_index, split_index, split_dim, shell_param.dtype, shell_param.requires_grad)
                 new_param = param_cache.get(cache_key)
                 if new_param is None:
                     if source_param.dtype != shell_param.dtype:
