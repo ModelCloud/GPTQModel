@@ -3,14 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from copy import deepcopy
 from typing import Dict
 
-from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
-from ...utils.image import fetch_image
 from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
