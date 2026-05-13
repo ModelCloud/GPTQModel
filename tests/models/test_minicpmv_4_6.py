@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import os.path
-
-from model_test import ModelTest
-from PIL import Image
 
 
 class TestMiniCPMV4_6(ModelTest):
