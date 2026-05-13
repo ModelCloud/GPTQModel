@@ -16,13 +16,11 @@ This feature allows specifying where calibration data is stored during quantizat
 """
 
 import os
-import types
-import unittest
-
 import pytest
 import torch
 import torch.nn as nn
-
+import types
+import unittest
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization import QuantizeConfig
 
@@ -210,6 +208,7 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
         move_input_capture_example = BaseQModel.move_input_capture_example
         prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
         run_input_capture = BaseQModel.run_input_capture
+        _sanitize_input_ids_for_embeddings = BaseQModel._sanitize_input_ids_for_embeddings
 
         def __init__(self):
             self.quantize_config = types.SimpleNamespace(
@@ -355,6 +354,7 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
         move_input_capture_example = BaseQModel.move_input_capture_example
         prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
         run_input_capture = BaseQModel.run_input_capture
+        _sanitize_input_ids_for_embeddings = BaseQModel._sanitize_input_ids_for_embeddings
 
         def __init__(self):
             self.quantize_config = types.SimpleNamespace(
@@ -509,6 +509,7 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
         move_input_capture_example = BaseQModel.move_input_capture_example
         prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
         run_input_capture = BaseQModel.run_input_capture
+        _sanitize_input_ids_for_embeddings = BaseQModel._sanitize_input_ids_for_embeddings
 
         def __init__(self):
             self.quantize_config = types.SimpleNamespace(
