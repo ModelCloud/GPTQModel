@@ -9,6 +9,7 @@ import hashlib
 import logging
 import math
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -928,7 +929,30 @@ class TorchOpsJitExtension:
                 elapsed = time.perf_counter() - started
                 self._load_attempted = True
                 self._load_result = False
-                self._last_error = f"{self.display_name}: failed to build torch.ops JIT extension: {exc}"
+                diagnostic_lines = [
+                    f"{self.display_name}: failed to build torch.ops JIT extension: {exc}",
+                    f"build_root={build_root}",
+                    f"base_build_root={base_build_root}",
+                    f"python={platform.python_version()}",
+                    f"pid={os.getpid()}",
+                    f"TORCH_EXTENSIONS_DIR={os.getenv('TORCH_EXTENSIONS_DIR', '')}",
+                    f"GPTQMODEL_TORCH_EXTENSIONS_DIR={os.getenv('GPTQMODEL_TORCH_EXTENSIONS_DIR', '')}",
+                ]
+                candidate_paths = self._candidate_binary_paths(build_root)
+                if candidate_paths:
+                    diagnostic_lines.append(
+                        "candidate_binaries="
+                        + ", ".join(f"{path}:{'exists' if path.exists() else 'missing'}" for path in candidate_paths)
+                    )
+                try:
+                    entries = sorted(build_root.iterdir())
+                    preview = ", ".join(entry.name for entry in entries[:24])
+                    if len(entries) > 24:
+                        preview += f", ... (+{len(entries) - 24} more)"
+                    diagnostic_lines.append(f"build_root_entries=[{preview}]")
+                except OSError as snapshot_exc:
+                    diagnostic_lines.append(f"build_root_entries=<unavailable: {snapshot_exc}>")
+                self._last_error = " | ".join(diagnostic_lines)
                 log.debug("%s", self._last_error, exc_info=True)
                 logger.info(
                     f"{self.display_name}: torch.ops JIT compilation failed "
