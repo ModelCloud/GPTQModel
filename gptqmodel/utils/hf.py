@@ -1213,7 +1213,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
                 encoder_cls.__init__ = encoder_init_compat
                 encoder_cls._gptqmodel_meta_dpr_patch = True
 
-        if config.model_type == "minicpmv" or config.model_type == "minicpmo":
+        if config.model_type in {"minicpmv", "minicpmv4_6", "minicpmo"}:
             vision_model_cls = getattr(
                 remote_module,
                 "SiglipVisionTransformer",
