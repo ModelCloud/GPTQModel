@@ -6,6 +6,7 @@
 import json
 import numpy as np
 import os
+import shutil
 import sys
 import transformers
 import warnings
@@ -19,6 +20,7 @@ from transformers import (
     GenerationConfig,
     PreTrainedModel,
 )
+from transformers.models.auto.tokenization_auto import get_tokenizer_config, tokenizer_class_from_name
 from typing import Any, Optional
 
 import inspect
@@ -75,6 +77,59 @@ INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
 _INTERNAL_GGUF_TORCH_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER"
 _FALSEY_ENV_VALUES = {"", "0", "false", "off", "no"}
+
+
+def _sync_local_remote_code_cache(model_id_or_path: Optional[str]) -> None:
+    if not model_id_or_path or not os.path.isdir(model_id_or_path):
+        return
+
+    try:
+        from transformers.dynamic_module_utils import HF_MODULES_CACHE, _sanitize_module_name
+    except Exception:
+        return
+
+    repo_name = os.path.basename(os.path.normpath(model_id_or_path))
+    cache_root = os.path.join(
+        HF_MODULES_CACHE,
+        "transformers_modules",
+        _sanitize_module_name(repo_name),
+    )
+    # `trust_remote_code=True` on a local model path still goes through the
+    # transformers dynamic-module cache. On newer transformers releases we
+    # occasionally observe split/incomplete cache revisions for the same local
+    # repo: one revision contains `configuration_*.py`, another contains
+    # `modeling_*.py`, and recursive relative-import discovery then crashes
+    # with FileNotFoundError before the model class can be imported.
+    #
+    # The model directory already contains the authoritative source files, so
+    # for local paths we can safely backfill any missing top-level Python files
+    # into each cached revision directory. This keeps the fix narrowly scoped:
+    # it only affects local trust-remote-code models, only fills missing files,
+    # and never overwrites files that transformers has already materialized.
+    if not os.path.isdir(cache_root):
+        return
+
+    source_files = [
+        file_name
+        for file_name in os.listdir(model_id_or_path)
+        if file_name.endswith(".py") and os.path.isfile(os.path.join(model_id_or_path, file_name))
+    ]
+    if not source_files:
+        return
+
+    target_dirs = [cache_root]
+    for entry in os.listdir(cache_root):
+        target_dir = os.path.join(cache_root, entry)
+        if os.path.isdir(target_dir):
+            target_dirs.append(target_dir)
+
+    for target_dir in target_dirs:
+        for file_name in source_files:
+            source_path = os.path.join(model_id_or_path, file_name)
+            target_path = os.path.join(target_dir, file_name)
+            if not os.path.exists(target_path):
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                shutil.copy2(source_path, target_path)
 
 
 def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
@@ -1151,6 +1206,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
         return
 
     deci_init_compat(config)
+    _sync_local_remote_code_cache(model_id_or_path)
 
     auto_map = getattr(config, "auto_map", None) or {}
     class_ref = auto_map.get("AutoModelForCausalLM")
@@ -1470,6 +1526,19 @@ def load_hf_tokenizer(
             trust_remote_code=trust_remote_code,
             **kwargs,
         )
+    except ValueError as exc:
+        # Transformers 5.x can incorrectly route some legacy/local repos to the
+        # generic tokenizers backend, which then fails before consulting the
+        # declared tokenizer class from tokenizer_config.json.
+        #
+        # In that failure mode the repo may still have a complete
+        # `vocab.json`/`merges.txt` pair, but `AutoTokenizer` never reaches the
+        # model-specific tokenizer class that knows how to map those files to
+        # `vocab_file` / `merges_file`. The issue is therefore dispatch, not
+        # missing tokenizer assets.
+        if "Couldn't instantiate the backend tokenizer" not in str(exc):
+            raise
+        auto_tokenizer_exc = exc
     except AttributeError as exc:
         # Narrow fallback for legacy trust_remote_code repositories. On
         # transformers 5.x, some old repos no longer resolve to a tokenizer
@@ -1479,6 +1548,26 @@ def load_hf_tokenizer(
         if not trust_remote_code or "from_pretrained" not in str(exc):
             raise
         auto_tokenizer_exc = exc
+
+    tokenizer_config = get_tokenizer_config(
+        tokenizer_or_path,
+        trust_remote_code=trust_remote_code,
+        **kwargs,
+    )
+    tokenizer_class_name = tokenizer_config.get("tokenizer_class")
+    if isinstance(tokenizer_class_name, str):
+        # `tokenizer_config.json` is the most direct source of truth once the
+        # generic auto-dispatch path has proven unreliable. Resolving the class
+        # name explicitly lets us instantiate the tokenizer implementation that
+        # ships with transformers (for example `Qwen2Tokenizer`) so it can load
+        # its expected files from the repo in the normal way.
+        tokenizer_cls = tokenizer_class_from_name(tokenizer_class_name)
+        if tokenizer_cls is not None:
+            return tokenizer_cls.from_pretrained(
+                tokenizer_or_path,
+                trust_remote_code=trust_remote_code,
+                **kwargs,
+            )
 
     auto_map = getattr(model_config, "auto_map", None) or {}
     # Old repositories often still expose an authoritative dynamic tokenizer
