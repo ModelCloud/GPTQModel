@@ -215,6 +215,19 @@ def _cannoe_inner_precise(rows: int, in_features: int, out_features: int, group_
     return value
 
 
+def _cannoe_direct_inner_precise(rows: int, in_features: int, group_size: int) -> int:
+    raw = _cannoe_env(_CANNOE_INNER_PRECISE_ENV)
+    if raw is None or raw.strip().lower() == "auto":
+        return int(rows <= 16 and group_size == 32 and in_features >= 4096)
+    try:
+        value = int(raw)
+    except ValueError as err:
+        raise RuntimeError(f"{_CANNOE_INNER_PRECISE_ENV} must be 0 or 1; got `{raw}`.") from err
+    if value not in (0, 1):
+        raise RuntimeError(f"{_CANNOE_INNER_PRECISE_ENV} must be 0 or 1; got `{raw}`.")
+    return value
+
+
 def _cannoe_fused_op_names() -> tuple[str, ...]:
     raw = _cannoe_env(_CANNOE_FUSED_OP_ENV)
     if raw is None:
@@ -1514,16 +1527,31 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
             )
         )
         bias = self._cannoe_bias(device=x_flat.device, dtype=torch.float32) if fuse_bias else None
-        output = self._awq_native_matmul()(
-            x_flat,
-            packed_weight,
-            scales,
-            offsets,
-            None,
-            None,
-            bias if fuse_bias else None,
-            native_group_size,
-        )
+        matmul_op = self._awq_native_matmul()
+        inner_precise = _cannoe_direct_inner_precise(x_flat.shape[0], self.in_features, native_group_size)
+        if inner_precise == 0:
+            output = matmul_op(
+                x_flat,
+                packed_weight,
+                scales,
+                offsets,
+                None,
+                None,
+                bias if fuse_bias else None,
+                native_group_size,
+            )
+        else:
+            output = matmul_op(
+                x_flat,
+                packed_weight,
+                scales,
+                offsets,
+                None,
+                None,
+                bias if fuse_bias else None,
+                native_group_size,
+                int(inner_precise),
+            )
 
         if self.bias is not None and not fuse_bias:
             bias = self._cannoe_bias(device=output.device, dtype=output.dtype)
@@ -1540,6 +1568,11 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
     def _awq_plain_native_fp16_forward_checked(self, x: torch.Tensor):
         if x.dtype == torch.float16:
             return AwqKomodoLinear._native_forward(self, x)
+        return self._native_forward(x)
+
+    def _awq_bf16_direct_forward_checked(self, x: torch.Tensor):
+        if x.dtype == torch.bfloat16:
+            return self._native_bf16_direct_forward(x)
         return self._native_forward(x)
 
     def forward(self, x: torch.Tensor):
@@ -1560,6 +1593,7 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
             self.forward = self._awq_plain_native_fp16_forward_checked
             return AwqKomodoLinear._native_forward(self, x)
         if input_dtype == torch.bfloat16 and self._awq_bf16_direct_candidate(rows=x.reshape(-1, x.shape[-1]).shape[0]):
+            self.forward = self._awq_bf16_direct_forward_checked
             return self._native_bf16_direct_forward(x)
 
         compute_dtype = torch.float16

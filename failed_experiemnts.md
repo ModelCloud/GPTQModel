@@ -304,3 +304,29 @@ while physical NPU1 regresses by about 4%.
 
 Re-test only if a shape-specific policy is introduced for the wide projections,
 or if a larger repeated run shows the NPU1 regression was measurement noise.
+
+## 2026-05-14: GPTQ Qwen3 27B BF16 direct `inner_precise=1`
+
+Status: failed speed gate.
+
+Tested change: pass CANN `inner_precise=1` through the GPTQ BF16 native-direct
+path for group-32 Qwen3 27B q/k/v projection shapes.
+
+Commands:
+
+- Physical NPU0: `ASCEND_RT_VISIBLE_DEVICES=0 ... python scripts/benchmark_komodo_npu_ab.py --device 0 --cases qwen3_6_27b_gptq --warmup 6 --iters 50 --komodo-native-int4 --komodo-drop-source-weights --cannoe`
+- Physical NPU1: `ASCEND_RT_VISIBLE_DEVICES=1 ... python scripts/benchmark_komodo_npu_ab.py --device 0 --cases qwen3_6_27b_gptq --warmup 6 --iters 50 --komodo-native-int4 --komodo-drop-source-weights --cannoe`
+
+| Variant | Device | Total ms | max_abs | max_rel |
+| --- | --- | ---: | ---: | ---: |
+| Default BF16 direct | physical NPU0 | 0.9684 | 0.5 | 85.8 |
+| GPTQ direct `inner_precise=1` | physical NPU0 | 1.0066 | 0.5 | 85.8 |
+| Default BF16 direct | physical NPU1 | 0.9974 | 0.5 | 85.8 |
+| GPTQ direct `inner_precise=1` | physical NPU1 | 1.0099 | 0.5 | 85.8 |
+
+Reason: isolated q/k/v microprobes looked mixed-to-positive, but the complete
+Qwen3 27B GPTQ projection set regressed on both physical NPUs with no accuracy
+improvement. Keep the default GPTQ BF16 direct call shape.
+
+Re-test only if CANN changes the `inner_precise` implementation or if we add a
+per-projection policy with full-model two-device benchmark evidence.
