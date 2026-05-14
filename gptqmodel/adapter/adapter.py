@@ -124,7 +124,7 @@ class Lora(Adapter):
         path: str = None,
         lora_A: torch.Tensor = None,
         lora_B: torch.Tensor = None,
-        eora_cholesky: bool = False,
+        eora_cholesky: bool = True,
     ):
         """Initializes the adapter with optional preloaded LoRA matrices."""
 
@@ -293,10 +293,9 @@ class Lora(Adapter):
         payload = {
             "name": self.name(),
             "path": self.path,
-            "rank": self.rank
+            "rank": self.rank,
+            "eora_cholesky": self.eora_cholesky,
         }
-        if self.eora_cholesky:
-            payload["eora_cholesky"] = True
         return payload
 
 ADAPTER_MAPPING = {Lora.name(): Lora}

@@ -69,9 +69,10 @@ class TestExtensionConfig(unittest.TestCase):
         print(f"{lora} config: {kv}")
 
         assert lora_config.rank == rank
-        assert len(kv) == 3
+        assert len(kv) == 4
         assert rank_field in kv.keys()
         assert kv[rank_field] == rank
+        assert kv["eora_cholesky"] is True
 
     def test_extension_config_eora_cholesky_roundtrip(self):
         lora_config = Lora(rank=8, eora_cholesky=True)
@@ -83,6 +84,18 @@ class TestExtensionConfig(unittest.TestCase):
         assert isinstance(restored, Lora)
         assert restored.rank == 8
         assert restored.eora_cholesky is True
+
+    def test_extension_config_eora_cholesky_default_and_false_roundtrip(self):
+        default_lora = Lora(rank=8)
+        assert default_lora.eora_cholesky is True
+        assert default_lora.to_dict()["eora_cholesky"] is True
+
+        disabled_lora = Lora(rank=8, eora_cholesky=False)
+        restored = normalize_adapter(adapter=disabled_lora.to_dict())
+
+        assert disabled_lora.to_dict()["eora_cholesky"] is False
+        assert isinstance(restored, Lora)
+        assert restored.eora_cholesky is False
 
     def test_extension_parse_does_not_mutate_serialized_payload(self):
         payload = Lora(path="/tmp/adapter", rank=128).to_dict()

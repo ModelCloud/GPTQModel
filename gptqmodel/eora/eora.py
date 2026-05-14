@@ -13,7 +13,8 @@
 #   year={2024}
 # }
 
-from typing import Sequence, Tuple
+import os
+from typing import Optional, Sequence, Tuple
 
 import torch
 from torch import Tensor
@@ -176,7 +177,7 @@ def eora_compute_lora(
         rank: int,
         dtype: torch.dtype,
         device: torch.device,
-        use_cholesky: bool = False,
+        use_cholesky: Optional[bool] = True,
 ) -> Tuple[Tensor, Tensor]:
 
     assert w_wq_delta.dtype == torch.float32
@@ -189,7 +190,10 @@ def eora_compute_lora(
         original_backend = torch.backends.cuda.preferred_linalg_library()
         torch.backends.cuda.preferred_linalg_library(backend="magma")
 
-    use_cholesky = bool(use_cholesky or env_flag(_EORA_CHOLESKY_ENV, default=False))
+    if os.getenv(_EORA_CHOLESKY_ENV) is not None:
+        use_cholesky = env_flag(_EORA_CHOLESKY_ENV, default=use_cholesky)
+    else:
+        use_cholesky = bool(use_cholesky)
     result = None
     if use_cholesky and not (IS_ROCM and not TORCH_GTE_210):
         result = _eora_compute_lora_cholesky(

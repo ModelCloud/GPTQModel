@@ -1,5 +1,6 @@
 import torch
 
+from gptqmodel.eora import eora as eora_module
 from gptqmodel.eora.eora import eora_compute_lora
 
 
@@ -61,6 +62,39 @@ def test_eora_cholesky_fast_path_preserves_weighted_objective():
         / torch.linalg.matrix_norm(reconstruction_eigh).clamp_min(1e-12)
     )
     assert rel_reconstruction_diff < 1e-2
+
+
+def test_eora_compute_lora_defaults_to_cholesky(monkeypatch):
+    calls = []
+    cols = 4
+    rows = 8
+    rank = 2
+    cov = _make_spd(cols)
+    delta = torch.randn(rows, cols, dtype=torch.float32)
+
+    def _fake_cholesky(w_wq_delta, name, raw_scaling_diag_matrix, rank, dtype):
+        del name, raw_scaling_diag_matrix
+        calls.append("cholesky")
+        return (
+            torch.zeros((rank, w_wq_delta.shape[1]), dtype=dtype),
+            torch.zeros((w_wq_delta.shape[0], rank), dtype=dtype),
+        )
+
+    monkeypatch.delenv("GPTQMODEL_EORA_CHOLESKY", raising=False)
+    monkeypatch.setattr(eora_module, "_eora_compute_lora_cholesky", _fake_cholesky)
+
+    A, B = eora_module.eora_compute_lora(
+        w_wq_delta=delta,
+        name="default_cholesky",
+        eigen_scaling_diag_matrix=cov,
+        rank=rank,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+
+    assert calls == ["cholesky"]
+    assert A.shape == (rank, cols)
+    assert B.shape == (rows, rank)
 
 
 def test_eora_cholesky_fast_path_falls_back_for_non_spd_covariance():
