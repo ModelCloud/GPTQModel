@@ -45,6 +45,11 @@ def test_eora_cholesky_fast_path_preserves_weighted_objective():
         use_cholesky=True,
     )
 
+    assert A_eigh.is_contiguous()
+    assert B_eigh.is_contiguous()
+    assert A_chol.is_contiguous()
+    assert B_chol.is_contiguous()
+
     err_eigh = _weighted_error(delta, cov, A_eigh, B_eigh)
     err_chol = _weighted_error(delta, cov, A_chol, B_chol)
     torch.testing.assert_close(err_chol, err_eigh, rtol=1e-5, atol=1e-5)
@@ -85,4 +90,6 @@ def test_eora_cholesky_fast_path_falls_back_for_non_spd_covariance():
         use_cholesky=True,
     )
 
+    assert A_chol.is_contiguous()
+    assert B_chol.is_contiguous()
     torch.testing.assert_close(B_chol @ A_chol, B_eigh @ A_eigh, rtol=1e-5, atol=1e-5)

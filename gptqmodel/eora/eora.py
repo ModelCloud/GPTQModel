@@ -122,7 +122,7 @@ def _eora_compute_lora_eigh(
     del sqrtEigenvalues, scaling_diag_matrix, scaling_matrix_inv, delta_scale
     del truc_s, truc_u, truc_v, truc_sigma, sqrtS
 
-    return A, B
+    return A.contiguous(), B.contiguous()
 
 
 def _eora_compute_lora_cholesky(
@@ -166,7 +166,7 @@ def _eora_compute_lora_cholesky(
     del U, S, V
     del scaling_diag_matrix, delta_scale, sqrt_s, truc_v
 
-    return A, B
+    return A.contiguous(), B.contiguous()
 
 
 def eora_compute_lora(
