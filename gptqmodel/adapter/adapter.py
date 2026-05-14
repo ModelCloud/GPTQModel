@@ -118,13 +118,21 @@ class Adapter():
 class Lora(Adapter):
     """LoRA adapter implementation backed by A/B projection matrices."""
 
-    def __init__(self, rank: int, path: str = None, lora_A: torch.Tensor = None, lora_B: torch.Tensor = None):
+    def __init__(
+        self,
+        rank: int,
+        path: str = None,
+        lora_A: torch.Tensor = None,
+        lora_B: torch.Tensor = None,
+        eora_cholesky: bool = False,
+    ):
         """Initializes the adapter with optional preloaded LoRA matrices."""
 
         super().__init__(rank, path)
 
         self.lora_A = lora_A
         self.lora_B = lora_B
+        self.eora_cholesky = bool(eora_cholesky)
 
     @classmethod
     def name(cls) -> str:
@@ -282,11 +290,14 @@ class Lora(Adapter):
     def to_dict(self):
         """Serializes the minimal adapter descriptor used by GPT-QModel."""
 
-        return {
+        payload = {
             "name": self.name(),
             "path": self.path,
             "rank": self.rank
         }
+        if self.eora_cholesky:
+            payload["eora_cholesky"] = True
+        return payload
 
 ADAPTER_MAPPING = {Lora.name(): Lora}
 

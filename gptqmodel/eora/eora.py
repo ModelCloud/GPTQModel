@@ -18,11 +18,14 @@ from typing import Sequence, Tuple
 import torch
 from torch import Tensor
 
+from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.rocm import IS_ROCM
 from ..utils.torch import TORCH_GTE_210
 
 log = setup_logger()
+
+_EORA_CHOLESKY_ENV = "GPTQMODEL_EORA_CHOLESKY"
 
 def eora_process_input(
         input: Tensor,
@@ -78,25 +81,14 @@ def merge_eora_segments(segments: Sequence[Tuple[torch.Tensor, float]]) -> torch
     assert result is not None
     return result
 
-def eora_compute_lora(
-        w_wq_delta: Tensor, # need the w (original weight) and wq (quantized qweight) delta in float32
+
+def _eora_compute_lora_eigh(
+        w_wq_delta: Tensor,
         name: str,
-        eigen_scaling_diag_matrix: torch.Tensor,
+        raw_scaling_diag_matrix: torch.Tensor,
         rank: int,
         dtype: torch.dtype,
-        device: torch.device,
 ) -> Tuple[Tensor, Tensor]:
-
-    assert w_wq_delta.dtype == torch.float32
-
-    # save this later for SVD
-    raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(device=device, dtype=torch.float64)
-
-    if IS_ROCM and not TORCH_GTE_210:
-        # hip cannot resolve linalg ops
-        original_backend = torch.backends.cuda.preferred_linalg_library()
-        torch.backends.cuda.preferred_linalg_library(backend="magma")
-
     L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
 
     if (L < 0).any():
@@ -126,10 +118,99 @@ def eora_compute_lora(
     B = torch.matmul(truc_u, sqrtS).to(dtype=dtype) # default to float16, check if we should save to float32
     A = torch.matmul(sqrtS, truc_v).to(dtype=dtype) # default to float16, check if we should save to float32
 
-
     del L, Q, U, S, V,
-    del w_wq_delta, raw_scaling_diag_matrix, sqrtEigenvalues, scaling_diag_matrix, scaling_matrix_inv, delta_scale
+    del sqrtEigenvalues, scaling_diag_matrix, scaling_matrix_inv, delta_scale
     del truc_s, truc_u, truc_v, truc_sigma, sqrtS
+
+    return A, B
+
+
+def _eora_compute_lora_cholesky(
+        w_wq_delta: Tensor,
+        name: str,
+        raw_scaling_diag_matrix: torch.Tensor,
+        rank: int,
+        dtype: torch.dtype,
+) -> Tuple[Tensor, Tensor] | None:
+    if not hasattr(torch.linalg, "cholesky_ex"):
+        log.warn.once("EoRA: Cholesky fast path requires torch.linalg.cholesky_ex; falling back to eigensolve.")
+        return None
+
+    scaling_diag_matrix, info = torch.linalg.cholesky_ex(raw_scaling_diag_matrix, check_errors=False)
+    info_value = int(info.item())
+    if info_value != 0:
+        log.warn.once(
+            f"EoRA: Cholesky fast path skipped for `{name}` because the covariance matrix is not positive definite "
+            f"(cholesky_ex info={info_value}); falling back to eigensolve."
+        )
+        return None
+
+    scaling_diag_matrix = scaling_diag_matrix.to(dtype=torch.float32)
+    delta_scale = torch.matmul(w_wq_delta, scaling_diag_matrix)
+
+    U, S, V = torch.linalg.svd(delta_scale, full_matrices=False)
+    lowrank_r = rank
+    sqrt_s = torch.sqrt(S[:lowrank_r])
+    B = (U[:, :lowrank_r] * sqrt_s.unsqueeze(0)).to(dtype=dtype)
+
+    # Equivalent to V[:rank, :] @ inv(scaling_diag_matrix), without materializing
+    # the dense inverse. `left=False` solves X @ scaling_diag_matrix = V[:rank, :].
+    truc_v = torch.linalg.solve_triangular(
+        scaling_diag_matrix,
+        V[:lowrank_r, :],
+        upper=False,
+        left=False,
+    )
+    A = (sqrt_s.unsqueeze(1) * truc_v).to(dtype=dtype)
+
+    del U, S, V
+    del scaling_diag_matrix, delta_scale, sqrt_s, truc_v
+
+    return A, B
+
+
+def eora_compute_lora(
+        w_wq_delta: Tensor, # need the w (original weight) and wq (quantized qweight) delta in float32
+        name: str,
+        eigen_scaling_diag_matrix: torch.Tensor,
+        rank: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        use_cholesky: bool = False,
+) -> Tuple[Tensor, Tensor]:
+
+    assert w_wq_delta.dtype == torch.float32
+
+    # save this later for SVD
+    raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(device=device, dtype=torch.float64)
+
+    if IS_ROCM and not TORCH_GTE_210:
+        # hip cannot resolve linalg ops
+        original_backend = torch.backends.cuda.preferred_linalg_library()
+        torch.backends.cuda.preferred_linalg_library(backend="magma")
+
+    use_cholesky = bool(use_cholesky or env_flag(_EORA_CHOLESKY_ENV, default=False))
+    result = None
+    if use_cholesky and not (IS_ROCM and not TORCH_GTE_210):
+        result = _eora_compute_lora_cholesky(
+            w_wq_delta=w_wq_delta,
+            name=name,
+            raw_scaling_diag_matrix=raw_scaling_diag_matrix,
+            rank=rank,
+            dtype=dtype,
+        )
+    if result is None:
+        result = _eora_compute_lora_eigh(
+            w_wq_delta=w_wq_delta,
+            name=name,
+            raw_scaling_diag_matrix=raw_scaling_diag_matrix,
+            rank=rank,
+            dtype=dtype,
+        )
+
+    A, B = result
+
+    del w_wq_delta, raw_scaling_diag_matrix
 
     # revert linalg backend
     if IS_ROCM and not TORCH_GTE_210:

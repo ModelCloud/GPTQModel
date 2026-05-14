@@ -280,6 +280,7 @@ class EoraProcessor(LoopProcessor):
             rank=module.adapter_cfg.rank,
             dtype=module.module_dtype,
             device=module.weight.data.device,
+            use_cholesky=module.adapter_cfg.eora_cholesky,
         )
 
         del eigen_scaling_diag_matrix
