@@ -695,6 +695,9 @@ def _cannoe_weight_quant_matmul(
 class _CannoePlanMixin:
     _cann_plan_cache: dict
 
+    def _cannoe_update_plain_native_binding(self) -> None:
+        return None
+
     def _normalize_cannoe_prepack_tile_n(self, tile_n: int) -> int:
         if self.out_features % self.pack_factor != 0:
             return super()._native_prepack_tile_n()
@@ -1433,7 +1436,7 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
     SUPPORTS_PLATFORM = AwqKomodoLinear.SUPPORTS_PLATFORM
     SUPPORTS_PACK_DTYPES = AwqKomodoLinear.SUPPORTS_PACK_DTYPES
     SUPPORTS_ADAPTERS = AwqKomodoLinear.SUPPORTS_ADAPTERS
-    SUPPORTS_DTYPES = AwqKomodoLinear.SUPPORTS_DTYPES
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
     REQUIRES_FORMAT_V2 = AwqKomodoLinear.REQUIRES_FORMAT_V2
     QUANT_TYPE = "awq_cannoe"
 
@@ -1448,10 +1451,108 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
         self._cann_native_hot_plan = None
         self._last_cann_plan: CannoeTilingPlan | None = None
         self._last_cann_path: str | None = None
+        self._cannoe_native_tuning_requested = _cannoe_native_tuning_requested()
+        self._cannoe_plain_native_passthrough = not self._cannoe_native_tuning_requested
+        self._cannoe_plain_native_bf16_plan_key = None
+        self._cannoe_plain_native_bf16_plan = None
+        self._cannoe_plain_native_matmul_op = None
+
+    def _cannoe_update_plain_native_binding(self) -> None:
+        self.__dict__.pop("forward", None)
+
+    def _awq_bf16_direct_candidate(self, *, rows: int) -> bool:
+        raw = _cannoe_env(_CANNOE_BF16_NATIVE_ENV)
+        if raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}:
+            return False
+        if raw is not None and raw.strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+
+        return rows <= 16 and self.in_features <= 8192 and self.out_features <= 8192
+
+    def _awq_bf16_native_plan(self, *, device: torch.device):
+        key = self._native_key(device=device, dtype=torch.bfloat16)
+        if self._cannoe_plain_native_bf16_plan_key == key:
+            return self._cannoe_plain_native_bf16_plan
+
+        packed_weight, scales, offsets, native_group_size, input_perm = self._native_plan(
+            device=device,
+            dtype=torch.float16,
+        )
+        plan = (
+            packed_weight,
+            scales.to(dtype=torch.bfloat16).contiguous(),
+            offsets.to(dtype=torch.bfloat16).contiguous(),
+            native_group_size,
+            input_perm,
+        )
+        self._cannoe_plain_native_bf16_plan_key = key
+        self._cannoe_plain_native_bf16_plan = plan
+        return plan
+
+    def _awq_native_matmul(self):
+        matmul_op = self._cannoe_plain_native_matmul_op
+        if matmul_op is None:
+            matmul_op = _npu_weight_quant_op()
+            self._cannoe_plain_native_matmul_op = matmul_op
+        return matmul_op
+
+    def _native_bf16_direct_forward(self, x: torch.Tensor):
+        original_shape = x.shape[:-1] + (self.out_features,)
+        x_flat = x.reshape(-1, x.shape[-1])
+        if not x_flat.is_contiguous():
+            x_flat = x_flat.contiguous()
+
+        packed_weight, scales, offsets, native_group_size, _ = self._awq_bf16_native_plan(device=x_flat.device)
+        fuse_bias = self.bias is not None and _fuse_bias_enabled() and native_group_size == 128
+        bias = self._cannoe_bias(device=x_flat.device, dtype=torch.float32) if fuse_bias else None
+        output = self._awq_native_matmul()(
+            x_flat,
+            packed_weight,
+            scales,
+            offsets,
+            None,
+            None,
+            bias if fuse_bias else None,
+            native_group_size,
+        )
+
+        if self.bias is not None and not fuse_bias:
+            bias = self._cannoe_bias(device=output.device, dtype=output.dtype)
+            output = output + bias
+
+        if self.adapter:
+            output = self.adapter.apply(x=x_flat, out=output)
+
+        self._last_cann_path = "plain_native_bf16_direct"
+        self._last_cann_plan = None
+        self._maybe_schedule_lookahead(torch.float16)
+        return output.reshape(original_shape)
+
+    def _awq_plain_native_fp16_forward_checked(self, x: torch.Tensor):
+        if x.dtype == torch.float16:
+            return AwqKomodoLinear._native_forward(self, x)
+        return self._native_forward(x)
+
+    def forward(self, x: torch.Tensor):
+        _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
+        compute_dtype = torch.float16
+        if self._can_use_native_int4(x, compute_dtype):
+            return self._native_forward(x)
+        if x.dtype == torch.bfloat16:
+            raise RuntimeError("AwqCannoeLinear bfloat16 inference requires the native int4 NPU path.")
+        return AwqKomodoLinear.forward(self, x)
 
     def _native_forward(self, x: torch.Tensor):
-        _assert_fp16_inference_input(x, self.__class__.__name__)
+        _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)
         input_dtype = x.dtype
+        if input_dtype == torch.float16 and getattr(self, "_cannoe_plain_native_passthrough", False):
+            self._last_cann_path = "plain_native_forward"
+            self._last_cann_plan = None
+            self.forward = self._awq_plain_native_fp16_forward_checked
+            return AwqKomodoLinear._native_forward(self, x)
+        if input_dtype == torch.bfloat16 and self._awq_bf16_direct_candidate(rows=x.reshape(-1, x.shape[-1]).shape[0]):
+            return self._native_bf16_direct_forward(x)
+
         compute_dtype = torch.float16
         original_shape = x.shape[:-1] + (self.out_features,)
         device = x.device

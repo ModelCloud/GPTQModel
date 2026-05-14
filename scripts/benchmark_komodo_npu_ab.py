@@ -321,7 +321,8 @@ def _make_awq_pair(
         module.post_init()
         module.eval()
 
-    candidate.enable_weight_cache(cache_dequantized)
+    if hasattr(candidate, "enable_weight_cache"):
+        candidate.enable_weight_cache(cache_dequantized)
     return baseline.to(device=device, dtype=dtype), candidate.to(device=device, dtype=dtype)
 
 
