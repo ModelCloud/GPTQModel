@@ -1218,18 +1218,24 @@ class BaseQModel(nn.Module):
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
 
         from ..adapter.adapter import Lora
+        from ..looper.analysis_processor import AnalysisProcessor
         from ..looper.dequantize_processor import DequantizeProcessor
         from ..looper.eora_processor import EoraProcessor
         from ..looper.module_looper import ModuleLooper
         from ..looper.module_preprocessor import ModulePreProcessor
+        from ..quantization.config import AnalysisConfig
 
         self.quantize_config.adapter = adapter
 
         assert isinstance(self.quantize_config.adapter, Lora)
 
         # init processor with EoRA processor
+        configured_preprocessors = getattr(self.quantize_config, "preprocessors", None) or []
+        analysis_enabled = any(isinstance(item, AnalysisConfig) for item in configured_preprocessors)
+        planning_preprocessors = [item for item in configured_preprocessors if not isinstance(item, AnalysisConfig)]
+
         processors = []
-        if getattr(self.quantize_config, "preprocessors", None):
+        if planning_preprocessors:
             processors.append(
                 ModulePreProcessor(
                     tokenizer=self.tokenizer,
@@ -1238,6 +1244,19 @@ class BaseQModel(nn.Module):
                     prepare_dataset_func=self.prepare_dataset,
                     calibration_concat_size=calibration_dataset_concat_size,
                     calibration_sort=calibration_dataset_sort,
+                    calibration_concat_separator=calibration_concat_separator,
+                    batch_size=batch_size,
+                ),
+            )
+        if analysis_enabled:
+            processors.append(
+                AnalysisProcessor(
+                    tokenizer=self.tokenizer,
+                    qcfg=self.quantize_config,
+                    calibration=calibration_dataset,
+                    prepare_dataset_func=self.prepare_dataset,
+                    calibration_concat_size=calibration_dataset_concat_size,
+                    calibration_sort=calibration_sort,
                     calibration_concat_separator=calibration_concat_separator,
                     batch_size=batch_size,
                 ),
