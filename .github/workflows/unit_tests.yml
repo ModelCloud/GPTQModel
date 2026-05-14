@@ -67,9 +67,8 @@ env:
   CUDA_VERSION: 130
   UV_TORCH_BACKEND: cu130
   TORCH_VERSION: 2.11.0
-  # vllm doesn't support 3.14
-  PYTHON_VERSION: 3.13
-  UV_PYTHON: 3.13
+  PYTHON_VERSION: 3.14t
+  UV_PYTHON: 3.14t
   # PYTHON_GIL: 0 // test libs don't support yet
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py,models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   MODEL_TEST_MODE: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
