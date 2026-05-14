@@ -1503,7 +1503,14 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
             x_flat = x_flat.contiguous()
 
         packed_weight, scales, offsets, native_group_size, _ = self._awq_bf16_native_plan(device=x_flat.device)
-        fuse_bias = self.bias is not None and _fuse_bias_enabled() and native_group_size == 128
+        fuse_bias = (
+            self.bias is not None
+            and _fuse_bias_enabled()
+            and (
+                native_group_size == 128
+                or (native_group_size == 32 and self.in_features >= 4096 and self.out_features <= 2048)
+            )
+        )
         bias = self._cannoe_bias(device=x_flat.device, dtype=torch.float32) if fuse_bias else None
         output = self._awq_native_matmul()(
             x_flat,
