@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+#
+# Ascend 910B Cannoe reference, physical NPU7, 2026-05-14:
+# ASCEND_RT_VISIBLE_DEVICES=7 python scripts/benchmark_qwen3_27b_gptq_fp16.py \
+#   --path cannoe --device npu:0 --tokens 1 --warmup 10 --iters 50
+# Steady-state fp16 GPTQ group-32 mean_ms:
+# q=0.0775, k=0.0655, v=0.0654, gate=0.2477, up=0.2440, down=0.3002,
+# total=1.0001. First-run total=258.2754ms, dominated by native packing.
 
 from __future__ import annotations
 
