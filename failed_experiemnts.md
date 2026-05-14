@@ -209,3 +209,27 @@ two-device win.
 Re-test only if the packing implementation can specialize by shape/device or a
 larger repeated run shows the NPU1 result was measurement noise.
 
+## 2026-05-14: GPTQ Group16 int32 `group_list`
+
+Status: invalid CANN API input.
+
+Tested change: change the cached group16 grouped-matmul `group_list` tensor
+from `torch.int64` to `torch.int32`.
+
+Commands:
+
+- Physical NPU0: `ASCEND_RT_VISIBLE_DEVICES=0 ... python scripts/benchmark_komodo_npu_ab.py --device 0 --cases gptq_group_sizes --dtype fp16 --warmup 8 --iters 80 --komodo-native-int4 --komodo-drop-source-weights --cannoe --json-output /tmp/cannoe_gptq_group_list_int32_phys0.json`
+- Physical NPU1: `ASCEND_RT_VISIBLE_DEVICES=1 ... python scripts/benchmark_komodo_npu_ab.py --device 0 --cases gptq_group_sizes --dtype fp16 --warmup 8 --iters 80 --komodo-native-int4 --komodo-drop-source-weights --cannoe --json-output /tmp/cannoe_gptq_group_list_int32_phys1.json`
+
+| Device | Result | Error |
+| --- | --- | --- |
+| physical NPU0 | Failed before timing JSON | `aclnnGroupedMatmulV5 failed, error code 161002`; `Only int64 is supported for groupList` |
+| physical NPU1 | Failed before timing JSON | `aclnnGroupedMatmulV5 failed, error code 161002`; `Only int64 is supported for groupList` |
+
+Reason: despite some grouped-matmul docs implying int32 group-list support in
+other modes, the CANN path used here is split-M, single-x, single-weight,
+single-y W4A16 grouped matmul, and it requires int64 `group_list`.
+
+Re-test only if we switch to a different grouped matmul API or CANN release
+notes explicitly state int32 `group_list` support for this exact grouped W4A16
+mode.
