@@ -72,8 +72,10 @@ def finalize_for_save(tensor: torch.Tensor, target_dtype: torch.dtype) -> torch.
         tensor = tensor.to(target_dtype)
 
     tensor_cpu = tensor.to("cpu")
-    if tensor_cpu.ndim >= 4:
+    if tensor_cpu.ndim == 4:
         tensor_cpu = tensor_cpu.contiguous(memory_format=torch.channels_last)
+    else:
+        tensor_cpu = tensor_cpu.contiguous()
     return tensor_cpu
 
 
@@ -312,6 +314,59 @@ def resolve_block_size(config: dict) -> Optional[Tuple[int, int]]:
     return None
 
 
+def resolve_ignored_layers(config: dict) -> frozenset[str]:
+    # Quantization configs name modules without tensor suffixes.
+    quant_cfg = config.get("quantization_config", {}) or {}
+    ignored_layers = quant_cfg.get("ignored_layers") or ()
+    if not isinstance(ignored_layers, (list, tuple, set, frozenset)):
+        return frozenset()
+    return frozenset(layer for layer in ignored_layers if isinstance(layer, str) and layer)
+
+
+def _tensor_key_matches_ignored_layer(key: str, ignored_layers: Iterable[str]) -> bool:
+    return any(key == layer or key.startswith(f"{layer}.") for layer in ignored_layers)
+
+
+def _is_quant_auxiliary_tensor_key(key: str) -> bool:
+    # Auxiliary quantization tensors are not useful once the paired weight is kept or dequantized.
+    return key.endswith(
+        (
+            "_scale_inv",
+            ".scale",
+            ".weight_scale",
+            ".weight_absmax",
+            ".weight_quant_map",
+            ".weight_nested_absmax",
+            ".weight_nested_quant_map",
+            ".weight_quant_state",
+            ".weight_scb",
+            ".qweight",
+            ".qzeros",
+            ".scales",
+            ".g_idx",
+            ".weight_packed",
+            ".weight_zero_point",
+            ".weight_g_idx",
+            ".weight_shape",
+        )
+    )
+
+
+def _handle_ignored_tensor(
+    key: str,
+    tensor: torch.Tensor,
+    target_dtype: torch.dtype,
+    ignored_layers: Iterable[str],
+) -> Optional[torch.Tensor]:
+    if not _tensor_key_matches_ignored_layer(key, ignored_layers):
+        return None
+    if _is_quant_auxiliary_tensor_key(key):
+        LOG.debug("Dropping auxiliary quantization tensor '%s' for ignored layer", key)
+        return None
+    # Ignored layers are already stored as dense tensors in mixed-precision checkpoints.
+    return finalize_for_save(tensor, target_dtype)
+
+
 def _expected_block_grid_shape(
     weight_shape: Tuple[int, int],
     block_shape: Tuple[int, int],
@@ -322,6 +377,20 @@ def _expected_block_grid_shape(
         (rows + block_rows - 1) // block_rows,
         (cols + block_cols - 1) // block_cols,
     )
+
+
+def _block_scale_grid_covers_weight(
+    scale_shape: Optional[Tuple[int, ...]],
+    weight_shape: Tuple[int, int],
+    block_shape: Tuple[int, int],
+) -> bool:
+    # Accept scale grids padded beyond the real tensor shape.
+    if scale_shape is None or len(scale_shape) != 2:
+        return False
+    rows, cols = weight_shape
+    block_rows, block_cols = block_shape
+    blocks_r, blocks_c = scale_shape
+    return blocks_r * block_rows >= rows and blocks_c * block_cols >= cols
 
 
 def _expand_padded_block_scale(
@@ -344,11 +413,14 @@ def _expand_padded_block_scale(
 
     block_rows, block_cols = block_shape
     expected_grid = _expected_block_grid_shape(weight_shape, block_shape)
-    if (blocks_r, blocks_c) != expected_grid:
+    if (blocks_r, blocks_c) != expected_grid and not _block_scale_grid_covers_weight(
+        (blocks_r, blocks_c),
+        weight_shape,
+        block_shape,
+    ):
         return scale_tensor
 
-    # Some checkpoints store one scale per padded block and rely on the final
-    # block being cropped back to the real tensor shape during dequantization.
+    # Expand block scales to elementwise scales, then crop padded edge blocks.
     expanded = scale_tensor.repeat_interleave(block_rows, dim=0)
     expanded = expanded.repeat_interleave(block_cols, dim=1)
     return expanded[:rows, :cols].contiguous()
@@ -729,11 +801,19 @@ def convert_fp8_shard(
     block_shape: Optional[Tuple[int, int]],
     scale_semantics: str = "heuristic",
     tensor_lookup: Optional[_ShardTensorLookup] = None,
+    ignored_layers: Iterable[str] = (),
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     reader_keys = set(reader.keys())
     for key in reader.keys():
         tensor = reader.get_tensor(key)
+        ignored_tensor = _handle_ignored_tensor(key, tensor, target_dtype, ignored_layers)
+        if ignored_tensor is not None:
+            tensors[key] = ignored_tensor
+            continue
+        if _tensor_key_matches_ignored_layer(key, ignored_layers):
+            continue
+
         if key.endswith(".weight") and tensor.dtype in _FLOAT8_DTYPES:
             scale_key = key + "_scale_inv"
             scale_tensor = None
@@ -785,7 +865,11 @@ def convert_fp8_shard(
             partial_block_grid = _expected_block_grid_shape((rows, cols), effective_block)
             block_source = scale_inv if scale_inv is not None else scale_tensor
             block_source_shape = tuple(block_source.shape) if isinstance(block_source, torch.Tensor) else None
-            allows_partial_edge_blocks = block_source_shape == partial_block_grid
+            allows_partial_edge_blocks = block_source_shape == partial_block_grid or _block_scale_grid_covers_weight(
+                block_source_shape,
+                (rows, cols),
+                effective_block,
+            )
             if (rows % block_rows != 0 or cols % block_cols != 0) and not allows_partial_edge_blocks:
                 raise ValueError(
                     f"Tensor {key} shape {tensor.shape} incompatible with block size {effective_block}"
@@ -855,10 +939,22 @@ def convert_fp8_shard(
     return tensors
 
 
-def convert_nvfp4_shard(reader, target_dtype: torch.dtype) -> Dict[str, torch.Tensor]:
+def convert_nvfp4_shard(
+    reader,
+    target_dtype: torch.dtype,
+    *,
+    ignored_layers: Iterable[str] = (),
+) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     for key in reader.keys():
         tensor = reader.get_tensor(key)
+        ignored_tensor = _handle_ignored_tensor(key, tensor, target_dtype, ignored_layers)
+        if ignored_tensor is not None:
+            tensors[key] = ignored_tensor
+            continue
+        if _tensor_key_matches_ignored_layer(key, ignored_layers):
+            continue
+
         if key.endswith(".weight") and tensor.dtype in _NVFP4_STORAGE_DTYPES:
             scale_key = key + "_scale"
             if scale_key not in reader.keys():
@@ -885,6 +981,7 @@ def convert_bitsandbytes_shard(
     target_dtype: torch.dtype,
     *,
     quant_cfg: dict,
+    ignored_layers: Iterable[str] = (),
 ) -> Dict[str, torch.Tensor]:
     bnb = _get_bitsandbytes_dependencies()
 
@@ -910,6 +1007,12 @@ def convert_bitsandbytes_shard(
 
     for key in keys:
         tensor = reader.get_tensor(key)
+        ignored_tensor = _handle_ignored_tensor(key, tensor, target_dtype, ignored_layers)
+        if ignored_tensor is not None:
+            tensors[key] = ignored_tensor
+            continue
+        if _tensor_key_matches_ignored_layer(key, ignored_layers):
+            continue
 
         if key.endswith(".weight") and (key[:-len(".weight")] + ".weight_quant_state") in key_set:
             prefix = key[:-len(".weight")]
@@ -948,12 +1051,25 @@ def convert_bitsandbytes_shard(
     return tensors
 
 
-def convert_awq_file(path: Path, target_dtype: torch.dtype, device: str) -> Dict[str, torch.Tensor]:
+def convert_awq_file(
+    path: Path,
+    target_dtype: torch.dtype,
+    device: str,
+    *,
+    ignored_layers: Iterable[str] = (),
+) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
     with safe_open(path, framework="pt", device=device) as reader:
         for key in reader.keys():
             tensor = reader.get_tensor(key)
+            ignored_tensor = _handle_ignored_tensor(key, tensor, target_dtype, ignored_layers)
+            if ignored_tensor is not None:
+                tensors[key] = ignored_tensor
+                continue
+            if _tensor_key_matches_ignored_layer(key, ignored_layers):
+                continue
+
             if key.endswith(".qweight"):
                 prefix = key[:-len(".qweight")]
                 module_buffers[prefix]["qweight"] = tensor
@@ -999,12 +1115,26 @@ def convert_awq_file(path: Path, target_dtype: torch.dtype, device: str) -> Dict
     return tensors
 
 
-def convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, device: str) -> Dict[str, torch.Tensor]:
+def convert_gptq_file(
+    path: Path,
+    target_dtype: torch.dtype,
+    config: dict,
+    device: str,
+    *,
+    ignored_layers: Iterable[str] = (),
+) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
     with safe_open(path, framework="pt", device=device) as reader:
         for key in reader.keys():
             tensor = reader.get_tensor(key)
+            ignored_tensor = _handle_ignored_tensor(key, tensor, target_dtype, ignored_layers)
+            if ignored_tensor is not None:
+                tensors[key] = ignored_tensor
+                continue
+            if _tensor_key_matches_ignored_layer(key, ignored_layers):
+                continue
+
             if key.endswith(".qweight"):
                 prefix = key[:-len(".qweight")]
                 module_buffers[prefix]["qweight"] = tensor
@@ -1066,6 +1196,7 @@ def convert_compressed_pack_file(
     device: str,
     module_to_scheme: Dict[str, "QuantizationScheme"],
     compressor: "BaseCompressor",
+    ignored_layers: Iterable[str] = (),
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
@@ -1073,6 +1204,13 @@ def convert_compressed_pack_file(
     with safe_open(path, framework="pt", device=device) as reader:
         for key in reader.keys():
             tensor = reader.get_tensor(key)
+            ignored_tensor = _handle_ignored_tensor(key, tensor, target_dtype, ignored_layers)
+            if ignored_tensor is not None:
+                tensors[key] = ignored_tensor
+                continue
+            if _tensor_key_matches_ignored_layer(key, ignored_layers):
+                continue
+
             if key.endswith(".weight_packed"):
                 prefix = key[: -len(".weight_packed")]
                 module_buffers[prefix]["weight_packed"] = tensor
@@ -1166,6 +1304,7 @@ def dequantize_model(
         torch.cuda.set_device(torch.device(device_str))
     open_device = device_str or "cpu"
 
+    ignored_layers = resolve_ignored_layers(config)
     block_shape = resolve_block_size(config) if fmt == "fp8" else None
     fp8_scale_semantics = str(quant_cfg.get("weight_scale_semantics") or "heuristic").strip().lower()
 
@@ -1224,6 +1363,7 @@ def dequantize_model(
                         block_shape=block_shape,
                         scale_semantics=fp8_scale_semantics,
                         tensor_lookup=tensor_lookup,
+                        ignored_layers=ignored_layers,
                     )
             elif fmt == "bitsandbytes":
                 with safe_open(path, framework="pt", device=open_device) as reader:
@@ -1231,14 +1371,30 @@ def dequantize_model(
                         reader,
                         target_dtype,
                         quant_cfg=quant_cfg,
+                        ignored_layers=ignored_layers,
                     )
             elif fmt == "nvfp4":
                 with safe_open(path, framework="pt", device=open_device) as reader:
-                    tensors = convert_nvfp4_shard(reader, target_dtype)
+                    tensors = convert_nvfp4_shard(
+                        reader,
+                        target_dtype,
+                        ignored_layers=ignored_layers,
+                    )
             elif fmt == "awq":
-                tensors = convert_awq_file(path, target_dtype, open_device)
+                tensors = convert_awq_file(
+                    path,
+                    target_dtype,
+                    open_device,
+                    ignored_layers=ignored_layers,
+                )
             elif fmt == "gptq":
-                tensors = convert_gptq_file(path, target_dtype, quant_cfg, open_device)
+                tensors = convert_gptq_file(
+                    path,
+                    target_dtype,
+                    quant_cfg,
+                    open_device,
+                    ignored_layers=ignored_layers,
+                )
             elif fmt == "compressed-pack":
                 if compressed_compressor is None:
                     raise RuntimeError("Compressed-tensors compressor was not initialized")
@@ -1248,6 +1404,7 @@ def dequantize_model(
                     device=open_device,
                     module_to_scheme=compressed_module_to_scheme,
                     compressor=compressed_compressor,
+                    ignored_layers=ignored_layers,
                 )
             else:
                 raise ValueError(f"Unsupported format {fmt}")
