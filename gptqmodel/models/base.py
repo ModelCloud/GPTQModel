@@ -1301,6 +1301,8 @@ class BaseQModel(nn.Module):
         if not callable(embedder):
             return input_ids
 
+        # Some multimodal wrappers expose get_input_embeddings but intentionally
+        # raise NotImplementedError at runtime; skip sanitization in that case.
         try:
             embedding = embedder()
         except NotImplementedError:
