@@ -1467,7 +1467,7 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
         if raw is not None and raw.strip().lower() in {"1", "true", "yes", "on"}:
             return True
 
-        return rows <= 16 and self.in_features <= 8192 and self.out_features <= 8192
+        return rows <= 16
 
     def _awq_bf16_native_plan(self, *, device: torch.device):
         key = self._native_key(device=device, dtype=torch.bfloat16)
