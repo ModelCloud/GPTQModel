@@ -998,6 +998,8 @@ class BaseQModel(nn.Module):
         from ..looper.eora_processor import EoraProcessor
         from ..looper.module_looper import ModuleLooper
         from ..looper.module_preprocessor import ModulePreProcessor
+        from ..looper.analysis_processor import AnalysisProcessor
+        from ..quantization.config import AnalysisConfig
 
         needs_lora = isinstance(self.quantize_config.adapter, Lora)
 
@@ -1013,9 +1015,15 @@ class BaseQModel(nn.Module):
             "calculate_w_wq_diff": needs_lora,
         }
 
+        configured_preprocessors = getattr(self.quantize_config, "preprocessors", None) or []
+        analysis_enabled = any(isinstance(item, AnalysisConfig) for item in configured_preprocessors)
+        planning_preprocessors = [item for item in configured_preprocessors if not isinstance(item, AnalysisConfig)]
+
         preprocessors = []
-        if getattr(self.quantize_config, "preprocessors", None):
+        if planning_preprocessors:
             preprocessors.append(ModulePreProcessor(**args))
+        if analysis_enabled:
+            preprocessors.append(AnalysisProcessor(**args))
 
         if self.quantize_config.method == METHOD.EXL3:
             from ..looper.exllamav3_processor import EXL3Processor

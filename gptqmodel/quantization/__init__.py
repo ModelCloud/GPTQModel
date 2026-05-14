@@ -11,6 +11,7 @@ from .config import (
                      METHOD_FIELD_CODE,
                      QUANT_CONFIG_FILENAME,
                      QUANT_METHOD_FIELD,
+                     AnalysisConfig,
                      AutoModuleDecoderConfig,
                      AWQConfig,
                      BaseComplexBits,

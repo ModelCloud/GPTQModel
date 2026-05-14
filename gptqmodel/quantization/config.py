@@ -186,6 +186,7 @@ class PreProcessorCode(str, Enum):
     SMOOTHER = "smoother"
     AUTO_MODULE_DECODER = "auto_module_decoder"
     TENSOR_PARALLEL_PADDER = "tensor_parallel_padder"
+    ANALYSIS = "analysis"
 
 
 _GGUF_BITS_ALIAS_INFO = {
@@ -1192,6 +1193,44 @@ class TensorParallelPadderConfig(BasePreProcessorConfig):
 
 
 @dataclass
+class AnalysisConfig(BasePreProcessorConfig):
+    """Configure an early module quantizability report for the active quant config."""
+
+    code: ClassVar[str] = PreProcessorCode.ANALYSIS.value
+    top_k: int = 32
+    emit_markdown: bool = True
+    emit_json: bool = True
+    bad_block_rel_rmse_threshold: float = 0.10
+
+    def __post_init__(self):
+        """Validate report shape and scoring thresholds."""
+
+        if not isinstance(self.top_k, int):
+            raise ValueError("AnalysisConfig: `top_k` must be an integer.")
+        if self.top_k <= 0:
+            raise ValueError("AnalysisConfig: `top_k` must be greater than 0.")
+        self.emit_markdown = bool(self.emit_markdown)
+        self.emit_json = bool(self.emit_json)
+        self.bad_block_rel_rmse_threshold = float(self.bad_block_rel_rmse_threshold)
+        if self.bad_block_rel_rmse_threshold <= 0:
+            raise ValueError("AnalysisConfig: `bad_block_rel_rmse_threshold` must be greater than 0.")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the analysis preprocessor config."""
+
+        payload = super().to_dict()
+        payload.update(
+            {
+                "top_k": self.top_k,
+                "emit_markdown": self.emit_markdown,
+                "emit_json": self.emit_json,
+                "bad_block_rel_rmse_threshold": self.bad_block_rel_rmse_threshold,
+            }
+        )
+        return payload
+
+
+@dataclass
 class HessianConfig:
     """Controls for chunked Hessian accumulation during GPTQ calibration."""
 
@@ -1657,6 +1696,8 @@ def _normalize_preprocessor_config(payload: Any) -> BasePreProcessorConfig:
             return AutoModuleDecoderConfig()
         if normalized == PreProcessorCode.TENSOR_PARALLEL_PADDER.value:
             return TensorParallelPadderConfig()
+        if normalized == PreProcessorCode.ANALYSIS.value:
+            return AnalysisConfig()
         return SmootherConfig(smooth=payload)
     if isinstance(payload, dict):
         code = str(payload.get("code", "")).strip().lower()
@@ -1667,6 +1708,13 @@ def _normalize_preprocessor_config(payload: Any) -> BasePreProcessorConfig:
             )
         if code == PreProcessorCode.TENSOR_PARALLEL_PADDER.value:
             return TensorParallelPadderConfig()
+        if code == PreProcessorCode.ANALYSIS.value:
+            return AnalysisConfig(
+                top_k=payload.get("top_k", 32),
+                emit_markdown=payload.get("emit_markdown", True),
+                emit_json=payload.get("emit_json", True),
+                bad_block_rel_rmse_threshold=payload.get("bad_block_rel_rmse_threshold", 0.10),
+            )
         if code and code != PreProcessorCode.SMOOTHER.value:
             raise ValueError(f"QuantizeConfig: unsupported preprocessor code `{code}`.")
         if "smooth" in payload:
@@ -3118,6 +3166,8 @@ class GPTQConfig(PreProcessorConfig):
             self.act_group_aware = False
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
+        super()._update_meta_payload(meta_payload)
+
         if self.gptaq is None:
             meta_payload["gptaq"] = None
         elif self.foem is None:

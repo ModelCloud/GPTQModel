@@ -1518,23 +1518,6 @@ class ModuleLooper():
         for processor in self.processors:
             processor.release_calibration_dataset()
 
-        if self.gptq_model.quantize_config.offload_to_disk:
-            log.info("Offloading base modules to disk...")
-            offload_to_disk(
-                model=self.gptq_model.model,
-                module=self.gptq_model.get_base_modules(model=self.gptq_model.model),
-                disk_path=self.gptq_model.quantize_config.offload_to_disk_path
-            )
-
-        for processor in self.processors:
-            # Pre-build ParoQuant's optional fused rotation extension before the
-            # first timed layer so layer 0 does not absorb a one-time JIT cost.
-            if isinstance(processor, ParoQuantProcessor):
-                processor.prewarm_runtime()
-
-        if region_timer is not None:
-            region_timer.flush()
-
         is_awq_quantize = any(isinstance(proc, (AWQProcessor, ParoQuantProcessor)) for proc in self.processors)
         # Capture-only layer groups are driven by processor execution config,
         # not by ad-hoc processor attributes.
@@ -1553,6 +1536,29 @@ class ModuleLooper():
             is_awq_quantize=is_awq_quantize,
             include_capture_only=requires_activation_capture,
         )
+
+        self._run_pre_quantize_analysis(
+            layers=layers,
+            layer_modules=layer_modules,
+            layers_prefix=layers_prefix,
+        )
+
+        if self.gptq_model.quantize_config.offload_to_disk:
+            log.info("Offloading base modules to disk...")
+            offload_to_disk(
+                model=self.gptq_model.model,
+                module=self.gptq_model.get_base_modules(model=self.gptq_model.model),
+                disk_path=self.gptq_model.quantize_config.offload_to_disk_path
+            )
+
+        for processor in self.processors:
+            # Pre-build ParoQuant's optional fused rotation extension before the
+            # first timed layer so layer 0 does not absorb a one-time JIT cost.
+            if isinstance(processor, ParoQuantProcessor):
+                processor.prewarm_runtime()
+
+        if region_timer is not None:
+            region_timer.flush()
 
         # true-sequential will replay the quantized activations after each subset has been quantized to be used for next subset quantization
         # this should always be true for gptq unless you want lower but misleading error_loss that is misleading and will lead to lower post-quantized model
@@ -1667,6 +1673,21 @@ class ModuleLooper():
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
         return total_log
+
+    def _run_pre_quantize_analysis(self, *, layers, layer_modules, layers_prefix):
+        """Run processors that provide a model-wide pre-quant analysis hook."""
+
+        for processor in self.processors:
+            analyze_model = getattr(processor, "analyze_model", None)
+            if not callable(analyze_model):
+                continue
+            analyze_model(
+                layers=layers,
+                layer_modules=layer_modules,
+                layers_prefix=layers_prefix,
+                quantize_config=self.gptq_model.quantize_config,
+                model=self.gptq_model.model,
+            )
 
     def hook_embeddings_module(self, module):
         if module and isinstance(module, torch.nn.Linear):
