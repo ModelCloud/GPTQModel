@@ -1256,7 +1256,7 @@ class BaseQModel(nn.Module):
                     calibration=calibration_dataset,
                     prepare_dataset_func=self.prepare_dataset,
                     calibration_concat_size=calibration_dataset_concat_size,
-                    calibration_sort=calibration_sort,
+                    calibration_sort=calibration_dataset_sort,
                     calibration_concat_separator=calibration_concat_separator,
                     batch_size=batch_size,
                 ),
