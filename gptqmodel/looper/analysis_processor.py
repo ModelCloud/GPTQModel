@@ -193,6 +193,14 @@ class AnalysisProcessor(LoopProcessor):
 
         rows, cols = weight.shape
         effective_group_size = cols if group_size <= 0 else min(group_size, cols)
+        if cols % effective_group_size == 0:
+            return self._group_quant_stats_divisible(
+                weight=weight,
+                bit_width=bit_width,
+                group_size=effective_group_size,
+                sym=sym,
+            )
+
         qmax = (2 ** (bit_width - 1) - 1) if sym else (2 ** bit_width - 1)
         qmin = -qmax if sym else 0
         eps = torch.finfo(torch.float32).eps
@@ -228,6 +236,89 @@ class AnalysisProcessor(LoopProcessor):
 
             block_sse = torch.sum(diff * diff, dim=1)
             block_signal = torch.sum(block * block, dim=1).clamp_min(eps)
+            block_rel_rmse = torch.sqrt(block_sse / block_signal)
+            total_bad_blocks += int((block_rel_rmse > self.config.bad_block_rel_rmse_threshold).sum().item())
+            total_blocks += int(block_rel_rmse.numel())
+
+        rel_rmse = math.sqrt(total_sse / max(total_signal, eps))
+        small_value_fraction = total_small / max(total_values, 1)
+        bad_block_fraction = total_bad_blocks / max(total_blocks, 1)
+        max_to_median_abs = max_abs / max(median_abs, eps)
+
+        return {
+            "shape": (int(rows), int(cols)),
+            "rel_rmse": float(rel_rmse),
+            "small_value_fraction": float(small_value_fraction),
+            "bad_block_fraction": float(bad_block_fraction),
+            "max_abs": float(max_abs),
+            "median_abs": float(median_abs),
+            "max_to_median_abs": float(max_to_median_abs),
+            "num_blocks": int(total_blocks),
+        }
+
+    def _group_quant_stats_divisible(
+        self,
+        *,
+        weight: torch.Tensor,
+        bit_width: int,
+        group_size: int,
+        sym: bool,
+    ) -> Dict[str, Any]:
+        """Vectorized grouped stats for the common no-tail group layout."""
+
+        rows, cols = weight.shape
+        qmax = (2 ** (bit_width - 1) - 1) if sym else (2 ** bit_width - 1)
+        qmin = -qmax if sym else 0
+        eps = torch.finfo(torch.float32).eps
+
+        total_values = int(weight.numel())
+        total_signal = float(torch.sum(weight * weight).item())
+        max_abs = float(torch.max(torch.abs(weight)).item()) if total_values else 0.0
+        abs_flat = torch.abs(weight).reshape(-1)
+        nonzero_abs = abs_flat[abs_flat > 0]
+        median_abs = float(torch.median(nonzero_abs).item()) if nonzero_abs.numel() else 0.0
+
+        if not total_values:
+            return {
+                "shape": (int(rows), int(cols)),
+                "rel_rmse": 0.0,
+                "small_value_fraction": 0.0,
+                "bad_block_fraction": 0.0,
+                "max_abs": 0.0,
+                "median_abs": 0.0,
+                "max_to_median_abs": 0.0,
+                "num_blocks": 0,
+            }
+
+        total_sse = 0.0
+        total_small = 0
+        total_bad_blocks = 0
+        total_blocks = 0
+        num_groups = cols // group_size
+        max_chunk_values = 8 * 1024 * 1024
+        row_chunk = max(1, min(rows, max_chunk_values // max(cols, 1)))
+
+        for row_start in range(0, rows, row_chunk):
+            chunk = weight[row_start : row_start + row_chunk]
+            grouped = chunk.reshape(chunk.shape[0], num_groups, group_size)
+            if sym:
+                scale = torch.amax(torch.abs(grouped), dim=2, keepdim=True).clamp_min(eps) / max(qmax, 1)
+                quantized = torch.round(grouped / scale).clamp(qmin, qmax)
+                dequantized = quantized * scale
+            else:
+                block_min = torch.amin(grouped, dim=2, keepdim=True)
+                block_max = torch.amax(grouped, dim=2, keepdim=True)
+                scale = (block_max - block_min).clamp_min(eps) / max(qmax, 1)
+                zero = torch.round(-block_min / scale).clamp(qmin, qmax)
+                quantized = torch.round(grouped / scale + zero).clamp(qmin, qmax)
+                dequantized = (quantized - zero) * scale
+
+            diff = grouped - dequantized
+            total_sse += float(torch.sum(diff * diff).item())
+            total_small += int((torch.abs(grouped) <= (0.5 * scale)).sum().item())
+
+            block_sse = torch.sum(diff * diff, dim=2)
+            block_signal = torch.sum(grouped * grouped, dim=2).clamp_min(eps)
             block_rel_rmse = torch.sqrt(block_sse / block_signal)
             total_bad_blocks += int((block_rel_rmse > self.config.bad_block_rel_rmse_threshold).sum().item())
             total_blocks += int(block_rel_rmse.numel())

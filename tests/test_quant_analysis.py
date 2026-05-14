@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from gptqmodel.looper.analysis_processor import AnalysisProcessor
@@ -106,3 +107,47 @@ def test_analysis_processor_respects_dynamic_quant_config():
     assert processor.records[0]["bits"] == 8
     assert processor.records[0]["group_size"] == -1
     assert processor.records[0]["sym"] is False
+
+
+def test_analysis_group_stats_fast_path_matches_loop_math():
+    qcfg = GPTQConfig(
+        bits=4,
+        group_size=4,
+        preprocessors=[AnalysisConfig(top_k=2, emit_markdown=False, emit_json=False)],
+    )
+    processor = AnalysisProcessor(qcfg=qcfg, tokenizer=None)
+    weight = torch.tensor(
+        [
+            [-0.20, -0.15, -0.10, -0.05, 0.05, 0.10, 0.15, 0.20],
+            [-0.18, -0.12, -0.08, -0.04, 0.04, 0.08, 0.12, 0.18],
+            [-0.16, -0.11, -0.06, -0.03, 0.03, 0.06, 0.11, 0.16],
+        ],
+        dtype=torch.float32,
+    )
+
+    fast = processor._group_quant_stats(weight=weight, bit_width=4, group_size=4, sym=True)
+
+    qmax = 7
+    eps = torch.finfo(torch.float32).eps
+    total_sse = 0.0
+    total_signal = float(torch.sum(weight * weight).item())
+    total_small = 0
+    total_bad_blocks = 0
+    total_blocks = 0
+    for start in range(0, weight.shape[1], 4):
+        block = weight[:, start : start + 4]
+        scale = torch.amax(torch.abs(block), dim=1, keepdim=True).clamp_min(eps) / qmax
+        dequantized = torch.round(block / scale).clamp(-qmax, qmax) * scale
+        diff = block - dequantized
+        total_sse += float(torch.sum(diff * diff).item())
+        total_small += int((torch.abs(block) <= (0.5 * scale)).sum().item())
+        block_sse = torch.sum(diff * diff, dim=1)
+        block_signal = torch.sum(block * block, dim=1).clamp_min(eps)
+        block_rel_rmse = torch.sqrt(block_sse / block_signal)
+        total_bad_blocks += int((block_rel_rmse > processor.config.bad_block_rel_rmse_threshold).sum().item())
+        total_blocks += int(block_rel_rmse.numel())
+
+    expected_rel_rmse = float((total_sse / total_signal) ** 0.5)
+    assert fast["rel_rmse"] == pytest.approx(expected_rel_rmse)
+    assert fast["small_value_fraction"] == total_small / weight.numel()
+    assert fast["bad_block_fraction"] == total_bad_blocks / total_blocks
