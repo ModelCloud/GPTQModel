@@ -803,7 +803,7 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         key = (torch.device(device), rows, group_count)
         cached = self._native_group16_group_list_cache.get(key)
         if cached is None:
-            cached = torch.full((group_count,), rows, dtype=torch.int64, device=device)
+            cached = torch.arange(1, group_count + 1, dtype=torch.int64, device=device).mul_(rows)
             self._native_group16_group_list_cache[key] = cached
         return cached
 
@@ -902,7 +902,7 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
                 group_list=group_list,
                 split_item=2,
                 group_type=0,
-                group_list_type=1,
+                group_list_type=0,
             )[0]
             out = out_groups.reshape(group_count, rows, self.out_features).sum(0).reshape(out_shape)
         elif rows == 1:

@@ -1112,7 +1112,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
                 group_list=group_list,
                 split_item=2,
                 group_type=0,
-                group_list_type=1,
+                group_list_type=0,
             )[0]
             out = out_groups.reshape(group_count, rows, self.out_features).sum(0).reshape(out_shape)
         elif rows == 1:
@@ -1327,7 +1327,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
                 group_list=group_list,
                 split_item=2,
                 group_type=0,
-                group_list_type=1,
+                group_list_type=0,
             )[0]
             out = out_groups.reshape(group_count, rows, self.out_features).sum(0).reshape(out_shape)
         elif rows == 1:
