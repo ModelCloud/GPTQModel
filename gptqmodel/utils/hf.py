@@ -3,19 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import inspect
 import json
+import numpy as np
 import os
 import sys
+import transformers
 import warnings
+from accelerate import init_empty_weights
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Optional
-
-import numpy as np
-import torch
-import transformers
-from accelerate import init_empty_weights
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -23,7 +19,10 @@ from transformers import (
     GenerationConfig,
     PreTrainedModel,
 )
+from typing import Any, Optional
 
+import inspect
+import torch
 from ..nn_modules.qlinear.gguf import (
     PRISM_Q1_0_G128_BLOCK_SIZE,
     PRISM_Q1_0_G128_NAME,
@@ -991,9 +990,6 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
     legacy_rope_scaling = getattr(config, "rope_scaling", None)
     rope_parameters = dict(legacy_rope_scaling) if isinstance(legacy_rope_scaling, dict) else dict(rope_parameters or {})
 
-    if not rope_parameters and getattr(config, "rope_theta", None) is None and getattr(config, "default_theta", None) is None:
-        return
-
     rope_parameters.setdefault("rope_type", rope_parameters.get("type", "default"))
     if rope_parameters.get("rope_theta") is None:
         rope_theta = getattr(config, "rope_theta", None)
@@ -1138,6 +1134,10 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # some config classes synchronize `rope_scaling` from `rope_parameters` and
     # can drop legacy keys like `rope_scaling["type"]`.
     _normalize_remote_code_config_compat(config)
+    # Some config classes can still nullify rope_parameters during the second
+    # remote-code field normalization pass. Ensure final config always carries
+    # valid rope_parameters for model classes that directly subscript it.
+    _normalize_rope_parameters_config_compat(config)
 
 
 def prepare_remote_code_compat(config: Any) -> None:
@@ -1213,7 +1213,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
                 encoder_cls.__init__ = encoder_init_compat
                 encoder_cls._gptqmodel_meta_dpr_patch = True
 
-        if config.model_type == "minicpmv" or config.model_type == "minicpmo":
+        if config.model_type in {"minicpmv", "minicpmv4_6", "minicpmo"}:
             vision_model_cls = getattr(
                 remote_module,
                 "SiglipVisionTransformer",

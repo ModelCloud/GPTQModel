@@ -24,6 +24,11 @@ class Qwen3_5QModel(LlamaQModel):
 
     rotary_embedding = "model.language_model.rotary_emb"
 
+    # Preserve auxiliary MTP/draft-head tensors when present.
+    # Qwen3_5_MoeQModel already does this; dense Qwen3.5/Qwen3.6 models
+    # can also ship mtp.* tensors in auxiliary safetensors files.
+    out_of_model_tensors = {"prefixes": ["mtp"]}
+
     module_tree = [
         "model",
         "language_model",

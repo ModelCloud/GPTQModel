@@ -129,7 +129,8 @@ from .definitions.mimo import MimoQModel  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCpm3QModel  # noqa: E402
 from .definitions.minicpm_o import MiniCPMOQModel  # noqa: E402
-from .definitions.minicpm_v import MiniCPMVQModel  # noqa: E402
+from .definitions.minicpmv import MiniCPMVQModel  # noqa: E402
+from .definitions.minicpmv_4_6 import MiniCPMV4_6QModel  # noqa: E402
 from .definitions.minimax_m2 import MiniMaxM2GPTQ  # noqa: E402
 from .definitions.mistral3 import Mistral3GPTQ
 from .definitions.mixtral import MixtralQModel  # noqa: E402
@@ -247,6 +248,7 @@ MODEL_MAP = {
     "minicpm3": MiniCpm3QModel,
     "minicpmo": MiniCPMOQModel,
     "minicpmv": MiniCPMVQModel,
+    "minicpmv4_6": MiniCPMV4_6QModel,
     "minimax": MiniMaxM2GPTQ,
     "minimax_m2": MiniMaxM2GPTQ,
     "qwen2_moe": Qwen2MoeQModel,
