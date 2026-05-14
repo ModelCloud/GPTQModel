@@ -11,7 +11,7 @@ urls=(
 )
 
 echo "===== remove ModelCloud git deps if installed ====="
-uv pip uninstall -y "${packages[@]}" || true
+uv pip uninstall "${packages[@]}" || true
 
 echo "===== install ModelCloud git deps ====="
 printf '  - %s\n' "${urls[@]}"
