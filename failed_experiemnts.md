@@ -233,3 +233,45 @@ single-y W4A16 grouped matmul, and it requires int64 `group_list`.
 Re-test only if we switch to a different grouped matmul API or CANN release
 notes explicitly state int32 `group_list` support for this exact grouped W4A16
 mode.
+
+## 2026-05-14: GPTQ Group16 `npu_grouped_matmul_finalize_routing`
+
+Status: invalid CANN API input for current W4A16 grouped layout.
+
+Tested change: replace group16 `npu_grouped_matmul(...)[0]` plus
+`reshape(...).sum(0)` with `npu_grouped_matmul_finalize_routing`, hoping CANN
+could do grouped matmul and row scatter/reduction internally.
+
+Probe shape:
+
+- `x`: `[512, 16]` FP16, representing 64 groups x 8 rows.
+- `weight`: `[64, 16, 128]` packed INT4.
+- `scale`: `[64, 1, 1024]`.
+- `offset`: `[64, 1, 1024]`.
+- `group_list`: `[64]` cumulative int64, `group_list_type=0`.
+- `row_index`: `[512]`, tested both int64 and int32.
+- `output_bs=8`.
+
+Commands:
+
+- Physical NPU0: `ASCEND_RT_VISIBLE_DEVICES=0 ... python - <<'PY'` inline probe using `BenchCase('gptq_gs16', 'gptq', 'fp16', 8, 1024, 1024, 16)`.
+- Physical NPU1: same probe with `ASCEND_RT_VISIBLE_DEVICES=1`.
+
+| Device | row_index dtype | Bias | Result |
+| --- | --- | --- | --- |
+| physical NPU0 | int64 | false | `aclnnGroupedMatmulFinalizeRoutingV3 failed`, error code `161001` |
+| physical NPU0 | int64 | true | `aclnnGroupedMatmulFinalizeRoutingV3 failed`, error code `161001` |
+| physical NPU0 | int32 | false | `aclnnGroupedMatmulFinalizeRoutingV3 failed`, error code `161001` |
+| physical NPU0 | int32 | true | `aclnnGroupedMatmulFinalizeRoutingV3 failed`, error code `161001` |
+| physical NPU1 | int64 | false | `aclnnGroupedMatmulFinalizeRoutingV3 failed`, error code `161001` |
+| physical NPU1 | int64 | true | `aclnnGroupedMatmulFinalizeRoutingV3 failed`, error code `161001` |
+| physical NPU1 | int32 | false | `aclnnGroupedMatmulFinalizeRoutingV3 failed`, error code `161001` |
+| physical NPU1 | int32 | true | `aclnnGroupedMatmulFinalizeRoutingV3 failed`, error code `161001` |
+
+Reason: the finalize-routing API exists in torch-npu/CANN 9, but this W4A16
+packed weight plus antiquant scale/offset layout is not accepted by
+`aclnnGroupedMatmulFinalizeRoutingV3`.
+
+Re-test only if CANN exposes W4A16 antiquant support for finalize-routing, or
+if we change group16 to a different packed format that the finalize-routing API
+explicitly supports.

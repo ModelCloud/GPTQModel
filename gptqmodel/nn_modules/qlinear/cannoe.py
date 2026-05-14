@@ -1525,7 +1525,7 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
 
         if self.bias is not None and not fuse_bias:
             bias = self._cannoe_bias(device=output.device, dtype=output.dtype)
-            output = output + bias
+            output.add_(bias)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)
