@@ -275,3 +275,32 @@ packed weight plus antiquant scale/offset layout is not accepted by
 Re-test only if CANN exposes W4A16 antiquant support for finalize-routing, or
 if we change group16 to a different packed format that the finalize-routing API
 explicitly supports.
+
+## 2026-05-14: GPTQ Qwen3 27B wide BF16 force-direct
+
+Status: failed stable speed gate; keep the moderate-feature guard for GPTQ
+BF16 direct.
+
+Tested change: force `GPTQMODEL_CANNOE_BF16_NATIVE=1` for all Qwen3 27B GPTQ
+BF16 projection shapes, including the wide `gate_proj`, `up_proj`, and
+`down_proj` cases that are intentionally blocked by the default
+`in_features/out_features <= 8192` guard.
+
+Commands:
+
+- Physical NPU0: `ASCEND_RT_VISIBLE_DEVICES=0 GPTQMODEL_CANNOE_BF16_NATIVE=1 ... python scripts/benchmark_komodo_npu_ab.py --device 0 --cases qwen3_6_27b_gptq --warmup 6 --iters 50 --komodo-native-int4 --komodo-drop-source-weights --cannoe --json-output /tmp/cannoe_qwen27b_gptq_forced_direct_phys0.json`
+- Physical NPU1: `ASCEND_RT_VISIBLE_DEVICES=1 GPTQMODEL_CANNOE_BF16_NATIVE=1 ... python scripts/benchmark_komodo_npu_ab.py --device 0 --cases qwen3_6_27b_gptq --warmup 6 --iters 50 --komodo-native-int4 --komodo-drop-source-weights --cannoe --json-output /tmp/cannoe_qwen27b_gptq_forced_direct_phys1.json`
+
+| Variant | Device | Total ms | max_abs | max_rel |
+| --- | --- | ---: | ---: | ---: |
+| Default guarded policy | physical NPU0 | 0.9684 | 0.5 | 85.8 |
+| Forced direct | physical NPU0 | 0.9670 | 0.5 | 0.09375 |
+| Default guarded policy | physical NPU1 | 0.9974 | 0.5 | 85.8 |
+| Forced direct | physical NPU1 | 1.0374 | 0.5 | 0.09375 |
+
+Reason: forced direct greatly improves relative drift on the wide GPTQ shapes,
+but the speed result is not a two-device win. Physical NPU0 is effectively tied,
+while physical NPU1 regresses by about 4%.
+
+Re-test only if a shape-specific policy is introduced for the wide projections,
+or if a larger repeated run shows the NPU1 regression was measurement noise.
