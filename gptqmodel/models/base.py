@@ -9,14 +9,12 @@ import json
 import os
 import threading
 import time
-from collections import defaultdict
-from contextlib import nullcontext
-from itertools import count
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
-
 import torch
 import torch._dynamo
 import torch.nn as nn
+from collections import defaultdict
+from contextlib import nullcontext
+from itertools import count
 from tokenicer import Tokenicer
 from transformers import (
     AutoModelForCausalLM,
@@ -26,6 +24,7 @@ from transformers import (
     ProcessorMixin,
     modeling_utils,
 )
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
 
 try:  # Optional dependency for huggingface datasets support
     from datasets import Dataset as HFDataset
@@ -1302,7 +1301,12 @@ class BaseQModel(nn.Module):
         if not callable(embedder):
             return input_ids
 
-        embedding = embedder()
+        try:
+            embedding = embedder()
+        except NotImplementedError:
+            return input_ids
+        except Exception:
+            return input_ids
         if embedding is None or not hasattr(embedding, "num_embeddings"):
             return input_ids
 
