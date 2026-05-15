@@ -368,3 +368,79 @@ avoids full FP16 weight materialization through GM/L2, but do not route
 production Cannoe through it until the local-B INT4 decode path stops using
 scalar SetValue-style expansion and can feed Cube with vectorized UB/TSCM
 staging at native-kernel speed.
+
+## 2026-05-15: Cannoe CANN9 `basic_api/reg_compute` INT4 dequant probe on 910B
+
+Status: failed compile gate; do not retry on 910B unless Huawei expands
+`basic_api/reg_compute` to `__NPU_ARCH__ == 2201`.
+
+Tested change: an opt-in VecOut local-A strategy that attempted to use CANN9
+`basic_api/reg_compute/kernel_reg_compute_intf.h` for 128-lane signed INT4 to
+FP16 conversion in UB, followed by vector scale multiply and vector store into
+the Cube-facing local B tile.
+
+Command:
+
+- `python scripts/build_cannoe_ascendc.py --strategy vecout-reg-dequant --output /tmp/cannoe_w4a16_vecout_reg_dequant --clean`
+
+Result:
+
+| Probe | Result |
+| --- | --- |
+| Include gated by `ASC_DEVKIT_MAJOR >= 9` | Failed because `ASC_DEVKIT_MAJOR` was not defined at include time, so the reg-compute definitions were skipped. |
+| Include gated only by `CANNOE_EXPERIMENTAL_VECOUT_REG_DEQUANT` | Still failed; CANN9 `kernel_reg_compute_intf.h` defines `AscendC::Reg` only for `__NPU_ARCH__` 3510/5102/3003/3113 or host debug, not 910B `__NPU_ARCH__ == 2201`. |
+
+Representative compiler errors:
+
+- `no type named 'CastTrait' in namespace 'AscendC::Reg'`
+- `no type named 'MaskReg' in namespace 'AscendC::Reg'`
+- `no member named 'RegTensor' in namespace 'AscendC::Reg'`
+
+Reason: the local CANN9 headers expose 910B-compatible C API vector/cube
+primitives under `asc/include/c_api`, but the C++ register-compute API used by
+the public antiquant examples is not compiled for 910B. Keeping an opt-in build
+flag for this path would leave a known-noncompiling strategy in the tree, so the
+probe was reverted after logging.
+
+Next viable target: continue with 2201-compatible C API primitives:
+`asc_int42half_sync` for local vector dequant, `asc_mul_sync` or related vector
+compute for scaling when the tile layout is contiguous, and C API Cube data
+movement/compute for a direct L1/L0B handoff if high-level Matmul cannot consume
+the staged local tile efficiently.
+
+## 2026-05-15: Cannoe VecOut local-B 2201 vector pair scale/store
+
+Status: failed runtime smoke; reverted.
+
+Tested change: in the symmetric/zero-offset VecOut local-A path, replace two
+scalar 8-lane B-tile writes with a 16-lane 2201 C API sequence:
+
+1. pack two INT4 words into a 32 B UB scratch buffer;
+2. call `asc_int42half_sync(..., count=16)`;
+3. copy 16 FP16 scales from GM to UB once per packed-column pair;
+4. call `asc_mul_sync` with the destination pointer set directly to the local B
+   tile at the 32 B-aligned column pair.
+
+Build result:
+
+- `python scripts/build_cannoe_ascendc.py --strategy vecout-local-a --output /tmp/cannoe_w4a16_vecout_pair_scale --clean`
+- Result: compiled and packaged successfully.
+
+Runtime smoke:
+
+- Installed package with `custom_opp_ubuntu_aarch64.run --quiet --install-path=/tmp/cannoe_vecout_pair_scale_install`.
+- Single physical NPU0 worker:
+  `ASCEND_RT_VISIBLE_DEVICES=0 ... python scripts/validate_cannoe_ascendc_raw.py --worker --device 0 --case-json '{"rows":1,"k":384,"n":256,"group":32,"seed":2200,"base_m":16,"base_n":-256,"base_k":-128}' --warmup 1 --iters 3 --max-abs 0.08 --mean-abs 0.008`
+- Result: no JSON result after 90 seconds; worker was killed. This is worse
+  than the previous scalar local-A smoke, which returned first-call timings near
+  513 ms for the same small shape.
+
+Likely cause: direct `asc_mul_sync` vector store into the high-level Matmul
+`TPosition::VECOUT` local B tensor is not a safe/forward-progress path on this
+code shape, even when the destination offset is arranged as a 32 B pair. It may
+need explicit C API L1/L0B movement instead of writing through the Matmul
+LocalTensor abstraction.
+
+Decision: do not use vector compute to write directly into Matmul's local B
+`LocalTensor`. Revisit only inside a lower-level C API Cube pipeline where the
+destination memory space and synchronization are controlled explicitly.

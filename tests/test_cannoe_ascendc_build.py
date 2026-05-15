@@ -75,6 +75,19 @@ def test_raw_validator_custom_timing_stats():
     }
 
 
+def test_raw_validator_batches_one_case_per_device():
+    validator = _load_raw_validator()
+    cases = [{"case": idx} for idx in range(5)]
+
+    batches = validator._device_case_batches([0, 1], cases)
+
+    assert batches == [
+        [(0, {"case": 0}), (1, {"case": 1})],
+        [(0, {"case": 2}), (1, {"case": 3})],
+        [(0, {"case": 4})],
+    ]
+
+
 def test_raw_validator_quiet_cann_env_defaults_preserve_overrides():
     validator = _load_raw_validator()
     env = {"ASCEND_GLOBAL_LOG_LEVEL": "2"}

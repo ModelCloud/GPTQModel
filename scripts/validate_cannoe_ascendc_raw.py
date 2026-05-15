@@ -113,6 +113,13 @@ def _timing_stats(results: list[dict[str, Any]]) -> dict[str, float | None]:
     }
 
 
+def _device_case_batches(devices: list[int], cases: list[dict[str, Any]]) -> list[list[tuple[int, dict[str, Any]]]]:
+    return [
+        [(devices[offset], case) for offset, case in enumerate(cases[start : start + len(devices)])]
+        for start in range(0, len(cases), len(devices))
+    ]
+
+
 def _worker(args: argparse.Namespace) -> int:
     result_fd = _enable_quiet_process_output(not args.no_quiet_cann_logs)
     try:
@@ -255,35 +262,35 @@ def _run_parent(args: argparse.Namespace) -> int:
     else:
         cases = list(DEFAULT_LOCAL_A_CASES)
     devices = args.devices
-    procs: list[tuple[int, dict[str, Any], subprocess.Popen[str]]] = []
-    for index, case in enumerate(cases):
-        procs.append((devices[index % len(devices)], case, _launch_worker(devices[index % len(devices)], case, args)))
-
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    for device, case, proc in procs:
-        try:
-            stdout, stderr = proc.communicate(timeout=args.timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-            failures.append({"device": device, "case": case, "timeout_s": args.timeout, "stderr_tail": _stderr_tail(stderr)})
-            continue
+    for batch in _device_case_batches(devices, cases):
+        procs = [(device, case, _launch_worker(device, case, args)) for device, case in batch]
+        for device, case, proc in procs:
+            try:
+                stdout, stderr = proc.communicate(timeout=args.timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                failures.append(
+                    {"device": device, "case": case, "timeout_s": args.timeout, "stderr_tail": _stderr_tail(stderr)}
+                )
+                continue
 
-        result = _last_json_object(stdout)
-        if proc.returncode != 0 or result is None:
-            failures.append(
-                {
-                    "device": device,
-                    "case": case,
-                    "returncode": proc.returncode,
-                    "stdout_tail": _stderr_tail(stdout),
-                    "stderr_tail": _stderr_tail(stderr),
-                }
-            )
-            continue
-        results.append(result)
-        print(json.dumps(result, sort_keys=True), flush=True)
+            result = _last_json_object(stdout)
+            if proc.returncode != 0 or result is None:
+                failures.append(
+                    {
+                        "device": device,
+                        "case": case,
+                        "returncode": proc.returncode,
+                        "stdout_tail": _stderr_tail(stdout),
+                        "stderr_tail": _stderr_tail(stderr),
+                    }
+                )
+                continue
+            results.append(result)
+            print(json.dumps(result, sort_keys=True), flush=True)
 
     summary = {
         "all_pass": len(results) == len(cases) and all(row["pass"] for row in results) and not failures,
