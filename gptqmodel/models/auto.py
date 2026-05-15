@@ -125,6 +125,7 @@ from .definitions.llama4 import Llama4QModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashQModel  # noqa: E402
 from .definitions.mimo import MimoQModel  # noqa: E402
+from .definitions.mimo_v2 import MimoV2QModel  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCpm3QModel  # noqa: E402
 from .definitions.minicpm_o import MiniCPMOQModel  # noqa: E402
@@ -280,6 +281,7 @@ MODEL_MAP = {
     "telechat": TeleChat2QModel,
     "instella": InstellaQModel,
     "mimo": MimoQModel,
+    "mimo_v2": MimoV2QModel,
     "falcon_h1": FalconH1QModel,
     "zamba": ZambaQModel,
     "zamba2": Zamba2QModel,
