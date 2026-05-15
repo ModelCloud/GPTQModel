@@ -246,19 +246,19 @@ jobs:
           - name: Test pypi pip
             env_name: pypi_pip_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'true'
-            install_cmd: pip install gptqmodel torch -U
+            install_cmd: pip install gptqmodel torch -U -vvv
           - name: Test pypi uv
             env_name: pypi_uv_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'false'
-            install_cmd: uv pip install gptqmodel torch -U
+            install_cmd: uv pip install gptqmodel torch -U -vvv
           - name: Test local pip
             env_name: local_pip_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'true'
-            install_cmd: pip install . torch -U
+            install_cmd: pip install . torch -U -vvv
           - name: Test local uv
             env_name: local_uv_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'false'
-            install_cmd: uv pip install . torch -U
+            install_cmd: uv pip install . torch -U -vvv
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
