@@ -289,6 +289,7 @@ jobs:
       - name: Clear installer cache on failure
         if: failure()
         run: |
+          echo "RETRY_INSTALL=true" >> $GITHUB_ENV
           source "${{ matrix.env_name }}/bin/activate"
 
           INSTALL_CMD='${{ matrix.install_cmd }}'
@@ -298,9 +299,8 @@ jobs:
             uv cache clean
           elif [[ "$INSTALL_CMD" == pip* || "$INSTALL_CMD" == *" pip "* ]]; then
             echo "[INFO] Previous install command uses pip, clearing pip cache..."
-            pip cache purge || rm -rf ~/.cache/pip
+            pip cache purge
           fi
-          echo "RETRY_INSTALL=true" >> $GITHUB_ENV
 
       - name: retry ${{ matrix.name }}
         if: env.RETRY_INSTALL == 'true'
