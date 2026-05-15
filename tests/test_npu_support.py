@@ -79,7 +79,7 @@ def test_cannoe_tiling_plan_uses_split_k_for_decode_large_k(monkeypatch):
     assert plan.packed_int4_tile_bytes == plan.base_k * plan.base_n // 2
     assert plan.dequant_fp16_tile_bytes == plan.base_k * plan.base_n * 2
     assert plan.vector_dequant_tasks == (plan.out_features // plan.base_n) * plan.split_k * plan.k_tiles_per_split
-    assert plan.active_cores == min(plan.cube_cores, plan.split_k * 4)
+    assert plan.active_cores == min(plan.cube_cores, 8, plan.split_k * 4)
     assert plan.staged_dequant is False
     assert plan.staging_workspace_bytes == 0
     assert plan.strategy == "planned_split_k_aiv_dequant_aic_matmul"
@@ -151,6 +151,7 @@ def test_cannoe_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
     assert staged_plan.staging_slots == 2
     assert staged_plan.staging_blocks == min(
         staged_plan.vector_cores,
+        8,
         max(1, staged_plan.out_features // 8),
         (staged_plan.out_features // staged_plan.base_n) * staged_plan.split_k,
     )
@@ -381,10 +382,11 @@ def test_cannoe_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
 
     assert wide_staged_plan.staging_blocks == min(
         wide_staged_plan.vector_cores,
+        8,
         max(1, wide_staged_plan.out_features // 8),
         (wide_staged_plan.out_features // wide_staged_plan.base_n) * wide_staged_plan.split_k,
     )
-    assert wide_staged_plan.staging_blocks > 8
+    assert wide_staged_plan.staging_blocks == 8
 
 
 def test_cannoe_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):

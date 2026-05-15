@@ -39,6 +39,7 @@ _CANNOE_PREPACK_TILE_N_ENV = "GPTQMODEL_CANNOE_PREPACK_TILE_N"
 _CANNOE_BF16_NATIVE_ENV = "GPTQMODEL_CANNOE_BF16_NATIVE"
 # 910B CANN reserves this system workspace before the user workspace returned by GetUserWorkspace().
 _CANNOE_CUBE_WORKSPACE_BYTES = 16 * 1024 * 1024
+_CANNOE_MAX_LOGICAL_BLOCKS = 8
 _NPU_PREFETCH_OP_UNSET = object()
 _NPU_PREFETCH_OP = _NPU_PREFETCH_OP_UNSET
 _NPU_WEIGHT_QUANT_OP_UNSET = object()
@@ -533,7 +534,7 @@ def _cannoe_tiling_plan(
     l0c_tile_bytes = base_m * base_n * 4
     staging_slots = 2
     staging_tile_bytes = _align_up(dequant_fp16_tile_bytes, 512)
-    scalar_owner_cap = min(vector_cores, max(1, out_features // 8))
+    scalar_owner_cap = min(vector_cores, _CANNOE_MAX_LOGICAL_BLOCKS, max(1, out_features // 8))
     staging_blocks = min(scalar_owner_cap, max(1, n_tiles * split_k))
     staging_workspace_bytes = staging_tile_bytes * staging_slots * staging_blocks
     cube_workspace_bytes = _CANNOE_CUBE_WORKSPACE_BYTES if cube_consumer_requested else 0
@@ -553,7 +554,7 @@ def _cannoe_tiling_plan(
         custom_workspace_bytes = 0
     staging_workspace_offset = 0
     cube_consumer = bool(cube_consumer_requested and staged_dequant)
-    active_cores = min(cube_cores, max(1, n_tiles * split_k))
+    active_cores = min(cube_cores, _CANNOE_MAX_LOGICAL_BLOCKS, max(1, n_tiles * split_k))
     prefetch_enabled = _cannoe_prefetch_enabled()
     prefetch_min_bytes = _cannoe_prefetch_min_bytes()
     prefetch_max_bytes = _cannoe_prefetch_max_bytes(device)

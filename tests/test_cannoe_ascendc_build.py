@@ -27,6 +27,21 @@ def _load_raw_validator():
     return module
 
 
+def test_ascendc_host_tiler_caps_logical_blocks():
+    host_tiler = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext"
+        / "cannoe"
+        / "ascendc"
+        / "op_host"
+        / "cannoe_w4_a16_matmul.cpp"
+    )
+    text = host_tiler.read_text(encoding="utf-8")
+
+    assert "constexpr uint32_t kMaxLogicalBlocks = 8;" in text
+    assert "return available_blocks < kMaxLogicalBlocks ? available_blocks : kMaxLogicalBlocks;" in text
+
+
 def test_raw_validator_finds_embedded_json_after_cann_warning():
     validator = _load_raw_validator()
     text = (

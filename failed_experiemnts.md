@@ -330,3 +330,41 @@ improvement. Keep the default GPTQ BF16 direct call shape.
 
 Re-test only if CANN changes the `inner_precise` implementation or if we add a
 per-projection policy with full-model two-device benchmark evidence.
+
+## 2026-05-15: Cannoe Ascend C VecOut Local-A fused handoff
+
+Status: correctness scaffold validated after logical-block cap, but failed the
+speed gate and remains experimental only.
+
+Accepted change: cap the Ascend C host tiler and Python staged planner to 8
+logical blocks. Before the cap, scalar output ownership was sparse/wrong and
+the VecOut local-A path could hang. After the cap:
+
+| Path | Shape | Tile attrs | Result |
+| --- | --- | --- | --- |
+| Scalar baseline | rows=1,K=384,N=256,group=32 | base_m=16,base_n=256,base_k=-128 | pass, max_abs=0, mean_abs=0, first custom_ms=509.012 |
+| VecOut local-A | rows=1,K=384,N=256,group=32 | base_m=16,base_n=-256,base_k=-128 | pass, max_abs=0.00390625, mean_abs=0.0005016, first custom_ms=513.256 |
+
+Rejected/not promoted:
+
+| Shape | Tile attrs | Result |
+| --- | --- | --- |
+| rows=1,K=5120,N=6144,group=32 | base_m=16,base_n=-256,base_k=-128 | pass, warmed custom_ms=76.118, max_abs=0.0625, mean_abs=0.006378 |
+| rows=1,K=5120,N=6144,group=32 | base_m=16,base_n=-128,base_k=-128 | pass, warmed custom_ms=76.332, max_abs=0.0625, mean_abs=0.006317 |
+| rows=1,K=5120,N=256,group=32 | base_m=16,base_n=-128,base_k=-128 | pass only with relaxed tolerance, warmed custom_ms=12.816, max_abs=0.046875, mean_abs=0.006222 |
+| rows=1,K=5120,N=256,group=32 | base_m=16,base_n=-256,base_k=-128 | pass only with relaxed tolerance, warmed custom_ms=25.439, max_abs=0.0625, mean_abs=0.005989 |
+| rows=1,K=5120,N=1024,group=32 | base_m=16,base_n=-256,base_k=-128 | pass only with relaxed tolerance, warmed custom_ms=25.479, max_abs=0.0390625, mean_abs=0.006622 |
+| rows=1,K=5120,N=1024,group=32 | base_m=16,base_n=-128,base_k=-128 | AICore 507015 illegal instruction, likely unaligned UUB access |
+| rows=1,K=5120,N=256,group=32 | base_m=16,base_n=-64,base_k=-128 | AICore 507015 illegal instruction, likely unaligned UUB access |
+| rows=1,K=5120,N=6144,group=32 | base_m=16,base_n=-512,base_k=-128 | AICore 507015 load3d out-of-range |
+| rows=1,K=5120,N=256,group=32 | base_m=16,base_n=-256,base_k=-256 | AICore 507015 load3d out-of-range |
+
+Comparison point: the native Cannoe Qwen3 27B fp16 GPTQ NPU0 total was
+previously 0.9179 ms, while A100 Marlin reported 0.3835 ms. A fused q-proj
+tile taking 76 ms is not a candidate default path.
+
+Decision: keep VecOut local-A as an opt-in Ascend C correctness scaffold that
+avoids full FP16 weight materialization through GM/L2, but do not route
+production Cannoe through it until the local-B INT4 decode path stops using
+scalar SetValue-style expansion and can feed Cube with vectorized UB/TSCM
+staging at native-kernel speed.

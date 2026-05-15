@@ -19,6 +19,7 @@ constexpr size_t kAttrBaseK = 4;
 constexpr uint32_t kKernelModeScalar = 0;
 constexpr uint32_t kKernelModeStagedDequant = 1;
 constexpr uint32_t kStagingSlots = 2;
+constexpr uint32_t kMaxLogicalBlocks = 8;
 constexpr uint64_t kStagingAlignmentBytes = 512;
 // 910B CANN reserves this system workspace before the user workspace returned by GetUserWorkspace().
 constexpr uint64_t kCubeSysWorkspaceBytes = 16ULL * 1024ULL * 1024ULL;
@@ -85,7 +86,8 @@ uint32_t PickBlockDim(uint32_t packed_words, uint32_t aiv_cores)
     if (packed_words <= 1 || aiv_cores == 0) {
         return 1;
     }
-    return packed_words < aiv_cores ? packed_words : aiv_cores;
+    const uint32_t available_blocks = packed_words < aiv_cores ? packed_words : aiv_cores;
+    return available_blocks < kMaxLogicalBlocks ? available_blocks : kMaxLogicalBlocks;
 }
 }  // namespace
 
