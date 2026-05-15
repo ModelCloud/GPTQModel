@@ -67,9 +67,8 @@ env:
   CUDA_VERSION: 130
   UV_TORCH_BACKEND: cu130
   TORCH_VERSION: 2.11.0
-  # vllm doesn't support 3.14
-  PYTHON_VERSION: 3.13
-  UV_PYTHON: 3.13
+  PYTHON_VERSION: 3.14t
+  UV_PYTHON: 3.14t
   # PYTHON_GIL: 0 // test libs don't support yet
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py,models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   MODEL_TEST_MODE: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
@@ -247,19 +246,19 @@ jobs:
           - name: Test pypi pip
             env_name: pypi_pip_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'true'
-            install_cmd: pip install gptqmodel torch -U
+            install_cmd: pip install gptqmodel torch -U -vvv
           - name: Test pypi uv
             env_name: pypi_uv_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'false'
-            install_cmd: uv pip install gptqmodel torch -U
+            install_cmd: uv pip install gptqmodel torch -U -vvv
           - name: Test local pip
             env_name: local_pip_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'true'
-            install_cmd: pip install . torch -U
+            install_cmd: pip install . torch -U -vvv
           - name: Test local uv
             env_name: local_uv_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'false'
-            install_cmd: uv pip install . torch -U
+            install_cmd: uv pip install . torch -U -vvv
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
@@ -278,6 +277,13 @@ jobs:
           if [[ "${{ matrix.use_pip }}" == "true" ]]; then
             uv pip install pip -U
           fi
+          if python -VV 2>&1 | grep -q '3\.14.*free-threading'; then
+            echo "[INFO] Python 3.14t detected, installing torchao..."
+            uv pip install http://10.0.13.31/files/torchao-0.18.0+git13cd013d6-cp314-cp314t-linux_x86_64.whl
+          else
+            echo "[INFO] Current Python is not 3.14t, skip torchao."
+          fi
+          
           ${{ matrix.install_cmd }}
 
 
