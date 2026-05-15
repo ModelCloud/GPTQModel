@@ -303,7 +303,7 @@ jobs:
           fi
 
       - name: retry ${{ matrix.name }}
-        if: env.RETRY_INSTALL == 'true'
+        if: failure()
         run: |
           uv venv "${{ matrix.env_name }}"
           source "${{ matrix.env_name }}/bin/activate"
