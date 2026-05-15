@@ -7,8 +7,7 @@ from model_test import ModelTest
 
 
 class TestMimo(ModelTest):
-    # NATIVE_MODEL_ID = "/monster/data/model/MiMo-V2.5-Base-BF16"
-    NATIVE_MODEL_ID = "./temp/MiMo-V2.5-Base-BF16"
+    NATIVE_MODEL_ID = "/monster/data/model/MiMo-V2.5-Base-BF16"
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
@@ -22,7 +21,6 @@ class TestMimo(ModelTest):
     EVAL_BATCH_SIZE = 6
     MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride(num_experts_per_tok="all"))
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
-    SAVE_PATH = "./temp/mimo_v2_gptq"
 
     def test_mimo(self):
         self.quantize_and_evaluate()

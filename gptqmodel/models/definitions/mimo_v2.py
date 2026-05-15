@@ -5,10 +5,12 @@ import json
 import os
 
 from safetensors import safe_open
+from torch import nn
 
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ..base import BaseQModel
+from ...utils.torch import CPU
 
 
 class MimoV2QModel(BaseQModel):
@@ -65,22 +67,70 @@ class MimoV2QModel(BaseQModel):
         return True
 
     @staticmethod
-    def _drop_visual_ln_q_bias_if_checkpoint_omits_it(model, model_local_path: str) -> None:
+    def _drop_visual_merger_biases_if_checkpoint_omits_them(model, model_local_path: str) -> None:
         visual = getattr(model, "visual", None)
         merger = getattr(visual, "merger", None)
-        ln_q = getattr(merger, "ln_q", None)
-        if ln_q is None or getattr(ln_q, "bias", None) is None:
+        if not isinstance(merger, nn.Module):
             return
 
-        bias_name = "visual.merger.ln_q.bias"
-        if MimoV2QModel._checkpoint_has_tensor(model_local_path, bias_name):
+        for module_name, module in merger.named_modules():
+            if getattr(module, "bias", None) is None:
+                continue
+
+            prefix = "visual.merger"
+            if module_name:
+                prefix = f"{prefix}.{module_name}"
+            weight_name = f"{prefix}.weight"
+            bias_name = f"{prefix}.bias"
+            if MimoV2QModel._checkpoint_has_tensor(model_local_path, bias_name):
+                continue
+            if not MimoV2QModel._checkpoint_has_tensor(model_local_path, weight_name):
+                continue
+
+            # MiMo V2.5 Base visual merger checkpoints include weights but omit
+            # default biases; align the shell so offload-backed save skips them.
+            module.register_parameter("bias", None)
+
+    @staticmethod
+    def _drop_parameter_if_checkpoint_omits_it(model, model_local_path: str, tensor_name: str) -> None:
+        if MimoV2QModel._checkpoint_has_tensor(model_local_path, tensor_name):
             return
 
-        # MiMo V2.5 Base checkpoints omit this default LayerNorm bias; keep
-        # the shell parameters aligned so offload-backed save does not chase it.
-        ln_q.register_parameter("bias", None)
+        module_path, _, leaf = tensor_name.rpartition(".")
+        module = model
+        for part in module_path.split("."):
+            module = getattr(module, part, None)
+            if module is None:
+                return
+
+        if not isinstance(module, nn.Module) or leaf not in module._parameters:
+            return
+
+        module.register_parameter(leaf, None)
+
+    @staticmethod
+    def _drop_checkpoint_omitted_audio_tensors(model, model_local_path: str) -> None:
+        # Remote MiMo marks this input embedding as load-missing-ignored and
+        # feeds the local transformer via inputs_embeds, so no trained weight exists.
+        MimoV2QModel._drop_parameter_if_checkpoint_omits_it(
+            model,
+            model_local_path,
+            "audio_encoder.input_local_transformer.embed_tokens.weight",
+        )
 
     def after_model_load(self, model, load_quantized_model=False):
         model = super().after_model_load(model, load_quantized_model=load_quantized_model)
-        self._drop_visual_ln_q_bias_if_checkpoint_omits_it(model, self.model_local_path)
+        self._drop_visual_merger_biases_if_checkpoint_omits_them(model, self.model_local_path)
+        self._drop_checkpoint_omitted_audio_tensors(model, self.model_local_path)
         return model
+
+    def pre_quantize_generate_hook_start(self):
+        model = self.model.model
+        rotary_emb_cls = type(model.rotary_emb)
+        assert "MiMoV2RotaryEmbedding" in rotary_emb_cls.__name__
+        config = model.rotary_emb.config
+        # MiMoV2RotaryEmbedding cannot be correctly reconstructed via `_build_nonpersistent_buffer_template()`.
+        # Since it takes three arguments, `_build_nonpersistent_buffer_template()` is unable to infer the `is_swa` parameter.
+        # Therefore, MiMoV2RotaryEmbedding is manually reconstructed here.
+        model.rotary_emb = rotary_emb_cls(config=config, is_swa=False, device=CPU)
+        model.swa_rotary_emb = rotary_emb_cls(config=config, is_swa=True, device=CPU)

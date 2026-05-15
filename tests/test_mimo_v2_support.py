@@ -22,6 +22,24 @@ _LOCAL_MIMO_V2_5_BASE_MODELING_SIGNATURE = {
 }
 
 
+class _FakeVisualMerger(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.ln_q = nn.LayerNorm(8)
+        self.mlp = nn.Sequential(
+            nn.Linear(8, 8),
+            nn.GELU(),
+            nn.Linear(8, 4),
+        )
+
+
+class _FakeAudioEncoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.input_local_transformer = nn.Module()
+        self.input_local_transformer.embed_tokens = nn.Embedding(16, 8)
+
+
 def test_mimo_v2_model_type_selects_definition(monkeypatch):
     fake_config = SimpleNamespace(model_type="mimo_v2")
 
@@ -72,33 +90,33 @@ def test_mimo_v2_module_tree_expands_fused_attention_dense_mlp_and_moe_paths():
     assert "mlp.gate" not in flat_modules
 
 
-def test_mimo_v2_drops_visual_ln_q_bias_when_checkpoint_omits_it(tmp_path):
+def test_mimo_v2_drops_visual_merger_biases_when_checkpoint_omits_them(tmp_path):
     model = SimpleNamespace(
         visual=SimpleNamespace(
-            merger=SimpleNamespace(
-                ln_q=nn.LayerNorm(8),
-            )
+            merger=_FakeVisualMerger()
         )
     )
     index = {
         "metadata": {},
         "weight_map": {
             "visual.merger.ln_q.weight": "model.safetensors",
+            "visual.merger.mlp.0.weight": "model.safetensors",
+            "visual.merger.mlp.2.weight": "model.safetensors",
         },
     }
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index), encoding="utf-8")
 
-    MimoV2QModel._drop_visual_ln_q_bias_if_checkpoint_omits_it(model, str(tmp_path))
+    MimoV2QModel._drop_visual_merger_biases_if_checkpoint_omits_them(model, str(tmp_path))
 
     assert model.visual.merger.ln_q.bias is None
+    assert model.visual.merger.mlp[0].bias is None
+    assert model.visual.merger.mlp[2].bias is None
 
 
-def test_mimo_v2_keeps_visual_ln_q_bias_when_checkpoint_has_it(tmp_path):
+def test_mimo_v2_keeps_visual_merger_biases_when_checkpoint_has_them(tmp_path):
     model = SimpleNamespace(
         visual=SimpleNamespace(
-            merger=SimpleNamespace(
-                ln_q=nn.LayerNorm(8),
-            )
+            merger=_FakeVisualMerger()
         )
     )
     index = {
@@ -106,10 +124,46 @@ def test_mimo_v2_keeps_visual_ln_q_bias_when_checkpoint_has_it(tmp_path):
         "weight_map": {
             "visual.merger.ln_q.weight": "model.safetensors",
             "visual.merger.ln_q.bias": "model.safetensors",
+            "visual.merger.mlp.0.weight": "model.safetensors",
+            "visual.merger.mlp.0.bias": "model.safetensors",
+            "visual.merger.mlp.2.weight": "model.safetensors",
+            "visual.merger.mlp.2.bias": "model.safetensors",
         },
     }
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index), encoding="utf-8")
 
-    MimoV2QModel._drop_visual_ln_q_bias_if_checkpoint_omits_it(model, str(tmp_path))
+    MimoV2QModel._drop_visual_merger_biases_if_checkpoint_omits_them(model, str(tmp_path))
 
     assert model.visual.merger.ln_q.bias is not None
+    assert model.visual.merger.mlp[0].bias is not None
+    assert model.visual.merger.mlp[2].bias is not None
+
+
+def test_mimo_v2_drops_audio_input_embedding_when_checkpoint_omits_it(tmp_path):
+    model = SimpleNamespace(audio_encoder=_FakeAudioEncoder())
+    index = {
+        "metadata": {},
+        "weight_map": {
+            "audio_encoder.input_local_transformer.layers.0.input_layernorm.weight": "model.safetensors",
+        },
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    MimoV2QModel._drop_checkpoint_omitted_audio_tensors(model, str(tmp_path))
+
+    assert model.audio_encoder.input_local_transformer.embed_tokens.weight is None
+
+
+def test_mimo_v2_keeps_audio_input_embedding_when_checkpoint_has_it(tmp_path):
+    model = SimpleNamespace(audio_encoder=_FakeAudioEncoder())
+    index = {
+        "metadata": {},
+        "weight_map": {
+            "audio_encoder.input_local_transformer.embed_tokens.weight": "model.safetensors",
+        },
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    MimoV2QModel._drop_checkpoint_omitted_audio_tensors(model, str(tmp_path))
+
+    assert model.audio_encoder.input_local_transformer.embed_tokens.weight is not None
