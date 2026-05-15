@@ -52,6 +52,7 @@ from .minicpm_o import MiniCPMOQModel
 from .minicpmv import MiniCPMVQModel
 from .minicpmv_4_6 import MiniCPMV4_6QModel
 from .minimax_m2 import MiniMaxM2GPTQ
+from .mimo_v2 import MimoV2QModel
 from .mixtral import MixtralQModel
 from .mllama import MLlamaQModel
 from .mobilellm import MobileLLMQModel
