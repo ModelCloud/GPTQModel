@@ -7,11 +7,11 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 
 import torch
 import transformers
+from accelerate.utils import has_offloaded_params
 from torch import nn
 
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.logger import setup_logger
-
 
 log = setup_logger()
 
@@ -21,6 +21,29 @@ class StopForward(Exception):
     pass
 
 STOP_FORWARD_EXCEPTION = StopForward("Forwarding stopped")
+
+
+def _restore_output_device(output: torch.Tensor, original_device: torch.device) -> torch.Tensor:
+    if output.device == original_device:
+        return output
+    if original_device.type == "meta":
+        # Meta tensors are placeholders with no backing storage; never move real
+        # outputs back to meta during hook replay.
+        return output
+    return output.to(device=original_device)
+
+
+def _materialize_if_meta_weight(module: nn.Module, *, input_device: torch.device) -> None:
+    weight = getattr(module, "weight", None)
+    if weight is None:
+        return
+    if getattr(weight, "is_meta", False) or weight.device.type == "meta":
+        if has_offloaded_params(module):
+            from ..utils.offload import undo_offload_to_disk
+
+            restore_device = input_device if input_device.type != "meta" else torch.device("cpu")
+            undo_offload_to_disk(module, device=restore_device, include_buffers=False)
+
 
 # Models using conv1d: gpt2
 class HookedConv1D(transformers.Conv1D):
@@ -42,6 +65,7 @@ class HookedConv1D(transformers.Conv1D):
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         original_device = input.device
+        _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
         if original_device != target_device:
             input = input.to(device=target_device)
@@ -52,9 +76,7 @@ class HookedConv1D(transformers.Conv1D):
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
 
-        if output.device != original_device:
-            output = output.to(device=original_device)
-        return output
+        return _restore_output_device(output, original_device)
 
 class HookedConv1d(torch.nn.Conv1d):
     def __init__(
@@ -106,6 +128,7 @@ class HookedConv1d(torch.nn.Conv1d):
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         original_device = input.device
+        _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
         if original_device != target_device:
             input = input.to(device=target_device)
@@ -114,9 +137,7 @@ class HookedConv1d(torch.nn.Conv1d):
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
-        if output.device != original_device:
-            output = output.to(device=original_device)
-        return output
+        return _restore_output_device(output, original_device)
 
 # Models using conv2d: ovis
 class HookedConv2d(torch.nn.Conv2d):
@@ -169,6 +190,7 @@ class HookedConv2d(torch.nn.Conv2d):
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         original_device = input.device
+        _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
         if original_device != target_device:
             input = input.to(device=target_device)
@@ -177,9 +199,7 @@ class HookedConv2d(torch.nn.Conv2d):
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
-        if output.device != original_device:
-            output = output.to(device=original_device)
-        return output
+        return _restore_output_device(output, original_device)
 
 # Models using transformers.conv1d: gpt2
 class HookedTransformerConv1D(transformers.Conv1D):
@@ -200,6 +220,7 @@ class HookedTransformerConv1D(transformers.Conv1D):
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         original_device = input.device
+        _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
         if original_device != target_device:
             input = input.to(device=target_device)
@@ -208,9 +229,7 @@ class HookedTransformerConv1D(transformers.Conv1D):
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
-        if output.device != original_device:
-            output = output.to(device=original_device)
-        return output
+        return _restore_output_device(output, original_device)
 
 class HookedLinear(torch.nn.Linear):
     def __init__(self, in_features: int, out_features: int) -> None:
@@ -233,6 +252,7 @@ class HookedLinear(torch.nn.Linear):
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         original_device = input.device
+        _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
         module_name = getattr(self, "module_name", None) or getattr(self, "full_name", None) or getattr(self, "name", None) or "unknown"
         emit_device_telemetry(
@@ -248,9 +268,7 @@ class HookedLinear(torch.nn.Linear):
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
-        if output.device != original_device:
-            output = output.to(device=original_device)
-        return output
+        return _restore_output_device(output, original_device)
 
 
 def _replace_module(module, child, name, level: int = 0, debug: bool = False) -> bool:
