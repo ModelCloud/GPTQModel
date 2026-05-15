@@ -9,7 +9,9 @@ For new entries, include:
 - Date and kernel path.
 - Exact change or environment knob tested.
 - Benchmark artifacts or command shape.
-- NPU devices used. Current policy for routine tests is NPU 0 and NPU 1 only.
+- NPU devices used. Current policy for broad speed-discovery sweeps is one
+  worker per physical NPU across NPU 0-7 when the user asks for all devices;
+  use narrower NPU 0/1 checks only for quick confirmation.
 - Speed, accuracy, and memory data when available.
 - Decision and what would justify re-testing.
 
@@ -480,3 +482,86 @@ handoff into explicit C API Cube movement/compute primitives where L1/L0B
 destination alignment and synchronization are controlled directly. The existing
 optimized Cannoe/VecOut path remains the runnable baseline while this lower
 level handoff is developed.
+
+## 2026-05-15: Qwen3 27B Ascend C VecOut local-A as a production route
+
+Status: failed speed gate; keep as an opt-in fused-kernel scaffold only.
+
+Tested change: rebuild the current accepted `vecout-local-a` Ascend C package
+and force the benchmark through `GPTQMODEL_CANNOE_ASCENDC=1`,
+`GPTQMODEL_CANNOE_STAGED_DEQUANT=1`, and
+`GPTQMODEL_CANNOE_CUBE_CONSUMER=1` for Qwen3 27B GPTQ fp16 group-32 shapes.
+
+Artifacts:
+
+- `/tmp/cannoe_vecout_local_a_current_install`
+- `/tmp/cannoe_qwen27_debug_npu0.json`
+- `/tmp/cannoe_layer_k_npu1.json`
+- `/tmp/cannoe_layer_gate_npu3.json`
+- `/tmp/cannoe_layer_up_npu4.json`
+- `/tmp/cannoe_layer_down_bk64_npu7.json`
+
+| Probe | Device | Shape | Mean ms | Peak MB | Result |
+| --- | --- | --- | ---: | ---: | --- |
+| q default fused | NPU0 | `M=1,K=5120,N=6144` | 76.1650 | 214.4 | Reject |
+| k default fused | NPU1 | `M=1,K=5120,N=1024` | 25.5160 | 92.9 | Reject |
+| gate default fused | NPU3 | `M=1,K=5120,N=17408` | 228.2138 | 271.8 | Reject |
+| up default fused | NPU4 | `M=1,K=5120,N=17408` | 228.0849 | 271.8 | Reject |
+| down fused, `base_k=64` | NPU7 | `M=1,K=17408,N=5120` | 259.5352 | 703.9 | Reject |
+
+Additional all-NPU probes:
+
+| Probe | Devices | Result |
+| --- | --- | --- |
+| Full six-layer Qwen pass through forced Ascend C fused path | NPU0 | Timed out at 300 s before table output. |
+| Isolated q/v/down/default and gate `base_n=128` while eight workers were active | NPU0/NPU2/NPU5/NPU6 | Timed out at 300 s. |
+| Forced fused `base_n=512` and `base_k=256` | NPU2/NPU4 | Exited nonzero before JSON, consistent with unsupported oversize tile buffers. |
+
+Reason: the local-A VecOut path avoids full dense FP16 weight materialization,
+but for Qwen-scale K/N it is orders of magnitude slower than the production
+native CANN path. It is still useful for correctness and handoff experiments,
+not as a default inference route.
+
+Re-test only after the device kernel stops scalar-expanding the whole B tile
+and uses a true vectorized INT4 dequant-to-Cube handoff with explicit
+L1/L0B synchronization.
+
+## 2026-05-15: Qwen3 27B native Cannoe prepack/tuning sweep
+
+Status: no production change; default plain-native path remains fastest in the
+all-layer total.
+
+Tested change: run the production native Cannoe path on all physical NPUs
+concurrently, one process per device, with different prepack/tuning knobs.
+
+Artifacts:
+
+- `/tmp/cannoe_native_qwen27_default_npu0.json`
+- `/tmp/cannoe_native_qwen27_komodo_tile512_npu1.json`
+- `/tmp/cannoe_native_qwen27_komodo_tile2048_npu2.json`
+- `/tmp/cannoe_native_qwen27_komodo_tile4096_npu3.json`
+- `/tmp/cannoe_native_qwen27_komodo_tile8192_npu4.json`
+- `/tmp/cannoe_native_qwen27_cannoe_tile2048_npu5.json`
+- `/tmp/cannoe_native_qwen27_inner1_npu6.json`
+- `/tmp/cannoe_native_qwen27_desc_act_npu7.json`
+
+| Variant | Device | Total mean ms | q | k | v | gate | up | down | Peak MB max |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Default plain native | NPU0 | 0.8980 | 0.0776 | 0.0686 | 0.0723 | 0.2124 | 0.1905 | 0.2766 | 513.2 |
+| `GPTQMODEL_KOMODO_PREPACK_TILE_N=512` | NPU1 | 0.9201 | 0.0775 | 0.0728 | 0.0756 | 0.2215 | 0.1928 | 0.2799 | 360.6 |
+| `GPTQMODEL_KOMODO_PREPACK_TILE_N=2048` | NPU2 | 1.0230 | 0.0778 | 0.0708 | 0.0740 | 0.2491 | 0.2505 | 0.3007 | 819.4 |
+| `GPTQMODEL_KOMODO_PREPACK_TILE_N=4096` | NPU3 | 1.0035 | 0.0772 | 0.0612 | 0.0716 | 0.2482 | 0.2457 | 0.2997 | 1389.2 |
+| `GPTQMODEL_KOMODO_PREPACK_TILE_N=8192` | NPU4 | 0.9694 | 0.0756 | 0.0699 | 0.0732 | 0.2446 | 0.2332 | 0.2727 | 1695.6 |
+| `GPTQMODEL_CANNOE_PREPACK_TILE_N=2048` | NPU5 | 1.1047 | 0.1114 | 0.1144 | 0.1146 | 0.2467 | 0.2498 | 0.2678 | 819.6 |
+| `GPTQMODEL_CANNOE_INNER_PRECISE=1` | NPU6 | 1.1198 | 0.1091 | 0.1096 | 0.1107 | 0.2420 | 0.2475 | 0.3008 | 819.6 |
+| Default desc-act | NPU7 | 1.1441 | 0.1048 | 0.1093 | 0.1107 | 0.2467 | 0.2601 | 0.3124 | 512.8 |
+
+Reason: larger prepack tiles can help isolated q/down timings slightly, but
+they slow gate/up enough to lose the full Qwen layer total and can inflate peak
+allocation substantially. Forced Cannoe tuning disables the plain-native fast
+binding and is slower for this workload. Forced `inner_precise=1` remains
+shape-dependent and should not be broadened beyond the existing auto rule.
+
+Re-test if CANN changes the packed W4A16 layout or if we add shape-local packing
+selection that can choose a different tile per projection without increasing
+the persistent packed-weight footprint.
