@@ -283,11 +283,11 @@ jobs:
           else
             echo "[INFO] Current Python is not 3.14t, skip torchao."
           fi
-          
-          ${{ matrix.install_cmd }}
+
+          ${{ matrix.install_cmd }} || echo "RETRY_INSTALL=true" >> $GITHUB_ENV
 
       - name: Clear installer cache on failure
-        if: failure()
+        if: always() && env.RETRY_INSTALL == 'true'
         run: |
           source "${{ matrix.env_name }}/bin/activate"
 
@@ -302,7 +302,7 @@ jobs:
           fi
 
       - name: retry ${{ matrix.name }}
-        if: failure()
+        if: always() && env.RETRY_INSTALL == 'true'
         run: |
           source "${{ matrix.env_name }}/bin/activate"
           if [[ "${{ matrix.use_pip }}" == "true" ]]; then
