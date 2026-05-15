@@ -277,6 +277,13 @@ jobs:
           if [[ "${{ matrix.use_pip }}" == "true" ]]; then
             uv pip install pip -U
           fi
+          if python -VV 2>&1 | grep -q '3\.14.*free-threading'; then
+            echo "[INFO] Python 3.14t detected, installing torchao..."
+            uv pip install /monster/docker/files/torchao-0.18.0+git13cd013d6-cp314-cp314t-linux_x86_64.whl
+          else
+            echo "[INFO] Current Python is not 3.14t, skip torchao."
+          fi
+          
           ${{ matrix.install_cmd }}
 
 
