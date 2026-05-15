@@ -444,3 +444,39 @@ LocalTensor abstraction.
 Decision: do not use vector compute to write directly into Matmul's local B
 `LocalTensor`. Revisit only inside a lower-level C API Cube pipeline where the
 destination memory space and synchronization are controlled explicitly.
+
+## 2026-05-15: Cannoe high-level TSCM direct handoff on CANN 9.0.0 all-NPU sweep
+
+Status: failed runtime gate; keep the high-level `Matmul`/`TPosition::TSCM`
+route experimental and do not promote it as the default fused handoff on the
+current CANN 9.0.0-beta.2 stack.
+
+Tested package:
+
+- Build: `python scripts/build_cannoe_ascendc.py --strategy tscm-direct-multik --output /tmp/cannoe_w4a16_tscm_direct_current --clean`
+- Install: `/tmp/cannoe_tscm_direct_current_install`
+- Runtime harness: `scripts/validate_cannoe_ascendc_raw.py` with physical
+  devices `0,1,2,3,4,5,6,7`, one worker per NPU.
+
+Results:
+
+| Probe | Devices | Shape / tile | Result |
+| --- | --- | --- | --- |
+| Current direct TSCM, Qwen-like wide N tile | 0-7 | `rows=8,K=128,N=8192,group=32,base_m=16,base_n=256,base_k=128` | All 8 workers failed before timing JSON with `507015`; CANN reported AICore illegal instruction, usually caused by unaligned UUB addresses. |
+| TSCM-specific logical block cap raised from 8 to 24 | 0-7 | same as above | All 8 workers still failed with the same `507015` / unaligned-UUB class error. Temporary source change was reverted. |
+| Older known-good family retry | 0-7 | `rows=8,K=64,N=8192,group=32,base_m=8,base_n=256,base_k=64` | Run hit the outer 180 s timeout before worker JSON. Several workers exited early while others remained stuck. |
+
+Representative error text:
+
+- `npuSynchronizeDevice ... error code is 507015`
+- `The aicore execution is abnormal`
+- `errorStr: Illegal instruction, which is usually caused by unaligned UUB addresses`
+
+Interpretation: the public high-level Matmul TSCM local-B route is currently
+not a stable production path on this CANN 9.0.0-beta.2 environment, even when
+the dequantized tile is bounded and never written as a full dense FP16 matrix.
+The next true fused attempt should move below the high-level Matmul local tensor
+handoff into explicit C API Cube movement/compute primitives where L1/L0B
+destination alignment and synchronization are controlled directly. The existing
+optimized Cannoe/VecOut path remains the runnable baseline while this lower
+level handoff is developed.

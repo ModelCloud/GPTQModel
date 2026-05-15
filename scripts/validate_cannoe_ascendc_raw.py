@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -253,7 +254,43 @@ def _launch_worker(device: int, case: dict[str, Any], args: argparse.Namespace) 
     ]
     if args.no_quiet_cann_logs:
         cmd.append("--no-quiet-cann-logs")
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, start_new_session=True)
+
+
+def _kill_worker(proc: subprocess.Popen[str]) -> tuple[str, str]:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        proc.kill()
+    return proc.communicate()
+
+
+def _record_worker_result(
+    *,
+    device: int,
+    case: dict[str, Any],
+    proc: subprocess.Popen[str],
+    stdout: str,
+    stderr: str,
+    results: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+) -> None:
+    result = _last_json_object(stdout)
+    if proc.returncode != 0 or result is None:
+        failures.append(
+            {
+                "device": device,
+                "case": case,
+                "returncode": proc.returncode,
+                "stdout_tail": _stderr_tail(stdout),
+                "stderr_tail": _stderr_tail(stderr),
+            }
+        )
+        return
+    results.append(result)
+    print(json.dumps(result, sort_keys=True), flush=True)
 
 
 def _run_parent(args: argparse.Namespace) -> int:
@@ -265,32 +302,39 @@ def _run_parent(args: argparse.Namespace) -> int:
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     for batch in _device_case_batches(devices, cases):
-        procs = [(device, case, _launch_worker(device, case, args)) for device, case in batch]
-        for device, case, proc in procs:
-            try:
-                stdout, stderr = proc.communicate(timeout=args.timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                stdout, stderr = proc.communicate()
-                failures.append(
-                    {"device": device, "case": case, "timeout_s": args.timeout, "stderr_tail": _stderr_tail(stderr)}
-                )
-                continue
-
-            result = _last_json_object(stdout)
-            if proc.returncode != 0 or result is None:
-                failures.append(
-                    {
-                        "device": device,
-                        "case": case,
-                        "returncode": proc.returncode,
-                        "stdout_tail": _stderr_tail(stdout),
-                        "stderr_tail": _stderr_tail(stderr),
-                    }
-                )
-                continue
-            results.append(result)
-            print(json.dumps(result, sort_keys=True), flush=True)
+        running = [
+            {"device": device, "case": case, "proc": _launch_worker(device, case, args), "start": time.monotonic()}
+            for device, case in batch
+        ]
+        while running:
+            next_running: list[dict[str, Any]] = []
+            for item in running:
+                proc = item["proc"]
+                device = item["device"]
+                case = item["case"]
+                if proc.poll() is not None:
+                    stdout, stderr = proc.communicate()
+                    _record_worker_result(
+                        device=device,
+                        case=case,
+                        proc=proc,
+                        stdout=stdout,
+                        stderr=stderr,
+                        results=results,
+                        failures=failures,
+                    )
+                    continue
+                elapsed = time.monotonic() - float(item["start"])
+                if elapsed >= args.timeout:
+                    stdout, stderr = _kill_worker(proc)
+                    failures.append(
+                        {"device": device, "case": case, "timeout_s": args.timeout, "stderr_tail": _stderr_tail(stderr)}
+                    )
+                    continue
+                next_running.append(item)
+            running = next_running
+            if running:
+                time.sleep(0.1)
 
     summary = {
         "all_pass": len(results) == len(cases) and all(row["pass"] for row in results) and not failures,
