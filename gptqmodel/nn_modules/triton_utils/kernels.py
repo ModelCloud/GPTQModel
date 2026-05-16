@@ -15,9 +15,56 @@ from . import custom_autotune
 
 log = setup_logger()
 
+
+@triton.jit
+def _load_int3_10_1_10_1_10(base_ptr, base_offsets, idx, mask, word_stride):
+    word_offset = tl.where(idx <= 10, 0, tl.where(idx <= 21, 1, 2))
+    shift = tl.where(idx <= 10, idx * 3, tl.where(idx <= 21, 1 + 3 * (idx - 11), 2 + 3 * (idx - 22)))
+    word = tl.load(base_ptr + base_offsets + word_offset * word_stride, mask=mask, other=0)
+    value = (word >> shift) & 0x7
+
+    split_mask = (idx == 10) | (idx == 21)
+    next_word = tl.load(base_ptr + base_offsets + (word_offset + 1) * word_stride, mask=mask & split_mask, other=0)
+    value_10 = ((word >> 30) & 0x3) | ((next_word << 2) & 0x4)
+    value_21 = ((word >> 31) & 0x1) | ((next_word << 1) & 0x6)
+    value = tl.where(idx == 10, value_10, value)
+    value = tl.where(idx == 21, value_21, value)
+    return tl.cast(value, tl.int32)
+
+
 # code based https://github.com/fpgaminer/GPTQ-triton
 @custom_autotune.autotune(
     configs=[
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 1,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 1,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 1,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
         triton.Config(
             {
                 "BLOCK_SIZE_M": 64,
@@ -99,8 +146,8 @@ def quant_matmul_248_kernel(
     M,
     N,
     K,
-    bits,
-    maxq,
+    bits: tl.constexpr,
+    maxq: tl.constexpr,
     stride_am,
     stride_ak,
     stride_bk,
@@ -124,8 +171,7 @@ def quant_matmul_248_kernel(
     g_ptr is of shape (K) int32
     """
 
-    # TODO FIXME: pack_dtype ratio is not always 32//bits
-    infearure_per_bits = 32 // bits
+    features_per_word: tl.constexpr = 32 // bits
 
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
@@ -143,38 +189,53 @@ def quant_matmul_248_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
     a_mask = offs_am[:, None] < M
-    # b_ptrs is set up such that it repeats elements along the K axis 8 times
+    # b_ptrs is set up such that it repeats elements along the K axis pack_factor times.
     b_ptrs = b_ptr + (
-        (offs_k[:, None] // infearure_per_bits) * stride_bk + offs_bn[None, :] * stride_bn
+        (offs_k[:, None] // features_per_word) * stride_bk + offs_bn[None, :] * stride_bn
     )  # (BLOCK_SIZE_K, BLOCK_SIZE_N)
     g_ptrs = g_ptr + offs_k
     # shifter is used to extract the N bits of each element in the 32-bit word from B
     scales_ptrs = scales_ptr + offs_bn[None, :]
-    zeros_ptrs = zeros_ptr + (offs_bn[None, :] // infearure_per_bits)
+    zeros_ptrs = zeros_ptr + (offs_bn[None, :] // features_per_word)
 
-    shifter = (offs_k % infearure_per_bits) * bits
-    zeros_shifter = (offs_bn % infearure_per_bits) * bits
+    shifter = (offs_k % features_per_word) * bits
+    zeros_shifter = (offs_bn % features_per_word) * bits
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     for k in range(0, num_pid_k):
-        g_idx = tl.load(g_ptrs)
+        k_idxs = k * BLOCK_SIZE_K + offs_k
+        k_mask = k_idxs < K
+        n_mask = offs_bn < N
+        load_mask = k_mask[:, None] & n_mask[None, :]
+        g_idx = tl.load(g_ptrs, mask=k_mask, other=0)
 
         # Fetch scales and zeros; these are per-outfeature and thus reused in the inner loop
-        scales = tl.load(scales_ptrs + g_idx[:, None] * stride_scales)  # (BLOCK_SIZE_K, BLOCK_SIZE_N,)
-        zeros = tl.load(zeros_ptrs + g_idx[:, None] * stride_zeros)  # (BLOCK_SIZE_K, BLOCK_SIZE_N,)
+        scales = tl.load(scales_ptrs + g_idx[:, None] * stride_scales, mask=load_mask, other=0.0)  # (BLOCK_SIZE_K, BLOCK_SIZE_N,)
 
-        zeros = (zeros >> zeros_shifter[None, :]) & maxq
+        if bits == 3:
+            zero_word_base = (offs_bn // 32) * 3
+            zero_idx = offs_bn % 32
+            zero_base_offsets = g_idx[:, None] * stride_zeros + zero_word_base[None, :]
+            zeros = _load_int3_10_1_10_1_10(zeros_ptr, zero_base_offsets, zero_idx[None, :], load_mask, 1)
 
-        a = tl.load(a_ptrs, mask=a_mask, other=0.0)  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
-        b = tl.load(b_ptrs)  # (BLOCK_SIZE_K, BLOCK_SIZE_N), but repeated
+            weight_word_base = (k_idxs // 32) * 3
+            weight_idx = k_idxs % 32
+            weight_base_offsets = weight_word_base[:, None] * stride_bk + offs_bn[None, :] * stride_bn
+            b = _load_int3_10_1_10_1_10(b_ptr, weight_base_offsets, weight_idx[:, None], load_mask, stride_bk)
+        else:
+            zeros = tl.load(zeros_ptrs + g_idx[:, None] * stride_zeros, mask=load_mask, other=0)  # (BLOCK_SIZE_K, BLOCK_SIZE_N,)
+            zeros = (zeros >> zeros_shifter[None, :]) & maxq
 
-        # Now we need to unpack b (which is N-bit values) into 32-bit values
-        b = (b >> shifter[:, None]) & maxq  # Extract the N-bit values
+            b = tl.load(b_ptrs, mask=load_mask, other=0)  # (BLOCK_SIZE_K, BLOCK_SIZE_N), but repeated
+            # Now we need to unpack b (which is N-bit values) into 32-bit values.
+            b = (b >> shifter[:, None]) & maxq  # Extract the N-bit values
+
+        a = tl.load(a_ptrs, mask=a_mask & k_mask[None, :], other=0.0)  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
         b = (b - zeros) * scales  # Scale and shift
 
         accumulator += tl.dot(a, b)
         a_ptrs += BLOCK_SIZE_K
-        b_ptrs += (BLOCK_SIZE_K // infearure_per_bits) * stride_bk
+        b_ptrs += (BLOCK_SIZE_K // features_per_word) * stride_bk
         g_ptrs += BLOCK_SIZE_K
 
     c_ptrs = c_ptr + stride_cm * offs_am[:, None] + stride_cn * offs_bn[None, :]
@@ -260,8 +321,8 @@ def transpose_quant_matmul_248_kernel(
     M,
     N,
     K,
-    bits,
-    maxq,
+    bits: tl.constexpr,
+    maxq: tl.constexpr,
     stride_am,
     stride_ak,
     stride_bk,
@@ -284,8 +345,7 @@ def transpose_quant_matmul_248_kernel(
     zeros is of shape (G, N) float16
     g_ptr is of shape (K) int32
     """
-    # TODO FIXME: pack_dtype ratio is not always 32//bits
-    infearure_per_bits = 32 // bits
+    features_per_word: tl.constexpr = 32 // bits
 
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
@@ -303,33 +363,48 @@ def transpose_quant_matmul_248_kernel(
     offs_n = tl.arange(0, BLOCK_SIZE_N)
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_n[None, :] * stride_ak)  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
     a_mask = offs_am[:, None] < M
-    # b_ptrs is set up such that it repeats elements along the K axis 8 times
+    # b_ptrs is set up such that it repeats elements along the K axis pack_factor times.
     b_ptrs = b_ptr + (
-        (offs_bk[:, None] // infearure_per_bits) * stride_bk + offs_n[None, :] * stride_bn
+        (offs_bk[:, None] // features_per_word) * stride_bk + offs_n[None, :] * stride_bn
     )  # (BLOCK_SIZE_K, BLOCK_SIZE_N)
     g_ptrs = g_ptr + offs_bk
-    g_idx = tl.load(g_ptrs)
+    bk_mask = offs_bk < K
+    g_idx = tl.load(g_ptrs, mask=bk_mask, other=0)
 
     # shifter is used to extract the N bits of each element in the 32-bit word from B
     scales_ptrs = scales_ptr + offs_n[None, :] + g_idx[:, None] * stride_scales
-    zeros_ptrs = zeros_ptr + (offs_n[None, :] // infearure_per_bits) + g_idx[:, None] * stride_zeros
+    zeros_ptrs = zeros_ptr + (offs_n[None, :] // features_per_word) + g_idx[:, None] * stride_zeros
 
-    shifter = (offs_bk % infearure_per_bits) * bits
-    zeros_shifter = (offs_n % infearure_per_bits) * bits
+    shifter = (offs_bk % features_per_word) * bits
+    zeros_shifter = (offs_n % features_per_word) * bits
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
 
     for k in range(0, num_pid_n):
+        n_idxs = k * BLOCK_SIZE_N + offs_n
+        n_mask = n_idxs < N
+        load_mask = bk_mask[:, None] & n_mask[None, :]
         # Fetch scales and zeros; these are per-outfeature and thus reused in the inner loop
-        scales = tl.load(scales_ptrs)  # (BLOCK_SIZE_K, BLOCK_SIZE_N,)
-        zeros = tl.load(zeros_ptrs)  # (BLOCK_SIZE_K, BLOCK_SIZE_N,)
+        scales = tl.load(scales_ptrs, mask=load_mask, other=0.0)  # (BLOCK_SIZE_K, BLOCK_SIZE_N,)
 
-        zeros = (zeros >> zeros_shifter[None, :]) & maxq
+        if bits == 3:
+            zero_word_base = (n_idxs // 32) * 3
+            zero_idx = n_idxs % 32
+            zero_base_offsets = g_idx[:, None] * stride_zeros + zero_word_base[None, :]
+            zeros = _load_int3_10_1_10_1_10(zeros_ptr, zero_base_offsets, zero_idx[None, :], load_mask, 1)
 
-        a = tl.load(a_ptrs, mask=a_mask, other=0.0)  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
-        b = tl.load(b_ptrs)  # (BLOCK_SIZE_K, BLOCK_SIZE_N), but repeated
+            weight_word_base = (offs_bk // 32) * 3
+            weight_idx = offs_bk % 32
+            weight_base_offsets = weight_word_base[:, None] * stride_bk + n_idxs[None, :] * stride_bn
+            b = _load_int3_10_1_10_1_10(b_ptr, weight_base_offsets, weight_idx[:, None], load_mask, stride_bk)
+        else:
+            zeros = tl.load(zeros_ptrs, mask=load_mask, other=0)  # (BLOCK_SIZE_K, BLOCK_SIZE_N,)
+            zeros = (zeros >> zeros_shifter[None, :]) & maxq
 
-        # Now we need to unpack b (which is N-bit values) into 32-bit values
-        b = (b >> shifter[:, None]) & maxq  # Extract the N-bit values
+            b = tl.load(b_ptrs, mask=load_mask, other=0)  # (BLOCK_SIZE_K, BLOCK_SIZE_N), but repeated
+            # Now we need to unpack b (which is N-bit values) into 32-bit values.
+            b = (b >> shifter[:, None]) & maxq  # Extract the N-bit values
+
+        a = tl.load(a_ptrs, mask=a_mask & n_mask[None, :], other=0.0)  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
         b = (b - zeros) * scales  # Scale and shift
         b = tl.trans(b)
 
@@ -337,7 +412,7 @@ def transpose_quant_matmul_248_kernel(
         a_ptrs += BLOCK_SIZE_N
         b_ptrs += BLOCK_SIZE_N
         scales_ptrs += BLOCK_SIZE_N
-        zeros_ptrs += BLOCK_SIZE_N // infearure_per_bits
+        zeros_ptrs += BLOCK_SIZE_N // features_per_word
 
     c_ptrs = c_ptr + stride_cm * offs_am[:, None] + stride_cn * offs_bk[None, :]
     c_mask = (offs_am[:, None] < M) & (offs_bk[None, :] < K)

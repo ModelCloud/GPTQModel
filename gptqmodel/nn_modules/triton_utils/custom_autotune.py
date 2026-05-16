@@ -86,7 +86,8 @@ class CustomizedTritonAutoTuner(triton.KernelInterface):
         try:
             # In testings using only 40 reps seems to be close enough and it appears to be what PyTorch uses
             # PyTorch also sets fast_flush to True, but I didn't see any speedup so I'll leave the default
-            return triton.testing.do_bench(kernel_call, quantiles=(0.5, 0.2, 0.8), rep=40)
+            result = triton.testing.do_bench(kernel_call, quantiles=(0.5, 0.2, 0.8), rep=40)
+            return tuple(result) if isinstance(result, list) else result
         except triton.OutOfResources:
             return (float("inf"), float("inf"), float("inf"))
 
