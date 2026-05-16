@@ -20,6 +20,8 @@ from .cpp import (
 _VECQUANT3_OPS_NAME = "gptqmodel_vecquant3_ops"
 _VECQUANT3_NAMESPACE = "gptqmodel_vecquant3"
 _VECQUANT3_REQUIRED_CUDA_HEADERS = ("cuda_runtime_api.h",)
+_VECQUANT3_ACCUMULATION_FLOAT32 = 0
+_VECQUANT3_ACCUMULATION_INPUT = 1
 
 
 def _vecquant3_root() -> Path:
@@ -43,7 +45,7 @@ def _vecquant3_include_paths() -> list[str]:
 
 def _vecquant3_extra_cuda_cflags() -> list[str]:
     flags = default_jit_cuda_cflags(
-        enable_bf16=False,
+        enable_bf16=True,
         include_lineinfo=True,
         include_nvcc_threads=True,
         include_ptxas_optimizations=True,
@@ -64,7 +66,7 @@ _VECQUANT3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     build_root_env="GPTQMODEL_VECQUANT3_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("vecquant3"),
     display_name="VecQuant3 GPTQ grouped GEMV",
-    extra_cflags=lambda: default_jit_cflags(enable_bf16=False),
+    extra_cflags=lambda: default_jit_cflags(enable_bf16=True),
     extra_cuda_cflags=_vecquant3_extra_cuda_cflags,
     extra_include_paths=_vecquant3_include_paths,
     force_rebuild_env="GPTQMODEL_VECQUANT3_FORCE_REBUILD",
@@ -95,15 +97,54 @@ def vecquant3_runtime_available() -> bool:
     return _extension_api().is_available("vecquant3")
 
 
+def _normalize_accumulation_dtype(
+    accumulation_dtype: str | torch.dtype | None,
+    input_dtype: torch.dtype,
+) -> int:
+    if input_dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(
+            "VecQuant3 GPTQ grouped GEMV supports only torch.float16 or torch.bfloat16 input tensors."
+        )
+
+    if accumulation_dtype is None:
+        return _VECQUANT3_ACCUMULATION_FLOAT32
+
+    if isinstance(accumulation_dtype, torch.dtype):
+        if accumulation_dtype == torch.float32:
+            return _VECQUANT3_ACCUMULATION_FLOAT32
+        if accumulation_dtype == input_dtype:
+            return _VECQUANT3_ACCUMULATION_INPUT
+        raise ValueError(
+            "`accumulation_dtype` must be torch.float32, 'input', or the same low-precision dtype as the input tensor."
+        )
+
+    normalized = str(accumulation_dtype).strip().lower().replace("torch.", "")
+    normalized = normalized.replace("-", "_")
+    if normalized in {"float32", "fp32", "f32", "float"}:
+        return _VECQUANT3_ACCUMULATION_FLOAT32
+    if normalized in {"input", "input_dtype", "native", "low", "low_precision"}:
+        return _VECQUANT3_ACCUMULATION_INPUT
+    if normalized in {"float16", "fp16", "f16", "half"} and input_dtype == torch.float16:
+        return _VECQUANT3_ACCUMULATION_INPUT
+    if normalized in {"bfloat16", "bf16"} and input_dtype == torch.bfloat16:
+        return _VECQUANT3_ACCUMULATION_INPUT
+    raise ValueError(
+        "`accumulation_dtype` must be one of float32/fp32, input/native, "
+        "float16/fp16 for fp16 inputs, or bfloat16/bf16 for bf16 inputs."
+    )
+
+
 def gemv(
     x: torch.Tensor,
     qweight: torch.Tensor,
     scales: torch.Tensor,
     qzeros: torch.Tensor,
     group_size: int,
+    accumulation_dtype: str | torch.dtype | None = torch.float32,
 ) -> torch.Tensor:
     ops = _extension_api().namespace(name="vecquant3")
-    return ops.gemv(x, qweight, scales, qzeros, int(group_size))
+    accumulation_type = _normalize_accumulation_dtype(accumulation_dtype, x.dtype)
+    return ops.gemv(x, qweight, scales, qzeros, int(group_size), accumulation_type)
 
 
 def gemv_lora(
@@ -114,9 +155,11 @@ def gemv_lora(
     down: torch.Tensor,
     up: torch.Tensor,
     group_size: int,
+    accumulation_dtype: str | torch.dtype | None = torch.float32,
 ) -> torch.Tensor:
     ops = _extension_api().namespace(name="vecquant3")
-    return ops.gemv_lora(x, qweight, scales, qzeros, down, up, int(group_size))
+    accumulation_type = _normalize_accumulation_dtype(accumulation_dtype, x.dtype)
+    return ops.gemv_lora(x, qweight, scales, qzeros, down, up, int(group_size), accumulation_type)
 
 
 __all__ = [
