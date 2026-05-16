@@ -105,6 +105,15 @@ _EXTENSION_SPECS = (
         )(),
     ),
     _ExtensionSpec(
+        name="vecquant3",
+        aliases=("vecq3", "gptq_vecquant3"),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.vecquant3", "_VECQUANT3_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.vecquant3", "vecquant3_supported")(),
+        unsupported_error=lambda: _resolve_attr(
+            "gptqmodel.utils.vecquant3", "vecquant3_runtime_error"
+        )(),
+    ),
+    _ExtensionSpec(
         name="paroquant",
         aliases=("paroquant_rotation",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.paroquant", "_PAROQUANT_ROTATION_EXTENSION"),
