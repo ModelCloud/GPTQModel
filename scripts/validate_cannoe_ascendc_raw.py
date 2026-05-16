@@ -164,7 +164,17 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
     iters = int(args.iters)
 
     x = torch.randn((rows, k), device="npu", dtype=torch.float16)
+    one_hot_k = int(case.get("one_hot_k", args.one_hot_k))
+    if one_hot_k >= 0:
+        if one_hot_k >= k:
+            raise ValueError(f"one_hot_k={one_hot_k} must be less than k={k}")
+        x.zero_()
+        x[:, one_hot_k] = 1
     signed_weight = torch.randint(-8, 8, (k, n), device="npu", dtype=torch.int32).contiguous()
+    if args.lane_diagnostic:
+        pattern = torch.arange(-8, 8, device="npu", dtype=torch.int32).repeat(4)
+        signed_weight.zero_()
+        signed_weight[0, : pattern.numel()].copy_(pattern)
     packed_weight = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
     scales = torch.full((k // group, n), 0.03125, device="npu", dtype=torch.float16)
     offsets = torch.zeros((k // group, n), device="npu", dtype=torch.float16)
@@ -182,6 +192,74 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
             base_n,
             base_k,
         )
+
+    if args.lane_diagnostic:
+        custom = custom_call()
+        torch.npu.synchronize()
+        diagnostic = custom[0, :192].to("cpu", dtype=torch.float32)
+        capi_vector = diagnostic[:64]
+        scalar = diagnostic[64:128]
+        cast_vector = diagnostic[128:192]
+        capi_diff = (capi_vector - scalar).abs()
+        cast_diff = (cast_vector - scalar).abs()
+        capi_max_abs = float(capi_diff.max().item())
+        capi_mean_abs = float(capi_diff.mean().item())
+        cast_max_abs = float(cast_diff.max().item())
+        cast_mean_abs = float(cast_diff.mean().item())
+        capi_pass = capi_max_abs <= args.max_abs and capi_mean_abs <= args.mean_abs
+        cast_pass = cast_max_abs <= args.max_abs and cast_mean_abs <= args.mean_abs
+        result = {
+            "device": int(args.device),
+            "rows": rows,
+            "k": k,
+            "n": n,
+            "group": group,
+            "base_m": base_m,
+            "base_n": base_n,
+            "base_k": base_k,
+            "custom_ms": None,
+            "max_abs": min(capi_max_abs, cast_max_abs),
+            "mean_abs": min(capi_mean_abs, cast_mean_abs),
+            "pass": capi_pass or cast_pass,
+            "capi_max_abs": capi_max_abs,
+            "capi_mean_abs": capi_mean_abs,
+            "cast_max_abs": cast_max_abs,
+            "cast_mean_abs": cast_mean_abs,
+            "best_path": "cast" if cast_max_abs <= capi_max_abs else "capi",
+            "capi_first16": [float(value) for value in capi_vector[:16].tolist()],
+            "cast_first16": [float(value) for value in cast_vector[:16].tolist()],
+            "scalar_first16": [float(value) for value in scalar[:16].tolist()],
+        }
+        _emit_json_result(result, result_fd)
+        return 0 if result["pass"] else 2
+
+    if args.tile_fill_diagnostic:
+        custom = custom_call()
+        torch.npu.synchronize()
+        diagnostic = custom.flatten()[:256].to("cpu", dtype=torch.float32)
+        scalar = diagnostic[:128]
+        cast_vector = diagnostic[128:256]
+        diff = (cast_vector - scalar).abs()
+        max_abs = float(diff.max().item())
+        mean_abs = float(diff.mean().item())
+        result = {
+            "device": int(args.device),
+            "rows": rows,
+            "k": k,
+            "n": n,
+            "group": group,
+            "base_m": base_m,
+            "base_n": base_n,
+            "base_k": base_k,
+            "custom_ms": None,
+            "max_abs": max_abs,
+            "mean_abs": mean_abs,
+            "pass": max_abs <= args.max_abs and mean_abs <= args.mean_abs,
+            "scalar_first16": [float(value) for value in scalar[:16].tolist()],
+            "cast_first16": [float(value) for value in cast_vector[:16].tolist()],
+        }
+        _emit_json_result(result, result_fd)
+        return 0 if result["pass"] else 2
 
     for _ in range(warmup):
         custom_call()
@@ -218,6 +296,7 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
         "base_m": base_m,
         "base_n": base_n,
         "base_k": base_k,
+        "one_hot_k": one_hot_k,
         "custom_ms": custom_ms,
         "max_abs": max_abs,
         "mean_abs": mean_abs,
@@ -251,9 +330,15 @@ def _launch_worker(device: int, case: dict[str, Any], args: argparse.Namespace) 
         str(args.warmup),
         "--iters",
         str(args.iters),
+        "--one-hot-k",
+        str(args.one_hot_k),
     ]
     if args.no_quiet_cann_logs:
         cmd.append("--no-quiet-cann-logs")
+    if args.lane_diagnostic:
+        cmd.append("--lane-diagnostic")
+    if args.tile_fill_diagnostic:
+        cmd.append("--tile-fill-diagnostic")
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, start_new_session=True)
 
 
@@ -369,10 +454,27 @@ def main() -> int:
     parser.add_argument("--mean-abs", type=float, default=0.004)
     parser.add_argument("--warmup", type=int, default=0, help="Untimed custom-op warmup calls per worker.")
     parser.add_argument("--iters", type=int, default=1, help="Timed custom-op calls per worker.")
+    parser.add_argument("--one-hot-k", type=int, default=-1, help="Use one-hot activations at this K index for diagnostics.")
     parser.add_argument(
         "--no-quiet-cann-logs",
         action="store_true",
         help="Do not suppress noisy CANN registration warnings in worker subprocesses.",
+    )
+    parser.add_argument(
+        "--lane-diagnostic",
+        action="store_true",
+        help=(
+            "Run the opt-in int4 lane-layout diagnostic instead of the matmul accuracy benchmark. "
+            "Requires a package built with --experimental-int4-lane-diagnostic."
+        ),
+    )
+    parser.add_argument(
+        "--tile-fill-diagnostic",
+        action="store_true",
+        help=(
+            "Run the opt-in B-tile fill diagnostic instead of the matmul accuracy benchmark. "
+            "Requires a package built with --experimental-vecout-tile-fill-diagnostic."
+        ),
     )
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--device", type=int, default=0, help=argparse.SUPPRESS)
@@ -382,6 +484,8 @@ def main() -> int:
         parser.error("--warmup must be >= 0")
     if args.iters <= 0:
         parser.error("--iters must be > 0")
+    if args.lane_diagnostic and args.tile_fill_diagnostic:
+        parser.error("--lane-diagnostic and --tile-fill-diagnostic are mutually exclusive")
 
     if args.worker:
         return _worker(args)

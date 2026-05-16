@@ -135,6 +135,11 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_CONSUMER")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_TILE_FILL_DIAGNOSTIC")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_CAST_SCRATCH_PROBE")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_INT4_LANE_DIAGNOSTIC")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_CONSUMER")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
@@ -152,6 +157,11 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
         "-DCANNOE_EXPERIMENTAL_VECOUT_CONSUMER=1 "
         "-DCANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_VECOUT_LOCAL_A=1 "
+        "-DCANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT=1 "
+        "-DCANNOE_EXPERIMENTAL_VECOUT_TILE_FILL_DIAGNOSTIC=1 "
+        "-DCANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT=1 "
+        "-DCANNOE_EXPERIMENTAL_VECOUT_CAST_SCRATCH_PROBE=1 "
+        "-DCANNOE_EXPERIMENTAL_INT4_LANE_DIAGNOSTIC=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_CONSUMER=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1 "
@@ -176,6 +186,11 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_CONSUMER")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_TILE_FILL_DIAGNOSTIC")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_VECOUT_CAST_SCRATCH_PROBE")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_INT4_LANE_DIAGNOSTIC")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_CONSUMER")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
@@ -192,6 +207,11 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
         "-DCANNOE_EXPERIMENTAL_VECOUT_CONSUMER=1 "
         "-DCANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_VECOUT_LOCAL_A=1 "
+        "-DCANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT=1 "
+        "-DCANNOE_EXPERIMENTAL_VECOUT_TILE_FILL_DIAGNOSTIC=1 "
+        "-DCANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT=1 "
+        "-DCANNOE_EXPERIMENTAL_VECOUT_CAST_SCRATCH_PROBE=1 "
+        "-DCANNOE_EXPERIMENTAL_INT4_LANE_DIAGNOSTIC=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_CONSUMER=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1 "
@@ -210,6 +230,11 @@ def _strategy_args(strategy: str):
         experimental_vecout_consumer=False,
         experimental_vecout_runtime_handoff=False,
         experimental_vecout_local_a=False,
+        experimental_vecout_tile_cast_dequant=False,
+        experimental_vecout_tile_fill_diagnostic=False,
+        experimental_vecout_inplace_cast_dequant=False,
+        experimental_vecout_cast_scratch_probe=False,
+        experimental_int4_lane_diagnostic=False,
         experimental_tscm_consumer=False,
         experimental_tscm_runtime_handoff=False,
         experimental_tscm_direct_dequant=False,
@@ -248,6 +273,91 @@ def test_public_strategy_tscm_direct_multik_expands_flags():
     assert args.experimental_tscm_direct_dequant
     assert args.experimental_tscm_direct_multik
     assert not args.experimental_vecout_consumer
+
+
+def test_int4_lane_diagnostic_expands_minimal_vector_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("manual")
+    args.experimental_int4_lane_diagnostic = True
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_int4_lane_diagnostic
+    assert not args.experimental_cube_consumer
+    assert not args.experimental_mixed_launch
+
+
+def test_vecout_tile_cast_dequant_expands_vecout_local_a_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("manual")
+    args.experimental_vecout_tile_cast_dequant = True
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_vecout_consumer
+    assert args.experimental_vecout_runtime_handoff
+    assert args.experimental_vecout_local_a
+    assert args.experimental_vecout_tile_cast_dequant
+
+
+def test_vecout_tile_fill_diagnostic_expands_tile_cast_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("manual")
+    args.experimental_vecout_tile_fill_diagnostic = True
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_vecout_consumer
+    assert args.experimental_vecout_runtime_handoff
+    assert args.experimental_vecout_local_a
+    assert args.experimental_vecout_tile_cast_dequant
+    assert args.experimental_vecout_tile_fill_diagnostic
+
+
+def test_vecout_inplace_cast_dequant_expands_vecout_local_a_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("manual")
+    args.experimental_vecout_inplace_cast_dequant = True
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_vecout_consumer
+    assert args.experimental_vecout_runtime_handoff
+    assert args.experimental_vecout_local_a
+    assert args.experimental_vecout_inplace_cast_dequant
+    assert not args.experimental_vecout_tile_cast_dequant
+
+
+def test_vecout_cast_scratch_probe_expands_tile_cast_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("manual")
+    args.experimental_vecout_cast_scratch_probe = True
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_vecout_consumer
+    assert args.experimental_vecout_runtime_handoff
+    assert args.experimental_vecout_local_a
+    assert args.experimental_vecout_tile_cast_dequant
+    assert args.experimental_vecout_cast_scratch_probe
 
 
 def test_command_for_python_entrypoint_uses_active_interpreter(tmp_path):

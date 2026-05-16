@@ -10,6 +10,7 @@ using namespace matmul;
 
 #if defined(CANNOE_EXPERIMENTAL_CANN9_VECTOR_DEQUANT)
 using CannoeCapiInt4 = ::int4b_t;
+using CannoeAscendInt4 = AscendC::int4b_t;
 #endif
 
 #if defined(CANNOE_EXPERIMENTAL_MIXED_LAUNCH) && !defined(CANNOE_EXPERIMENTAL_CUBE_CONSUMER) && \
@@ -46,6 +47,33 @@ using CannoeCapiInt4 = ::int4b_t;
 
 #if defined(CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A) && !defined(CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
 #error "CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A requires VecOut runtime handoff"
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT) && !defined(CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A)
+#error "CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT requires VecOut local-A handoff"
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT) && !defined(CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A)
+#error "CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT requires VecOut local-A handoff"
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT) && \
+    defined(CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT)
+#error "CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT and TILE_CAST_DEQUANT are mutually exclusive"
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_VECOUT_TILE_FILL_DIAGNOSTIC) && \
+    !defined(CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT)
+#error "CANNOE_EXPERIMENTAL_VECOUT_TILE_FILL_DIAGNOSTIC requires VecOut tile-cast dequant"
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_VECOUT_CAST_SCRATCH_PROBE) && \
+    !defined(CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT)
+#error "CANNOE_EXPERIMENTAL_VECOUT_CAST_SCRATCH_PROBE requires VecOut tile-cast dequant"
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_INT4_LANE_DIAGNOSTIC) && !defined(CANNOE_EXPERIMENTAL_CANN9_VECTOR_DEQUANT)
+#error "CANNOE_EXPERIMENTAL_INT4_LANE_DIAGNOSTIC requires CANN9 vector dequant"
 #endif
 
 #if defined(CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT) || \
@@ -217,7 +245,12 @@ private:
 #ifdef CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A
         local_a_ready_ = pipe.InitBuffer(a_ub_, tiling->base_m * base_k * sizeof(half));
         packed_b_ready_ = pipe.InitBuffer(packed_b_ub_, base_k * (base_n >> 3) * sizeof(int32_t));
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT
+        tile_dequant_ready_ = pipe.InitBuffer(tile_dequant_b_ub_, base_k * base_n * sizeof(half));
+        return direct_dequant_ready_ && local_a_ready_ && packed_b_ready_ && tile_dequant_ready_;
+#else
         return direct_dequant_ready_ && local_a_ready_ && packed_b_ready_;
+#endif
 #else
         return direct_dequant_ready_;
 #endif
@@ -239,9 +272,20 @@ private:
         return packed_b_ub_.Get<int32_t>(tiling->base_k * (tiling->base_n >> 3));
     }
 
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT
+    __aicore__ inline LocalTensor<half> GetTileDequantBTile(const CannoeW4A16MatmulTilingData* tiling)
+    {
+        return tile_dequant_b_ub_.Get<half>(tiling->base_k * tiling->base_n);
+    }
+#endif
+
     __aicore__ inline bool LocalAReady() const
     {
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT
+        return local_a_ready_ && packed_b_ready_ && tile_dequant_ready_;
+#else
         return local_a_ready_ && packed_b_ready_;
+#endif
     }
 #endif
 
@@ -254,6 +298,10 @@ private:
 #ifdef CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A
     TBuf<TPosition::VECOUT> a_ub_;
     TBuf<TPosition::VECCALC> packed_b_ub_;
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT
+    TBuf<TPosition::VECCALC> tile_dequant_b_ub_;
+    bool tile_dequant_ready_ = false;
+#endif
     bool local_a_ready_ = false;
     bool packed_b_ready_ = false;
 #endif
@@ -317,16 +365,25 @@ public:
         }
         y_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(y));
 #ifdef CANNOE_EXPERIMENTAL_STAGED_DEQUANT
-        if (tiling->kernel_mode == kKernelModeStagedDequant && tiling->staging_workspace_bytes != 0) {
+        const bool staged_dequant_ready =
+            tiling->kernel_mode == kKernelModeStagedDequant && tiling->staging_workspace_bytes != 0;
+        if (staged_dequant_ready) {
             __gm__ uint8_t* workspace_bytes = reinterpret_cast<__gm__ uint8_t*>(user_workspace);
             staged_weight_gm_.SetGlobalBuffer(
                 reinterpret_cast<__gm__ half*>(workspace_bytes + tiling->staging_workspace_offset));
+        }
 #ifdef CANNOE_EXPERIMENTAL_CANN9_VECTOR_DEQUANT
+#ifdef CANNOE_EXPERIMENTAL_INT4_LANE_DIAGNOSTIC
+        const bool should_init_vector_dequant = true;
+#else
+        const bool should_init_vector_dequant = staged_dequant_ready;
+#endif
+        if (should_init_vector_dequant) {
             vector_dequant_ready_ =
                 pipe_.InitBuffer(vector_packed_ub_, kCann9VectorDequantPackedBytes) &&
                 pipe_.InitBuffer(vector_half_ub_, kCann9VectorDequantHalfBytes);
-#endif
         }
+#endif
 #else
         (void)user_workspace;
 #endif
@@ -354,6 +411,12 @@ public:
             return;
         }
         const uint32_t core_idx = physical_core_idx % block_dim;
+
+#ifdef CANNOE_EXPERIMENTAL_INT4_LANE_DIAGNOSTIC
+        if (TryProcessInt4LaneDiagnostic(core_idx)) {
+            return;
+        }
+#endif
 
 #ifdef CANNOE_EXPERIMENTAL_STAGED_DEQUANT
         if (tiling_->kernel_mode == kKernelModeStagedDequant) {
@@ -617,6 +680,15 @@ public:
 #ifdef CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A
         LocalTensor<half> direct_a_tile = cube_probe.GetLocalATile(tiling_);
         LocalTensor<int32_t> packed_b_tile = cube_probe.GetPackedBTile(tiling_);
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT
+        LocalTensor<half> tile_dequant_b_tile = cube_probe.GetTileDequantBTile(tiling_);
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_TILE_FILL_DIAGNOSTIC
+        if (TryProcessVecoutTileFillDiagnostic(
+                direct_b_tile, packed_b_tile, tile_dequant_b_tile, core_idx, packed_stride, zero_offsets)) {
+            return true;
+        }
+#endif
+#endif
         for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
             const uint32_t k_begin = k_tile * tiling_->base_k;
             if (m_tiles <= 1) {
@@ -629,6 +701,39 @@ public:
                     const uint32_t n_end = n_begin + base_n;
                     const uint32_t packed_begin = n_begin >> 3;
                     const uint32_t packed_end = n_end >> 3;
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_CAST_SCRATCH_PROBE
+                    FillDirectBTileKTileCastScratchThenScalar(
+                        direct_b_tile,
+                        packed_b_tile,
+                        tile_dequant_b_tile,
+                        k_tile,
+                        n_begin,
+                        packed_begin,
+                        packed_end,
+                        packed_stride,
+                        zero_offsets);
+#elif defined(CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT)
+                    FillDirectBTileKTileFromPackedTileCast(
+                        direct_b_tile,
+                        packed_b_tile,
+                        tile_dequant_b_tile,
+                        k_tile,
+                        n_begin,
+                        packed_begin,
+                        packed_end,
+                        packed_stride,
+                        zero_offsets);
+#elif defined(CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT)
+                    FillDirectBTileKTileFromPackedTileInplaceCast(
+                        direct_b_tile,
+                        packed_b_tile,
+                        k_tile,
+                        n_begin,
+                        packed_begin,
+                        packed_end,
+                        packed_stride,
+                        zero_offsets);
+#else
                     FillDirectBTileKTileFromPackedTile(
                         direct_b_tile,
                         packed_b_tile,
@@ -638,7 +743,13 @@ public:
                         packed_end,
                         packed_stride,
                         zero_offsets);
+#endif
+#if defined(CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT) || \
+    defined(CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT)
+                    PipeBarrier<PIPE_ALL>();
+#else
                     PipeBarrier<PIPE_V>();
+#endif
                     cube_probe.mm.SetTensorA(direct_a_tile);
                     cube_probe.mm.SetTensorB(direct_b_tile);
                     cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
@@ -654,6 +765,39 @@ public:
                 const uint32_t n_end = n_begin + base_n;
                 const uint32_t packed_begin = n_begin >> 3;
                 const uint32_t packed_end = n_end >> 3;
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_CAST_SCRATCH_PROBE
+                FillDirectBTileKTileCastScratchThenScalar(
+                    direct_b_tile,
+                    packed_b_tile,
+                    tile_dequant_b_tile,
+                    k_tile,
+                    n_begin,
+                    packed_begin,
+                    packed_end,
+                    packed_stride,
+                    zero_offsets);
+#elif defined(CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT)
+                FillDirectBTileKTileFromPackedTileCast(
+                    direct_b_tile,
+                    packed_b_tile,
+                    tile_dequant_b_tile,
+                    k_tile,
+                    n_begin,
+                    packed_begin,
+                    packed_end,
+                    packed_stride,
+                    zero_offsets);
+#elif defined(CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT)
+                FillDirectBTileKTileFromPackedTileInplaceCast(
+                    direct_b_tile,
+                    packed_b_tile,
+                    k_tile,
+                    n_begin,
+                    packed_begin,
+                    packed_end,
+                    packed_stride,
+                    zero_offsets);
+#else
                 FillDirectBTileKTileFromPackedTile(
                     direct_b_tile,
                     packed_b_tile,
@@ -663,7 +807,13 @@ public:
                     packed_end,
                     packed_stride,
                     zero_offsets);
+#endif
+#if defined(CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT) || \
+    defined(CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT)
+                PipeBarrier<PIPE_ALL>();
+#else
                 PipeBarrier<PIPE_V>();
+#endif
                 for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
                     const uint32_t m_begin = m_tile * base_m;
                     const uint32_t m_len_candidate = rows - m_begin;
@@ -709,6 +859,50 @@ public:
 #endif
 
 private:
+#ifdef CANNOE_EXPERIMENTAL_INT4_LANE_DIAGNOSTIC
+    __aicore__ inline bool TryProcessInt4LaneDiagnostic(uint32_t core_idx)
+    {
+        constexpr uint32_t kDiagnosticWords = 8;
+        constexpr uint32_t kDiagnosticLanes = kDiagnosticWords * 8;
+        if (!vector_dequant_ready_ || tiling_->rows == 0 || tiling_->out_features < kDiagnosticLanes * 3 ||
+            (tiling_->out_features >> 3) < kDiagnosticWords) {
+            return false;
+        }
+        if (core_idx != 0) {
+            return true;
+        }
+
+        LocalTensor<int32_t> packed = vector_packed_ub_.Get<int32_t>(kDiagnosticWords);
+        LocalTensor<half> dequant = vector_half_ub_.Get<half>(kDiagnosticLanes);
+        DataCopy(packed, packed_weight_gm_[0], kDiagnosticWords);
+        PipeBarrier<PIPE_MTE2>();
+        asc_int42half_sync(
+            reinterpret_cast<__ubuf__ half*>(dequant.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ CannoeCapiInt4*>(packed.GetPhyAddr()),
+            static_cast<uint32_t>(kDiagnosticLanes));
+        PipeBarrier<PIPE_V>();
+
+        for (uint32_t lane = 0; lane < kDiagnosticLanes; ++lane) {
+            y_gm_.SetValue(lane, dequant.GetValue(lane));
+        }
+        for (uint32_t word_idx = 0; word_idx < kDiagnosticWords; ++word_idx) {
+            const uint32_t word = static_cast<uint32_t>(packed.GetValue(word_idx));
+            const uint32_t dst_base = kDiagnosticLanes + word_idx * 8;
+            for (uint32_t lane = 0; lane < 8; ++lane) {
+                y_gm_.SetValue(dst_base + lane, static_cast<half>(SignedLane(word, lane)));
+            }
+        }
+
+        LocalTensor<CannoeAscendInt4> packed_int4 = packed.ReinterpretCast<CannoeAscendInt4>();
+        Cast<half, CannoeAscendInt4>(dequant, packed_int4, RoundMode::CAST_NONE, kDiagnosticLanes);
+        PipeBarrier<PIPE_V>();
+        for (uint32_t lane = 0; lane < kDiagnosticLanes; ++lane) {
+            y_gm_.SetValue(kDiagnosticLanes * 2 + lane, dequant.GetValue(lane));
+        }
+        return true;
+    }
+#endif
+
 #if defined(CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF) || \
     defined(CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
     __aicore__ inline void ConfigureCubeBiasForKTile(
@@ -783,6 +977,472 @@ private:
         FillDirectBTileKTileFromPackedValues(
             b_tile, packed_tile, k_tile, n_begin, packed_begin, packed_end, packed_cols, zero_offsets);
     }
+
+#if defined(CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT) || \
+    defined(CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT)
+    __aicore__ inline void FillDirectBTileKTileFromPackedTileCast(
+        LocalTensor<half>& b_tile,
+        LocalTensor<int32_t>& packed_tile,
+        LocalTensor<half>& dequant_tile,
+        uint32_t k_tile,
+        uint32_t n_begin,
+        uint32_t packed_begin,
+        uint32_t packed_end,
+        uint32_t packed_stride,
+        uint32_t zero_offsets)
+    {
+        const uint32_t base_k = tiling_->base_k;
+        const uint32_t packed_cols = packed_end - packed_begin;
+        const uint32_t k_begin = k_tile * base_k;
+        for (uint32_t tile_k = 0; tile_k < base_k; ++tile_k) {
+            const uint32_t k = k_begin + tile_k;
+            DataCopy(
+                packed_tile[tile_k * packed_cols],
+                packed_weight_gm_[k * packed_stride + packed_begin],
+                packed_cols);
+        }
+        PipeBarrier<PIPE_MTE2>();
+        LocalTensor<CannoeAscendInt4> packed_int4 = packed_tile.ReinterpretCast<CannoeAscendInt4>();
+        Cast<half, CannoeAscendInt4>(
+            dequant_tile, packed_int4, RoundMode::CAST_NONE, base_k * packed_cols * 8);
+        PipeBarrier<PIPE_V>();
+        FillDirectBTileKTileFromCastValues(
+            b_tile, dequant_tile, k_tile, n_begin, packed_begin, packed_end, packed_cols, zero_offsets);
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_GROUP_TAIL_REPAIR
+        PipeBarrier<PIPE_ALL>();
+        PatchDirectBTileGroupTailRowsFromPackedValues(
+            b_tile, packed_tile, k_tile, n_begin, packed_begin, packed_end, packed_cols, zero_offsets);
+        PipeBarrier<PIPE_ALL>();
+#endif
+        PatchDirectBTileTailRowsFromPackedValues(
+            b_tile, packed_tile, k_tile, n_begin, packed_begin, packed_end, packed_cols, zero_offsets);
+    }
+
+    __aicore__ inline void FillDirectBTileKTileFromPackedTileInplaceCast(
+        LocalTensor<half>& b_tile,
+        LocalTensor<int32_t>& packed_tile,
+        uint32_t k_tile,
+        uint32_t n_begin,
+        uint32_t packed_begin,
+        uint32_t packed_end,
+        uint32_t packed_stride,
+        uint32_t zero_offsets)
+    {
+        const uint32_t base_k = tiling_->base_k;
+        const uint32_t packed_cols = packed_end - packed_begin;
+        const uint32_t k_begin = k_tile * base_k;
+        for (uint32_t tile_k = 0; tile_k < base_k; ++tile_k) {
+            const uint32_t k = k_begin + tile_k;
+            DataCopy(
+                packed_tile[tile_k * packed_cols],
+                packed_weight_gm_[k * packed_stride + packed_begin],
+                packed_cols);
+        }
+        PipeBarrier<PIPE_MTE2>();
+        LocalTensor<CannoeAscendInt4> packed_int4 = packed_tile.ReinterpretCast<CannoeAscendInt4>();
+        Cast<half, CannoeAscendInt4>(
+            b_tile, packed_int4, RoundMode::CAST_NONE, base_k * packed_cols * 8);
+        PipeBarrier<PIPE_V>();
+        FillDirectBTileKTileFromCastValues(
+            b_tile, b_tile, k_tile, n_begin, packed_begin, packed_end, packed_cols, zero_offsets);
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_GROUP_TAIL_REPAIR
+        PipeBarrier<PIPE_ALL>();
+        PatchDirectBTileGroupTailRowsFromPackedValues(
+            b_tile, packed_tile, k_tile, n_begin, packed_begin, packed_end, packed_cols, zero_offsets);
+        PipeBarrier<PIPE_ALL>();
+#endif
+        PatchDirectBTileTailRowsFromPackedValues(
+            b_tile, packed_tile, k_tile, n_begin, packed_begin, packed_end, packed_cols, zero_offsets);
+    }
+
+    __aicore__ inline void FillDirectBTileKTileCastScratchThenScalar(
+        LocalTensor<half>& b_tile,
+        LocalTensor<int32_t>& packed_tile,
+        LocalTensor<half>& dequant_tile,
+        uint32_t k_tile,
+        uint32_t n_begin,
+        uint32_t packed_begin,
+        uint32_t packed_end,
+        uint32_t packed_stride,
+        uint32_t zero_offsets)
+    {
+        const uint32_t base_k = tiling_->base_k;
+        const uint32_t packed_cols = packed_end - packed_begin;
+        const uint32_t k_begin = k_tile * base_k;
+        for (uint32_t tile_k = 0; tile_k < base_k; ++tile_k) {
+            const uint32_t k = k_begin + tile_k;
+            DataCopy(
+                packed_tile[tile_k * packed_cols],
+                packed_weight_gm_[k * packed_stride + packed_begin],
+                packed_cols);
+        }
+        PipeBarrier<PIPE_MTE2>();
+        LocalTensor<CannoeAscendInt4> packed_int4 = packed_tile.ReinterpretCast<CannoeAscendInt4>();
+        Cast<half, CannoeAscendInt4>(
+            dequant_tile, packed_int4, RoundMode::CAST_NONE, base_k * packed_cols * 8);
+        PipeBarrier<PIPE_V>();
+        FillDirectBTileKTileFromPackedValues(
+            b_tile, packed_tile, k_tile, n_begin, packed_begin, packed_end, packed_cols, zero_offsets);
+    }
+
+    __aicore__ inline void FillDirectBTileKTileFromCastValues(
+        LocalTensor<half>& b_tile,
+        LocalTensor<half>& dequant_tile,
+        uint32_t k_tile,
+        uint32_t n_begin,
+        uint32_t packed_begin,
+        uint32_t packed_end,
+        uint32_t packed_cols,
+        uint32_t zero_offsets)
+    {
+        const uint32_t base_n = tiling_->base_n;
+        const uint32_t k_begin = k_tile * tiling_->base_k;
+        const uint32_t k_end = k_begin + tiling_->base_k;
+        const uint32_t first_group = tiling_->group_size == 0 ? 0 : k_begin / tiling_->group_size;
+        const uint32_t last_group = tiling_->group_size == 0 ? 0 : (k_end - 1) / tiling_->group_size;
+        for (uint32_t group = first_group; group <= last_group; ++group) {
+            const uint32_t group_k_begin_candidate = tiling_->group_size == 0 ? k_begin : group * tiling_->group_size;
+            const uint32_t group_k_end_candidate =
+                tiling_->group_size == 0 ? k_end : group_k_begin_candidate + tiling_->group_size;
+            const uint32_t group_k_begin = group_k_begin_candidate < k_begin ? k_begin : group_k_begin_candidate;
+            const uint32_t group_k_end = group_k_end_candidate > k_end ? k_end : group_k_end_candidate;
+            for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
+                const uint32_t n_base = packed_col << 3;
+                const uint32_t tile_n = n_base - n_begin;
+                const uint32_t scale_base = group * tiling_->out_features + n_base;
+                const uint32_t packed_offset = packed_col - packed_begin;
+                const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
+                const float scale1 = static_cast<float>(scales_gm_.GetValue(scale_base + 1));
+                const float scale2 = static_cast<float>(scales_gm_.GetValue(scale_base + 2));
+                const float scale3 = static_cast<float>(scales_gm_.GetValue(scale_base + 3));
+                const float scale4 = static_cast<float>(scales_gm_.GetValue(scale_base + 4));
+                const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
+                const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
+                const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+                const float offset0 = OffsetValue(scale_base, zero_offsets);
+                const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
+                const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
+                const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
+                const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
+                const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
+                const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
+                const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
+                for (uint32_t k = group_k_begin; k < group_k_end; ++k) {
+                    const uint32_t tile_k = k - k_begin;
+                    const uint32_t dequant_base = tile_k * packed_cols * 8 + packed_offset * 8;
+                    const uint32_t b_base = tile_k * base_n + tile_n;
+                    b_tile.SetValue(
+                        b_base,
+                        static_cast<half>(
+                            (static_cast<float>(dequant_tile.GetValue(dequant_base)) + offset0) * scale0));
+                    b_tile.SetValue(
+                        b_base + 1,
+                        static_cast<half>(
+                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 1)) + offset1) * scale1));
+                    b_tile.SetValue(
+                        b_base + 2,
+                        static_cast<half>(
+                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 2)) + offset2) * scale2));
+                    b_tile.SetValue(
+                        b_base + 3,
+                        static_cast<half>(
+                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 3)) + offset3) * scale3));
+                    b_tile.SetValue(
+                        b_base + 4,
+                        static_cast<half>(
+                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 4)) + offset4) * scale4));
+                    b_tile.SetValue(
+                        b_base + 5,
+                        static_cast<half>(
+                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 5)) + offset5) * scale5));
+                    b_tile.SetValue(
+                        b_base + 6,
+                        static_cast<half>(
+                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 6)) + offset6) * scale6));
+                    b_tile.SetValue(
+                        b_base + 7,
+                        static_cast<half>(
+                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 7)) + offset7) * scale7));
+                }
+            }
+        }
+    }
+
+    __aicore__ inline void PatchDirectBTileTailRowsFromPackedValues(
+        LocalTensor<half>& b_tile,
+        LocalTensor<int32_t>& packed_tile,
+        uint32_t k_tile,
+        uint32_t n_begin,
+        uint32_t packed_begin,
+        uint32_t packed_end,
+        uint32_t packed_cols,
+        uint32_t zero_offsets)
+    {
+        const uint32_t base_n = tiling_->base_n;
+        const uint32_t base_k = tiling_->base_k;
+        constexpr uint32_t kPatchRows = 33;
+        const uint32_t tile_k_begin = base_k > kPatchRows ? base_k - kPatchRows : 0;
+        for (uint32_t tile_k = tile_k_begin; tile_k < base_k; ++tile_k) {
+            const uint32_t k = k_tile * base_k + tile_k;
+            const uint32_t group = tiling_->group_size == 0 ? 0 : k / tiling_->group_size;
+            for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
+                const uint32_t n_base = packed_col << 3;
+                const uint32_t tile_n = n_base - n_begin;
+                const uint32_t scale_base = group * tiling_->out_features + n_base;
+                const uint32_t packed_offset = packed_col - packed_begin;
+                const uint32_t word =
+                    static_cast<uint32_t>(packed_tile.GetValue(tile_k * packed_cols + packed_offset));
+                if (zero_offsets != 0) {
+                    FillDirectBTileWordValuesNoOffset(
+                        b_tile,
+                        tile_k * base_n + tile_n,
+                        word,
+                        static_cast<float>(scales_gm_.GetValue(scale_base)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 1)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 2)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 3)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 4)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 5)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 6)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 7)));
+                    continue;
+                }
+                FillDirectBTileWordValues(
+                    b_tile,
+                    tile_k * base_n + tile_n,
+                    word,
+                    static_cast<float>(scales_gm_.GetValue(scale_base)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 1)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 2)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 3)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 4)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 5)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 6)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 7)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 1)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 2)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 3)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 4)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 5)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 6)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 7)));
+            }
+        }
+    }
+
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_GROUP_TAIL_REPAIR
+    __aicore__ inline void PatchDirectBTileGroupTailRowsFromPackedValues(
+        LocalTensor<half>& b_tile,
+        LocalTensor<int32_t>& packed_tile,
+        uint32_t k_tile,
+        uint32_t n_begin,
+        uint32_t packed_begin,
+        uint32_t packed_end,
+        uint32_t packed_cols,
+        uint32_t zero_offsets)
+    {
+        const uint32_t group_size = tiling_->group_size;
+        const uint32_t base_k = tiling_->base_k;
+        if (group_size == 0 || group_size >= base_k) {
+            return;
+        }
+        const uint32_t base_n = tiling_->base_n;
+        const uint32_t k_begin = k_tile * base_k;
+        for (uint32_t tile_k = group_size - 1; tile_k < base_k; tile_k += group_size) {
+            const uint32_t k = k_begin + tile_k;
+            const uint32_t group = k / group_size;
+            for (uint32_t packed_col = packed_begin; packed_col < packed_end; ++packed_col) {
+                const uint32_t n_base = packed_col << 3;
+                const uint32_t tile_n = n_base - n_begin;
+                const uint32_t scale_base = group * tiling_->out_features + n_base;
+                const uint32_t packed_offset = packed_col - packed_begin;
+                const uint32_t word =
+                    static_cast<uint32_t>(packed_tile.GetValue(tile_k * packed_cols + packed_offset));
+                if (zero_offsets != 0) {
+                    FillDirectBTileWordValuesNoOffset(
+                        b_tile,
+                        tile_k * base_n + tile_n,
+                        word,
+                        static_cast<float>(scales_gm_.GetValue(scale_base)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 1)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 2)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 3)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 4)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 5)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 6)),
+                        static_cast<float>(scales_gm_.GetValue(scale_base + 7)));
+                    continue;
+                }
+                FillDirectBTileWordValues(
+                    b_tile,
+                    tile_k * base_n + tile_n,
+                    word,
+                    static_cast<float>(scales_gm_.GetValue(scale_base)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 1)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 2)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 3)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 4)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 5)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 6)),
+                    static_cast<float>(scales_gm_.GetValue(scale_base + 7)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 1)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 2)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 3)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 4)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 5)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 6)),
+                    static_cast<float>(offsets_gm_.GetValue(scale_base + 7)));
+            }
+        }
+    }
+#endif
+
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_TILE_FILL_DIAGNOSTIC
+    __aicore__ inline bool TryProcessVecoutTileFillDiagnostic(
+        LocalTensor<half>& direct_b_tile,
+        LocalTensor<int32_t>& packed_b_tile,
+        LocalTensor<half>& tile_dequant_b_tile,
+        uint32_t core_idx,
+        uint32_t packed_stride,
+        uint32_t zero_offsets)
+    {
+        constexpr uint32_t kCheckRows = 8;
+        constexpr uint32_t kCheckCols = 16;
+        constexpr uint32_t kCheckValues = kCheckRows * kCheckCols;
+        if (tiling_->rows * tiling_->out_features < kCheckValues * 2 || tiling_->base_k < kCheckRows ||
+            tiling_->base_n < kCheckCols || packed_stride < (tiling_->base_n >> 3)) {
+            return false;
+        }
+        if (core_idx != 0) {
+            return true;
+        }
+
+        constexpr uint32_t kTile = 0;
+        constexpr uint32_t kNBegin = 0;
+        const uint32_t packed_begin = 0;
+        const uint32_t packed_end = tiling_->base_n >> 3;
+        FillDirectBTileKTileFromPackedTile(
+            direct_b_tile,
+            packed_b_tile,
+            kTile,
+            kNBegin,
+            packed_begin,
+            packed_end,
+            packed_stride,
+            zero_offsets);
+        PipeBarrier<PIPE_ALL>();
+        for (uint32_t row = 0; row < kCheckRows; ++row) {
+            const uint32_t tile_row = DiagnosticTileRow(row);
+            const uint32_t src_base = tile_row * tiling_->base_n;
+            const uint32_t dst_base = row * kCheckCols;
+            for (uint32_t col = 0; col < kCheckCols; ++col) {
+                y_gm_.SetValue(dst_base + col, direct_b_tile.GetValue(src_base + DiagnosticTileCol(col)));
+            }
+        }
+
+        FillDirectBTileKTileFromPackedTileCast(
+            direct_b_tile,
+            packed_b_tile,
+            tile_dequant_b_tile,
+            kTile,
+            kNBegin,
+            packed_begin,
+            packed_end,
+            packed_stride,
+            zero_offsets);
+        PipeBarrier<PIPE_ALL>();
+        for (uint32_t row = 0; row < kCheckRows; ++row) {
+            const uint32_t tile_row = DiagnosticTileRow(row);
+            const uint32_t src_base = tile_row * tiling_->base_n;
+            const uint32_t dst_base = kCheckValues + row * kCheckCols;
+            for (uint32_t col = 0; col < kCheckCols; ++col) {
+                y_gm_.SetValue(dst_base + col, direct_b_tile.GetValue(src_base + DiagnosticTileCol(col)));
+            }
+        }
+        return true;
+    }
+
+    __aicore__ inline uint32_t DiagnosticTileRow(uint32_t slot)
+    {
+        const uint32_t base_k = tiling_->base_k;
+        if (slot == 0) {
+            return 0;
+        }
+        if (slot == 1) {
+            return base_k > 31 ? 31 : base_k - 1;
+        }
+        if (slot == 2) {
+            return base_k > 32 ? 32 : base_k - 1;
+        }
+        if (slot == 3) {
+            return base_k > 63 ? 63 : base_k - 1;
+        }
+        if (slot == 4) {
+            return base_k > 64 ? 64 : base_k - 1;
+        }
+        if (slot == 5) {
+            return base_k > 95 ? 95 : base_k - 1;
+        }
+        if (slot == 6) {
+            return base_k > 96 ? 96 : base_k - 1;
+        }
+        return base_k - 1;
+    }
+
+    __aicore__ inline uint32_t DiagnosticTileCol(uint32_t slot)
+    {
+        const uint32_t base_n = tiling_->base_n;
+        if (slot == 0) {
+            return 0;
+        }
+        if (slot == 1) {
+            return 1;
+        }
+        if (slot == 2) {
+            return base_n > 15 ? 15 : base_n - 1;
+        }
+        if (slot == 3) {
+            return base_n > 16 ? 16 : base_n - 1;
+        }
+        if (slot == 4) {
+            return base_n > 31 ? 31 : base_n - 1;
+        }
+        if (slot == 5) {
+            return base_n > 32 ? 32 : base_n - 1;
+        }
+        if (slot == 6) {
+            return base_n > 63 ? 63 : base_n - 1;
+        }
+        if (slot == 7) {
+            return base_n > 64 ? 64 : base_n - 1;
+        }
+        if (slot == 8) {
+            return base_n > 95 ? 95 : base_n - 1;
+        }
+        if (slot == 9) {
+            return base_n > 96 ? 96 : base_n - 1;
+        }
+        if (slot == 10) {
+            return base_n > 127 ? 127 : base_n - 1;
+        }
+        if (slot == 11) {
+            return base_n > 128 ? 128 : base_n - 1;
+        }
+        if (slot == 12) {
+            return base_n > 159 ? 159 : base_n - 1;
+        }
+        if (slot == 13) {
+            return base_n > 160 ? 160 : base_n - 1;
+        }
+        if (slot == 14) {
+            return base_n > 191 ? 191 : base_n - 1;
+        }
+        return base_n - 1;
+    }
+#endif
+#endif
 
     __aicore__ inline void FillDirectBTileKTileFromPackedValues(
         LocalTensor<half>& b_tile,
@@ -2494,20 +3154,24 @@ private:
         return zero_offsets != 0 ? 0.0f : static_cast<float>(offsets_gm_.GetValue(offset));
     }
 
+    __aicore__ inline int32_t SignedNibble(uint32_t raw)
+    {
+        return raw < 8U ? static_cast<int32_t>(raw) : static_cast<int32_t>(raw) - 16;
+    }
+
+    __aicore__ inline int32_t SignedLane(uint32_t word, uint32_t lane)
+    {
+        return SignedNibble((word >> (lane << 2)) & 0xFU);
+    }
+
     __aicore__ inline float DequantLane(uint32_t word, uint32_t lane, float scale, float offset)
     {
-        const uint32_t shift = lane << 2;
-        const uint32_t raw = (word >> shift) & 0xFU;
-        const int32_t signed_w = raw < 8U ? static_cast<int32_t>(raw) : static_cast<int32_t>(raw) - 16;
-        return (static_cast<float>(signed_w) + offset) * scale;
+        return (static_cast<float>(SignedLane(word, lane)) + offset) * scale;
     }
 
     __aicore__ inline float DequantLaneNoOffset(uint32_t word, uint32_t lane, float scale)
     {
-        const uint32_t shift = lane << 2;
-        const uint32_t raw = (word >> shift) & 0xFU;
-        const int32_t signed_w = raw < 8U ? static_cast<int32_t>(raw) : static_cast<int32_t>(raw) - 16;
-        return static_cast<float>(signed_w) * scale;
+        return static_cast<float>(SignedLane(word, lane)) * scale;
     }
 
 #ifdef CANNOE_EXPERIMENTAL_STAGED_DEQUANT
@@ -2526,10 +3190,17 @@ private:
 #ifdef CANNOE_EXPERIMENTAL_STAGED_DEQUANT
     GlobalTensor<half> staged_weight_gm_;
 #ifdef CANNOE_EXPERIMENTAL_CANN9_VECTOR_DEQUANT
+#ifdef CANNOE_EXPERIMENTAL_INT4_LANE_DIAGNOSTIC
+    static constexpr uint32_t kCann9VectorDequantLanes = 64;
+    static constexpr uint32_t kCann9VectorDequantPackedWords = 8;
+    static constexpr uint32_t kCann9VectorDequantPackedBytes = 32;
+    static constexpr uint32_t kCann9VectorDequantHalfBytes = 128;
+#else
     static constexpr uint32_t kCann9VectorDequantLanes = 8;
     static constexpr uint32_t kCann9VectorDequantPackedWords = 1;
     static constexpr uint32_t kCann9VectorDequantPackedBytes = 32;
     static constexpr uint32_t kCann9VectorDequantHalfBytes = 32;
+#endif
     TPipe pipe_;
     TBuf<TPosition::VECCALC> vector_packed_ub_;
     TBuf<TPosition::VECCALC> vector_half_ub_;

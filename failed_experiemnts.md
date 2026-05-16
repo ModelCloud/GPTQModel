@@ -15,6 +15,101 @@ For new entries, include:
 - Speed, accuracy, and memory data when available.
 - Decision and what would justify re-testing.
 
+## 2026-05-16: Cannoe Ascend C VECOUT Cast-to-Cube Handoff
+
+Status: failed accuracy gate; keep scalar VecOut/local-A as the profiled
+runtime baseline while looking for a different Cube handoff.
+
+Tested change: use CANN 9 Ascend C `Cast<half, AscendC::int4b_t>` to decode a
+packed INT4 B tile in UB, scale it into the VECOUT B tile, and hand that tile
+to Cube without writing a full FP16 weight tile through GM/L2. All broad sweeps
+used physical NPU 0-7 with one worker per NPU.
+
+Artifacts:
+
+- `/tmp/cannoe_vecout_tile_cast_shape_sweep_summary.json`
+- `/tmp/cannoe_vecout_tile_fill_diag_cols_summary.json`
+- `/tmp/cannoe_vecout_cast_scratch_probe_shape_sweep_summary.json`
+- `/tmp/cannoe_vecout_tile_cast_tail32_shape_sweep_summary.json`
+- `/tmp/cannoe_vecout_tile_cast_tail33_shape_sweep_summary.json`
+- `/tmp/cannoe_vecout_tile_cast_tail33_bk64_shape_sweep_summary.json`
+- `/tmp/cannoe_vecout_tile_cast_tail33_onehot_seed3300_summary.json`
+- `/tmp/cannoe_vecout_local_a_same_shape_sweep_summary.json`
+
+| Variant | Result | Passing cases | Failing max_abs range | Failing max mean_abs | Notes |
+| --- | --- | ---: | ---: | ---: | --- |
+| Scalar VecOut/local-A baseline | Pass | 8/8 | n/a | n/a | Reference; max_abs 0.015625, max mean_abs 0.001581 |
+| Raw VECOUT tile Cast | Fail | 0/8 | 4.7265625-10.1484375 | 1.7373046875 | Bad random matmul accuracy |
+| Tile-fill diagnostic | Pass | 8/8 | n/a | n/a | Sampled scalar-fill vs Cast-fill B values matched exactly |
+| Cast scratch then scalar fill | Pass | 8/8 | n/a | n/a | Cast execution/allocation alone does not poison Cube |
+| Tail32 scalar repair | Fail | 3/8 | 0.345703125-1.857421875 | 0.363525390625 | Fixed many tile-tail one-hot rows but not random matmul |
+| Tail33 scalar repair | Fail | 3/8 | 0.4453125-1.3125 | 0.298828125 | `one_hot_k` seed-3300 sweep passed 141/141, random still failed |
+| Tail33 with `base_k=64` | Fail | 0/8 | 0.2353515625-1.724609375 | 0.34912109375 | Smaller K tiles made accuracy worse |
+
+Reason: lane diagnostics showed `AscendC::int4b_t` Cast decodes torch-npu
+int4pack lanes correctly, and sampled B-tile fill matched scalar fill. The
+scratch probe also passed, so the active failure is specifically Cube consuming
+B tiles whose values came from the Cast path under multi-row/random
+accumulation. One-hot tests are insufficient for approval because they can pass
+while random input still fails by large margins.
+
+Re-test only if the handoff changes materially, for example a true TSCM/NZ tile
+producer, an Ascend C Matmul API mode documented for VECOUT producer tiles, or
+a vector scale/store path that avoids scalar `GetValue`/`SetValue` B-tile
+materialization.
+
+## 2026-05-16: Cannoe VECOUT Cast Repair Variants
+
+Status: failed accuracy gate; do not enable by default.
+
+Tested change: after Tail33, patch extra quant-group boundary rows or enforce
+hard barriers between Cast-filled rows and scalar-repaired rows.
+
+Artifacts:
+
+- `/tmp/cannoe_vecout_tile_cast_tail33_grouptail_shape_sweep_summary.json`
+- `/tmp/cannoe_vecout_tile_cast_tail33_grouptail_barrier_shape_sweep_summary.json`
+- `/tmp/cannoe_vecout_tile_cast_tail33_singleproducer_shape_sweep_summary.json`
+
+| Variant | Result | Passing cases | Failing max_abs range | Failing max mean_abs | Notes |
+| --- | --- | ---: | ---: | ---: | --- |
+| Group-tail row repair | Fail | 4/8 | 0.98583984375-1.3837890625 | 0.357666015625 | Helped some group32 rows but broke group64 |
+| Group-tail repair plus hard barriers | Fail | 1/8 | 0.08984375-1.4921875 | 0.362548828125 | Barriers did not stabilize VECOUT/Cube consumption |
+| Single-producer tail repair | Fail | 1/8 | 0.205078125-1.43359375 | 0.212890625 | Avoiding double writes to repaired tail rows was worse |
+
+Reason: the passing/failing shape set moved around, but no variant achieved the
+scalar VecOut/local-A accuracy envelope. Keep group-tail repair guarded behind
+`CANNOE_EXPERIMENTAL_VECOUT_GROUP_TAIL_REPAIR` if further forensic work needs
+it, but do not use it in normal tile-cast experiments.
+
+Re-test only with a new diagnostic that proves Cube consumes every produced
+B-tile row consistently under random A, not just with one-hot A.
+
+## 2026-05-16: Cannoe TSCM Direct-Dequant Handoff
+
+Status: failed validation/timeout gate.
+
+Tested change: use the existing TSCM/NZ direct-dequant route instead of VECOUT
+for the B tile handoff to Cube.
+
+Artifacts:
+
+- `/tmp/cannoe_tscm_direct_timeout_check_summary.json`
+- `/tmp/cannoe_tscm_block24_qwen_tile_summary.json`
+- `/tmp/cannoe_tscm_direct_current_qwen_tile_summary.json`
+
+Result: all recorded TSCM summaries failed with `count=0` and 8 failures,
+mostly timeout-style failures before usable accuracy/speed numbers were
+produced.
+
+Reason: the current TSCM path is not a usable replacement for the scalar
+VecOut/local-A runtime path. It likely needs a fresh NZ producer design rather
+than the current ND-to-NZ copy experiment.
+
+Re-test only after rewriting the TSCM producer around the exact NZ layout Cube
+expects, with a small single-tile correctness diagnostic before running broad
+Qwen-sized sweeps.
+
 ## 2026-05-14: AWQ BF16 Fuse Bias For All Group-32 Shapes
 
 Status: failed accuracy gate, replaced by selective fusion.

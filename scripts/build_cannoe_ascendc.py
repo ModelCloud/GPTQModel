@@ -51,6 +51,23 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
     _apply_strategy_flags(args)
     if args.experimental_vecout_local_a:
         args.experimental_vecout_runtime_handoff = True
+    if args.experimental_vecout_tile_cast_dequant:
+        args.experimental_vecout_local_a = True
+        args.experimental_vecout_runtime_handoff = True
+    if args.experimental_vecout_tile_fill_diagnostic:
+        args.experimental_vecout_tile_cast_dequant = True
+        args.experimental_vecout_local_a = True
+        args.experimental_vecout_runtime_handoff = True
+    if args.experimental_vecout_cast_scratch_probe:
+        args.experimental_vecout_tile_cast_dequant = True
+        args.experimental_vecout_local_a = True
+        args.experimental_vecout_runtime_handoff = True
+    if args.experimental_vecout_inplace_cast_dequant:
+        args.experimental_vecout_local_a = True
+        args.experimental_vecout_runtime_handoff = True
+    if args.experimental_int4_lane_diagnostic:
+        args.experimental_staged_dequant = True
+        args.experimental_cann9_vector_dequant = True
     if args.experimental_vecout_runtime_handoff:
         args.experimental_staged_dequant = True
         args.experimental_cann9_vector_dequant = True
@@ -78,6 +95,8 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         parser.error("--experimental-vecout-runtime-handoff cannot be combined with TSCM runtime handoff flags")
     if args.experimental_vecout_consumer and args.experimental_tscm_consumer:
         parser.error("--experimental-vecout-consumer and --experimental-tscm-consumer are mutually exclusive")
+    if args.experimental_vecout_inplace_cast_dequant and args.experimental_vecout_tile_cast_dequant:
+        parser.error("--experimental-vecout-inplace-cast-dequant and --experimental-vecout-tile-cast-dequant are mutually exclusive")
     if args.experimental_vecout_consumer:
         args.experimental_cube_consumer = True
     if args.experimental_tscm_consumer:
@@ -348,6 +367,49 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--experimental-int4-lane-diagnostic",
+        action="store_true",
+        help=(
+            "Compile an opt-in diagnostic path that writes CANN int4b_t vector-cast lanes and the "
+            "current scalar unpack lanes into y for packed-layout bring-up. This implies "
+            "--experimental-staged-dequant and --experimental-cann9-vector-dequant."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-vecout-tile-cast-dequant",
+        action="store_true",
+        help=(
+            "Compile the guarded VecOut local-A handoff variant that vector-decodes each packed "
+            "INT4 B tile with AscendC Cast<half, int4b_t> before scaling and handing the tile to Cube. "
+            "This implies --experimental-vecout-local-a."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-vecout-tile-fill-diagnostic",
+        action="store_true",
+        help=(
+            "Compile an opt-in diagnostic that compares scalar B-tile fill with Cast-based B-tile fill "
+            "before the Matmul handoff. This implies --experimental-vecout-tile-cast-dequant."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-vecout-cast-scratch-probe",
+        action="store_true",
+        help=(
+            "Compile a VecOut local-A probe that executes Cast into scratch, discards it, then "
+            "fills the Cube B tile through the scalar path. This implies --experimental-vecout-tile-cast-dequant."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-vecout-inplace-cast-dequant",
+        action="store_true",
+        help=(
+            "Compile the guarded VecOut local-A handoff variant that Cast-decodes INT4 directly "
+            "into the VECOUT B tile, then applies scale/offset in place before Cube consumes it. "
+            "This implies --experimental-vecout-local-a."
+        ),
+    )
+    parser.add_argument(
         "--experimental-tscm-consumer",
         action="store_true",
         help=(
@@ -431,6 +493,16 @@ def main() -> int:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF")
     if args.experimental_vecout_local_a:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A")
+    if args.experimental_vecout_tile_cast_dequant:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT")
+    if args.experimental_vecout_tile_fill_diagnostic:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_VECOUT_TILE_FILL_DIAGNOSTIC")
+    if args.experimental_vecout_cast_scratch_probe:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_VECOUT_CAST_SCRATCH_PROBE")
+    if args.experimental_vecout_inplace_cast_dequant:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_VECOUT_INPLACE_CAST_DEQUANT")
+    if args.experimental_int4_lane_diagnostic:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_INT4_LANE_DIAGNOSTIC")
     if args.experimental_tscm_consumer:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_CONSUMER")
     if args.experimental_tscm_runtime_handoff:
