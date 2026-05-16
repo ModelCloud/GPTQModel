@@ -45,6 +45,7 @@ from ...utils.marlin import (
     marlin_sort_g_idx,
     replace_parameter,
 )
+from ...utils.eora_marlin import apply_eora_marlin_fused_lora
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
 
@@ -332,7 +333,8 @@ class MarlinLinear(GPTQQuantLinear):
         )
 
         if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
+            fused_out = apply_eora_marlin_fused_lora(self.adapter, x=x, out=out)
+            out = fused_out if fused_out is not None else self.adapter.apply(x=x, out=out)
 
         return out
 

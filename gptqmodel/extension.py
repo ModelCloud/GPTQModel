@@ -96,6 +96,15 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin", "_MARLIN_BF16_TORCH_OPS_EXTENSION"),
     ),
     _ExtensionSpec(
+        name="eora_marlin",
+        aliases=("eora_lora", "marlin_eora"),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.eora_marlin", "_EORA_MARLIN_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.eora_marlin", "eora_marlin_supported")(),
+        unsupported_error=lambda: _resolve_attr(
+            "gptqmodel.utils.eora_marlin", "eora_marlin_runtime_error"
+        )(),
+    ),
+    _ExtensionSpec(
         name="paroquant",
         aliases=("paroquant_rotation",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.paroquant", "_PAROQUANT_ROTATION_EXTENSION"),
