@@ -565,3 +565,52 @@ shape-dependent and should not be broadened beyond the existing auto rule.
 Re-test if CANN changes the packed W4A16 layout or if we add shape-local packing
 selection that can choose a different tile per projection without increasing
 the persistent packed-weight footprint.
+
+## 2026-05-16: Cannoe VecOut `asc_int42half_sync` dequant-to-local-B probes
+
+Status: failed correctness and forward-progress gates; reverted.
+
+Tested change: keep the fused Ascend C VecOut/local-A scaffold, but replace
+part of the scalar INT4 unpack with CANN 9 public vector INT4-to-FP16 device
+API before feeding the dequantized B values into the high-level Matmul local-B
+tile. All probes used physical devices `0,1,2,3,4,5,6,7`, one worker per NPU.
+
+Artifacts:
+
+- `/tmp/cannoe_vecout_word_vector_summary.json`
+- `/tmp/cannoe_vecout_word_vector_barrier_summary.json`
+- `/tmp/cannoe_vecout_tile_vector_summary.json`
+
+| Probe | Devices | Returned timings | Accuracy / progress | Result |
+| --- | --- | ---: | --- | --- |
+| Per-packed-word `asc_int42half_sync` into scratch UB, then scalar placement | 0-7 | 2.8988-4.3048 ms on returned workers | `max_abs=3392`, `NaN`, or timeout on 5/8 workers | Reject |
+| Same word-vector path with `PipeBarrier<PIPE_V>()` after vector cast | 0-7 | 2.2079-5.1139 ms on returned workers | `max_abs=12.75`, `NaN`, `Infinity`, or timeout on 5/8 workers | Reject |
+| Whole packed B tile copied to VECCALC UB, tile-wide `asc_int42half_sync`, scalar scale/place into local B | 0-7 | 1.6115-3.1559 ms on returned workers | `max_abs=3.09-3.66`, `mean_abs=0.73-0.83`, or timeout on 5/8 workers | Reject |
+
+Representative failing cases:
+
+| Probe | Device | Shape | Mean ms | Max abs | Mean abs |
+| --- | --- | --- | ---: | ---: | ---: |
+| Word vector | NPU5 | `rows=3,K=768,N=256,group=96` | 4.3048 | 3392.0 | 10.5938 |
+| Word vector | NPU1 | `rows=2,K=512,N=256,group=64` | 2.8988 | NaN | NaN |
+| Word vector + barrier | NPU0 | `rows=1,K=384,N=256,group=32` | 2.2079 | 12.75 | 3.0566 |
+| Word vector + barrier | NPU6 | `rows=7,K=896,N=256,group=128` | 5.1139 | Infinity | Infinity |
+| Tile vector | NPU0 | `rows=1,K=384,N=256,group=32` | 1.6115 | 3.2422 | 0.7349 |
+| Tile vector | NPU2 | `rows=4,K=512,N=256,group=32` | 2.1496 | 3.6562 | 0.8296 |
+| Tile vector | NPU5 | `rows=3,K=768,N=256,group=96` | 3.1559 | 3.0938 | 0.8188 |
+
+Interpretation: `asc_int42half_sync` is not a drop-in replacement for the
+current torch-npu INT4 packed-word decode order. The per-word granularity is
+unstable even with a V-pipe barrier, while the whole-tile granularity is faster
+for workers that return but still decodes the wrong values and can hang. This
+points to a packed-lane/layout mismatch between `npu_convert_weight_to_int4pack`
+and CANN's public `int4b_t` vector cast semantics, or to an unsafe source tensor
+interpretation for the current local-B handoff.
+
+Decision: do not keep either vector path in production or behind a normal
+runtime knob. Re-test only after adding a small lane-order diagnostic that
+compares known packed words against CANN `int4b_t` vector decode, or after
+switching to the public `AscendAntiQuant` local-tile API with explicit layout
+handling. The production baseline remains native Cannoe while the true fused
+kernel target moves toward a verified local INT4 tile layout plus explicit
+Cube handoff.
