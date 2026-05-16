@@ -79,6 +79,9 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         args.experimental_staged_dequant = True
         args.experimental_cann9_vector_dequant = True
         args.experimental_tscm_runtime_handoff = True
+    if args.experimental_tscm_tbuf_handoff:
+        args.experimental_staged_dequant = True
+        args.experimental_tscm_runtime_handoff = True
     if args.experimental_tscm_runtime_handoff:
         args.experimental_tscm_consumer = True
         args.experimental_mixed_launch = True
@@ -91,6 +94,7 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         or args.experimental_tscm_runtime_handoff
         or args.experimental_tscm_direct_dequant
         or args.experimental_tscm_direct_multik
+        or args.experimental_tscm_tbuf_handoff
     ):
         parser.error("--experimental-vecout-runtime-handoff cannot be combined with TSCM runtime handoff flags")
     if args.experimental_vecout_consumer and args.experimental_tscm_consumer:
@@ -446,6 +450,15 @@ def main() -> int:
             "--experimental-tscm-direct-dequant."
         ),
     )
+    parser.add_argument(
+        "--experimental-tscm-tbuf-handoff",
+        action="store_true",
+        help=(
+            "Compile the guarded TSCM handoff variant that uses a raw TBuf<TPosition::TSCM> L1 buffer "
+            "instead of the queue-style TSCM object. This follows CANN transformer-kernel TSCM full-load "
+            "patterns and implies --experimental-tscm-runtime-handoff."
+        ),
+    )
     args = parser.parse_args()
     _resolve_experimental_flags(args, parser)
 
@@ -511,6 +524,8 @@ def main() -> int:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
     if args.experimental_tscm_direct_multik:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
+    if args.experimental_tscm_tbuf_handoff:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF")
 
     if args.no_build:
         print(f"Generated project with Cannoe overlay at {output}")

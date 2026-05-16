@@ -709,3 +709,42 @@ switching to the public `AscendAntiQuant` local-tile API with explicit layout
 handling. The production baseline remains native Cannoe while the true fused
 kernel target moves toward a verified local INT4 tile layout plus explicit
 Cube handoff.
+
+## 2026-05-16: Cannoe high-level TSCM TBuf handoff
+
+Status: failed accuracy and forward-progress gates; keep as an explicit AIC/AIV
+handoff problem, not a high-level Matmul/KFC tuning problem.
+
+Tested change: add a guarded `TBuf<TPosition::TSCM>` variant for the direct
+TSCM handoff so the staged FP16 B tile uses the same raw L1 allocation style as
+CANN 9 transformer WQMM kernels. The second pass also tried `EnQue`/`DeQue` on
+the TBuf local tensor before `SetTensorB`, because the high-level Matmul client
+packs a TSCM queue event id with the TSCM address. All sweeps used physical
+devices `0,1,2,3,4,5,6,7`, one worker per NPU.
+
+Artifacts:
+
+- `/tmp/cannoe_tscm_tbuf_direct_multik_shape_sweep_summary.json`
+- `/tmp/cannoe_tscm_tbuf_enque_shape_sweep_summary.json`
+- `/tmp/cannoe_tscm_queue_same_shape_sweep_summary.json`
+- `/tmp/cannoe_tscm_tbuf_enque_basek512_sweep_summary.json`
+
+| Probe | Devices | Result count | Representative timing | Accuracy / progress | Result |
+| --- | --- | ---: | ---: | --- | --- |
+| Raw TSCM TBuf, no queue mark | 0-7 | 0/8 pass | 534-688 ms | `max_abs=28.16-87.13`, `mean_abs=3.55-5.89` | Reject |
+| Raw TSCM TBuf plus `EnQue`/`DeQue` | 0-7 | 0/8 pass | 529-786 ms | `max_abs=28.16-87.13`, `mean_abs=3.55-5.89` | Reject |
+| Existing queue-style `TSCM<TPosition::GM>` direct path on same shapes | 0-7 | 0/8 pass | 531-706 ms | `max_abs=11.41-21.34`, `mean_abs=3.24-4.71` | Reject |
+| TBuf path with `base_k=512` to narrow multi-K accumulation | 0-7 | 0/8 pass | n/a | all 8 workers timed out at 80s | Reject |
+
+Interpretation: the high-level `Matmul`/KFC TSCM local-B route remains wrong for
+Cannoe even when the local tensor comes from a raw TBuf. Queue marking does not
+change the failure signature. The single-large-K probe times out rather than
+recovering accuracy, so this is not just a two-slot multi-K lifetime issue.
+CANN's own WQMM path instead has AIV producers fill shared TSCM, set cross-core
+flags, and an AIC-side `MatmulImpl` consumer wait on those flags before Cube
+launches. Cannoe needs that explicit split; continuing to tune the current
+AIV-side high-level TSCM client is not a promising route.
+
+Re-test only after adding an AIC-executed consumer path with explicit
+`CrossCoreSetFlag`/`CrossCoreWaitFlag` synchronization and a verified TSCM/NZ B
+tile layout.

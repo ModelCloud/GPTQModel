@@ -39,6 +39,11 @@ using CannoeAscendInt4 = AscendC::int4b_t;
 #error "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK requires TSCM direct dequant"
 #endif
 
+#if defined(CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF) && \
+    !defined(CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF)
+#error "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF requires TSCM runtime handoff"
+#endif
+
 #if defined(CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF) && \
     (!defined(CANNOE_EXPERIMENTAL_VECOUT_CONSUMER) || !defined(CANNOE_EXPERIMENTAL_MIXED_LAUNCH) || \
      !defined(CANNOE_EXPERIMENTAL_STAGED_DEQUANT) || !defined(CANNOE_EXPERIMENTAL_CANN9_VECTOR_DEQUANT))
@@ -135,7 +140,14 @@ public:
 #else
         constexpr uint32_t kTscmSlots = 1;
 #endif
+#ifdef CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF
+        tscm_slots_ = kTscmSlots;
+        const uint32_t tscm_tile_elements = base_k * base_n;
+        tscm_tile_bytes_ = CeilDivU32(tscm_tile_elements * sizeof(half), 512U) * 512U;
+        tscm_ready_ = pipe.InitBuffer(b_tscm_tbuf_, kTscmSlots * tscm_tile_bytes_);
+#else
         tscm_ready_ = pipe.InitBuffer(b_tscm_, kTscmSlots, base_k * base_n * sizeof(half));
+#endif
 #ifdef CANNOE_EXPERIMENTAL_LOCAL_DIRECT_DEQUANT
         direct_dequant_ready_ = pipe.InitBuffer(b_ub_, base_k * base_n * sizeof(half));
 #endif
@@ -147,7 +159,11 @@ public:
         uint32_t stage_offset,
         const CannoeW4A16MatmulTilingData* tiling)
     {
+#ifdef CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF
+        b_tscm_local_ = GetTscmTbufTile(0, tiling);
+#else
         b_tscm_local_ = b_tscm_.AllocTensor<half>();
+#endif
         Nd2NzParams trans_param = {
             1,
             static_cast<uint16_t>(tiling->base_k),
@@ -159,8 +175,14 @@ public:
             0,
         };
         DataCopy(b_tscm_local_, staged_weight[stage_offset], trans_param);
+#ifdef CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF
+        PipeBarrier<PIPE_MTE2>();
+        b_tscm_tbuf_.EnQue(b_tscm_local_);
+        b_tscm_tbuf_.DeQue();
+#else
         b_tscm_.EnQue(b_tscm_local_);
         b_tscm_.DeQue();
+#endif
         return b_tscm_local_;
     }
 
@@ -173,9 +195,15 @@ public:
 #ifdef CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
     __aicore__ inline LocalTensor<half> LoadDirectBTileToTscm(
         const LocalTensor<half>& b_tile,
-        const CannoeW4A16MatmulTilingData* tiling)
+        const CannoeW4A16MatmulTilingData* tiling,
+        uint32_t slot = 0)
     {
+#ifdef CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF
+        b_tscm_local_ = GetTscmTbufTile(slot, tiling);
+#else
+        (void)slot;
         b_tscm_local_ = b_tscm_.AllocTensor<half>();
+#endif
         Nd2NzParams trans_param = {
             1,
             static_cast<uint16_t>(tiling->base_k),
@@ -188,8 +216,14 @@ public:
         };
         PipeBarrier<PIPE_ALL>();
         DataCopy(b_tscm_local_, b_tile, trans_param);
+#ifdef CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF
+        PipeBarrier<PIPE_MTE2>();
+        b_tscm_tbuf_.EnQue(b_tscm_local_);
+        b_tscm_tbuf_.DeQue();
+#else
         b_tscm_.EnQue(b_tscm_local_);
         b_tscm_.DeQue();
+#endif
         return b_tscm_local_;
     }
 #endif
@@ -207,13 +241,19 @@ public:
 
     __aicore__ inline void FreeTscmBTile()
     {
+#ifndef CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF
         b_tscm_.FreeTensor(b_tscm_local_);
+#endif
     }
 
 #ifdef CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK
     __aicore__ inline void FreeTscmBTile(LocalTensor<half>& b_tile)
     {
+#ifdef CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF
+        (void)b_tile;
+#else
         b_tscm_.FreeTensor(b_tile);
+#endif
     }
 #endif
 
@@ -223,7 +263,20 @@ public:
     }
 
 private:
+#ifdef CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF
+    __aicore__ inline LocalTensor<half> GetTscmTbufTile(uint32_t slot, const CannoeW4A16MatmulTilingData* tiling)
+    {
+        const uint32_t bounded_slot = tscm_slots_ == 0 ? 0 : slot % tscm_slots_;
+        return b_tscm_tbuf_.GetWithOffset<half>(
+            tiling->base_k * tiling->base_n, bounded_slot * tscm_tile_bytes_);
+    }
+
+    TBuf<TPosition::TSCM> b_tscm_tbuf_;
+    uint32_t tscm_slots_ = 1;
+    uint32_t tscm_tile_bytes_ = 0;
+#else
     TSCM<TPosition::GM> b_tscm_;
+#endif
     LocalTensor<half> b_tscm_local_;
     bool tscm_ready_ = false;
 #ifdef CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
@@ -517,7 +570,7 @@ public:
             const bool use_pipelined_fill = tiling_->base_k >= 128 || k_tiles >= 4;
             if (use_pipelined_fill) {
                 FillDirectBTileKTile(direct_b_tile, 0, n_begin, packed_begin, packed_end, packed_stride, zero_offsets);
-                LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_);
+                LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_, 0);
                 for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
                     const uint32_t k_begin = k_tile * tiling_->base_k;
                     LocalTensor<half> next_b_tscm_tile;
@@ -541,7 +594,8 @@ public:
                                 packed_end,
                                 packed_stride,
                                 zero_offsets);
-                            next_b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_);
+                            next_b_tscm_tile =
+                                cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_, (k_tile + 1) & 1U);
                         }
                         cube_probe.mm.WaitIterateAll();
                     }
@@ -566,7 +620,7 @@ public:
                                 direct_b_tile, tile_k * base_n + tile_n, word, scale_base, zero_offsets);
                         }
                     }
-                    LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_);
+                    LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_, 0);
                     for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
                         const uint32_t m_begin = m_tile * base_m;
                         const uint32_t m_len_candidate = rows - m_begin;
@@ -595,7 +649,7 @@ public:
                     FillDirectBTileWord(direct_b_tile, k * base_n + tile_n, word, scale_base, zero_offsets);
                 }
             }
-            LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_);
+            LocalTensor<half> b_tscm_tile = cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_, 0);
 #endif
 #else
             for (uint32_t k = 0; k < in_features; ++k) {

@@ -144,6 +144,7 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF")
 
     text = cmake_path.read_text()
     assert text.count("add_ops_compile_options(ALL OPTIONS -DCANNOE_EXPERIMENTAL_") == 1
@@ -165,7 +166,8 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
         "-DCANNOE_EXPERIMENTAL_TSCM_CONSUMER=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1 "
-        "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK=1)"
+        "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK=1 "
+        "-DCANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF=1)"
     ) in text
 
 
@@ -195,6 +197,7 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF")
 
     text = cmake_path.read_text()
     assert text.count("npu_op_kernel_options(ascendc_kernels ALL OPTIONS -DCANNOE_EXPERIMENTAL_") == 1
@@ -215,7 +218,8 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
         "-DCANNOE_EXPERIMENTAL_TSCM_CONSUMER=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1 "
-        "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK=1)"
+        "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK=1 "
+        "-DCANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF=1)"
     ) in text
 
 
@@ -239,6 +243,7 @@ def _strategy_args(strategy: str):
         experimental_tscm_runtime_handoff=False,
         experimental_tscm_direct_dequant=False,
         experimental_tscm_direct_multik=False,
+        experimental_tscm_tbuf_handoff=False,
     )
 
 
@@ -287,6 +292,21 @@ def test_int4_lane_diagnostic_expands_minimal_vector_flags():
     assert args.experimental_int4_lane_diagnostic
     assert not args.experimental_cube_consumer
     assert not args.experimental_mixed_launch
+
+
+def test_tscm_tbuf_handoff_expands_runtime_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("manual")
+    args.experimental_tscm_tbuf_handoff = True
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_tscm_consumer
+    assert args.experimental_tscm_runtime_handoff
+    assert args.experimental_tscm_tbuf_handoff
 
 
 def test_vecout_tile_cast_dequant_expands_vecout_local_a_flags():
