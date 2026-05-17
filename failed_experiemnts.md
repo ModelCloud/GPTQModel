@@ -173,6 +173,33 @@ scheme that avoids reuse of the same TSCM slots across K tiles, or with a
 verified CANN sample showing repeated AIV-produced TSCM/NZ B tiles consumed by
 `MatmulImpl`.
 
+## 2026-05-17: Cannoe AIC/TSCM Four-Slot B Ring
+
+Status: failed runtime-safety gate; simple TSCM B slot reuse is not the root
+cause.
+
+Tested change: behind `--experimental-aic-tscm-unsafe-runtime`, allow
+`k_tiles > 2` and replace the two-slot low/high TSCM B ping-pong with a
+four-slot contiguous ring. AIC/AIV synchronization still used the existing
+even/odd flag pair, but B slot reuse was delayed from two K tiles to four K
+tiles. The target was to test whether repeated K faults came from Cube still
+reading a slot when AIV reused it for a later dequantized B tile.
+
+Artifacts:
+
+- `/tmp/cannoe_aic_tscm_4slot_ring`
+- `/tmp/cannoe_aic_tscm_4slot_ring_summary.json`
+
+| Probe | Devices | Passing cases | Failure signature | Decision |
+| --- | --- | ---: | --- | --- |
+| Standard 8-case multi-K raw validation, `base_m=16,base_n=256,base_k=128` | 0-7 | 0/8 | All workers failed with AIVector MPU address access faults, runtime `507015`; failing shapes covered `K=384-1024`, `N=256/512`, rows `1/2/3/4/7/8` | Reject |
+
+Decision: revert the source change. Delaying B slot reuse does not change the
+failure class. The next AIC/TSCM attempt needs a different local-buffer
+contract, likely one that lets the Matmul implementation allocate/own the B1
+workspace offsets or one that follows a complete public sample for
+AIV-produced TSCM/NZ B tiles.
+
 ## 2026-05-17: Cannoe Explicit AIC/TSCM Multi-K Handoff
 
 Status: partial bring-up only. Keep the guarded strategy and diagnostics, but
