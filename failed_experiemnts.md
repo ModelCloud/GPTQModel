@@ -80,6 +80,35 @@ scalar A fill for row-1 decode, even on large K. Re-test only if A tile filling
 is overlapped with B dequant/Cube work instead of replacing the row-1 copy loop
 in place.
 
+## 2026-05-17: Cannoe Explicit Branchless Nibble Decode
+
+Status: failed runtime-safety gate; keep the current ternary nibble decode.
+
+Tested change: replace `SignedNibble(raw)` with explicit two's-complement
+branchless decode, `((raw ^ 8) & 0xF) - 8`, in the shared Ascend C dequant
+helper. The target was B-tile dequant scalar pressure in the fused
+VecOut/local-A path.
+
+Artifacts:
+
+- `/tmp/cannoe_vecout_branchless_nibble`
+- `/tmp/cannoe_vecout_branchless_nibble_install`
+- `/tmp/cannoe_branchless_nibble_qwen_summary.json` was not produced because
+  the run was manually stopped after the down-proj worker wedged.
+
+Observed behavior:
+
+- Baseline package on NPU2 completed the Qwen-like q-proj and gate/up cases at
+  `76.0988 ms` and `228.0238 ms`, and produced a down-proj timing of
+  `258.4964 ms` with relaxed drift.
+- The branchless-nibble package advanced to the down-proj worker without
+  printing successful parent rows for the first two cases, then NPU2 sat at
+  100% AICore on `M=1,K=17408,N=5120,group=32` until the run was stopped.
+
+Decision: revert the source change. The compiler/device path for the ternary is
+safer than the explicit XOR expression in this kernel. Re-test only with an
+isolated lane diagnostic plus a small all-8 smoke before any Qwen-shaped run.
+
 ## 2026-05-17: Cannoe Explicit AIC/TSCM Multi-K Handoff
 
 Status: partial bring-up only. Keep the guarded strategy and diagnostics, but
