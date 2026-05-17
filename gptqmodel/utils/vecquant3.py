@@ -61,7 +61,7 @@ def _vecquant3_extra_cuda_cflags() -> list[str]:
 _VECQUANT3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_VECQUANT3_OPS_NAME,
     namespace=_VECQUANT3_NAMESPACE,
-    required_ops=("gemv", "gemv_lora"),
+    required_ops=("gemv", "gemv_lora", "gemv_lora_int8"),
     sources=_vecquant3_sources,
     build_root_env="GPTQMODEL_VECQUANT3_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("vecquant3"),
@@ -162,10 +162,67 @@ def gemv_lora(
     return ops.gemv_lora(x, qweight, scales, qzeros, down, up, int(group_size), accumulation_type)
 
 
+def _normalize_lora_int8_up_shape(up_shape: torch.Tensor | tuple[int, int] | list[int]) -> tuple[int, int]:
+    if isinstance(up_shape, torch.Tensor):
+        shape_values = up_shape.detach().cpu().reshape(-1).tolist()
+    else:
+        shape_values = list(up_shape)
+    if len(shape_values) != 2:
+        raise ValueError("VecQuant3 int8 LoRA-B shape must contain exactly [rank, out_features].")
+    rank, out_features = (int(shape_values[0]), int(shape_values[1]))
+    if rank <= 0 or out_features <= 0:
+        raise ValueError("VecQuant3 int8 LoRA-B shape values must be positive.")
+    return rank, out_features
+
+
+def gemv_lora_int8(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    down: torch.Tensor,
+    up_qweight: torch.Tensor,
+    up_scales: torch.Tensor,
+    up_shape: torch.Tensor | tuple[int, int] | list[int],
+    group_size: int,
+    lora_group_size: int,
+    accumulation_dtype: str | torch.dtype | None = torch.float32,
+) -> torch.Tensor:
+    rank, out_features = _normalize_lora_int8_up_shape(up_shape)
+    if int(down.reshape(-1).numel()) != rank:
+        raise ValueError("VecQuant3 int8 LoRA-B rank must match the down projection length.")
+    if int(qweight.size(1)) != out_features:
+        raise ValueError("VecQuant3 int8 LoRA-B out_features must match the quantized base output width.")
+    if lora_group_size <= 0:
+        raise ValueError("VecQuant3 int8 LoRA-B group size must be positive.")
+    expected_values = rank * out_features
+    if int(up_qweight.numel()) < expected_values:
+        raise ValueError("VecQuant3 int8 LoRA-B qweight is too small for the provided shape.")
+    expected_scale_groups = (expected_values + int(lora_group_size) - 1) // int(lora_group_size)
+    if int(up_scales.numel()) < expected_scale_groups:
+        raise ValueError("VecQuant3 int8 LoRA-B scales are too small for the provided shape/group size.")
+
+    ops = _extension_api().namespace(name="vecquant3")
+    accumulation_type = _normalize_accumulation_dtype(accumulation_dtype, x.dtype)
+    return ops.gemv_lora_int8(
+        x,
+        qweight,
+        scales,
+        qzeros,
+        down,
+        up_qweight,
+        up_scales,
+        int(group_size),
+        int(lora_group_size),
+        accumulation_type,
+    )
+
+
 __all__ = [
     "_VECQUANT3_TORCH_OPS_EXTENSION",
     "gemv",
     "gemv_lora",
+    "gemv_lora_int8",
     "vecquant3_runtime_available",
     "vecquant3_runtime_error",
     "vecquant3_supported",

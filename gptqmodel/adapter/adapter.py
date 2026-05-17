@@ -13,7 +13,7 @@ import torch
 
 from ..utils.logger import setup_logger
 from .peft import LoraConfig
-from .quant import compressed_weight_keys, dequantize_tensor_groupwise_int8
+from .quant import compressed_weight_keys, dequantize_tensor_groupwise_int, normalize_lora_grouped_bits
 from .remote import resolve_path
 
 log = setup_logger()
@@ -128,6 +128,7 @@ class Lora(Adapter):
         lora_B: torch.Tensor = None,
         eora_cholesky: bool = True,
         lora_weight_format: str = None,
+        lora_weight_bits: int = None,
         lora_weight_group_size: int = 128,
         lora_weight_scale_dtype: str = "bfloat16",
         lora_dequant_mode: str = "forward",
@@ -140,6 +141,11 @@ class Lora(Adapter):
         self.lora_B = lora_B
         self.eora_cholesky = bool(eora_cholesky)
         self.lora_weight_format = lora_weight_format
+        self.lora_weight_bits = (
+            normalize_lora_grouped_bits(lora_weight_bits, lora_weight_format)
+            if lora_weight_bits is not None or lora_weight_format is not None
+            else None
+        )
         self.lora_weight_group_size = int(lora_weight_group_size)
         self.lora_weight_scale_dtype = lora_weight_scale_dtype
         self.lora_dequant_mode = lora_dequant_mode
@@ -170,7 +176,7 @@ class Lora(Adapter):
         #self.apply = torch_compile(self.apply, backend=backend, mode=mode, fullgraph=fullgraph)
 
     def _has_compressed_lora(self) -> bool:
-        """Reports whether this adapter stores grouped-int8 LoRA tensors."""
+        """Reports whether this adapter stores grouped low-bit LoRA tensors."""
 
         return self.lora_A_qweight is not None and self.lora_B_qweight is not None
 
@@ -180,10 +186,11 @@ class Lora(Adapter):
         qweight = getattr(self, f"{prefix}_qweight")
         scales = getattr(self, f"{prefix}_scales")
         shape = getattr(self, f"{prefix}_shape")
-        tensor = dequantize_tensor_groupwise_int8(
+        tensor = dequantize_tensor_groupwise_int(
             qweight=qweight,
             scales=scales,
             shape=shape,
+            bits=self.lora_weight_bits or 8,
             group_size=self.lora_weight_group_size,
             device=x.device,
             dtype=x.dtype,
@@ -232,6 +239,12 @@ class Lora(Adapter):
 
         if getattr(lora_cfg, "gptqmodel_lora_weight_format", None):
             self.lora_weight_format = lora_cfg.gptqmodel_lora_weight_format
+            self.lora_weight_bits = normalize_lora_grouped_bits(self.lora_weight_bits, self.lora_weight_format)
+        if getattr(lora_cfg, "gptqmodel_lora_weight_bits", None):
+            self.lora_weight_bits = normalize_lora_grouped_bits(
+                int(lora_cfg.gptqmodel_lora_weight_bits),
+                self.lora_weight_format,
+            )
         if getattr(lora_cfg, "gptqmodel_lora_group_size", None):
             self.lora_weight_group_size = int(lora_cfg.gptqmodel_lora_group_size)
         if getattr(lora_cfg, "gptqmodel_lora_scale_dtype", None):
@@ -239,7 +252,7 @@ class Lora(Adapter):
         if getattr(lora_cfg, "gptqmodel_lora_dequant_mode", None):
             self.lora_dequant_mode = lora_cfg.gptqmodel_lora_dequant_mode
 
-        env_mode = os.environ.get("GPTQMODEL_LORA_INT8_DEQUANT_MODE")
+        env_mode = os.environ.get("GPTQMODEL_LORA_DEQUANT_MODE") or os.environ.get("GPTQMODEL_LORA_INT8_DEQUANT_MODE")
         if env_mode:
             self.lora_dequant_mode = env_mode
         self.lora_dequant_mode = str(self.lora_dequant_mode or "forward").lower()
@@ -280,10 +293,11 @@ class Lora(Adapter):
 
         pop_keys.extend([q_key, scales_key, shape_key])
         if self.lora_dequant_mode == "load":
-            return dequantize_tensor_groupwise_int8(
+            return dequantize_tensor_groupwise_int(
                 qweight=qweight,
                 scales=scales,
                 shape=shape,
+                bits=self.lora_weight_bits or 8,
                 group_size=self.lora_weight_group_size,
                 device=device,
                 dtype=torch.bfloat16,
@@ -433,6 +447,7 @@ class Lora(Adapter):
             "rank": self.rank,
             "eora_cholesky": self.eora_cholesky,
             "lora_weight_format": self.lora_weight_format,
+            "lora_weight_bits": self.lora_weight_bits,
             "lora_weight_group_size": self.lora_weight_group_size,
             "lora_weight_scale_dtype": self.lora_weight_scale_dtype,
             "lora_dequant_mode": self.lora_dequant_mode,

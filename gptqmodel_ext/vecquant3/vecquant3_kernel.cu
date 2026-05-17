@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 #include <torch/types.h>
 
+#include <climits>
 #include <cstdint>
 #include <type_traits>
 
@@ -19,6 +20,9 @@ constexpr int kBlockHeight = 24;
 constexpr int kThreads = kBlockWidth;
 constexpr int kAccumulationFloat32 = 0;
 constexpr int kAccumulationInput = 1;
+constexpr int kLoraNone = 0;
+constexpr int kLoraDense = 1;
+constexpr int kLoraInt8 = 2;
 
 template <typename scalar_t>
 struct scalar_traits;
@@ -168,7 +172,7 @@ __device__ __forceinline__ void accumulate_pair(
   }
 }
 
-template <typename scalar_t, int GroupSize, bool WithLora, bool FloatAccum>
+template <typename scalar_t, int GroupSize, int LoraMode, bool FloatAccum>
 __global__ void vecquant3_gptq_gemv_kernel(
     const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ vec,
     const int *__restrict__ qweight,
@@ -176,11 +180,14 @@ __global__ void vecquant3_gptq_gemv_kernel(
     const int *__restrict__ qzeros,
     const scalar_t *__restrict__ down,
     const scalar_t *__restrict__ up,
+    const int8_t *__restrict__ up_qweight,
+    const scalar_t *__restrict__ up_scales,
     float *__restrict__ out,
     int qweight_rows,
     int width,
     int qzeros_stride,
-    int rank) {
+    int rank,
+    int lora_group_size) {
   using traits = scalar_traits<scalar_t>;
   using scalar2_t = typename traits::scalar2_t;
 
@@ -299,10 +306,20 @@ __global__ void vecquant3_gptq_gemv_kernel(
     acc = traits::to_float(acc_input.x) + traits::to_float(acc_input.y);
   }
 
-  if constexpr (WithLora) {
+  if constexpr (LoraMode == kLoraDense) {
     if (blockIdx.x == 0) {
       for (int r = 0; r < rank; ++r) {
         acc += traits::to_float(traits::mul(down[r], up[r * width + col]));
+      }
+    }
+  } else if constexpr (LoraMode == kLoraInt8) {
+    if (blockIdx.x == 0) {
+      for (int r = 0; r < rank; ++r) {
+        const int idx = r * width + col;
+        const scalar_t up_value = traits::mul(
+            traits::from_int(static_cast<int>(up_qweight[idx])),
+            up_scales[idx / lora_group_size]);
+        acc += traits::to_float(traits::mul(down[r], up_value));
       }
     }
   }
@@ -358,14 +375,17 @@ void validate_common_inputs(const torch::Tensor &vec,
               "vecquant3 gemv inputs must be contiguous");
 }
 
-template <typename scalar_t, bool WithLora, bool FloatAccum>
+template <typename scalar_t, int LoraMode, bool FloatAccum>
 torch::Tensor launch_vecquant3_gptq_gemv_typed(torch::Tensor vec,
                                                torch::Tensor qweight,
                                                torch::Tensor scales,
                                                torch::Tensor qzeros,
                                                torch::Tensor down,
                                                torch::Tensor up,
-                                               int64_t group_size) {
+                                               torch::Tensor up_qweight,
+                                               torch::Tensor up_scales,
+                                               int64_t group_size,
+                                               int64_t lora_group_size) {
   using traits = scalar_traits<scalar_t>;
   using scalar2_t = typename traits::scalar2_t;
   using torch_t = typename traits::torch_t;
@@ -385,7 +405,9 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed(torch::Tensor vec,
   const int qweight_rows = static_cast<int>(qweight.size(0));
   const int width = static_cast<int>(qweight.size(1));
   const int qzeros_stride = static_cast<int>(qzeros.size(1));
-  const int rank = WithLora ? static_cast<int>(down.numel()) : 0;
+  const int rank = LoraMode == kLoraNone ? 0 : static_cast<int>(down.numel());
+  const int lora_group =
+      LoraMode == kLoraInt8 ? static_cast<int>(lora_group_size) : 1;
   dim3 blocks((qweight_rows + kBlockHeight - 1) / kBlockHeight,
               (width + kBlockWidth - 1) / kBlockWidth);
   dim3 threads(kThreads);
@@ -395,46 +417,53 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed(torch::Tensor vec,
   const auto *scale_ptr =
       reinterpret_cast<const scalar_t *>(scales.data_ptr<torch_t>());
   const auto *down_ptr =
-      WithLora ? reinterpret_cast<const scalar_t *>(down.data_ptr<torch_t>()) : nullptr;
+      LoraMode == kLoraNone ? nullptr : reinterpret_cast<const scalar_t *>(down.data_ptr<torch_t>());
   const auto *up_ptr =
-      WithLora ? reinterpret_cast<const scalar_t *>(up.data_ptr<torch_t>()) : nullptr;
+      LoraMode == kLoraDense ? reinterpret_cast<const scalar_t *>(up.data_ptr<torch_t>()) : nullptr;
+  const int8_t *up_qweight_ptr =
+      LoraMode == kLoraInt8 ? up_qweight.data_ptr<int8_t>() : nullptr;
+  const auto *up_scale_ptr =
+      LoraMode == kLoraInt8 ? reinterpret_cast<const scalar_t *>(up_scales.data_ptr<torch_t>()) : nullptr;
 
   if (group_size == 32) {
-    vecquant3_gptq_gemv_kernel<scalar_t, 32, WithLora, FloatAccum>
+    vecquant3_gptq_gemv_kernel<scalar_t, 32, LoraMode, FloatAccum>
         <<<blocks, threads, 0, stream>>>(
         vec_ptr, qweight.data_ptr<int>(), scale_ptr, qzeros.data_ptr<int>(),
-        down_ptr, up_ptr, out.data_ptr<float>(), qweight_rows, width,
-        qzeros_stride, rank);
+        down_ptr, up_ptr, up_qweight_ptr, up_scale_ptr, out.data_ptr<float>(),
+        qweight_rows, width, qzeros_stride, rank, lora_group);
   } else if (group_size == 64) {
-    vecquant3_gptq_gemv_kernel<scalar_t, 64, WithLora, FloatAccum>
+    vecquant3_gptq_gemv_kernel<scalar_t, 64, LoraMode, FloatAccum>
         <<<blocks, threads, 0, stream>>>(
         vec_ptr, qweight.data_ptr<int>(), scale_ptr, qzeros.data_ptr<int>(),
-        down_ptr, up_ptr, out.data_ptr<float>(), qweight_rows, width,
-        qzeros_stride, rank);
+        down_ptr, up_ptr, up_qweight_ptr, up_scale_ptr, out.data_ptr<float>(),
+        qweight_rows, width, qzeros_stride, rank, lora_group);
   } else {
-    vecquant3_gptq_gemv_kernel<scalar_t, 128, WithLora, FloatAccum>
+    vecquant3_gptq_gemv_kernel<scalar_t, 128, LoraMode, FloatAccum>
         <<<blocks, threads, 0, stream>>>(
         vec_ptr, qweight.data_ptr<int>(), scale_ptr, qzeros.data_ptr<int>(),
-        down_ptr, up_ptr, out.data_ptr<float>(), qweight_rows, width,
-        qzeros_stride, rank);
+        down_ptr, up_ptr, up_qweight_ptr, up_scale_ptr, out.data_ptr<float>(),
+        qweight_rows, width, qzeros_stride, rank, lora_group);
   }
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
 
-template <bool WithLora>
+template <int LoraMode>
 torch::Tensor launch_vecquant3_gptq_gemv(torch::Tensor vec,
                                          torch::Tensor qweight,
                                          torch::Tensor scales,
                                          torch::Tensor qzeros,
                                          torch::Tensor down,
                                          torch::Tensor up,
+                                         torch::Tensor up_qweight,
+                                         torch::Tensor up_scales,
                                          int64_t group_size,
+                                         int64_t lora_group_size,
                                          int64_t accumulation_type) {
   validate_common_inputs(vec, qweight, scales, qzeros, group_size,
                          accumulation_type);
-  if constexpr (WithLora) {
+  if constexpr (LoraMode == kLoraDense) {
     TORCH_CHECK(down.is_cuda() && up.is_cuda(),
                 "vecquant3 gemv_lora requires CUDA LoRA tensors");
     TORCH_CHECK(down.scalar_type() == vec.scalar_type() &&
@@ -447,24 +476,52 @@ torch::Tensor launch_vecquant3_gptq_gemv(torch::Tensor vec,
                 "vecquant3 gemv_lora up must be [rank, out_features]");
     TORCH_CHECK(down.is_contiguous() && up.is_contiguous(),
                 "vecquant3 gemv_lora LoRA tensors must be contiguous");
+  } else if constexpr (LoraMode == kLoraInt8) {
+    TORCH_CHECK(down.is_cuda() && up_qweight.is_cuda() && up_scales.is_cuda(),
+                "vecquant3 gemv_lora_int8 requires CUDA LoRA tensors");
+    TORCH_CHECK(down.scalar_type() == vec.scalar_type() &&
+                    up_scales.scalar_type() == vec.scalar_type(),
+                "vecquant3 gemv_lora_int8 down/up scales dtype must match vec dtype");
+    TORCH_CHECK(up_qweight.scalar_type() == torch::kInt8,
+                "vecquant3 gemv_lora_int8 up_qweight must be int8");
+    TORCH_CHECK(down.dim() == 1,
+                "vecquant3 gemv_lora_int8 down must be a rank vector");
+    TORCH_CHECK(up_qweight.dim() == 1 && up_scales.dim() == 1,
+                "vecquant3 gemv_lora_int8 up_qweight and up_scales must be flat tensors");
+    TORCH_CHECK(lora_group_size > 0 && lora_group_size <= INT32_MAX,
+                "vecquant3 gemv_lora_int8 lora_group_size must be positive");
+    const int64_t expected_up_values = down.numel() * qweight.size(1);
+    TORCH_CHECK(up_qweight.numel() >= expected_up_values,
+                "vecquant3 gemv_lora_int8 up_qweight is too small for [rank, out_features]");
+    TORCH_CHECK(
+        up_scales.numel() >=
+            (expected_up_values + lora_group_size - 1) / lora_group_size,
+        "vecquant3 gemv_lora_int8 up_scales is too small for grouped int8 LoRA-B");
+    TORCH_CHECK(down.is_contiguous() && up_qweight.is_contiguous() &&
+                    up_scales.is_contiguous(),
+                "vecquant3 gemv_lora_int8 LoRA tensors must be contiguous");
   }
 
   const bool use_float_accum = accumulation_type == kAccumulationFloat32;
   if (vec.scalar_type() == torch::kFloat16) {
     if (use_float_accum) {
-      return launch_vecquant3_gptq_gemv_typed<half, WithLora, true>(
-          vec, qweight, scales, qzeros, down, up, group_size);
+      return launch_vecquant3_gptq_gemv_typed<half, LoraMode, true>(
+          vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
+          group_size, lora_group_size);
     }
-    return launch_vecquant3_gptq_gemv_typed<half, WithLora, false>(
-        vec, qweight, scales, qzeros, down, up, group_size);
+    return launch_vecquant3_gptq_gemv_typed<half, LoraMode, false>(
+        vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
+        group_size, lora_group_size);
   }
 
   if (use_float_accum) {
-    return launch_vecquant3_gptq_gemv_typed<__nv_bfloat16, WithLora, true>(
-        vec, qweight, scales, qzeros, down, up, group_size);
+    return launch_vecquant3_gptq_gemv_typed<__nv_bfloat16, LoraMode, true>(
+        vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
+        group_size, lora_group_size);
   }
-  return launch_vecquant3_gptq_gemv_typed<__nv_bfloat16, WithLora, false>(
-      vec, qweight, scales, qzeros, down, up, group_size);
+  return launch_vecquant3_gptq_gemv_typed<__nv_bfloat16, LoraMode, false>(
+      vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
+      group_size, lora_group_size);
 }
 
 }  // namespace
@@ -475,10 +532,10 @@ torch::Tensor vecquant3_gptq_gemv_cuda(torch::Tensor vec,
                                        torch::Tensor qzeros,
                                        int64_t group_size,
                                        int64_t accumulation_type) {
-  return launch_vecquant3_gptq_gemv<false>(vec.reshape({-1}), qweight, scales,
-                                           qzeros, torch::Tensor(),
-                                           torch::Tensor(), group_size,
-                                           accumulation_type);
+  return launch_vecquant3_gptq_gemv<kLoraNone>(
+      vec.reshape({-1}), qweight, scales, qzeros, torch::Tensor(),
+      torch::Tensor(), torch::Tensor(), torch::Tensor(), group_size, 0,
+      accumulation_type);
 }
 
 torch::Tensor vecquant3_gptq_gemv_lora_cuda(torch::Tensor vec,
@@ -489,7 +546,23 @@ torch::Tensor vecquant3_gptq_gemv_lora_cuda(torch::Tensor vec,
                                             torch::Tensor up,
                                             int64_t group_size,
                                             int64_t accumulation_type) {
-  return launch_vecquant3_gptq_gemv<true>(vec.reshape({-1}), qweight, scales,
-                                          qzeros, down.reshape({-1}), up,
-                                          group_size, accumulation_type);
+  return launch_vecquant3_gptq_gemv<kLoraDense>(
+      vec.reshape({-1}), qweight, scales, qzeros, down.reshape({-1}), up,
+      torch::Tensor(), torch::Tensor(), group_size, 0, accumulation_type);
+}
+
+torch::Tensor vecquant3_gptq_gemv_lora_int8_cuda(torch::Tensor vec,
+                                                 torch::Tensor qweight,
+                                                 torch::Tensor scales,
+                                                 torch::Tensor qzeros,
+                                                 torch::Tensor down,
+                                                 torch::Tensor up_qweight,
+                                                 torch::Tensor up_scales,
+                                                 int64_t group_size,
+                                                 int64_t lora_group_size,
+                                                 int64_t accumulation_type) {
+  return launch_vecquant3_gptq_gemv<kLoraInt8>(
+      vec.reshape({-1}), qweight, scales, qzeros, down.reshape({-1}),
+      torch::Tensor(), up_qweight.reshape({-1}), up_scales.reshape({-1}),
+      group_size, lora_group_size, accumulation_type);
 }
