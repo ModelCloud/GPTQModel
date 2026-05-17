@@ -109,6 +109,70 @@ Decision: revert the source change. The compiler/device path for the ternary is
 safer than the explicit XOR expression in this kernel. Re-test only with an
 isolated lane diagnostic plus a small all-8 smoke before any Qwen-shaped run.
 
+## 2026-05-17: Cannoe VecOut/local-A Qwen Tile Boundary Probes
+
+Status: failed runtime-safety or accuracy gates; keep the Qwen-shaped
+VecOut/local-A path on `base_m=16`, `base_n=256`, and `base_k=128`.
+
+Tested change: force larger or narrower Cube tile attributes against
+Qwen3-27B-sized decode projections while using the validated scalar
+VecOut/local-A package. The target was to find a better Cube handoff shape for
+`M=1` q/gate/up/down without materializing full FP16 weights.
+
+Artifacts:
+
+- `/tmp/cannoe_base_n512_qwen_npu2_summary.json`
+- `/tmp/cannoe_base_k256_qwen_npu2_summary.json`
+- `/tmp/cannoe_base_m8_qwen_npu2_summary.json`
+- `/tmp/cannoe_row1_qwen_ab_cases.json`
+
+| Probe | Device | Cases | Result | Failure signature |
+| --- | --- | ---: | --- | --- |
+| `base_n=512,base_k=128` | NPU2 | 3/3 | 0 pass | AICore `507015`, MTE `load3d` write address out of range on q/gate/down |
+| `base_n=256,base_k=256` | NPU2 | 3/3 | 0 pass | AICore `507015`, MTE `load3d` write address out of range on q/gate/down |
+| `base_m=8,base_n=256,base_k=128` | NPU2 | 3/3 | 0 pass | No device fault, but output corruption: q `max_abs=26.953125`, gate/up `30.046875`, down `47.375` |
+
+Representative timings from the corrupt `base_m=8` run were `76.0854 ms` for
+`M=1,K=5120,N=6144`, `228.0143 ms` for `M=1,K=5120,N=17408`, and `258.5733 ms`
+for `M=1,K=17408,N=5120`, which is effectively the baseline speed envelope but
+with unusable accuracy.
+
+Decision: do not broaden the planner to these tile shapes. `base_n=512` and
+`base_k=256` violate the current VECOUT-to-Cube load3d contract, while
+`base_m=8` changes the local-A/Cube tail contract enough to corrupt output even
+though it avoids a fault. Re-test only after the Cube consumer uses a different
+documented local-tile contract or after adding a device diagnostic that proves
+the exact L0A/L0B tile address ranges for these attributes.
+
+## 2026-05-17: Cannoe AIC/TSCM Per-N Matmul Lifecycle and CANN Sample Flags
+
+Status: failed runtime-safety gate; keep the unsafe AIC/TSCM runtime disabled
+for multi-K.
+
+Tested change: behind `--experimental-aic-tscm-unsafe-runtime`, allow
+`k_tiles > 2`, switch cross-core ping-pong flags to the CANN sample convention
+(`1/17` AIC-to-AIV and `2/18` AIV-to-AIC), and reinitialize/end `MatmulImpl`
+once per N tile instead of once for the full core loop.
+
+Artifacts:
+
+- `/tmp/cannoe_aic_tscm_pern_flags`
+- `/tmp/cannoe_aic_tscm_pern_flags_summary.json`
+- `/tmp/cannoe_aic_tscm_pern_flags_small_summary.json`
+- `/tmp/cannoe_aic_tscm_pern_small_cases.json`
+
+| Probe | Devices | Passing cases | Failure signature | Decision |
+| --- | --- | ---: | --- | --- |
+| Standard 8-case multi-K raw validation, `base_m=16,base_n=256,base_k=128` | 0-7 | 0/8 | All workers failed with AIVector MPU address access faults, runtime `507015`; failing shapes covered `K=384-1024`, `N=256/512`, rows `1/2/3/4/7/8` | Reject |
+| Small `K=128/256,N=256` sanity check | 0,1 | 2/2 | `max_abs=0`; timings `543.764/505.435 ms` | Not evidence of handoff success because these shapes are below/equal the staged-workspace threshold and fall back to scalar mode |
+
+Decision: revert the source change. The per-N lifecycle and sample-style flag
+IDs do not fix the repeated K-tile AIC/TSCM contract. Multi-K remains unsafe
+even before Qwen-sized shapes. Re-test only with a different B tile ownership
+scheme that avoids reuse of the same TSCM slots across K tiles, or with a
+verified CANN sample showing repeated AIV-produced TSCM/NZ B tiles consumed by
+`MatmulImpl`.
+
 ## 2026-05-17: Cannoe Explicit AIC/TSCM Multi-K Handoff
 
 Status: partial bring-up only. Keep the guarded strategy and diagnostics, but
