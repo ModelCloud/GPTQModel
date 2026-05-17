@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-
+from gptqmodel import BACKEND
 from model_test import ModelTest
 
 
@@ -11,8 +11,8 @@ class TestHymba(ModelTest):
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
-            "acc": {"value": 0.2073, "floor_pct": 0.75},
-            "acc_norm": {"value": 0.2713, "floor_pct": 0.75},
+            "acc": {"value": {"A100": 0.3737}, "floor_pct": 0.75},
+            "acc_norm": {"value": {"A100": 0.3703}, "floor_pct": 0.75},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
@@ -25,6 +25,9 @@ class TestHymba(ModelTest):
     # Hymba currently tests that DESC_ACT=False to get better results.
     # If DESC_ACT=False, the output will be terrible.
     DESC_ACT = False
+    OFFLOAD_TO_DISK = False # FIXME the issue where hymba does not work with OFFLOAD_TO_DISK=True
+    LOAD_BACKEND = BACKEND.AUTO
+    USE_FLASH_ATTN = True
 
 
     def test_hymba(self):

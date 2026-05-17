@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from causal_conv1d import causal_conv1d_fn
+from gptqmodel.hf_kernels.causal_conv1d import causal_conv1d_fn
 
 
 def selective_scan_ref(

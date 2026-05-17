@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from causal_conv1d import causal_conv1d_fn
+from gptqmodel.hf_kernels.causal_conv1d import causal_conv1d_fn
 
 
 def rmsnorm_fn(x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True):

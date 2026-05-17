@@ -8,6 +8,7 @@ import json
 import os
 import random
 import time
+from pathlib import Path
 
 import pcre
 import torch
@@ -16,7 +17,6 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from ..utils.logger import setup_logger
-
 
 choices = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"]
 max_model_length = 4096
@@ -219,8 +219,15 @@ def mmlupro(model: PreTrainedModel,
             seed: int = 12345,
             max_samples: int | None = None):
     random.seed(seed)
+    if save_dir == "results":
+        save_dir = str(Path("logs") / "mmlupro" / "results")
     os.makedirs(save_dir, exist_ok=True)
     model_name = os.path.basename(model.config.name_or_path)
+    if not os.path.isabs(global_record_file) and os.path.dirname(global_record_file) == "":
+        logs_dir = Path("logs")
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        global_record_file = str(logs_dir / global_record_file)
+
     save_result_dir = os.path.join(
         save_dir, "/".join(args_generate_path(model_name, selected_subjects))
     )

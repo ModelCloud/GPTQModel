@@ -52,6 +52,7 @@ class TestLlama3_2_GGUF(ModelTest):
     BITS = "q4_k_m"
     LOAD_BACKEND = BACKEND.GGUF_TORCH
     KERNEL_INFERENCE = {GGUFTorchLinear}
+    MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
     def test_llama3_2_gguf_full_model(self):
         self.quantize_and_evaluate()

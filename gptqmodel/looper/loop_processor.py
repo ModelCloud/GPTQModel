@@ -7,14 +7,13 @@ import os
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from device_smi import Device
 import torch
+from device_smi import Device
 from torch import Tensor
 from torch.nn import Module
-
-from ..utils.random_str import get_random_string
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
@@ -26,12 +25,14 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
 from ..quantization.config import QuantizeConfig
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
+from ..utils.random_str import get_random_string
 from ..utils.torch import CPU, DEVICE_0, DEVICE_1, HAS_NPU
 
 log = setup_logger()
 
 # global level lock
 PROCESSOR_GLOBAL_LOCK = threading.Lock()
+_PROJECT_LOG_DIR = Path("logs")
 
 MODULE_FEATURE_COLUMN = "feat: in, out"
 DTYPE_SIZE_COLUMN = "dtype: size"
@@ -138,7 +139,7 @@ class LoopProcessor:
         self._log_columns = None
         self._log_header_interval = 20
         current_time = datetime.now().strftime("%m_%d_%Y_%Hh_%Mm_%Ss")
-        self.log_tmp_log_file_name = f"{self.name()}_log_{get_random_string()}_time_{current_time}.log"
+        self.log_tmp_log_file_name = str(self._build_log_file_path(self.name(), current_time))
         self._device_smi_handles = self._init_device_smi_handles()
         self._cpu_device_smi = self._init_cpu_device_handle()
         self._device_metric_failures: Set[str] = set()
@@ -202,6 +203,13 @@ class LoopProcessor:
         # processors can retrieve deterministic ordering information (e.g.
         # GPTQ's Hessian updates) even when forwards run on multiple threads.
         self._batch_tls = threading.local()
+
+    @staticmethod
+    def _build_log_file_path(processor_name: str, current_time: str) -> Path:
+        """Place processor temp log files under the project-local logs directory."""
+
+        _PROJECT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        return _PROJECT_LOG_DIR / f"{processor_name}_log_{get_random_string()}_time_{current_time}.log"
 
     def draw_progress(self, title: str, subtitle: str = "") -> None:
         """Best-effort progress-bar redraw for processors with an attached progress handle."""

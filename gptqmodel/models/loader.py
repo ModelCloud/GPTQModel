@@ -6,15 +6,15 @@
 from __future__ import annotations
 
 import copy
+import numpy as np
 import os
+import shutil
 import time
+import torch
+import transformers
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
 from typing import Dict, List, Optional, Union
-
-import numpy as np
-import torch
-import transformers
 
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.structure import LazyTurtle, print_module_tree
@@ -124,6 +124,47 @@ def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
     return False
 
 
+def _iter_nested_pretrained_configs(config: PretrainedConfig):
+    """Yield config and all nested PretrainedConfig nodes once."""
+
+    stack = [config]
+    visited = set()
+
+    while stack:
+        cur = stack.pop()
+        if not isinstance(cur, PretrainedConfig):
+            continue
+
+        node_id = id(cur)
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        yield cur
+
+        for value in vars(cur).values():
+            if isinstance(value, PretrainedConfig):
+                stack.append(value)
+            elif isinstance(value, dict):
+                for sub in value.values():
+                    if isinstance(sub, PretrainedConfig):
+                        stack.append(sub)
+            elif isinstance(value, (list, tuple, set)):
+                for sub in value:
+                    if isinstance(sub, PretrainedConfig):
+                        stack.append(sub)
+
+
+def _override_attn_implementation(config: PretrainedConfig, attn_implementation: str) -> None:
+    """Apply attention implementation override to root and nested configs."""
+
+    for sub_config in _iter_nested_pretrained_configs(config):
+        try:
+            sub_config._attn_implementation = attn_implementation
+        except Exception:
+            # Some remote configs may expose read-only wrappers; ignore safely.
+            pass
+
+
 def _is_accelerated_attention_device(device: object) -> bool:
     """Return True when the selected device can run fused attention."""
 
@@ -228,6 +269,43 @@ def _is_meta_shell_build_error(exc: Exception) -> bool:
     # during __init__, which breaks when the shell is built on the meta device.
     message = str(exc)
     return "cannot be called on meta tensors" in message and ".item()" in message
+
+
+def _is_broken_transformers_dynamic_module_error(exc: Exception) -> bool:
+    if not isinstance(exc, FileNotFoundError):
+        return False
+    missing_path = str(getattr(exc, "filename", "") or exc)
+    return "transformers_modules" in missing_path and missing_path.endswith(".py")
+
+
+def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_path: str, **kwargs):
+    try:
+        return loader.from_pretrained(model_local_path, **kwargs)
+    except Exception as exc:
+        if not _is_broken_transformers_dynamic_module_error(exc):
+            raise
+
+        missing_path = str(getattr(exc, "filename", "") or "")
+        missing_name = os.path.basename(missing_path)
+        source_path = os.path.join(model_local_path, missing_name)
+        if missing_path and os.path.isfile(source_path):
+            os.makedirs(os.path.dirname(missing_path), exist_ok=True)
+            shutil.copy2(source_path, missing_path)
+            log.warn(
+                "Loader: repaired missing dynamic-module file by copying `%s` -> `%s`.",
+                source_path,
+                missing_path,
+            )
+
+        retry_kwargs = dict(kwargs)
+        retry_kwargs["force_download"] = True
+        log.warn(
+            "Loader: detected broken transformers dynamic-module cache while loading `%s`; "
+            "retrying once with force_download=True: %s",
+            model_local_path,
+            exc,
+        )
+        return loader.from_pretrained(model_local_path, **retry_kwargs)
 
 
 def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
@@ -496,7 +574,7 @@ def ModelLoader(cls):
 
         if atten_impl is not None:
             log.info(f"Loader: overriding attn_implementation in config to `{atten_impl}`")
-            config._attn_implementation = atten_impl
+            _override_attn_implementation(config, atten_impl)
 
         resolved_device = normalize_device_device_map(device, device_map)
         resolved_device = auto_select_device(resolved_device, backend)
@@ -574,7 +652,12 @@ def ModelLoader(cls):
                 hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
                 log.info("Loader: Auto enabling flash_attention_2 for dense Bonsai PROFILE.%s.", effective_profile.name)
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
-            model = cls.loader.from_pretrained(model_local_path, config=config, **hf_model_init_kwargs)
+            model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                cls.loader,
+                model_local_path,
+                config=config,
+                **hf_model_init_kwargs,
+            )
             model._model_init_kwargs = hf_model_init_kwargs
             _maybe_print_module_tree(model=model)
 
@@ -672,7 +755,8 @@ def ModelLoader(cls):
                 fallback_init_kwargs = model_init_kwargs_without_internal.copy()
                 fallback_init_kwargs.pop("device_map", None)
                 fallback_init_kwargs["low_cpu_mem_usage"] = False
-                model = cls.loader.from_pretrained(
+                model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                    cls.loader,
                     model_local_path,
                     config=config,
                     **fallback_init_kwargs,
@@ -712,7 +796,8 @@ def ModelLoader(cls):
                 )
         else:
             log.info("Loader: loading model directly to CPU (not using meta device or turtle_model)")
-            model = cls.loader.from_pretrained(
+            model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                cls.loader,
                 model_local_path,
                 config=config,
                 **model_init_kwargs_without_internal,
@@ -1101,9 +1186,49 @@ def ModelLoader(cls):
                     log.info("Loader: Auto enabling flash attention2")
             set_dtype_compat(args, dtype)
 
-            model = cls.loader.from_config(
-                config, trust_remote_code=trust_remote_code, **args
-            )
+            try:
+                model = cls.loader.from_config(
+                    config, trust_remote_code=trust_remote_code, **args
+                )
+            except FileNotFoundError as exc:
+                # trust_remote_code dynamic-module caches can be incomplete for
+                # legacy Deci files; rebuild missing shim + refresh once.
+                missing_path = str(exc)
+                if (
+                    trust_remote_code
+                    and "transformers_modules" in missing_path
+                    and "No such file or directory" in missing_path
+                ):
+                    missing_file = None
+                    if "'" in missing_path:
+                        parts = missing_path.split("'")
+                        if len(parts) >= 2:
+                            missing_file = parts[1]
+
+                    if (
+                        missing_file
+                        and missing_file.endswith("__configuration_llama.py")
+                        and not os.path.exists(missing_file)
+                    ):
+                        os.makedirs(os.path.dirname(missing_file), exist_ok=True)
+                        with open(missing_file, "w", encoding="utf-8") as fp:
+                            fp.write("from transformers.models.llama.configuration_llama import *\n")
+
+                    auto_map = getattr(config, "auto_map", None) or {}
+                    class_ref = auto_map.get("AutoModelForCausalLM")
+                    if isinstance(class_ref, str):
+                        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+                        get_class_from_dynamic_module(
+                            class_ref,
+                            str(getattr(config, "_name_or_path", "")),
+                            force_download=True,
+                        )
+
+                    model = cls.loader.from_config(
+                        config, trust_remote_code=trust_remote_code, **args
+                    )
+                else:
+                    raise
             defuser.convert_model(model, cleanup_original=True)
             model.checkpoint_file_name = model_save_name
             if native_gguf_qspec is not None:

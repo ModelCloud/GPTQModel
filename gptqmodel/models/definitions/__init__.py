@@ -18,6 +18,7 @@ from .dbrx_converted import DbrxConvertedQModel
 from .decilm import DeciLMQModel
 from .deepseek_v2 import DeepSeekV2QModel
 from .deepseek_v3 import DeepSeekV3QModel
+from .deepseek_v4 import DeepSeekV4QModel
 from .dots1 import Dots1QModel
 from .dream import DreamQModel
 from .exaone import ExaOneQModel
@@ -48,8 +49,10 @@ from .llama4 import Llama4QModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel
 from .minicpm_o import MiniCPMOQModel
-from .minicpm_v import MiniCPMVQModel
+from .minicpmv import MiniCPMVQModel
+from .minicpmv_4_6 import MiniCPMV4_6QModel
 from .minimax_m2 import MiniMaxM2GPTQ
+from .mimo_v2 import MimoV2QModel
 from .mixtral import MixtralQModel
 from .mllama import MLlamaQModel
 from .mobilellm import MobileLLMQModel
@@ -73,6 +76,8 @@ from .telechat2 import TeleChat2QModel
 from .xverse import XverseQModel
 from .falcon_h1 import FalconH1QModel
 from .falcon_mamba import FalconMambaQModel
+from .zamba import ZambaQModel
+from .zamba2 import Zamba2QModel
 from .pangu_alpha import PanguAlphaQModel
 from .longcat_flash import LongCatFlashQModel
 from .apertus import ApertusQModel
@@ -84,5 +89,6 @@ from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .mistral3 import Mistral3GPTQ
 from .afmoe import AfMoeQModel
 from .glm4v import Glm4vGPTQ
+from .glm4v_moe import Glm4vMoeQModel
 from .voxtral import VoxtralGPTQ
 from .glm4_moe_lite import Glm4MoeLiteQModel

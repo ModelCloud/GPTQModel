@@ -3,28 +3,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import inspect
 import json
+import numpy as np
 import os
+import shutil
 import sys
+import transformers
 import warnings
+from accelerate import init_empty_weights
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Optional
-
-import numpy as np
-import torch
-import transformers
-from accelerate import init_empty_weights
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
     GenerationConfig,
-    PreTrainedConfig,
     PreTrainedModel,
 )
+from transformers.models.auto.tokenization_auto import get_tokenizer_config, tokenizer_class_from_name
+from typing import Any, Optional
 
+import inspect
+import torch
 from ..nn_modules.qlinear.gguf import (
     PRISM_Q1_0_G128_BLOCK_SIZE,
     PRISM_Q1_0_G128_NAME,
@@ -41,7 +41,14 @@ from ..utils import _MONKEY_PATCH_LOCK, internal_gguf
 try:
     from transformers.initialization import no_init_weights
 except ImportError:
-    from transformers.modeling_utils import no_init_weights
+    from transformers.modeling_utils import no_init_weights# Compatibility wrapper for no_init_weights across different transformers versions
+
+# transformers >= 5.0.0: from transformers import PreTrainedConfig
+# transformers < 5.0.0: from transformers import PretrainedConfig
+try:
+    from transformers import PreTrainedConfig
+except ImportError:
+    from transformers import PretrainedConfig as PreTrainedConfig
 
 from ..utils.logger import setup_logger
 
@@ -70,6 +77,59 @@ INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
 _INTERNAL_GGUF_TORCH_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER"
 _FALSEY_ENV_VALUES = {"", "0", "false", "off", "no"}
+
+
+def _sync_local_remote_code_cache(model_id_or_path: Optional[str]) -> None:
+    if not model_id_or_path or not os.path.isdir(model_id_or_path):
+        return
+
+    try:
+        from transformers.dynamic_module_utils import HF_MODULES_CACHE, _sanitize_module_name
+    except Exception:
+        return
+
+    repo_name = os.path.basename(os.path.normpath(model_id_or_path))
+    cache_root = os.path.join(
+        HF_MODULES_CACHE,
+        "transformers_modules",
+        _sanitize_module_name(repo_name),
+    )
+    # `trust_remote_code=True` on a local model path still goes through the
+    # transformers dynamic-module cache. On newer transformers releases we
+    # occasionally observe split/incomplete cache revisions for the same local
+    # repo: one revision contains `configuration_*.py`, another contains
+    # `modeling_*.py`, and recursive relative-import discovery then crashes
+    # with FileNotFoundError before the model class can be imported.
+    #
+    # The model directory already contains the authoritative source files, so
+    # for local paths we can safely backfill any missing top-level Python files
+    # into each cached revision directory. This keeps the fix narrowly scoped:
+    # it only affects local trust-remote-code models, only fills missing files,
+    # and never overwrites files that transformers has already materialized.
+    if not os.path.isdir(cache_root):
+        return
+
+    source_files = [
+        file_name
+        for file_name in os.listdir(model_id_or_path)
+        if file_name.endswith(".py") and os.path.isfile(os.path.join(model_id_or_path, file_name))
+    ]
+    if not source_files:
+        return
+
+    target_dirs = [cache_root]
+    for entry in os.listdir(cache_root):
+        target_dir = os.path.join(cache_root, entry)
+        if os.path.isdir(target_dir):
+            target_dirs.append(target_dir)
+
+    for target_dir in target_dirs:
+        for file_name in source_files:
+            source_path = os.path.join(model_id_or_path, file_name)
+            target_path = os.path.join(target_dir, file_name)
+            if not os.path.exists(target_path):
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                shutil.copy2(source_path, target_path)
 
 
 def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
@@ -985,9 +1045,6 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
     legacy_rope_scaling = getattr(config, "rope_scaling", None)
     rope_parameters = dict(legacy_rope_scaling) if isinstance(legacy_rope_scaling, dict) else dict(rope_parameters or {})
 
-    if not rope_parameters and getattr(config, "rope_theta", None) is None and getattr(config, "default_theta", None) is None:
-        return
-
     rope_parameters.setdefault("rope_type", rope_parameters.get("type", "default"))
     if rope_parameters.get("rope_theta") is None:
         rope_theta = getattr(config, "rope_theta", None)
@@ -1015,6 +1072,14 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
     _normalize_chatglm_remote_code_config_compat(config)
     model_type = getattr(config, "model_type", None)
     model_type_lower = model_type.lower() if isinstance(model_type, str) else None
+
+    if model_type_lower == "hymba":
+        # hymba uses Flex by default;
+        # however, `modeling_hymba` has not yet been adapted to support the latest version of PyTorch Flex.
+        # Therefore, we are applying a patch here to switch to flash_attention_2 or sdpa.
+        if getattr(config, 'attn_implementation_new', None) == "flex":
+            from transformers.utils import is_flash_attn_2_available
+            config.attn_implementation_new = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
 
     if model_type_lower == "dream" or model_type == "brumby":
         import transformers.modeling_rope_utils as rope_utils
@@ -1064,6 +1129,14 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
     if rope_type is None:
         if "factor" not in rope_scaling:
             config.rope_scaling = None
+            return
+        # Some remote-code repos (e.g. MiniCPM variants) now surface
+        # `rope_scaling={"factor": ...}` after transformers normalization.
+        # Legacy model code expects `rope_scaling["type"]` to exist whenever
+        # `rope_scaling` is a dict.
+        rope_scaling = dict(rope_scaling)
+        rope_scaling["type"] = "linear"
+        config.rope_scaling = rope_scaling
         return
 
     rope_scaling = dict(rope_scaling)
@@ -1100,7 +1173,9 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # legacy RoPE fields or nothing but a default `rope_theta`.
     _normalize_rope_parameters_config_compat(config)
 
-    if not trust_remote_code:
+    auto_map = getattr(config, "auto_map", None) or {}
+    has_remote_automap = isinstance(auto_map.get("AutoModelForCausalLM"), str)
+    if not trust_remote_code and not has_remote_automap:
         return
 
     _patch_transformers_remote_code_compat()
@@ -1109,6 +1184,14 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # remote-code normalization that clears legacy default `rope_scaling` can
     # also reset `rope_parameters` back to None. Re-apply the RoPE backfill
     # after remote-code field cleanup so from_config() sees stable metadata.
+    _normalize_rope_parameters_config_compat(config)
+    # Re-apply remote-code field aliases after RoPE parameter backfill, since
+    # some config classes synchronize `rope_scaling` from `rope_parameters` and
+    # can drop legacy keys like `rope_scaling["type"]`.
+    _normalize_remote_code_config_compat(config)
+    # Some config classes can still nullify rope_parameters during the second
+    # remote-code field normalization pass. Ensure final config always carries
+    # valid rope_parameters for model classes that directly subscript it.
     _normalize_rope_parameters_config_compat(config)
 
 
@@ -1123,6 +1206,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
         return
 
     deci_init_compat(config)
+    _sync_local_remote_code_cache(model_id_or_path)
 
     auto_map = getattr(config, "auto_map", None) or {}
     class_ref = auto_map.get("AutoModelForCausalLM")
@@ -1185,7 +1269,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
                 encoder_cls.__init__ = encoder_init_compat
                 encoder_cls._gptqmodel_meta_dpr_patch = True
 
-        if config.model_type == "minicpmv" or config.model_type == "minicpmo":
+        if config.model_type in {"minicpmv", "minicpmv4_6", "minicpmo"}:
             vision_model_cls = getattr(
                 remote_module,
                 "SiglipVisionTransformer",
@@ -1233,6 +1317,31 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
                     support_tokenizer_types.append("TokenizersBackend")
                     formatter_cls.support_tokenizer_types = support_tokenizer_types
                 formatter_cls._gptqmodel_tokenizer_backend_patch = True
+
+        if getattr(config, "model_type", None) == "hymba" and remote_module is not None:
+            rotary_cls = getattr(remote_module, "LlamaRotaryEmbedding", None)
+            attention_cls = getattr(remote_module, "HymbaAttention", None)
+            if (
+                rotary_cls is not None
+                and attention_cls is not None
+                and not getattr(attention_cls, "_gptqmodel_init_rope_meta_patch", False)
+            ):
+                def hymba_init_rope_compat(self):
+                    # Hymba remote code hard-codes CUDA here, which forces a
+                    # meta->real-device materialization during __init__ under
+                    # transformers 5.x. Keep the device is None until HF
+                    # finishes model loading and device placement.
+                    device = None
+
+                    self.rotary_emb = rotary_cls(
+                        config=self.config,
+                        dim=self.kq_head_dim,
+                        base=self.rope_theta,
+                        device=device,
+                    )
+
+                attention_cls._init_rope = hymba_init_rope_compat
+                attention_cls._gptqmodel_init_rope_meta_patch = True
 
         if getattr(config, "model_type", None) != "phi4mm":
             return
@@ -1417,6 +1526,19 @@ def load_hf_tokenizer(
             trust_remote_code=trust_remote_code,
             **kwargs,
         )
+    except ValueError as exc:
+        # Transformers 5.x can incorrectly route some legacy/local repos to the
+        # generic tokenizers backend, which then fails before consulting the
+        # declared tokenizer class from tokenizer_config.json.
+        #
+        # In that failure mode the repo may still have a complete
+        # `vocab.json`/`merges.txt` pair, but `AutoTokenizer` never reaches the
+        # model-specific tokenizer class that knows how to map those files to
+        # `vocab_file` / `merges_file`. The issue is therefore dispatch, not
+        # missing tokenizer assets.
+        if "Couldn't instantiate the backend tokenizer" not in str(exc):
+            raise
+        auto_tokenizer_exc = exc
     except AttributeError as exc:
         # Narrow fallback for legacy trust_remote_code repositories. On
         # transformers 5.x, some old repos no longer resolve to a tokenizer
@@ -1426,6 +1548,26 @@ def load_hf_tokenizer(
         if not trust_remote_code or "from_pretrained" not in str(exc):
             raise
         auto_tokenizer_exc = exc
+
+    tokenizer_config = get_tokenizer_config(
+        tokenizer_or_path,
+        trust_remote_code=trust_remote_code,
+        **kwargs,
+    )
+    tokenizer_class_name = tokenizer_config.get("tokenizer_class")
+    if isinstance(tokenizer_class_name, str):
+        # `tokenizer_config.json` is the most direct source of truth once the
+        # generic auto-dispatch path has proven unreliable. Resolving the class
+        # name explicitly lets us instantiate the tokenizer implementation that
+        # ships with transformers (for example `Qwen2Tokenizer`) so it can load
+        # its expected files from the repo in the normal way.
+        tokenizer_cls = tokenizer_class_from_name(tokenizer_class_name)
+        if tokenizer_cls is not None:
+            return tokenizer_cls.from_pretrained(
+                tokenizer_or_path,
+                trust_remote_code=trust_remote_code,
+                **kwargs,
+            )
 
     auto_map = getattr(model_config, "auto_map", None) or {}
     # Old repositories often still expose an authoritative dynamic tokenizer
@@ -1610,11 +1752,51 @@ def build_shell_model(
     pb = log.spinner(title="Model loading...", interval=0.1)
     try:
         with init_empty_weights(include_buffers=True):
-            shell = loader.from_config(
-                config,
-                trust_remote_code=trust_remote_code,
-                **init_kwargs
-            )
+            try:
+                shell = loader.from_config(
+                    config,
+                    trust_remote_code=trust_remote_code,
+                    **init_kwargs
+                )
+            except FileNotFoundError as exc:
+                # Some trust_remote_code caches can become stale (missing
+                # generated files like transformers_v*__configuration_*.py).
+                # Try to recreate known compatibility shims, then refresh once.
+                missing_path = str(exc)
+                if (
+                    trust_remote_code
+                    and "transformers_modules" in missing_path
+                    and "No such file or directory" in missing_path
+                ):
+                    missing_file = None
+                    # Parse "...: '/path/to/file.py'" from OSError message.
+                    if "'" in missing_path:
+                        parts = missing_path.split("'")
+                        if len(parts) >= 2:
+                            missing_file = parts[1]
+
+                    if (
+                        missing_file
+                        and missing_file.endswith("__configuration_llama.py")
+                        and not os.path.exists(missing_file)
+                    ):
+                        os.makedirs(os.path.dirname(missing_file), exist_ok=True)
+                        with open(missing_file, "w", encoding="utf-8") as fp:
+                            fp.write("from transformers.models.llama.configuration_llama import *\n")
+
+                    auto_map = getattr(config, "auto_map", None) or {}
+                    class_ref = auto_map.get("AutoModelForCausalLM")
+                    if isinstance(class_ref, str):
+                        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+                        get_class_from_dynamic_module(class_ref, str(getattr(config, "_name_or_path", "")), force_download=True)
+
+                    shell = loader.from_config(
+                        config,
+                        trust_remote_code=trust_remote_code,
+                        **init_kwargs,
+                    )
+                else:
+                    raise
     finally:
         pb.close()
 

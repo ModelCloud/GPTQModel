@@ -7,15 +7,11 @@ common:
 tests:
   test_multi_gpu_inference: # per-test config
     gpu: 5
-    py: 3.14t
 
   test_calibration_data_device:
     gpu: 2
-    py: 3.14t
 
 tests/models:
-  py: 3.13
-
   test_llama3_2_fp8:
     sm: '12.0'
 

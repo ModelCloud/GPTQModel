@@ -27,6 +27,12 @@ def strip_py_suffix(name: str) -> str:
     return name.removesuffix(".py")
 
 
+def default_env_prefix() -> str:
+    run_id = os.getenv("GITHUB_RUN_ID", "local")
+    run_attempt = os.getenv("GITHUB_RUN_ATTEMPT", "0")
+    return f"gptqmodel_test_{run_id}_{run_attempt}"
+
+
 @dataclass(frozen=True)
 class TestRuntime:
     test_name: str
@@ -470,7 +476,7 @@ def main() -> int:
     resolve_parser.add_argument("--test-name", required=True)
     resolve_parser.add_argument("--cuda-version", required=True)
     resolve_parser.add_argument("--torch-version", required=True)
-    resolve_parser.add_argument("--env-prefix", default="gptqmodel_test")
+    resolve_parser.add_argument("--env-prefix", default=default_env_prefix())
     resolve_parser.add_argument("--shell", action="store_true")
 
     runtime_parser = subparsers.add_parser("resolve-test-runtime")

@@ -243,6 +243,7 @@ class ForwardExecutor:
             is_embeddings_module = is_lm_head_module
 
         outputs: List[List[torch.Tensor]] = []
+        write_shared_kv_cache = bool(getattr(self.looper.gptq_model, "write_shared_kv_cache", False))
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
         total_batches, batch_row_counts, total_rows = self._resolve_batch_progress(
             processor,
@@ -332,7 +333,7 @@ class ForwardExecutor:
                 del additional_inputs
 
                 if (
-                    reuse_kv
+                    (reuse_kv or write_shared_kv_cache)
                     and module_output is not None
                     and isinstance(module_output, tuple)
                     and len(module_output) > 0
@@ -478,6 +479,7 @@ class ForwardExecutor:
                     ctx.__enter__()
                     moe_contexts.append(ctx)
 
+            write_shared_kv_cache = bool(getattr(self.looper.gptq_model, "write_shared_kv_cache", False))
             prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
             results: Dict[int, torch.Tensor | None] = {}
             processed_rows = 0
@@ -569,6 +571,7 @@ class ForwardExecutor:
                             need_output=need_outputs,
                             reuse_kv=reuse_kv,
                             prev_kv=prev_kv,
+                            write_shared_kv_cache=write_shared_kv_cache,
                         )
                     )
 
@@ -582,7 +585,7 @@ class ForwardExecutor:
                         primary = module_output[0] if isinstance(module_output, tuple) else module_output
                         results[batch_idx] = move_to(primary, device=target_device)
                         del module_output
-                    if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
+                    if (reuse_kv or write_shared_kv_cache) and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
                         shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)
 
                     rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
