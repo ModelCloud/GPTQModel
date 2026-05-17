@@ -41,6 +41,7 @@ Artifacts:
 - `/tmp/cannoe_aic_tscm_safe_compile_summary.json`
 - `/tmp/cannoe_aic_tscm_safe_compile_supported_summary.json`
 - `/tmp/cannoe_aic_tscm_safe_compile_singlek_summary.json`
+- `/tmp/cannoe_aic_tscm_tbuf_supported_summary.json`
 
 | Probe | Devices | Passing cases | Failure signature | Decision |
 | --- | --- | ---: | --- | --- |
@@ -52,6 +53,7 @@ Artifacts:
 | Host mixed-key fallback only | 0-7 | 2/8 | Host selected AIV, but staged mode still faulted with vector-core D-cache errors, error 507035 | Reject |
 | Wide-N `k_tiles=2` supported probe | NPU0 | 0/1 | AIC/fftsplus AIVector MPU fault, error 507015 | Reject |
 | Wide-N `k_tiles=1` supported probe | NPU0 | 0/1 | AIC/fftsplus AIVector MPU fault, error 507015 | Reject |
+| TBuf-backed TSCM local tensors | NPU0 | 0/1 | Same wide-N `k_tiles=2` AIC/MPU fault after replacing raw TSCM tensors with `TBuf<TPosition::TSCM>` plus `EnQue`/`DeQue` | Reject |
 | Host scalar fallback for unsupported shapes | 0-7 | 8/8 | `max_abs=0.0078125`, max `mean_abs=0.0018529892`, mean one-shot timing `573.71 ms` | Keep as guard |
 | Safe compile-only handoff strategy | 0-7 plus two wide NPU0 probes | 10/10 | small suite `max_abs=0.0078125`; wide probes `max_abs<=0.0078125`, max `mean_abs=0.0009169579` | Keep |
 
@@ -73,6 +75,29 @@ Re-test only with a materially different AIC consumer contract, for example a
 documented MatmulImpl TSCM producer/consumer pattern that supports repeated K
 tiles, a per-n-tile AIC re-init/end lifecycle, or a verified CANN sample that
 uses AIV-produced TSCM/NZ B tiles across more than two K chunks.
+
+## 2026-05-17: Cannoe Plain-Native Auto `inner_precise` Default
+
+Status: failed speed gate; do not pass auto `inner_precise=1` from the default
+plain-native GPTQ FP16 path.
+
+Tested change: route `_plain_native_fp16_forward` through the same
+`_cannoe_inner_precise(...)` policy used by the explicit tuning path. The target
+was the Qwen3 27B q-proj shape, where older direct CANN checks had shown a
+small win for `inner_precise=1`.
+
+Artifacts:
+
+- `/tmp/cannoe_plain_q_before.json`
+- `/tmp/cannoe_plain_q_after.json`
+
+| Shape | Device | Before | After | Result |
+| --- | --- | ---: | ---: | --- |
+| `M=1,K=5120,N=6144,group=32,sym=True` q-proj | NPU0 | `0.0754 ms` | `0.0854 ms` | Reject |
+
+Decision: revert the code change. Keep `GPTQMODEL_CANNOE_INNER_PRECISE` as an
+explicit tuning override and keep the existing auto rule only on the tuning
+path until same-run multi-device data proves a stable win.
 
 ## 2026-05-16: Cannoe Ascend C VECOUT Cast-to-Cube Handoff
 
