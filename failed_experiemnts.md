@@ -15,6 +15,71 @@ For new entries, include:
 - Speed, accuracy, and memory data when available.
 - Decision and what would justify re-testing.
 
+## 2026-05-17: Cannoe VecOut/local-A Expanded Staged Owner Cap
+
+Status: failed runtime-safety gate; keep the fixed eight-owner cap for the
+default fused VecOut/local-A path.
+
+Tested change: remove the host tiler's fixed `kMaxLogicalBlocks=8` staged
+owner cap for mixed Cube-consumer staged plans. The probe kept the scalar path
+capped at eight owners but allowed staged fused plans to use
+`min(AIC cores, AIV cores, packed columns, staged tasks)`. The matching Python
+planner was updated to account for the larger staged workspace. This targets
+large-N serialization without caching full dequantized FP16 weights.
+
+Artifacts:
+
+- `/tmp/cannoe_vecout_owner_baseline`
+- `/tmp/cannoe_vecout_owner_baseline_install`
+- `/tmp/cannoe_vecout_owner_expand`
+- `/tmp/cannoe_vecout_owner_expand_install`
+- `/tmp/cannoe_owner_qwen_cases.json`
+- `/tmp/cannoe_owner_medium_cases.json`
+
+Partial metrics before the sweeps were stopped:
+
+| Probe | Devices | Passing output before hang | Failure signature | Decision |
+| --- | --- | --- | --- | --- |
+| Baseline `5626aba2`, Qwen-like q/k/v/gate/up/down cases | 0-7 | NPU2 `M=1,K=5120,N=1024` `25.519 ms`, `max_abs=0.046875`; NPU3/NPU4 `M=1,K=5120,N=17408` `228.026/228.045 ms`, `max_abs<=0.078125` | NPU0/NPU1/NPU5/NPU6/NPU7 stopped producing results and several sat at 100% AICore with only ~140-188 MB process memory | Inconclusive baseline, not usable for A/B |
+| Baseline `5626aba2`, medium owner-sensitive cases | 0-7 | NPU2 `M=1,K=512,N=8192` `10.209 ms`; NPU4 `M=16,K=512,N=4096` `5.197 ms`; NPU5 `M=8,K=1024,N=4096` `10.157 ms`; all with `max_abs<=0.015625` | NPU0/NPU1/NPU3/NPU6/NPU7 hung on modest `N=1024-8192` cases | Inconclusive baseline, not usable for A/B |
+| Expanded owner cap, same medium cases | 0-7 | NPU7 `M=8,K=512,N=1024` `2.636 ms`, `max_abs=0.0078125` | NPU0 hung on `M=1,K=512,N=2048`; NPU6 hung on `M=1,K=1024,N=8192`; other workers exited without enough clean parent output before manual stop | Reject as default |
+
+Decision: revert the source changes. The larger staged owner count can leave
+workers stuck in the fused path even on modest shapes. Re-test only if the
+mixed-launch scheduler is changed to prove the exact AIC/AIV physical owner
+mapping and Matmul client lifecycle for `block_dim > 8`, or if the validator is
+extended with a device-side tiling diagnostic that records `block_dim`,
+`staging_blocks`, and physical core ownership before entering the Cube loop.
+
+## 2026-05-17: Cannoe VecOut/local-A Row-1 Local-A DataCopy Gate
+
+Status: failed speed gate; keep row-1 large-K local-A fill on scalar
+`GetValue`/`SetValue`.
+
+Tested change: extend `FillDirectATile` so `M=1,K>=4096` uses row-wise
+GM-to-VECOUT `DataCopy`, matching the existing accepted `rows>=16` and
+`rows==8 && K>=1024` gate. The target was Qwen-style decode where A is tiny but
+reloaded for every K tile.
+
+Artifacts:
+
+- `/tmp/cannoe_vecout_row1_datacopy`
+- `/tmp/cannoe_vecout_row1_datacopy_install`
+- `/tmp/cannoe_row1_qwen_ab_cases.json`
+- `/tmp/cannoe_row1_qwen_baseline_summary.json`
+- `/tmp/cannoe_row1_qwen_datacopy_summary.json`
+
+| Shape | Device | Baseline | Row-1 DataCopy | Drift | Decision |
+| --- | --- | ---: | ---: | --- | --- |
+| `M=1,K=5120,N=6144,group=32` | NPU2 | `76.0988 ms` | `77.7094 ms` | `max_abs=0.0625`, `mean_abs=0.006393` | Reject |
+| `M=1,K=5120,N=17408,group=32` | NPU2 | `228.0238 ms` | `232.9481 ms` | `max_abs=0.078125`, `mean_abs=0.006508` | Reject |
+| `M=1,K=17408,N=5120,group=32` | NPU2 | `258.4964 ms` | `264.0368 ms` | `max_abs=0.21875`, `mean_abs=0.020493` | Reject |
+
+Decision: revert the source change. The extra MTE path costs more than the
+scalar A fill for row-1 decode, even on large K. Re-test only if A tile filling
+is overlapped with B dequant/Cube work instead of replacing the row-1 copy loop
+in place.
+
 ## 2026-05-17: Cannoe Explicit AIC/TSCM Multi-K Handoff
 
 Status: partial bring-up only. Keep the guarded strategy and diagnostics, but
