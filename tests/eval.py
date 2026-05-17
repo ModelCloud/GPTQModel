@@ -151,14 +151,26 @@ def resolve_eval_metric_alias(metric_name: str, metrics: Mapping[str, Any]) -> s
         return metric_name
 
     aliases = {
-        "acc": "accuracy,loglikelihood",
-        "acc_norm": "accuracy,loglikelihood_norm",
-        "acc,none": "accuracy,loglikelihood",
-        "acc_norm,none": "accuracy,loglikelihood_norm",
+        "acc": (
+            "accuracy,loglikelihood",
+            "acc,ll",
+        ),
+        "acc_norm": (
+            "accuracy,loglikelihood_norm",
+            "acc,ll_avg",
+        ),
+        "acc,none": (
+            "accuracy,loglikelihood",
+            "acc,ll",
+        ),
+        "acc_norm,none": (
+            "accuracy,loglikelihood_norm",
+            "acc,ll_avg",
+        ),
     }
-    alias = aliases.get(metric_name)
-    if alias and alias in metrics:
-        return alias
+    for alias in aliases.get(metric_name, ()):
+        if alias in metrics:
+            return alias
     return None
 
 
