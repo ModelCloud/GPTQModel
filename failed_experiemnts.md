@@ -15,6 +15,40 @@ For new entries, include:
 - Speed, accuracy, and memory data when available.
 - Decision and what would justify re-testing.
 
+## 2026-05-17: Cannoe CANN 9 `MatmulTypeWithScale` INT4 Direct-B Probe
+
+Status: failed compile-surface gate; do not pursue GPTQ through the public
+MX-scale `MatmulTypeWithScale` path as a direct INT4-to-Cube replacement.
+
+Tested change: temporarily added a compile-only diagnostic that instantiated
+CANN 9 Ascend C Matmul with half A, `int4b_t` B, half C, and MX-style scale
+positions. The probe was tried first through the public `Matmul<>` alias and
+then directly through `MatmulImpl<..., CFG_MDL>`, matching the lower-level AIC
+side used by the existing AIC/TSCM bring-up. This targeted a possible
+direct-B Cube handoff route that would avoid materializing full dequantized
+FP16 weight tiles.
+
+Artifacts:
+
+- `/tmp/cannoe_int4_matmul_type_probe`
+- `/tmp/cannoe_int4_matmul_impl_probe`
+
+Build command shape:
+
+- `source /usr/local/Ascend/cann/set_env.sh && python scripts/build_cannoe_ascendc.py --output /tmp/cannoe_int4_matmul_impl_probe --clean --experimental-cube-consumer --experimental-int4-matmul-type-probe`
+
+| Probe | Result | Failure signature | Decision |
+| --- | --- | --- | --- |
+| `Matmul<>` alias with `MatmulTypeWithScale<A=half,B=int4b_t>` | Compile fail | `MatmulClient` has no `SetTensorScaleA` or `SetTensorScaleB`; the lower MX instantiation also reports missing `CopyCubeInScaleA/B` and scale buffer modules | Reject |
+| Direct `MatmulImpl<..., CFG_MDL>` with the same types | Compile fail | `mx_matmul_impl.h` instantiates, but `MatmulPolicy<CFG_MDL,...>` has no `CopyCubeInScaleA`, `CopyCubeInScaleB`, `CubeInBufferScaleA`, or `CubeInBufferScaleB` | Reject |
+
+Decision: revert the temporary probe. CANN 9 exposes `int4b_t` in low-level
+Matmul copy/L0 paths, but the public scaled-Matmul specialization is not wired
+for this GPTQ use case in the available policy modules, and its scale tensor
+surface is MX-style `fp8_e8m0_t` rather than GPTQ half scale/offset. Re-test
+only if a future CANN release adds documented `int4b_t` B-scale modules or a
+public GPTQ/W4A16 Matmul policy with half scales and zero-points.
+
 ## 2026-05-17: Cannoe VecOut/local-A Expanded Staged Owner Cap
 
 Status: failed runtime-safety gate; keep the fixed eight-owner cap for the
