@@ -8,6 +8,7 @@ os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 import pytest  # noqa: E402
 import torch  # noqa: E402
 
+from gptqmodel.adapter.quant import dequantize_tensor_groupwise_int8, quantize_tensor_groupwise_int8  # noqa: E402
 from gptqmodel.nn_modules.triton_utils.dequant import quant_matmul as dequant_quant_matmul  # noqa: E402
 from gptqmodel.utils import vecquant3  # noqa: E402
 
@@ -102,6 +103,62 @@ def test_vecquant3_grouped_gemv_matches_dequant_reference(group_size, dtype):
         x, qweight, scales, qzeros, down, lora_b, group_size, accumulation_dtype="input"
     )
     torch.testing.assert_close(actual_lora_input_accum, expected_lora_input_accum, rtol=0, atol=lora_atol)
+
+    for lora_group_size in (32, 64, 96, 128):
+        up_qweight, up_scales, up_shape = quantize_tensor_groupwise_int8(
+            lora_b,
+            group_size=lora_group_size,
+            scale_dtype=dtype,
+        )
+        up_dequant = dequantize_tensor_groupwise_int8(
+            qweight=up_qweight,
+            scales=up_scales,
+            shape=up_shape,
+            group_size=lora_group_size,
+            device=device,
+            dtype=dtype,
+        ).contiguous()
+        up_qweight = up_qweight.to(device=device, non_blocking=True).contiguous()
+        up_scales = up_scales.to(device=device, non_blocking=True).contiguous()
+        lora_int8_term = (down.reshape(-1, 1) * up_dequant).float().sum(dim=0)
+
+        expected_lora_int8 = actual + lora_int8_term
+        actual_lora_int8 = vecquant3.gemv_lora_int8(
+            x,
+            qweight,
+            scales,
+            qzeros,
+            down,
+            up_qweight,
+            up_scales,
+            up_shape,
+            group_size,
+            lora_group_size,
+            accumulation_dtype=torch.float32,
+        )
+        int8_lora_atol = 8e-3 if dtype == torch.float16 else 3e-2
+        torch.testing.assert_close(actual_lora_int8, expected_lora_int8, rtol=0, atol=int8_lora_atol)
+
+        expected_lora_int8_input_accum = actual_input_accum + lora_int8_term
+        actual_lora_int8_input_accum = vecquant3.gemv_lora_int8(
+            x,
+            qweight,
+            scales,
+            qzeros,
+            down,
+            up_qweight,
+            up_scales,
+            up_shape,
+            group_size,
+            lora_group_size,
+            accumulation_dtype="input",
+        )
+        torch.testing.assert_close(
+            actual_lora_int8_input_accum,
+            expected_lora_int8_input_accum,
+            rtol=0,
+            atol=int8_lora_atol,
+        )
 
 
 def test_vecquant3_accumulation_dtype_validation():
