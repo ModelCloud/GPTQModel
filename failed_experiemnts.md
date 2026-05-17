@@ -34,6 +34,7 @@ Artifacts:
 - `/tmp/cannoe_ascendc_bridge_cache2`
 - `/tmp/cannoe_ascendc_bridge_cache3`
 - `/tmp/cannoe_ascendc_bridge_cache4`
+- `/tmp/cannoe_ascendc_bridge_workspace`
 - `/tmp/cannoe_cached_bridge_single_m1_iters6_summary.json`
 - `/tmp/cannoe_scalar_m1_iters6_summary.json`
 
@@ -44,6 +45,7 @@ Artifacts:
 | Cache custom ACLNN executor/descriptors and workspace, patterned after the stable V3 bridge | Incorrect output, then stall | call 1 `518.749 ms`, sum `-13.4019775`; call 2 `2.075 ms`, sum `-2565.38671875`; call 3 timed out | Reject executor cache for generated custom ACLNN op |
 | Disable executor cache but keep persistent workspace cache | Runtime stall | call 1 `509.150 ms`, call 2 `2.169 ms`, both sums `-13.4019775`; call 3 timed out | Reject as insufficient |
 | Force `RunOpApiV2(..., sync=true)` while keeping executor cache off | Runtime stall | call 1 `504.060 ms`, call 2 `2.228 ms`, both sums `-13.4019775`; call 3 timed out | Reject as insufficient |
+| Replace plain `at::empty` workspace with torch-npu `OpPreparation::unsafe_empty_workspace` | Extension load failure | JIT compile produced `gptqmodel_cannoe_ascendc_ops.so`, but load failed; `nm -D` showed unresolved `at_npu::native::OpPreparation::unsafe_empty_workspace(unsigned long)`, and `libtorch_npu.so` in this environment does not export that symbol | Reject for standalone bridge |
 | Force scalar custom-op path with positive `base_n=256` | Runtime stall / unusable fallback | six-launch validator timed out at 180s before producing a result | Do not use this as a safety fallback |
 
 Decision: revert all source changes from this probe. The repeated-launch issue
@@ -52,8 +54,9 @@ descriptor lifetime alone. The generated custom ACLNN executor is not safe to
 cache for this op: it produced incorrect output on the second call. Re-test only
 with a smaller device-side lifecycle diagnostic that records launch mode,
 tiling key, workspace sizes, and whether AIC/AIV branches return before entering
-the Matmul loop, or with a regenerated custom-op wrapper that uses the same
-thread-local huge-memory setup/release path as torch-npu's op-plugin macros.
+the Matmul loop, or with a regenerated custom-op wrapper that uses exported
+torch-npu/op-plugin workspace and thread-local huge-memory setup/release hooks
+instead of private, non-exported helper symbols.
 
 ## 2026-05-17: Cannoe CANN 9 `MatmulTypeWithScale` INT4 Direct-B Probe
 
