@@ -49,6 +49,38 @@ surface is MX-style `fp8_e8m0_t` rather than GPTQ half scale/offset. Re-test
 only if a future CANN release adds documented `int4b_t` B-scale modules or a
 public GPTQ/W4A16 Matmul policy with half scales and zero-points.
 
+## 2026-05-17: Cannoe VecOut INT4-to-INT8 AntiQuant Probe
+
+Status: failed compile-surface gate; do not route the current KFC VecOut
+consumer through CANN Matmul antiquant.
+
+Tested change: temporarily added `--experimental-vecout-int8-antiquant` as a
+VecOut/local-A variant. The AIV side expanded each packed INT4 B tile to a
+local INT8 tile, staged one half scale vector and one half offset vector for the
+current GPTQ group, and tried to call `SetAntiQuantVector` before handing INT8
+B to the mixed-launch Cube consumer. Runtime was guarded to group-aligned K
+tiles only, so group-size 32 would require `base_k=32` and group-size 128 could
+use `base_k=128`.
+
+Artifact:
+
+- `/tmp/cannoe_vecout_int8_antiquant`
+
+Build command shape:
+
+- `source /usr/local/Ascend/cann/set_env.sh && python scripts/build_cannoe_ascendc.py --output /tmp/cannoe_vecout_int8_antiquant --clean --experimental-vecout-int8-antiquant`
+
+| Probe | Result | Failure signature | Decision |
+| --- | --- | --- | --- |
+| KFC `Matmul<>` mixed-launch client, `A=VECOUT half`, `B=VECOUT int8_t`, antiquant vector config | Compile fail | `MatmulClient` / `MatmulServiceAux` has no `SetAntiQuantVector` member for this public mixed-launch surface | Reject |
+| Same instantiation, independent template backtrace in the same build | Compile fail | VECOUT int8 B ND-to-NZ path reaches `data_copy_wrapper_nd.h` and has no matching 3-argument `DataCopy` for the required local int8 copy | Reject |
+
+Decision: revert the temporary probe. CANN antiquant remains relevant only if
+we switch to a different Matmul contract, likely direct AIC-side `MatmulImpl`
+with a B source position/layout that supports int8 copy and antiquant. The
+current validated mixed-launch VecOut path cannot use it without replacing the
+consumer contract.
+
 ## 2026-05-17: Cannoe VecOut/local-A Expanded Staged Owner Cap
 
 Status: failed runtime-safety gate; keep the fixed eight-owner cap for the
