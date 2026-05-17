@@ -23,7 +23,13 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
-from ..adapter.quant import LORA_INT8_FORMAT, compressed_weight_keys, dtype_from_name, quantize_tensor_groupwise_int8
+from ..adapter.quant import (
+    compressed_weight_keys,
+    dtype_from_name,
+    is_grouped_lora_weight_format,
+    normalize_lora_grouped_bits,
+    quantize_tensor_groupwise_int,
+)
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization.config import (
     FORMAT,
@@ -533,16 +539,23 @@ def ModelWriter(cls):
                 weight_key = f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}{key}"
 
                 lora_weight_format = self.quantize_config.adapter.lora_weight_format
-                if lora_weight_format == LORA_INT8_FORMAT:
+                if is_grouped_lora_weight_format(lora_weight_format):
                     group_size = self.quantize_config.adapter.lora_weight_group_size
-                    scale_dtype = dtype_from_name(getattr(self.quantize_config.adapter, "lora_weight_scale_dtype", None))
+                    bits = normalize_lora_grouped_bits(
+                        self.quantize_config.adapter.lora_weight_bits,
+                        lora_weight_format,
+                    )
+                    scale_dtype = dtype_from_name(
+                        getattr(self.quantize_config.adapter, "lora_weight_scale_dtype", None)
+                    )
                     for tensor_key, tensor in (
                         (f"{weight_key}.lora_A.weight", adapter.lora_A),
                         (f"{weight_key}.lora_B.weight", adapter.lora_B),
                     ):
                         q_key, scales_key, shape_key = compressed_weight_keys(tensor_key)
-                        qweight, scales, shape = quantize_tensor_groupwise_int8(
+                        qweight, scales, shape = quantize_tensor_groupwise_int(
                             tensor,
+                            bits=bits,
                             group_size=group_size,
                             scale_dtype=scale_dtype,
                         )
@@ -561,16 +574,17 @@ def ModelWriter(cls):
             if self.quantize_config.dynamic:
                 rank_pattern = self.quantize_config.extract_adapter_rank_patterns()
 
+            grouped_lora = is_grouped_lora_weight_format(self.quantize_config.adapter.lora_weight_format)
             lora_cfg = LoraConfig(base_model_name_or_path=model_save_dir,
                                   r=self.quantize_config.adapter.rank,
                                   lora_alpha=self.quantize_config.adapter.rank,
                                   target_modules=list(target_modules),
                                   rank_pattern=rank_pattern,
                                   gptqmodel_lora_weight_format=self.quantize_config.adapter.lora_weight_format,
-                                  gptqmodel_lora_weight_bits=8 if self.quantize_config.adapter.lora_weight_format == LORA_INT8_FORMAT else None,
-                                  gptqmodel_lora_group_size=self.quantize_config.adapter.lora_weight_group_size if self.quantize_config.adapter.lora_weight_format == LORA_INT8_FORMAT else None,
-                                  gptqmodel_lora_scale_dtype=getattr(self.quantize_config.adapter, "lora_weight_scale_dtype", None) if self.quantize_config.adapter.lora_weight_format == LORA_INT8_FORMAT else None,
-                                  gptqmodel_lora_dequant_mode=self.quantize_config.adapter.lora_dequant_mode if self.quantize_config.adapter.lora_weight_format == LORA_INT8_FORMAT else None)
+                                  gptqmodel_lora_weight_bits=self.quantize_config.adapter.lora_weight_bits if grouped_lora else None,
+                                  gptqmodel_lora_group_size=self.quantize_config.adapter.lora_weight_group_size if grouped_lora else None,
+                                  gptqmodel_lora_scale_dtype=getattr(self.quantize_config.adapter, "lora_weight_scale_dtype", None) if grouped_lora else None,
+                                  gptqmodel_lora_dequant_mode=self.quantize_config.adapter.lora_dequant_mode if grouped_lora else None)
             lora_cfg.save_pretrained(save_dir=save_dir)
 
             log.info(f"Adapter: Saving EoRA weights to -> `{save_dir}`")
