@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -12,6 +13,7 @@ import torch
 
 from ..utils.logger import setup_logger
 from .peft import LoraConfig
+from .quant import compressed_weight_keys, dequantize_tensor_groupwise_int8
 from .remote import resolve_path
 
 log = setup_logger()
@@ -125,6 +127,10 @@ class Lora(Adapter):
         lora_A: torch.Tensor = None,
         lora_B: torch.Tensor = None,
         eora_cholesky: bool = True,
+        lora_weight_format: str = None,
+        lora_weight_group_size: int = 128,
+        lora_weight_scale_dtype: str = "bfloat16",
+        lora_dequant_mode: str = "forward",
     ):
         """Initializes the adapter with optional preloaded LoRA matrices."""
 
@@ -133,6 +139,16 @@ class Lora(Adapter):
         self.lora_A = lora_A
         self.lora_B = lora_B
         self.eora_cholesky = bool(eora_cholesky)
+        self.lora_weight_format = lora_weight_format
+        self.lora_weight_group_size = int(lora_weight_group_size)
+        self.lora_weight_scale_dtype = lora_weight_scale_dtype
+        self.lora_dequant_mode = lora_dequant_mode
+        self.lora_A_qweight = None
+        self.lora_A_scales = None
+        self.lora_A_shape = None
+        self.lora_B_qweight = None
+        self.lora_B_scales = None
+        self.lora_B_shape = None
 
     @classmethod
     def name(cls) -> str:
@@ -153,13 +169,33 @@ class Lora(Adapter):
         #logger.info("Adapter: optimize (compile)")
         #self.apply = torch_compile(self.apply, backend=backend, mode=mode, fullgraph=fullgraph)
 
-    def apply(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
-        """Adds the LoRA update to the kernel output, reshaping batched outputs when needed."""
+    def _has_compressed_lora(self) -> bool:
+        """Reports whether this adapter stores grouped-int8 LoRA tensors."""
 
-        # original code
-        # out = out + ((x @ self.lora_A) @ self.lora_B)
+        return self.lora_A_qweight is not None and self.lora_B_qweight is not None
 
-        # native quantized model/eora is float16 for gptq but for training, we may load the model as bfloat16 for accuracy
+    def _dequant_compressed_lora_tensor(self, prefix: str, x: torch.Tensor) -> torch.Tensor:
+        """Materializes one compressed LoRA tensor into the forward input dtype."""
+
+        qweight = getattr(self, f"{prefix}_qweight")
+        scales = getattr(self, f"{prefix}_scales")
+        shape = getattr(self, f"{prefix}_shape")
+        tensor = dequantize_tensor_groupwise_int8(
+            qweight=qweight,
+            scales=scales,
+            shape=shape,
+            group_size=self.lora_weight_group_size,
+            device=x.device,
+            dtype=x.dtype,
+        )
+        return tensor.T.contiguous()
+
+    def _forward_lora_tensors(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns LoRA A/B tensors matching the current forward input."""
+
+        if self._has_compressed_lora():
+            return self._dequant_compressed_lora_tensor("lora_A", x), self._dequant_compressed_lora_tensor("lora_B", x)
+
         if x.dtype != self.lora_A.dtype or x.device != self.lora_A.device:
             log.info.once(
                 f"Adapter: Lora A/B auto changed from `{self.lora_A.dtype}` on `{self.lora_A.device}` "
@@ -168,17 +204,95 @@ class Lora(Adapter):
             self.lora_A = self.lora_A.to(device=x.device, dtype=x.dtype)
             self.lora_B = self.lora_B.to(device=x.device, dtype=x.dtype)
 
+        return self.lora_A, self.lora_B
+
+    def apply(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        """Adds the LoRA update to the kernel output, reshaping batched outputs when needed."""
+
+        # original code
+        # out = out + ((x @ self.lora_A) @ self.lora_B)
+
+        # native quantized model/eora is float16 for gptq but for training, we may load the model as bfloat16 for accuracy
+        lora_A, lora_B = self._forward_lora_tensors(x)
+
         # fix batch for lora
         # Some kernels do not reshape x, such as marlin / exllama / exllamav2.
         # out.dim() > x.dim() is used to exclude these kernels without additional processing
         if out.dim() > x.dim() and out.shape[0] > 1:
             out_orgi_shape = out.shape
             out = out.view(-1, out.shape[-1])
-            out.add_((x @ self.lora_A) @ self.lora_B)
+            out.add_((x @ lora_A) @ lora_B)
             out = out.view(out_orgi_shape)
             return out
         else:
-            return out.add_((x @ self.lora_A) @ self.lora_B)
+            return out.add_((x @ lora_A) @ lora_B)
+
+    def _apply_lora_config_extensions(self, lora_cfg: LoraConfig) -> None:
+        """Copies GPTQModel compressed-LoRA metadata from the saved adapter config."""
+
+        if getattr(lora_cfg, "gptqmodel_lora_weight_format", None):
+            self.lora_weight_format = lora_cfg.gptqmodel_lora_weight_format
+        if getattr(lora_cfg, "gptqmodel_lora_group_size", None):
+            self.lora_weight_group_size = int(lora_cfg.gptqmodel_lora_group_size)
+        if getattr(lora_cfg, "gptqmodel_lora_scale_dtype", None):
+            self.lora_weight_scale_dtype = lora_cfg.gptqmodel_lora_scale_dtype
+        if getattr(lora_cfg, "gptqmodel_lora_dequant_mode", None):
+            self.lora_dequant_mode = lora_cfg.gptqmodel_lora_dequant_mode
+
+        env_mode = os.environ.get("GPTQMODEL_LORA_INT8_DEQUANT_MODE")
+        if env_mode:
+            self.lora_dequant_mode = env_mode
+        self.lora_dequant_mode = str(self.lora_dequant_mode or "forward").lower()
+        if self.lora_dequant_mode not in {"forward", "load"}:
+            raise ValueError(
+                "Adapter: compressed LoRA dequant mode must be `forward` or `load`, "
+                f"actual = `{self.lora_dequant_mode}`."
+            )
+
+    @staticmethod
+    def _find_weight(lora_weights: Dict[str, torch.Tensor], suffix: str) -> tuple[str, torch.Tensor] | tuple[None, None]:
+        """Finds one adapter tensor by suffix because HF prefixes can vary."""
+
+        for k, v in lora_weights.items():
+            if k.endswith(suffix):
+                return k, v
+        return None, None
+
+    def _load_compressed_lora_tensor(
+        self,
+        *,
+        lora_weights: Dict[str, torch.Tensor],
+        weight_key: str,
+        prefix: str,
+        device: torch.device,
+        pop_keys: list[str],
+    ) -> torch.Tensor | None:
+        """Loads one grouped-int8 LoRA tensor or returns None when absent."""
+
+        q_suffix, scales_suffix, shape_suffix = compressed_weight_keys(weight_key)
+        q_key, qweight = self._find_weight(lora_weights, q_suffix)
+        scales_key, scales = self._find_weight(lora_weights, scales_suffix)
+        shape_key, shape = self._find_weight(lora_weights, shape_suffix)
+        if qweight is None and scales is None and shape is None:
+            return None
+        if qweight is None or scales is None or shape is None:
+            raise ValueError(f"Adapter: incomplete compressed LoRA tensor set for `{weight_key}`.")
+
+        pop_keys.extend([q_key, scales_key, shape_key])
+        if self.lora_dequant_mode == "load":
+            return dequantize_tensor_groupwise_int8(
+                qweight=qweight,
+                scales=scales,
+                shape=shape,
+                group_size=self.lora_weight_group_size,
+                device=device,
+                dtype=torch.bfloat16,
+            ).T.contiguous()
+
+        setattr(self, f"{prefix}_qweight", qweight.to(device=device, non_blocking=True))
+        setattr(self, f"{prefix}_scales", scales.to(device=device, non_blocking=True))
+        setattr(self, f"{prefix}_shape", shape.cpu())
+        return None
 
     def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
         """Loads, caches, and materializes LoRA tensors for the target module."""
@@ -217,6 +331,7 @@ class Lora(Adapter):
 
         # lora_cache result is a tuple
         lora_cfg, lora_weights = lora_cache
+        self._apply_lora_config_extensions(lora_cfg)
 
         weight_key = weight_key.lower()
 
@@ -234,6 +349,23 @@ class Lora(Adapter):
                 lora_B = torch.clone(v.T, memory_format=torch.contiguous_format)
                 pop_keys.append(k)
 
+        if lora_A is None:
+            lora_A = self._load_compressed_lora_tensor(
+                lora_weights=lora_weights,
+                weight_key=lora_A_weight_key,
+                prefix="lora_A",
+                device=device,
+                pop_keys=pop_keys,
+            )
+        if lora_B is None:
+            lora_B = self._load_compressed_lora_tensor(
+                lora_weights=lora_weights,
+                weight_key=lora_B_weight_key,
+                prefix="lora_B",
+                device=device,
+                pop_keys=pop_keys,
+            )
+
         if pop_keys:
             for k in pop_keys:
                 lora_weights.pop(k) # releasee lora weights from cache memory
@@ -246,7 +378,7 @@ class Lora(Adapter):
         else:
             log.warn(f"Adapter: Lora weights not found for `{weight_key}`")
 
-        assert lora_A is not None and lora_B is not None, f"Adapter: `lora_A` and `lora_B` must both be present in the weights: actual = `{lora_A}` and `{lora_B}`"
+        assert (lora_A is not None and lora_B is not None) or self._has_compressed_lora(), f"Adapter: `lora_A` and `lora_B` must both be present in the weights: actual = `{lora_A}` and `{lora_B}`"
 
         # check for rank override from base config
         self.dynamic_rank_override(lora_cfg=lora_cfg, weight_key=weight_key)
@@ -257,6 +389,11 @@ class Lora(Adapter):
 
         # print(f"Adapter: {self.name()}, loaded lora_A shape: {lora_A.shape}")
         # print(f"Adapter: {self.name()}, loaded lora_B shape: {lora_B.shape}")
+        if lora_A is None or lora_B is None:
+            self.lora_A = None
+            self.lora_B = None
+            return
+
         if lora_A.dtype not in [torch.float16, torch.bfloat16] or lora_B.dtype not in [torch.float16, torch.bfloat16]:
             log.warn.once(f"Adapter: `lora_A` and `lora_B` tensors should be of dtype = [torch.float16, torch.bfloat16]: actual = `[{lora_A.dtype}, {lora_B.dtype}]`.")
 
@@ -295,6 +432,10 @@ class Lora(Adapter):
             "path": self.path,
             "rank": self.rank,
             "eora_cholesky": self.eora_cholesky,
+            "lora_weight_format": self.lora_weight_format,
+            "lora_weight_group_size": self.lora_weight_group_size,
+            "lora_weight_scale_dtype": self.lora_weight_scale_dtype,
+            "lora_dequant_mode": self.lora_dequant_mode,
         }
         return payload
 

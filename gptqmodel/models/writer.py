@@ -23,6 +23,7 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
+from ..adapter.quant import LORA_INT8_FORMAT, compressed_weight_keys, dtype_from_name, quantize_tensor_groupwise_int8
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization.config import (
     FORMAT,
@@ -531,8 +532,26 @@ def ModelWriter(cls):
                 # must normalize key since HF can load weights as `model.` or not based on what AutoModel is used
                 weight_key = f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}{key}"
 
-                weights[f"{weight_key}.lora_A.weight"] = adapter.lora_A
-                weights[f"{weight_key}.lora_B.weight"] = adapter.lora_B
+                lora_weight_format = self.quantize_config.adapter.lora_weight_format
+                if lora_weight_format == LORA_INT8_FORMAT:
+                    group_size = self.quantize_config.adapter.lora_weight_group_size
+                    scale_dtype = dtype_from_name(getattr(self.quantize_config.adapter, "lora_weight_scale_dtype", None))
+                    for tensor_key, tensor in (
+                        (f"{weight_key}.lora_A.weight", adapter.lora_A),
+                        (f"{weight_key}.lora_B.weight", adapter.lora_B),
+                    ):
+                        q_key, scales_key, shape_key = compressed_weight_keys(tensor_key)
+                        qweight, scales, shape = quantize_tensor_groupwise_int8(
+                            tensor,
+                            group_size=group_size,
+                            scale_dtype=scale_dtype,
+                        )
+                        weights[q_key] = qweight
+                        weights[scales_key] = scales
+                        weights[shape_key] = shape
+                else:
+                    weights[f"{weight_key}.lora_A.weight"] = adapter.lora_A
+                    weights[f"{weight_key}.lora_B.weight"] = adapter.lora_B
                 log.info(f"Adapter: EoRA weights found -> `{weight_key}.lora_A/Lora_B.weight`, rank = `{adapter.rank}`")
 
             weight_file_path = f"{save_dir.removesuffix('/')}/{HF_ADAPTER_FILE_NAME}"
@@ -546,7 +565,12 @@ def ModelWriter(cls):
                                   r=self.quantize_config.adapter.rank,
                                   lora_alpha=self.quantize_config.adapter.rank,
                                   target_modules=list(target_modules),
-                                  rank_pattern=rank_pattern)
+                                  rank_pattern=rank_pattern,
+                                  gptqmodel_lora_weight_format=self.quantize_config.adapter.lora_weight_format,
+                                  gptqmodel_lora_weight_bits=8 if self.quantize_config.adapter.lora_weight_format == LORA_INT8_FORMAT else None,
+                                  gptqmodel_lora_group_size=self.quantize_config.adapter.lora_weight_group_size if self.quantize_config.adapter.lora_weight_format == LORA_INT8_FORMAT else None,
+                                  gptqmodel_lora_scale_dtype=getattr(self.quantize_config.adapter, "lora_weight_scale_dtype", None) if self.quantize_config.adapter.lora_weight_format == LORA_INT8_FORMAT else None,
+                                  gptqmodel_lora_dequant_mode=self.quantize_config.adapter.lora_dequant_mode if self.quantize_config.adapter.lora_weight_format == LORA_INT8_FORMAT else None)
             lora_cfg.save_pretrained(save_dir=save_dir)
 
             log.info(f"Adapter: Saving EoRA weights to -> `{save_dir}`")

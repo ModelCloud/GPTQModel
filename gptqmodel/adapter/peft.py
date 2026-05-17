@@ -303,6 +303,26 @@ class LoraConfig():
     auto_mapping: Optional[dict] = field(
         default=None, metadata={"help": "An auto mapping dict to help retrieve the base model class if needed."}
     )
+    gptqmodel_lora_weight_format: Optional[str] = field(
+        default=None,
+        metadata={"help": "GPTQModel extension for compressed LoRA tensor storage."},
+    )
+    gptqmodel_lora_weight_bits: Optional[int] = field(
+        default=None,
+        metadata={"help": "GPTQModel extension for compressed LoRA bit width."},
+    )
+    gptqmodel_lora_group_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "GPTQModel extension for grouped LoRA weight scales."},
+    )
+    gptqmodel_lora_scale_dtype: Optional[str] = field(
+        default=None,
+        metadata={"help": "GPTQModel extension for compressed LoRA scale dtype."},
+    )
+    gptqmodel_lora_dequant_mode: Optional[str] = field(
+        default=None,
+        metadata={"help": "GPTQModel extension controlling compressed LoRA materialization."},
+    )
 
     def to_dict(self):
         """
