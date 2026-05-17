@@ -15,6 +15,46 @@ For new entries, include:
 - Speed, accuracy, and memory data when available.
 - Decision and what would justify re-testing.
 
+## 2026-05-17: Cannoe Ascend C Bridge Lifetime and Repeat-Launch Probes
+
+Status: failed runtime-safety gate; keep the Ascend C bridge source at the
+validated baseline and do not enable custom-op executor caching.
+
+Context: the current VecOut/local-A raw custom op can return correct first and
+second results for a small decode-like case, then stall on the next launch in
+the same Python process. The tested shape was
+`M=1,K=384,N=256,group_size=32,base_m=16,base_n=-256,base_k=-128` on NPU0 with
+`/tmp/cannoe_vecout_local_a_current` and the `gptqmodel_cannoe_ascendc_ops`
+bridge.
+
+Artifacts:
+
+- `/tmp/cannoe_vecout_local_a_end_probe`
+- `/tmp/cannoe_ascendc_bridge_cache`
+- `/tmp/cannoe_ascendc_bridge_cache2`
+- `/tmp/cannoe_ascendc_bridge_cache3`
+- `/tmp/cannoe_ascendc_bridge_cache4`
+- `/tmp/cannoe_cached_bridge_single_m1_iters6_summary.json`
+- `/tmp/cannoe_scalar_m1_iters6_summary.json`
+
+| Probe | Result | Metrics / failure signature | Decision |
+| --- | --- | --- | --- |
+| Baseline per-call VecOut/local-A bridge | Runtime stall | call 1 `488.320 ms`, call 2 `2.104 ms`, call 3 `2.021 ms`, call 4 timed out at 180s; all printed sums matched before the stall | Root issue to isolate |
+| Add `cube_probe.mm.End()` on TSCM/VecOut handoff exits | Runtime stall | six-launch validator for the same M1 case timed out at 180s with no completed result | Revert |
+| Cache custom ACLNN executor/descriptors and workspace, patterned after the stable V3 bridge | Incorrect output, then stall | call 1 `518.749 ms`, sum `-13.4019775`; call 2 `2.075 ms`, sum `-2565.38671875`; call 3 timed out | Reject executor cache for generated custom ACLNN op |
+| Disable executor cache but keep persistent workspace cache | Runtime stall | call 1 `509.150 ms`, call 2 `2.169 ms`, both sums `-13.4019775`; call 3 timed out | Reject as insufficient |
+| Force `RunOpApiV2(..., sync=true)` while keeping executor cache off | Runtime stall | call 1 `504.060 ms`, call 2 `2.228 ms`, both sums `-13.4019775`; call 3 timed out | Reject as insufficient |
+| Force scalar custom-op path with positive `base_n=256` | Runtime stall / unusable fallback | six-launch validator timed out at 180s before producing a result | Do not use this as a safety fallback |
+
+Decision: revert all source changes from this probe. The repeated-launch issue
+is not explained by missing `Matmul::End`, host workspace lifetime, or
+descriptor lifetime alone. The generated custom ACLNN executor is not safe to
+cache for this op: it produced incorrect output on the second call. Re-test only
+with a smaller device-side lifecycle diagnostic that records launch mode,
+tiling key, workspace sizes, and whether AIC/AIV branches return before entering
+the Matmul loop, or with a regenerated custom-op wrapper that uses the same
+thread-local huge-memory setup/release path as torch-npu's op-plugin macros.
+
 ## 2026-05-17: Cannoe CANN 9 `MatmulTypeWithScale` INT4 Direct-B Probe
 
 Status: failed compile-surface gate; do not pursue GPTQ through the public
