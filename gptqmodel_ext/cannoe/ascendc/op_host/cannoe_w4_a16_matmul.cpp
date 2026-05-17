@@ -207,21 +207,40 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
         const uint64_t dense_dequant_bytes =
             static_cast<uint64_t>(k64) * static_cast<uint64_t>(n64) * sizeof(uint16_t);
         if (staging_workspace_bytes > 0 && staging_workspace_bytes < dense_dequant_bytes) {
-            tiling.set_kernel_mode(kKernelModeStagedDequant);
-            tiling.set_staging_blocks(staging_blocks);
-            tiling.set_staging_slots(kStagingSlots);
-            tiling.set_staging_tile_bytes(ClampU64ToU32(tile_bytes));
-            tiling.set_staging_workspace_bytes(ClampU64ToU32(staging_workspace_bytes));
-            tiling.set_staging_workspace_offset(0);
-            tiling.set_cube_workspace_bytes(ClampU64ToU32(cube_workspace_bytes));
+            bool enable_staged_dequant = true;
 #ifdef CANNOE_EXPERIMENTAL_MIXED_LAUNCH
             tiling_key = GET_TPL_TILING_KEY(kCannoeLaunchModeMixedAicAiv);
+#ifdef CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF
+            const uint32_t m_tiles =
+                tiling.get_base_m() == 0 ? 0 : CeilDivU32(static_cast<uint32_t>(rows64), tiling.get_base_m());
+            bool aic_tscm_supported = context->GetOptionalInputShape(kInputBias) == nullptr &&
+                m_tiles == 1 && static_cast<uint32_t>(k64) % requested_base_k == 0 &&
+                static_cast<uint32_t>(n64) % requested_base_n == 0;
+#if !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME) && \
+    !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC) && \
+    !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC)
+            aic_tscm_supported = false;
 #endif
-            size_t* workspaces = context->GetWorkspaceSizes(1);
-            if (workspaces == nullptr) {
-                return ge::GRAPH_FAILED;
+            if (!aic_tscm_supported) {
+                tiling_key = GET_TPL_TILING_KEY(kCannoeLaunchModeAiv);
+                enable_staged_dequant = false;
             }
-            workspaces[0] = static_cast<size_t>(workspace_bytes);
+#endif
+#endif
+            if (enable_staged_dequant) {
+                tiling.set_kernel_mode(kKernelModeStagedDequant);
+                tiling.set_staging_blocks(staging_blocks);
+                tiling.set_staging_slots(kStagingSlots);
+                tiling.set_staging_tile_bytes(ClampU64ToU32(tile_bytes));
+                tiling.set_staging_workspace_bytes(ClampU64ToU32(staging_workspace_bytes));
+                tiling.set_staging_workspace_offset(0);
+                tiling.set_cube_workspace_bytes(ClampU64ToU32(cube_workspace_bytes));
+                size_t* workspaces = context->GetWorkspaceSizes(1);
+                if (workspaces == nullptr) {
+                    return ge::GRAPH_FAILED;
+                }
+                workspaces[0] = static_cast<size_t>(workspace_bytes);
+            }
         }
     }
 

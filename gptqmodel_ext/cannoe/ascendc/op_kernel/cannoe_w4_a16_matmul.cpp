@@ -8,6 +8,8 @@
 using namespace AscendC;
 using namespace matmul;
 
+static constexpr uint64_t kCannoeCrossCoreSyncMode = 4;
+
 #if defined(CANNOE_EXPERIMENTAL_CANN9_VECTOR_DEQUANT)
 using CannoeCapiInt4 = ::int4b_t;
 using CannoeAscendInt4 = AscendC::int4b_t;
@@ -42,6 +44,31 @@ using CannoeAscendInt4 = AscendC::int4b_t;
 #if defined(CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF) && \
     !defined(CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF)
 #error "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF requires TSCM runtime handoff"
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF) && \
+    (!defined(CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK) || !defined(CANNOE_EXPERIMENTAL_MIXED_LAUNCH))
+#error "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF requires TSCM direct multi-K and mixed launch"
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC) && \
+    !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF)
+#error "CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC requires AIC/TSCM handoff"
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC) && \
+    !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF)
+#error "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC requires AIC/TSCM handoff"
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC) && \
+    defined(CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC)
+#error "AIC/TSCM path and zero-B diagnostics are mutually exclusive"
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME) && \
+    !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF)
+#error "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME requires AIC/TSCM handoff"
 #endif
 
 #if defined(CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF) && \
@@ -100,6 +127,17 @@ __aicore__ inline uint32_t CeilDivU32(uint32_t value, uint32_t divisor)
 {
     return divisor == 0 ? 0 : (value + divisor - 1) / divisor;
 }
+
+template <
+    TPosition Position,
+    CubeFormat Format,
+    typename Type,
+    bool IsTrans = false,
+    LayoutMode Layout = LayoutMode::NONE,
+    bool IbShare = false>
+struct CannoeMatmulL1GmType : MatmulType<Position, Format, Type, IsTrans, Layout, IbShare> {
+    constexpr static TPosition srcPos = TPosition::GM;
+};
 
 #ifdef CANNOE_EXPERIMENTAL_CUBE_CONSUMER
 class CannoeW4A16CubeConsumerProbe {
@@ -909,6 +947,176 @@ public:
         }
 #endif
         return true;
+    }
+#endif
+
+#if defined(CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF)
+    __aicore__ inline bool TryProcessAicTscmHandoff()
+    {
+        if (tiling_->kernel_mode != kKernelModeStagedDequant || tiling_->base_m == 0 || tiling_->base_n == 0 ||
+            tiling_->base_k == 0 || tiling_->block_dim == 0 || tiling_->staging_blocks == 0 ||
+            tiling_->has_bias != 0 || tiling_->out_features % tiling_->base_n != 0 ||
+            tiling_->in_features % tiling_->base_k != 0) {
+            return false;
+        }
+        if ASCEND_IS_AIV {
+            if (GetSubBlockIdx() != 0) {
+                return true;
+            }
+        }
+
+        uint32_t physical_core_idx = static_cast<uint32_t>(GetBlockIdx());
+        if ASCEND_IS_AIV {
+            const uint32_t task_ratio = static_cast<uint32_t>(GetTaskRation());
+            if (task_ratio > 1) {
+                physical_core_idx /= task_ratio;
+            }
+        }
+        const uint32_t core_idx = physical_core_idx;
+        if (core_idx >= tiling_->block_dim || core_idx >= tiling_->staging_blocks) {
+            return true;
+        }
+
+        constexpr uint16_t kAicToAivFlag0 = 6;
+        constexpr uint16_t kAicToAivFlag1 = 7;
+        constexpr uint16_t kAivToAicFlag0 = 10;
+        constexpr uint16_t kAivToAicFlag1 = 11;
+        const uint32_t rows = tiling_->rows;
+        const uint32_t in_features = tiling_->in_features;
+        const uint32_t out_features = tiling_->out_features;
+        const uint32_t base_m = tiling_->base_m;
+        const uint32_t base_n = tiling_->base_n;
+        const uint32_t base_k = tiling_->base_k;
+        const uint32_t packed_stride = out_features >> 3;
+        const uint32_t n_tiles = out_features / base_n;
+        const uint32_t k_tiles = in_features / base_k;
+        const uint32_t m_tiles = CeilDivU32(rows, base_m);
+        if (m_tiles != 1) {
+            return false;
+        }
+#ifndef CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC
+        if (k_tiles > 2) {
+            return false;
+        }
+#endif
+        const uint32_t b_tile_elements = base_k * base_n;
+        const uint32_t a_tile_elements = base_m * base_k;
+        const uint32_t b_tile_bytes = CeilDivU32(b_tile_elements * sizeof(half), 512U) * 512U;
+        const uint32_t a_tile_bytes = CeilDivU32(a_tile_elements * sizeof(half), 512U) * 512U;
+        const uint32_t b_slot_elements = b_tile_bytes / sizeof(half);
+        const uint32_t a_slot_elements = a_tile_bytes / sizeof(half);
+        constexpr uint32_t kTscmBSlots = 2;
+        const uint32_t tscm_capacity_bytes = tiling_->l1_bytes != 0 ? tiling_->l1_bytes : 512U * 1024U;
+        const uint32_t tscm_capacity_elements = tscm_capacity_bytes / sizeof(half);
+        if (b_tile_bytes * kTscmBSlots + a_tile_bytes > tscm_capacity_bytes) {
+            return false;
+        }
+        const uint32_t b_high_slot_offset = tscm_capacity_elements - b_slot_elements;
+        const uint32_t a_slot_offset = b_slot_elements;
+        if (a_slot_offset + a_slot_elements > b_high_slot_offset) {
+            return false;
+        }
+
+        TPipe pipe;
+        LocalTensor<half> tscm_tile(TPosition::TSCM, 0, tscm_capacity_elements);
+        LocalTensor<half> b_tscm_tile = tscm_tile;
+        LocalTensor<half> a_tscm_tile = tscm_tile[a_slot_offset];
+
+        if ASCEND_IS_AIV {
+            TBuf<TPosition::VECCALC> b_ub_tbuf;
+            if (!pipe.InitBuffer(b_ub_tbuf, b_tile_elements * sizeof(half))) {
+                return false;
+            }
+            LocalTensor<half> b_ub_tile = b_ub_tbuf.Get<half>(b_tile_elements);
+            for (uint32_t n_tile = core_idx; n_tile < n_tiles; n_tile += tiling_->staging_blocks) {
+                const uint32_t n_begin = n_tile * base_n;
+                const uint32_t packed_begin = n_begin >> 3;
+                const uint32_t packed_end = (n_begin + base_n) >> 3;
+                for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
+                    const uint32_t slot = k_tile & 1U;
+                    const uint16_t aic_to_aiv_flag = slot == 0 ? kAicToAivFlag0 : kAicToAivFlag1;
+                    const uint16_t aiv_to_aic_flag = slot == 0 ? kAivToAicFlag0 : kAivToAicFlag1;
+#ifdef CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC
+                    for (uint32_t index = 0; index < b_tile_elements; ++index) {
+                        b_ub_tile.SetValue(index, static_cast<half>(0.0f));
+                    }
+#else
+                    FillDirectBTileKTile(
+                        b_ub_tile, k_tile, n_begin, packed_begin, packed_end, packed_stride, tiling_->zero_offsets);
+#endif
+                    PipeBarrier<PIPE_ALL>();
+                    Nd2NzParams b_nd2nz = {
+                        1,
+                        static_cast<uint16_t>(base_k),
+                        static_cast<uint16_t>(base_n),
+                        0,
+                        static_cast<uint16_t>(base_n),
+                        static_cast<uint16_t>(CeilDivU32(base_k, 16) * 16),
+                        1,
+                        0,
+                    };
+                    const uint32_t b_slot_offset = slot == 0 ? 0 : b_high_slot_offset;
+                    DataCopy(b_tscm_tile[b_slot_offset], b_ub_tile, b_nd2nz);
+                    PipeBarrier<PIPE_MTE2>();
+                    CrossCoreSetFlag<kCannoeCrossCoreSyncMode, PIPE_MTE3>(aiv_to_aic_flag);
+                    CrossCoreWaitFlag<kCannoeCrossCoreSyncMode, PIPE_MTE3>(aic_to_aiv_flag);
+                }
+            }
+            return true;
+        }
+
+        if ASCEND_IS_AIC {
+            using AType = CannoeMatmulL1GmType<TPosition::TSCM, CubeFormat::NZ, half, false>;
+            using BType = CannoeMatmulL1GmType<TPosition::TSCM, CubeFormat::NZ, half, true>;
+            using CType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
+            using BiasType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
+            MatmulImpl<AType, BType, CType, BiasType, CFG_MDL> mm;
+            TCubeTiling cube_tiling = MakeCubeConsumerTiling(tiling_);
+            cube_tiling.Ka = static_cast<int32_t>(base_k);
+            cube_tiling.Kb = static_cast<int32_t>(base_k);
+            cube_tiling.isBias = 0;
+            mm.SetSubBlockIdx(0);
+            mm.Init(&cube_tiling, &pipe);
+            for (uint32_t n_tile = core_idx; n_tile < n_tiles; n_tile += tiling_->staging_blocks) {
+                const uint32_t n_begin = n_tile * base_n;
+                const uint32_t m_begin = 0;
+                const uint32_t m_len = rows < base_m ? rows : base_m;
+                for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
+                    const uint32_t k_begin = k_tile * base_k;
+                    const uint32_t slot = k_tile & 1U;
+                    const uint16_t aic_to_aiv_flag = slot == 0 ? kAicToAivFlag0 : kAicToAivFlag1;
+                    const uint16_t aiv_to_aic_flag = slot == 0 ? kAivToAicFlag0 : kAivToAicFlag1;
+                    CrossCoreWaitFlag<kCannoeCrossCoreSyncMode, PIPE_MTE1>(aiv_to_aic_flag);
+                    Nd2NzParams a_nd2nz = {
+                        1,
+                        static_cast<uint16_t>(m_len),
+                        static_cast<uint16_t>(base_k),
+                        0,
+                        static_cast<uint16_t>(in_features),
+                        static_cast<uint16_t>(CeilDivU32(m_len, 16) * 16),
+                        1,
+                        0,
+                    };
+                    DataCopy(a_tscm_tile, x_gm_[m_begin * in_features + k_begin], a_nd2nz);
+                    PipeBarrier<PIPE_MTE2>();
+                    mm.SetOrgShape(
+                        static_cast<int32_t>(CeilDivU32(m_len, 16) * 16),
+                        static_cast<int32_t>(CeilDivU32(base_n, 16) * 16),
+                        static_cast<int32_t>(CeilDivU32(base_k, 16) * 16),
+                        static_cast<int32_t>(CeilDivU32(base_k, 16) * 16),
+                        static_cast<int32_t>(out_features));
+                    mm.SetTensorA(a_tscm_tile, false);
+                    const uint32_t b_slot_offset = slot == 0 ? 0 : b_high_slot_offset;
+                    mm.SetTensorB(b_tscm_tile[b_slot_offset], true);
+                    mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n), static_cast<int32_t>(base_k));
+                    mm.IterateAll(y_gm_[m_begin * out_features + n_begin], k_tile != 0, false, true);
+                    CrossCoreSetFlag<kCannoeCrossCoreSyncMode, PIPE_MTE1>(aic_to_aiv_flag);
+                }
+            }
+            mm.End();
+            return true;
+        }
+        return false;
     }
 #endif
 
@@ -3277,7 +3485,11 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
     GM_ADDR tiling)
 {
 #ifdef CANNOE_EXPERIMENTAL_MIXED_LAUNCH
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+    if constexpr (LAUNCH_MODE == kCannoeLaunchModeMixedAicAiv) {
+        KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+    } else {
+        KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    }
 #else
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 #endif
@@ -3298,6 +3510,7 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
         return;
     }
     AscendC::SetSysWorkspaceForce(workspace);
+#ifndef CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF
     AscendC::clearWorkspace(reinterpret_cast<__gm__ uint8_t*>(workspace));
     TPipe cube_pipe;
     CannoeW4A16CubeConsumerProbe cube_probe;
@@ -3310,6 +3523,7 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
     cube_probe.InitTscmBTile(cube_pipe, &tiling_data);
 #elif defined(CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
     cube_probe.InitVecoutBTile(cube_pipe, &tiling_data);
+#endif
 #endif
 #else
     if ASCEND_IS_AIC {
@@ -3335,10 +3549,39 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
 #else
     op.Init(x, packed_weight, scales, offsets, bias, y, workspace, &tiling_data);
 #endif
+#ifdef CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC
+    if ASCEND_IS_AIV {
+        if (GetBlockIdx() == 0 && GetSubBlockIdx() == 0) {
+            GlobalTensor<half> diag_y;
+            diag_y.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(y), tiling_data.total_outputs);
+            diag_y.SetValue(0, static_cast<half>(910.0f));
+            diag_y.SetValue(1, static_cast<half>(static_cast<int32_t>(tiling_data.kernel_mode)));
+            diag_y.SetValue(2, static_cast<half>(static_cast<int32_t>(tiling_data.rows)));
+            diag_y.SetValue(3, static_cast<half>(static_cast<int32_t>(tiling_data.base_m)));
+            diag_y.SetValue(4, static_cast<half>(static_cast<int32_t>(tiling_data.base_n)));
+            diag_y.SetValue(5, static_cast<half>(static_cast<int32_t>(tiling_data.base_k)));
+            diag_y.SetValue(6, static_cast<half>(static_cast<int32_t>(tiling_data.staging_blocks)));
+            diag_y.SetValue(7, static_cast<half>(static_cast<int32_t>(tiling_data.block_dim)));
+        }
+        return;
+    }
+    if ASCEND_IS_AIC {
+        return;
+    }
+#endif
 #ifdef CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF
+#ifdef CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF
+    if (op.TryProcessAicTscmHandoff()) {
+        return;
+    }
+    if ASCEND_IS_AIC {
+        return;
+    }
+#else
     if (op.TryProcessSingleKTileTscmHandoff(cube_probe)) {
         return;
     }
+#endif
 #elif defined(CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF)
     if (op.TryProcessVecoutHandoff(cube_probe)) {
         return;

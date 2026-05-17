@@ -42,6 +42,24 @@ def test_ascendc_host_tiler_caps_logical_blocks():
     assert "return available_blocks < kMaxLogicalBlocks ? available_blocks : kMaxLogicalBlocks;" in text
 
 
+def test_ascendc_host_tiler_disables_staging_for_unsupported_aic_tscm_shapes():
+    host_tiler = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext"
+        / "cannoe"
+        / "ascendc"
+        / "op_host"
+        / "cannoe_w4_a16_matmul.cpp"
+    )
+    text = host_tiler.read_text(encoding="utf-8")
+
+    assert "bool enable_staged_dequant = true;" in text
+    assert "bool aic_tscm_supported" in text
+    assert "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME" in text
+    assert "enable_staged_dequant = false;" in text
+    assert "if (enable_staged_dequant) {" in text
+
+
 def test_raw_validator_finds_embedded_json_after_cann_warning():
     validator = _load_raw_validator()
     text = (
@@ -145,6 +163,10 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME")
 
     text = cmake_path.read_text()
     assert text.count("add_ops_compile_options(ALL OPTIONS -DCANNOE_EXPERIMENTAL_") == 1
@@ -167,7 +189,11 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
         "-DCANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK=1 "
-        "-DCANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF=1)"
+        "-DCANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF=1 "
+        "-DCANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF=1 "
+        "-DCANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC=1 "
+        "-DCANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC=1 "
+        "-DCANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME=1)"
     ) in text
 
 
@@ -198,6 +224,10 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME")
 
     text = cmake_path.read_text()
     assert text.count("npu_op_kernel_options(ascendc_kernels ALL OPTIONS -DCANNOE_EXPERIMENTAL_") == 1
@@ -219,8 +249,43 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
         "-DCANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK=1 "
-        "-DCANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF=1)"
+        "-DCANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF=1 "
+        "-DCANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF=1 "
+        "-DCANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC=1 "
+        "-DCANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC=1 "
+        "-DCANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME=1)"
     ) in text
+
+
+def test_enable_host_define_coalesces_experimental_options(tmp_path):
+    build_helper = _load_build_helper()
+    cmake_path = tmp_path / "op_host" / "CMakeLists.txt"
+    cmake_path.parent.mkdir()
+    cmake_path.write_text(
+        "add_compile_options(-DCANNOE_EXPERIMENTAL_MIXED_LAUNCH=1)\n"
+        "\n"
+        "aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} ops_srcs)\n"
+    )
+
+    build_helper._enable_host_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")
+    build_helper._enable_host_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")
+
+    text = cmake_path.read_text()
+    assert text.count("-DCANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF=1") == 1
+    assert (
+        "add_compile_options("
+        "-DCANNOE_EXPERIMENTAL_MIXED_LAUNCH=1 "
+        "-DCANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF=1)"
+    ) in text
+
+
+def test_aic_tscm_handoff_enables_matching_host_define():
+    build_helper = _load_build_helper()
+    script_text = Path(build_helper.__file__).read_text(encoding="utf-8")
+
+    assert '_enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")' in script_text
+    assert '_enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")' in script_text
+    assert '_enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME")' in script_text
 
 
 def _strategy_args(strategy: str):
@@ -244,6 +309,10 @@ def _strategy_args(strategy: str):
         experimental_tscm_direct_dequant=False,
         experimental_tscm_direct_multik=False,
         experimental_tscm_tbuf_handoff=False,
+        experimental_aic_tscm_handoff=False,
+        experimental_aic_tscm_zero_b_diagnostic=False,
+        experimental_aic_tscm_path_diagnostic=False,
+        experimental_aic_tscm_unsafe_runtime=False,
     )
 
 
@@ -307,6 +376,81 @@ def test_tscm_tbuf_handoff_expands_runtime_flags():
     assert args.experimental_tscm_consumer
     assert args.experimental_tscm_runtime_handoff
     assert args.experimental_tscm_tbuf_handoff
+
+
+def test_aic_tscm_handoff_expands_direct_multik_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("aic-tscm-handoff")
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_tscm_consumer
+    assert args.experimental_tscm_runtime_handoff
+    assert args.experimental_tscm_direct_dequant
+    assert args.experimental_tscm_direct_multik
+    assert args.experimental_tscm_tbuf_handoff
+    assert args.experimental_aic_tscm_handoff
+
+
+def test_aic_tscm_zero_b_diagnostic_expands_handoff_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("aic-tscm-zero-b-diagnostic")
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_tscm_consumer
+    assert args.experimental_tscm_runtime_handoff
+    assert args.experimental_tscm_direct_dequant
+    assert args.experimental_tscm_direct_multik
+    assert args.experimental_tscm_tbuf_handoff
+    assert args.experimental_aic_tscm_handoff
+    assert args.experimental_aic_tscm_zero_b_diagnostic
+
+
+def test_aic_tscm_path_diagnostic_expands_handoff_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("aic-tscm-path-diagnostic")
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_tscm_consumer
+    assert args.experimental_tscm_runtime_handoff
+    assert args.experimental_tscm_direct_dequant
+    assert args.experimental_tscm_direct_multik
+    assert args.experimental_tscm_tbuf_handoff
+    assert args.experimental_aic_tscm_handoff
+    assert args.experimental_aic_tscm_path_diagnostic
+
+
+def test_aic_tscm_unsafe_runtime_expands_handoff_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("aic-tscm-unsafe-runtime")
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_tscm_consumer
+    assert args.experimental_tscm_runtime_handoff
+    assert args.experimental_tscm_direct_dequant
+    assert args.experimental_tscm_direct_multik
+    assert args.experimental_tscm_tbuf_handoff
+    assert args.experimental_aic_tscm_handoff
+    assert args.experimental_aic_tscm_unsafe_runtime
 
 
 def test_vecout_tile_cast_dequant_expands_vecout_local_a_flags():

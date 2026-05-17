@@ -36,6 +36,18 @@ CANNOE_PUBLIC_STRATEGIES: dict[str, tuple[str, ...]] = {
     "tscm-direct-multik": (
         "experimental_tscm_direct_multik",
     ),
+    "aic-tscm-handoff": (
+        "experimental_aic_tscm_handoff",
+    ),
+    "aic-tscm-zero-b-diagnostic": (
+        "experimental_aic_tscm_zero_b_diagnostic",
+    ),
+    "aic-tscm-path-diagnostic": (
+        "experimental_aic_tscm_path_diagnostic",
+    ),
+    "aic-tscm-unsafe-runtime": (
+        "experimental_aic_tscm_unsafe_runtime",
+    ),
 }
 
 
@@ -75,6 +87,25 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         args.experimental_mixed_launch = True
     if args.experimental_tscm_direct_multik:
         args.experimental_tscm_direct_dequant = True
+    if args.experimental_aic_tscm_handoff:
+        args.experimental_tscm_direct_multik = True
+        args.experimental_tscm_direct_dequant = True
+        args.experimental_tscm_tbuf_handoff = True
+    if args.experimental_aic_tscm_zero_b_diagnostic:
+        args.experimental_aic_tscm_handoff = True
+        args.experimental_tscm_direct_multik = True
+        args.experimental_tscm_direct_dequant = True
+        args.experimental_tscm_tbuf_handoff = True
+    if args.experimental_aic_tscm_path_diagnostic:
+        args.experimental_aic_tscm_handoff = True
+        args.experimental_tscm_direct_multik = True
+        args.experimental_tscm_direct_dequant = True
+        args.experimental_tscm_tbuf_handoff = True
+    if args.experimental_aic_tscm_unsafe_runtime:
+        args.experimental_aic_tscm_handoff = True
+        args.experimental_tscm_direct_multik = True
+        args.experimental_tscm_direct_dequant = True
+        args.experimental_tscm_tbuf_handoff = True
     if args.experimental_tscm_direct_dequant:
         args.experimental_staged_dequant = True
         args.experimental_cann9_vector_dequant = True
@@ -95,6 +126,10 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         or args.experimental_tscm_direct_dequant
         or args.experimental_tscm_direct_multik
         or args.experimental_tscm_tbuf_handoff
+        or args.experimental_aic_tscm_handoff
+        or args.experimental_aic_tscm_zero_b_diagnostic
+        or args.experimental_aic_tscm_path_diagnostic
+        or args.experimental_aic_tscm_unsafe_runtime
     ):
         parser.error("--experimental-vecout-runtime-handoff cannot be combined with TSCM runtime handoff flags")
     if args.experimental_vecout_consumer and args.experimental_tscm_consumer:
@@ -459,6 +494,43 @@ def main() -> int:
             "patterns and implies --experimental-tscm-runtime-handoff."
         ),
     )
+    parser.add_argument(
+        "--experimental-aic-tscm-handoff",
+        action="store_true",
+        help=(
+            "Compile the guarded explicit AIV producer / AIC MatmulImpl consumer probe. The AIV side "
+            "dequantizes one INT4 B tile into UB, copies that tile into TSCM/NZ, signals AIC, and the "
+            "AIC side copies only the live A tile into TSCM before Cube compute. This implies "
+            "--experimental-tscm-direct-multik and remains a bring-up path."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-aic-tscm-zero-b-diagnostic",
+        action="store_true",
+        help=(
+            "Compile the AIC/TSCM handoff probe with the AIV producer writing zero B tiles instead of "
+            "dequantized INT4 values. This isolates cross-core TSCM/Cube lifetime faults from dequant "
+            "and implies --experimental-aic-tscm-handoff."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-aic-tscm-path-diagnostic",
+        action="store_true",
+        help=(
+            "Compile the AIC/TSCM handoff probe as a path marker that writes selected tiling fields into "
+            "the output and returns before Matmul. This verifies whether the guarded mixed-launch branch "
+            "is actually reached."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-aic-tscm-unsafe-runtime",
+        action="store_true",
+        help=(
+            "Allow the guarded AIC/TSCM handoff to run for isolated crash/debug probes. Normal "
+            "aic-tscm-handoff builds compile the code but keep staged runtime selection disabled because "
+            "current wide-N and multi-K probes hit AIC MPU faults."
+        ),
+    )
     args = parser.parse_args()
     _resolve_experimental_flags(args, parser)
 
@@ -526,6 +598,18 @@ def main() -> int:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
     if args.experimental_tscm_tbuf_handoff:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF")
+    if args.experimental_aic_tscm_handoff:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")
+        _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")
+    if args.experimental_aic_tscm_zero_b_diagnostic:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC")
+        _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC")
+    if args.experimental_aic_tscm_path_diagnostic:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC")
+        _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC")
+    if args.experimental_aic_tscm_unsafe_runtime:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME")
+        _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME")
 
     if args.no_build:
         print(f"Generated project with Cannoe overlay at {output}")

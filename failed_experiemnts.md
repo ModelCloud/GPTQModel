@@ -15,6 +15,65 @@ For new entries, include:
 - Speed, accuracy, and memory data when available.
 - Decision and what would justify re-testing.
 
+## 2026-05-17: Cannoe Explicit AIC/TSCM Multi-K Handoff
+
+Status: partial bring-up only. Keep the guarded strategy and diagnostics, but
+do not use the AIC/TSCM handoff for `k_tiles > 2`. Unsupported shapes must fall
+back to the scalar Cannoe path with staged mode disabled.
+
+Tested change: add an experimental mixed AIC/AIV path where AIV dequantizes a
+live INT4 B tile into UB, copies it to TSCM/NZ, signals the AIC side, and AIC
+copies the live A tile into TSCM before calling `MatmulImpl`. All validation
+used physical devices `0,1,2,3,4,5,6,7`, one worker per NPU.
+
+Artifacts:
+
+- `/tmp/cannoe_aic_tscm_flags1011_summary.json`
+- `/tmp/cannoe_aic_tscm_iterateall_summary.json`
+- `/tmp/cannoe_aic_tscm_zero_b_diag_summary.json`
+- `/tmp/cannoe_aic_tscm_pingpong_summary.json`
+- `/tmp/cannoe_aic_tscm_guarded_summary.json`
+- `/tmp/cannoe_aic_tscm_aiv_fallback_summary.json`
+- `/tmp/cannoe_aic_tscm_host_fallback_summary.json`
+- `/tmp/cannoe_aic_tscm_scalar_fallback_summary.json`
+- `/tmp/cannoe_aic_tscm_supported_summary.json`
+- `/tmp/cannoe_aic_tscm_singlek_summary.json`
+- `/tmp/cannoe_aic_tscm_safe_compile_summary.json`
+- `/tmp/cannoe_aic_tscm_safe_compile_supported_summary.json`
+- `/tmp/cannoe_aic_tscm_safe_compile_singlek_summary.json`
+
+| Probe | Devices | Passing cases | Failure signature | Decision |
+| --- | --- | ---: | --- | --- |
+| Explicit flags 10/11 | 0-7 | 2/8 | K>=384 AIC/fftsplus AIVector MPU fault, error 507015 | Reject |
+| Per-K `IterateAll` lifetime wait | 0-7 | 2/8 | Same K>=384 AIC/MPU fault, error 507015 | Reject |
+| Zero-B diagnostic producer | 0-7 | 2/8 | K>=384 still faults without INT4 dequant values | Reject as dequant root cause |
+| Ping-pong flags and high/low TSCM B slots | 0-7 | 2/8 | K>=384 still faults | Reject |
+| Device-side `k_tiles > 2` guard only | 0-7 | 2/8 | Fallback still ran staged AIV path and hit D-cache faults | Reject |
+| Host mixed-key fallback only | 0-7 | 2/8 | Host selected AIV, but staged mode still faulted with vector-core D-cache errors, error 507035 | Reject |
+| Wide-N `k_tiles=2` supported probe | NPU0 | 0/1 | AIC/fftsplus AIVector MPU fault, error 507015 | Reject |
+| Wide-N `k_tiles=1` supported probe | NPU0 | 0/1 | AIC/fftsplus AIVector MPU fault, error 507015 | Reject |
+| Host scalar fallback for unsupported shapes | 0-7 | 8/8 | `max_abs=0.0078125`, max `mean_abs=0.0018529892`, mean one-shot timing `573.71 ms` | Keep as guard |
+| Safe compile-only handoff strategy | 0-7 plus two wide NPU0 probes | 10/10 | small suite `max_abs=0.0078125`; wide probes `max_abs<=0.0078125`, max `mean_abs=0.0009169579` | Keep |
+
+Path diagnostics established that K128/K256 cases were not exercising the
+staged AIC/TSCM path (`kernel_mode=0`), while K384 entered staged mode
+(`kernel_mode=1`, `base_k=128`, `base_n=256`, `staging_blocks=1`). The zero-B
+diagnostic still crashed K>=384, so the fault is in repeated TSCM/Cube
+handoff, cross-core synchronization, or Matmul lifetime, not in INT4 unpack or
+scale math.
+
+Decision: retain `aic-tscm-handoff`, `aic-tscm-zero-b-diagnostic`, and
+`aic-tscm-path-diagnostic` as explicit build strategies for bring-up, but keep
+runtime selection conservative. Host tiling now disables staged mode for normal
+`aic-tscm-handoff` builds so the experimental binary can be validation-safe.
+Use the explicit unsafe runtime flag only for isolated crash/debug probes until
+the AIC consumer contract changes.
+
+Re-test only with a materially different AIC consumer contract, for example a
+documented MatmulImpl TSCM producer/consumer pattern that supports repeated K
+tiles, a per-n-tile AIC re-init/end lifecycle, or a verified CANN sample that
+uses AIV-produced TSCM/NZ B tiles across more than two K chunks.
+
 ## 2026-05-16: Cannoe Ascend C VECOUT Cast-to-Cube Handoff
 
 Status: failed accuracy gate; keep scalar VecOut/local-A as the profiled
