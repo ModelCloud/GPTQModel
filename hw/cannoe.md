@@ -620,6 +620,31 @@ host prefetch. The explicit prefetch trace emitted 36 `npu_prefetch` host calls
 over 12 iterations and no separate device kernel, so prefetch remains opt-in and
 the default no-prefetch path bypasses that helper completely.
 
+## Ascend C Fused Prototype Status
+
+The TSCM direct local-A fused prototype now has a correctness fix for one
+critical failure mode: direct multi-K paths must not use the per-packed-word
+`asc_int42half_sync` helper. With that helper disabled, the raw asymmetric
+offset probe at `rows=8,K=1024,N=512,group=32,base_n=256,base_k=128` is finite
+with `max_abs=0.015625`, and the standard raw validator passes on all 8 NPUs.
+
+That is not yet the target runtime path for Qwen-sized GPTQ projections. A
+forced Qwen3.6-27B GPTQ FP16 run on NPU0 is finite but still slow:
+
+| Path | Total repeat ms | Worst max abs | Status |
+|---|---:|---:|---|
+| Cannoe native CANN baseline | 0.940 | 0.0625 | production path |
+| Komodo | 1.102 | 0.0625 | comparison baseline |
+| Cannoe fused TSCM local-A prototype | 997.459 | 1.203125 | disabled prototype |
+
+The current fused prototype still calls high-level CANN Matmul once per
+`base_k` tile and writes/reads FP16 C through GM between K tiles. That defeats
+the intended dequant-to-Cube handoff for large reductions. A deferred
+`GetTensorC` attempt timed out on all eight raw validator cases, so the next
+real speed step should move accumulation to a lower-level Cube path that can
+keep partial sums in Cube-local storage instead of materializing partial C in
+GM/L2 after every K tile.
+
 ## Sources
 
 - Local 910B notes: `hw/ascend_910b.md`

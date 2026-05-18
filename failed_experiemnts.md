@@ -1507,3 +1507,96 @@ Use `base_n=128` for the validated smaller/default TSCM-local-A shapes and
 fall back to `base_n=256` for `rows=8,K=1024,N=512`. Do not raise `base_k`
 above 128 on this path until the TSCM/L0B address contract is better
 understood.
+
+## 2026-05-18: Cannoe Direct Multi-K Per-Word Vector Dequant
+
+Status: failed correctness gate for direct multi-K TSCM/local-A. Do not use the
+per-packed-word `asc_int42half_sync` helper in `CANNOE_EXPERIMENTAL_LOCAL_DIRECT_MULTIK`.
+
+Tested baseline: the TSCM direct local-A package still allowed the word-vector
+helper inside `FillDirectBTileWordValues`. A small asymmetric offset probe
+(`rows=8,K=1024,N=512,group=32,base_n=256,base_k=128`) returned non-finite
+output with and without bias.
+
+| Probe | Mean ms | Finite | Max abs | Mean abs |
+| --- | ---: | --- | ---: | ---: |
+| Old TSCM local-A, no bias | 286.207 | false | NaN | NaN |
+| Old TSCM local-A, bias | 7.076 | false | NaN | NaN |
+| Fixed local-A, no bias | 5.999 | true | 0.015625 | 0.001961 |
+| Fixed local-A, bias | 5.916 | true | 0.015625 | 0.001913 |
+
+Artifacts:
+
+- fixed package: `/tmp/cannoe_tscm_direct_local_a_no_word_vector_ws`
+- all-8 validation summary: `/tmp/cannoe_tscm_local_a_no_word_vector_all8_summary.json`
+- forced Qwen short benchmark: `/tmp/cannoe_fused_no_word_vector_qwen27_gptq_fp16_npu0_short.json`
+
+The fixed package passed the standard raw validator on all 8 NPUs with
+`custom_ms min/mean/max = 2.160/4.318/8.454` and
+`max_abs_max = 0.015625`. The forced Qwen3.6-27B GPTQ FP16 benchmark became
+finite, but it is still not a production path: total repeat time was
+`997.459ms`, with worst `max_abs = 1.203125`.
+
+Interpretation: the per-word vector helper corrupts direct multi-K B tile
+values. Keep the scalar direct B fill for this path until dequant is moved into
+a wider, validated UB/TSCM tile pipeline.
+
+## 2026-05-18: Cannoe Deferred GetTensorC on TSCM Local-A
+
+Status: failed liveness gate; do not replace per-K-tile `IterateAll` with
+deferred `Matmul::Iterate<false>(partial)` plus one final `GetTensorC` in the
+current mixed TSCM local-A implementation.
+
+Tested change: a temporary `CANNOE_EXPERIMENTAL_TSCM_DEFER_GET_C` path kept the
+same local-A/TSCM-B staging, called `Iterate<false>` for each K tile, and called
+`GetTensorC` once at the end for single-M-tile shapes.
+
+Artifacts:
+
+- package: `/tmp/cannoe_tscm_defer_get_c_ws`
+- summary: `/tmp/cannoe_tscm_defer_get_c_all8_summary.json`
+
+| Probe | Devices/Cases | Result |
+| --- | --- | --- |
+| Deferred GetTensorC TSCM local-A | all 8 default raw validator cases | 0/8 pass; every worker timed out at 120s |
+
+Interpretation: the high-level Matmul object did not make forward progress with
+that delayed-C choreography in the mixed AIC/AIV path. The next accumulation
+attempt should use a lower-level Ascend C Cube API or a minimal single-tile
+diagnostic before reintroducing multi-K accumulation.
+
+## 2026-05-18: Cannoe Qwen Fused Tiling Sweeps After Word-Vector Fix
+
+Status: failed performance gate. The corrected fused prototype is finite, but
+these tile changes do not approach Cannoe native or Komodo speed on Qwen-sized
+M=1 projections.
+
+Tested package: `/tmp/cannoe_tscm_direct_local_a_no_word_vector_ws`.
+
+| Variant | Layer | Repeat ms | Max abs | Max rel |
+| --- | --- | ---: | ---: | ---: |
+| `base_n=128,base_k=128` | q_proj | 127.517 | 0.09375 | 2.533 |
+| `base_n=128,base_k=128` | k_proj | 14.835 | 0.0625 | 0.182 |
+| `base_n=128,base_k=128` | gate_proj | 266.236 | 0.109375 | 7.976 |
+| `base_n=128,base_k=128` | down_proj | 251.950 | 0.28125 | 7.461 |
+| `base_n=256,base_k=64` | q_proj | 127.344 | 25.466 | 1475.832 |
+| `base_n=256,base_k=64` | k_proj | 29.080 | 0.09375 | 0.344 |
+| `base_n=256,base_k=64` | gate_proj | 259.994 | 34.883 | 1346.602 |
+| `base_n=256,base_k=64` | down_proj | 294.510 | 0.5 | 2.221 |
+
+Artifacts:
+
+- `/tmp/cannoe_sweep_bn128_q_npu0.json`
+- `/tmp/cannoe_sweep_bn128_k_npu1.json`
+- `/tmp/cannoe_sweep_bn128_gate_npu2.json`
+- `/tmp/cannoe_sweep_bn128_down_npu3.json`
+- `/tmp/cannoe_sweep_bk64_q_npu4.json`
+- `/tmp/cannoe_sweep_bk64_k_npu5.json`
+- `/tmp/cannoe_sweep_bk64_gate_npu6.json`
+- `/tmp/cannoe_sweep_bk64_down_npu7.json`
+
+Interpretation: `base_k=64` is both slower and numerically unsafe for q/gate.
+`base_n=128` is shape-sensitive and can reduce down-projection time, but the
+kernel is still dominated by per-K-tile C materialization and remains far
+behind the native CANN path. Do not enable the fused prototype for large Qwen
+shapes by tiling alone.

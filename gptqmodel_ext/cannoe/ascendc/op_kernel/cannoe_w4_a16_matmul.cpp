@@ -2321,7 +2321,8 @@ private:
         float offset6,
         float offset7)
     {
-#ifndef CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF
+#if !defined(CANNOE_EXPERIMENTAL_VECOUT_RUNTIME_HANDOFF) && \
+    !defined(CANNOE_EXPERIMENTAL_LOCAL_DIRECT_MULTIK)
         if (vector_dequant_ready_) {
             FillDirectBTileWordVectorValues(
                 b_tile,
