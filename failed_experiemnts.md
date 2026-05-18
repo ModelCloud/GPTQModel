@@ -1237,3 +1237,41 @@ direct scalar writes to a raw `TPosition::TSCM` local tensor on AIV are not
 visible to AIC as a staged tile. The next real fused handoff should use CANN's
 KFC/SCM path (`ScmDataCopy*`/Matmul-managed UB-to-L1 sharing) or another
 documented AIV-to-AIC L1 transfer path, not raw `LocalTensor<TSCM>` sharing.
+
+## 2026-05-18: Cannoe direct AIV UB-to-TSCM DataCopy after SyncAll
+
+Status: failed address-validity gate; do not use direct AIV
+`DataCopy(ub_tile, TPosition::TSCM, Nd2NzParams)` in the generated
+`MIX_AIC_1_2` kernel without the CANN KFC/Matmul-managed server path.
+
+Tested change: add a guarded `aic-tscm-datacopy-diagnostic` probe. AIV
+subblock 0 filled a 1x16 FP16 UB tile with marker `930`, copied it to
+`LocalTensor<half>(TPosition::TSCM, 0, ...)` using CANN `DataCopy(...,
+Nd2NzParams)`, then all mixed cores executed `SyncAll<false>()`. AIC entries
+read the same TSCM slot and the host validator required the observed value to
+be at least `929` before passing. This tested the same UB-to-L1/NZ movement
+needed by fused INT4 dequant-to-Cube handoff, without Matmul in the loop.
+
+Artifacts:
+
+- build package: `/tmp/cannoe_aic_tscm_datacopy_ws`
+- installed OPP: `/tmp/cannoe_aic_tscm_datacopy_ws/build_out/packages`
+- summary: `/tmp/cannoe_aic_tscm_datacopy_ws_summary.json`
+
+| Probe | Devices | Cases | Result |
+| --- | --- | --- | --- |
+| AIV UB FP16 marker -> `TSCM/NZ` via `DataCopy`, `SyncAll`, AIC scalar read | 0-7 | default raw validator cases, `K=384..1024`, `N=256/512`, groups `32..128` | 0/8 pass; every worker hit AIVector MPU invalid-address exception |
+
+Representative failure: `AclrtSynchronizeDeviceWithTimeout` returned `507015`
+with `aicore exception`; CANN reported `fftsplus aivector error` and
+`The MPU address access is invalid` on the AIV side. The first build also
+showed two Ascend C scalar restrictions: integer-to-float casts and half
+comparisons in control flow are rejected in `__aicore__` code.
+
+Interpretation: CANN's public `DataCopy` overload for UB-to-`TSCM` may lower to
+a direct AIV L1 copy in this `MIX_AIC_1_2` build, and that address is not valid
+for the generated mixed kernel. This is a stronger failure than the raw TSCM
+visibility test: the direct path faults before AIC can observe anything. The
+next fused-kernel attempt should be built around `REGIST_MATMUL_OBJ`/KFC or a
+Matmul-managed `TPosition::TSCM` input path so the AIC-side server owns the L1
+copy and synchronization.
