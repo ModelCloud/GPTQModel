@@ -229,7 +229,9 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
                 static_cast<uint32_t>(n64) % requested_base_n == 0;
 #if !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME) && \
     !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC) && \
-    !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC)
+    !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC) && \
+    !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_INDEX_DIAGNOSTIC) && \
+    !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_PING_DIAGNOSTIC)
             aic_tscm_supported = false;
 #endif
             if (!aic_tscm_supported) {

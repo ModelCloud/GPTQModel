@@ -1160,3 +1160,45 @@ for the real AIC/TSCM compute loop. The failure appears in the AIVector side
 after entering the direct TSCM producer/consumer path, so the next re-test must
 first isolate TSCM address layout and cross-core flag reuse with a smaller
 ping-pong diagnostic before re-enabling multi-K production compute.
+
+## 2026-05-17: Cannoe AIC/TSCM ping with reserved sync IDs
+
+Status: failed forward-progress gate; do not reuse this flag/pipe pattern.
+
+Tested change: add a minimal AIC/TSCM ping diagnostic that removed TSCM data
+movement and Matmul entirely. AIV subblock 0 on logical core 0 set flag `12`
+with `CrossCoreSetFlag<4, PIPE_MTE3>()`, waited on flag `13` with
+`PIPE_MTE3`, and the paired AIC waited on flag `12` with `PIPE_MTE1` before
+setting flag `13` with `PIPE_MTE1`.
+
+Artifacts:
+
+- build package: `/tmp/cannoe_aic_tscm_ping_ws`
+- installed OPP: `/tmp/cannoe_aic_tscm_ping_ws_install`
+- summary: `/tmp/cannoe_aic_tscm_ping_ws_summary.json`
+
+| Probe | Devices | Cases | Result |
+| --- | --- | --- | --- |
+| AIC/TSCM ping, no TSCM copy, no Matmul, one worker per NPU | 0-7 | default raw validator cases, `K=384..1024`, `N=256/512`, groups `32..128` | 0/8 pass; every worker timed out at 180s |
+
+Interpretation: this was a deadlock, not an MPU/AICore fault. CANN 9.0.0
+`dav_c310` internals reserve sync IDs `11`, `12`, and `13` for mixed AIC/AIV
+task synchronization, and their mixed-core pattern uses AIV `set_intra_block`
+through `PIPE_MTE3` with AIC waiting through `PIPE_S`, then AIC replies through
+`PIPE_S` with AIV also waiting through `PIPE_S`. The failed diagnostic used
+reserved IDs and waited on MTE1/MTE3 directly, so future handoff tests must use
+private flag IDs and the same pipe choreography as CANN's own mixed sync path.
+
+Follow-up re-test: switching to private IDs `2/3`, moving waits to `PIPE_S`,
+and then making both AIV subblocks participate with AIC waiting on `flag` and
+`flag+16` still timed out on all 8 NPUs at an 80s per-worker timeout
+(`/tmp/cannoe_aic_tscm_ping_fixed_ws_summary.json` and
+`/tmp/cannoe_aic_tscm_ping_subblocks_ws_summary.json`). The validated no-wait
+index diagnostic showed why: the generated `MIX_AIC_1_2` op does not expose a
+simple `AIC GetBlockIdx() == normalized AIV GetBlockIdx()` relationship. For
+example, `M=1,K=384,N=256` reported AIV raw blocks `0/1` for logical producer
+0, while visible AIC records started at raw block `1`; `M=4,K=512,N=512`
+reported AIC records at raw blocks `0,3,4,7` and AIV producers at raw
+`0/1,2/3,4/5,6/7,...`. Do not re-enable the manual mode-4 ping until the
+AIC/AIV block pairing is derived from CANN's KFC/matmul launch metadata or the
+handoff is rewritten around a global FFTS/KFC rendezvous.

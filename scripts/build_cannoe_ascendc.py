@@ -45,6 +45,9 @@ CANNOE_PUBLIC_STRATEGIES: dict[str, tuple[str, ...]] = {
     "aic-tscm-path-diagnostic": (
         "experimental_aic_tscm_path_diagnostic",
     ),
+    "aic-tscm-index-diagnostic": (
+        "experimental_aic_tscm_index_diagnostic",
+    ),
     "aic-tscm-unsafe-runtime": (
         "experimental_aic_tscm_unsafe_runtime",
     ),
@@ -103,6 +106,16 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         args.experimental_tscm_direct_multik = True
         args.experimental_tscm_direct_dequant = True
         args.experimental_tscm_tbuf_handoff = True
+    if args.experimental_aic_tscm_index_diagnostic:
+        args.experimental_aic_tscm_handoff = True
+        args.experimental_tscm_direct_multik = True
+        args.experimental_tscm_direct_dequant = True
+        args.experimental_tscm_tbuf_handoff = True
+    if args.experimental_aic_tscm_ping_diagnostic:
+        args.experimental_aic_tscm_handoff = True
+        args.experimental_tscm_direct_multik = True
+        args.experimental_tscm_direct_dequant = True
+        args.experimental_tscm_tbuf_handoff = True
     if args.experimental_aic_tscm_unsafe_runtime:
         args.experimental_aic_tscm_handoff = True
         args.experimental_tscm_direct_multik = True
@@ -131,6 +144,8 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         or args.experimental_aic_tscm_handoff
         or args.experimental_aic_tscm_zero_b_diagnostic
         or args.experimental_aic_tscm_path_diagnostic
+        or args.experimental_aic_tscm_index_diagnostic
+        or args.experimental_aic_tscm_ping_diagnostic
         or args.experimental_aic_tscm_unsafe_runtime
     ):
         parser.error("--experimental-vecout-runtime-handoff cannot be combined with TSCM runtime handoff flags")
@@ -535,6 +550,22 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--experimental-aic-tscm-index-diagnostic",
+        action="store_true",
+        help=(
+            "Compile the AIC/TSCM handoff probe as a no-wait mixed-entry index marker. "
+            "This reports AIC/AIV block and sub-block numbering before cross-core handoff tuning."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-aic-tscm-ping-diagnostic",
+        action="store_true",
+        help=(
+            "Compile the AIC/TSCM handoff probe as a minimal cross-core flag ping. "
+            "This isolates CrossCoreSetFlag/WaitFlag from TSCM data movement and Matmul."
+        ),
+    )
+    parser.add_argument(
         "--experimental-aic-tscm-unsafe-runtime",
         action="store_true",
         help=(
@@ -626,6 +657,12 @@ def main() -> int:
     if args.experimental_aic_tscm_path_diagnostic:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC")
         _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC")
+    if args.experimental_aic_tscm_index_diagnostic:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_INDEX_DIAGNOSTIC")
+        _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_INDEX_DIAGNOSTIC")
+    if args.experimental_aic_tscm_ping_diagnostic:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_PING_DIAGNOSTIC")
+        _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_PING_DIAGNOSTIC")
     if args.experimental_aic_tscm_unsafe_runtime:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME")
         _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME")
