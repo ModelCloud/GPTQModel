@@ -478,6 +478,11 @@ __aicore__ inline TCubeTiling MakeCubeConsumerTiling(const CannoeW4A16MatmulTili
 }
 #endif
 
+__aicore__ inline bool CannoeOutputTileIsSequential(uint32_t m_len, uint32_t base_n, uint32_t out_features)
+{
+    return m_len <= 1U || base_n == out_features;
+}
+
 class CannoeW4A16ScalarKernel {
 public:
     __aicore__ inline void Init(
@@ -676,7 +681,7 @@ public:
                         cube_probe.mm.SetTensorB(b_tscm_tile, false);
                         cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                         ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
-                        const bool sequential_write = m_len <= 1U || base_n == out_features;
+                        const bool sequential_write = CannoeOutputTileIsSequential(m_len, base_n, out_features);
                         cube_probe.mm.IterateAll<false>(
                             y_gm_[m_begin * out_features + n_begin], k_tile != 0, sequential_write, true);
                         if (m_tile == 0 && has_next_k_tile) {
@@ -729,7 +734,7 @@ public:
                         cube_probe.mm.SetTensorB(b_tscm_tile, false);
                         cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                         ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
-                        const bool sequential_write = m_len <= 1U || base_n == out_features;
+                        const bool sequential_write = CannoeOutputTileIsSequential(m_len, base_n, out_features);
                         cube_probe.mm.IterateAll<false>(
                             y_gm_[m_begin * out_features + n_begin], k_tile != 0, sequential_write, true);
                         cube_probe.mm.WaitIterateAll();
@@ -775,7 +780,8 @@ public:
                 cube_probe.mm.SetTensorB(b_tscm_tile, false);
                 cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                 ConfigureCubeBiasForKTile(cube_probe, 0, n_begin);
-                cube_probe.mm.IterateAll<false>(y_gm_[m_begin * out_features + n_begin], false, false, true);
+                const bool sequential_write = CannoeOutputTileIsSequential(m_len, base_n, out_features);
+                cube_probe.mm.IterateAll<false>(y_gm_[m_begin * out_features + n_begin], false, sequential_write, true);
                 cube_probe.mm.WaitIterateAll();
             }
             cube_probe.FreeTscmBTile();
@@ -909,8 +915,9 @@ public:
                     cube_probe.mm.SetTensorB(direct_b_tile);
                     cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                     ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
+                    const bool sequential_write = CannoeOutputTileIsSequential(m_len, base_n, out_features);
                     cube_probe.mm.IterateAll<false>(
-                        y_gm_[m_begin * out_features + n_begin], k_tile != 0, false, true);
+                        y_gm_[m_begin * out_features + n_begin], k_tile != 0, sequential_write, true);
                     cube_probe.mm.WaitIterateAll();
                 }
                 continue;
@@ -979,8 +986,9 @@ public:
                     cube_probe.mm.SetTensorB(direct_b_tile);
                     cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                     ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
+                    const bool sequential_write = CannoeOutputTileIsSequential(m_len, base_n, out_features);
                     cube_probe.mm.IterateAll<false>(
-                        y_gm_[m_begin * out_features + n_begin], k_tile != 0, false, true);
+                        y_gm_[m_begin * out_features + n_begin], k_tile != 0, sequential_write, true);
                     cube_probe.mm.WaitIterateAll();
                 }
             }
@@ -1002,8 +1010,9 @@ public:
                     cube_probe.mm.SetTensorB(direct_b_tile);
                     cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                     ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
+                    const bool sequential_write = CannoeOutputTileIsSequential(m_len, base_n, out_features);
                     cube_probe.mm.IterateAll<false>(
-                        y_gm_[m_begin * out_features + n_begin], k_tile != 0, false, true);
+                        y_gm_[m_begin * out_features + n_begin], k_tile != 0, sequential_write, true);
                     cube_probe.mm.WaitIterateAll();
                 }
             }

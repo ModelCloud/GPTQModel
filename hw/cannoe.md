@@ -418,6 +418,15 @@ positive-`base_k` fallback shape.
   `2.160392/4.317659/8.454348 ms` min/mean/max to
   `2.059953/4.107422/8.158103 ms`; worst drift stayed `max_abs=0.015625` and
   `mean_abs=0.0024566650390625`.
+- The same contiguous-output write guard is now shared by VecOut/local-A,
+  direct TSCM/local-A, and the staged TSCM fallback. The VecOut/local-A package
+  passed the all-8 fixed-256 raw sweep with min/mean/max
+  `1.919938/3.478979/5.051962 ms`, improving the documented repeat-safe
+  VecOut/local-A reference mean of `3.515399 ms`; worst drift stayed
+  `max_abs=0.015625` and `mean_abs=0.0024566650390625`. The rebuilt direct
+  TSCM/local-A package also passed all eight cases with
+  `2.062128/4.108074/8.156297 ms`, confirming the helper did not regress the
+  true TSCM/NZ handoff path.
 - A public `Matmul::IterateBatch` partial-sum replacement for the same TSCM
   direct path compiled but timed out on all eight raw workers at `120s`. Keep
   the validated `IterateAll` accumulation route until a smaller
