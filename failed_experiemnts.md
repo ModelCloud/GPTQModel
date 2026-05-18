@@ -15,6 +15,30 @@ For new entries, include:
 - Speed, accuracy, and memory data when available.
 - Decision and what would justify re-testing.
 
+## 2026-05-18: Cannoe TSCM All-`base_n=128` Raw Sweep
+
+Status: failed runtime-safety gate for the two large narrow K cases; keep the
+planner's hybrid `base_n` policy instead of forcing `base_n=128` globally.
+
+Tested change: ran the rebuilt `tscm-direct-local-a` package with
+`--base-n -128` for every default raw case after the contiguous-output write
+guard. The goal was to see whether the two historically conservative
+`rows=8,K=1024,N=512` cases could now move from `base_n=256` to `base_n=128`.
+
+Artifacts:
+
+- OPP package: `/tmp/cannoe_tscm_seq_helper_ws`
+- Raw all-device summary: `/tmp/cannoe_tscm_seq_helper_base_n128_all8_summary.json`
+
+| Probe | Devices | Result | Metrics / failure signature | Decision |
+| --- | --- | --- | --- | --- |
+| Force `base_n=128` for all eight default TSCM direct-local-A raw cases | NPU 0-7 | 6/8 pass | Passing six-case min/mean/max `1.048927/1.629669/2.462595 ms`; the two `rows=8,K=1024,N=512` workers failed with runtime `507015` AICore exception and CANN report `Illegal instruction, which is usually caused by unaligned UUB addresses`; passing-case worst drift was `max_abs=0.009765625` | Reject global `base_n=128` |
+
+Decision: keep `base_n=128` only for the validated smaller/wider cases and
+retain `base_n=256` for `rows=8,K=1024,N=512`. The accepted planner-shaped
+sweep is now available through
+`scripts/validate_cannoe_ascendc_raw.py --planner-tiles`.
+
 ## 2026-05-18: Cannoe TSCM `IterateBatch` Partial-Sum Probe
 
 Status: failed runtime-safety gate; do not replace the validated direct-TSCM

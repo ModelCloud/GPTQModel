@@ -427,6 +427,14 @@ positive-`base_k` fallback shape.
   TSCM/local-A package also passed all eight cases with
   `2.062128/4.108074/8.156297 ms`, confirming the helper did not regress the
   true TSCM/NZ handoff path.
+- `scripts/validate_cannoe_ascendc_raw.py --planner-tiles` now applies the
+  runtime planner's validated fused tile policy to raw package sweeps. On the
+  same rebuilt direct TSCM/local-A package, this planner-shaped all-8 run used
+  `base_n=128` for the six validated fast cases and `base_n=256` for the two
+  unsafe `rows=8,K=1024,N=512` cases. It passed with min/mean/max
+  `1.050940/2.927955/8.144283 ms`, improving the fixed-256 mean while
+  preserving worst drift at `max_abs=0.015625` and
+  `mean_abs=0.0024566650390625`.
 - A public `Matmul::IterateBatch` partial-sum replacement for the same TSCM
   direct path compiled but timed out on all eight raw workers at `120s`. Keep
   the validated `IterateAll` accumulation route until a smaller

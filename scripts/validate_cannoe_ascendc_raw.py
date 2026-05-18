@@ -97,10 +97,33 @@ def _apply_custom_opp_env(env: dict[str, str], args: argparse.Namespace) -> None
 
 def _case_payload(case: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     payload = dict(case)
-    payload.setdefault("base_m", args.base_m)
-    payload.setdefault("base_n", args.base_n)
-    payload.setdefault("base_k", args.base_k)
+    if args.planner_tiles:
+        rows = int(payload["rows"])
+        k = int(payload["k"])
+        n = int(payload["n"])
+        payload.setdefault("base_m", 16 if rows <= 16 else min(128, _align_up(rows, 16)))
+        payload.setdefault("base_n", -_planner_base_n(rows, k, n))
+        payload.setdefault("base_k", -128 if k % 128 == 0 else -64)
+    else:
+        payload.setdefault("base_m", args.base_m)
+        payload.setdefault("base_n", args.base_n)
+        payload.setdefault("base_k", args.base_k)
     return payload
+
+
+def _align_up(value: int, alignment: int) -> int:
+    return ((value + alignment - 1) // alignment) * alignment
+
+
+def _planner_base_n(rows: int, k: int, n: int) -> int:
+    if (
+        n == 256
+        or (n == 640 and k in {512, 768})
+        or (n in {512, 768} and k in {512, 768, 896})
+        or (rows <= 8 and k == 512 and n == 1024)
+    ):
+        return 128
+    return min(256, _align_up(n, 16))
 
 
 def _timing_stats(results: list[dict[str, Any]]) -> dict[str, float | None]:
@@ -534,6 +557,14 @@ def main() -> int:
     parser.add_argument("--base-m", type=int, default=16)
     parser.add_argument("--base-n", type=int, default=-256)
     parser.add_argument("--base-k", type=int, default=-128)
+    parser.add_argument(
+        "--planner-tiles",
+        action="store_true",
+        help=(
+            "Use the Cannoe runtime planner's validated fused tile defaults per case. "
+            "Case dictionaries can still override base_m/base_n/base_k explicitly."
+        ),
+    )
     parser.add_argument("--max-abs", type=float, default=0.02)
     parser.add_argument("--mean-abs", type=float, default=0.004)
     parser.add_argument("--warmup", type=int, default=0, help="Untimed custom-op warmup calls per worker.")

@@ -106,6 +106,26 @@ def test_raw_validator_batches_one_case_per_device():
     ]
 
 
+def test_raw_validator_planner_tiles_match_validated_cannoe_policy():
+    validator = _load_raw_validator()
+    args = argparse.Namespace(planner_tiles=True, base_m=16, base_n=-256, base_k=-128)
+
+    fast_case = validator._case_payload(
+        {"rows": 4, "k": 512, "n": 512, "group": 32, "seed": 1},
+        args,
+    )
+    unsafe_narrow_case = validator._case_payload(
+        {"rows": 8, "k": 1024, "n": 512, "group": 32, "seed": 2},
+        args,
+    )
+
+    assert fast_case["base_m"] == 16
+    assert fast_case["base_n"] == -128
+    assert fast_case["base_k"] == -128
+    assert unsafe_narrow_case["base_n"] == -256
+    assert unsafe_narrow_case["base_k"] == -128
+
+
 def test_raw_validator_quiet_cann_env_defaults_preserve_overrides():
     validator = _load_raw_validator()
     env = {"ASCEND_GLOBAL_LOG_LEVEL": "2"}
@@ -295,6 +315,8 @@ def _strategy_args(strategy: str):
         experimental_cube_consumer=False,
         experimental_mixed_launch=False,
         experimental_mixed_aiv_baseline=False,
+        experimental_mixed_entry_diagnostic=False,
+        experimental_mixed_matmul_reg_diagnostic=False,
         experimental_cann9_vector_dequant=False,
         experimental_vecout_consumer=False,
         experimental_vecout_runtime_handoff=False,
@@ -308,10 +330,14 @@ def _strategy_args(strategy: str):
         experimental_tscm_runtime_handoff=False,
         experimental_tscm_direct_dequant=False,
         experimental_tscm_direct_multik=False,
+        experimental_tscm_local_a=False,
         experimental_tscm_tbuf_handoff=False,
         experimental_aic_tscm_handoff=False,
         experimental_aic_tscm_zero_b_diagnostic=False,
         experimental_aic_tscm_path_diagnostic=False,
+        experimental_aic_tscm_index_diagnostic=False,
+        experimental_aic_tscm_syncall_diagnostic=False,
+        experimental_aic_tscm_ping_diagnostic=False,
         experimental_aic_tscm_unsafe_runtime=False,
     )
 
