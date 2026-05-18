@@ -54,6 +54,45 @@ torch-npu's exported op-plugin execution helpers more closely, especially the
 allocation inside the task-queue callable, or after the custom op can run a
 minimal mixed-launch entry diagnostic repeatedly in one Python process.
 
+## 2026-05-18: Cannoe Ascend C Bridge Task-Queue Workspace Probes
+
+Status: failed runtime-safety gate; do not move the custom ACLNN
+`GetWorkspaceSize`/workspace allocation into the `RunOpApiV2` callable in the
+current bridge.
+
+Tested changes:
+
+- V2-style callable: capture the torch tensors and output, then create ACL
+  tensors, call `aclnnCannoeW4A16MatmulGetWorkspaceSize`, allocate the workspace,
+  and call `aclnnCannoeW4A16Matmul` inside the `RunOpApiV2` callable.
+- V2-style callable plus public ACL stream-resource binding:
+  `aclrtUseStreamResInCurrentThread(stream)`, gated by torch-npu's exported
+  `check_enqueue_need_use` / `check_dequeue_need_use` checks.
+
+Artifacts:
+
+- Base OPP package: `/tmp/cannoe_bridge_context`
+- Installed OPP: `/tmp/cannoe_bridge_context_install`
+- V2 JIT bridge: `/tmp/cannoe_bridge_v2_jit/f96e06c66796a27e/gptqmodel_cannoe_ascendc_ops.so`
+- V2 single-case summary: `/tmp/cannoe_bridge_v2_onecase_summary.json`
+- V2 all-8 summary: `/tmp/cannoe_bridge_v2_all8_summary.json`
+- V2 stream-binding JIT bridge: `/tmp/cannoe_bridge_v2_stream_jit/bc1dd20d3999ea91/gptqmodel_cannoe_ascendc_ops.so`
+- V2 stream-binding summary: `/tmp/cannoe_bridge_v2_stream_onecase_summary.json`
+
+| Probe | Devices | Result | Metrics / failure signature | Decision |
+| --- | --- | --- | --- | --- |
+| V2-style callable, isolated first run | NPU0 | 1/1 pass | `rows=1,K=384,N=256,group=32`, `custom_ms=1.944633`, `max_abs=0.00390625`, `mean_abs=0.000549316` | Insufficient; continue to all-NPU gate |
+| V2-style callable, all-8 raw sweep | 0-7 | 1/8 pass | Only NPU2 passed one `rows=4,K=512,N=256,group=32` case at `2.597860 ms`; NPU0/1/3/4/5/6/7 timed out at `180s` with no stderr tail | Reject |
+| V2-style callable retested sequentially after the all-8 failure | NPU0/NPU2 observed before stop | Mixed | NPU0 timed out at `90s`; NPU2 passed the same one-case shape at `1.951992 ms`; loop was stopped to avoid spending 90s per failed device | Reject as nondeterministic/device-dependent |
+| V2-style callable plus `aclrtUseStreamResInCurrentThread` enqueue/dequeue binding | NPU0 | 0/1 pass | Same one-case shape timed out at `90s` with no worker JSON and no stderr tail | Reject |
+
+Decision: revert both bridge changes. The only credible next bridge direction is
+to use torch-npu/op-plugin exported execution helpers end-to-end, including its
+workspace allocator and huge-memory/thread-local setup, or to reduce the custom
+op to a minimal repeated mixed-launch diagnostic before reintroducing the
+VecOut/local-A Matmul lifecycle. Partial single-device success from the V2
+callable is not enough to promote the fused op path.
+
 ## 2026-05-17: Cannoe Ascend C Bridge Lifetime and Repeat-Launch Probes
 
 Status: failed runtime-safety gate; keep the Ascend C bridge source at the
