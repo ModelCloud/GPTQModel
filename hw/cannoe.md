@@ -442,6 +442,13 @@ positive-`base_k` fallback shape.
   `--planner-tiles` raw sweep with min/mean/max
   `1.072683/2.744680/6.195503 ms`; worst drift remained
   `max_abs=0.015625` and `mean_abs=0.0024566650390625`.
+- After every Cannoe kernel change, including micro-optimizations that only
+  target raw fused probes, run the full Qwen3 27B GPTQ FP16 projection gate with
+  all default layers (`q,k,v,gate,up,down`) to catch module-level regressions.
+  The post-unroll NPU0 gate passed with total repeat `0.9371 ms`:
+  `q=0.0772`, `k=0.0730`, `v=0.0709`, `gate=0.2214`, `up=0.2188`,
+  `down=0.2757`; JSON artifact
+  `/tmp/cannoe_qwen3_27b_full_gate_after_tscm_unroll.json`.
 - A public `Matmul::IterateBatch` partial-sum replacement for the same TSCM
   direct path compiled but timed out on all eight raw workers at `120s`. Keep
   the validated `IterateAll` accumulation route until a smaller

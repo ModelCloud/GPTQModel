@@ -107,7 +107,17 @@ python scripts/benchmark_komodo_npu_ab.py \
 
 For Qwen projection claims, run the relevant `qwen3_6_*` case set on both
 physical devices and report mean, min/max, and paired change versus the previous
-ledger row.
+ledger row. For every Cannoe/Cannoe Ascend C kernel change, including narrow
+micro-optimizations, also run the full Qwen3 27B GPTQ FP16 projection gate so
+`q_proj`, `k_proj`, `v_proj`, `gate_proj`, `up_proj`, and `down_proj` are all
+checked for end-to-end module regression:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID ASCEND_RT_VISIBLE_DEVICES=0 \
+python scripts/benchmark_qwen3_27b_gptq_fp16.py \
+  --path cannoe --device npu:0 --tokens 1 --warmup 10 --iters 50 \
+  --json-output /tmp/cannoe_qwen3_27b_full_gate.json
+```
 
 ### Dense-Cache Guard
 
