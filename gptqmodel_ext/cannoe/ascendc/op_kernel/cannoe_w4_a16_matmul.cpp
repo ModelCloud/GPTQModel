@@ -72,6 +72,11 @@ using CannoeAscendInt4 = AscendC::int4b_t;
 #error "CANNOE_EXPERIMENTAL_AIC_TSCM_INDEX_DIAGNOSTIC requires AIC/TSCM handoff"
 #endif
 
+#if defined(CANNOE_EXPERIMENTAL_AIC_TSCM_SYNCALL_DIAGNOSTIC) && \
+    !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF)
+#error "CANNOE_EXPERIMENTAL_AIC_TSCM_SYNCALL_DIAGNOSTIC requires AIC/TSCM handoff"
+#endif
+
 #if defined(CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC) && \
     defined(CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC)
 #error "AIC/TSCM path and zero-B diagnostics are mutually exclusive"
@@ -962,6 +967,30 @@ public:
 #endif
 
 #if defined(CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF)
+#ifdef CANNOE_EXPERIMENTAL_AIC_TSCM_SYNCALL_DIAGNOSTIC
+    __aicore__ inline bool TryProcessAicTscmSyncAllDiagnostic()
+    {
+        if (tiling_->kernel_mode != kKernelModeStagedDequant || tiling_->block_dim == 0 ||
+            tiling_->staging_blocks == 0) {
+            return false;
+        }
+        SyncAll<false>();
+        if ASCEND_IS_AIV {
+            if (GetBlockIdx() == 0 && GetSubBlockIdx() == 0 && tiling_->total_outputs >= 8) {
+                y_gm_.SetValue(0, static_cast<half>(914.0f));
+                y_gm_.SetValue(1, static_cast<half>(static_cast<int32_t>(tiling_->kernel_mode)));
+                y_gm_.SetValue(2, static_cast<half>(static_cast<int32_t>(tiling_->rows)));
+                y_gm_.SetValue(3, static_cast<half>(static_cast<int32_t>(tiling_->base_m)));
+                y_gm_.SetValue(4, static_cast<half>(static_cast<int32_t>(tiling_->base_n)));
+                y_gm_.SetValue(5, static_cast<half>(static_cast<int32_t>(tiling_->base_k)));
+                y_gm_.SetValue(6, static_cast<half>(static_cast<int32_t>(tiling_->staging_blocks)));
+                y_gm_.SetValue(7, static_cast<half>(static_cast<int32_t>(tiling_->block_dim)));
+            }
+        }
+        return true;
+    }
+#endif
+
 #ifdef CANNOE_EXPERIMENTAL_AIC_TSCM_INDEX_DIAGNOSTIC
     __aicore__ inline bool TryProcessAicTscmIndexDiagnostic()
     {
@@ -3694,6 +3723,11 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
     op.Init(x, packed_weight, scales, offsets, bias, y, user_workspace, &tiling_data);
 #else
     op.Init(x, packed_weight, scales, offsets, bias, y, workspace, &tiling_data);
+#endif
+#ifdef CANNOE_EXPERIMENTAL_AIC_TSCM_SYNCALL_DIAGNOSTIC
+    if (op.TryProcessAicTscmSyncAllDiagnostic()) {
+        return;
+    }
 #endif
 #ifdef CANNOE_EXPERIMENTAL_AIC_TSCM_INDEX_DIAGNOSTIC
     if (op.TryProcessAicTscmIndexDiagnostic()) {

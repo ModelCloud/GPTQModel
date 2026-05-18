@@ -236,6 +236,13 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
             and marker_values[6] > 0
             and marker_values[7] > 0
         )
+        aic_tscm_syncall_pass = (
+            abs(marker - 914.0) <= 0.5
+            and len(marker_values) >= 8
+            and int(marker_values[1]) == 1
+            and marker_values[6] > 0
+            and marker_values[7] > 0
+        )
         result = {
             "device": int(args.device),
             "rows": rows,
@@ -248,7 +255,13 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
             "custom_ms": custom_ms,
             "max_abs": 0.0,
             "mean_abs": 0.0,
-            "pass": mixed_entry_pass or aic_tscm_path_pass or aic_tscm_ping_pass or aic_tscm_index_pass,
+            "pass": (
+                mixed_entry_pass
+                or aic_tscm_path_pass
+                or aic_tscm_ping_pass
+                or aic_tscm_index_pass
+                or aic_tscm_syncall_pass
+            ),
             "markers": marker_values,
         }
         _emit_json_result(result, result_fd)

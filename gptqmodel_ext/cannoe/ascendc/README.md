@@ -525,6 +525,15 @@ to `6.1858/6.0609/5.9748/5.9162 ms`; act-order group-size 32/128 improved from
 `6.8434/6.7026 ms` to `6.1966/5.9862 ms`. Max abs drift stayed unchanged at
 `0.015625`.
 
+For the mixed AIC/AIV fused-kernel bring-up, a no-wait index diagnostic now
+records raw AIC/AIV block and sub-block numbering because `MIX_AIC_1_2` does not
+map AIC `GetBlockIdx()` directly to normalized AIV producer IDs. The validated
+CANN `SyncAll<false>()` diagnostic proves the generated op can run a full
+mixed-core rendezvous safely: the 8-NPU raw path sweep passed with
+`custom_ms_mean=0.05895`, `custom_ms_min=0.05395`, and `custom_ms_max=0.07119`.
+The next fused handoff should build around that known-good rendezvous or CANN's
+KFC metadata instead of assuming a manual one-AIC/one-AIV block pairing.
+
 Build from the repo root:
 
 ```bash

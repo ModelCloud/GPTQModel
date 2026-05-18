@@ -48,6 +48,9 @@ CANNOE_PUBLIC_STRATEGIES: dict[str, tuple[str, ...]] = {
     "aic-tscm-index-diagnostic": (
         "experimental_aic_tscm_index_diagnostic",
     ),
+    "aic-tscm-syncall-diagnostic": (
+        "experimental_aic_tscm_syncall_diagnostic",
+    ),
     "aic-tscm-unsafe-runtime": (
         "experimental_aic_tscm_unsafe_runtime",
     ),
@@ -111,6 +114,11 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         args.experimental_tscm_direct_multik = True
         args.experimental_tscm_direct_dequant = True
         args.experimental_tscm_tbuf_handoff = True
+    if args.experimental_aic_tscm_syncall_diagnostic:
+        args.experimental_aic_tscm_handoff = True
+        args.experimental_tscm_direct_multik = True
+        args.experimental_tscm_direct_dequant = True
+        args.experimental_tscm_tbuf_handoff = True
     if args.experimental_aic_tscm_ping_diagnostic:
         args.experimental_aic_tscm_handoff = True
         args.experimental_tscm_direct_multik = True
@@ -145,6 +153,7 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         or args.experimental_aic_tscm_zero_b_diagnostic
         or args.experimental_aic_tscm_path_diagnostic
         or args.experimental_aic_tscm_index_diagnostic
+        or args.experimental_aic_tscm_syncall_diagnostic
         or args.experimental_aic_tscm_ping_diagnostic
         or args.experimental_aic_tscm_unsafe_runtime
     ):
@@ -558,6 +567,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--experimental-aic-tscm-syncall-diagnostic",
+        action="store_true",
+        help=(
+            "Compile the AIC/TSCM handoff probe as a CANN SyncAll<false>() mixed-core marker. "
+            "This validates CANN's built-in AIC/AIV rendezvous before manual tile handoff tuning."
+        ),
+    )
+    parser.add_argument(
         "--experimental-aic-tscm-ping-diagnostic",
         action="store_true",
         help=(
@@ -660,6 +677,9 @@ def main() -> int:
     if args.experimental_aic_tscm_index_diagnostic:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_INDEX_DIAGNOSTIC")
         _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_INDEX_DIAGNOSTIC")
+    if args.experimental_aic_tscm_syncall_diagnostic:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_SYNCALL_DIAGNOSTIC")
+        _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_SYNCALL_DIAGNOSTIC")
     if args.experimental_aic_tscm_ping_diagnostic:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_PING_DIAGNOSTIC")
         _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_PING_DIAGNOSTIC")
