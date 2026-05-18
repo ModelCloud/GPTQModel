@@ -435,6 +435,13 @@ positive-`base_k` fallback shape.
   `1.050940/2.927955/8.144283 ms`, improving the fixed-256 mean while
   preserving worst drift at `max_abs=0.015625` and
   `mean_abs=0.0024566650390625`.
+- The direct TSCM/local-A zero-offset B-tile fill now processes four adjacent
+  packed INT4 columns per inner K sweep, matching the already validated
+  VecOut packed-tile unroll but reading directly from GM into the live UB tile.
+  A fresh `--strategy tscm-direct-local-a` package passed the all-8
+  `--planner-tiles` raw sweep with min/mean/max
+  `1.072683/2.744680/6.195503 ms`; worst drift remained
+  `max_abs=0.015625` and `mean_abs=0.0024566650390625`.
 - A public `Matmul::IterateBatch` partial-sum replacement for the same TSCM
   direct path compiled but timed out on all eight raw workers at `120s`. Keep
   the validated `IterateAll` accumulation route until a smaller
