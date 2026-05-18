@@ -243,6 +243,13 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
             and marker_values[6] > 0
             and marker_values[7] > 0
         )
+        mixed_matmul_reg_pass = (
+            abs(marker - 915.0) <= 0.5
+            and len(marker_values) >= 8
+            and int(marker_values[1]) == 1
+            and marker_values[6] > 0
+            and marker_values[7] > 0
+        )
         result = {
             "device": int(args.device),
             "rows": rows,
@@ -261,6 +268,7 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
                 or aic_tscm_ping_pass
                 or aic_tscm_index_pass
                 or aic_tscm_syncall_pass
+                or mixed_matmul_reg_pass
             ),
             "markers": marker_values,
         }

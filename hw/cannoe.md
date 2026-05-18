@@ -377,6 +377,27 @@ The same harness passed with positive `base_k=128`, so the module planner can
 mark all symmetric GPTQ fused calls as zero-offset while retaining a validated
 positive-`base_k` fallback shape.
 
+2026-05-18 mixed-launch lifecycle update:
+
+- A no-Matmul `MIX_AIC_1_2` entry diagnostic passed on all eight NPUs with
+  `warmup=10,iters=50`, averaging `0.041555 ms` and returning marker `911`.
+  This isolates custom-op registration, tiling-key selection, and the basic
+  mixed AIC/AIV launch as repeat-safe.
+- A Matmul-registration diagnostic then showed the generic mixed Cube path must
+  use the same KFC workspace choreography as the known-good mixed-entry and
+  AIC/TSCM branches: AIC clears system workspace, AIV waits on
+  `WORKSPACE_SYNC_ID`, and only then both sides register the Matmul object.
+  The old unconditional `clearWorkspace` path timed out on all eight NPUs.
+- After that fix, the Matmul-registration diagnostic passed on all eight NPUs
+  with marker `915` and mean `0.041603 ms`, proving `REGIST_MATMUL_OBJ` itself
+  is repeat-safe when the workspace event is owned by AIC.
+- The real VecOut/local-A runtime package rebuilt with the same fix passed the
+  default all-8 raw validation sweep (`warmup=2,iters=6`) with min/mean/max
+  `1.936433/3.515399/5.107260 ms`, worst `max_abs=0.015625`, and worst
+  `mean_abs=0.0024566650390625`. This restores repeatable fused local-A
+  execution; the remaining target is replacing the VecOut local-B path with a
+  true TSCM/NZ dequant-to-Cube handoff.
+
 ## aclnn V3 Probe
 
 `scripts/probe_cannoe_v3.py` builds

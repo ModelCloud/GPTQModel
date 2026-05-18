@@ -188,7 +188,8 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_cube_workspace_bytes(0);
     uint64_t tiling_key = GET_TPL_TILING_KEY(kCannoeLaunchModeAiv);
 
-#ifdef CANNOE_EXPERIMENTAL_MIXED_ENTRY_DIAGNOSTIC
+#if defined(CANNOE_EXPERIMENTAL_MIXED_ENTRY_DIAGNOSTIC) || \
+    defined(CANNOE_EXPERIMENTAL_MIXED_MATMUL_REG_DIAGNOSTIC)
     tiling_key = GET_TPL_TILING_KEY(kCannoeLaunchModeMixedAicAiv);
     tiling.set_cube_workspace_bytes(ClampU64ToU32(kCubeSysWorkspaceBytes));
     size_t* workspaces = context->GetWorkspaceSizes(1);

@@ -54,6 +54,9 @@ CANNOE_PUBLIC_STRATEGIES: dict[str, tuple[str, ...]] = {
     "aic-tscm-unsafe-runtime": (
         "experimental_aic_tscm_unsafe_runtime",
     ),
+    "mixed-matmul-reg-diagnostic": (
+        "experimental_mixed_matmul_reg_diagnostic",
+    ),
 }
 
 
@@ -87,6 +90,9 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         args.experimental_staged_dequant = True
         args.experimental_cann9_vector_dequant = True
     if args.experimental_mixed_entry_diagnostic:
+        args.experimental_mixed_launch = True
+    if args.experimental_mixed_matmul_reg_diagnostic:
+        args.experimental_cube_consumer = True
         args.experimental_mixed_launch = True
     if args.experimental_vecout_runtime_handoff:
         args.experimental_staged_dequant = True
@@ -172,6 +178,8 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         args.experimental_mixed_launch = True
     if args.experimental_mixed_entry_diagnostic and args.experimental_cube_consumer:
         parser.error("--experimental-mixed-entry-diagnostic cannot be combined with --experimental-cube-consumer")
+    if args.experimental_mixed_entry_diagnostic and args.experimental_mixed_matmul_reg_diagnostic:
+        parser.error("--experimental-mixed-entry-diagnostic and --experimental-mixed-matmul-reg-diagnostic are mutually exclusive")
 
 
 def _find_cann_root() -> Path | None:
@@ -407,6 +415,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--experimental-mixed-matmul-reg-diagnostic",
+        action="store_true",
+        help=(
+            "Compile a MIX_AIC_1_2 probe that clears Matmul/KFC workspace, registers the CANN Matmul "
+            "object, writes path markers, and returns before SetTensor/IterateAll. This isolates "
+            "Matmul registration lifecycle from the live local-tile handoff."
+        ),
+    )
+    parser.add_argument(
         "--experimental-cann9-vector-dequant",
         action="store_true",
         help=(
@@ -637,6 +654,9 @@ def main() -> int:
     if args.experimental_mixed_entry_diagnostic:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_MIXED_ENTRY_DIAGNOSTIC")
         _enable_host_define(output, "CANNOE_EXPERIMENTAL_MIXED_ENTRY_DIAGNOSTIC")
+    if args.experimental_mixed_matmul_reg_diagnostic:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_MIXED_MATMUL_REG_DIAGNOSTIC")
+        _enable_host_define(output, "CANNOE_EXPERIMENTAL_MIXED_MATMUL_REG_DIAGNOSTIC")
     if args.experimental_cann9_vector_dequant:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_CANN9_VECTOR_DEQUANT")
     if args.experimental_vecout_consumer:

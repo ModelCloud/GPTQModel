@@ -1414,3 +1414,32 @@ lifecycle while continuing to pass hand-built ACL tensors segfaulted before any
 measurable kernel result. Future bridge work should either port the full
 `ConvertTypes`/`ReleaseConvertTypes` execution path or use a smaller repeated
 mixed-launch diagnostic before reintroducing the VecOut/local-A Matmul kernel.
+
+## 2026-05-18: Cannoe Mixed Matmul Registration With Unconditional Workspace Clear
+
+Status: failed mixed-launch lifecycle gate; do not let AIV cores call
+`AscendC::clearWorkspace` for the shared CANN Matmul/KFC system workspace.
+
+Tested change: add a guarded `mixed-matmul-reg-diagnostic` package that selects
+the `MIX_AIC_1_2` tiling key, clears CANN's 16 MiB Matmul system workspace,
+registers `REGIST_MATMUL_OBJ`, writes marker `915`, and returns before
+`SetTensorB` or `IterateAll`. The first version reused the generic mixed Cube
+path's unconditional `clearWorkspace(...)` call.
+
+Artifacts:
+
+- build package: `/tmp/cannoe_mixed_matmul_reg_ws`
+- installed OPP: `/tmp/cannoe_mixed_matmul_reg_ws/build_out/packages`
+- bridge JIT: `/tmp/cannoe_reg_diag_jit/a9901d82ae8bd224/gptqmodel_cannoe_ascendc_ops.so`
+- summary: `/tmp/cannoe_mixed_matmul_reg_summary.json`
+
+| Probe | Devices | Cases | Result |
+| --- | --- | --- | --- |
+| Mixed launch plus unconditional workspace clear plus Matmul registration | 0-7 | default raw validator cases, `warmup=10,iters=50` | 0/8 pass; every worker timed out at 90s with no stderr |
+
+Interpretation: the no-Matmul mixed-entry diagnostic passed on the same devices
+and shapes, so the failure was not custom-op registration or the mixed tiling
+key. The follow-up fix moved `clearWorkspace` behind `ASCEND_IS_AIC` and made
+AIV wait on `WORKSPACE_SYNC_ID` before Matmul registration; that variant passed
+on all eight NPUs. Keep the AIC-owned workspace event choreography for every
+mixed Cube path.
