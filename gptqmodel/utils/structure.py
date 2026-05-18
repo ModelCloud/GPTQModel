@@ -2072,6 +2072,7 @@ class LazyTurtle:
         grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
         for rel_name in t_params:
             full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
+            print("full_name", full_name, rel_name)
             if full_name is None:
                 continue
             shard = self._weight_map.get(full_name)

@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from functools import lru_cache
 from transformers import (
     AutoConfig,
+    AutoModel,
     AutoModelForCausalLM,
     AutoTokenizer,
     GenerationConfig,
@@ -1201,6 +1202,32 @@ def prepare_remote_code_compat(config: Any) -> None:
     normalize_hf_config_compat(config, trust_remote_code=True)
 
 
+def register_runtime_automodel_config(config, remote_module, config_attr: str, remote_model_name: str) -> None:
+    # Obtain the correct config class path to register the config and model.
+    # Fix ValueError: Unrecognized configuration class
+    # <class 'transformers_modules.Ovis1_dot_6_hyphen_Llama3_dot_2_hyphen_3B.e514127b17008465.configuration_ovis.
+    # SiglipVisualTokenizerConfig'> for this kind of AutoModel: AutoModel.
+    runtime_config = getattr(config, config_attr, None)
+    runtime_model_cls = getattr(remote_module, remote_model_name, None) if remote_module is not None else None
+    if runtime_config is None or runtime_model_cls is None:
+        return
+
+    runtime_config_cls = type(runtime_config)
+
+    try:
+        if getattr(runtime_model_cls, "config_class", None) is not runtime_config_cls:
+            runtime_model_cls.config_class = runtime_config_cls
+        AutoModel.register(runtime_config_cls, runtime_model_cls, exist_ok=True)
+    except Exception as exc:
+        log.debug(
+            "HF: failed to bridge AutoModel registration for `%s` using `%s.%s`: %s",
+            config_attr,
+            getattr(remote_module, "__name__", "unknown"),
+            remote_model_name,
+            exc,
+        )
+
+
 def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: Any) -> None:
     if not model_id_or_path:
         return
@@ -1278,6 +1305,18 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
             if vision_model_cls:
                 try_patch_legacy_flash_attn_flag(vision_model_cls)
 
+        if config.model_type == "ovis":
+            from transformers import LlamaForCausalLM
+            try_patch_legacy_flash_attn_flag(LlamaForCausalLM)
+
+            vision_model_cls = getattr(
+                remote_module,
+                "SiglipVisualTokenizer",
+                None,
+            )
+            if vision_model_cls:
+                try_patch_legacy_flash_attn_flag(vision_model_cls)
+
         if (
             outer_model_cls is not None
             and hasattr(outer_model_cls, "tie_weights")
@@ -1307,6 +1346,8 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
                     outer_model_cls._gptqmodel_tie_weights_kwargs_patch = True
 
         if getattr(config, "model_type", None) == "ovis" and ovis_config_module is not None:
+            register_runtime_automodel_config(config, remote_module, "visual_tokenizer_config", "SiglipVisualTokenizer")
+
             formatter_cls = getattr(ovis_config_module, "Llama3ConversationFormatter", None)
             if formatter_cls is not None and not getattr(formatter_cls, "_gptqmodel_tokenizer_backend_patch", False):
                 support_tokenizer_types = list(getattr(formatter_cls, "support_tokenizer_types", None) or [])
@@ -1317,6 +1358,9 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
                     support_tokenizer_types.append("TokenizersBackend")
                     formatter_cls.support_tokenizer_types = support_tokenizer_types
                 formatter_cls._gptqmodel_tokenizer_backend_patch = True
+
+        if getattr(config, "model_type", None) == "ovis2_5":
+            register_runtime_automodel_config(config, remote_module, "vit_config", "Siglip2NavitModel")
 
         if getattr(config, "model_type", None) == "hymba" and remote_module is not None:
             rotary_cls = getattr(remote_module, "LlamaRotaryEmbedding", None)
@@ -1473,6 +1517,12 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
 def try_patch_legacy_flash_attn_flag(model_cls):
     with _MONKEY_PATCH_LOCK:
         if model_cls is None or not isinstance(model_cls, type):
+            return
+
+        # The remote modeling code for some models(For example, ovis.) still relies on `_supports_flash_attn_2`
+        if hasattr(model_cls, "_supports_flash_attn"):
+            if not hasattr(model_cls, "_supports_flash_attn_2"):
+                setattr(model_cls, "_supports_flash_attn_2", bool(model_cls._supports_flash_attn))
             return
 
         # Find the most specific class that explicitly declares the newer
