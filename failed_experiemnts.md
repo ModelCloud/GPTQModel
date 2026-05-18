@@ -1202,3 +1202,38 @@ reported AIC records at raw blocks `0,3,4,7` and AIV producers at raw
 `0/1,2/3,4/5,6/7,...`. Do not re-enable the manual mode-4 ping until the
 AIC/AIV block pairing is derived from CANN's KFC/matmul launch metadata or the
 handoff is rewritten around a global FFTS/KFC rendezvous.
+
+## 2026-05-18: Cannoe direct TSCM visibility after SyncAll
+
+Status: failed data-visibility gate; do not use raw AIV `LocalTensor<TSCM>`
+writes as the AIC handoff mechanism.
+
+Tested change: add a guarded SyncAll-based visibility diagnostic. Every AIV
+entry wrote a small marker value into `LocalTensor<half>(TPosition::TSCM, 0, ...)`,
+all mixed cores executed `SyncAll<false>()`, and AIC entries then read the same
+TSCM slot and reported it to GM. This used the validated full mixed-core
+rendezvous from `/tmp/cannoe_aic_tscm_syncall_ws_summary.json`.
+
+Artifacts:
+
+- build package: `/tmp/cannoe_aic_tscm_visibility_ws`
+- installed OPP: `/tmp/cannoe_aic_tscm_visibility_ws_install`
+- summary: `/tmp/cannoe_aic_tscm_visibility_ws_summary.json`
+
+| Probe | Devices | Result |
+| --- | --- | --- |
+| SyncAll plus direct AIV TSCM marker write / AIC TSCM scalar read | 0-7 | Launch passed, `custom_ms_mean=0.05966`; AIC records read `0.0` instead of AIV marker values |
+
+Representative NPU0 `M=1,K=384,N=256,group=32` AIC records:
+
+| Output offset | AIC raw block | Observed TSCM value |
+| ---: | ---: | ---: |
+| 24 | 2 | 0.0 |
+| 56 | 6 | 0.0 |
+| 64 | 7 | 0.0 |
+
+Interpretation: `SyncAll<false>()` is a valid full mixed-core rendezvous, but
+direct scalar writes to a raw `TPosition::TSCM` local tensor on AIV are not
+visible to AIC as a staged tile. The next real fused handoff should use CANN's
+KFC/SCM path (`ScmDataCopy*`/Matmul-managed UB-to-L1 sharing) or another
+documented AIV-to-AIC L1 transfer path, not raw `LocalTensor<TSCM>` sharing.
