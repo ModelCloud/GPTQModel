@@ -15,6 +15,45 @@ For new entries, include:
 - Speed, accuracy, and memory data when available.
 - Decision and what would justify re-testing.
 
+## 2026-05-18: Cannoe Ascend C Bridge Shared Launch Context
+
+Status: failed runtime-safety gate; keep the Ascend C bridge on the previous
+per-call ACL tensor/workspace lifetime model and do not use a shared context as
+a repeat-launch fix.
+
+Tested change: keep the torch tensors, ACL descriptors, workspace tensor,
+workspace pointer, output tensor, and ACLNN executor alive through a
+`std::shared_ptr` captured by the `RunOpApiV2` callable in
+`gptqmodel_ext/cannoe/w4a16_ascendc_bridge.cpp`. The target was the
+repeat-launch stall in the VecOut/local-A fused op, under the theory that
+torch-npu's task queue could run the custom handler after stack-local
+descriptors or workspace went out of scope.
+
+Artifacts:
+
+- OPP package: `/tmp/cannoe_bridge_context`
+- Installed OPP: `/tmp/cannoe_bridge_context_install`
+- JIT bridge: `/tmp/cannoe_bridge_context_jit/da57e391c0e6a014/gptqmodel_cannoe_ascendc_ops.so`
+- Single-case summary: `/tmp/cannoe_bridge_context_onecase_summary.json`
+
+Build and validation shape:
+
+- `python scripts/build_cannoe_ascendc.py --output /tmp/cannoe_bridge_context --clean --strategy vecout-local-a`
+- `rows=1,K=384,N=256,group_size=32,base_m=16,base_n=-256,base_k=-128`
+- NPU0, `warmup=2`, `iters=6`, timeout `90s`
+
+| Probe | Device | Result | Failure signature | Decision |
+| --- | --- | --- | --- | --- |
+| Shared bridge launch context around the existing VecOut/local-A op | NPU0 | 0/1 pass | No worker JSON, no stderr tail, parent timeout at `90s` before any timing or drift result | Reject |
+
+Decision: revert the bridge change. Capturing the stack-local launch resources
+does not fix the custom-op lifecycle; it makes the first tested repeat-launch
+case time out before producing a result. Re-test only with a bridge that follows
+torch-npu's exported op-plugin execution helpers more closely, especially the
+`EXEC_NPU_CMD_V2` pattern that performs workspace-size lookup and workspace
+allocation inside the task-queue callable, or after the custom op can run a
+minimal mixed-launch entry diagnostic repeatedly in one Python process.
+
 ## 2026-05-17: Cannoe Ascend C Bridge Lifetime and Repeat-Launch Probes
 
 Status: failed runtime-safety gate; keep the Ascend C bridge source at the
