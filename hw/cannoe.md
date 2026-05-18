@@ -411,6 +411,17 @@ positive-`base_k` fallback shape.
   all-8 sweep passed with min/mean/max `1.144248/3.161435/8.643608 ms`, making
   the true TSCM/NZ handoff faster than the fixed-256 VecOut/local-A sweep
   (`3.515399 ms` mean) on this raw case set while preserving the same drift.
+- The direct TSCM/local-A path now enables CANN Matmul sequential GM writes only
+  when the visible C tile is contiguous (`m_len <= 1` or the N tile spans the
+  full row). This keeps multi-row strided output safe while improving decode-like
+  tiles. The warmed all-8 fixed-256 sweep improved from
+  `2.160392/4.317659/8.454348 ms` min/mean/max to
+  `2.059953/4.107422/8.158103 ms`; worst drift stayed `max_abs=0.015625` and
+  `mean_abs=0.0024566650390625`.
+- A public `Matmul::IterateBatch` partial-sum replacement for the same TSCM
+  direct path compiled but timed out on all eight raw workers at `120s`. Keep
+  the validated `IterateAll` accumulation route until a smaller
+  `IterateBatch` lifecycle diagnostic passes.
 
 ## aclnn V3 Probe
 

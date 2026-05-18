@@ -15,6 +15,32 @@ For new entries, include:
 - Speed, accuracy, and memory data when available.
 - Decision and what would justify re-testing.
 
+## 2026-05-18: Cannoe TSCM `IterateBatch` Partial-Sum Probe
+
+Status: failed runtime-safety gate; do not replace the validated direct-TSCM
+`IterateAll` loop with the public `Matmul::IterateBatch` KFC client in the
+current mixed-launch fused path.
+
+Tested change: temporarily routed the TSCM direct multi-K local-A path through
+`IterateBatch<false, true>(..., batchA=1, batchB=1, enPartialSum=k_tile != 0)`
+and `WaitIterateBatch()`. The target was to use the explicit `enPartialSum`
+argument instead of `IterateAll`'s `enAtomic` output accumulation argument.
+
+Artifacts:
+
+- OPP package: `/tmp/cannoe_tscm_iterate_batch_partial_ws`
+- Raw all-device summary: `/tmp/cannoe_tscm_iterate_batch_partial_all8_summary.json`
+
+| Probe | Devices | Result | Metrics / failure signature | Decision |
+| --- | --- | --- | --- | --- |
+| TSCM direct multi-K local-A with `IterateBatch` partial accumulation | NPU 0-7 | 0/8 pass | Every worker hit the `120s` timeout with no stderr tail; no `custom_ms`, `max_abs`, or `mean_abs` was produced | Reject and keep the source on `IterateAll` |
+
+Decision: revert the probe. The public signature is visible in CANN 9, but this
+KFC-client path does not make forward progress in the current Cannoe mixed
+launch. Re-test only after adding a minimal `IterateBatch` lifecycle diagnostic
+that does not also stage INT4 dequant tiles, or after switching the fused path
+to the lower-level AIC-side `MatmulImpl` contract.
+
 ## 2026-05-18: Cannoe Ascend C Bridge Shared Launch Context
 
 Status: failed runtime-safety gate; keep the Ascend C bridge on the previous
