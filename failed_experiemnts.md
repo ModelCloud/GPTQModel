@@ -1702,3 +1702,33 @@ fused prototype is slow for large reductions. However, the public KFC Matmul
 client's synchronous `Iterate` choreography did not make progress in this
 mixed TSCM setup, so the next no-GM-partial path still needs a lower-level Cube
 implementation or a much smaller `Iterate` lifecycle diagnostic.
+
+## 2026-05-18: Cannoe Large Down Prepack Tile as Steady-Speed Win
+
+Status: failed steady-speed gate; keep the narrow tile only as a cold/prepack
+memory improvement.
+
+Tested change: use `prepack_tile_n=512` by default for large GPTQ group-32
+down-style projections (`K>=16384`, `4096<=N<=8192`) while preserving the
+plain-native CANN fast path.
+
+Artifacts:
+
+- `/tmp/cannoe_down_tile512_default.json`
+- `/tmp/cannoe_qwen3_27b_full_gate_down_tile512_default_run2.json`
+- `/tmp/cannoe_qwen3_27b_full_gate_down_tile512_default_final.json`
+- `/tmp/cannoe_down_tile_accuracy.log`
+
+| Probe | Result |
+| --- | --- |
+| Down-only old default | `0.2964 ms`, `397.9 MB` peak |
+| Down-only new default | `0.2719 ms`, `244.9 MB` peak |
+| New vs old down output | `max_abs=0`, `mean_abs=0`, `max_rel=0` |
+| Full Qwen gate, best repeat | `0.9095 ms` total, `down=0.2594 ms` |
+| Full Qwen gate, final guard | `0.9684 ms` total, `down=0.2979 ms` |
+
+Interpretation: the smaller tile reliably lowers cold prepack workspace and can
+help isolated down-projection timing, but it did not prove a stable full-layer
+steady-state speed win. Do not treat tile retuning as the path to matching CUDA
+Marlin; the remaining target is still a fused Ascend C/Cube implementation that
+avoids the native packed-matmul boundary and GM/L2 full-tile materialization.

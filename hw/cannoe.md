@@ -449,6 +449,18 @@ positive-`base_k` fallback shape.
   `q=0.0772`, `k=0.0730`, `v=0.0709`, `gate=0.2214`, `up=0.2188`,
   `down=0.2757`; JSON artifact
   `/tmp/cannoe_qwen3_27b_full_gate_after_tscm_unroll.json`.
+- The large GPTQ down-projection default prepack tile is now narrowed to
+  `tile_n=512` for `group_size=32`, `K>=16384`, and `4096<=N<=8192`. This keeps
+  the plain native CANN fast path but reduces cold prepack workspace for the
+  Qwen3 27B down shape. On NPU0, down-only improved from the default
+  `0.2964 ms`, `397.9 MB` peak to `0.2719 ms`, `244.9 MB` peak; a direct
+  output comparison against the old `tile_n=1024` plan produced
+  `max_abs=0`, `mean_abs=0`, `max_rel=0`. Full Qwen3 27B FP16 gate repeats were
+  noisy, with one `0.9095 ms` total run (`down=0.2594`) followed by a final guard
+  run at `0.9684 ms` total (`down=0.2979`). Treat this as a cold/prepack memory
+  improvement, not a proven steady-state speed win; JSON artifacts
+  `/tmp/cannoe_qwen3_27b_full_gate_down_tile512_default_run2.json` and
+  `/tmp/cannoe_qwen3_27b_full_gate_down_tile512_default_final.json`.
 - A public `Matmul::IterateBatch` partial-sum replacement for the same TSCM
   direct path compiled but timed out on all eight raw workers at `120s`. Keep
   the validated `IterateAll` accumulation route until a smaller

@@ -119,6 +119,15 @@ python scripts/benchmark_qwen3_27b_gptq_fp16.py \
   --json-output /tmp/cannoe_qwen3_27b_full_gate.json
 ```
 
+2026-05-18 NPU0 down-projection prepack retune: Cannoe now uses
+`prepack_tile_n=512` by default for large GPTQ down-style group-32 projections
+(`K>=16384`, `4096<=N<=8192`). The Qwen3 27B down-only probe improved from
+`0.2964 ms`, `397.9 MB` peak to `0.2719 ms`, `244.9 MB` peak with exact output
+match versus the old `tile_n=1024` plan. Full projection gate repeats were
+noisy: best observed `0.9095 ms` total with `down=0.2594`, while the final guard
+run completed at `0.9684 ms` total with `down=0.2979`. Count this as a
+cold/prepack memory improvement, not a stable steady-state speed claim.
+
 ### Dense-Cache Guard
 
 ```bash

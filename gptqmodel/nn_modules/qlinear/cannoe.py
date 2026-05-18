@@ -721,9 +721,6 @@ class _CannoePlanMixin:
         return max(self.pack_factor, tile_n)
 
     def _auto_cannoe_prepack_tile_n(self) -> int | None:
-        if getattr(self, "_cannoe_plain_native_passthrough", False):
-            return None
-
         raw = _cannoe_env(_CANNOE_PREPACK_TILE_N_ENV)
         if raw is not None:
             try:
@@ -735,7 +732,16 @@ class _CannoePlanMixin:
 
         drop_sources = bool(getattr(self, "_drop_source_weights_after_native_pack", False))
         quant_type = getattr(self, "QUANT_TYPE", "")
+        plain_passthrough = getattr(self, "_cannoe_plain_native_passthrough", False)
         if quant_type == "cannoe":
+            if (
+                self.group_size == 32
+                and self.in_features >= 16384
+                and 4096 <= self.out_features <= 8192
+            ):
+                return 512
+            if plain_passthrough:
+                return None
             if self.group_size == 32 and (
                 (self.in_features == 5120 and self.out_features in {1024, 6144, 17408})
                 or (self.in_features == 17408 and self.out_features == 5120)
@@ -744,6 +750,8 @@ class _CannoePlanMixin:
             if not drop_sources and self.in_features == 1024 and self.out_features == 1024:
                 return 512
         elif quant_type == "awq_cannoe":
+            if plain_passthrough:
+                return None
             if self.group_size == 32 and (
                 (self.in_features == 5120 and self.out_features in {1024, 6144, 17408})
                 or (self.in_features == 17408 and self.out_features == 5120)
