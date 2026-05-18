@@ -1385,3 +1385,32 @@ also depends on WQMM's full L1 allocation scheme, TSCM offsets, `MatmulImpl`
 policy, and mode-4 flag choreography. Future work should either port a minimal
 WQMM-style basic block wholesale or call/benchmark `aclnnWeightQuantBatchMatmulV3`
 for supported formats, rather than continuing standalone raw TSCM copy probes.
+
+## 2026-05-18: Cannoe Bridge RunAclCall/ExecuteApiFunc Probe
+
+Status: failed runtime-safety gate; do not mix op-plugin exported execution
+helpers with Cannoe's manual ACL tensor construction.
+
+Tested change: update the PyTorch bridge to call the exported torch-npu
+helpers used by op-plugin macros (`InitExecCommonCtx`, `GetAclStream`,
+`SetExecConfig`, `RunAclCall`, `InitExecSubTheadCtx`, `ExecuteApiFunc`, and
+`UnInitExecCommonCtx`) around the Cannoe custom op API. The device package was
+the same validated local-A fused OPP used for the previous bridge probes.
+
+Artifacts:
+
+- build package: `/tmp/cannoe_bridge_context`
+- installed OPP: `/tmp/cannoe_bridge_context_install`
+- JIT bridge: `/tmp/cannoe_bridge_runacl_jit/a39d1961c769f4de/gptqmodel_cannoe_ascendc_ops.so`
+- summary: `/tmp/cannoe_bridge_runacl_onecase_summary.json`
+
+| Device | Shape | Launch config | Result |
+| --- | --- | --- | --- |
+| NPU0 | `M=1,K=384,N=256,group=32` | `base_m=16,base_n=-256,base_k=-128,warmup=2,iters=6` | worker returned `-11`; no stdout/stderr; reject |
+
+Interpretation: the exported helper path still depends on op-plugin's full
+argument conversion, release, cache, and huge-memory setup. Using the helper
+lifecycle while continuing to pass hand-built ACL tensors segfaulted before any
+measurable kernel result. Future bridge work should either port the full
+`ConvertTypes`/`ReleaseConvertTypes` execution path or use a smaller repeated
+mixed-launch diagnostic before reintroducing the VecOut/local-A Matmul kernel.
