@@ -21,13 +21,9 @@
 
 ## Latest News
 
-<<<<<<< HEAD
 * 05/18/2026 7.1.0-dev `main`: ✨ Added `ovis2_5` model support
-* 05/13/2026 7.1.0-dev `main`: ✨ Added `minicpmv_4_6` model support
-=======
 * 05/15/2026 7.1.0-dev `main`: ✨ Added `mimo_v2` model support
 * 05/13/2026 7.1.0-dev `main`: ✨ Added `minicpmv_4_6` and `DeepSeek V4` model support
->>>>>>> origin/main
 * 05/07/2026 7.1.0-dev `main`: ✨ Added `GLM-4.5V`, `GLM-4.6V`, `Zamba` and `Zamba2` model support
 * 04/29/2026 7.1.0-dev `main`: ✨ Added PoolSideAI `Laguna` model support for fused Laguna MoE checkpoints. Added `ERNIE 4.5 VL MoE`, `Ling-2.6-flash` and NVIDIA `Nemotron 3 Nano Omni` model support.
 * 04/28/2026 [7.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.0.0): 🚀 Added Huawei Ascend NPU support through native torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3. Added `internvl_chat`, `gemma3n`, `GLM-OCR`, `GLM-ASR`, and `falcon_mamba` model support.
