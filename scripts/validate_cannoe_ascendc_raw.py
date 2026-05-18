@@ -193,6 +193,53 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
             base_k,
         )
 
+    if args.path_diagnostic:
+        for _ in range(warmup):
+            custom_call()
+        torch.npu.synchronize()
+        start = time.perf_counter()
+        custom = None
+        for _ in range(iters):
+            custom = custom_call()
+        torch.npu.synchronize()
+        custom_ms = (time.perf_counter() - start) * 1000.0 / max(1, iters)
+        if custom is None:
+            custom = custom_call()
+            torch.npu.synchronize()
+        markers = custom.flatten()[:8].to("cpu", dtype=torch.float32)
+        marker_values = [float(value) for value in markers.tolist()]
+        marker = marker_values[0] if marker_values else float("nan")
+        launch_mode = marker_values[1] if len(marker_values) > 1 else float("nan")
+        kernel_mode = marker_values[2] if len(marker_values) > 2 else float("nan")
+        block_dim = marker_values[3] if len(marker_values) > 3 else 0.0
+        mixed_entry_pass = (
+            abs(marker - 911.0) <= 0.5 and int(launch_mode) == 1 and int(kernel_mode) == 0 and block_dim > 0
+        )
+        aic_tscm_path_pass = (
+            abs(marker - 910.0) <= 0.5
+            and len(marker_values) >= 8
+            and int(marker_values[1]) == 1
+            and marker_values[6] > 0
+            and marker_values[7] > 0
+        )
+        result = {
+            "device": int(args.device),
+            "rows": rows,
+            "k": k,
+            "n": n,
+            "group": group,
+            "base_m": base_m,
+            "base_n": base_n,
+            "base_k": base_k,
+            "custom_ms": custom_ms,
+            "max_abs": 0.0,
+            "mean_abs": 0.0,
+            "pass": mixed_entry_pass or aic_tscm_path_pass,
+            "markers": marker_values,
+        }
+        _emit_json_result(result, result_fd)
+        return 0 if result["pass"] else 2
+
     if args.lane_diagnostic:
         custom = custom_call()
         torch.npu.synchronize()
@@ -339,6 +386,8 @@ def _launch_worker(device: int, case: dict[str, Any], args: argparse.Namespace) 
         cmd.append("--lane-diagnostic")
     if args.tile_fill_diagnostic:
         cmd.append("--tile-fill-diagnostic")
+    if args.path_diagnostic:
+        cmd.append("--path-diagnostic")
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, start_new_session=True)
 
 
@@ -476,6 +525,14 @@ def main() -> int:
             "Requires a package built with --experimental-vecout-tile-fill-diagnostic."
         ),
     )
+    parser.add_argument(
+        "--path-diagnostic",
+        action="store_true",
+        help=(
+            "Run the opt-in mixed-entry marker diagnostic instead of the matmul accuracy benchmark. "
+            "Requires a package built with --experimental-mixed-entry-diagnostic."
+        ),
+    )
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--device", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--case-json", help=argparse.SUPPRESS)
@@ -484,8 +541,9 @@ def main() -> int:
         parser.error("--warmup must be >= 0")
     if args.iters <= 0:
         parser.error("--iters must be > 0")
-    if args.lane_diagnostic and args.tile_fill_diagnostic:
-        parser.error("--lane-diagnostic and --tile-fill-diagnostic are mutually exclusive")
+    diagnostic_count = sum(bool(value) for value in (args.lane_diagnostic, args.tile_fill_diagnostic, args.path_diagnostic))
+    if diagnostic_count > 1:
+        parser.error("--lane-diagnostic, --tile-fill-diagnostic, and --path-diagnostic are mutually exclusive")
 
     if args.worker:
         return _worker(args)

@@ -80,6 +80,8 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
     if args.experimental_int4_lane_diagnostic:
         args.experimental_staged_dequant = True
         args.experimental_cann9_vector_dequant = True
+    if args.experimental_mixed_entry_diagnostic:
+        args.experimental_mixed_launch = True
     if args.experimental_vecout_runtime_handoff:
         args.experimental_staged_dequant = True
         args.experimental_cann9_vector_dequant = True
@@ -144,6 +146,8 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         if args.experimental_cube_consumer:
             parser.error("--experimental-mixed-aiv-baseline cannot be combined with --experimental-cube-consumer")
         args.experimental_mixed_launch = True
+    if args.experimental_mixed_entry_diagnostic and args.experimental_cube_consumer:
+        parser.error("--experimental-mixed-entry-diagnostic cannot be combined with --experimental-cube-consumer")
 
 
 def _find_cann_root() -> Path | None:
@@ -371,6 +375,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--experimental-mixed-entry-diagnostic",
+        action="store_true",
+        help=(
+            "Compile a minimal MIX_AIC_1_2 entry probe that writes tiling/path markers and returns. "
+            "This isolates repeat-launch lifecycle from staging workspace and Matmul/KFC registration."
+        ),
+    )
+    parser.add_argument(
         "--experimental-cann9-vector-dequant",
         action="store_true",
         help=(
@@ -563,13 +575,20 @@ def main() -> int:
     _force_compute_unit(output, args.compute_unit)
     if args.experimental_staged_dequant:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_STAGED_DEQUANT")
-    if args.experimental_cube_consumer or (args.experimental_mixed_launch and not args.experimental_mixed_aiv_baseline):
+    if args.experimental_cube_consumer or (
+        args.experimental_mixed_launch
+        and not args.experimental_mixed_aiv_baseline
+        and not args.experimental_mixed_entry_diagnostic
+    ):
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_CUBE_CONSUMER")
     if args.experimental_mixed_launch:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_MIXED_LAUNCH")
         _enable_host_define(output, "CANNOE_EXPERIMENTAL_MIXED_LAUNCH")
     if args.experimental_mixed_aiv_baseline:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_MIXED_AIV_BASELINE")
+    if args.experimental_mixed_entry_diagnostic:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_MIXED_ENTRY_DIAGNOSTIC")
+        _enable_host_define(output, "CANNOE_EXPERIMENTAL_MIXED_ENTRY_DIAGNOSTIC")
     if args.experimental_cann9_vector_dequant:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_CANN9_VECTOR_DEQUANT")
     if args.experimental_vecout_consumer:

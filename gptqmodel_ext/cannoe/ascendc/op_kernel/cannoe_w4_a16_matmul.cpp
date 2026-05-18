@@ -16,7 +16,8 @@ using CannoeAscendInt4 = AscendC::int4b_t;
 #endif
 
 #if defined(CANNOE_EXPERIMENTAL_MIXED_LAUNCH) && !defined(CANNOE_EXPERIMENTAL_CUBE_CONSUMER) && \
-    !defined(CANNOE_EXPERIMENTAL_MIXED_AIV_BASELINE)
+    !defined(CANNOE_EXPERIMENTAL_MIXED_AIV_BASELINE) && \
+    !defined(CANNOE_EXPERIMENTAL_MIXED_ENTRY_DIAGNOSTIC)
 #error "CANNOE_EXPERIMENTAL_MIXED_LAUNCH requires CANNOE_EXPERIMENTAL_CUBE_CONSUMER"
 #endif
 
@@ -3494,6 +3495,32 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 #endif
     GET_TILING_DATA(tiling_data, tiling);
+#ifdef CANNOE_EXPERIMENTAL_MIXED_ENTRY_DIAGNOSTIC
+    if (workspace == nullptr) {
+        return;
+    }
+    AscendC::SetSysWorkspaceForce(workspace);
+    if ASCEND_IS_AIC {
+        AscendC::clearWorkspace(reinterpret_cast<__gm__ uint8_t*>(workspace));
+        return;
+    }
+    if ASCEND_IS_AIV {
+        AscendC::WaitEvent(AscendC::WORKSPACE_SYNC_ID);
+        if (GetBlockIdx() == 0 && GetSubBlockIdx() == 0 && tiling_data.total_outputs >= 8) {
+            GlobalTensor<half> diag_y;
+            diag_y.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(y), tiling_data.total_outputs);
+            diag_y.SetValue(0, static_cast<half>(911.0f));
+            diag_y.SetValue(1, static_cast<half>(LAUNCH_MODE));
+            diag_y.SetValue(2, static_cast<half>(static_cast<int32_t>(tiling_data.kernel_mode)));
+            diag_y.SetValue(3, static_cast<half>(static_cast<int32_t>(tiling_data.block_dim)));
+            diag_y.SetValue(4, static_cast<half>(static_cast<int32_t>(tiling_data.rows)));
+            diag_y.SetValue(5, static_cast<half>(static_cast<int32_t>(tiling_data.base_m)));
+            diag_y.SetValue(6, static_cast<half>(static_cast<int32_t>(tiling_data.base_n)));
+            diag_y.SetValue(7, static_cast<half>(static_cast<int32_t>(tiling_data.base_k)));
+        }
+        return;
+    }
+#endif
 #ifdef CANNOE_EXPERIMENTAL_STAGED_DEQUANT
     GM_ADDR user_workspace = workspace;
     if (tiling_data.kernel_mode == kKernelModeStagedDequant && tiling_data.staging_workspace_bytes != 0) {
@@ -3510,7 +3537,14 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
         return;
     }
     AscendC::SetSysWorkspaceForce(workspace);
-#ifndef CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF
+#ifdef CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF
+    if ASCEND_IS_AIC {
+        AscendC::clearWorkspace(reinterpret_cast<__gm__ uint8_t*>(workspace));
+    }
+    if ASCEND_IS_AIV {
+        AscendC::WaitEvent(AscendC::WORKSPACE_SYNC_ID);
+    }
+#else
     AscendC::clearWorkspace(reinterpret_cast<__gm__ uint8_t*>(workspace));
     TPipe cube_pipe;
     CannoeW4A16CubeConsumerProbe cube_probe;

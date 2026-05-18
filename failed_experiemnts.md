@@ -1126,3 +1126,37 @@ AIV-side high-level TSCM client is not a promising route.
 Re-test only after adding an AIC-executed consumer path with explicit
 `CrossCoreSetFlag`/`CrossCoreWaitFlag` synchronization and a verified TSCM/NZ B
 tile layout.
+
+## 2026-05-17: Cannoe AIC/TSCM unsafe multi-K enablement
+
+Status: failed forward-progress gate; reverted.
+
+Tested change: after validating the mixed-launch reserved-workspace lifecycle,
+the guarded AIC/TSCM handoff was allowed to run with more than two K tiles under
+`CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME`. The goal was to stop silently
+falling back to the scalar/AIV path on realistic K depths and exercise the
+true AIV dequant-to-TSCM / AIC Cube consumer loop.
+
+Artifacts:
+
+- `/tmp/cannoe_aic_tscm_unsafe_multik_ws_validate.json`
+- build package: `/tmp/cannoe_aic_tscm_unsafe_multik_ws`
+- installed OPP: `/tmp/cannoe_aic_tscm_unsafe_multik_ws_install`
+
+| Probe | Devices | Cases | Result |
+| --- | --- | --- | --- |
+| AIC/TSCM unsafe multi-K, `base_k=128`, `base_n=256`, one worker per NPU | 0-7 | default raw validator cases, `K=384..1024`, `N=256/512`, groups `32..128` | 0/8 pass; every worker raised `507015` AICore exception |
+
+Representative failure signature:
+
+| Device | Shape | Runtime error |
+| --- | --- | --- |
+| NPU0 | `rows=1,K=384,N=256,group=32` | `fftsplus aivector error`, `MPU address access is invalid` |
+| NPU1 | `rows=2,K=512,N=256,group=64` | `fftsplus aivector error`, `MPU address access is invalid` |
+| NPU7 | `rows=8,K=1024,N=512,group=32` | `fftsplus aivector error`, `MPU address access is invalid` |
+
+Interpretation: the mixed-launch lifecycle fix is necessary but not sufficient
+for the real AIC/TSCM compute loop. The failure appears in the AIVector side
+after entering the direct TSCM producer/consumer path, so the next re-test must
+first isolate TSCM address layout and cross-core flag reuse with a smaller
+ping-pong diagnostic before re-enabling multi-K production compute.

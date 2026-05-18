@@ -188,6 +188,17 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_cube_workspace_bytes(0);
     uint64_t tiling_key = GET_TPL_TILING_KEY(kCannoeLaunchModeAiv);
 
+#ifdef CANNOE_EXPERIMENTAL_MIXED_ENTRY_DIAGNOSTIC
+    tiling_key = GET_TPL_TILING_KEY(kCannoeLaunchModeMixedAicAiv);
+    tiling.set_cube_workspace_bytes(ClampU64ToU32(kCubeSysWorkspaceBytes));
+    size_t* workspaces = context->GetWorkspaceSizes(1);
+    if (workspaces == nullptr) {
+        return ge::GRAPH_FAILED;
+    }
+    workspaces[0] = static_cast<size_t>(kCubeSysWorkspaceBytes);
+#endif
+
+#ifndef CANNOE_EXPERIMENTAL_MIXED_ENTRY_DIAGNOSTIC
     if (AttrIsNegative(attrs, kAttrBaseN) != 0 && requested_base_n != 0 && requested_base_k != 0) {
         const uint32_t n_tiles = CeilDivU32(static_cast<uint32_t>(n64), requested_base_n);
         const uint32_t split_k = requested_split_k == 0 ? 1 : requested_split_k;
@@ -243,6 +254,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
             }
         }
     }
+#endif
 
     if (tiling_key == INVALID_TILING_KEY) {
         return ge::GRAPH_FAILED;
