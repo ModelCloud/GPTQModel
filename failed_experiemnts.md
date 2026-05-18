@@ -1275,3 +1275,35 @@ visibility test: the direct path faults before AIC can observe anything. The
 next fused-kernel attempt should be built around `REGIST_MATMUL_OBJ`/KFC or a
 Matmul-managed `TPosition::TSCM` input path so the AIC-side server owns the L1
 copy and synchronization.
+
+## 2026-05-18: Cannoe WQMM-style LCM-to-TSCM DataCopy probe
+
+Status: failed address-validity gate; do not copy from an isolated
+`TPosition::LCM` marker tile into raw `TPosition::TSCM` in Cannoe's generated
+`MIX_AIC_1_2` diagnostic.
+
+Tested change: after inspecting CANN 9.0.0-beta.2 built-in
+`weight_quant_batch_matmul_v2` for arch35, add a guarded probe that copied a
+1x16 FP16 marker tile from `LocalTensor<half>(TPosition::LCM, ...)` into
+`LocalTensor<half>(TPosition::TSCM, ...)` with regular `DataCopyParams`, then
+used `SyncAll<false>()` and AIC-side scalar reads. This matched the built-in
+WQMM style more closely than the previous `TBuf<TPosition::VECCALC>` source
+probe.
+
+Artifacts:
+
+- build package: `/tmp/cannoe_aic_tscm_lcm_datacopy_ws`
+- installed OPP: `/tmp/cannoe_aic_tscm_lcm_datacopy_ws/build_out/packages`
+- summary: `/tmp/cannoe_aic_tscm_lcm_datacopy_ws_summary.json`
+
+| Probe | Devices | Cases | Result |
+| --- | --- | --- | --- |
+| AIV `LCM` FP16 marker -> raw `TSCM` via `DataCopyParams`, `SyncAll`, AIC read | 0-7 | default raw validator cases, `K=384..1024`, `N=256/512`, groups `32..128` | 0/8 pass; every worker hit AIVector MPU invalid-address exception |
+
+Interpretation: the built-in WQMM source does use AIV antiquant into local
+buffers followed by L1/TSCM consumption by Cube, but that pattern is not
+portable as an isolated raw `LCM -> TSCM` copy inside Cannoe. Its working path
+also depends on WQMM's full L1 allocation scheme, TSCM offsets, `MatmulImpl`
+policy, and mode-4 flag choreography. Future work should either port a minimal
+WQMM-style basic block wholesale or call/benchmark `aclnnWeightQuantBatchMatmulV3`
+for supported formats, rather than continuing standalone raw TSCM copy probes.
