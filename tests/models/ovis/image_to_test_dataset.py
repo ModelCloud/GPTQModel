@@ -11,6 +11,7 @@ from gptqmodel.models.definitions.minicpmv import MiniCPMVQModel
 from gptqmodel.models.definitions.minicpmv_4_6 import MiniCPMV4_6QModel
 from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
+from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
 from gptqmodel.models.definitions.qwen3_vl import Qwen3_VLQModel
 
 
@@ -92,6 +93,9 @@ def get_calib_dataset(model):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
 
     if isinstance(model, Ovis2QModel):
+        return prepare_dataset(format_ovis2_dataset, n_sample=20)
+
+    if isinstance(model, Ovis2_5QModel):
         return prepare_dataset(format_ovis2_dataset, n_sample=20)
 
     if (

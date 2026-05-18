@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 05/18/2026 7.1.0-dev `main`: ✨ Added `ovis2_5` model support
 * 05/15/2026 7.1.0-dev `main`: ✨ Added `mimo_v2` model support
 * 05/13/2026 7.1.0-dev `main`: ✨ Added `minicpmv_4_6` and `DeepSeek V4` model support
 * 05/07/2026 7.1.0-dev `main`: ✨ Added `GLM-4.5V`, `GLM-4.6V`, `Zamba` and `Zamba2` model support
@@ -256,7 +257,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | DBRX Converted           | ✅ | GPT-2                           | ✅ | Llama 3.2 VL     | ✅ | Nemotron Ultra      | ✅ | TeleChat2               | ✅ |
 | Deci                     | ✅ | GPT-J                           | ✅ | Llama 4          | ✅ | OPT                 | ✅ | Trinity                 | ✅ |
 | DeepSeek-V2/V3/V4/R1        | ✅ | GPT-OSS                         | ✅ | LongCat Flash    | ✅ | OLMo2 / LLaDA2      | ✅ | Yi                      | ✅ |
-| DeepSeek-V2-Lite         | ✅ | Granite / Granite MoE           | ✅ | LongLLaMA        | ✅ | Ovis 1.6/2          | ✅ | Seed-OSS                | ✅ |
+| DeepSeek-V2-Lite         | ✅ | Granite / Granite MoE           | ✅ | LongLLaMA        | ✅ | Ovis 1.6/2/2.5          | ✅ | Seed-OSS                | ✅ |
 | Dream                    | ✅ | GRIN-MoE                        | ✅ | Instella         | ✅ | Phi 1-4             | ✅ | Voxtral                 | ✅ |
 | ERNIE 4.5 / MoE / VL MoE | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V/V 4_6 | ✅ | PanGu-α                 | ✅ |
 | XVERSE                   | ✅ | Brumby                          | ✅ | Hymba            | ✅ | Mistral             | ✅ | Qwen 1/2/3/3.5          | ✅ |
