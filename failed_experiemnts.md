@@ -1600,3 +1600,55 @@ Interpretation: `base_k=64` is both slower and numerically unsafe for q/gate.
 kernel is still dominated by per-K-tile C materialization and remains far
 behind the native CANN path. Do not enable the fused prototype for large Qwen
 shapes by tiling alone.
+
+## 2026-05-18: Cannoe AIC/TSCM Unsafe Runtime After Word-Vector Fix
+
+Status: still failed runtime-safety gate. The direct AIV producer / AIC
+consumer path remains unsafe even after disabling the per-word vector dequant
+helper.
+
+Tested package: `/tmp/cannoe_aic_tscm_unsafe_no_word_vector_ws`
+
+Artifact: `/tmp/cannoe_aic_tscm_unsafe_no_word_vector_all8_summary.json`
+
+| Probe | Devices/Cases | Result |
+| --- | --- | --- |
+| `aic-tscm-unsafe-runtime`, raw validator | all 8 default raw cases | 0/8 pass; every worker returned code 2 with runtime error `507015` |
+
+Representative device error:
+
+- `fftsplus aivector error`
+- D-cache to UB bus response was non-zero
+- `rtDeviceSynchronizeWithTimeout` reported an AICore exception
+
+Interpretation: the older AIC/TSCM unsafe failures were not just the
+per-packed-word vector helper corrupting B. The explicit AIV/AIC TSCM path has
+a separate memory/lifetime fault in its AIV-side data movement or cross-core
+handoff. Keep it behind unsafe/debug flags.
+
+## 2026-05-18: Cannoe Sync Iterate plus Final GetTensorC
+
+Status: failed liveness gate; do not replace per-K-tile `IterateAll` with
+synchronous `Iterate(enPartialSum)` plus one final `GetTensorC` in the current
+TSCM direct local-A path.
+
+Tested change: a temporary guarded build strategy,
+`tscm-sync-iterate-get-c`, used `Matmul::Iterate<true>(k_tile != 0)` for
+single-M-tile shapes and called `GetTensorC<true>` only after the final K tile.
+The code was removed after validation failed.
+
+Tested package: `/tmp/cannoe_tscm_sync_iterate_get_c_ws`
+
+Artifact: `/tmp/cannoe_tscm_sync_iterate_get_c_all8_summary.json`
+
+| Probe | Devices/Cases | Result |
+| --- | --- | --- |
+| Sync `Iterate(enPartialSum)` plus final `GetTensorC` | all 8 default raw cases | 0/8 pass; every worker timed out at 120s with no stderr |
+
+Discovery: `IterateAll(gm, ...)` does not expose partial-sum accumulation; its
+first argument after `gm` is `enAtomic`. Passing `k_tile != 0` there asks CANN
+to write partial C through GM with atomics, which explains why the current
+fused prototype is slow for large reductions. However, the public KFC Matmul
+client's synchronous `Iterate` choreography did not make progress in this
+mixed TSCM setup, so the next no-GM-partial path still needs a lower-level Cube
+implementation or a much smaller `Iterate` lifecycle diagnostic.

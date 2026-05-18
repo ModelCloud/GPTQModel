@@ -645,6 +645,13 @@ real speed step should move accumulation to a lower-level Cube path that can
 keep partial sums in Cube-local storage instead of materializing partial C in
 GM/L2 after every K tile.
 
+One important API detail: `Matmul::IterateAll(gm, ...)` does not take a
+partial-sum flag. Its first argument after `gm` is `enAtomic`, so using
+`k_tile != 0` there still writes partial C through GM rather than accumulating
+in CO1. A guarded synchronous `Iterate(enPartialSum)` plus final `GetTensorC`
+probe compiled, but all eight raw validator workers timed out at 120 seconds.
+That keeps lower-level Cube/L0C control as the active target.
+
 ## Sources
 
 - Local 910B notes: `hw/ascend_910b.md`
