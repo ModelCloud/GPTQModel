@@ -18,6 +18,7 @@ from .dbrx_converted import DbrxConvertedQModel
 from .decilm import DeciLMQModel
 from .deepseek_v2 import DeepSeekV2QModel
 from .deepseek_v3 import DeepSeekV3QModel
+from .deepseek_v4 import DeepSeekV4QModel
 from .dots1 import Dots1QModel
 from .dream import DreamQModel
 from .exaone import ExaOneQModel
@@ -51,6 +52,7 @@ from .minicpm_o import MiniCPMOQModel
 from .minicpmv import MiniCPMVQModel
 from .minicpmv_4_6 import MiniCPMV4_6QModel
 from .minimax_m2 import MiniMaxM2GPTQ
+from .mimo_v2 import MimoV2QModel
 from .mixtral import MixtralQModel
 from .mllama import MLlamaQModel
 from .mobilellm import MobileLLMQModel

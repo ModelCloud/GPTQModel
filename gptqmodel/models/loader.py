@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import numpy as np
 import os
+import shutil
 import time
 import torch
 import transformers
@@ -115,6 +116,47 @@ def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
     return False
 
 
+def _iter_nested_pretrained_configs(config: PretrainedConfig):
+    """Yield config and all nested PretrainedConfig nodes once."""
+
+    stack = [config]
+    visited = set()
+
+    while stack:
+        cur = stack.pop()
+        if not isinstance(cur, PretrainedConfig):
+            continue
+
+        node_id = id(cur)
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        yield cur
+
+        for value in vars(cur).values():
+            if isinstance(value, PretrainedConfig):
+                stack.append(value)
+            elif isinstance(value, dict):
+                for sub in value.values():
+                    if isinstance(sub, PretrainedConfig):
+                        stack.append(sub)
+            elif isinstance(value, (list, tuple, set)):
+                for sub in value:
+                    if isinstance(sub, PretrainedConfig):
+                        stack.append(sub)
+
+
+def _override_attn_implementation(config: PretrainedConfig, attn_implementation: str) -> None:
+    """Apply attention implementation override to root and nested configs."""
+
+    for sub_config in _iter_nested_pretrained_configs(config):
+        try:
+            sub_config._attn_implementation = attn_implementation
+        except Exception:
+            # Some remote configs may expose read-only wrappers; ignore safely.
+            pass
+
+
 def _is_accelerated_attention_device(device: object) -> bool:
     """Return True when the selected device can run CUDA/ROCm flash attention."""
 
@@ -195,6 +237,43 @@ def _is_meta_shell_build_error(exc: Exception) -> bool:
     # during __init__, which breaks when the shell is built on the meta device.
     message = str(exc)
     return "cannot be called on meta tensors" in message and ".item()" in message
+
+
+def _is_broken_transformers_dynamic_module_error(exc: Exception) -> bool:
+    if not isinstance(exc, FileNotFoundError):
+        return False
+    missing_path = str(getattr(exc, "filename", "") or exc)
+    return "transformers_modules" in missing_path and missing_path.endswith(".py")
+
+
+def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_path: str, **kwargs):
+    try:
+        return loader.from_pretrained(model_local_path, **kwargs)
+    except Exception as exc:
+        if not _is_broken_transformers_dynamic_module_error(exc):
+            raise
+
+        missing_path = str(getattr(exc, "filename", "") or "")
+        missing_name = os.path.basename(missing_path)
+        source_path = os.path.join(model_local_path, missing_name)
+        if missing_path and os.path.isfile(source_path):
+            os.makedirs(os.path.dirname(missing_path), exist_ok=True)
+            shutil.copy2(source_path, missing_path)
+            log.warn(
+                "Loader: repaired missing dynamic-module file by copying `%s` -> `%s`.",
+                source_path,
+                missing_path,
+            )
+
+        retry_kwargs = dict(kwargs)
+        retry_kwargs["force_download"] = True
+        log.warn(
+            "Loader: detected broken transformers dynamic-module cache while loading `%s`; "
+            "retrying once with force_download=True: %s",
+            model_local_path,
+            exc,
+        )
+        return loader.from_pretrained(model_local_path, **retry_kwargs)
 
 
 def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
@@ -458,7 +537,7 @@ def ModelLoader(cls):
 
         if atten_impl is not None and atten_impl != "auto":
             log.info(f"Loader: overriding attn_implementation in config to `{atten_impl}`")
-            config._attn_implementation = atten_impl
+            _override_attn_implementation(config, atten_impl)
 
         resolved_device = normalize_device_device_map(device, device_map)
         resolved_device = auto_select_device(resolved_device, backend)
@@ -536,7 +615,12 @@ def ModelLoader(cls):
                 hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
                 log.info("Loader: Auto enabling flash_attention_2 for dense Bonsai PROFILE.%s.", effective_profile.name)
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
-            model = cls.loader.from_pretrained(model_local_path, config=config, **hf_model_init_kwargs)
+            model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                cls.loader,
+                model_local_path,
+                config=config,
+                **hf_model_init_kwargs,
+            )
             model._model_init_kwargs = hf_model_init_kwargs
             _maybe_print_module_tree(model=model)
 
@@ -634,7 +718,8 @@ def ModelLoader(cls):
                 fallback_init_kwargs = model_init_kwargs_without_internal.copy()
                 fallback_init_kwargs.pop("device_map", None)
                 fallback_init_kwargs["low_cpu_mem_usage"] = False
-                model = cls.loader.from_pretrained(
+                model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                    cls.loader,
                     model_local_path,
                     config=config,
                     **fallback_init_kwargs,
@@ -674,7 +759,8 @@ def ModelLoader(cls):
                 )
         else:
             log.info("Loader: loading model directly to CPU (not using meta device or turtle_model)")
-            model = cls.loader.from_pretrained(
+            model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                cls.loader,
                 model_local_path,
                 config=config,
                 **model_init_kwargs_without_internal,
