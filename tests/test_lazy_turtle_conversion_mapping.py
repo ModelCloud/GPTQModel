@@ -12,6 +12,7 @@ from torch import nn
 
 from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ
 from gptqmodel.models.definitions.mixtral import MixtralQModel
+from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel
@@ -275,6 +276,34 @@ def _assert_gemma3_shell_vision_alias_resolution(turtle: LazyTurtle) -> None:
             "patch_embedding.weight",
         )
         == "vision_tower.vision_model.embeddings.patch_embedding.weight"
+    )
+
+
+def _assert_ovis_shell_vision_alias_resolution(turtle: LazyTurtle) -> None:
+    assert (
+        turtle._resolve_checkpoint_module_path("visual_tokenizer.backbone.head")
+        == "visual_tokenizer.backbone.vision_model.head"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "visual_tokenizer",
+            "backbone.head.mlp.fc1.weight",
+        )
+        == "visual_tokenizer.backbone.vision_model.head.mlp.fc1.weight"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "visual_tokenizer.backbone",
+            "head.mlp.fc1.weight",
+        )
+        == "visual_tokenizer.backbone.vision_model.head.mlp.fc1.weight"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "visual_tokenizer",
+            "backbone.embeddings.patch_embedding.weight",
+        )
+        == "visual_tokenizer.backbone.vision_model.embeddings.patch_embedding.weight"
     )
 
 
@@ -690,6 +719,28 @@ def test_gemma3_definition_hf_conversion_map_reversed_fixes_shell_vision_paths(t
     )
     assert resolved_hf_again is not None
     assert resolved_hf_again[0].source_patterns[0] == r"^model\.vision_tower\.(?!vision_model\.)(.+)$"
+
+
+def test_ovis_definition_hf_conversion_map_reversed_fixes_shell_vision_paths(tmp_path):
+    resolved_hf = OvisQModel.resolve_hf_conversion_map_reversed()
+
+    assert resolved_hf is not None
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "visual_tokenizer.backbone.vision_model.head.mlp.fc1.weight": torch.zeros(2, 2),
+            "visual_tokenizer.backbone.vision_model.embeddings.patch_embedding.weight": torch.zeros(2, 2),
+        },
+        hf_conversion_map_reversed=resolved_hf,
+    )
+
+    _assert_ovis_shell_vision_alias_resolution(turtle)
+
+    resolved_hf[0].source_patterns[0] = r"^mutated\.runtime\.(.+)$"
+    resolved_hf_again = OvisQModel.resolve_hf_conversion_map_reversed()
+    assert resolved_hf_again is not None
+    assert resolved_hf_again[0].source_patterns[0] == r"^visual_tokenizer\.backbone\.(?!vision_model\.)(.+)$"
 
 
 def test_lazy_turtle_keeps_module_tree_alias_resolution_for_mixtral(tmp_path):
