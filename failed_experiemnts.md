@@ -1443,3 +1443,45 @@ key. The follow-up fix moved `clearWorkspace` behind `ASCEND_IS_AIC` and made
 AIV wait on `WORKSPACE_SYNC_ID` before Matmul registration; that variant passed
 on all eight NPUs. Keep the AIC-owned workspace event choreography for every
 mixed Cube path.
+
+## 2026-05-18: Cannoe TSCM Direct Handoff Subpaths Before Local-A Fix
+
+Status: failed correctness/liveness gates; do not use these intermediate TSCM
+handoff variants.
+
+Tested changes after the mixed Matmul workspace-sync fix:
+
+- `tscm-direct-multik` with `SetTensorB(b_tscm_tile, true)`.
+- Staged GM-to-TSCM single-K runtime handoff at `K=384,base_k=384` and at
+  `K=128,base_k=128`.
+- `tscm-direct-multik` with `SetTensorB(b_tscm_tile, false)` but GM A input.
+- `tscm-direct-local-a` with row-wise `DataCopy` A fill enabled for
+  `rows=8,K>=1024`.
+
+Artifacts:
+
+- direct TSCM package: `/tmp/cannoe_tscm_direct_wait_ws`
+- staged TSCM package: `/tmp/cannoe_tscm_staged_wait_ws`
+- non-transposed B package: `/tmp/cannoe_tscm_direct_b_notrans_ws`
+- first local-A package: `/tmp/cannoe_tscm_direct_local_a_ws`
+- summaries: `/tmp/cannoe_tscm_direct_wait_summary.json`,
+  `/tmp/cannoe_tscm_staged_k384_summary.json`,
+  `/tmp/cannoe_tscm_staged_k128_summary.json`,
+  `/tmp/cannoe_tscm_direct_b_notrans_summary.json`,
+  `/tmp/cannoe_tscm_notrans_isolate_summary.json`,
+  `/tmp/cannoe_tscm_direct_local_a_summary.json`
+
+| Probe | Devices/Cases | Result |
+| --- | --- | --- |
+| Direct TSCM with transposed B handoff | all 8 default raw cases | 0/8 pass; `max_abs` roughly `9.27..23.84`, `mean_abs` roughly `2.80..4.71` |
+| Staged GM-to-TSCM single-K | NPU0, `K=384` and `K=128` single cases | both timed out with no stderr |
+| Direct TSCM with non-transposed B and GM A | all 8 default raw cases | only `rows=1,K=384,N=256` passed; M>1 failed due GM A row stride mismatch |
+| Non-transposed B isolate | `rows=1,K=512,N=256` and `rows=1,K=1024,N=512` | both passed, confirming B handoff should be non-transposed |
+| TSCM local-A with row-wise A `DataCopy` | all 8 default raw cases | 6/8 pass; both `rows=8,K=1024,N=512` cases failed |
+
+Interpretation: TSCM B must be handed to Matmul as non-transposed, and GM A is
+not valid for M>1 because the live K tile has row stride `base_k` while the GM
+activation tensor has row stride full `K`. Staging A into VECOUT fixes that
+stride contract. For TSCM-local-A, keep scalar A fill for the row-8 large-K
+cases; the row-wise `DataCopy` shortcut that works for VecOut local-B caused
+the two `K=1024,N=512` TSCM-local-A cases to fail.

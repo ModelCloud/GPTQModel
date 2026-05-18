@@ -36,6 +36,9 @@ CANNOE_PUBLIC_STRATEGIES: dict[str, tuple[str, ...]] = {
     "tscm-direct-multik": (
         "experimental_tscm_direct_multik",
     ),
+    "tscm-direct-local-a": (
+        "experimental_tscm_local_a",
+    ),
     "aic-tscm-handoff": (
         "experimental_aic_tscm_handoff",
     ),
@@ -100,6 +103,9 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         args.experimental_vecout_consumer = True
         args.experimental_mixed_launch = True
     if args.experimental_tscm_direct_multik:
+        args.experimental_tscm_direct_dequant = True
+    if args.experimental_tscm_local_a:
+        args.experimental_tscm_direct_multik = True
         args.experimental_tscm_direct_dequant = True
     if args.experimental_aic_tscm_handoff:
         args.experimental_tscm_direct_multik = True
@@ -539,6 +545,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--experimental-tscm-local-a",
+        action="store_true",
+        help=(
+            "Compile the TSCM direct multi-K probe with the live A tile staged into VECOUT before "
+            "Matmul. This preserves the correct row stride for M>1 while keeping B in TSCM/NZ."
+        ),
+    )
+    parser.add_argument(
         "--experimental-tscm-tbuf-handoff",
         action="store_true",
         help=(
@@ -683,6 +697,8 @@ def main() -> int:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
     if args.experimental_tscm_direct_multik:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
+    if args.experimental_tscm_local_a:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_LOCAL_A")
     if args.experimental_tscm_tbuf_handoff:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF")
     if args.experimental_aic_tscm_handoff:

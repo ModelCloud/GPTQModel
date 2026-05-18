@@ -97,6 +97,10 @@ using CannoeAscendInt4 = AscendC::int4b_t;
 #error "CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A requires VecOut runtime handoff"
 #endif
 
+#if defined(CANNOE_EXPERIMENTAL_TSCM_LOCAL_A) && !defined(CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK)
+#error "CANNOE_EXPERIMENTAL_TSCM_LOCAL_A requires TSCM direct multi-K"
+#endif
+
 #if defined(CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT) && !defined(CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A)
 #error "CANNOE_EXPERIMENTAL_VECOUT_TILE_CAST_DEQUANT requires VecOut local-A handoff"
 #endif
@@ -134,6 +138,10 @@ using CannoeAscendInt4 = AscendC::int4b_t;
 #define CANNOE_EXPERIMENTAL_LOCAL_DIRECT_MULTIK 1
 #endif
 
+#if defined(CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A) || defined(CANNOE_EXPERIMENTAL_TSCM_LOCAL_A)
+#define CANNOE_EXPERIMENTAL_LOCAL_A_TILE 1
+#endif
+
 namespace {
 #ifdef CANNOE_EXPERIMENTAL_STAGED_DEQUANT
 constexpr uint32_t kKernelModeStagedDequant = 1;
@@ -158,7 +166,7 @@ struct CannoeMatmulL1GmType : MatmulType<Position, Format, Type, IsTrans, Layout
 #ifdef CANNOE_EXPERIMENTAL_CUBE_CONSUMER
 class CannoeW4A16CubeConsumerProbe {
 public:
-#ifdef CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A
+#ifdef CANNOE_EXPERIMENTAL_LOCAL_A_TILE
     using AType = MatmulType<TPosition::VECOUT, CubeFormat::ND, half>;
 #else
     using AType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
@@ -204,6 +212,9 @@ public:
 #endif
 #ifdef CANNOE_EXPERIMENTAL_LOCAL_DIRECT_DEQUANT
         direct_dequant_ready_ = pipe.InitBuffer(b_ub_, base_k * base_n * sizeof(half));
+#endif
+#ifdef CANNOE_EXPERIMENTAL_TSCM_LOCAL_A
+        local_a_ready_ = pipe.InitBuffer(a_ub_, tiling->base_m * base_k * sizeof(half));
 #endif
         return tscm_ready_;
     }
@@ -288,6 +299,18 @@ public:
     }
 #endif
 
+#ifdef CANNOE_EXPERIMENTAL_TSCM_LOCAL_A
+    __aicore__ inline LocalTensor<half> GetLocalATile(const CannoeW4A16MatmulTilingData* tiling)
+    {
+        return a_ub_.Get<half>(tiling->base_m * tiling->base_k);
+    }
+
+    __aicore__ inline bool LocalAReady() const
+    {
+        return local_a_ready_;
+    }
+#endif
+
     __aicore__ inline void SetTensorBTscmProbe(const LocalTensor<half>& b_tile)
     {
         mm.SetTensorB(b_tile, true);
@@ -336,6 +359,10 @@ private:
 #ifdef CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT
     TBuf<TPosition::VECCALC> b_ub_;
     bool direct_dequant_ready_ = false;
+#endif
+#ifdef CANNOE_EXPERIMENTAL_TSCM_LOCAL_A
+    TBuf<TPosition::VECOUT> a_ub_;
+    bool local_a_ready_ = false;
 #endif
 #endif
 
@@ -606,6 +633,12 @@ public:
         const uint32_t tile_elements = tiling_->staging_tile_bytes / sizeof(half);
         const uint32_t packed_stride = out_features >> 3;
         const uint32_t m_tiles = CeilDivU32(rows, base_m);
+#ifdef CANNOE_EXPERIMENTAL_TSCM_LOCAL_A
+        if (!cube_probe.LocalAReady()) {
+            return false;
+        }
+        LocalTensor<half> direct_a_tile = cube_probe.GetLocalATile(tiling_);
+#endif
         for (uint32_t n_tile = core_idx; n_tile < n_tiles; n_tile += staging_blocks) {
             const uint32_t slot = (n_tile / staging_blocks) % staging_slots;
             const uint32_t n_begin = n_tile * base_n;
@@ -633,8 +666,14 @@ public:
                         const uint32_t m_begin = m_tile * base_m;
                         const uint32_t m_len_candidate = rows - m_begin;
                         const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
+#ifdef CANNOE_EXPERIMENTAL_TSCM_LOCAL_A
+                        FillDirectATile(direct_a_tile, m_begin, m_len, k_begin, tiling_->base_k, in_features);
+                        PipeBarrier<PIPE_ALL>();
+                        cube_probe.mm.SetTensorA(direct_a_tile);
+#else
                         cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features + k_begin]);
-                        cube_probe.mm.SetTensorB(b_tscm_tile, true);
+#endif
+                        cube_probe.mm.SetTensorB(b_tscm_tile, false);
                         cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                         ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
                         cube_probe.mm.IterateAll<false>(
@@ -679,8 +718,14 @@ public:
                         const uint32_t m_begin = m_tile * base_m;
                         const uint32_t m_len_candidate = rows - m_begin;
                         const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
+#ifdef CANNOE_EXPERIMENTAL_TSCM_LOCAL_A
+                        FillDirectATile(direct_a_tile, m_begin, m_len, k_begin, tiling_->base_k, in_features);
+                        PipeBarrier<PIPE_ALL>();
+                        cube_probe.mm.SetTensorA(direct_a_tile);
+#else
                         cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features + k_begin]);
-                        cube_probe.mm.SetTensorB(b_tscm_tile, true);
+#endif
+                        cube_probe.mm.SetTensorB(b_tscm_tile, false);
                         cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                         ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
                         cube_probe.mm.IterateAll<false>(
@@ -725,7 +770,7 @@ public:
                 const uint32_t m_len_candidate = rows - m_begin;
                 const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
                 cube_probe.mm.SetTensorA(x_gm_[m_begin * in_features]);
-                cube_probe.mm.SetTensorB(b_tscm_tile, true);
+                cube_probe.mm.SetTensorB(b_tscm_tile, false);
                 cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
                 ConfigureCubeBiasForKTile(cube_probe, 0, n_begin);
                 cube_probe.mm.IterateAll<false>(y_gm_[m_begin * out_features + n_begin], false, false, true);
@@ -1327,7 +1372,7 @@ private:
 
 #ifdef CANNOE_EXPERIMENTAL_STAGED_DEQUANT
 #ifdef CANNOE_EXPERIMENTAL_LOCAL_DIRECT_DEQUANT
-#ifdef CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A
+#ifdef CANNOE_EXPERIMENTAL_LOCAL_A_TILE
     __aicore__ inline void FillDirectATile(
         LocalTensor<half>& a_tile,
         uint32_t m_begin,
@@ -1336,6 +1381,7 @@ private:
         uint32_t base_k,
         uint32_t in_features)
     {
+#ifdef CANNOE_EXPERIMENTAL_VECOUT_LOCAL_A
         // Row-wise DataCopy wins on medium/larger local-A tiles and row-8 large-K tiles.
         if (tiling_->rows >= 16 || (tiling_->rows == 8 && in_features >= 1024)) {
             for (uint32_t m = 0; m < m_len; ++m) {
@@ -1345,6 +1391,7 @@ private:
             }
             return;
         }
+#endif
         for (uint32_t m = 0; m < m_len; ++m) {
             const uint32_t src_base = (m_begin + m) * in_features + k_begin;
             const uint32_t dst_base = m * base_k;

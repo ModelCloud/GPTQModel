@@ -397,6 +397,14 @@ positive-`base_k` fallback shape.
   `mean_abs=0.0024566650390625`. This restores repeatable fused local-A
   execution; the remaining target is replacing the VecOut local-B path with a
   true TSCM/NZ dequant-to-Cube handoff.
+- `--strategy tscm-direct-local-a` is the first all-8 passing direct
+  dequant-to-TSCM/NZ-to-Cube path. The key fixes were using a non-transposed
+  TSCM B handoff, staging the live A tile into VECOUT so row stride is `base_k`
+  instead of full `K`, and using scalar A fill for the TSCM-local-A variant.
+  Validation passed with min/mean/max `2.246633/4.456605/8.655868 ms`, worst
+  `max_abs=0.015625`, and worst `mean_abs=0.0024566650390625`. This is
+  structurally closer to the final kernel than VecOut local-B, but not yet
+  faster.
 
 ## aclnn V3 Probe
 
