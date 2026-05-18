@@ -405,6 +405,12 @@ positive-`base_k` fallback shape.
   `max_abs=0.015625`, and worst `mean_abs=0.0024566650390625`. This is
   structurally closer to the final kernel than VecOut local-B, but not yet
   faster.
+- The existing planner-shaped `base_n` policy is better for TSCM-local-A than
+  a fixed `base_n=256`: use `base_n=128` for the six validated smaller cases
+  and keep `base_n=256` for the two `rows=8,K=1024,N=512` cases. The hybrid
+  all-8 sweep passed with min/mean/max `1.144248/3.161435/8.643608 ms`, making
+  the true TSCM/NZ handoff faster than the fixed-256 VecOut/local-A sweep
+  (`3.515399 ms` mean) on this raw case set while preserving the same drift.
 
 ## aclnn V3 Probe
 

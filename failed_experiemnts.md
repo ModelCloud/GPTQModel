@@ -1485,3 +1485,25 @@ activation tensor has row stride full `K`. Staging A into VECOUT fixes that
 stride contract. For TSCM-local-A, keep scalar A fill for the row-8 large-K
 cases; the row-wise `DataCopy` shortcut that works for VecOut local-B caused
 the two `K=1024,N=512` TSCM-local-A cases to fail.
+
+## 2026-05-18: Cannoe TSCM Local-A Oversized Tile Probes
+
+Status: failed stability gates; keep TSCM-local-A at `base_k=128`, and do not
+use `base_n=128` for the `rows=8,K=1024,N=512` cases.
+
+Artifacts:
+
+- package: `/tmp/cannoe_tscm_direct_local_a_scalar_ws`
+- base-k summary: `/tmp/cannoe_tscm_direct_local_a_bk256_summary.json`
+- base-n summary: `/tmp/cannoe_tscm_direct_local_a_bn128_summary.json`
+
+| Probe | Devices/Cases | Result |
+| --- | --- | --- |
+| `base_k=256,base_n=256` | all 8 default raw cases | failed; several AIC/AIV exceptions, including MTE write-address out-of-range and D-cache-to-UB bus errors, then remaining workers timed out |
+| `base_k=128,base_n=128` | all 8 default raw cases | 6/8 pass and much faster for those six; both `rows=8,K=1024,N=512` cases failed with AIC illegal-instruction/UUB alignment errors |
+
+Interpretation: the useful gate is hybrid tiling, not a larger universal tile.
+Use `base_n=128` for the validated smaller/default TSCM-local-A shapes and
+fall back to `base_n=256` for `rows=8,K=1024,N=512`. Do not raise `base_k`
+above 128 on this path until the TSCM/L0B address contract is better
+understood.
