@@ -556,6 +556,24 @@ def test_awq_chunked_scale_loss_matches_legacy_expression():
     assert chunk_elements == expected_diff.numel()
 
 
+def test_awq_clip_error_sentinel_avoids_ones_like_multiply(monkeypatch):
+    tensors = [
+        torch.randn(2, 1, 3, 1, dtype=torch.float16).abs(),
+        torch.randn(2, 1, 3, 1, dtype=torch.bfloat16).abs(),
+        torch.randn(2, 1, 3, 1, dtype=torch.float32).abs(),
+    ]
+    expected = [torch.ones_like(tensor) * 1e9 for tensor in tensors]
+
+    def _reject_ones_like(*args, **kwargs):
+        raise AssertionError("clip error sentinel should not allocate a ones_like tensor")
+
+    monkeypatch.setattr(torch, "ones_like", _reject_ones_like)
+
+    for tensor, expected_tensor in zip(tensors, expected):
+        actual = AWQProcessor._initial_awq_clip_errors_like(tensor)
+        torch.testing.assert_close(actual, expected_tensor, atol=0, rtol=0)
+
+
 def test_awq_legacy_eager_loss_matches_chunked_expression():
     torch.manual_seed(0)
 

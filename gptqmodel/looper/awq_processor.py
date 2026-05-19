@@ -1509,6 +1509,17 @@ class AWQProcessor(LoopProcessor):
 
         return clip_list
 
+    @staticmethod
+    def _initial_awq_clip_errors_like(org_max_val: torch.Tensor) -> torch.Tensor:
+        """Create AWQ clip-search error sentinels without a ones-like multiply."""
+
+        min_errs = torch.empty_like(org_max_val)
+        # The legacy `ones_like(...)*1e9` expression overflows fp16 to inf.
+        # Preserve that sentinel exactly while avoiding the temporary ones tensor.
+        sentinel = float("inf") if org_max_val.dtype == torch.float16 else 1e9
+        min_errs.fill_(sentinel)
+        return min_errs
+
     @torch.inference_mode()
     def _compute_best_clip(
             self,
@@ -1558,7 +1569,7 @@ class AWQProcessor(LoopProcessor):
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
             best_max_val = org_max_val.clone()
-            min_errs = torch.ones_like(org_max_val) * 1e9
+            min_errs = self._initial_awq_clip_errors_like(org_max_val)
             clamp_slice = scratch_clamp[: w.shape[0]]
             quant_slice = scratch_quant[: w.shape[0]]
 
