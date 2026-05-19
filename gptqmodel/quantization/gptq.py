@@ -1737,8 +1737,11 @@ class GPTQ:
                     q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                     Q1[:, i] = q
                     if Hinv is not None:
-                        loss_sum.add_(torch.sum((w - q) ** 2 / d**2) / 2)
-                        err1 = (w - q) / d
+                        # Reuse the exact same column diff for loss reporting
+                        # and GPTQ error feedback instead of recomputing w - q.
+                        diff = w - q
+                        loss_sum.add_(torch.sum(diff ** 2 / d**2) / 2)
+                        err1 = diff / d
                         W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                         Err1[:, i] = err1
 
