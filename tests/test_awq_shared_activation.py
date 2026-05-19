@@ -238,11 +238,14 @@ def test_awq_activation_x_mean_toggle_serializes_as_process_config():
         quant_method=METHOD.AWQ,
         format=FORMAT.GEMM,
         enable_activation_x_mean_cache=False,
+        scale_search_gpu_weight_restore=False,
     )
     assert qcfg.enable_activation_x_mean_cache is False
+    assert qcfg.scale_search_gpu_weight_restore is False
 
     restored = QuantizeConfig.from_quant_config(qcfg.to_dict())
     assert restored.enable_activation_x_mean_cache is False
+    assert restored.scale_search_gpu_weight_restore is False
 
 
 @pytest.mark.cuda

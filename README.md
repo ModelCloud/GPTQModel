@@ -222,6 +222,8 @@ GPT-QModel deduplicates selected calibration-time work for same-input module gro
 
 Both paths are enabled by default and can be disabled through process-level quantization config: `GPTQConfig(enable_shared_hessian_cache=False)` or `AWQConfig(enable_activation_x_mean_cache=False)`.
 
+AWQ scale search also keeps pristine restore weights on GPU when free-memory headroom allows, avoiding repeated CPU-to-GPU restores during the ratio grid. Disable this speed path with `AWQConfig(scale_search_gpu_weight_restore=False)` for low-VRAM A/B runs.
+
 See [Quantization Runtime Sharing](docs/quantization_runtime_sharing.md) for implementation notes and regression test coverage.
 
 ## Features

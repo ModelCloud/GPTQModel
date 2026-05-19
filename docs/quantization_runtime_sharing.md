@@ -57,6 +57,14 @@ The main implementation points are:
 - `gptqmodel/quantization/config.py`: exposes `enable_activation_x_mean_cache`, enabled by default on `AWQConfig`
 - `tests/test_awq_shared_activation.py`: validates CPU copy dedupe, CUDA capture-to-CPU dedupe on GPU 6/7 by default, `x_mean` reuse, variable-length no-alias behavior, disabled-cache behavior, and exact enabled/disabled activation math
 
+## AWQ Scale-Search Weight Restore
+
+AWQ evaluates a grid of candidate scales. Each candidate temporarily mutates the inspected linear weights, pseudo-quantizes them in place, scores reconstruction loss, and then restores the original weights before the next ratio.
+
+GPT-QModel keeps a pristine master weight copy for that restore step. By default, `AWQConfig(scale_search_gpu_weight_restore=True)` keeps the master copy on GPU when free-memory headroom is sufficient, avoiding repeated CPU-to-GPU restores across the ratio grid. If headroom is low, or if the toggle is disabled, the processor uses the lower-VRAM CPU master-copy path.
+
+This optimization does not change AWQ search math: it only changes where the pristine restore copy lives.
+
 ## Operational Notes
 
 These optimizations are enabled by default and scoped to one subset/layer lifecycle. They are released by `cleanup_subset()` to avoid retaining large calibration tensors after worker processing.
@@ -65,8 +73,9 @@ Use process-level quantization config to disable a sharing path for A/B validati
 
 - `GPTQConfig(enable_shared_hessian_cache=False)`
 - `AWQConfig(enable_activation_x_mean_cache=False)`
+- `AWQConfig(scale_search_gpu_weight_restore=False)`
 
-Disabling either toggle restores the original per-module work path without changing the quantization algorithm.
+Disabling any toggle restores the corresponding lower-sharing or lower-VRAM path without changing the quantization algorithm.
 
 Use the exposed test counters when benchmarking or debugging:
 

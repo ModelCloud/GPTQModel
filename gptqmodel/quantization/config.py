@@ -2878,6 +2878,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_channel_scale_clamp_min": "opt_channel_scale_clamp_min",
             "opt_channel_scale_clamp_max": "opt_channel_scale_clamp_max",
             "scale_search_chunked_activations": "scale_search_chunked_activations",
+            "scale_search_gpu_weight_restore": "scale_search_gpu_weight_restore",
             "enable_shared_hessian_cache": "enable_shared_hessian_cache",
             "enable_activation_x_mean_cache": "enable_activation_x_mean_cache",
         }
@@ -3223,6 +3224,12 @@ class AWQConfig(PreProcessorConfig):
             "help": "Share same-input AWQ activation CPU captures and chunked activation x-mean reductions within one processor subset."
         },
     )
+    scale_search_gpu_weight_restore: bool = field(
+        default=True,
+        metadata={
+            "help": "Keep AWQ scale-search restore weights on GPU when there is enough free device memory; otherwise fall back to CPU restore."
+        },
+    )
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.AWQ,)
@@ -3252,6 +3259,7 @@ class AWQConfig(PreProcessorConfig):
         super()._update_meta_payload(meta_payload)
         meta_payload["scale_search_chunked_activations"] = self.scale_search_chunked_activations
         meta_payload["enable_activation_x_mean_cache"] = self.enable_activation_x_mean_cache
+        meta_payload["scale_search_gpu_weight_restore"] = self.scale_search_gpu_weight_restore
 
 
 @dataclass

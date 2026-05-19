@@ -1659,6 +1659,49 @@ class AWQProcessor(LoopProcessor):
             dst_view.mul_(scales)
 
 
+    def _select_awq_weight_restore_device(
+        self,
+        device: torch.device,
+        linears2scale: List[nn.Linear],
+    ) -> torch.device:
+        """Choose where AWQ scale search keeps pristine restore weights."""
+
+        if not getattr(self.qcfg, "scale_search_gpu_weight_restore", True):
+            return torch.device(CPU)
+
+        device = torch.device(device)
+        if device.type != "cuda" or not torch.cuda.is_available():
+            return torch.device(CPU)
+
+        required_bytes = sum(
+            fc.weight.numel() * fc.weight.element_size()
+            for fc in linears2scale
+        )
+        if required_bytes <= 0:
+            return torch.device(CPU)
+
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        except Exception:
+            return device
+
+        # Keep enough slack for the active module weights, temporary quantized
+        # outputs, and allocator fragmentation. If that headroom is unavailable,
+        # prefer the existing CPU restore path over risking an OOM.
+        reserve_bytes = max(required_bytes, int(total_bytes * 0.05), 512 << 20)
+        if free_bytes >= required_bytes + reserve_bytes:
+            return device
+        return torch.device(CPU)
+
+    @staticmethod
+    def _restore_awq_weight_from_master(fc: nn.Linear, master_weight: torch.Tensor) -> None:
+        """Restore one AWQ search weight from its pristine master copy."""
+
+        source = master_weight
+        if source.dtype != fc.weight.dtype:
+            source = source.to(dtype=fc.weight.dtype)
+        fc.weight.copy_(source)
+
     def _compute_best_scale(
         self,
         x: torch.Tensor,
@@ -1684,22 +1727,40 @@ class AWQProcessor(LoopProcessor):
         best_scales = None
         best_error = float("inf")
 
-        # Clone original weights to CPU once so candidate ratios can mutate
-        # in-flight module weights without load_state_dict overhead. Preserve
-        # source dtype to reduce restore bandwidth for fp16/bf16 modules; the
-        # explicit copy also prevents CPU quantization from aliasing the live
-        # parameter storage.
-        orig_weights_cpu: Dict[nn.Linear, torch.Tensor] = {
-            fc: fc.weight.detach().to(device=CPU, dtype=fc.weight.dtype, copy=True).contiguous()
-            for fc in linears2scale
-        }
-
         try:
             device = next(module2inspect.parameters()).device
         except StopIteration:
             device = x.device
         except Exception:
             device = x.device
+
+        # Clone original weights once so candidate ratios can mutate in-flight
+        # module weights without load_state_dict overhead. By default this uses
+        # a GPU master copy when headroom allows, avoiding 20 CPU->GPU restores
+        # during AWQ ratio search. Low-memory runs keep the CPU restore path.
+        restore_device = self._select_awq_weight_restore_device(device, linears2scale)
+        try:
+            orig_weights_master: Dict[nn.Linear, torch.Tensor] = {
+                fc: fc.weight.detach().to(
+                    device=restore_device,
+                    dtype=fc.weight.dtype,
+                    copy=True,
+                ).contiguous()
+                for fc in linears2scale
+            }
+        except RuntimeError as exc:
+            if restore_device.type != "cuda" or "out of memory" not in str(exc).lower():
+                raise
+            restore_device = torch.device(CPU)
+            orig_weights_master = {
+                fc: fc.weight.detach().to(
+                    device=restore_device,
+                    dtype=fc.weight.dtype,
+                    copy=True,
+                ).contiguous()
+                for fc in linears2scale
+            }
+
         x_mean = x_mean.view(-1).to(device)
         w_mean = w_mean.view(-1).to(device)
 
@@ -1767,12 +1828,12 @@ class AWQProcessor(LoopProcessor):
                 best_ratio = ratio
                 best_scales = scales.clone()
             for fc in linears2scale:
-                fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
+                self._restore_awq_weight_from_master(fc, orig_weights_master[fc])
 
         # Reset weights one final time so callers always see the pristine FP copy.
         for fc in linears2scale:
-            fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
-        orig_weights_cpu.clear()
+            self._restore_awq_weight_from_master(fc, orig_weights_master[fc])
+        orig_weights_master.clear()
 
         if best_ratio == -1:
             log.debug(history)

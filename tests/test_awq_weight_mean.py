@@ -477,6 +477,81 @@ def test_awq_compute_best_scale_restores_cpu_weights_without_aliasing():
     assert loss >= 0
 
 
+def test_awq_scale_search_restore_device_respects_config_and_headroom(monkeypatch):
+    layer = nn.Linear(8, 8, bias=False, dtype=torch.float16).eval()
+    cuda_device = torch.device("cuda", 0)
+
+    disabled = _TestAWQProcessor(
+        AWQConfig(format=FORMAT.GEMM, group_size=4, scale_search_gpu_weight_restore=False)
+    )
+    assert disabled._select_awq_weight_restore_device(cuda_device, [layer]) == torch.device("cpu")
+
+    enabled = _TestAWQProcessor(
+        AWQConfig(format=FORMAT.GEMM, group_size=4, scale_search_gpu_weight_restore=True)
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _device: (128 << 20, 16 << 30))
+    assert enabled._select_awq_weight_restore_device(cuda_device, [layer]) == torch.device("cpu")
+
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _device: (2 << 30, 16 << 30))
+    assert enabled._select_awq_weight_restore_device(cuda_device, [layer]) == cuda_device
+
+
+@pytest.mark.cuda
+def test_awq_gpu_weight_restore_preserves_exact_scale_search_math(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available for this test run.")
+
+    requested = int(os.environ.get("GPTQMODEL_TEST_CUDA_INDEX", "0"))
+    device = torch.device("cuda", requested if requested < torch.cuda.device_count() else 0)
+    torch.cuda.set_device(device)
+    torch.manual_seed(0)
+
+    base = nn.Linear(16, 16, bias=False, device=device, dtype=torch.float16).eval()
+    x = torch.randn(2, 4, 16, device=device, dtype=torch.float16)
+
+    def run_case(use_gpu_restore: bool):
+        qcfg = AWQConfig(
+            format=FORMAT.GEMM,
+            group_size=8,
+            scale_search_gpu_weight_restore=use_gpu_restore,
+        )
+        processor = _TestAWQProcessor(qcfg)
+        processor._quant_batch_size = 1
+        module = nn.Linear(16, 16, bias=False, device=device, dtype=torch.float16).eval()
+        module.load_state_dict(base.state_dict())
+        if use_gpu_restore:
+            monkeypatch.setattr(
+                processor,
+                "_select_awq_weight_restore_device",
+                lambda _device, _layers: device,
+            )
+        w_mean = _compute_awq_weight_mean([module], processor.qcfg.group_size)
+        x_mean = processor._compute_activation_x_mean(x)
+        fp16_output = [
+            output.detach().cpu()
+            for output in processor._iter_module_forward_outputs(x, module, {})
+        ]
+        with torch.inference_mode():
+            scales, loss = processor._compute_best_scale(
+                x,
+                w_mean,
+                x_mean,
+                module,
+                [module],
+                fp16_output,
+                {},
+            )
+        return scales, loss, module.weight.detach().cpu()
+
+    cpu_scales, cpu_loss, cpu_weight = run_case(False)
+    gpu_scales, gpu_loss, gpu_weight = run_case(True)
+
+    torch.testing.assert_close(gpu_scales, cpu_scales, atol=0, rtol=0)
+    torch.testing.assert_close(gpu_weight, cpu_weight, atol=0, rtol=0)
+    assert gpu_loss == cpu_loss
+
+
 @parameterized.expand([
     ("cpu_gs32", "cpu", 32),
     ("cpu_gs64", "cpu", 64),
