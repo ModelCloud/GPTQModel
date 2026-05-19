@@ -1279,7 +1279,9 @@ class GPTQ:
             zero = []
             now_idx = 1
 
-            Losses = torch.zeros_like(W)  # we keep losses for avg_loss computation
+            # Embedding loss is only reported after quantization; keep one
+            # scalar instead of a full [embedding_dim, vocab] loss tensor.
+            loss_sum = W.new_zeros(())
             Q = torch.zeros_like(W)
 
             # Fast vectorized path (no cross-column error feedback for Embedding)
@@ -1289,7 +1291,6 @@ class GPTQ:
 
                 W1 = W[:, i1:i2]
                 Q1 = torch.zeros_like(W1)
-                Losses1 = torch.zeros_like(W1)
 
                 if self.qcfg.group_size != -1:
                     # Group-wise parameter finding across columns
@@ -1363,10 +1364,9 @@ class GPTQ:
                     col_idx = i1 + i
                     d = Hinv_diag[col_idx]
                     if d > 0:
-                        Losses1[:, i] = (W1[:, i] - Q1[:, i]) ** 2 / (d ** 2)
+                        loss_sum.add_(torch.sum((W1[:, i] - Q1[:, i]) ** 2 / (d ** 2)) / 2)
 
                 Q[:, i1:i2] = Q1
-                Losses[:, i1:i2] = Losses1 / 2
 
             # Undo permutations if applied
             if self.qcfg.desc_act:
@@ -1427,7 +1427,7 @@ class GPTQ:
             duration = time.time() - start
             # Compute avg_loss
             if self.nsamples != 0:
-                avg_loss = torch.sum(Losses).item() / self.nsamples
+                avg_loss = loss_sum.item() / self.nsamples
                 if math.isnan(avg_loss):
                     if self.fail_safe:
                         log.info(f"Quantization: Failed due to NaN loss for `{self.name}`, retry with mock quantization.")

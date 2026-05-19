@@ -182,6 +182,40 @@ def test_gptq_dense_loss_uses_scalar_accumulator(monkeypatch):
     assert avg_loss >= 0
 
 
+def test_gptq_embedding_loss_uses_scalar_accumulator(monkeypatch):
+    torch.manual_seed(0)
+
+    layer = nn.Embedding(8, 6, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(bits=4, group_size=4, desc_act=False)
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.tensor([[0, 1, 2, 3]], dtype=torch.long), None)
+
+    operating_shape = (layer.embedding_dim, layer.num_embeddings)
+    full_zero_like_calls = 0
+    original_zeros_like = torch.zeros_like
+
+    def _record_zeros_like(input_tensor, *args, **kwargs):
+        nonlocal full_zero_like_calls
+        if tuple(input_tensor.shape) == operating_shape:
+            full_zero_like_calls += 1
+        return original_zeros_like(input_tensor, *args, **kwargs)
+
+    # Embedding GPTQ works on transposed weights. It still needs one full output
+    # buffer (Q), but loss reporting must stay scalar even for large vocabularies.
+    monkeypatch.setattr(torch, "zeros_like", _record_zeros_like)
+
+    qweight, scales, zeros, g_idx, _, avg_loss, _, nsamples = gptq.quantize(blocksize=4)
+
+    assert full_zero_like_calls == 1
+    assert qweight.shape == layer.weight.shape
+    assert scales.shape == zeros.shape == (6, 2)
+    assert g_idx.shape == (8,)
+    assert nsamples == 4
+    assert math.isfinite(avg_loss)
+    assert avg_loss >= 0
+
+
 class TestGPTQAddBatchCPU(ModelTest):
     ######### test_gptq_add_batch_cpu.py ###########
     pytestmark = pytest.mark.skipif(
