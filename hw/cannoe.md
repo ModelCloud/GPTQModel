@@ -742,6 +742,18 @@ raw validator workers timed out at 180 seconds with no stderr. That keeps
 lower-level Cube/L0C control, or a different CANN Matmul lifecycle, as the
 active target.
 
+The guarded `aic-staged-gm-visibility-diagnostic` strategy now isolates another
+handoff boundary. The marker-only build has AIV write two FP16 markers into the
+bounded custom-op user workspace after AIC-owned workspace clear and AIV
+`WORKSPACE_SYNC_ID` wait, then uses `SyncAll<false>()` before AIC readback. It
+still fails on all eight default raw cases with runtime `507015`,
+`fftsplus aivector error`, and D-cache-to-UB bus-response errors before any
+marker reaches host JSON. That means the blocker is not the INT4 dequant loop
+or `GetUserWorkspace()` timing alone: standalone AIV writes to the generated
+ACLNN workspace are not a safe AIC handoff mechanism in this mixed launch. The
+next fused attempt should use CANN/Matmul-managed KFC/SCM buffer ownership or a
+lower-level Cube API path for the producer-consumer buffer.
+
 ## Sources
 
 - Local 910B notes: `hw/ascend_910b.md`

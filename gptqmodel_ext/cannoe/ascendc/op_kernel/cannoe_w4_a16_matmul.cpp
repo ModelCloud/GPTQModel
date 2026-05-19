@@ -67,6 +67,11 @@ using CannoeAscendInt4 = AscendC::int4b_t;
 #error "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC requires AIC/TSCM handoff"
 #endif
 
+#if defined(CANNOE_EXPERIMENTAL_AIC_STAGED_GM_VISIBILITY_DIAGNOSTIC) && \
+    !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF)
+#error "CANNOE_EXPERIMENTAL_AIC_STAGED_GM_VISIBILITY_DIAGNOSTIC requires AIC/TSCM handoff"
+#endif
+
 #if defined(CANNOE_EXPERIMENTAL_AIC_TSCM_PING_DIAGNOSTIC) && \
     !defined(CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF)
 #error "CANNOE_EXPERIMENTAL_AIC_TSCM_PING_DIAGNOSTIC requires AIC/TSCM handoff"
@@ -1183,6 +1188,60 @@ public:
             CrossCoreWaitFlag<kCannoeCrossCoreSyncMode, PIPE_S>(kPingAivToAicFlag + 16);
             CrossCoreSetFlag<kCannoeCrossCoreSyncMode, PIPE_S>(kPingAicToAivFlag);
             CrossCoreSetFlag<kCannoeCrossCoreSyncMode, PIPE_S>(kPingAicToAivFlag + 16);
+            return true;
+        }
+        return true;
+    }
+#endif
+
+#ifdef CANNOE_EXPERIMENTAL_AIC_STAGED_GM_VISIBILITY_DIAGNOSTIC
+    __aicore__ inline bool TryProcessAicStagedGmVisibilityDiagnostic()
+    {
+        if (tiling_->kernel_mode != kKernelModeStagedDequant || tiling_->base_k == 0 ||
+            tiling_->base_n == 0 || tiling_->block_dim == 0 || tiling_->staging_blocks == 0 ||
+            tiling_->staging_slots == 0 || tiling_->staging_tile_bytes == 0 ||
+            tiling_->out_features % tiling_->base_n != 0 || tiling_->in_features % tiling_->base_k != 0) {
+            return false;
+        }
+
+        uint32_t physical_core_idx = static_cast<uint32_t>(GetBlockIdx());
+        if ASCEND_IS_AIV {
+            const uint32_t task_ratio = static_cast<uint32_t>(GetTaskRation());
+            if (task_ratio > 1) {
+                physical_core_idx /= task_ratio;
+            }
+            const uint32_t core_idx = physical_core_idx % tiling_->block_dim;
+            if (GetSubBlockIdx() == 0 && core_idx == 0 && tiling_->staging_blocks != 0) {
+                const uint32_t tile_elements = tiling_->staging_tile_bytes / sizeof(half);
+                const uint32_t last_tile_offset = tile_elements == 0 ? 0 : tile_elements - 1;
+                staged_weight_gm_.SetValue(0, static_cast<half>(321.0f));
+                staged_weight_gm_.SetValue(last_tile_offset, static_cast<half>(123.0f));
+                PipeBarrier<PIPE_ALL>();
+            }
+            SyncAll<false>();
+            return true;
+        }
+
+        if ASCEND_IS_AIC {
+            SyncAll<false>();
+            if (tiling_->total_outputs >= 16) {
+                const uint32_t tile_elements = tiling_->staging_tile_bytes / sizeof(half);
+                const half first_staged = staged_weight_gm_.GetValue(0);
+                const uint32_t last_tile_offset = tile_elements == 0 ? 0 : tile_elements - 1;
+                const half last_staged = staged_weight_gm_.GetValue(last_tile_offset);
+                y_gm_.SetValue(0, static_cast<half>(916.0f));
+                y_gm_.SetValue(1, static_cast<half>(static_cast<int32_t>(tiling_->kernel_mode)));
+                y_gm_.SetValue(2, static_cast<half>(static_cast<int32_t>(tiling_->rows)));
+                y_gm_.SetValue(3, static_cast<half>(static_cast<int32_t>(tiling_->base_m)));
+                y_gm_.SetValue(4, static_cast<half>(static_cast<int32_t>(tiling_->base_n)));
+                y_gm_.SetValue(5, static_cast<half>(static_cast<int32_t>(tiling_->base_k)));
+                y_gm_.SetValue(6, static_cast<half>(static_cast<int32_t>(tiling_->staging_blocks)));
+                y_gm_.SetValue(7, static_cast<half>(static_cast<int32_t>(tiling_->block_dim)));
+                y_gm_.SetValue(8, first_staged);
+                y_gm_.SetValue(9, last_staged);
+                y_gm_.SetValue(10, static_cast<half>(static_cast<int32_t>(GetBlockIdx())));
+                y_gm_.SetValue(11, static_cast<half>(static_cast<int32_t>(tiling_->staging_tile_bytes)));
+            }
             return true;
         }
         return true;
@@ -3924,12 +3983,16 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
 #endif
 #ifdef CANNOE_EXPERIMENTAL_STAGED_DEQUANT
     GM_ADDR user_workspace = workspace;
-    if (tiling_data.kernel_mode == kKernelModeStagedDequant && tiling_data.staging_workspace_bytes != 0) {
+    const bool staged_dequant_uses_workspace =
+        tiling_data.kernel_mode == kKernelModeStagedDequant && tiling_data.staging_workspace_bytes != 0;
+    if (staged_dequant_uses_workspace) {
         if (workspace == nullptr) {
             return;
         }
         AscendC::SetSysWorkspaceForce(workspace);
+#ifndef CANNOE_EXPERIMENTAL_CUBE_CONSUMER
         user_workspace = AscendC::GetUserWorkspace(workspace);
+#endif
     }
 #endif
 #ifdef CANNOE_EXPERIMENTAL_CUBE_CONSUMER
@@ -3945,6 +4008,11 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
     if ASCEND_IS_AIV {
         AscendC::WaitEvent(AscendC::WORKSPACE_SYNC_ID);
     }
+#ifdef CANNOE_EXPERIMENTAL_STAGED_DEQUANT
+    if (staged_dequant_uses_workspace) {
+        user_workspace = AscendC::GetUserWorkspace(workspace);
+    }
+#endif
 #else
     if ASCEND_IS_AIC {
         AscendC::clearWorkspace(reinterpret_cast<__gm__ uint8_t*>(workspace));
@@ -3952,6 +4020,11 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
     if ASCEND_IS_AIV {
         AscendC::WaitEvent(AscendC::WORKSPACE_SYNC_ID);
     }
+#ifdef CANNOE_EXPERIMENTAL_STAGED_DEQUANT
+    if (staged_dequant_uses_workspace) {
+        user_workspace = AscendC::GetUserWorkspace(workspace);
+    }
+#endif
     TPipe cube_pipe;
     CannoeW4A16CubeConsumerProbe cube_probe;
     TCubeTiling cube_tiling = MakeCubeConsumerTiling(&tiling_data);
@@ -4018,6 +4091,11 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
 #endif
 #ifdef CANNOE_EXPERIMENTAL_AIC_TSCM_PING_DIAGNOSTIC
     if (op.TryProcessAicTscmPingDiagnostic()) {
+        return;
+    }
+#endif
+#ifdef CANNOE_EXPERIMENTAL_AIC_STAGED_GM_VISIBILITY_DIAGNOSTIC
+    if (op.TryProcessAicStagedGmVisibilityDiagnostic()) {
         return;
     }
 #endif

@@ -368,7 +368,7 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
         if custom is None:
             custom = custom_call()
             torch.npu.synchronize()
-        markers = custom.flatten()[:8].to("cpu", dtype=torch.float32)
+        markers = custom.flatten()[:12].to("cpu", dtype=torch.float32)
         marker_values = [float(value) for value in markers.tolist()]
         marker = marker_values[0] if marker_values else float("nan")
         launch_mode = marker_values[1] if len(marker_values) > 1 else float("nan")
@@ -412,6 +412,15 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
             and marker_values[6] > 0
             and marker_values[7] > 0
         )
+        aic_staged_gm_visibility_pass = (
+            abs(marker - 916.0) <= 0.5
+            and len(marker_values) >= 10
+            and int(marker_values[1]) == 1
+            and marker_values[6] > 0
+            and marker_values[7] > 0
+            and abs(marker_values[8] - 321.0) <= 0.5
+            and abs(marker_values[9] - 123.0) <= 0.5
+        )
         result = {
             "device": int(args.device),
             "rows": rows,
@@ -431,6 +440,7 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
                 or aic_tscm_index_pass
                 or aic_tscm_syncall_pass
                 or mixed_matmul_reg_pass
+                or aic_staged_gm_visibility_pass
             ),
             "markers": marker_values,
         }

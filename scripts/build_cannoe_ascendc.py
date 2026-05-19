@@ -51,6 +51,9 @@ CANNOE_PUBLIC_STRATEGIES: dict[str, tuple[str, ...]] = {
     "aic-tscm-path-diagnostic": (
         "experimental_aic_tscm_path_diagnostic",
     ),
+    "aic-staged-gm-visibility-diagnostic": (
+        "experimental_aic_staged_gm_visibility_diagnostic",
+    ),
     "aic-tscm-index-diagnostic": (
         "experimental_aic_tscm_index_diagnostic",
     ),
@@ -128,6 +131,11 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         args.experimental_tscm_direct_multik = True
         args.experimental_tscm_direct_dequant = True
         args.experimental_tscm_tbuf_handoff = True
+    if args.experimental_aic_staged_gm_visibility_diagnostic:
+        args.experimental_aic_tscm_handoff = True
+        args.experimental_tscm_direct_multik = True
+        args.experimental_tscm_direct_dequant = True
+        args.experimental_tscm_tbuf_handoff = True
     if args.experimental_aic_tscm_index_diagnostic:
         args.experimental_aic_tscm_handoff = True
         args.experimental_tscm_direct_multik = True
@@ -171,6 +179,7 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         or args.experimental_aic_tscm_handoff
         or args.experimental_aic_tscm_zero_b_diagnostic
         or args.experimental_aic_tscm_path_diagnostic
+        or args.experimental_aic_staged_gm_visibility_diagnostic
         or args.experimental_aic_tscm_index_diagnostic
         or args.experimental_aic_tscm_syncall_diagnostic
         or args.experimental_aic_tscm_ping_diagnostic
@@ -606,6 +615,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--experimental-aic-staged-gm-visibility-diagnostic",
+        action="store_true",
+        help=(
+            "Compile the AIC/TSCM bring-up probe that has AIV entries write marker values into the "
+            "bounded GM workspace, SyncAll, then has AIC entries read the staged markers. This verifies "
+            "the mixed-core workspace visibility lifecycle before another L1/TSCM handoff."
+        ),
+    )
+    parser.add_argument(
         "--experimental-aic-tscm-index-diagnostic",
         action="store_true",
         help=(
@@ -728,6 +746,9 @@ def main() -> int:
     if args.experimental_aic_tscm_path_diagnostic:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC")
         _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC")
+    if args.experimental_aic_staged_gm_visibility_diagnostic:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_STAGED_GM_VISIBILITY_DIAGNOSTIC")
+        _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_STAGED_GM_VISIBILITY_DIAGNOSTIC")
     if args.experimental_aic_tscm_index_diagnostic:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_INDEX_DIAGNOSTIC")
         _enable_host_define(output, "CANNOE_EXPERIMENTAL_AIC_TSCM_INDEX_DIAGNOSTIC")

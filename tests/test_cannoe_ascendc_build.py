@@ -311,6 +311,7 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_STAGED_GM_VISIBILITY_DIAGNOSTIC")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME")
 
     text = cmake_path.read_text()
@@ -339,6 +340,7 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC=1 "
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC=1 "
+        "-DCANNOE_EXPERIMENTAL_AIC_STAGED_GM_VISIBILITY_DIAGNOSTIC=1 "
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME=1)"
     ) in text
 
@@ -374,6 +376,7 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_STAGED_GM_VISIBILITY_DIAGNOSTIC")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME")
 
     text = cmake_path.read_text()
@@ -401,6 +404,7 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC=1 "
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC=1 "
+        "-DCANNOE_EXPERIMENTAL_AIC_STAGED_GM_VISIBILITY_DIAGNOSTIC=1 "
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME=1)"
     ) in text
 
@@ -464,6 +468,7 @@ def _strategy_args(strategy: str):
         experimental_aic_tscm_handoff=False,
         experimental_aic_tscm_zero_b_diagnostic=False,
         experimental_aic_tscm_path_diagnostic=False,
+        experimental_aic_staged_gm_visibility_diagnostic=False,
         experimental_aic_tscm_index_diagnostic=False,
         experimental_aic_tscm_syncall_diagnostic=False,
         experimental_aic_tscm_ping_diagnostic=False,
@@ -606,6 +611,25 @@ def test_aic_tscm_path_diagnostic_expands_handoff_flags():
     assert args.experimental_tscm_tbuf_handoff
     assert args.experimental_aic_tscm_handoff
     assert args.experimental_aic_tscm_path_diagnostic
+
+
+def test_aic_staged_gm_visibility_diagnostic_expands_handoff_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("aic-staged-gm-visibility-diagnostic")
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_tscm_consumer
+    assert args.experimental_tscm_runtime_handoff
+    assert args.experimental_tscm_direct_dequant
+    assert args.experimental_tscm_direct_multik
+    assert args.experimental_tscm_tbuf_handoff
+    assert args.experimental_aic_tscm_handoff
+    assert args.experimental_aic_staged_gm_visibility_diagnostic
 
 
 def test_aic_tscm_unsafe_runtime_expands_handoff_flags():

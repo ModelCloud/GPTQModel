@@ -1806,3 +1806,81 @@ when built as a fresh CANN 9 OPP package and loaded through a fresh bridge.
 This reinforces that the target fused kernel likely needs lower-level Cube/L0C
 control or a different CANN Matmul lifecycle, not another wrapper around
 `IterateAll` or the current high-level TSCM direct path.
+
+## 2026-05-19: Cannoe Qwen Down Prefetch and Tile Retest
+
+Status: failed default-policy gate; keep host prefetch opt-in and keep the
+validated down-projection native CANN plan as the production path.
+
+Tested change: reran Qwen3 27B GPTQ FP16 `down_proj`
+(`M=1,K=17408,N=5120,group=32`) with tile-size and prefetch variants while
+targeting the slow large in/out feature shape. Each run used
+`scripts/benchmark_qwen3_27b_gptq_fp16.py --path cannoe --layers down`.
+
+Artifacts:
+
+- One-shot sweep: `/tmp/cannoe_down_sweep2_*.json`
+- Paired NPU sweep: `/tmp/cannoe_down_pair_{default,prefetch}_npu*.json`
+
+| Variant | Device | Mean ms | First ms | Peak MB | Decision |
+| --- | --- | ---: | ---: | ---: | --- |
+| default | NPU0 | 0.273943 | 279.710 | 244.88 | Baseline |
+| tile256 | NPU1 | 0.296390 | 392.970 | 241.83 | Reject |
+| tile512 | NPU2 | 0.272414 | 388.143 | 244.88 | Not a stable win |
+| tile1024 | NPU3 | 0.295684 | 375.444 | 397.88 | Reject, higher memory |
+| tile2048 | NPU4 | 0.283881 | 373.639 | 703.88 | Reject, higher memory |
+| tile4096 | NPU5 | 0.300002 | 367.437 | 1273.38 | Reject, much higher memory |
+| inner_precise=1 | NPU6 | 0.297896 | 376.445 | 244.88 | Reject |
+| prefetch | NPU7 | 0.268764 | 382.486 | 244.88 | Inconclusive |
+
+Paired default vs prefetch repeat across NPU0-7:
+
+| Device | Default ms | Prefetch ms | Ratio | Result |
+| --- | ---: | ---: | ---: | --- |
+| NPU0 | 0.297504 | 0.263675 | 0.886 | Win |
+| NPU1 | 0.244696 | 0.284036 | 1.161 | Loss |
+| NPU2 | 0.301621 | 0.276652 | 0.917 | Win |
+| NPU3 | 0.269876 | 0.304621 | 1.129 | Loss |
+| NPU4 | 0.292321 | 0.283020 | 0.968 | Small win |
+| NPU5 | 0.292547 | 0.275882 | 0.943 | Win |
+| NPU6 | 0.274641 | 0.282934 | 1.030 | Loss |
+| NPU7 | 0.293951 | 0.267189 | 0.909 | Win |
+
+Interpretation: prefetch can win on some devices/runs, but the direction is not
+stable enough to enable by default. Larger native prepack tiles inflate peak
+memory without a speed win on the target down shape. Re-test only with a real
+device-side overlap change or a profiler counter showing repeatable memory
+latency relief.
+
+## 2026-05-19: Cannoe AIV Staged GM Visibility Diagnostic
+
+Status: failed workspace-write gate; keep the new strategy as an opt-in
+diagnostic only and do not use AIV writes into the generated custom-op user
+workspace as the fused AIC handoff mechanism yet.
+
+Tested change: added a guarded public strategy
+`aic-staged-gm-visibility-diagnostic`. It expands to the mixed AIC/AIV
+staged-dequant handoff flags, selects the staged tiling key, has AIV write two
+known FP16 markers into the bounded user workspace, executes `SyncAll<false>()`,
+and requires AIC to read marker `321` and `123` back before the validator
+passes. The first version ran the full `StageWeightTiles` dequant loop; the
+second version reduced the probe to marker-only writes.
+
+Artifacts:
+
+- OPP package: `/tmp/cannoe_aic_staged_gm_visibility_ws`
+- Bridge: `/tmp/cannoe_aic_staged_gm_visibility_bridge/a9901d82ae8bd224/gptqmodel_cannoe_ascendc_ops.so`
+- Summary: `/tmp/cannoe_aic_staged_gm_visibility_summary.json`
+
+| Probe | Devices/Cases | Result | Failure signature |
+| --- | --- | --- | --- |
+| Full AIV staged dequant to bounded GM workspace, then AIC readback | all 8 default raw cases | 0/8 pass | Runtime `507015`; `fftsplus aivector error`; D-cache-to-UB bus response nonzero |
+| Marker-only AIV writes to bounded GM workspace after AIC-owned workspace clear and AIV wait | all 8 default raw cases | 0/8 pass | Same runtime `507015` D-cache-to-UB bus-response failure before any marker JSON |
+| Marker-only after moving `GetUserWorkspace()` behind the workspace event | all 8 default raw cases | 0/8 pass | Same runtime `507015`; pointer timing was not the root cause |
+
+Interpretation: the known-good mixed `SyncAll<false>()` diagnostic proves the
+generated mixed launch and output GM writes are valid, but AIV writes into the
+custom-op user workspace fault before AIC can observe data. This narrows the
+fused-kernel target: the next handoff should use CANN/Matmul-managed KFC/SCM
+buffer ownership or lower-level Cube APIs, not standalone AIV writes to the
+generated ACLNN workspace.
