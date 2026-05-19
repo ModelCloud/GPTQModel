@@ -91,6 +91,50 @@ def test_raw_validator_custom_timing_stats():
         "custom_ms_mean": 2.0,
         "custom_ms_max": 3.0,
     }
+    assert validator._timing_stats([{"custom_ms": float("nan")}, {"custom_ms": 4.0}]) == {
+        "custom_ms_min": 4.0,
+        "custom_ms_mean": 4.0,
+        "custom_ms_max": 4.0,
+    }
+
+
+def test_raw_validator_records_failed_json_metrics():
+    validator = _load_raw_validator()
+
+    class Proc:
+        returncode = 2
+
+        def poll(self):
+            return self.returncode
+
+    results = []
+    failures = []
+    validator._record_worker_result(
+        device=0,
+        case={"rows": 1, "k": 17408, "n": 5120},
+        proc=Proc(),
+        stdout=(
+            '{"custom_ms": 907.8, "diff_nonfinite_count": 5120, '
+            '"max_abs": null, "mean_abs": null, "pass": false}'
+        ),
+        stderr="",
+        results=results,
+        failures=failures,
+    )
+
+    assert len(results) == 1
+    assert len(failures) == 1
+    assert results[0]["worker_returncode"] == 2
+    assert results[0]["diff_nonfinite_count"] == 5120
+    assert failures[0]["result"]["custom_ms"] == 907.8
+
+
+def test_raw_validator_qwen_down_preset_targets_large_projection():
+    validator = _load_raw_validator()
+
+    assert list(validator.CASE_PRESETS["qwen3_27b_down"]) == [
+        {"rows": 1, "k": 17408, "n": 5120, "group": 32, "seed": 2701}
+    ]
 
 
 def test_raw_validator_batches_one_case_per_device():

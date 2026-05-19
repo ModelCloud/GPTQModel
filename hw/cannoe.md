@@ -465,6 +465,18 @@ positive-`base_k` fallback shape.
   direct path compiled but timed out on all eight raw workers at `120s`. Keep
   the validated `IterateAll` accumulation route until a smaller
   `IterateBatch` lifecycle diagnostic passes.
+- The raw Ascend C validator now has a `--case-preset qwen3_27b_down` target
+  for the actual large decode projection shape (`M=1,K=17408,N=5120,group=32`).
+  This is the current fused-kernel target guard. A fresh CANN 9
+  `tscm-direct-local-a` package still passed the eight default small raw cases
+  (`max_abs=0.015625`, `mean_abs=0.0024566650390625`) but failed the Qwen down
+  target at `base_n=256,base_k=128`: `custom_ms=851.9068`,
+  `max_abs=0.21875`, `mean_abs=0.0218505859375`. The matching tile sweep also
+  failed for `base_n in {128,256}` and `base_k in {64,128}` with best observed
+  latency `801.015 ms` and worst `max_abs=0.34375`. This confirms the remaining
+  fused work is not tile retuning; large-K accumulation must stop writing
+  partial C through GM atomics and must keep accuracy within the established
+  raw envelope before runtime enablement.
 
 ## aclnn V3 Probe
 

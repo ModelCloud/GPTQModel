@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -25,6 +26,15 @@ DEFAULT_LOCAL_A_CASES = (
     {"rows": 7, "k": 896, "n": 256, "group": 128, "seed": 2206},
     {"rows": 8, "k": 1024, "n": 512, "group": 32, "seed": 2207},
 )
+
+QWEN3_27B_DOWN_CASES = (
+    {"rows": 1, "k": 17408, "n": 5120, "group": 32, "seed": 2701},
+)
+
+CASE_PRESETS = {
+    "default": DEFAULT_LOCAL_A_CASES,
+    "qwen3_27b_down": QWEN3_27B_DOWN_CASES,
+}
 
 
 def _parse_devices(raw: str) -> list[int]:
@@ -127,7 +137,11 @@ def _planner_base_n(rows: int, k: int, n: int) -> int:
 
 
 def _timing_stats(results: list[dict[str, Any]]) -> dict[str, float | None]:
-    timings = [float(row["custom_ms"]) for row in results if row.get("custom_ms") is not None]
+    timings = [
+        float(row["custom_ms"])
+        for row in results
+        if row.get("custom_ms") is not None and math.isfinite(float(row["custom_ms"]))
+    ]
     if not timings:
         return {"custom_ms_min": None, "custom_ms_mean": None, "custom_ms_max": None}
     return {
@@ -135,6 +149,23 @@ def _timing_stats(results: list[dict[str, Any]]) -> dict[str, float | None]:
         "custom_ms_mean": sum(timings) / len(timings),
         "custom_ms_max": max(timings),
     }
+
+
+def _finite_result_values(results: list[dict[str, Any]], key: str) -> list[float]:
+    values: list[float] = []
+    for row in results:
+        value = row.get(key)
+        if value is None:
+            continue
+        value = float(value)
+        if math.isfinite(value):
+            values.append(value)
+    return values
+
+
+def _max_finite_result_value(results: list[dict[str, Any]], key: str) -> float | None:
+    values = _finite_result_values(results, key)
+    return max(values, default=None)
 
 
 def _device_case_batches(devices: list[int], cases: list[dict[str, Any]]) -> list[list[tuple[int, dict[str, Any]]]]:
@@ -390,8 +421,17 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
     )
     torch.npu.synchronize()
     diff = (custom - native).abs()
-    max_abs = float(diff.max().item())
-    mean_abs = float(diff.mean().item())
+    finite_diff = diff[torch.isfinite(diff)]
+    diff_nonfinite_count = int(diff.numel() - finite_diff.numel())
+    max_abs = float(finite_diff.max().item()) if finite_diff.numel() > 0 else None
+    mean_abs = float(finite_diff.mean().item()) if finite_diff.numel() > 0 else None
+    passed = (
+        diff_nonfinite_count == 0
+        and max_abs is not None
+        and mean_abs is not None
+        and max_abs <= args.max_abs
+        and mean_abs <= args.mean_abs
+    )
     result = {
         "device": int(args.device),
         "rows": rows,
@@ -405,7 +445,8 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
         "custom_ms": custom_ms,
         "max_abs": max_abs,
         "mean_abs": mean_abs,
-        "pass": max_abs <= args.max_abs and mean_abs <= args.mean_abs,
+        "diff_nonfinite_count": diff_nonfinite_count,
+        "pass": passed,
     }
     _emit_json_result(result, result_fd)
     return 0 if result["pass"] else 2
@@ -470,6 +511,23 @@ def _record_worker_result(
     failures: list[dict[str, Any]],
 ) -> None:
     result = _last_json_object(stdout)
+    if result is not None:
+        result["worker_returncode"] = proc.returncode
+        if proc.returncode != 0:
+            result["pass"] = False
+            failures.append(
+                {
+                    "device": device,
+                    "case": case,
+                    "returncode": proc.returncode,
+                    "result": result,
+                    "stderr_tail": _stderr_tail(stderr),
+                }
+            )
+        results.append(result)
+        print(json.dumps(result, sort_keys=True), flush=True)
+        return
+
     if proc.returncode != 0 or result is None:
         failures.append(
             {
@@ -481,15 +539,13 @@ def _record_worker_result(
             }
         )
         return
-    results.append(result)
-    print(json.dumps(result, sort_keys=True), flush=True)
 
 
 def _run_parent(args: argparse.Namespace) -> int:
     if args.cases_json:
         cases = json.loads(Path(args.cases_json).expanduser().read_text(encoding="utf-8"))
     else:
-        cases = list(DEFAULT_LOCAL_A_CASES)
+        cases = list(CASE_PRESETS[args.case_preset])
     devices = args.devices
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
@@ -532,8 +588,9 @@ def _run_parent(args: argparse.Namespace) -> int:
         "all_pass": len(results) == len(cases) and all(row["pass"] for row in results) and not failures,
         "count": len(results),
         "expected": len(cases),
-        "max_abs_max": max((row["max_abs"] for row in results), default=None),
-        "mean_abs_max": max((row["mean_abs"] for row in results), default=None),
+        "max_abs_max": _max_finite_result_value(results, "max_abs"),
+        "mean_abs_max": _max_finite_result_value(results, "mean_abs"),
+        "diff_nonfinite_count": sum(int(row.get("diff_nonfinite_count") or 0) for row in results),
         "warmup": args.warmup,
         "iters": args.iters,
         "failures": failures,
@@ -552,6 +609,12 @@ def main() -> int:
     parser.add_argument("--opapi-lib", help="Explicit libcust_opapi.so path; overrides --opp-install discovery.")
     parser.add_argument("--devices", type=_parse_devices, default=[0], help="Comma-separated physical NPU IDs.")
     parser.add_argument("--cases-json", help="Optional JSON file containing a list of case dictionaries.")
+    parser.add_argument(
+        "--case-preset",
+        choices=sorted(CASE_PRESETS),
+        default="default",
+        help="Built-in case preset used when --cases-json is not provided.",
+    )
     parser.add_argument("--summary-json", help="Optional path to write a JSON summary.")
     parser.add_argument("--timeout", type=float, default=120.0, help="Seconds to allow each worker process.")
     parser.add_argument("--base-m", type=int, default=16)

@@ -1732,3 +1732,33 @@ help isolated down-projection timing, but it did not prove a stable full-layer
 steady-state speed win. Do not treat tile retuning as the path to matching CUDA
 Marlin; the remaining target is still a fused Ascend C/Cube implementation that
 avoids the native packed-matmul boundary and GM/L2 full-tile materialization.
+
+## 2026-05-19: Cannoe Qwen3 27B Down Fused Tile Sweep
+
+Status: failed target-shape accuracy and speed gate; keep the fused Ascend C
+large down path disabled.
+
+Tested package: `/tmp/cannoe_target_down_ws`, built with
+`scripts/build_cannoe_ascendc.py --strategy tscm-direct-local-a --target install`.
+Bridge: `/tmp/cannoe_target_down_bridge/a9901d82ae8bd224/gptqmodel_cannoe_ascendc_ops.so`.
+
+Artifacts:
+
+- `/tmp/cannoe_target_down_default_summary.json`
+- `/tmp/cannoe_target_down_qwen_summary_v2.json`
+- `/tmp/cannoe_qwen_down_tile_sweep_summary.json`
+
+| Probe | Result |
+| --- | --- |
+| Default small raw cases, planner tiles | 8/8 pass; `custom_ms_mean=631.3155`, `max_abs_max=0.015625`, `mean_abs_max=0.0024566650390625` |
+| Qwen3 27B down preset, planner tile `base_n=256,base_k=128` | fail; `custom_ms=851.9068`, `max_abs=0.21875`, `mean_abs=0.0218505859375` |
+| Qwen3 27B down sweep `base_n=128,base_k=64` | fail; `custom_ms=801.0150`, `max_abs=0.34375`, `mean_abs=0.0298004150390625` |
+| Qwen3 27B down sweep `base_n=128,base_k=128` | fail; `custom_ms=869.9486`, `max_abs=0.21875`, `mean_abs=0.0218505859375` |
+| Qwen3 27B down sweep `base_n=256,base_k=64` | fail; `custom_ms=840.6078`, `max_abs=0.34375`, `mean_abs=0.0298004150390625` |
+| Qwen3 27B down sweep `base_n=256,base_k=128` | fail; `custom_ms=802.9824`, `max_abs=0.21875`, `mean_abs=0.0218505859375` |
+
+Interpretation: tile width does not solve the Qwen down fused path. The error
+tracks `base_k` more than `base_n`, which is consistent with the current
+per-K-tile `IterateAll(..., enAtomic=k_tile != 0)` accumulation path losing
+precision or ordering on large reductions. The next attempt should target a
+correct no-GM-partial accumulator lifecycle before further tile sweeps.
