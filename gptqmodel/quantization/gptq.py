@@ -1317,7 +1317,9 @@ class GPTQ:
                 count = i2 - i1
 
                 W1 = W[:, i1:i2]
-                Q1 = torch.zeros_like(W1)
+                # Every column in Q1 is written before use; skip the zero-fill
+                # on this block scratch buffer.
+                Q1 = torch.empty_like(W1)
 
                 if self.qcfg.group_size != -1:
                     # Group-wise parameter finding across columns
@@ -1596,7 +1598,9 @@ class GPTQ:
                 count = i2 - i1
 
                 W1 = W[:, i1:i2]
-                Q1 = torch.zeros_like(W1)
+                # Mock quantization either replaces Q1 with a vectorized result
+                # or fills every column in the fallback path.
+                Q1 = torch.empty_like(W1)
 
                 # Handle group quantization parameters efficiently (similar to original)
                 if self.qcfg.group_size != -1:
@@ -1700,8 +1704,11 @@ class GPTQ:
                 count = i2 - i1
 
                 W1 = W[:, i1:i2].clone()
-                Q1 = torch.zeros_like(W1)
-                Err1 = torch.zeros_like(W1) if Hinv is not None else None
+                # Q1 and Err1 are column-complete scratch buffers. Avoid
+                # zero-filling them because no element is read before it is
+                # assigned by the quantization loop below.
+                Q1 = torch.empty_like(W1)
+                Err1 = torch.empty_like(W1) if Hinv is not None else None
 
                 if Hinv is not None:
                     Hinv1 = Hinv[i1:i2, i1:i2]

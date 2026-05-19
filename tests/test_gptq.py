@@ -254,6 +254,42 @@ def test_gptq_dense_final_dtype_output_buffer_preserves_quantized_weight(monkeyp
     assert default_result[4] == fp32_buffer_result[4]
 
 
+def test_gptq_dense_block_scratch_buffers_are_fully_written(monkeypatch):
+    torch.manual_seed(0)
+
+    base_layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    calibration = torch.randn(1, 4, 8, dtype=torch.float32)
+    block_shape = (base_layer.out_features, 4)
+
+    def _run_quantize() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
+        layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+        layer.weight.data.copy_(base_layer.weight.data)
+        qcfg = QuantizeConfig(bits=4, group_size=4, desc_act=False)
+        gptq = GPTQ(layer, qcfg=qcfg)
+        gptq.quantizer.configure(perchannel=True)
+        gptq.add_batch(calibration, None)
+        qweight, scales, zeros, g_idx, _, avg_loss, *_ = gptq.quantize(blocksize=4)
+        return qweight, scales, zeros, g_idx, avg_loss
+
+    baseline_result = _run_quantize()
+    original_empty_like = torch.empty_like
+
+    def _poison_block_scratch(input_tensor, *args, **kwargs):
+        result = original_empty_like(input_tensor, *args, **kwargs)
+        if tuple(input_tensor.shape) == block_shape:
+            result.fill_(float("nan"))
+        return result
+
+    # Block scratch buffers now use empty_like. Poison the allocation so this
+    # test fails if Q1 or Err1 ever reads an element before writing it.
+    monkeypatch.setattr(torch, "empty_like", _poison_block_scratch)
+    poisoned_result = _run_quantize()
+
+    for baseline_tensor, poisoned_tensor in zip(baseline_result[:4], poisoned_result[:4]):
+        assert torch.equal(baseline_tensor, poisoned_tensor)
+    assert baseline_result[4] == poisoned_result[4]
+
+
 def test_gptq_embedding_loss_uses_scalar_accumulator(monkeypatch):
     torch.manual_seed(0)
 
