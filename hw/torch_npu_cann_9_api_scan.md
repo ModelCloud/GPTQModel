@@ -409,6 +409,119 @@ Concrete next implementation order:
    `asc_sync_block_arrive`, and `asc_sync_block_wait` only inside a measured
    ping-pong pipeline.
 
+## 2026-05-19 CANN 9.1.0-beta.1 910B Sweep
+
+The active Ascend SDK now resolves to
+`/usr/local/Ascend/cann-9.1.0-beta.1`. The local CANN 9.0.0-beta.2 tree on this
+host is a thin package and does not expose the full public ACLNN, Ascend C, or
+OPP source tree under `aarch64-linux`. Treat this section as the practical
+local delta from the 9.0 beta2 install to the new 9.1 beta1 install, not as a
+complete upstream-vs-upstream release diff.
+
+Local package inventory:
+
+| Tree | 9.0.0-beta.2 local files | 9.1.0-beta.1 local files | Cannoe relevance |
+| --- | ---: | ---: | --- |
+| `aarch64-linux/include/aclnnop` | missing | 1675 | Public ACLNN headers are now available locally, including W4A16, NZ, MX, and compress/dequant matmul variants. |
+| `aarch64-linux/asc/include` | missing | 521 | Public Ascend C headers are available for custom kernel builds and C API probes. |
+| `aarch64-linux/asc/impl` | missing | 2142 | Private implementation headers are useful for reading intent only; do not include them directly from production code. |
+| `opp/built-in/op_impl` | missing | 22188 | Reference Ascend C/TBE sources now include CMCT matmul, antiquant prologues, quant batch matmul, and compress/dequant kernels. |
+| `opp/built-in/data/tiling` | missing | 575 | Includes 910B matmul repository and cost-model files for multiple AIC counts. |
+| `opp/built-in/data/op` | missing | 37 | Includes 910B unified-bank metadata for `Mc2MatMulV3` and `Mc2QuantBatchMatmulV3`. |
+
+Newly exposed or newly actionable public ACLNN headers for GPTQ/Cannoe:
+
+| Surface | Header | Status | Cannoe read |
+| --- | --- | --- | --- |
+| W4A16 weight-only matmul V3 | `aclnn_weight_quant_batch_matmul_v3.h` | Exported by `libopapi.so`; public signature includes `innerPrecise`. | Keep the current V3 bridge as a shape-policy probe. It can call the same CANN op family directly and select `innerPrecise` from our measured table, but it is not a fused-kernel replacement. |
+| W4A16 right-weight NZ matmul | `aclnn_weight_quant_batch_matmul_nz.h` | Exported by `libopapi.so`; documents FP16/BF16 `x`, INT4 NZ `weight`, FP16/BF16 output, group size, optional bias, scale, and offset. | Best next native fallback probe. If we can store GPTQ packed weights in CANN's NZ INT4 layout without dense FP16 caching, this may cut internal transpose/prepack overhead on large `down_proj`. |
+| Public INT4 pack converter | `aclnn_convert_weight_to_int4_pack.h` | Exported header for CANN INT4 pack conversion. | Compare its layout with `torch.ops.npu.npu_convert_weight_to_int4pack` before building an NZ path. |
+| Quant matmul V5 | `aclnn_quant_matmul_v5.h` | Supports both inputs as `float4_e2m1`, INT8, INT4, FP8, or HiFloat8 with output INT8/FP16/BF16/FP32. | Not direct GPTQ W4A16 because activations are also quantized, but useful for future A4W4/A8W4 experiments. |
+| Fused quant matmul weight NZ | `aclnn_fused_quant_matmul_weight_nz.h` | Supports INT4/INT8/INT32 inputs, NZ weight, optional bias, GELU fusion, FP16/BF16 output. | Not a decode GPTQ path unless activations are quantized. Good reference for NZ weight contracts and epilogue fusion. |
+| Dual-level quant matmul NZ | `aclnn_dual_level_quant_matmul_nz.h` | Targets MxFP4/MxFP4 with dual-level scales and NZ right matrix. | Not GPTQ-compatible today, but confirms 9.1 has first-class FP4/NZ matmul work. |
+| Quant matmul dequant | `aclnn_quant_matmul_dequant.h` and grouped/NZ variants | Document INT8 weight dequant paths, including grouped and NZ variants. | Not direct GPTQ INT4, but useful reference for host ABI and weight-scale layout. |
+| Matmul compress/dequant | `aclnn_matmul_compress_dequant.h` | Public compressed-weight dequant API. | Exploratory only; no clear GPTQ INT4 mapping yet. |
+| Matmul weight transform | `aclnn_trans_matmul_weight.h` | Weight-size and transform helpers mention V3 matmul weight sizing, but documented dtypes are INT8/FP16/BF16. | Do not assume INT4 support; runtime-probe before using. |
+
+The 9.1 `libopapi.so` exports the key symbols:
+
+```text
+aclnnWeightQuantBatchMatmulV3
+aclnnWeightQuantBatchMatmulV3GetWorkspaceSize
+aclnnWeightQuantBatchMatmulNz
+aclnnWeightQuantBatchMatmulNzGetWorkspaceSize
+aclnnQuantMatmulV5
+aclnnFusedQuantMatmulWeightNz
+aclnnMatmulCompressDequant
+aclnnQuantGroupedMatmulDequantWeightNZ
+```
+
+Torch-NPU still exposes the high-level Python binding:
+
+```text
+torch.ops.npu.npu_weight_quant_batchmatmul(
+    x, weight, antiquant_scale, antiquant_offset=None,
+    quant_scale=None, quant_offset=None, bias=None,
+    antiquant_group_size=0, inner_precise=0)
+```
+
+The installed torch-npu packages do not expose a Python binding for
+`aclnnWeightQuantBatchMatmulNz`, so NZ probing needs a C++/ACLNN bridge or a
+future torch-npu update.
+
+9.1 OPP sources now include a useful CMCT reference shape for the true Cannoe
+fused kernel:
+
+```text
+opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/cmct/kernel/kernel_matmul_a_prefetch_b_antiquant.h
+opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/cmct/prologue/block_prologue_b_antiquant_scmc_nd_kn.h
+opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/cmct/prologue/block_prologue_b_antiquant_scmc_nd_nk_nz_kn.h
+opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/cmct/prologue/tile/antiquant_nd_kn.h
+opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/cmct/prologue/tile/antiquant_nd_nk.h
+opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/cmct/prologue/tile/antiquant_zn.h
+opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/cmct/prologue/tile/tile_antiquant.h
+```
+
+The important design pattern in those sources is a split AIV/AIC operator:
+AIV walks B-weight tiles, scale tiles, and offset tiles and runs the antiquant
+prologue; AIC preloads A and runs the matmul block scheduler over the same
+N/M tile space. This is the closest shipped reference to Cannoe's target
+kernel. It should guide scheduling, tile ownership, and ND/NZ antiquant
+prologue structure, but production Cannoe should still include public Ascend C
+headers rather than private `opp` implementation headers.
+
+910B-specific OPP metadata is now visible for multiple B variants:
+
+```text
+Ascend910B1_24_AiCore_Mc2MatMulV3_runtime_kb.json
+Ascend910B1_24_AiCore_Mc2QuantBatchMatmulV3_runtime_kb.json
+Ascend910B1_25_AiCore_Mc2QuantBatchMatmulV3_runtime_kb.json
+Ascend910B2*_Mc2QuantBatchMatmulV3_runtime_kb.json
+Ascend910B3*_Mc2QuantBatchMatmulV3_runtime_kb.json
+Ascend910B4*_Mc2QuantBatchMatmulV3_runtime_kb.json
+```
+
+`Mc2*` is primarily a communication/distributed matmul family, so it is not the
+single-card GPTQ decode path by itself. The useful part for Cannoe is the
+metadata shape: CANN is now shipping 910B-specific quant matmul bank data and
+CMCT matmul sources that can be used as scheduling references.
+
+Actionable order after this sweep:
+
+1. Add a small ACLNN NZ bridge probe for `aclnnWeightQuantBatchMatmulNz`, using
+   a persistent packed INT4 NZ weight layout. The acceptance rule is no dense
+   FP16 weight cache and a full Qwen q/k/v/gate/up/down benchmark versus current
+   Cannoe and Komodo.
+2. Keep the existing V3 bridge for `innerPrecise` shape-policy expansion only.
+   It is correct but slower than the native torch-npu call boundary in the
+   current measurements.
+3. Use the CMCT `A-prefetch/B-antiquant` sources as the implementation map for
+   the true fused Cannoe kernel: AIV antiquant prologue, AIC matmul consumer,
+   bounded per-tile storage, and no full dequantized weight materialization.
+4. Do not spend time on `aclnnQuantMatmulV5`, fused quant matmul weight NZ, or
+   dual-level MX/FP4 paths for GPTQ FP16 decode until there is an activation
+   quantization mode to justify them.
+
 ## CANN 9 Operator Metadata Check
 
 The CANN 9.0.0-beta.2 910B OPP package is installed and has the metadata needed

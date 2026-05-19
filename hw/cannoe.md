@@ -694,6 +694,48 @@ The FP16 GPTQ group-size/act-order regression stayed clean on NPU1:
 
 ## CANN Profiling Read
 
+## CANN 9.1-beta1 Kernel Surface
+
+The 2026-05-19 SDK sweep found the active toolkit at
+`/usr/local/Ascend/cann-9.1.0-beta.1`. The most useful new local surface for
+Cannoe is not a replacement one-call torch op; it is a fuller 910B CANN source
+and header package that exposes the pieces needed to finish the fused design.
+
+Immediate candidates:
+
+- `aclnnWeightQuantBatchMatmulV3` is public and exported, and its C API exposes
+  `innerPrecise` directly. Keep using the existing V3 probe to expand the
+  shape table, but do not promote it as the fast path without a full Qwen
+  q/k/v/gate/up/down win.
+- `aclnnWeightQuantBatchMatmulNz` is public and exported for FP16/BF16
+  activation, INT4 NZ right weight, group scale/offset, optional bias, and
+  FP16/BF16 output. There is no installed torch-npu Python binding for it, so
+  the next native fallback experiment needs a small C++ ACLNN bridge and a
+  persistent packed INT4 NZ weight layout. This must not create or cache a
+  dense FP16 weight tensor.
+- `aclnnConvertWeightToINT4Pack` and `npu_convert_weight_to_int4pack` should be
+  compared before implementing the NZ bridge, because the current Cannoe and
+  Komodo path already depends on CANN's packed INT4 layout.
+- `aclnnQuantMatmulV5`, `aclnnFusedQuantMatmulWeightNz`, and dual-level MX/FP4
+  NZ matmuls are not direct GPTQ FP16 decode paths because they quantize the
+  activation side too. Keep them as future A4W4/A8W4 or FP4 references, not the
+  current speed target.
+
+The most valuable 9.1 reference source is CANN's CMCT AIV/AIC antiquant matmul
+pattern:
+
+```text
+opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/cmct/kernel/kernel_matmul_a_prefetch_b_antiquant.h
+opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/cmct/prologue/tile/tile_antiquant.h
+```
+
+That reference splits the operator structurally the way Cannoe needs to:
+AIV iterates B-weight tiles plus scale/offset tiles and runs antiquant
+prologues, while AIC preloads A and runs matmul over the same scheduled N/M
+tiles. The next fused-kernel pass should use this pattern for scheduling and
+tile ownership, while keeping Cannoe code on public Ascend C headers. Do not
+include private `opp` implementation headers directly.
+
 Use the profiling helper for single-shape CANN traces:
 
 ```bash
