@@ -477,6 +477,47 @@ def test_awq_compute_best_scale_restores_cpu_weights_without_aliasing():
     assert loss >= 0
 
 
+def test_awq_compute_best_scale_avoids_winning_scale_clone(monkeypatch):
+    torch.manual_seed(0)
+
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=4))
+    processor._quant_batch_size = 1
+
+    module = nn.Linear(8, 8, bias=False, dtype=torch.float32).eval()
+    x = torch.randn(2, 4, 8)
+    w_mean = _compute_awq_weight_mean([module], processor.qcfg.group_size)
+    x_mean = processor._compute_activation_x_mean(x)
+    fp16_output = [
+        output.detach()
+        for output in processor._iter_module_forward_outputs(x, module, {})
+    ]
+
+    clone_shapes = []
+    original_clone = torch.Tensor.clone
+
+    def _record_clone(tensor, *args, **kwargs):
+        if tuple(tensor.shape) == tuple(w_mean.shape):
+            clone_shapes.append(tuple(tensor.shape))
+        return original_clone(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "clone", _record_clone)
+
+    with torch.inference_mode():
+        best_scales, loss = processor._compute_best_scale(
+            x,
+            w_mean,
+            x_mean,
+            module,
+            [module],
+            fp16_output,
+            {},
+        )
+
+    assert best_scales.shape == w_mean.shape
+    assert loss >= 0
+    assert clone_shapes == []
+
+
 def test_awq_chunked_scale_loss_matches_legacy_expression():
     torch.manual_seed(0)
 

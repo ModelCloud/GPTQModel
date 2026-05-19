@@ -1863,7 +1863,10 @@ class AWQProcessor(LoopProcessor):
             if loss < best_error:
                 best_error = loss
                 best_ratio = ratio
-                best_scales = scales.clone()
+                # Each ratio creates a fresh scales tensor and never mutates it
+                # after scoring, so retaining the winning tensor avoids clone
+                # allocations during the grid search.
+                best_scales = scales
             for fc in linears2scale:
                 self._restore_awq_weight_from_master(fc, orig_weights_master[fc])
 
