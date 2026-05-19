@@ -477,6 +477,17 @@ positive-`base_k` fallback shape.
   fused work is not tile retuning; large-K accumulation must stop writing
   partial C through GM atomics and must keep accuracy within the established
   raw envelope before runtime enablement.
+- The validator also has `--case-preset qwen3_27b_down_onehot`, which keeps the
+  same Qwen3 27B down shape but activates only one K lane at group and
+  `base_k` boundaries. The first all-8 NPU run passed exactly with
+  `max_abs_max=0`, `mean_abs_max=0`, and `diff_nonfinite_count=0`; timing stayed
+  slow (`custom_ms_mean=903.9163`) because it still launches the full fused
+  tile loop. A rebased all-8 repeat later saw one NPU0 `one_hot_k=0` worker
+  report `diff_nonfinite_count=256`, and an isolated rerun of that exact case
+  passed with `diff_nonfinite_count=0`. Treat this as a boundary diagnostic
+  rather than a runtime enablement gate: it isolates the main deterministic
+  Qwen down drift to multi-K accumulation/partial-C lifecycle, while still
+  keeping non-finite output visible in future runs.
 
 ## aclnn V3 Probe
 

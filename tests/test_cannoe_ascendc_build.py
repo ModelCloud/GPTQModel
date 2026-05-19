@@ -137,6 +137,18 @@ def test_raw_validator_qwen_down_preset_targets_large_projection():
     ]
 
 
+def test_raw_validator_qwen_down_onehot_preset_targets_accumulation_boundaries():
+    validator = _load_raw_validator()
+
+    cases = list(validator.CASE_PRESETS["qwen3_27b_down_onehot"])
+
+    assert [case["one_hot_k"] for case in cases] == [0, 31, 32, 127, 128, 8703, 8704, 17407]
+    assert {case["rows"] for case in cases} == {1}
+    assert {case["k"] for case in cases} == {17408}
+    assert {case["n"] for case in cases} == {5120}
+    assert {case["group"] for case in cases} == {32}
+
+
 def test_raw_validator_batches_one_case_per_device():
     validator = _load_raw_validator()
     cases = [{"case": idx} for idx in range(5)]

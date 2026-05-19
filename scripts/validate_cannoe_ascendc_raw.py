@@ -31,9 +31,15 @@ QWEN3_27B_DOWN_CASES = (
     {"rows": 1, "k": 17408, "n": 5120, "group": 32, "seed": 2701},
 )
 
+QWEN3_27B_DOWN_ONEHOT_CASES = tuple(
+    {"rows": 1, "k": 17408, "n": 5120, "group": 32, "seed": 2710 + idx, "one_hot_k": one_hot_k}
+    for idx, one_hot_k in enumerate((0, 31, 32, 127, 128, 8703, 8704, 17407))
+)
+
 CASE_PRESETS = {
     "default": DEFAULT_LOCAL_A_CASES,
     "qwen3_27b_down": QWEN3_27B_DOWN_CASES,
+    "qwen3_27b_down_onehot": QWEN3_27B_DOWN_ONEHOT_CASES,
 }
 
 
