@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
+import traceback
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -26,6 +28,7 @@ os.environ.setdefault("GPTQ_CACHE_DEQUANTIZED_WEIGHTS", "0")
 import torch
 
 _RESULT_FD: int | None = None
+_ERROR_FD: int | None = None
 
 
 @dataclass(frozen=True)
@@ -100,16 +103,24 @@ def _quiet_cann_logs_enabled() -> bool:
 
 
 def _enable_quiet_cann_logs(path: str) -> None:
-    global _RESULT_FD
+    global _ERROR_FD, _RESULT_FD
     if path != "cannoe" or not _quiet_cann_logs_enabled() or _RESULT_FD is not None:
         return
     _RESULT_FD = os.dup(1)
+    _ERROR_FD = os.dup(2)
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
     try:
         os.dup2(devnull_fd, 1)
         os.dup2(devnull_fd, 2)
     finally:
         os.close(devnull_fd)
+    sys.excepthook = _emit_exception
+
+
+def _emit_exception(exc_type, exc, tb) -> None:
+    text = "".join(traceback.format_exception(exc_type, exc, tb))
+    fd = _ERROR_FD if _ERROR_FD is not None else 2
+    os.write(fd, text.encode("utf-8", errors="replace"))
 
 
 def _emit(text: str) -> None:

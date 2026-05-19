@@ -1916,3 +1916,68 @@ and rereads FP16 partial C through GM between K tiles. Wider K/N tiles exceed
 the current resource/lifecycle boundary. Revisit only after implementing a true
 partial-C accumulation path or a lower-level Cube handoff that avoids the GM
 partial-C round trip.
+
+## 2026-05-19: Cannoe Down Native Prepack Tile Retest
+
+Status: failed default-speed gate; keep the validated `tile_n=320` large-down
+native prepack default. Do not promote `tile_n=256`, split-K slicing, or direct
+`inner_precise` for the Qwen3 27B down path without a fresh full-Qwen gate.
+
+Tested change: swept `GPTQMODEL_CANNOE_PREPACK_TILE_N` on the Qwen3 27B GPTQ
+FP16 `down_proj` shape (`M=1,K=17408,N=5120,group=32`) with
+`warmup=20,iters=100`, then retested the low-memory candidates after a
+temporary default change.
+
+Artifacts:
+
+- `/tmp/cannoe_down_tile_default_*.json`
+- `/tmp/cannoe_down_tile_{256,320,512,768,1024,1536,2048,4096,full}_*.json`
+- `/tmp/cannoe_down_tile256_default_after_patch_*.json`
+- `/tmp/cannoe_down_tile320_forced_after_patch_*.json`
+- `/tmp/cannoe_down_tile_288_lowmem_reprobe_*.json`
+- `/tmp/cannoe_down_tile_{288,320}_confirm_*.json`
+
+| Tile | Mean ms | Peak MB | Decision |
+| ---: | ---: | ---: | --- |
+| default old `320` | 0.2773 | 241.8 | Baseline |
+| 256 | 0.2705 | 241.8 | Initial isolated win, but failed repeat gate |
+| 320 | 0.2733 | 241.8 | Keep validated default |
+| 512 | 0.2699 | 244.9 | Reject; higher memory and no full-gate win |
+| 768 | 0.2981 | 321.4 | Reject |
+| 1024 | 0.2873 | 397.9 | Reject |
+| 1536 | 0.2753 | 550.9 | Reject |
+| 2048 | 0.2710 | 703.9 | Reject |
+| 4096 | 0.2594 | 1273.4 | Reject; speed does not justify memory blowup |
+| full | 0.3032 | 1579.4 | Reject |
+| temporary default `256` retest | 0.2928 | 241.8 | Reject; slower than forced 320 in repeat |
+| forced `320` retest | 0.2898 | 241.8 | Repeat baseline |
+| 288 low-memory reprobe | 0.2477 | 241.8 | Interesting single run, but not stable |
+| 288 alternating confirm A/B | 0.3009 / 0.2759 | 241.8 | Reject; too noisy for default |
+| 320 alternating confirm A/B | 0.2867 / 0.2918 | 241.8 | Keep validated default |
+
+Interpretation: the down path is sensitive to native prepack tile width, but
+the isolated `256` and `288` wins were not stable under repeat testing, and
+wider tiles inflate peak memory. The safe production rule remains `tile_n=320`.
+
+Follow-up probes against the same packed native down plan also failed:
+
+| Probe | Mean ms | Peak MB | Drift vs full output | Decision |
+| --- | ---: | ---: | --- | --- |
+| split-K 2 slices | 0.2514 | 156.9 | `max_abs=63.4`, `mean_abs=13.4` | Reject; output composition invalid |
+| split-K 4 slices | 0.4729 | - | `max_abs=83.875` | Reject; invalid and slower |
+| split-K 8 slices | 0.8933 | - | `max_abs=85.1875` | Reject; invalid and slower |
+| split-K 16 slices | 1.7125 | - | `max_abs=80.125` | Reject; invalid and slower |
+| direct default native op | 0.3013 | 241.9 | exact | Baseline |
+| direct `inner_precise=0` | 0.3014 | 241.9 | exact | Reject; no speed win |
+| direct `inner_precise=1` | 0.3016 | 241.9 | exact | Reject; no speed win |
+
+The next down-projection speed step still needs the true fused Ascend C path:
+correct partial-C accumulation or a real dequant-to-Cube handoff that avoids
+materializing full FP16 weight tiles through GM/L2.
+
+Validation note: while testing `tile_n=288`, the CANN install on the host moved
+under us (`/usr/local/Ascend/cann` now points at `cann-9.1.0-beta.1` while the
+only discovered OPP tree is still `/usr/local/Ascend/cann-8.5.1/opp`), and
+`torch_npu` started failing import when run under an explicit CANN 9
+environment because `ASCEND_OPP_PATH` could not resolve a matching OPP package.
+Do not treat the failed full-gate candidate as a validated speed result.
