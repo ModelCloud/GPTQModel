@@ -39,6 +39,10 @@ CANNOE_PUBLIC_STRATEGIES: dict[str, tuple[str, ...]] = {
     "tscm-direct-local-a": (
         "experimental_tscm_local_a",
     ),
+    "tscm-direct-local-a-serial-k": (
+        "experimental_tscm_local_a",
+        "experimental_tscm_serial_k",
+    ),
     "tscm-iterate-getc-diagnostic": (
         "experimental_tscm_iterate_getc_diagnostic",
     ),
@@ -115,6 +119,9 @@ def _resolve_experimental_flags(args: argparse.Namespace, parser: argparse.Argum
         args.experimental_tscm_direct_dequant = True
     if args.experimental_tscm_iterate_getc_diagnostic:
         args.experimental_tscm_local_a = True
+        args.experimental_tscm_direct_multik = True
+        args.experimental_tscm_direct_dequant = True
+    if args.experimental_tscm_serial_k:
         args.experimental_tscm_direct_multik = True
         args.experimental_tscm_direct_dequant = True
     if args.experimental_aic_tscm_handoff:
@@ -578,6 +585,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--experimental-tscm-serial-k",
+        action="store_true",
+        help=(
+            "Compile the TSCM direct multi-K diagnostic that waits for each Cube K tile before filling and "
+            "loading the next B tile. This isolates async TSCM B-slot lifetime from partial-C accumulation."
+        ),
+    )
+    parser.add_argument(
         "--experimental-tscm-tbuf-handoff",
         action="store_true",
         help=(
@@ -735,6 +750,8 @@ def main() -> int:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_LOCAL_A")
     if args.experimental_tscm_iterate_getc_diagnostic:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_ITERATE_GETC_DIAGNOSTIC")
+    if args.experimental_tscm_serial_k:
+        _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_SERIAL_K")
     if args.experimental_tscm_tbuf_handoff:
         _enable_kernel_define(output, "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF")
     if args.experimental_aic_tscm_handoff:

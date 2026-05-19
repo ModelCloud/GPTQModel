@@ -47,6 +47,10 @@ using CannoeAscendInt4 = AscendC::int4b_t;
 #error "CANNOE_EXPERIMENTAL_TSCM_ITERATE_GETC_DIAGNOSTIC requires TSCM direct multi-K local-A"
 #endif
 
+#if defined(CANNOE_EXPERIMENTAL_TSCM_SERIAL_K) && !defined(CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK)
+#error "CANNOE_EXPERIMENTAL_TSCM_SERIAL_K requires TSCM direct multi-K"
+#endif
+
 #if defined(CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF) && \
     !defined(CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF)
 #error "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF requires TSCM runtime handoff"
@@ -296,6 +300,7 @@ public:
         b_tscm_tbuf_.EnQue(b_tscm_local_);
         b_tscm_tbuf_.DeQue();
 #else
+        PipeBarrier<PIPE_MTE2>();
         b_tscm_.EnQue(b_tscm_local_);
         b_tscm_.DeQue();
 #endif
@@ -729,6 +734,21 @@ public:
                         const bool sequential_write = CannoeOutputTileIsSequential(m_len, base_n, out_features);
                         cube_probe.mm.IterateAll<false>(
                             y_gm_[m_begin * out_features + n_begin], k_tile != 0, sequential_write, true);
+#ifdef CANNOE_EXPERIMENTAL_TSCM_SERIAL_K
+                        cube_probe.mm.WaitIterateAll();
+                        if (m_tile == 0 && has_next_k_tile) {
+                            FillDirectBTileKTile(
+                                direct_b_tile,
+                                k_tile + 1,
+                                n_begin,
+                                packed_begin,
+                                packed_end,
+                                packed_stride,
+                                zero_offsets);
+                            next_b_tscm_tile =
+                                cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_, (k_tile + 1) & 1U);
+                        }
+#else
                         if (m_tile == 0 && has_next_k_tile) {
                             FillDirectBTileKTile(
                                 direct_b_tile,
@@ -742,6 +762,7 @@ public:
                                 cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_, (k_tile + 1) & 1U);
                         }
                         cube_probe.mm.WaitIterateAll();
+#endif
                     }
                     cube_probe.FreeTscmBTile(b_tscm_tile);
                     if (has_next_k_tile) {

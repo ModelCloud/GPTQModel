@@ -747,6 +747,23 @@ raw validator workers timed out at 180 seconds with no stderr. That keeps
 lower-level Cube/L0C control, or a different CANN Matmul lifecycle, as the
 active target.
 
+Two TSCM lifetime probes further narrow the Qwen down failure:
+
+- Adding an explicit `PIPE_MTE2` barrier after direct UB-to-TSCM B-tile copies
+  kept the standard raw guard green on NPU0 (`8/8` pass,
+  `max_abs=0.015625`, `mean_abs=0.0024566650390625`) but the Qwen3 27B down
+  target still failed with `custom_ms=799.7961`, `max_abs=0.21875`,
+  `mean_abs=0.0218505859375`.
+- The guarded `tscm-direct-local-a-serial-k` strategy waits for each Cube K-tile
+  compute before filling/loading the next B tile. It also kept the standard raw
+  guard green on NPU0 (`8/8` pass, `max_abs=0.015625`,
+  `mean_abs=0.0024566650390625`) but the Qwen down target still failed with
+  `custom_ms=812.3234`, `max_abs=0.21875`, `mean_abs=0.0218505859375`.
+
+These probes rule out async UB-to-TSCM copy completion and K-overlap/TSCM-slot
+lifetime as the primary large-down drift source. The remaining target is still
+the multi-K partial-C accumulation path itself.
+
 The guarded `aic-staged-gm-visibility-diagnostic` strategy now isolates another
 handoff boundary. The marker-only build has AIV write two FP16 markers into the
 bounded custom-op user workspace after AIC-owned workspace clear and AIV

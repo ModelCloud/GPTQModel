@@ -464,6 +464,7 @@ def _strategy_args(strategy: str):
         experimental_tscm_direct_multik=False,
         experimental_tscm_local_a=False,
         experimental_tscm_iterate_getc_diagnostic=False,
+        experimental_tscm_serial_k=False,
         experimental_tscm_tbuf_handoff=False,
         experimental_aic_tscm_handoff=False,
         experimental_aic_tscm_zero_b_diagnostic=False,
@@ -525,6 +526,25 @@ def test_public_strategy_tscm_iterate_getc_diagnostic_expands_local_a_flags():
     assert args.experimental_tscm_direct_multik
     assert args.experimental_tscm_local_a
     assert args.experimental_tscm_iterate_getc_diagnostic
+    assert not args.experimental_vecout_consumer
+
+
+def test_public_strategy_tscm_serial_k_expands_local_a_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("tscm-direct-local-a-serial-k")
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_tscm_consumer
+    assert args.experimental_tscm_runtime_handoff
+    assert args.experimental_tscm_direct_dequant
+    assert args.experimental_tscm_direct_multik
+    assert args.experimental_tscm_local_a
+    assert args.experimental_tscm_serial_k
     assert not args.experimental_vecout_consumer
 
 
