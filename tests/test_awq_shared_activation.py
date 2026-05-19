@@ -197,11 +197,13 @@ def test_awq_activation_x_mean_streams_abs_chunks_exactly():
 
     base = torch.arange(-24, 24, dtype=torch.float32).reshape(2, 3, 8)
     x = base[:, :, ::2]
+    before = x.clone()
 
     mean = processor._compute_activation_x_mean(x)
     expected = x.abs().reshape(-1, x.shape[-1]).to(torch.float32).mean(dim=0).to(x.dtype)
 
     assert not x.is_contiguous()
+    assert torch.equal(x, before)
     assert torch.equal(mean, expected)
 
 

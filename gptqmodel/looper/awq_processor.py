@@ -467,7 +467,13 @@ class AWQProcessor(LoopProcessor):
         for i in range(0, num_elements, chunk_size):
             end = min(i + chunk_size, num_elements)
             chunk = inp_flat[i:end]
-            x_sum += chunk.abs().to(torch.float32).sum(dim=0)
+            # Use one private FP32 scratch tensor per chunk and take abs()
+            # in-place on that scratch. This avoids materializing both a
+            # low-precision abs tensor and a FP32 conversion at the same time.
+            chunk_fp32 = chunk.to(dtype=torch.float32, copy=True)
+            chunk_fp32.abs_()
+            x_sum.add_(chunk_fp32.sum(dim=0))
+            del chunk_fp32
 
         x_mean = (x_sum / num_elements).to(inp.dtype)
         del x_sum
