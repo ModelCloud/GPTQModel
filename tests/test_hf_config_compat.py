@@ -6,7 +6,7 @@ import pytest
 import torch
 import transformers
 import transformers.generation.utils as generation_utils
-from transformers import GenerationConfig, GPTNeoXConfig, LlamaConfig, cache_utils
+from transformers import AutoModel, GenerationConfig, GPTNeoXConfig, LlamaConfig, cache_utils
 from transformers.generation.configuration_utils import GenerationMode
 
 from gptqmodel.utils import hf as hf_utils
@@ -449,6 +449,118 @@ def test_prepare_remote_model_init_compat_accepts_tokenizers_backend_for_ovis(mo
 
     assert "TokenizersBackend" in Llama3ConversationFormatter.support_tokenizer_types
     assert getattr(Llama3ConversationFormatter, "_gptqmodel_tokenizer_backend_patch", False) is True
+
+
+def test_prepare_remote_model_init_compat_bridges_ovis_visual_tokenizer_registration(monkeypatch):
+    captured = {}
+
+    class RuntimeVisualConfig:
+        pass
+
+    class RemoteVisualConfig:
+        pass
+
+    class DummyVisualModel:
+        config_class = RemoteVisualConfig
+
+    remote_module = ModuleType("transformers_modules.fake_ovis_bridge.modeling_ovis")
+    remote_module.SiglipVisualTokenizer = DummyVisualModel
+    monkeypatch.setitem(sys.modules, remote_module.__name__, remote_module)
+
+    config_module = ModuleType("transformers_modules.fake_ovis_bridge.configuration_ovis")
+
+    class Llama3ConversationFormatter:
+        support_tokenizer_types = ["PreTrainedTokenizerFast"]
+
+    config_module.Llama3ConversationFormatter = Llama3ConversationFormatter
+    monkeypatch.setitem(sys.modules, config_module.__name__, config_module)
+
+    class DummyRemoteModel:
+        __module__ = remote_module.__name__
+
+    monkeypatch.setattr(
+        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+        lambda class_ref, model_id_or_path, **kwargs: DummyRemoteModel,
+    )
+
+    monkeypatch.setattr(
+        AutoModel,
+        "register",
+        classmethod(
+            lambda cls, config_class, model_class, exist_ok=False: captured.update(
+                {
+                    "config_class": config_class,
+                    "model_class": model_class,
+                    "exist_ok": exist_ok,
+                }
+            )
+        ),
+    )
+
+    config = SimpleNamespace(
+        model_type="ovis",
+        auto_map={"AutoModelForCausalLM": "modeling_ovis.Ovis"},
+        visual_tokenizer_config=RuntimeVisualConfig(),
+    )
+
+    prepare_remote_model_init_compat("/tmp/ovis", config)
+
+    assert captured["config_class"] is RuntimeVisualConfig
+    assert captured["model_class"] is DummyVisualModel
+    assert captured["exist_ok"] is True
+    assert DummyVisualModel.config_class is RuntimeVisualConfig
+
+
+def test_prepare_remote_model_init_compat_bridges_ovis2_5_vit_registration(monkeypatch):
+    captured = {}
+
+    class RuntimeVitConfig:
+        pass
+
+    class RemoteVitConfig:
+        pass
+
+    class DummyVitModel:
+        config_class = RemoteVitConfig
+
+    remote_module = ModuleType("transformers_modules.fake_ovis2_5_bridge.modeling_ovis2_5")
+    remote_module.Siglip2NavitModel = DummyVitModel
+    monkeypatch.setitem(sys.modules, remote_module.__name__, remote_module)
+
+    class DummyRemoteModel:
+        __module__ = remote_module.__name__
+
+    monkeypatch.setattr(
+        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+        lambda class_ref, model_id_or_path, **kwargs: DummyRemoteModel,
+    )
+
+    monkeypatch.setattr(
+        AutoModel,
+        "register",
+        classmethod(
+            lambda cls, config_class, model_class, exist_ok=False: captured.update(
+                {
+                    "config_class": config_class,
+                    "model_class": model_class,
+                    "exist_ok": exist_ok,
+                }
+            )
+        ),
+    )
+
+    config = SimpleNamespace(
+        model_type="ovis2_5",
+        auto_map={"AutoModelForCausalLM": "modeling_ovis2_5.Ovis2_5"},
+        vit_config=RuntimeVitConfig(),
+    )
+
+    prepare_remote_model_init_compat("/tmp/ovis2_5", config)
+
+    assert captured["config_class"] is RuntimeVitConfig
+    assert captured["model_class"] is DummyVitModel
+    assert captured["exist_ok"] is True
+    assert DummyVitModel.config_class is RuntimeVitConfig
 
 
 def test_prepare_remote_model_init_compat_promotes_phi4_positional_seed_to_meta(monkeypatch):

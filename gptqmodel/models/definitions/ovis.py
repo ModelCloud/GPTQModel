@@ -5,6 +5,7 @@
 
 import copy
 import logging
+from types import SimpleNamespace
 from typing import Dict
 
 import torch
@@ -18,6 +19,17 @@ from ..base import BaseQModel
 
 
 class OvisQModel(BaseQModel):
+    HF_CONVERSION_MAP_REVERSED = (
+        # Ovis 1.6 builds the SigLIP visual backbone via `AutoModel`, whose
+        # runtime shell exposes `visual_tokenizer.backbone.*` directly, while
+        # checkpoint tensors still live under `visual_tokenizer.backbone.vision_model.*`.
+        SimpleNamespace(
+            source_patterns=[r"^visual_tokenizer\.backbone\.(?!vision_model\.)(.+)$"],
+            target_patterns=[r"^visual_tokenizer.backbone.vision_model.\1"],
+            operations=[],
+        ),
+    )
+
     pre_lm_head_norm_module = "llm.model.norm"
 
     module_tree = [

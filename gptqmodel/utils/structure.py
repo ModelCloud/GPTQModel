@@ -1208,7 +1208,25 @@ class LazyTurtle:
                     if reversed_map is not None:
                         return reversed_map
 
-        return cls.reverse_hf_conversion_map(getattr(target_model, "_checkpoint_conversion_mapping", None))
+        reversed_map = cls.reverse_hf_conversion_map(getattr(target_model, "_checkpoint_conversion_mapping", None))
+        if reversed_map is not None:
+            return reversed_map
+
+        if model_type == "deepseek_v4":
+            return [
+                _LazyWeightRenaming(r"compressor\.kv_proj", r"compressor\.wkv"),
+                _LazyWeightRenaming(r"compressor\.gate_proj", r"compressor\.wgate"),
+                _LazyWeightRenaming(r"compressor\.indexer\.kv_proj", r"indexer\.compressor\.wkv"),
+                _LazyWeightRenaming(r"compressor\.indexer\.gate_proj", r"indexer\.compressor\.wgate"),
+                _LazyWeightRenaming(r"compressor\.indexer\.q_b_proj", r"indexer\.compressor\.wq_b"),
+                _LazyWeightRenaming(r"compressor\.indexer\.kv_norm", r"indexer\.compressor\.norm"),
+                _LazyWeightRenaming(r"compressor\.indexer\.position_bias", r"indexer\.compressor\.ape"),
+                _LazyWeightRenaming(r"experts\.(\d+)\.gate_proj", r"experts.\1.w1"),
+                _LazyWeightRenaming(r"experts\.(\d+)\.up_proj", r"experts.\1.w3"),
+                _LazyWeightRenaming(r"experts\.(\d+)\.down_proj", r"experts.\1.w2"),
+            ]
+
+        return None
 
     @staticmethod
     def _parse_module_spec(module_spec: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
