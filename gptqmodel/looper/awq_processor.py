@@ -1566,8 +1566,11 @@ class AWQProcessor(LoopProcessor):
                 self._pseudo_quantize_tensor_into(clamp_slice, quant_slice)
                 cur_out = (input_feat * quant_slice).sum(dim=-1)
 
-                # Evaluate the reconstruction error for the current clamp ratio and keep the best one.
-                err = (cur_out - org_out).pow(2).mean(dim=1).view(min_errs.shape)
+                # cur_out is no longer needed after this point, so reuse its
+                # storage for squared error instead of allocating diff/pow
+                # temporaries for every shrink step.
+                cur_out.sub_(org_out).pow_(2)
+                err = cur_out.mean(dim=1).view(min_errs.shape)
                 cur_best_idx = err < min_errs
                 min_errs[cur_best_idx] = err[cur_best_idx]
                 best_max_val[cur_best_idx] = max_val[cur_best_idx]
