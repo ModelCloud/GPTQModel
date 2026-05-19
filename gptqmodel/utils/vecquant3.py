@@ -61,11 +61,18 @@ def _vecquant3_extra_cuda_cflags() -> list[str]:
 _VECQUANT3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_VECQUANT3_OPS_NAME,
     namespace=_VECQUANT3_NAMESPACE,
-    required_ops=("gemv", "gemv_lora", "gemv_lora_int8"),
+    required_ops=(
+        "gemv",
+        "gemv_lora",
+        "gemv_lora_int8",
+        "gemm",
+        "gemm_lora",
+        "gemm_lora_int8",
+    ),
     sources=_vecquant3_sources,
     build_root_env="GPTQMODEL_VECQUANT3_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("vecquant3"),
-    display_name="VecQuant3 GPTQ grouped GEMV",
+    display_name="VecQuant3 GPTQ grouped GEMV/GEMM",
     extra_cflags=lambda: default_jit_cflags(enable_bf16=True),
     extra_cuda_cflags=_vecquant3_extra_cuda_cflags,
     extra_include_paths=_vecquant3_include_paths,
@@ -162,6 +169,34 @@ def gemv_lora(
     return ops.gemv_lora(x, qweight, scales, qzeros, down, up, int(group_size), accumulation_type)
 
 
+def gemm(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    group_size: int,
+    accumulation_dtype: str | torch.dtype | None = torch.float32,
+) -> torch.Tensor:
+    ops = _extension_api().namespace(name="vecquant3")
+    accumulation_type = _normalize_accumulation_dtype(accumulation_dtype, x.dtype)
+    return ops.gemm(x, qweight, scales, qzeros, int(group_size), accumulation_type)
+
+
+def gemm_lora(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    down: torch.Tensor,
+    up: torch.Tensor,
+    group_size: int,
+    accumulation_dtype: str | torch.dtype | None = torch.float32,
+) -> torch.Tensor:
+    ops = _extension_api().namespace(name="vecquant3")
+    accumulation_type = _normalize_accumulation_dtype(accumulation_dtype, x.dtype)
+    return ops.gemm_lora(x, qweight, scales, qzeros, down, up, int(group_size), accumulation_type)
+
+
 def _normalize_lora_int8_up_shape(up_shape: torch.Tensor | tuple[int, int] | list[int]) -> tuple[int, int]:
     if isinstance(up_shape, torch.Tensor):
         shape_values = up_shape.detach().cpu().reshape(-1).tolist()
@@ -218,8 +253,54 @@ def gemv_lora_int8(
     )
 
 
+def gemm_lora_int8(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    down: torch.Tensor,
+    up_qweight: torch.Tensor,
+    up_scales: torch.Tensor,
+    up_shape: torch.Tensor | tuple[int, int] | list[int],
+    group_size: int,
+    lora_group_size: int,
+    accumulation_dtype: str | torch.dtype | None = torch.float32,
+) -> torch.Tensor:
+    rank, out_features = _normalize_lora_int8_up_shape(up_shape)
+    if int(down.size(-1)) != rank:
+        raise ValueError("VecQuant3 int8 LoRA-B rank must match the down projection width.")
+    if int(qweight.size(1)) != out_features:
+        raise ValueError("VecQuant3 int8 LoRA-B out_features must match the quantized base output width.")
+    if lora_group_size <= 0:
+        raise ValueError("VecQuant3 int8 LoRA-B group size must be positive.")
+    expected_values = rank * out_features
+    if int(up_qweight.numel()) < expected_values:
+        raise ValueError("VecQuant3 int8 LoRA-B qweight is too small for the provided shape.")
+    expected_scale_groups = (expected_values + int(lora_group_size) - 1) // int(lora_group_size)
+    if int(up_scales.numel()) < expected_scale_groups:
+        raise ValueError("VecQuant3 int8 LoRA-B scales are too small for the provided shape/group size.")
+
+    ops = _extension_api().namespace(name="vecquant3")
+    accumulation_type = _normalize_accumulation_dtype(accumulation_dtype, x.dtype)
+    return ops.gemm_lora_int8(
+        x,
+        qweight,
+        scales,
+        qzeros,
+        down,
+        up_qweight,
+        up_scales,
+        int(group_size),
+        int(lora_group_size),
+        accumulation_type,
+    )
+
+
 __all__ = [
     "_VECQUANT3_TORCH_OPS_EXTENSION",
+    "gemm",
+    "gemm_lora",
+    "gemm_lora_int8",
     "gemv",
     "gemv_lora",
     "gemv_lora_int8",

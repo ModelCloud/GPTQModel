@@ -161,6 +161,116 @@ def test_vecquant3_grouped_gemv_matches_dequant_reference(group_size, dtype, out
         )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for VecQuant3 grouped kernel test")
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("out_features", [96, 256])
+def test_vecquant3_grouped_gemm_matches_dequant_reference(group_size, dtype, out_features):
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA BF16 support required")
+
+    torch.manual_seed(37 + group_size)
+    device = torch.device("cuda:0")
+    bits = 3
+    maxq = 7
+    pack_bits = 32
+    batch_size = 3
+    in_features = 256
+    rank = 64
+    groups = in_features // group_size
+
+    x = torch.randn(batch_size, in_features, device=device, dtype=torch.float16).to(dtype=dtype).contiguous()
+    qweight_values = torch.randint(0, 8, (in_features, out_features), dtype=torch.int64)
+    qzero_values = torch.randint(0, 8, (groups, out_features), dtype=torch.int64)
+    qweight = _pack_int3_rows(qweight_values).to(device)
+    qzeros = _pack_int3_cols(qzero_values).to(device)
+    scales = (torch.rand(groups, out_features, device=device, dtype=dtype) * 0.02 + 0.001).contiguous()
+    g_idx = (torch.arange(in_features, device=device, dtype=torch.int32) // group_size).contiguous()
+
+    expected = dequant_quant_matmul(x, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq).float()
+    actual = vecquant3.gemm(x, qweight, scales, qzeros, group_size, accumulation_dtype=torch.float32)
+    float_atol = 3e-2 if dtype == torch.float16 else 8e-2
+    torch.testing.assert_close(actual, expected, rtol=0, atol=float_atol)
+
+    actual_input_accum = vecquant3.gemm(x, qweight, scales, qzeros, group_size, accumulation_dtype=dtype)
+    input_atol = 5e-2 if dtype == torch.float16 else 2e-1
+    torch.testing.assert_close(actual_input_accum, expected, rtol=0, atol=input_atol)
+
+    lora_a = (torch.randn(in_features, rank, device=device, dtype=dtype) * 0.01).contiguous()
+    lora_b = (torch.randn(rank, out_features, device=device, dtype=dtype) * 0.01).contiguous()
+    down = (x @ lora_a).contiguous()
+    lora_term = (down @ lora_b).float()
+
+    expected_lora = actual + lora_term
+    actual_lora = vecquant3.gemm_lora(
+        x, qweight, scales, qzeros, down, lora_b, group_size, accumulation_dtype=torch.float32
+    )
+    lora_atol = 3e-3 if dtype == torch.float16 else 2e-2
+    torch.testing.assert_close(actual_lora, expected_lora, rtol=0, atol=lora_atol)
+
+    expected_lora_input_accum = actual_input_accum + lora_term
+    actual_lora_input_accum = vecquant3.gemm_lora(
+        x, qweight, scales, qzeros, down, lora_b, group_size, accumulation_dtype="input"
+    )
+    torch.testing.assert_close(actual_lora_input_accum, expected_lora_input_accum, rtol=0, atol=lora_atol)
+
+    for lora_group_size in (32, 64, 96, 128):
+        up_qweight, up_scales, up_shape = quantize_tensor_groupwise_int8(
+            lora_b,
+            group_size=lora_group_size,
+            scale_dtype=dtype,
+        )
+        up_dequant = dequantize_tensor_groupwise_int8(
+            qweight=up_qweight,
+            scales=up_scales,
+            shape=up_shape,
+            group_size=lora_group_size,
+            device=device,
+            dtype=dtype,
+        ).contiguous()
+        up_qweight = up_qweight.to(device=device, non_blocking=True).contiguous()
+        up_scales = up_scales.to(device=device, non_blocking=True).contiguous()
+        lora_int8_term = (down @ up_dequant).float()
+
+        expected_lora_int8 = actual + lora_int8_term
+        actual_lora_int8 = vecquant3.gemm_lora_int8(
+            x,
+            qweight,
+            scales,
+            qzeros,
+            down,
+            up_qweight,
+            up_scales,
+            up_shape,
+            group_size,
+            lora_group_size,
+            accumulation_dtype=torch.float32,
+        )
+        int8_lora_atol = 8e-3 if dtype == torch.float16 else 3e-2
+        torch.testing.assert_close(actual_lora_int8, expected_lora_int8, rtol=0, atol=int8_lora_atol)
+
+        expected_lora_int8_input_accum = actual_input_accum + lora_int8_term
+        actual_lora_int8_input_accum = vecquant3.gemm_lora_int8(
+            x,
+            qweight,
+            scales,
+            qzeros,
+            down,
+            up_qweight,
+            up_scales,
+            up_shape,
+            group_size,
+            lora_group_size,
+            accumulation_dtype="input",
+        )
+        torch.testing.assert_close(
+            actual_lora_int8_input_accum,
+            expected_lora_int8_input_accum,
+            rtol=0,
+            atol=int8_lora_atol,
+        )
+
+
 def test_vecquant3_accumulation_dtype_validation():
     assert vecquant3._normalize_accumulation_dtype(torch.float32, torch.float16) == 0
     assert vecquant3._normalize_accumulation_dtype("input", torch.float16) == 1
