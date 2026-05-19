@@ -1306,7 +1306,10 @@ class GPTQ:
             # Embedding loss is only reported after quantization; keep one
             # scalar instead of a full [embedding_dim, vocab] loss tensor.
             loss_sum = W.new_zeros(())
-            Q = torch.zeros_like(W)
+            # The full output buffer is only reordered/sliced before return.
+            # Keep it in the final module dtype instead of fp32 to reduce peak
+            # memory; per-block Q1 remains fp32 for quantization math/loss.
+            Q = torch.empty_like(W, dtype=self.module.weight.dtype)
 
             # Fast vectorized path (no cross-column error feedback for Embedding)
             for i1 in range(0, self.columns, blocksize):
@@ -1581,7 +1584,10 @@ class GPTQ:
         # Loss is only reported after quantization; keep a scalar accumulator
         # instead of a second full weight-sized tensor during GPTQ.
         loss_sum = W.new_zeros(()) if Hinv is not None else None
-        Q = torch.zeros_like(W)
+        # The retained full output buffer is not used for further arithmetic,
+        # only permutation/slicing/final return. Store it in the final module
+        # dtype while keeping block scratch tensors in fp32.
+        Q = torch.empty_like(W, dtype=self.module.weight.dtype)
 
         # Use simplified loop when mock_quantization is active
         if self.qcfg.mock_quantization:

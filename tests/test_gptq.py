@@ -159,7 +159,9 @@ def test_gptq_dense_loss_uses_scalar_accumulator(monkeypatch):
 
     full_weight_shape = tuple(layer.weight.shape)
     full_zero_like_calls = 0
+    full_empty_like_dtypes = []
     original_zeros_like = torch.zeros_like
+    original_empty_like = torch.empty_like
 
     def _record_zeros_like(input_tensor, *args, **kwargs):
         nonlocal full_zero_like_calls
@@ -167,13 +169,20 @@ def test_gptq_dense_loss_uses_scalar_accumulator(monkeypatch):
             full_zero_like_calls += 1
         return original_zeros_like(input_tensor, *args, **kwargs)
 
-    # The dense path still needs one full output buffer (Q), but loss reporting
-    # must not allocate a second full weight-shaped tensor.
+    def _record_empty_like(input_tensor, *args, **kwargs):
+        if tuple(input_tensor.shape) == full_weight_shape:
+            full_empty_like_dtypes.append(kwargs.get("dtype", input_tensor.dtype))
+        return original_empty_like(input_tensor, *args, **kwargs)
+
+    # Dense GPTQ must not zero-initialize any full weight-shaped tensors. The
+    # retained output buffer is allocated once with empty_like in final dtype.
     monkeypatch.setattr(torch, "zeros_like", _record_zeros_like)
+    monkeypatch.setattr(torch, "empty_like", _record_empty_like)
 
     qweight, scales, zeros, g_idx, _, avg_loss, _, nsamples = gptq.quantize(blocksize=4)
 
-    assert full_zero_like_calls == 1
+    assert full_zero_like_calls == 0
+    assert full_empty_like_dtypes == [layer.weight.dtype]
     assert qweight.shape == layer.weight.shape
     assert scales.shape == zeros.shape == (6, 2)
     assert g_idx.shape == (8,)
@@ -193,22 +202,56 @@ def test_gptq_dense_hessian_released_before_output_allocation(monkeypatch):
 
     full_weight_shape = tuple(layer.weight.shape)
     hessian_states_at_full_alloc = []
-    original_zeros_like = torch.zeros_like
+    original_empty_like = torch.empty_like
 
     def _record_hessian_state(input_tensor, *args, **kwargs):
         if tuple(input_tensor.shape) == full_weight_shape:
             hessian_states_at_full_alloc.append(getattr(gptq, "H", "missing"))
-        return original_zeros_like(input_tensor, *args, **kwargs)
+        return original_empty_like(input_tensor, *args, **kwargs)
 
     # Once Hinv is materialized, the dense Hessian should be gone before GPTQ
     # allocates the full output buffer and block scratch tensors.
-    monkeypatch.setattr(torch, "zeros_like", _record_hessian_state)
+    monkeypatch.setattr(torch, "empty_like", _record_hessian_state)
 
     qweight, *_ = gptq.quantize(blocksize=4)
 
     assert qweight.shape == layer.weight.shape
     assert hessian_states_at_full_alloc
     assert all(state is None for state in hessian_states_at_full_alloc)
+
+
+def test_gptq_dense_final_dtype_output_buffer_preserves_quantized_weight(monkeypatch):
+    torch.manual_seed(0)
+
+    base_layer = nn.Linear(8, 6, bias=False, dtype=torch.float16).eval()
+    calibration = torch.randn(1, 4, 8, dtype=torch.float16)
+    full_weight_shape = tuple(base_layer.weight.shape)
+
+    def _run_quantize() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
+        layer = nn.Linear(8, 6, bias=False, dtype=torch.float16).eval()
+        layer.weight.data.copy_(base_layer.weight.data)
+        qcfg = QuantizeConfig(bits=4, group_size=4, desc_act=False)
+        gptq = GPTQ(layer, qcfg=qcfg)
+        gptq.quantizer.configure(perchannel=True)
+        gptq.add_batch(calibration, None)
+        qweight, scales, zeros, g_idx, _, avg_loss, *_ = gptq.quantize(blocksize=4)
+        return qweight, scales, zeros, g_idx, avg_loss
+
+    default_result = _run_quantize()
+
+    original_empty_like = torch.empty_like
+
+    def _force_full_output_buffer_fp32(input_tensor, *args, **kwargs):
+        if tuple(input_tensor.shape) == full_weight_shape:
+            kwargs["dtype"] = torch.float32
+        return original_empty_like(input_tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "empty_like", _force_full_output_buffer_fp32)
+    fp32_buffer_result = _run_quantize()
+
+    for default_tensor, fp32_buffer_tensor in zip(default_result[:4], fp32_buffer_result[:4]):
+        assert torch.equal(default_tensor, fp32_buffer_tensor)
+    assert default_result[4] == fp32_buffer_result[4]
 
 
 def test_gptq_embedding_loss_uses_scalar_accumulator(monkeypatch):
@@ -222,7 +265,9 @@ def test_gptq_embedding_loss_uses_scalar_accumulator(monkeypatch):
 
     operating_shape = (layer.embedding_dim, layer.num_embeddings)
     full_zero_like_calls = 0
+    full_empty_like_dtypes = []
     original_zeros_like = torch.zeros_like
+    original_empty_like = torch.empty_like
 
     def _record_zeros_like(input_tensor, *args, **kwargs):
         nonlocal full_zero_like_calls
@@ -230,13 +275,20 @@ def test_gptq_embedding_loss_uses_scalar_accumulator(monkeypatch):
             full_zero_like_calls += 1
         return original_zeros_like(input_tensor, *args, **kwargs)
 
-    # Embedding GPTQ works on transposed weights. It still needs one full output
-    # buffer (Q), but loss reporting must stay scalar even for large vocabularies.
+    def _record_empty_like(input_tensor, *args, **kwargs):
+        if tuple(input_tensor.shape) == operating_shape:
+            full_empty_like_dtypes.append(kwargs.get("dtype", input_tensor.dtype))
+        return original_empty_like(input_tensor, *args, **kwargs)
+
+    # Embedding GPTQ works on transposed weights. It must not zero-initialize a
+    # full [embedding_dim, vocab] tensor; the output buffer is empty final dtype.
     monkeypatch.setattr(torch, "zeros_like", _record_zeros_like)
+    monkeypatch.setattr(torch, "empty_like", _record_empty_like)
 
     qweight, scales, zeros, g_idx, _, avg_loss, _, nsamples = gptq.quantize(blocksize=4)
 
-    assert full_zero_like_calls == 1
+    assert full_zero_like_calls == 0
+    assert full_empty_like_dtypes == [layer.weight.dtype]
     assert qweight.shape == layer.weight.shape
     assert scales.shape == zeros.shape == (6, 2)
     assert g_idx.shape == (8,)
