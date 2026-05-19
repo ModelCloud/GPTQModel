@@ -1884,3 +1884,35 @@ custom-op user workspace fault before AIC can observe data. This narrows the
 fused-kernel target: the next handoff should use CANN/Matmul-managed KFC/SCM
 buffer ownership or lower-level Cube APIs, not standalone AIV writes to the
 generated ACLNN workspace.
+
+## 2026-05-19: Cannoe Qwen Down Larger Fused Tile Sweep
+
+Status: partial win only; keep `base_n=128,base_k=256` as a raw diagnostic and
+do not enable the fused path for production Qwen down until the partial-C drift
+is fixed.
+
+Tested change: reran the raw Ascend C fused Qwen3 27B `down_proj` target
+(`M=1,K=17408,N=5120,group=32`) against the current TSCM direct-local-A package
+with larger K/N tiles.
+
+Artifacts:
+
+- Bridge: `/tmp/cannoe_target_down_bridge/a9901d82ae8bd224/gptqmodel_cannoe_ascendc_ops.so`
+- OPP package: `/tmp/cannoe_tscm_barrier_install/build_out/_CPack_Packages/Linux/External/custom_opp_ubuntu_aarch64.run/packages`
+- Summaries: `/tmp/cannoe_qwen_down_bn*_bk*.json`
+
+| base_n | base_k | Result | custom_ms | max_abs | mean_abs | Notes |
+| ---: | ---: | --- | ---: | ---: | ---: | --- |
+| 128 | 256 | Finite, fails accuracy | 723.0416-833.5908 | 0.15625 | 0.015579 | Best current fused down diagnostic; planner replay selected this tile |
+| 128 | 512 | Runtime failure | - | - | - | `507015`; AIC MTE write address / CCU address-check error |
+| 128 | 1024 | Runtime failure | - | - | - | `507015`; AIV MPU invalid access |
+| 256 | 256 | Runtime failure | - | - | - | `507015`; AIC MTE write address / CCU address-check error |
+| 256 | 512 | Runtime failure | - | - | - | `507015`; AIV MPU invalid access |
+| 256 | 1024 | Runtime failure | - | - | - | `507015`; AIV MPU invalid access |
+
+Interpretation: `base_k=256` halves the K-loop count and improves both latency
+and drift versus the prior `base_k=128` large-down probes, but it still writes
+and rereads FP16 partial C through GM between K tiles. Wider K/N tiles exceed
+the current resource/lifecycle boundary. Revisit only after implementing a true
+partial-C accumulation path or a lower-level Cube handoff that avoids the GM
+partial-C round trip.

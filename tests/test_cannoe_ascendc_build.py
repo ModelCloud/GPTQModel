@@ -242,12 +242,19 @@ def test_raw_validator_planner_tiles_match_validated_cannoe_policy():
         {"rows": 8, "k": 1024, "n": 512, "group": 32, "seed": 2},
         args,
     )
+    qwen_down_case = validator._case_payload(
+        {"rows": 1, "k": 17408, "n": 5120, "group": 32, "seed": 3},
+        args,
+    )
 
     assert fast_case["base_m"] == 16
     assert fast_case["base_n"] == -128
     assert fast_case["base_k"] == -128
     assert unsafe_narrow_case["base_n"] == -256
     assert unsafe_narrow_case["base_k"] == -128
+    assert qwen_down_case["base_m"] == 16
+    assert qwen_down_case["base_n"] == -128
+    assert qwen_down_case["base_k"] == -256
 
 
 def test_raw_validator_quiet_cann_env_defaults_preserve_overrides():

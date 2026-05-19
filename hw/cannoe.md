@@ -478,10 +478,19 @@ positive-`base_k` fallback shape.
   target at `base_n=256,base_k=128`: `custom_ms=851.9068`,
   `max_abs=0.21875`, `mean_abs=0.0218505859375`. The matching tile sweep also
   failed for `base_n in {128,256}` and `base_k in {64,128}` with best observed
-  latency `801.015 ms` and worst `max_abs=0.34375`. This confirms the remaining
-  fused work is not tile retuning; large-K accumulation must stop writing
-  partial C through GM atomics and must keep accuracy within the established
-  raw envelope before runtime enablement.
+  latency `801.015 ms` and worst `max_abs=0.34375`. A later narrow down-only
+  sweep found `base_n=128,base_k=256` is finite and directionally better
+  (`custom_ms=745.4321`, `max_abs=0.15625`,
+  `mean_abs=0.0155792236328125`), so the raw validator planner now uses this as
+  the Qwen down diagnostic tile. The planner replay selected
+  `base_n=-128,base_k=-256` and reproduced the same drift at
+  `custom_ms=763.5723`; after rebasing onto a newer `main`, repeat replays
+  ranged from `723.0416` to `833.5908` with the same drift. Do not widen further
+  without a new resource proof: `base_k in {512,1024}` and
+  `base_n=256,base_k>=256` faulted with runtime `507015` AIC/AIV memory-access
+  errors. This confirms the remaining fused work is not ordinary tile retuning;
+  large-K accumulation must stop writing partial C through GM atomics and must
+  keep accuracy within the established raw envelope before runtime enablement.
 - The validator also has `--case-preset qwen3_27b_down_onehot`, which keeps the
   same Qwen3 27B down shape but activates only one K lane at group and
   `base_k` boundaries. The first all-8 NPU run passed exactly with
@@ -763,6 +772,17 @@ Two TSCM lifetime probes further narrow the Qwen down failure:
 These probes rule out async UB-to-TSCM copy completion and K-overlap/TSCM-slot
 lifetime as the primary large-down drift source. The remaining target is still
 the multi-K partial-C accumulation path itself.
+
+The next down-specific planner probe keeps `base_n=128` and raises only
+`base_k` to `256`, cutting the Qwen down K-loop count from `136` to `68`.
+On NPU0 this improved the fused diagnostic to `custom_ms=745.4321`,
+`max_abs=0.15625`, and `mean_abs=0.0155792236328125`, still outside the raw
+acceptance envelope but better than the `base_k=128` TSCM lifetime probes. The
+automatic planner path replayed between `custom_ms=723.0416` and `833.5908`
+with the same drift across two rebases. Larger down tiles crossed the current
+local-memory/lifecycle boundary and faulted with runtime `507015`, so the next
+correctness step remains true partial-C accumulation control rather than larger
+staged B tiles.
 
 The guarded `aic-staged-gm-visibility-diagnostic` strategy now isolates another
 handoff boundary. The marker-only build has AIV write two FP16 markers into the

@@ -159,9 +159,10 @@ def _case_payload(case: dict[str, Any], args: argparse.Namespace) -> dict[str, A
         rows = int(payload["rows"])
         k = int(payload["k"])
         n = int(payload["n"])
+        group = int(payload["group"])
         payload.setdefault("base_m", 16 if rows <= 16 else min(128, _align_up(rows, 16)))
         payload.setdefault("base_n", -_planner_base_n(rows, k, n))
-        payload.setdefault("base_k", -128 if k % 128 == 0 else -64)
+        payload.setdefault("base_k", -_planner_base_k(rows, k, n, group))
     else:
         payload.setdefault("base_m", args.base_m)
         payload.setdefault("base_n", args.base_n)
@@ -174,6 +175,8 @@ def _align_up(value: int, alignment: int) -> int:
 
 
 def _planner_base_n(rows: int, k: int, n: int) -> int:
+    if _is_qwen3_27b_down(rows, k, n):
+        return 128
     if (
         n == 256
         or (n == 640 and k in {512, 768})
@@ -182,6 +185,16 @@ def _planner_base_n(rows: int, k: int, n: int) -> int:
     ):
         return 128
     return min(256, _align_up(n, 16))
+
+
+def _planner_base_k(rows: int, k: int, n: int, group: int) -> int:
+    if _is_qwen3_27b_down(rows, k, n) and group == 32:
+        return 256
+    return 128 if k % 128 == 0 else 64
+
+
+def _is_qwen3_27b_down(rows: int, k: int, n: int) -> bool:
+    return rows <= 16 and k == 17408 and n == 5120
 
 
 def _timing_stats(results: list[dict[str, Any]]) -> dict[str, float | None]:
