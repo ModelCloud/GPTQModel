@@ -751,6 +751,31 @@ __global__ void vecquant3_gptq_gemm_batch_kernel(
     }
   }
 
+  float lora_acc[BatchTileRows];
+  if constexpr (LoraMode == kLoraInt8) {
+    for (int batch_offset = 0; batch_offset < BatchTileRows; ++batch_offset) {
+      lora_acc[batch_offset] = 0.0f;
+    }
+    if (blockIdx.x == 0) {
+      for (int r = 0; r < rank; ++r) {
+        const int idx = r * width + col;
+        const scalar_t up_value = traits::mul(
+            traits::from_int(static_cast<int>(up_qweight[idx])),
+            up_scales[idx / lora_group_size]);
+        for (int batch_offset = 0; batch_offset < BatchTileRows;
+             ++batch_offset) {
+          if (batch_offset >= valid_rows) {
+            break;
+          }
+          const int batch_row = batch_base + batch_offset;
+          const scalar_t down_value = down[batch_row * down_stride + r];
+          lora_acc[batch_offset] +=
+              traits::to_float(traits::mul(down_value, up_value));
+        }
+      }
+    }
+  }
+
   for (int batch_offset = 0; batch_offset < BatchTileRows; ++batch_offset) {
     if (batch_offset >= valid_rows) {
       break;
@@ -762,29 +787,20 @@ __global__ void vecquant3_gptq_gemm_batch_kernel(
       acc = traits::to_float(acc_input[batch_offset].x) +
             traits::to_float(acc_input[batch_offset].y);
     }
-    const int batch_row = batch_base + batch_offset;
-    const scalar_t *__restrict__ down_row =
-        LoraMode == kLoraNone ? nullptr : down + batch_row * down_stride;
-
     if constexpr (LoraMode == kLoraDense) {
       if (blockIdx.x == 0) {
+        const scalar_t *__restrict__ down_row =
+            down + (batch_base + batch_offset) * down_stride;
         for (int r = 0; r < rank; ++r) {
           acc += traits::to_float(
               traits::mul(down_row[r], up[r * width + col]));
         }
       }
     } else if constexpr (LoraMode == kLoraInt8) {
-      if (blockIdx.x == 0) {
-        for (int r = 0; r < rank; ++r) {
-          const int idx = r * width + col;
-          const scalar_t up_value = traits::mul(
-              traits::from_int(static_cast<int>(up_qweight[idx])),
-              up_scales[idx / lora_group_size]);
-          acc += traits::to_float(traits::mul(down_row[r], up_value));
-        }
-      }
+      acc += lora_acc[batch_offset];
     }
 
+    const int batch_row = batch_base + batch_offset;
     atomicAdd(&out[batch_row * out_stride + col], acc);
   }
 }
