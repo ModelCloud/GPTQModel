@@ -445,6 +445,38 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
     assert captured["fp16_output_shape"] == (4, 8, 16)
 
 
+def test_awq_compute_best_scale_restores_cpu_weights_without_aliasing():
+    torch.manual_seed(0)
+
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=4))
+    processor._quant_batch_size = 1
+
+    module = nn.Linear(8, 8, bias=False, dtype=torch.float32).eval()
+    x = torch.randn(2, 4, 8)
+    original_weight = module.weight.detach().clone()
+    w_mean = _compute_awq_weight_mean([module], processor.qcfg.group_size)
+    x_mean = processor._compute_activation_x_mean(x)
+    fp16_output = [
+        output.detach().clone()
+        for output in processor._iter_module_forward_outputs(x, module, {})
+    ]
+
+    with torch.inference_mode():
+        best_scales, loss = processor._compute_best_scale(
+            x,
+            w_mean,
+            x_mean,
+            module,
+            [module],
+            fp16_output,
+            {},
+        )
+
+    torch.testing.assert_close(module.weight, original_weight, atol=0, rtol=0)
+    assert best_scales.device.type == "cpu"
+    assert loss >= 0
+
+
 @parameterized.expand([
     ("cpu_gs32", "cpu", 32),
     ("cpu_gs64", "cpu", 64),

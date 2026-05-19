@@ -1681,10 +1681,13 @@ class AWQProcessor(LoopProcessor):
         best_scales = None
         best_error = float("inf")
 
-        # Clone the original FP weights to CPU once so we can mutate/restore without load_state_dict overhead
+        # Clone original weights to CPU once so candidate ratios can mutate
+        # in-flight module weights without load_state_dict overhead. Preserve
+        # source dtype to reduce restore bandwidth for fp16/bf16 modules; the
+        # explicit copy also prevents CPU quantization from aliasing the live
+        # parameter storage.
         orig_weights_cpu: Dict[nn.Linear, torch.Tensor] = {
-            # stash a contiguous FP32 master copy on CPU; avoids tying up GPU memory between ratios
-            fc: fc.weight.detach().to(torch.float32).cpu().contiguous()
+            fc: fc.weight.detach().to(device=CPU, dtype=fc.weight.dtype, copy=True).contiguous()
             for fc in linears2scale
         }
 
