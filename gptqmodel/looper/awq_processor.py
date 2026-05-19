@@ -449,7 +449,10 @@ class AWQProcessor(LoopProcessor):
                     self._shared_activation_stats["x_mean_hits"] += 1
                     return cached
 
-        inp_flat = inp.abs().view(-1, inp.shape[-1])
+        # Keep the original activation view and take abs() inside each chunk.
+        # Materializing inp.abs() for the full calibration tensor defeats the
+        # memory cap below on large AWQ inputs.
+        inp_flat = inp.reshape(-1, inp.shape[-1])
         num_elements = inp_flat.size(0)
         num_channels = inp_flat.size(1)
         float32_size = torch.tensor([], dtype=torch.float32).element_size()
@@ -464,7 +467,7 @@ class AWQProcessor(LoopProcessor):
         for i in range(0, num_elements, chunk_size):
             end = min(i + chunk_size, num_elements)
             chunk = inp_flat[i:end]
-            x_sum += chunk.to(torch.float32).sum(dim=0)
+            x_sum += chunk.abs().to(torch.float32).sum(dim=0)
 
         x_mean = (x_sum / num_elements).to(inp.dtype)
         del x_sum

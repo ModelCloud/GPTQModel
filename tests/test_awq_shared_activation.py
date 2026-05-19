@@ -191,6 +191,20 @@ def test_awq_activation_x_mean_toggle_preserves_exact_activation_math():
         assert torch.equal(enabled_means[name], disabled_means[name])
 
 
+def test_awq_activation_x_mean_streams_abs_chunks_exactly():
+    processor = _make_awq_processor(enable_activation_x_mean_cache=False)
+    processor.max_chunk_memory = 16
+
+    base = torch.arange(-24, 24, dtype=torch.float32).reshape(2, 3, 8)
+    x = base[:, :, ::2]
+
+    mean = processor._compute_activation_x_mean(x)
+    expected = x.abs().reshape(-1, x.shape[-1]).to(torch.float32).mean(dim=0).to(x.dtype)
+
+    assert not x.is_contiguous()
+    assert torch.equal(mean, expected)
+
+
 def test_awq_feature_cache_does_not_alias_distinct_tensor_objects(monkeypatch):
     processor = _make_awq_processor()
     processor._set_current_batch_index(0)
