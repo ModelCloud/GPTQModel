@@ -99,6 +99,21 @@ def _maybe_print_module_tree(model) -> None:
         print_module_tree(model=model)
 
 
+def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
+    converted = defuser.convert_model(model, cleanup_original=cleanup_original)
+
+    defuser_module_paths = getattr(cls, "defuser_module_paths", ())
+    if defuser_module_paths:
+        for module_path in defuser_module_paths:
+            module, _ = get_module_by_name_prefix(model, module_path)
+            if module is None:
+                log.warn("Loader: defuser module path `%s` was not found.", module_path)
+                continue
+            converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
+
+    return converted
+
+
 def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
     """Detect whether the resolved HF architecture exposes FA2 kernels."""
 
@@ -727,12 +742,12 @@ def ModelLoader(cls):
                 )
                 if getattr(model, "config", None) is config:
                     model.config = copy.deepcopy(config)
-                defuser.convert_model(model, cleanup_original=False)
+                _convert_model_with_defuser(cls, model, cleanup_original=False)
                 model._model_init_kwargs = fallback_init_kwargs
                 _maybe_print_module_tree(model=model)
                 turtle_model = None
             else:
-                defuser.convert_model(model, cleanup_original=False)
+                _convert_model_with_defuser(cls, model, cleanup_original=False)
                 shell_model_init_kwargs = dict(model_init_kwargs_without_internal)
                 shell_model_init_kwargs.update(hf_gguf_load_kwargs)
                 model._model_init_kwargs = shell_model_init_kwargs
@@ -768,7 +783,7 @@ def ModelLoader(cls):
             )
             if getattr(model, "config", None) is config:
                 model.config = copy.deepcopy(config)
-            defuser.convert_model(model, cleanup_original=False)
+            _convert_model_with_defuser(cls, model, cleanup_original=False)
             direct_model_init_kwargs = dict(model_init_kwargs_without_internal)
             direct_model_init_kwargs.update(hf_gguf_load_kwargs)
             model._model_init_kwargs = direct_model_init_kwargs
@@ -1188,7 +1203,7 @@ def ModelLoader(cls):
                     )
                 else:
                     raise
-            defuser.convert_model(model, cleanup_original=True)
+            _convert_model_with_defuser(cls, model, cleanup_original=True)
             model.checkpoint_file_name = model_save_name
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)

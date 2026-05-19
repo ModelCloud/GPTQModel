@@ -17,8 +17,9 @@ class Test(ModelTest):
     EVAL_BATCH_SIZE = 1
 
     def test_ovis(self):
-        model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
-                                           dtype=self.TORCH_DTYPE, batch_size=1)
+        with self.model_compat_test_context():
+            model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
+                                               dtype=self.TORCH_DTYPE, batch_size=1)
 
         messages = [
             {

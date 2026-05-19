@@ -1317,6 +1317,15 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
             if vision_model_cls:
                 try_patch_legacy_flash_attn_flag(vision_model_cls)
 
+        if config.model_type == "ovis2_6_moe":
+            vision_model_cls = getattr(
+                remote_module,
+                "Siglip2NavitModel",
+                None,
+            )
+            if vision_model_cls:
+                try_patch_legacy_flash_attn_flag(vision_model_cls)
+
         if (
             outer_model_cls is not None
             and hasattr(outer_model_cls, "tie_weights")
@@ -1359,7 +1368,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
                     formatter_cls.support_tokenizer_types = support_tokenizer_types
                 formatter_cls._gptqmodel_tokenizer_backend_patch = True
 
-        if getattr(config, "model_type", None) == "ovis2_5":
+        if getattr(config, "model_type", None) in {"ovis2_5", "ovis2_6", "ovis2_6_moe"}:
             register_runtime_automodel_config(config, remote_module, "vit_config", "Siglip2NavitModel")
 
         if getattr(config, "model_type", None) == "hymba" and remote_module is not None:
@@ -1520,9 +1529,8 @@ def try_patch_legacy_flash_attn_flag(model_cls):
             return
 
         # The remote modeling code for some models(For example, ovis.) still relies on `_supports_flash_attn_2`
-        if hasattr(model_cls, "_supports_flash_attn"):
-            if not hasattr(model_cls, "_supports_flash_attn_2"):
-                setattr(model_cls, "_supports_flash_attn_2", bool(model_cls._supports_flash_attn))
+        if hasattr(model_cls, "_supports_flash_attn") and not hasattr(model_cls, "_supports_flash_attn_2"):
+            setattr(model_cls, "_supports_flash_attn_2", bool(model_cls._supports_flash_attn))
             return
 
         # Find the most specific class that explicitly declares the newer

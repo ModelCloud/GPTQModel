@@ -266,6 +266,11 @@ class BaseQModel(nn.Module):
 
     INPUT_EMBEDDING_EXTRA_ARGS = None
 
+    # Some models (e.g. ovis2_6_moe) do not contain MoE layers directly.
+    # The actual experts live inside submodules (e.g. Qwen3MoeModel.mlp.experts),
+    # so `defuser_module_paths` is used to explicitly locate and defuse them.
+    defuser_module_paths = None
+
     def __init__(
         self,
         model: PreTrainedModel,
