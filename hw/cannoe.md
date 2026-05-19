@@ -449,18 +449,23 @@ positive-`base_k` fallback shape.
   `q=0.0772`, `k=0.0730`, `v=0.0709`, `gate=0.2214`, `up=0.2188`,
   `down=0.2757`; JSON artifact
   `/tmp/cannoe_qwen3_27b_full_gate_after_tscm_unroll.json`.
-- The large GPTQ down-projection default prepack tile is now narrowed to
-  `tile_n=512` for `group_size=32`, `K>=16384`, and `4096<=N<=8192`. This keeps
-  the plain native CANN fast path but reduces cold prepack workspace for the
-  Qwen3 27B down shape. On NPU0, down-only improved from the default
-  `0.2964 ms`, `397.9 MB` peak to `0.2719 ms`, `244.9 MB` peak; a direct
-  output comparison against the old `tile_n=1024` plan produced
-  `max_abs=0`, `mean_abs=0`, `max_rel=0`. Full Qwen3 27B FP16 gate repeats were
-  noisy, with one `0.9095 ms` total run (`down=0.2594`) followed by a final guard
-  run at `0.9684 ms` total (`down=0.2979`). Treat this as a cold/prepack memory
-  improvement, not a proven steady-state speed win; JSON artifacts
-  `/tmp/cannoe_qwen3_27b_full_gate_down_tile512_default_run2.json` and
-  `/tmp/cannoe_qwen3_27b_full_gate_down_tile512_default_final.json`.
+- The large GPTQ down-projection default prepack tile is now narrowed further to
+  `tile_n=320` for `group_size=32`, `K>=16384`, and `4096<=N<=8192`. This keeps
+  the plain native CANN fast path while reducing cold prepack workspace for the
+  Qwen3 27B down shape. The NPU0 down-only sweep found `tile_n=320` at
+  `0.2568 ms`, `241.8 MB` peak versus the previous `tile_n=512` at
+  `0.2765 ms`, `244.9 MB` peak in the same sweep. Full Qwen3 27B FP16 gate
+  repeats remained noisy but favored the new tile: `tile_n=320` totals
+  `0.9288 ms` and `0.9161 ms`, while `GPTQMODEL_KOMODO_PREPACK_TILE_N=512`
+  totals were `0.9718 ms` and `1.0140 ms`. Count this as a validated native
+  CANN fast-path retune and cold/prepack memory improvement, not a substitute
+  for the true fused Ascend C dequant-to-Cube kernel target.
+- A planned-path `inner_precise` probe for the same Qwen3 27B down shape did not
+  validate. Down-only NPU0 measurements were: default plain-native `0.2625 ms`,
+  forced planned `inner_precise=0` `0.2756 ms`, and forced planned
+  `inner_precise=1` `0.2901 ms`. Keep the default down projection on the bound
+  plain-native path; do not route it through the heavier Cannoe plan just to
+  pass the optional `inner_precise` argument.
 - A public `Matmul::IterateBatch` partial-sum replacement for the same TSCM
   direct path compiled but timed out on all eight raw workers at `120s`. Keep
   the validated `IterateAll` accumulation route until a smaller

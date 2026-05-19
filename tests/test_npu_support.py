@@ -449,7 +449,7 @@ def test_cannoe_gptq_large_down_projection_uses_narrow_prepack_tile(monkeypatch)
         register_buffers=True,
     )
     assert q_proj._native_prepack_tile_n() == 1024
-    assert down_proj._native_prepack_tile_n() == 512
+    assert down_proj._native_prepack_tile_n() == 320
 
 
 def test_cannoe_default_fused_op_names_include_msopgen_aliases(monkeypatch):

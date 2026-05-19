@@ -119,14 +119,15 @@ python scripts/benchmark_qwen3_27b_gptq_fp16.py \
   --json-output /tmp/cannoe_qwen3_27b_full_gate.json
 ```
 
-2026-05-18 NPU0 down-projection prepack retune: Cannoe now uses
-`prepack_tile_n=512` by default for large GPTQ down-style group-32 projections
-(`K>=16384`, `4096<=N<=8192`). The Qwen3 27B down-only probe improved from
-`0.2964 ms`, `397.9 MB` peak to `0.2719 ms`, `244.9 MB` peak with exact output
-match versus the old `tile_n=1024` plan. Full projection gate repeats were
-noisy: best observed `0.9095 ms` total with `down=0.2594`, while the final guard
-run completed at `0.9684 ms` total with `down=0.2979`. Count this as a
-cold/prepack memory improvement, not a stable steady-state speed claim.
+2026-05-19 NPU0 down-projection prepack retune: Cannoe now uses
+`prepack_tile_n=320` by default for large GPTQ down-style group-32 projections
+(`K>=16384`, `4096<=N<=8192`). The Qwen3 27B down-only sweep measured
+`tile_n=320` at `0.2568 ms`, `241.8 MB` peak versus the previous `tile_n=512`
+at `0.2765 ms`, `244.9 MB` peak. Full projection gate repeats remained noisy
+but favored `320`: totals `0.9288 ms` and `0.9161 ms` versus forced `512`
+totals `0.9718 ms` and `1.0140 ms`. The planned `inner_precise` path failed for
+this down shape (`0.2756 ms` at `inner_precise=0`, `0.2901 ms` at
+`inner_precise=1`), so the runtime keeps the bound plain-native fast path.
 
 ### Dense-Cache Guard
 
