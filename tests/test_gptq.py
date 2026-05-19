@@ -16,7 +16,7 @@ import torch.nn as nn
 from models.model_test import ModelTest
 
 from gptqmodel.quantization import gptq as gptq_mod
-from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
+from gptqmodel.quantization.config import FallbackStrategy, HessianConfig, QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
 
 
@@ -379,6 +379,35 @@ def test_gptq_group_index_builder_matches_legacy_python_list():
 
     torch.testing.assert_close(perm_direct, perm_legacy, atol=0, rtol=0)
     torch.testing.assert_close(perm, perm_before, atol=0, rtol=0)
+
+
+def test_gptq_fallback_quantize_reuses_group_index_builder(monkeypatch):
+    torch.manual_seed(0)
+
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(bits=4, group_size=4, desc_act=False)
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+
+    calls = []
+    original_builder = GPTQ.build_group_index
+
+    def _record_builder(columns, group_size, device, *, source_perm=None):
+        calls.append((columns, group_size, torch.device(device), source_perm))
+        return original_builder(columns, group_size, device, source_perm=source_perm)
+
+    monkeypatch.setattr(GPTQ, "build_group_index", staticmethod(_record_builder))
+
+    qweight, _scales, _zeros, g_idx, *_ = gptq._fallback_quantize(FallbackStrategy.RTN, blocksize=4)
+
+    assert qweight.shape == layer.weight.shape
+    torch.testing.assert_close(
+        g_idx,
+        torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.int32, device=g_idx.device),
+        atol=0,
+        rtol=0,
+    )
+    assert calls == [(8, 4, g_idx.device, None)]
 
 
 def test_gptq_embedding_act_group_aware_reorders_scale_once(monkeypatch):

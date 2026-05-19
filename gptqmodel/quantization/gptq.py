@@ -1006,7 +1006,7 @@ class GPTQ:
             valid_cols = self.columns
 
         group_size = effective_group_size if effective_group_size != -1 else self.columns
-        g_idx = torch.arange(valid_cols, device=Q.device, dtype=torch.int32) // group_size
+        g_idx = self.build_group_index(valid_cols, group_size, Q.device)
 
         if isinstance(self.module, transformers.Conv1D):
             Q = Q.t()
