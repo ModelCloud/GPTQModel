@@ -20,7 +20,9 @@ constexpr int kBlockHeight = 24;
 constexpr int kKTileHalf2 = kBlockWidth / 2;
 constexpr int kWideKTileHalf2 = kBlockWidth / 4;
 constexpr int kGemmBatchTileRows = 4;
+constexpr int kWideGemmBatchTileRows = 8;
 constexpr int kGemmBatchTileMinWidth = 2048;
+constexpr int kWideGemmBatchTileMinFeature = 8192;
 constexpr int kThreads = kBlockWidth;
 constexpr int kAccumulationFloat32 = 0;
 constexpr int kAccumulationInput = 1;
@@ -1078,7 +1080,7 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed(
 }
 
 template <typename scalar_t, int Bits, int LoraMode, bool FloatAccum,
-          int KTileHalf2>
+          int KTileHalf2, int BatchTileRows>
 torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits_tile(
     torch::Tensor vec,
     torch::Tensor qweight,
@@ -1123,7 +1125,7 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits_tile(
   constexpr int q_rows_per_tile = (KTileHalf2 * Bits) / 16;
   dim3 blocks((qweight_rows + q_rows_per_tile - 1) / q_rows_per_tile,
               (width + kBlockWidth - 1) / kBlockWidth,
-              (rows + kGemmBatchTileRows - 1) / kGemmBatchTileRows);
+              (rows + BatchTileRows - 1) / BatchTileRows);
   dim3 threads(kThreads);
 
   const auto *vec_ptr =
@@ -1147,7 +1149,7 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits_tile(
 
   if (group_size == 32) {
     vecquant3_gptq_gemm_batch_kernel<scalar_t, Bits, 32, LoraMode, FloatAccum,
-                                     KTileHalf2, kGemmBatchTileRows>
+                                     KTileHalf2, BatchTileRows>
         <<<blocks, threads, 0, stream>>>(
             vec_ptr, qweight.data_ptr<int>(), scale_ptr,
             qzeros.data_ptr<int>(), down_ptr, up_ptr, up_qweight_ptr,
@@ -1156,7 +1158,7 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits_tile(
             rank, lora_group);
   } else if (group_size == 64) {
     vecquant3_gptq_gemm_batch_kernel<scalar_t, Bits, 64, LoraMode, FloatAccum,
-                                     KTileHalf2, kGemmBatchTileRows>
+                                     KTileHalf2, BatchTileRows>
         <<<blocks, threads, 0, stream>>>(
             vec_ptr, qweight.data_ptr<int>(), scale_ptr,
             qzeros.data_ptr<int>(), down_ptr, up_ptr, up_qweight_ptr,
@@ -1165,7 +1167,7 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits_tile(
             rank, lora_group);
   } else {
     vecquant3_gptq_gemm_batch_kernel<scalar_t, Bits, 128, LoraMode, FloatAccum,
-                                     KTileHalf2, kGemmBatchTileRows>
+                                     KTileHalf2, BatchTileRows>
         <<<blocks, threads, 0, stream>>>(
             vec_ptr, qweight.data_ptr<int>(), scale_ptr,
             qzeros.data_ptr<int>(), down_ptr, up_ptr, up_qweight_ptr,
@@ -1193,18 +1195,33 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits(
     int64_t batch_rows) {
   if constexpr (Bits == 3) {
     return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
-        scalar_t, Bits, LoraMode, FloatAccum, kKTileHalf2>(
+        scalar_t, Bits, LoraMode, FloatAccum, kKTileHalf2,
+        kGemmBatchTileRows>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows);
   } else {
     if (qweight.size(1) >= kGemmBatchTileMinWidth) {
+      const int64_t in_features = (qweight.size(0) / Bits) * 32;
+      const bool use_wide_batch_tile =
+          batch_rows >= kWideGemmBatchTileRows &&
+          (qweight.size(1) >= kWideGemmBatchTileMinFeature ||
+           in_features >= kWideGemmBatchTileMinFeature);
+      if (use_wide_batch_tile) {
+        return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
+            scalar_t, Bits, LoraMode, FloatAccum, kWideKTileHalf2,
+            kWideGemmBatchTileRows>(
+            vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
+            group_size, lora_group_size, batch_rows);
+      }
       return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
-          scalar_t, Bits, LoraMode, FloatAccum, kWideKTileHalf2>(
+          scalar_t, Bits, LoraMode, FloatAccum, kWideKTileHalf2,
+          kGemmBatchTileRows>(
           vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
           group_size, lora_group_size, batch_rows);
     }
     return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
-        scalar_t, Bits, LoraMode, FloatAccum, kKTileHalf2>(
+        scalar_t, Bits, LoraMode, FloatAccum, kKTileHalf2,
+        kGemmBatchTileRows>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows);
   }
