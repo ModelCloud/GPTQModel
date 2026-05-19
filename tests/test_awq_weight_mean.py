@@ -477,6 +477,27 @@ def test_awq_compute_best_scale_restores_cpu_weights_without_aliasing():
     assert loss >= 0
 
 
+def test_awq_chunked_scale_loss_matches_legacy_expression():
+    torch.manual_seed(0)
+
+    ref_chunk = torch.randn(2, 4, 16, dtype=torch.float16)
+    int_w_output = torch.randn(2, 4, 16, dtype=torch.float16)
+    int_w_output[0, 0, 0] = float("inf")
+
+    finfo = torch.finfo(int_w_output.dtype)
+    clamped = int_w_output.clip(finfo.min, finfo.max)
+    expected_diff = (ref_chunk.to(dtype=clamped.dtype) - clamped).float()
+    expected_loss = expected_diff.pow(2).sum().item()
+
+    chunk_loss, chunk_elements = AWQProcessor._accumulate_awq_chunk_loss(
+        ref_chunk,
+        int_w_output.clone(),
+    )
+
+    assert chunk_loss == expected_loss
+    assert chunk_elements == expected_diff.numel()
+
+
 def test_awq_scale_search_restore_device_respects_config_and_headroom(monkeypatch):
     layer = nn.Linear(8, 8, bias=False, dtype=torch.float16).eval()
     cuda_device = torch.device("cuda", 0)

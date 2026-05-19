@@ -1718,6 +1718,23 @@ class AWQProcessor(LoopProcessor):
             source = source.to(dtype=fc.weight.dtype)
         fc.weight.copy_(source)
 
+    @staticmethod
+    def _accumulate_awq_chunk_loss(ref_chunk: torch.Tensor, int_w_output: torch.Tensor) -> Tuple[float, int]:
+        """Score one AWQ output chunk while reusing the quantized output tensor as scratch."""
+
+        int_w_output.clamp_(
+            torch.finfo(int_w_output.dtype).min,
+            torch.finfo(int_w_output.dtype).max,
+        )
+        ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
+        # int_w_output is not reused after scoring this candidate chunk. Store
+        # the signed error in-place, then square the FP32 view in-place to avoid
+        # per-ratio diff and pow temporaries.
+        int_w_output.sub_(ref_chunk)
+        diff = int_w_output.float()
+        diff.pow_(2)
+        return diff.sum().item(), diff.numel()
+
     def _compute_best_scale(
         self,
         x: torch.Tensor,
@@ -1824,11 +1841,9 @@ class AWQProcessor(LoopProcessor):
                     self._iter_reference_output_chunks(x, fp16_output),
                     self._iter_module_forward_outputs(x, module2inspect, kwargs),
                 ):
-                    int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
-                    ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
-                    diff = (ref_chunk - int_w_output).float()
-                    total_loss += diff.pow(2).sum().item()
-                    total_elements += diff.numel()
+                    chunk_loss, chunk_elements = self._accumulate_awq_chunk_loss(ref_chunk, int_w_output)
+                    total_loss += chunk_loss
+                    total_elements += chunk_elements
 
                 loss = total_loss / max(total_elements, 1)
             else:
