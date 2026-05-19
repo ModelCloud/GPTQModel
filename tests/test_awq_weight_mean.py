@@ -13,6 +13,7 @@ from parameterized import parameterized
 from pytest import MonkeyPatch
 from torch import nn
 
+import gptqmodel.looper.awq_processor as awq_processor_mod
 from gptqmodel.looper.awq_processor import (
     AWQProcessor,
     _accumulate_awq_weight_mean,
@@ -214,6 +215,40 @@ def test_awq_module_forward_splits_accumulated_batches_even_when_quant_batch_siz
 
     assert out.shape == x.shape
     assert module.calls == [1, 1, 1, 1]
+
+
+def test_awq_forward_signature_is_cached_for_scale_search(monkeypatch):
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    processor._quant_batch_size = 1
+
+    class _ModuleWithKwargs(nn.Module):
+        def forward(self, x, attention_mask=None, position_ids=None):
+            return x
+
+    module = _ModuleWithKwargs()
+    real_signature = awq_processor_mod.inspect.signature
+    signature_calls = 0
+
+    def _record_signature(target):
+        nonlocal signature_calls
+        signature_calls += 1
+        return real_signature(target)
+
+    monkeypatch.setattr(awq_processor_mod.inspect, "signature", _record_signature)
+
+    kwargs = {
+        "attention_mask": None,
+        "position_ids": torch.arange(4).unsqueeze(0),
+        "unused": torch.ones(1),
+    }
+    x = torch.randn(1, 4, 8)
+
+    for _ in range(2):
+        sanitized = processor._sanitize_kwargs(kwargs, module)
+        assert "unused" not in sanitized
+        list(processor._iter_module_forward_outputs(x, module, sanitized))
+
+    assert signature_calls == 1
 
 
 def test_generate_node_for_awq_scaling_keeps_kwargs_for_later_nodes():

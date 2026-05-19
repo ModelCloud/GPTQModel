@@ -210,6 +210,10 @@ class AWQProcessor(LoopProcessor):
         self.duo_scaling = True
 
         self._module_forward_kwargs: Dict[str, torch.Tensor] = {}
+        # Forward signatures are static during quantization. Cache accepted
+        # kwarg names so AWQ's 20-ratio scale search does not repeatedly call
+        # inspect.signature for the same inspected module.
+        self._module_forward_signature_cache: Dict[int, Set[str]] = {}
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
         self._rotary_source_id: Optional[int] = None
@@ -268,6 +272,22 @@ class AWQProcessor(LoopProcessor):
             int(storage_ptr),
             int(version) if version is not None else None,
         )
+
+    def _forward_kwarg_names(self, module: torch.nn.Module) -> Set[str]:
+        """Returns cached forward kwarg names accepted by a module."""
+
+        cache_key = id(module)
+        cached = self._module_forward_signature_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            cached = set(inspect.signature(module.forward).parameters)
+        except (ValueError, TypeError):
+            cached = set()
+
+        self._module_forward_signature_cache[cache_key] = cached
+        return cached
 
     def prepare_subset(
         self,
@@ -1835,14 +1855,9 @@ class AWQProcessor(LoopProcessor):
                 if changed:
                     module_kwargs[key] = type(value)(converted)
 
-        supports_position_ids = False
-        supports_position_embeddings = False
-        try:
-            signature = inspect.signature(module.forward).parameters
-            supports_position_ids = "position_ids" in signature
-            supports_position_embeddings = "position_embeddings" in signature
-        except (ValueError, TypeError):
-            pass
+        forward_kwargs = self._forward_kwarg_names(module)
+        supports_position_ids = "position_ids" in forward_kwargs
+        supports_position_embeddings = "position_embeddings" in forward_kwargs
 
         if x.dim() == 2 and (supports_position_ids or supports_position_embeddings):
             x = x.unsqueeze(0)
@@ -2060,7 +2075,7 @@ class AWQProcessor(LoopProcessor):
             module (`torch.nn.Module`):
                 Target module to quantize.
         """
-        module_signature = inspect.signature(module.forward).parameters
+        module_signature = self._forward_kwarg_names(module)
         sanitized_kwargs = {}
         for k, v in inputs_kwargs.items():
             if k in module_signature:
