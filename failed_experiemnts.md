@@ -1750,6 +1750,9 @@ Artifacts:
 - `/tmp/cannoe_target_down_onehot_summary.json`
 - `/tmp/cannoe_target_down_onehot_summary_rebased.json`
 - `/tmp/cannoe_target_down_onehot_k0_npu0_rerun.json`
+- `/tmp/cannoe_target_down_pairwise_summary_with_tiles.json`
+- `/tmp/cannoe_target_down_sparse_fixed_seed_summary.json`
+- `/tmp/cannoe_target_down_random_scale_fixed_seed_summary.json`
 
 | Probe | Result |
 | --- | --- |
@@ -1760,6 +1763,9 @@ Artifacts:
 | Qwen3 27B down sweep `base_n=256,base_k=64` | fail; `custom_ms=840.6078`, `max_abs=0.34375`, `mean_abs=0.0298004150390625` |
 | Qwen3 27B down sweep `base_n=256,base_k=128` | fail; `custom_ms=802.9824`, `max_abs=0.21875`, `mean_abs=0.0218505859375` |
 | Qwen3 27B down one-hot K-boundary preset, planner tile `base_n=256,base_k=128` | first all-8 run passed exact, `custom_ms_mean=903.9163`, `max_abs_max=0`, `mean_abs_max=0`, `diff_nonfinite_count=0`; rebased all-8 repeat had one NPU0 `one_hot_k=0` worker fail with `diff_nonfinite_count=256`, then the isolated NPU0 rerun of the same case passed exact at `845.1356 ms` |
+| Qwen3 27B down pairwise K-boundary preset, fixed seed | 8/8 pass; exact output for same-tile, adjacent-tile, middle, and far-apart K pairs; `custom_ms_mean=854.8833`, `diff_nonfinite_count=0` |
+| Qwen3 27B down sparse ramped active-K preset, fixed seed | 7/8 pass; active K counts `4/8/16/32/64/128/512` exact, active K count `256` failed with `diff_nonfinite_count=506`, tile counts `{"1":252,"3":254}`, `max_abs=0.13671875`, `mean_abs=0.0000888705` |
+| Qwen3 27B down dense random-scale preset, fixed seed | Pass through `input_scale=0.1`; fail at `0.25`, `0.5`, `1.0`; full-scale drift `max_abs=0.21875`, `mean_abs=0.02105712890625`, no non-finite values in this fixed-seed run |
 
 Interpretation: tile width does not solve the Qwen down fused path. The error
 tracks `base_k` more than `base_n`, which is consistent with the current
@@ -1767,6 +1773,9 @@ per-K-tile `IterateAll(..., enAtomic=k_tile != 0)` accumulation path losing
 precision or ordering on large reductions. The one-hot boundary guard shows
 large-N packed INT4 decode, scale/offset lookup, TSCM B handoff, and output tile
 mapping can be exact when only one K row contributes, while also exposing a
-non-finite-count signal for transient fused-launch failures. The next attempt
-should target a correct no-GM-partial accumulator lifecycle before further tile
-sweeps.
+non-finite-count signal for transient fused-launch failures. Pairwise K pairs
+are also exact, so cross-`base_k` coverage alone is not the trigger. Dense
+activation magnitude is the repeatable failure axis, and sparse ramped inputs
+can still create tile-local non-finites at specific active-K densities. The
+next attempt should target a correct no-GM-partial accumulator lifecycle before
+further tile sweeps.

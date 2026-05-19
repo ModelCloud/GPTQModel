@@ -98,6 +98,28 @@ def test_raw_validator_custom_timing_stats():
     }
 
 
+def test_raw_validator_groups_nonfinite_indices_by_output_tile():
+    validator = _load_raw_validator()
+
+    assert validator._nonfinite_tile_counts([0, 1, 255, 256, 511, 512, 1024], n=5120, base_n=-256) == {
+        "0": 3,
+        "1": 2,
+        "2": 1,
+        "4": 1,
+    }
+
+
+def test_raw_validator_expands_sparse_active_k_and_values():
+    validator = _load_raw_validator()
+
+    case = {"active_k_count": 4, "active_value_mode": "ramp"}
+
+    assert validator._expand_active_k(case, 16) == [0, 4, 8, 12]
+    assert validator._active_values(case, 4) == [-1.0, 0.625, 0.125, -0.375]
+    assert validator._preview_values([1, 2, 3]) == [1, 2, 3]
+    assert validator._preview_values(list(range(20))) == list(range(8)) + list(range(12, 20))
+
+
 def test_raw_validator_records_failed_json_metrics():
     validator = _load_raw_validator()
 
@@ -143,6 +165,52 @@ def test_raw_validator_qwen_down_onehot_preset_targets_accumulation_boundaries()
     cases = list(validator.CASE_PRESETS["qwen3_27b_down_onehot"])
 
     assert [case["one_hot_k"] for case in cases] == [0, 31, 32, 127, 128, 8703, 8704, 17407]
+    assert {case["rows"] for case in cases} == {1}
+    assert {case["k"] for case in cases} == {17408}
+    assert {case["n"] for case in cases} == {5120}
+    assert {case["group"] for case in cases} == {32}
+
+
+def test_raw_validator_qwen_down_pairwise_preset_targets_cross_tile_accumulation():
+    validator = _load_raw_validator()
+
+    cases = list(validator.CASE_PRESETS["qwen3_27b_down_pairwise"])
+
+    assert [tuple(case["active_k"]) for case in cases] == [
+        (0, 31),
+        (0, 32),
+        (0, 127),
+        (0, 128),
+        (127, 128),
+        (8703, 8704),
+        (0, 8704),
+        (8704, 17407),
+    ]
+    assert {case["rows"] for case in cases} == {1}
+    assert {case["k"] for case in cases} == {17408}
+    assert {case["n"] for case in cases} == {5120}
+    assert {case["group"] for case in cases} == {32}
+
+
+def test_raw_validator_qwen_down_sparse_preset_targets_active_k_density():
+    validator = _load_raw_validator()
+
+    cases = list(validator.CASE_PRESETS["qwen3_27b_down_sparse"])
+
+    assert [case["active_k_count"] for case in cases] == [4, 8, 16, 32, 64, 128, 256, 512]
+    assert {case["active_value_mode"] for case in cases} == {"ramp"}
+    assert {case["rows"] for case in cases} == {1}
+    assert {case["k"] for case in cases} == {17408}
+    assert {case["n"] for case in cases} == {5120}
+    assert {case["group"] for case in cases} == {32}
+
+
+def test_raw_validator_qwen_down_random_scale_preset_targets_activation_distribution():
+    validator = _load_raw_validator()
+
+    cases = list(validator.CASE_PRESETS["qwen3_27b_down_random_scale"])
+
+    assert [case["input_scale"] for case in cases] == [0.0, 0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0]
     assert {case["rows"] for case in cases} == {1}
     assert {case["k"] for case in cases} == {17408}
     assert {case["n"] for case in cases} == {5120}

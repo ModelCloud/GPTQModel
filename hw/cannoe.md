@@ -488,6 +488,16 @@ positive-`base_k` fallback shape.
   rather than a runtime enablement gate: it isolates the main deterministic
   Qwen down drift to multi-K accumulation/partial-C lifecycle, while still
   keeping non-finite output visible in future runs.
+- Added fixed-seed `qwen3_27b_down_pairwise`, `qwen3_27b_down_sparse`, and
+  `qwen3_27b_down_random_scale` presets to bracket the large-down failure. The
+  pairwise guard passed exact for same-tile, adjacent-tile, middle, and
+  far-apart K pairs. Sparse ramped activations passed up to 128 active K lanes,
+  reproduced tile-local non-finites at 256 active K lanes, and passed again at
+  512 lanes in the sampled run. Dense random activations with the same weight
+  seed passed through `input_scale=0.1`, then failed at `0.25`, `0.5`, and
+  `1.0` with max drift scaling roughly linearly up to `0.21875`. This points at
+  dense accumulation magnitude / partial-C stability, not simple K-tile
+  coverage, as the next fused-kernel target.
 
 ## aclnn V3 Probe
 

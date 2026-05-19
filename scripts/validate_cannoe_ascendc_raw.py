@@ -36,10 +36,52 @@ QWEN3_27B_DOWN_ONEHOT_CASES = tuple(
     for idx, one_hot_k in enumerate((0, 31, 32, 127, 128, 8703, 8704, 17407))
 )
 
+QWEN3_27B_DOWN_PAIRWISE_CASES = tuple(
+    {"rows": 1, "k": 17408, "n": 5120, "group": 32, "seed": 2720, "active_k": active_k}
+    for active_k in (
+        (0, 31),
+        (0, 32),
+        (0, 127),
+        (0, 128),
+        (127, 128),
+        (8703, 8704),
+        (0, 8704),
+        (8704, 17407),
+    )
+)
+
+QWEN3_27B_DOWN_SPARSE_CASES = tuple(
+    {
+        "rows": 1,
+        "k": 17408,
+        "n": 5120,
+        "group": 32,
+        "seed": 2730,
+        "active_k_count": active_k_count,
+        "active_value_mode": "ramp",
+    }
+    for active_k_count in (4, 8, 16, 32, 64, 128, 256, 512)
+)
+
+QWEN3_27B_DOWN_RANDOM_SCALE_CASES = tuple(
+    {
+        "rows": 1,
+        "k": 17408,
+        "n": 5120,
+        "group": 32,
+        "seed": 2740,
+        "input_scale": input_scale,
+    }
+    for input_scale in (0.0, 0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
+)
+
 CASE_PRESETS = {
     "default": DEFAULT_LOCAL_A_CASES,
     "qwen3_27b_down": QWEN3_27B_DOWN_CASES,
     "qwen3_27b_down_onehot": QWEN3_27B_DOWN_ONEHOT_CASES,
+    "qwen3_27b_down_pairwise": QWEN3_27B_DOWN_PAIRWISE_CASES,
+    "qwen3_27b_down_random_scale": QWEN3_27B_DOWN_RANDOM_SCALE_CASES,
+    "qwen3_27b_down_sparse": QWEN3_27B_DOWN_SPARSE_CASES,
 }
 
 
@@ -174,6 +216,55 @@ def _max_finite_result_value(results: list[dict[str, Any]], key: str) -> float |
     return max(values, default=None)
 
 
+def _nonfinite_tile_counts(mask_values: list[int], n: int, base_n: int) -> dict[str, int]:
+    tile_n = abs(base_n)
+    if tile_n <= 0:
+        tile_n = n
+    counts: dict[str, int] = {}
+    for index in mask_values:
+        n_index = int(index) % n
+        tile = n_index // tile_n
+        key = str(tile)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _expand_active_k(case: dict[str, Any], k: int) -> list[int] | None:
+    explicit = case.get("active_k")
+    if explicit is not None:
+        return [int(value) for value in explicit]
+    count = int(case.get("active_k_count") or 0)
+    if count <= 0:
+        return None
+    if count > k:
+        raise ValueError(f"active_k_count={count} must be <= k={k}")
+    return [(idx * k) // count for idx in range(count)]
+
+
+def _active_values(case: dict[str, Any], count: int) -> list[float]:
+    explicit = case.get("active_values")
+    if explicit is not None:
+        if len(explicit) != count:
+            raise ValueError("active_values must match active_k length")
+        return [float(value) for value in explicit]
+    mode = str(case.get("active_value_mode") or "ones")
+    if mode == "ones":
+        return [1.0] * count
+    if mode == "ramp":
+        values = []
+        for idx in range(count):
+            value = (((idx * 13) % 17) - 8) / 8.0
+            values.append(value if value != 0.0 else 0.125)
+        return values
+    raise ValueError(f"unknown active_value_mode={mode!r}")
+
+
+def _preview_values(values: list[int], edge: int = 8) -> list[int]:
+    if len(values) <= edge * 2:
+        return values
+    return values[:edge] + values[-edge:]
+
+
 def _device_case_batches(devices: list[int], cases: list[dict[str, Any]]) -> list[list[tuple[int, dict[str, Any]]]]:
     return [
         [(devices[offset], case) for offset, case in enumerate(cases[start : start + len(devices)])]
@@ -224,8 +315,19 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
     iters = int(args.iters)
 
     x = torch.randn((rows, k), device="npu", dtype=torch.float16)
+    input_scale = case.get("input_scale")
+    if input_scale is not None:
+        x.mul_(float(input_scale))
+    active_k = _expand_active_k(case, k)
     one_hot_k = int(case.get("one_hot_k", args.one_hot_k))
-    if one_hot_k >= 0:
+    if active_k is not None:
+        active_values = _active_values(case, len(active_k))
+        x.zero_()
+        for active_index, active_value in zip(active_k, active_values):
+            if active_index < 0 or active_index >= k:
+                raise ValueError(f"active_k entry {active_index} must be in [0, {k})")
+            x[:, active_index] = active_value
+    elif one_hot_k >= 0:
         if one_hot_k >= k:
             raise ValueError(f"one_hot_k={one_hot_k} must be less than k={k}")
         x.zero_()
@@ -427,8 +529,19 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
     )
     torch.npu.synchronize()
     diff = (custom - native).abs()
-    finite_diff = diff[torch.isfinite(diff)]
+    finite_mask = torch.isfinite(diff)
+    finite_diff = diff[finite_mask]
     diff_nonfinite_count = int(diff.numel() - finite_diff.numel())
+    nonfinite_indices: list[int] = []
+    nonfinite_tile_counts: dict[str, int] = {}
+    if diff_nonfinite_count > 0:
+        nonfinite_flat = torch.nonzero(~finite_mask.flatten(), as_tuple=False).flatten().to("cpu", dtype=torch.int64)
+        nonfinite_indices = [int(value) for value in nonfinite_flat[:16].tolist()]
+        nonfinite_tile_counts = _nonfinite_tile_counts(
+            [int(value) for value in nonfinite_flat.tolist()],
+            n,
+            base_n,
+        )
     max_abs = float(finite_diff.max().item()) if finite_diff.numel() > 0 else None
     mean_abs = float(finite_diff.mean().item()) if finite_diff.numel() > 0 else None
     passed = (
@@ -448,10 +561,16 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
         "base_n": base_n,
         "base_k": base_k,
         "one_hot_k": one_hot_k,
+        "input_scale": input_scale,
+        "active_k": active_k if active_k is None or len(active_k) <= 16 else None,
+        "active_k_count": len(active_k) if active_k is not None else 0,
+        "active_k_preview": [] if active_k is None else _preview_values(active_k),
         "custom_ms": custom_ms,
         "max_abs": max_abs,
         "mean_abs": mean_abs,
         "diff_nonfinite_count": diff_nonfinite_count,
+        "diff_nonfinite_indices": nonfinite_indices,
+        "diff_nonfinite_tile_counts": nonfinite_tile_counts,
         "pass": passed,
     }
     _emit_json_result(result, result_fd)
