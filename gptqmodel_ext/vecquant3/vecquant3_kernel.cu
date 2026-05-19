@@ -18,6 +18,8 @@ namespace {
 constexpr int kBlockWidth = 256;
 constexpr int kBlockHeight = 24;
 constexpr int kKTileHalf2 = kBlockWidth / 2;
+constexpr int kGemmBatchTileRows = 4;
+constexpr int kGemmBatchTileMinWidth = 2048;
 constexpr int kThreads = kBlockWidth;
 constexpr int kAccumulationFloat32 = 0;
 constexpr int kAccumulationInput = 1;
@@ -151,6 +153,35 @@ struct Quant3GroupCache {
 };
 
 template <typename scalar_t, int GroupSize, bool FloatAccum>
+__device__ __forceinline__ typename scalar_traits<scalar_t>::scalar2_t
+decode_pair(
+    unsigned int packed_pair,
+    int absolute_half2_k,
+    int col,
+    int width,
+    int qzeros_stride,
+    const int *__restrict__ qzeros,
+    const scalar_t *__restrict__ scales,
+    const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ deq2,
+    int deq_offset,
+    Quant3GroupCache<scalar_t> &group_cache) {
+  using traits = scalar_traits<scalar_t>;
+  using scalar2_t = typename traits::scalar2_t;
+
+  const int group = (absolute_half2_k * 2) / GroupSize;
+  if (group != group_cache.group) {
+    group_cache.group = group;
+    group_cache.scale = scales[group * width + col];
+    const int zero = unpack_int3_zero(qzeros, group, col, qzeros_stride);
+    group_cache.zero2 = traits::make2(traits::mul(
+        traits::from_float(-static_cast<float>(zero)), group_cache.scale));
+  }
+  const scalar2_t scale2 = traits::make2(group_cache.scale);
+  const scalar2_t deq = deq2[(packed_pair & 0x3f) * 32 + deq_offset];
+  return traits::fma2(deq, scale2, group_cache.zero2);
+}
+
+template <typename scalar_t, int GroupSize, bool FloatAccum>
 __device__ __forceinline__ void accumulate_pair(
     unsigned int packed_pair,
     int absolute_half2_k,
@@ -169,22 +200,52 @@ __device__ __forceinline__ void accumulate_pair(
   using traits = scalar_traits<scalar_t>;
   using scalar2_t = typename traits::scalar2_t;
 
-  const int group = (absolute_half2_k * 2) / GroupSize;
-  if (group != group_cache.group) {
-    group_cache.group = group;
-    group_cache.scale = scales[group * width + col];
-    const int zero = unpack_int3_zero(qzeros, group, col, qzeros_stride);
-    group_cache.zero2 = traits::make2(
-        traits::mul(traits::from_float(-static_cast<float>(zero)), group_cache.scale));
-  }
-  const scalar2_t scale2 = traits::make2(group_cache.scale);
-  const scalar2_t deq = deq2[(packed_pair & 0x3f) * 32 + deq_offset];
-  const scalar2_t weight = traits::fma2(deq, scale2, group_cache.zero2);
+  const scalar2_t weight = decode_pair<scalar_t, GroupSize, FloatAccum>(
+      packed_pair, absolute_half2_k, col, width, qzeros_stride, qzeros, scales,
+      deq2, deq_offset, group_cache);
   if constexpr (FloatAccum) {
     const scalar2_t product = traits::mul2(weight, blockvec[relative_half2_k]);
     acc_float += traits::to_float(product.x) + traits::to_float(product.y);
   } else {
     acc_input = traits::fma2(weight, blockvec[relative_half2_k], acc_input);
+  }
+}
+
+template <typename scalar_t, int GroupSize, bool FloatAccum, int BatchTileRows,
+          int KTileHalf2>
+__device__ __forceinline__ void accumulate_pair_batch(
+    unsigned int packed_pair,
+    int absolute_half2_k,
+    int relative_half2_k,
+    int col,
+    int width,
+    int qzeros_stride,
+    int valid_rows,
+    const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ blockvec,
+    const int *__restrict__ qzeros,
+    const scalar_t *__restrict__ scales,
+    const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ deq2,
+    int deq_offset,
+    Quant3GroupCache<scalar_t> &group_cache,
+    float (&acc_float)[BatchTileRows],
+    typename scalar_traits<scalar_t>::scalar2_t (&acc_input)[BatchTileRows]) {
+  using traits = scalar_traits<scalar_t>;
+  using scalar2_t = typename traits::scalar2_t;
+
+  const scalar2_t weight = decode_pair<scalar_t, GroupSize, FloatAccum>(
+      packed_pair, absolute_half2_k, col, width, qzeros_stride, qzeros, scales,
+      deq2, deq_offset, group_cache);
+  for (int row = 0; row < BatchTileRows; ++row) {
+    if (row >= valid_rows) {
+      break;
+    }
+    const scalar2_t input = blockvec[row * KTileHalf2 + relative_half2_k];
+    if constexpr (FloatAccum) {
+      const scalar2_t product = traits::mul2(weight, input);
+      acc_float[row] += traits::to_float(product.x) + traits::to_float(product.y);
+    } else {
+      acc_input[row] = traits::fma2(weight, input, acc_input[row]);
+    }
   }
 }
 
@@ -366,6 +427,219 @@ __global__ void vecquant3_gptq_gemv_kernel(
   }
 
   atomicAdd(&out_row[col], acc);
+}
+
+template <typename scalar_t, int GroupSize, int LoraMode, bool FloatAccum,
+          int KTileHalf2, int BatchTileRows>
+__global__ void vecquant3_gptq_gemm_batch_kernel(
+    const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ vec,
+    const int *__restrict__ qweight,
+    const scalar_t *__restrict__ scales,
+    const int *__restrict__ qzeros,
+    const scalar_t *__restrict__ down,
+    const scalar_t *__restrict__ up,
+    const int8_t *__restrict__ up_qweight,
+    const scalar_t *__restrict__ up_scales,
+    float *__restrict__ out,
+    int qweight_rows,
+    int width,
+    int qzeros_stride,
+    int vec_stride_half2,
+    int down_stride,
+    int out_stride,
+    int batch_rows,
+    int rank,
+    int lora_group_size) {
+  using traits = scalar_traits<scalar_t>;
+  using scalar2_t = typename traits::scalar2_t;
+
+  static_assert(KTileHalf2 % 16 == 0,
+                "VecQuant3 K tile must align to GPTQ int3 packing.");
+  constexpr int blockwidth2 = KTileHalf2;
+  constexpr int blockheight = (KTileHalf2 * 3) / 16;
+  const int row = blockheight * blockIdx.x;
+  const int col = kBlockWidth * blockIdx.y + threadIdx.x;
+  const int batch_base = blockIdx.z * BatchTileRows;
+  const int valid_rows = min(BatchTileRows, batch_rows - batch_base);
+  const bool valid_col = col < width;
+
+  __shared__ scalar2_t blockvec[BatchTileRows * blockwidth2];
+  const int total_half2 = (qweight_rows / 3) * 16;
+  for (int idx = threadIdx.x; idx < BatchTileRows * blockwidth2;
+       idx += kThreads) {
+    const int batch_offset = idx / blockwidth2;
+    const int k_offset = idx - batch_offset * blockwidth2;
+    const int absolute_half2 = blockIdx.x * blockwidth2 + k_offset;
+    const int batch_row = batch_base + batch_offset;
+    blockvec[idx] =
+        batch_offset < valid_rows && absolute_half2 < total_half2
+            ? vec[batch_row * vec_stride_half2 + absolute_half2]
+            : traits::make2(traits::from_float(0.0f));
+  }
+
+  __shared__ scalar2_t deq2[64][32];
+  int val = threadIdx.x / 32;
+  const int off = threadIdx.x % 32;
+  for (; val < 64; val += kBlockWidth / 32) {
+    deq2[val][off] = traits::make2(traits::from_int(val & 0x7),
+                                   traits::from_int(val >> 3));
+  }
+
+  __syncthreads();
+
+  if (!valid_col || valid_rows <= 0) {
+    return;
+  }
+
+  int i = width * row + col;
+  int k = 0;
+  const int absolute_half2_base = blockIdx.x * blockwidth2;
+  float acc_float[BatchTileRows];
+  scalar2_t acc_input[BatchTileRows];
+  for (int batch_offset = 0; batch_offset < BatchTileRows; ++batch_offset) {
+    acc_float[batch_offset] = 0.0f;
+    acc_input[batch_offset] = traits::make2(traits::from_float(0.0f));
+  }
+  Quant3GroupCache<scalar_t> group_cache = {
+      -1,
+      traits::from_float(0.0f),
+      traits::make2(traits::from_float(0.0f)),
+  };
+
+  while (k < blockwidth2 && (row + ((k * 3) >> 4)) < qweight_rows) {
+    unsigned int tmp1 = as_unsigned(qweight[i]);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp1 >> 0, absolute_half2_base + k + 0, k + 0, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp1 >> 6, absolute_half2_base + k + 1, k + 1, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp1 >> 12, absolute_half2_base + k + 2, k + 2, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp1 >> 18, absolute_half2_base + k + 3, k + 3, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp1 >> 24, absolute_half2_base + k + 4, k + 4, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    i += width;
+    unsigned int tmp2 = as_unsigned(qweight[i]);
+    unsigned int tmp = (tmp1 >> 30) | ((tmp2 << 2) & 0x3c);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp, absolute_half2_base + k + 5, k + 5, col, width, qzeros_stride,
+        valid_rows, blockvec, qzeros, scales, &deq2[0][0], off, group_cache,
+        acc_float, acc_input);
+    tmp2 >>= 4;
+    k += 6;
+
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp2 >> 0, absolute_half2_base + k + 0, k + 0, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp2 >> 6, absolute_half2_base + k + 1, k + 1, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp2 >> 12, absolute_half2_base + k + 2, k + 2, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp2 >> 18, absolute_half2_base + k + 3, k + 3, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    i += width;
+    tmp1 = as_unsigned(qweight[i]);
+    tmp = (tmp2 >> 24) | ((tmp1 << 4) & 0x30);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp, absolute_half2_base + k + 4, k + 4, col, width, qzeros_stride,
+        valid_rows, blockvec, qzeros, scales, &deq2[0][0], off, group_cache,
+        acc_float, acc_input);
+    tmp1 >>= 2;
+    k += 5;
+
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp1 >> 0, absolute_half2_base + k + 0, k + 0, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp1 >> 6, absolute_half2_base + k + 1, k + 1, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp1 >> 12, absolute_half2_base + k + 2, k + 2, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp1 >> 18, absolute_half2_base + k + 3, k + 3, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    accumulate_pair_batch<scalar_t, GroupSize, FloatAccum, BatchTileRows,
+                          KTileHalf2>(
+        tmp1 >> 24, absolute_half2_base + k + 4, k + 4, col, width,
+        qzeros_stride, valid_rows, blockvec, qzeros, scales, &deq2[0][0],
+        off, group_cache, acc_float, acc_input);
+    i += width;
+    k += 5;
+  }
+
+  for (int batch_offset = 0; batch_offset < BatchTileRows; ++batch_offset) {
+    if (batch_offset >= valid_rows) {
+      break;
+    }
+    float acc;
+    if constexpr (FloatAccum) {
+      acc = acc_float[batch_offset];
+    } else {
+      acc = traits::to_float(acc_input[batch_offset].x) +
+            traits::to_float(acc_input[batch_offset].y);
+    }
+    const int batch_row = batch_base + batch_offset;
+    const scalar_t *__restrict__ down_row =
+        LoraMode == kLoraNone ? nullptr : down + batch_row * down_stride;
+
+    if constexpr (LoraMode == kLoraDense) {
+      if (blockIdx.x == 0) {
+        for (int r = 0; r < rank; ++r) {
+          acc += traits::to_float(
+              traits::mul(down_row[r], up[r * width + col]));
+        }
+      }
+    } else if constexpr (LoraMode == kLoraInt8) {
+      if (blockIdx.x == 0) {
+        for (int r = 0; r < rank; ++r) {
+          const int idx = r * width + col;
+          const scalar_t up_value = traits::mul(
+              traits::from_int(static_cast<int>(up_qweight[idx])),
+              up_scales[idx / lora_group_size]);
+          acc += traits::to_float(traits::mul(down_row[r], up_value));
+        }
+      }
+    }
+
+    atomicAdd(&out[batch_row * out_stride + col], acc);
+  }
 }
 
 void validate_common_inputs(const torch::Tensor &vec,
@@ -570,6 +844,106 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed(torch::Tensor vec,
   return out;
 }
 
+template <typename scalar_t, int LoraMode, bool FloatAccum>
+torch::Tensor launch_vecquant3_gptq_gemm_batch_typed(
+    torch::Tensor vec,
+    torch::Tensor qweight,
+    torch::Tensor scales,
+    torch::Tensor qzeros,
+    torch::Tensor down,
+    torch::Tensor up,
+    torch::Tensor up_qweight,
+    torch::Tensor up_scales,
+    int64_t group_size,
+    int64_t lora_group_size,
+    int64_t batch_rows) {
+  using scalar2_t = typename scalar_traits<scalar_t>::scalar2_t;
+  using torch_t = typename scalar_traits<scalar_t>::torch_t;
+  const c10::cuda::CUDAGuard device_guard(vec.device());
+  if constexpr (std::is_same_v<scalar_t, __nv_bfloat16>) {
+    const auto *props = at::cuda::getCurrentDeviceProperties();
+    TORCH_CHECK(props->major >= 8,
+                "vecquant3 gemm bf16 requires CUDA compute capability >= 8.0");
+  }
+
+  auto out = torch::empty({batch_rows, qweight.size(1)},
+                          torch::TensorOptions()
+                              .device(vec.device())
+                              .dtype(torch::kFloat32));
+  auto stream = at::cuda::getCurrentCUDAStream(vec.device().index());
+  C10_CUDA_CHECK(cudaMemsetAsync(out.data_ptr<float>(), 0,
+                                 out.numel() * sizeof(float), stream));
+
+  const int qweight_rows = static_cast<int>(qweight.size(0));
+  const int width = static_cast<int>(qweight.size(1));
+  const int qzeros_stride = static_cast<int>(qzeros.size(1));
+  const int rows = static_cast<int>(batch_rows);
+  const int rank_values =
+      LoraMode == kLoraNone ? 0 : static_cast<int>(down.numel());
+  const int rank = LoraMode == kLoraNone ? 0 : rank_values / rows;
+  const int vec_stride_half2 = (qweight_rows / 3) * 16;
+  const int down_stride = rank;
+  const int out_stride = width;
+  const int lora_group =
+      LoraMode == kLoraInt8 ? static_cast<int>(lora_group_size) : 1;
+  constexpr int q_rows_per_tile = (kKTileHalf2 * 3) / 16;
+  dim3 blocks((qweight_rows + q_rows_per_tile - 1) / q_rows_per_tile,
+              (width + kBlockWidth - 1) / kBlockWidth,
+              (rows + kGemmBatchTileRows - 1) / kGemmBatchTileRows);
+  dim3 threads(kThreads);
+
+  const auto *vec_ptr =
+      reinterpret_cast<const scalar2_t *>(vec.data_ptr<torch_t>());
+  const auto *scale_ptr =
+      reinterpret_cast<const scalar_t *>(scales.data_ptr<torch_t>());
+  const auto *down_ptr = LoraMode == kLoraNone
+                             ? nullptr
+                             : reinterpret_cast<const scalar_t *>(
+                                   down.data_ptr<torch_t>());
+  const auto *up_ptr = LoraMode == kLoraDense
+                           ? reinterpret_cast<const scalar_t *>(
+                                 up.data_ptr<torch_t>())
+                           : nullptr;
+  const int8_t *up_qweight_ptr =
+      LoraMode == kLoraInt8 ? up_qweight.data_ptr<int8_t>() : nullptr;
+  const auto *up_scale_ptr = LoraMode == kLoraInt8
+                                 ? reinterpret_cast<const scalar_t *>(
+                                       up_scales.data_ptr<torch_t>())
+                                 : nullptr;
+
+  if (group_size == 32) {
+    vecquant3_gptq_gemm_batch_kernel<scalar_t, 32, LoraMode, FloatAccum,
+                                     kKTileHalf2, kGemmBatchTileRows>
+        <<<blocks, threads, 0, stream>>>(
+            vec_ptr, qweight.data_ptr<int>(), scale_ptr,
+            qzeros.data_ptr<int>(), down_ptr, up_ptr, up_qweight_ptr,
+            up_scale_ptr, out.data_ptr<float>(), qweight_rows, width,
+            qzeros_stride, vec_stride_half2, down_stride, out_stride, rows,
+            rank, lora_group);
+  } else if (group_size == 64) {
+    vecquant3_gptq_gemm_batch_kernel<scalar_t, 64, LoraMode, FloatAccum,
+                                     kKTileHalf2, kGemmBatchTileRows>
+        <<<blocks, threads, 0, stream>>>(
+            vec_ptr, qweight.data_ptr<int>(), scale_ptr,
+            qzeros.data_ptr<int>(), down_ptr, up_ptr, up_qweight_ptr,
+            up_scale_ptr, out.data_ptr<float>(), qweight_rows, width,
+            qzeros_stride, vec_stride_half2, down_stride, out_stride, rows,
+            rank, lora_group);
+  } else {
+    vecquant3_gptq_gemm_batch_kernel<scalar_t, 128, LoraMode, FloatAccum,
+                                     kKTileHalf2, kGemmBatchTileRows>
+        <<<blocks, threads, 0, stream>>>(
+            vec_ptr, qweight.data_ptr<int>(), scale_ptr,
+            qzeros.data_ptr<int>(), down_ptr, up_ptr, up_qweight_ptr,
+            up_scale_ptr, out.data_ptr<float>(), qweight_rows, width,
+            qzeros_stride, vec_stride_half2, down_stride, out_stride, rows,
+            rank, lora_group);
+  }
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
 template <int LoraMode>
 torch::Tensor launch_vecquant3_gptq_gemv(torch::Tensor vec,
                                          torch::Tensor qweight,
@@ -700,11 +1074,23 @@ torch::Tensor launch_vecquant3_gptq_gemm(torch::Tensor vec,
   }
 
   const bool use_float_accum = accumulation_type == kAccumulationFloat32;
+  const bool use_batch_tiled =
+      batch_rows >= 2 && qweight.size(1) >= kGemmBatchTileMinWidth;
   if (vec.scalar_type() == torch::kFloat16) {
     if (use_float_accum) {
+      if (use_batch_tiled) {
+        return launch_vecquant3_gptq_gemm_batch_typed<half, LoraMode, true>(
+            vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
+            group_size, lora_group_size, batch_rows);
+      }
       return launch_vecquant3_gptq_gemv_typed<half, LoraMode, true>(
           vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
           group_size, lora_group_size, batch_rows, true);
+    }
+    if (use_batch_tiled) {
+      return launch_vecquant3_gptq_gemm_batch_typed<half, LoraMode, false>(
+          vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
+          group_size, lora_group_size, batch_rows);
     }
     return launch_vecquant3_gptq_gemv_typed<half, LoraMode, false>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
@@ -712,9 +1098,21 @@ torch::Tensor launch_vecquant3_gptq_gemm(torch::Tensor vec,
   }
 
   if (use_float_accum) {
+    if (use_batch_tiled) {
+      return launch_vecquant3_gptq_gemm_batch_typed<__nv_bfloat16, LoraMode,
+                                                   true>(
+          vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
+          group_size, lora_group_size, batch_rows);
+    }
     return launch_vecquant3_gptq_gemv_typed<__nv_bfloat16, LoraMode, true>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows, true);
+  }
+  if (use_batch_tiled) {
+    return launch_vecquant3_gptq_gemm_batch_typed<__nv_bfloat16, LoraMode,
+                                                 false>(
+        vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
+        group_size, lora_group_size, batch_rows);
   }
   return launch_vecquant3_gptq_gemv_typed<__nv_bfloat16, LoraMode, false>(
       vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,

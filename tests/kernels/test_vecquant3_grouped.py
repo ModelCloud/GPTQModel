@@ -271,6 +271,92 @@ def test_vecquant3_grouped_gemm_matches_dequant_reference(group_size, dtype, out
         )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for VecQuant3 grouped kernel test")
+def test_vecquant3_grouped_gemm_tiled_matches_gemv_loop():
+    torch.manual_seed(53)
+    device = torch.device("cuda:0")
+    dtype = torch.float16
+    group_size = 128
+    lora_group_size = 128
+    batch_size = 4
+    in_features = 256
+    out_features = 2048
+    rank = 32
+    groups = in_features // group_size
+
+    x = torch.randn(batch_size, in_features, device=device, dtype=dtype).contiguous()
+    qweight_values = torch.randint(0, 8, (in_features, out_features), dtype=torch.int64)
+    qzero_values = torch.randint(0, 8, (groups, out_features), dtype=torch.int64)
+    qweight = _pack_int3_rows(qweight_values).to(device)
+    qzeros = _pack_int3_cols(qzero_values).to(device)
+    scales = (torch.rand(groups, out_features, device=device, dtype=dtype) * 0.02 + 0.001).contiguous()
+
+    expected = torch.stack(
+        [
+            vecquant3.gemv(sample, qweight, scales, qzeros, group_size, accumulation_dtype=torch.float32)
+            for sample in x
+        ]
+    )
+    actual = vecquant3.gemm(x, qweight, scales, qzeros, group_size, accumulation_dtype=torch.float32)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=3e-3)
+
+    lora_a = (torch.randn(in_features, rank, device=device, dtype=dtype) * 0.01).contiguous()
+    lora_b = (torch.randn(rank, out_features, device=device, dtype=dtype) * 0.01).contiguous()
+    down = (x @ lora_a).contiguous()
+    expected_lora = torch.stack(
+        [
+            vecquant3.gemv_lora(
+                x[row], qweight, scales, qzeros, down[row], lora_b, group_size, accumulation_dtype=torch.float32
+            )
+            for row in range(batch_size)
+        ]
+    )
+    actual_lora = vecquant3.gemm_lora(
+        x, qweight, scales, qzeros, down, lora_b, group_size, accumulation_dtype=torch.float32
+    )
+    torch.testing.assert_close(actual_lora, expected_lora, rtol=0, atol=4e-3)
+
+    up_qweight, up_scales, up_shape = quantize_tensor_groupwise_int8(
+        lora_b,
+        group_size=lora_group_size,
+        scale_dtype=dtype,
+    )
+    up_qweight = up_qweight.to(device=device, non_blocking=True).contiguous()
+    up_scales = up_scales.to(device=device, non_blocking=True).contiguous()
+    expected_lora_int8 = torch.stack(
+        [
+            vecquant3.gemv_lora_int8(
+                x[row],
+                qweight,
+                scales,
+                qzeros,
+                down[row],
+                up_qweight,
+                up_scales,
+                up_shape,
+                group_size,
+                lora_group_size,
+                accumulation_dtype=torch.float32,
+            )
+            for row in range(batch_size)
+        ]
+    )
+    actual_lora_int8 = vecquant3.gemm_lora_int8(
+        x,
+        qweight,
+        scales,
+        qzeros,
+        down,
+        up_qweight,
+        up_scales,
+        up_shape,
+        group_size,
+        lora_group_size,
+        accumulation_dtype=torch.float32,
+    )
+    torch.testing.assert_close(actual_lora_int8, expected_lora_int8, rtol=0, atol=4e-3)
+
+
 def test_vecquant3_accumulation_dtype_validation():
     assert vecquant3._normalize_accumulation_dtype(torch.float32, torch.float16) == 0
     assert vecquant3._normalize_accumulation_dtype("input", torch.float16) == 1
