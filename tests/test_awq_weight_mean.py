@@ -498,6 +498,30 @@ def test_awq_chunked_scale_loss_matches_legacy_expression():
     assert chunk_elements == expected_diff.numel()
 
 
+def test_awq_legacy_eager_loss_matches_chunked_expression():
+    torch.manual_seed(0)
+
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=4))
+    processor.max_chunk_memory = 64
+    fp16_output = torch.randn(2, 4, 16, dtype=torch.float16)
+    int_w_output = torch.randn(2, 4, 16, dtype=torch.float16)
+    device = torch.device("cpu")
+
+    fp16_flat = fp16_output.view(-1)
+    int_w_flat = int_w_output.view(-1)
+    chunk_size = processor.max_chunk_memory // (fp16_output.element_size() * 2)
+    chunk_size = min(chunk_size, fp16_flat.size(0))
+
+    expected = 0.0
+    for fp16_chunk, int_w_chunk in zip(torch.split(fp16_flat, chunk_size), torch.split(int_w_flat, chunk_size)):
+        expected += (fp16_chunk.to(device) - int_w_chunk.to(device)).float().pow(2).sum().item()
+    expected /= fp16_flat.size(0)
+
+    loss = processor._compute_loss(fp16_output, int_w_output.clone(), device)
+
+    assert loss == expected
+
+
 def test_awq_scale_search_restore_device_respects_config_and_headroom(monkeypatch):
     layer = nn.Linear(8, 8, bias=False, dtype=torch.float16).eval()
     cuda_device = torch.device("cuda", 0)

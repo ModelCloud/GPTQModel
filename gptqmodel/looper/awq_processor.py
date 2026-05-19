@@ -1719,13 +1719,19 @@ class AWQProcessor(LoopProcessor):
         fc.weight.copy_(source)
 
     @staticmethod
-    def _accumulate_awq_chunk_loss(ref_chunk: torch.Tensor, int_w_output: torch.Tensor) -> Tuple[float, int]:
+    def _accumulate_awq_chunk_loss(
+        ref_chunk: torch.Tensor,
+        int_w_output: torch.Tensor,
+        *,
+        clamp: bool = True,
+    ) -> Tuple[float, int]:
         """Score one AWQ output chunk while reusing the quantized output tensor as scratch."""
 
-        int_w_output.clamp_(
-            torch.finfo(int_w_output.dtype).min,
-            torch.finfo(int_w_output.dtype).max,
-        )
+        if clamp:
+            int_w_output.clamp_(
+                torch.finfo(int_w_output.dtype).min,
+                torch.finfo(int_w_output.dtype).max,
+            )
         ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
         # int_w_output is not reused after scoring this candidate chunk. Store
         # the signed error in-place, then square the FP32 view in-place to avoid
@@ -1900,7 +1906,8 @@ class AWQProcessor(LoopProcessor):
 
         # Compute the loss for each chunk
         for fp16_chunk, int_w_chunk in zip(fp16_chunks, int_w_chunks):
-            chunk_loss = (fp16_chunk.to(device) - int_w_chunk.to(device)).float().pow(2).sum().item()
+            int_w_chunk = int_w_chunk.to(device)
+            chunk_loss, _ = self._accumulate_awq_chunk_loss(fp16_chunk, int_w_chunk, clamp=False)
             loss += chunk_loss
 
         # Normalize the loss by the total number of elements
