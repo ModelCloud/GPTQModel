@@ -34,6 +34,8 @@ The main implementation points are:
 - `gptqmodel/quantization/config.py`: exposes `enable_shared_hessian_cache`, enabled by default on `GPTQConfig`
 - `tests/test_gptq_shared_hessian.py`: validates q/k/v sharing, sample accounting, materialized Hessian pointer reuse, inverse-cache reuse, disabled-cache behavior, and exact enabled/disabled quantization math
 
+Shared inverse entries are refcounted by compatible consumer group and are dropped as soon as the last module consumes the cached inverse. The dense per-module Hessian is also released immediately after its inverse is built, so quantization does not retain both matrices longer than needed.
+
 ## AWQ Same-Input Activation Sharing
 
 AWQ does not use Hessian accumulation. Its repeated work for same-input groups is activation handling during scale search: the input is copied to CPU for later replay and `abs(input).mean(dim=0)` is reduced chunk-by-chunk.

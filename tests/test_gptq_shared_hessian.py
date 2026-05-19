@@ -118,6 +118,8 @@ def test_llama_same_input_modules_share_hessian_accumulation_and_inverse():
     stats = processor.shared_hessian_stats()
     assert stats["inverse_misses"] == 1
     assert stats["inverse_hits"] == len(names) - 1
+    assert processor._shared_hessian_inverse_cache == {}
+    assert processor._shared_hessian_inverse_ref_counts == {}
 
     processor.cleanup_subset(subset, subset_index=0, subset_total=1)
 

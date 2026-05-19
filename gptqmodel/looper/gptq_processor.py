@@ -154,6 +154,10 @@ class GPTQProcessor(LoopProcessor):
         # Per-group inverse/Cholesky cache used during quantization after the
         # shared Hessian has been materialized.
         self._shared_hessian_inverse_cache = {}
+        # Refcounts allow Hinv cache entries to be released as soon as the last
+        # compatible same-input module consumes them, rather than waiting for
+        # subset cleanup.
+        self._shared_hessian_inverse_ref_counts = {}
         self._shared_hessian_group_counts: Dict[Tuple[object, ...], int] = {}
         self._shared_hessian_stats = {
             "batch_requests": 0,
@@ -254,6 +258,7 @@ class GPTQProcessor(LoopProcessor):
             self._shared_hessian_batch_cache.clear()
             self._shared_hessian_states.clear()
             self._shared_hessian_inverse_cache.clear()
+            self._shared_hessian_inverse_ref_counts.clear()
             self._shared_hessian_group_counts.clear()
 
         for task in self.tasks.values():
@@ -264,6 +269,7 @@ class GPTQProcessor(LoopProcessor):
             task._shared_hessian_state = None
             task._shared_hessian_inverse_cache = None
             task._shared_hessian_inverse_lock = None
+            task._shared_hessian_inverse_ref_counts = None
             task._shared_hessian_stats = None
 
         if not self._enable_shared_hessian_cache:
@@ -315,6 +321,7 @@ class GPTQProcessor(LoopProcessor):
                 "total_samples": 0,
             }
             self._shared_hessian_states[accum_key] = shared_state
+            inverse_ref_counts: Dict[Tuple[object, ...], int] = {}
 
             for name in names:
                 task = self.tasks[name]
@@ -322,12 +329,16 @@ class GPTQProcessor(LoopProcessor):
                     accum_key,
                     self._hessian_inverse_signature(task.qcfg),
                 )
+                inverse_ref_counts[inverse_key] = inverse_ref_counts.get(inverse_key, 0) + 1
                 task._shared_hessian_accum_key = accum_key
                 task._shared_hessian_inverse_key = inverse_key
                 task._shared_hessian_state = shared_state
                 task._shared_hessian_inverse_cache = self._shared_hessian_inverse_cache
                 task._shared_hessian_inverse_lock = self._shared_hessian_inverse_lock
+                task._shared_hessian_inverse_ref_counts = self._shared_hessian_inverse_ref_counts
                 task._shared_hessian_stats = self._shared_hessian_stats
+
+            self._shared_hessian_inverse_ref_counts.update(inverse_ref_counts)
 
     def prepare_shared_hessian_subset(
         self,
@@ -359,6 +370,7 @@ class GPTQProcessor(LoopProcessor):
             self._shared_hessian_batch_cache.clear()
             self._shared_hessian_states.clear()
             self._shared_hessian_inverse_cache.clear()
+            self._shared_hessian_inverse_ref_counts.clear()
             self._shared_hessian_group_counts.clear()
 
         for task in self.tasks.values():
@@ -369,6 +381,7 @@ class GPTQProcessor(LoopProcessor):
             task._shared_hessian_state = None
             task._shared_hessian_inverse_cache = None
             task._shared_hessian_inverse_lock = None
+            task._shared_hessian_inverse_ref_counts = None
             task._shared_hessian_stats = None
 
     def clear_shared_hessian_subset(self) -> None:

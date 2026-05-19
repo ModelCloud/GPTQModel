@@ -250,6 +250,7 @@ class GPTQ:
         self._shared_hessian_inverse_cache = None
         self._shared_hessian_inverse_lock = None
         self._shared_hessian_inverse_key = None
+        self._shared_hessian_inverse_ref_counts = None
         self._shared_hessian_state = None
         self._shared_hessian_stats = None
 
@@ -1044,6 +1045,27 @@ class GPTQ:
             return None
         return key, str(torch.device(H.device)), str(H.dtype), tuple(H.shape)
 
+    def _release_shared_hessian_inverse_cache_entry(self, cache, cache_key) -> None:
+        """Drop a shared inverse cache entry after its last group consumer."""
+
+        ref_counts = self._shared_hessian_inverse_ref_counts
+        if cache is None or cache_key is None or ref_counts is None:
+            return
+
+        base_key = self._shared_hessian_inverse_key
+        remaining = ref_counts.get(cache_key)
+        if remaining is None and base_key is not None:
+            remaining = ref_counts.pop(base_key, None)
+        if remaining is None:
+            return
+
+        remaining -= 1
+        if remaining <= 0:
+            ref_counts.pop(cache_key, None)
+            cache.pop(cache_key, None)
+        else:
+            ref_counts[cache_key] = remaining
+
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
         """Return the GPTQ inverse/Cholesky result, sharing it for same-input groups."""
@@ -1060,6 +1082,7 @@ class GPTQ:
             if cached is not None:
                 if stats is not None:
                     stats["inverse_hits"] = int(stats.get("inverse_hits", 0)) + 1
+                self._release_shared_hessian_inverse_cache_entry(cache, cache_key)
                 return cached
 
             if stats is not None:
@@ -1068,6 +1091,7 @@ class GPTQ:
             result = self._compute_hessian_inverse_uncached(H)
             if result[0] is not None:
                 cache[cache_key] = result
+            self._release_shared_hessian_inverse_cache_entry(cache, cache_key)
             return result
 
     @torch.inference_mode()
