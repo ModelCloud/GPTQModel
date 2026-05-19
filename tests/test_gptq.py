@@ -307,6 +307,29 @@ def test_gptq_hessian_chunk_materialization_direct_copy_preserves_xtx():
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
+def test_gptq_dense_hessian_ordering_uses_diagonal_view(monkeypatch):
+    torch.manual_seed(0)
+
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(bits=4, group_size=4, desc_act=True)
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.randn(1, 4, 8), None)
+
+    original_diag = torch.diag
+
+    def _reject_dense_hessian_diag(input_tensor, *args, **kwargs):
+        if isinstance(input_tensor, torch.Tensor) and tuple(input_tensor.shape) == (8, 8):
+            raise AssertionError("dense GPTQ should read the Hessian diagonal through Tensor.diagonal()")
+        return original_diag(input_tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "diag", _reject_dense_hessian_diag)
+
+    qweight, *_ = gptq.quantize(blocksize=4)
+
+    assert qweight.shape == layer.weight.shape
+
+
 def test_gptq_embedding_loss_uses_scalar_accumulator(monkeypatch):
     torch.manual_seed(0)
 

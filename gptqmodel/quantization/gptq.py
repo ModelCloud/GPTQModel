@@ -1495,7 +1495,10 @@ class GPTQ:
         # H = self.H.to(device=self.H.device)
 
         if use_hessian:
-            dead = torch.diag(self.H) == 0
+            # Read the Hessian diagonal as a view; torch.diag would allocate a
+            # copy before dead-column handling and activation ordering.
+            h_diag = self.H.diagonal()
+            dead = h_diag == 0
             self.H[dead, dead] = 1
             W[:, dead] = 0
 
@@ -1517,7 +1520,7 @@ class GPTQ:
                 groups.append(quantizer)
 
         if self.qcfg.desc_act and use_hessian:
-            perm = torch.argsort(torch.diag(self.H), descending=True)
+            perm = torch.argsort(self.H.diagonal(), descending=True)
             try:
                 W = W[:, perm]
                 self.H = self.H[perm][:, perm]
@@ -1535,7 +1538,7 @@ class GPTQ:
             invperm = torch.argsort(perm)
 
         elif self.qcfg.act_group_aware and use_hessian:
-            diag_h = torch.diag(self.H)
+            diag_h = self.H.diagonal()
             local_perms, local_values = compute_local_perms(
                 diag_h, self.qcfg.group_size, return_values=True
             )
