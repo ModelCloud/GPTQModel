@@ -22,6 +22,7 @@ _VECQUANT3_NAMESPACE = "gptqmodel_vecquant3"
 _VECQUANT3_REQUIRED_CUDA_HEADERS = ("cuda_runtime_api.h",)
 _VECQUANT3_ACCUMULATION_FLOAT32 = 0
 _VECQUANT3_ACCUMULATION_INPUT = 1
+SUPPORTED_BITS = (3, 4, 8)
 
 
 def _vecquant3_root() -> Path:
@@ -72,7 +73,7 @@ _VECQUANT3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     sources=_vecquant3_sources,
     build_root_env="GPTQMODEL_VECQUANT3_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("vecquant3"),
-    display_name="VecQuant3 GPTQ grouped GEMV/GEMM",
+    display_name="GrassHopper GPTQ grouped GEMV/GEMM",
     extra_cflags=lambda: default_jit_cflags(enable_bf16=True),
     extra_cuda_cflags=_vecquant3_extra_cuda_cflags,
     extra_include_paths=_vecquant3_include_paths,
@@ -88,7 +89,7 @@ def vecquant3_supported() -> bool:
 
 def vecquant3_runtime_error() -> str:
     if not torch.cuda.is_available():
-        return "VecQuant3 GPTQ grouped GEMV requires CUDA."
+        return "GrassHopper GPTQ grouped GEMV/GEMM requires CUDA."
     return _VECQUANT3_TORCH_OPS_EXTENSION.last_error_message()
 
 
@@ -141,6 +142,13 @@ def _normalize_accumulation_dtype(
     )
 
 
+def _normalize_bits(bits: int) -> int:
+    normalized = int(bits)
+    if normalized not in SUPPORTED_BITS:
+        raise ValueError("GrassHopper GPTQ grouped GEMV/GEMM supports only 3, 4, or 8-bit base weights.")
+    return normalized
+
+
 def gemv(
     x: torch.Tensor,
     qweight: torch.Tensor,
@@ -148,10 +156,11 @@ def gemv(
     qzeros: torch.Tensor,
     group_size: int,
     accumulation_dtype: str | torch.dtype | None = torch.float32,
+    bits: int = 3,
 ) -> torch.Tensor:
     ops = _extension_api().namespace(name="vecquant3")
     accumulation_type = _normalize_accumulation_dtype(accumulation_dtype, x.dtype)
-    return ops.gemv(x, qweight, scales, qzeros, int(group_size), accumulation_type)
+    return ops.gemv(x, qweight, scales, qzeros, int(group_size), accumulation_type, _normalize_bits(bits))
 
 
 def gemv_lora(
@@ -163,10 +172,13 @@ def gemv_lora(
     up: torch.Tensor,
     group_size: int,
     accumulation_dtype: str | torch.dtype | None = torch.float32,
+    bits: int = 3,
 ) -> torch.Tensor:
     ops = _extension_api().namespace(name="vecquant3")
     accumulation_type = _normalize_accumulation_dtype(accumulation_dtype, x.dtype)
-    return ops.gemv_lora(x, qweight, scales, qzeros, down, up, int(group_size), accumulation_type)
+    return ops.gemv_lora(
+        x, qweight, scales, qzeros, down, up, int(group_size), accumulation_type, _normalize_bits(bits)
+    )
 
 
 def gemm(
@@ -176,10 +188,11 @@ def gemm(
     qzeros: torch.Tensor,
     group_size: int,
     accumulation_dtype: str | torch.dtype | None = torch.float32,
+    bits: int = 3,
 ) -> torch.Tensor:
     ops = _extension_api().namespace(name="vecquant3")
     accumulation_type = _normalize_accumulation_dtype(accumulation_dtype, x.dtype)
-    return ops.gemm(x, qweight, scales, qzeros, int(group_size), accumulation_type)
+    return ops.gemm(x, qweight, scales, qzeros, int(group_size), accumulation_type, _normalize_bits(bits))
 
 
 def gemm_lora(
@@ -191,10 +204,13 @@ def gemm_lora(
     up: torch.Tensor,
     group_size: int,
     accumulation_dtype: str | torch.dtype | None = torch.float32,
+    bits: int = 3,
 ) -> torch.Tensor:
     ops = _extension_api().namespace(name="vecquant3")
     accumulation_type = _normalize_accumulation_dtype(accumulation_dtype, x.dtype)
-    return ops.gemm_lora(x, qweight, scales, qzeros, down, up, int(group_size), accumulation_type)
+    return ops.gemm_lora(
+        x, qweight, scales, qzeros, down, up, int(group_size), accumulation_type, _normalize_bits(bits)
+    )
 
 
 def _normalize_lora_int8_up_shape(up_shape: torch.Tensor | tuple[int, int] | list[int]) -> tuple[int, int]:
@@ -222,6 +238,7 @@ def gemv_lora_int8(
     group_size: int,
     lora_group_size: int,
     accumulation_dtype: str | torch.dtype | None = torch.float32,
+    bits: int = 3,
 ) -> torch.Tensor:
     rank, out_features = _normalize_lora_int8_up_shape(up_shape)
     if int(down.reshape(-1).numel()) != rank:
@@ -250,6 +267,7 @@ def gemv_lora_int8(
         int(group_size),
         int(lora_group_size),
         accumulation_type,
+        _normalize_bits(bits),
     )
 
 
@@ -265,6 +283,7 @@ def gemm_lora_int8(
     group_size: int,
     lora_group_size: int,
     accumulation_dtype: str | torch.dtype | None = torch.float32,
+    bits: int = 3,
 ) -> torch.Tensor:
     rank, out_features = _normalize_lora_int8_up_shape(up_shape)
     if int(down.size(-1)) != rank:
@@ -293,10 +312,17 @@ def gemm_lora_int8(
         int(group_size),
         int(lora_group_size),
         accumulation_type,
+        _normalize_bits(bits),
     )
 
 
+grasshopper_supported = vecquant3_supported
+grasshopper_runtime_available = vecquant3_runtime_available
+grasshopper_runtime_error = vecquant3_runtime_error
+
+
 __all__ = [
+    "SUPPORTED_BITS",
     "_VECQUANT3_TORCH_OPS_EXTENSION",
     "gemm",
     "gemm_lora",
@@ -304,6 +330,9 @@ __all__ = [
     "gemv",
     "gemv_lora",
     "gemv_lora_int8",
+    "grasshopper_runtime_available",
+    "grasshopper_runtime_error",
+    "grasshopper_supported",
     "vecquant3_runtime_available",
     "vecquant3_runtime_error",
     "vecquant3_supported",
