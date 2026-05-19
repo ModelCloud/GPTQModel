@@ -46,11 +46,11 @@ CALIBRATION_TEXTS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ParoQuant repro helper")
-    parser.add_argument("--mode", choices=("jit", "quantize"), default="jit")
+    parser.add_argument("--mode", choices=("all", "jit", "quantize"), default="all")
     parser.add_argument("--rebuild", action="store_true", help="clear ParoQuant JIT cache before probing")
     parser.add_argument(
         "--model",
-        default="/monster/data/model/Qwen3.5-27B",  # "/monster/data/model/Qwen3-0.6B-Base",
+        default="/monster/data/model/Qwen3-0.6B-Base",
         help="local model path for quantize mode",
     )
     parser.add_argument(
@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--opt-rotation-epochs", type=int, default=1)
     parser.add_argument("--opt-finetune-epochs", type=int, default=1)
     parser.add_argument("--opt-train-samples", type=int, default=8)
-    parser.add_argument("--opt-validation-samples", type=int, default=0)
+    parser.add_argument("--opt-validation-samples", type=int, default=1)
     parser.add_argument("--opt-batch-size", type=int, default=4)
     parser.add_argument("--dtype", choices=("auto", "bfloat16", "float16"), default="bfloat16")
     return parser.parse_args()
@@ -90,7 +90,7 @@ def run_jit_repro(*, rebuild: bool) -> int:
         print("CUDA is not available, skip ParoQuant repro.")
         return 2
 
-    print("\n== Rebuild ParoQuant rotation extension ==")
+    print("\n== JIT Repro ==")
     if rebuild:
         clear_paroquant_rotation_extension_cache()
     started = time.perf_counter()
@@ -102,7 +102,7 @@ def run_jit_repro(*, rebuild: bool) -> int:
     if not ok:
         return 1
 
-    print("\n== Run one fused rotation call ==")
+    print("\n== Fused Rotation Probe ==")
     device = torch.device("cuda:0")
     x = torch.randn(32, 128, device=device, dtype=torch.bfloat16)
     pairs, theta, scales = build_identity_rotation_buffers(
@@ -204,6 +204,15 @@ def main() -> int:
     args = parse_args()
     if args.mode == "jit":
         return run_jit_repro(rebuild=args.rebuild)
+    if args.mode == "quantize":
+        return run_quantize_repro(args)
+
+    jit_result = run_jit_repro(rebuild=args.rebuild)
+    if jit_result != 0:
+        print("\nJIT repro failed; skip quantize repro.")
+        return jit_result
+
+    print("\n== Proceed To Quantize Repro ==")
     return run_quantize_repro(args)
 
 
