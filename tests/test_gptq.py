@@ -330,6 +330,44 @@ def test_gptq_dense_hessian_ordering_uses_diagonal_view(monkeypatch):
     assert qweight.shape == layer.weight.shape
 
 
+def test_gptq_group_index_builder_matches_legacy_python_list():
+    columns = 17
+    group_size = 4
+    device = torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
+
+    direct = GPTQ.build_group_index(columns, group_size, device)
+    legacy = torch.tensor(
+        [i // group_size for i in range(columns)],
+        dtype=torch.int32,
+        device=device,
+    )
+    torch.testing.assert_close(direct, legacy, atol=0, rtol=0)
+    assert direct.dtype == torch.int32
+    assert direct.device == device
+
+    perm = torch.tensor(
+        [16, 0, 7, 8, 3, 4, 15, 1, 2, 5, 6, 9, 10, 11, 12, 13, 14],
+        dtype=torch.long,
+        device=device,
+    )
+    perm_before = perm.clone()
+
+    perm_direct = GPTQ.build_group_index(
+        columns,
+        group_size,
+        device,
+        source_perm=perm,
+    )
+    perm_legacy = torch.tensor(
+        [int(perm_before[i].item()) // group_size for i in range(columns)],
+        dtype=torch.int32,
+        device=device,
+    )
+
+    torch.testing.assert_close(perm_direct, perm_legacy, atol=0, rtol=0)
+    torch.testing.assert_close(perm, perm_before, atol=0, rtol=0)
+
+
 def test_gptq_embedding_loss_uses_scalar_accumulator(monkeypatch):
     torch.manual_seed(0)
 

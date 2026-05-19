@@ -358,6 +358,25 @@ class GPTQ:
 
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
+    @staticmethod
+    def build_group_index(
+        columns: int,
+        group_size: int,
+        device: torch.device,
+        *,
+        source_perm: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Build GPTQ group ids directly as a tensor, avoiding large Python lists."""
+
+        if source_perm is not None:
+            g_idx = source_perm.to(device=device, dtype=torch.int32)
+            g_idx.div_(group_size, rounding_mode="floor")
+            return g_idx
+
+        g_idx = torch.arange(columns, device=device, dtype=torch.int32)
+        g_idx.div_(group_size, rounding_mode="floor")
+        return g_idx
+
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
         # Embedding: accumulate token counts only (1D)
         if isinstance(self.module, nn.Embedding):
@@ -1416,8 +1435,7 @@ class GPTQ:
 
             # Prepare g_idx (group indices per column)
             group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
-            g_idx = [i // group_size for i in range(self.columns)]
-            g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
+            g_idx = self.build_group_index(self.columns, group_size, Q.device)
 
             # Finalize scale/zero concatenation
             if scale == []:
@@ -1795,11 +1813,14 @@ class GPTQ:
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
         if self.qcfg.static_groups and self.qcfg.desc_act:
-            g_idx = [perm[i] // group_size for i in range(self.columns)]
+            g_idx = self.build_group_index(
+                self.columns,
+                group_size,
+                Q.device,
+                source_perm=perm,
+            )
         else:
-            g_idx = [i // group_size for i in range(self.columns)]
-
-        g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
+            g_idx = self.build_group_index(self.columns, group_size, Q.device)
 
         if self.qcfg.desc_act and use_hessian:
             invperm = invperm.to(device=Q.device)
