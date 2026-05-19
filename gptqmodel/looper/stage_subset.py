@@ -725,6 +725,15 @@ def _run_single_subset_pass(
     if is_embeddings_module is None:
         is_embeddings_module = is_lm_head_module
 
+    # Generic per-subset sharing lifecycle. GPTQ installs same-input Hessian
+    # sharing here; AWQ installs same-input activation sharing here. The stage
+    # stays quantizer-agnostic so future processors can reuse the same boundary.
+    processor.prepare_subset(
+        subset,
+        subset_index=subset_index,
+        subset_total=subset_total,
+    )
+
     handle = []
     subset_size = len(subset_names)
 
@@ -1096,14 +1105,23 @@ def _run_single_subset_pass(
         layer_index=layer_index,
     )
 
-    for fut in futures:
-        # Collect results in submission order so the final subset map preserves
-        # deterministic iteration for downstream consumers.
-        name, named_module = fut.result()
-        if isinstance(named_module, NamedModule) and named_module.state.get("capture_only"):
-            # Capture-only modules should not be finalized or offloaded.
-            continue
-        processed_subset[name] = named_module
+    try:
+        for fut in futures:
+            # Collect results in submission order so the final subset map preserves
+            # deterministic iteration for downstream consumers.
+            name, named_module = fut.result()
+            if isinstance(named_module, NamedModule) and named_module.state.get("capture_only"):
+                # Capture-only modules should not be finalized or offloaded.
+                continue
+            processed_subset[name] = named_module
+    finally:
+        # Release any per-subset sharing state after every worker has consumed
+        # it. This keeps heavy Hessian/activation caches scoped to one subset.
+        processor.cleanup_subset(
+            subset,
+            subset_index=subset_index,
+            subset_total=subset_total,
+        )
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
         torch_empty_cache(device=quant_flush_device, sync=True)
     else:

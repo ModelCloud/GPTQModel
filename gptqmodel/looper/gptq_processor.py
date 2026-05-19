@@ -9,6 +9,7 @@ import time
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
+import torch.nn as nn
 from torch.nn import Module
 
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
@@ -132,6 +133,35 @@ class GPTQProcessor(LoopProcessor):
         # padded calibration rows. GPTQ then consumes the original [B, S, H]
         # activations and applies the current batch mask itself.
         self.preserve_batch_keep_mask = True
+        self._enable_shared_hessian_cache = bool(getattr(qcfg, "enable_shared_hessian_cache", True))
+
+        # GPTQ same-input Hessian sharing:
+        # Q/K/V and gate/up projections often receive the exact same activation
+        # tensor inside one subset. Their Hessian XtX accumulation and
+        # inverse/Cholesky setup are identical, so the processor computes them
+        # once when `QuantizeConfig.enable_shared_hessian_cache` is enabled and
+        # attaches the shared result to every compatible plain GPTQ task.
+        # GPTAQ/FOEM and embeddings keep isolated statistics and do not
+        # participate in this cache. Disabling the toggle restores the original
+        # per-module accumulation and inverse lifecycle.
+        self._shared_hessian_lock = threading.Lock()
+        # Cache one processed calibration batch per shared group so later
+        # modules only record sample ownership instead of recomputing XtX.
+        self._shared_hessian_batch_cache = {}
+        # Per-group partial Hessian state; materialized lazily by GPTQ tasks.
+        self._shared_hessian_states = {}
+        self._shared_hessian_inverse_lock = threading.Lock()
+        # Per-group inverse/Cholesky cache used during quantization after the
+        # shared Hessian has been materialized.
+        self._shared_hessian_inverse_cache = {}
+        self._shared_hessian_group_counts: Dict[Tuple[object, ...], int] = {}
+        self._shared_hessian_stats = {
+            "batch_requests": 0,
+            "batch_hits": 0,
+            "batch_misses": 0,
+            "inverse_hits": 0,
+            "inverse_misses": 0,
+        }
 
     def set_calibration_dataset(self, calibration_dataset):
         """Rejects dataset replacement because GPTQ capture is fixed at construction."""
@@ -165,6 +195,295 @@ class GPTQProcessor(LoopProcessor):
             perchannel=True,
         )
         self.tasks[module.name] = tmp
+
+    @staticmethod
+    def _hessian_config_signature(qcfg: QuantizeConfig) -> Tuple[object, ...]:
+        """Return the Hessian accumulation fields that must match to share XtX."""
+
+        hessian = qcfg.hessian
+        return (
+            hessian.chunk_size,
+            hessian.chunk_bytes,
+            str(hessian.staging_dtype),
+        )
+
+    @staticmethod
+    def _hessian_inverse_signature(qcfg: QuantizeConfig) -> Tuple[object, ...]:
+        """Return the quantization fields that must match to share Hessian inverse."""
+
+        return (
+            float(qcfg.damp_percent),
+            float(qcfg.damp_auto_increment),
+            int(qcfg.group_size),
+            bool(qcfg.desc_act),
+            bool(qcfg.act_group_aware),
+        )
+
+    @staticmethod
+    def _tensor_cache_fingerprint(tensor: torch.Tensor) -> Tuple[object, ...]:
+        """Build a same-batch source activation identity for shared Hessian cache."""
+
+        try:
+            storage_ptr = tensor.untyped_storage().data_ptr()
+        except Exception:
+            storage_ptr = tensor.data_ptr()
+        return (
+            str(tensor.device),
+            str(tensor.dtype),
+            tuple(tensor.shape),
+            tuple(tensor.stride()),
+            int(tensor.storage_offset()),
+            int(storage_ptr),
+        )
+
+    def prepare_subset(
+        self,
+        subset: Dict[str, NamedModule],
+        *,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ) -> None:
+        """Enable GPTQ same-input Hessian sharing for one subset.
+
+        The grouping is conservative: modules must be plain GPTQ, non-Embedding,
+        have the same input-column count, and use the same Hessian config. The
+        runtime cache key later also includes the actual source activation view.
+        """
+
+        with self._shared_hessian_lock:
+            self._shared_hessian_batch_cache.clear()
+            self._shared_hessian_states.clear()
+            self._shared_hessian_inverse_cache.clear()
+            self._shared_hessian_group_counts.clear()
+
+        for task in self.tasks.values():
+            if not isinstance(task, GPTQ):
+                continue
+            task._shared_hessian_accum_key = None
+            task._shared_hessian_inverse_key = None
+            task._shared_hessian_state = None
+            task._shared_hessian_inverse_cache = None
+            task._shared_hessian_inverse_lock = None
+            task._shared_hessian_stats = None
+
+        if not self._enable_shared_hessian_cache:
+            return
+
+        groups: Dict[Tuple[object, ...], list[str]] = {}
+        for name, named_module in subset.items():
+            if named_module.state.get("capture_only"):
+                continue
+
+            task = self.tasks.get(name)
+            # GPTAQ and FOEM subclass GPTQ but maintain extra statistics, so
+            # only the plain GPTQ task participates in shared Hessian caching.
+            if type(task) is not GPTQ:
+                continue
+            if isinstance(task.module, nn.Embedding):
+                continue
+
+            # Same-input sharing is only valid for modules whose Hessian shape
+            # and accumulation settings match. Output rows may differ.
+            group_signature = (
+                int(task.columns),
+                self._hessian_config_signature(task.qcfg),
+            )
+            groups.setdefault(group_signature, []).append(name)
+
+        for group_index, (group_signature, names) in enumerate(groups.items()):
+            if len(names) < 2:
+                continue
+
+            # The group key intentionally includes ordered module names and the
+            # subset identity. This prevents reuse across unrelated subsets
+            # even if Python storage pointers are recycled later.
+            accum_key = (
+                "gptq-shared-hessian",
+                subset_index,
+                subset_total,
+                group_index,
+                tuple(names),
+                group_signature,
+            )
+            self._shared_hessian_group_counts[accum_key] = len(names)
+            shared_state = {
+                "lock": threading.Lock(),
+                "partials": {},
+                "sample_counts": {},
+                "H": None,
+                "dirty": False,
+                "total_samples": 0,
+            }
+            self._shared_hessian_states[accum_key] = shared_state
+
+            for name in names:
+                task = self.tasks[name]
+                inverse_key = (
+                    accum_key,
+                    self._hessian_inverse_signature(task.qcfg),
+                )
+                task._shared_hessian_accum_key = accum_key
+                task._shared_hessian_inverse_key = inverse_key
+                task._shared_hessian_state = shared_state
+                task._shared_hessian_inverse_cache = self._shared_hessian_inverse_cache
+                task._shared_hessian_inverse_lock = self._shared_hessian_inverse_lock
+                task._shared_hessian_stats = self._shared_hessian_stats
+
+    def prepare_shared_hessian_subset(
+        self,
+        subset: Dict[str, NamedModule],
+        *,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ) -> None:
+        """Compatibility wrapper for tests/tools that call the GPTQ-specific hook."""
+
+        self.prepare_subset(
+            subset,
+            subset_index=subset_index,
+            subset_total=subset_total,
+        )
+
+    def cleanup_subset(
+        self,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        *,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ) -> None:
+        """Drop per-subset shared Hessian tensors after all workers finish."""
+
+        del subset, subset_index, subset_total
+
+        with self._shared_hessian_lock:
+            self._shared_hessian_batch_cache.clear()
+            self._shared_hessian_states.clear()
+            self._shared_hessian_inverse_cache.clear()
+            self._shared_hessian_group_counts.clear()
+
+        for task in self.tasks.values():
+            if not isinstance(task, GPTQ):
+                continue
+            task._shared_hessian_accum_key = None
+            task._shared_hessian_inverse_key = None
+            task._shared_hessian_state = None
+            task._shared_hessian_inverse_cache = None
+            task._shared_hessian_inverse_lock = None
+            task._shared_hessian_stats = None
+
+    def clear_shared_hessian_subset(self) -> None:
+        """Compatibility wrapper for tests/tools that call the GPTQ-specific hook."""
+
+        self.cleanup_subset()
+
+    def shared_hessian_stats(self, reset: bool = False) -> Dict[str, int]:
+        """Return GPTQ same-input Hessian sharing counters for tests/benchmarks."""
+
+        stats = dict(self._shared_hessian_stats)
+        if reset:
+            for key in self._shared_hessian_stats:
+                self._shared_hessian_stats[key] = 0
+        return stats
+
+    def _shared_hessian_cache_key(
+        self,
+        task: GPTQ,
+        source_tensor: torch.Tensor,
+        batch_index: Optional[int],
+        cache_extra: Optional[Tuple[object, ...]],
+    ):
+        """Return a cache key when this GPTQ task belongs to a shared Hessian group."""
+
+        group_key = getattr(task, "_shared_hessian_accum_key", None)
+        if group_key is None:
+            return None
+        return (
+            group_key,
+            batch_index,
+            cache_extra,
+            self._tensor_cache_fingerprint(source_tensor),
+        )
+
+    @staticmethod
+    def _accumulate_shared_hessian_state(shared_state, batch_token_size: int, xtx: torch.Tensor, device: torch.device) -> None:
+        """Accumulate one XtX result into the processor-owned shared Hessian state."""
+
+        dev = torch.device(device)
+        with shared_state["lock"]:
+            partials = shared_state["partials"]
+            existing = partials.get(dev)
+            if existing is None:
+                partials[dev] = xtx.to(device=dev, dtype=torch.float32, copy=True).detach()
+            else:
+                if xtx.device != existing.device or xtx.dtype != torch.float32:
+                    existing.add_(xtx.to(device=existing.device, dtype=torch.float32))
+                else:
+                    existing.add_(xtx)
+            shared_state["sample_counts"][dev] = shared_state["sample_counts"].get(dev, 0) + batch_token_size
+            shared_state["dirty"] = True
+
+    def _add_batch_with_shared_hessian(
+        self,
+        task: GPTQ,
+        inp: torch.Tensor,
+        out: torch.Tensor,
+        *,
+        batch_index: Optional[int],
+        cache_source: torch.Tensor,
+        cache_extra: Optional[Tuple[object, ...]] = None,
+    ) -> None:
+        """Record a GPTQ batch, reusing same-input Hessian work when possible."""
+
+        if not self._enable_shared_hessian_cache:
+            task.add_batch(inp, out, batch_index=batch_index)
+            return
+
+        cache_key = self._shared_hessian_cache_key(
+            task,
+            cache_source,
+            batch_index,
+            cache_extra,
+        )
+        if cache_key is None:
+            task.add_batch(inp, out, batch_index=batch_index)
+            return
+
+        shared_state = getattr(task, "_shared_hessian_state", None)
+        if shared_state is None:
+            task.add_batch(inp, out, batch_index=batch_index)
+            return
+
+        cached = None
+        with self._shared_hessian_lock:
+            self._shared_hessian_stats["batch_requests"] += 1
+            cached = self._shared_hessian_batch_cache.get(cache_key)
+            if cached is not None:
+                self._shared_hessian_stats["batch_hits"] += 1
+                cached["remaining"] -= 1
+                if cached["remaining"] <= 0:
+                    self._shared_hessian_batch_cache.pop(cache_key, None)
+
+        if cached is not None:
+            task.record_shared_hessian_batch(cached["batch_token_size"], shared_state)
+            return
+
+        batch_token_size, xtx, device = task.process_batch(inp)
+        if batch_token_size == 0 or xtx is None:
+            return
+
+        self._accumulate_shared_hessian_state(shared_state, batch_token_size, xtx, device)
+
+        with self._shared_hessian_lock:
+            self._shared_hessian_stats["batch_misses"] += 1
+            group_key = getattr(task, "_shared_hessian_accum_key", None)
+            remaining = max(0, self._shared_hessian_group_counts.get(group_key, 1) - 1)
+            if remaining:
+                self._shared_hessian_batch_cache[cache_key] = {
+                    "batch_token_size": batch_token_size,
+                    "remaining": remaining,
+                }
+
+        task.record_shared_hessian_batch(batch_token_size, shared_state)
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports whether preprocessing omitted this module from GPTQ work."""
@@ -206,9 +525,27 @@ class GPTQProcessor(LoopProcessor):
                         sample_out = out_tensor[sample_index : sample_index + 1, sample_keep, :].contiguous()
                     else:
                         sample_out = out
-                    g.add_batch(sample_inp.data, sample_out.data, batch_index=batch_idx)  # noqa: F821
+                    self._add_batch_with_shared_hessian(
+                        g,
+                        sample_inp.data,
+                        sample_out.data,
+                        batch_index=batch_idx,
+                        cache_source=inp_tensor,
+                        cache_extra=(
+                            "sample",
+                            sample_index,
+                            self._tensor_cache_fingerprint(sample_keep),
+                            int(sample_keep.sum().item()),
+                        ),
+                    )
             else:
-                g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
+                self._add_batch_with_shared_hessian(
+                    g,
+                    inp_tensor.data,
+                    out.data,
+                    batch_index=batch_idx,
+                    cache_source=inp_tensor,
+                )
             del inp, out
         return tmp
 

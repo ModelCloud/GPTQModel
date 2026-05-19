@@ -85,6 +85,12 @@ def _should_drain_finalize_futures_synchronously(
 ) -> bool:
     """Decide whether one layer must finish finalization before the next begins.
 
+    AWQ scale search consumes activations produced by already-processed
+    previous layers. Letting AWQ finalizers overlap the next layer makes those
+    activations timing-sensitive: a faster capture path can change whether
+    replay sees dense or packed previous modules. Drain AWQ finalizers
+    synchronously so cache optimizations cannot change quantization math.
+
     ParoQuant layer/group optimization holds substantially more live CUDA state
     than the weight-only paths. Letting its finalizers overlap the next layer
     can visibly ratchet active VRAM upward from layer N to N+1, so ParoQuant
@@ -108,7 +114,7 @@ def _should_drain_finalize_futures_synchronously(
     }
     if len(active_accelerators) > 1:
         return True
-    return any(isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks)
+    return any(isinstance(process, (AWQProcessor, ParoQuantProcessor)) for process, *_ in finalize_tasks)
 
 
 def _should_empty_cache_after_sync_finalize(

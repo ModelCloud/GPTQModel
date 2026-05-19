@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 05/18/2026 7.1.0-dev `main`: Added quantization runtime sharing optimizations: GPTQ same-input Hessian accumulation/inverse sharing and AWQ same-input activation/x-mean caching for q/k/v and gate/up style module groups.
 * 05/15/2026 7.1.0-dev `main`: ✨ Added `mimo_v2` model support
 * 05/13/2026 7.1.0-dev `main`: ✨ Added `minicpmv_4_6` and `DeepSeek V4` model support
 * 05/07/2026 7.1.0-dev `main`: ✨ Added `GLM-4.5V`, `GLM-4.6V`, `Zamba` and `Zamba2` model support
@@ -211,6 +212,17 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 `BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
 
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
+
+### Quantization Runtime Sharing
+
+GPT-QModel deduplicates selected calibration-time work for same-input module groups such as Llama-style `q_proj` / `k_proj` / `v_proj` and MLP `gate_proj` / `up_proj`.
+
+- `GPTQ`: same-input plain GPTQ modules can share Hessian batch accumulation and the later inverse/Cholesky result when the modules have the same input width and Hessian configuration. `GPTAQ`, `FOEM`, and embedding modules keep isolated statistics.
+- `AWQ`: same-input modules can share the captured activation CPU copy and the chunked `abs(input).mean(dim=0)` reduction used during scale search. Weight-dependent AWQ scale search, clipping, and in-place replay tensors remain per module/group.
+
+Both paths are enabled by default and can be disabled through process-level quantization config: `GPTQConfig(enable_shared_hessian_cache=False)` or `AWQConfig(enable_activation_x_mean_cache=False)`.
+
+See [Quantization Runtime Sharing](docs/quantization_runtime_sharing.md) for implementation notes and regression test coverage.
 
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)

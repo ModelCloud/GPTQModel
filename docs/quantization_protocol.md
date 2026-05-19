@@ -4,6 +4,8 @@
 
 This document proposes a next-generation quantization configuration protocol for `gptqmodel`.
 
+Runtime implementation details such as GPTQ same-input Hessian sharing and AWQ same-input activation caching are documented separately in [Quantization Runtime Sharing](quantization_runtime_sharing.md).
+
 The protocol is designed to be:
 
 - clean and concise for humans

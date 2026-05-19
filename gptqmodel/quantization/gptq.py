@@ -240,6 +240,19 @@ class GPTQ:
         self._device_sample_counts: Dict[torch.device, int] = {}
         self._hessian_dirty: bool = False
 
+        # GPTQ same-input Hessian sharing:
+        # These fields are attached by GPTQProcessor.prepare_subset() when
+        # several compatible modules in the same subset consume the same input
+        # activation. The task still owns quantization and loss computation, but
+        # Hessian accumulation/materialization and inverse/Cholesky can be
+        # shared across q/k/v or gate/up groups. They stay None for GPTAQ, FOEM,
+        # embeddings, and modules without a same-input peer.
+        self._shared_hessian_inverse_cache = None
+        self._shared_hessian_inverse_lock = None
+        self._shared_hessian_inverse_key = None
+        self._shared_hessian_state = None
+        self._shared_hessian_stats = None
+
         self._borrow_workspace_stats = {
             "requests": 0,
             "staging_requests": 0,
@@ -385,6 +398,56 @@ class GPTQ:
             self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
             self.nsamples += batch_token_size
             self._hessian_dirty = True
+
+    def add_batch_from_hessian(
+        self,
+        batch_token_size: int,
+        xtx: Optional[torch.Tensor],
+        device: torch.device,
+    ) -> None:
+        """Accumulate a precomputed dense Hessian contribution.
+
+        The source `xtx` may be shared by multiple GPTQ tasks, so a new task
+        accumulator never stores it by reference. Existing accumulators are
+        updated in-place, preserving each module's independent lifecycle.
+        """
+
+        if batch_token_size == 0 or xtx is None:
+            return
+
+        dev = torch.device(device)
+
+        with self.lock:
+            self.fwd_counter += 1
+
+            existing = self._device_hessian_partials.get(dev)
+            if existing is None:
+                self._device_hessian_partials[dev] = xtx.to(
+                    device=dev,
+                    dtype=torch.float32,
+                    copy=True,
+                ).detach()
+            else:
+                if xtx.device != existing.device or xtx.dtype != torch.float32:
+                    existing.add_(xtx.to(device=existing.device, dtype=torch.float32))
+                else:
+                    existing.add_(xtx)
+
+            self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
+            self.nsamples += batch_token_size
+            self._hessian_dirty = True
+
+    def record_shared_hessian_batch(self, batch_token_size: int, shared_state) -> None:
+        """Record that this task observed a batch accumulated by a shared Hessian state."""
+
+        if batch_token_size == 0:
+            return
+
+        with self.lock:
+            self.fwd_counter += 1
+            self.nsamples += batch_token_size
+            self._hessian_dirty = True
+            self._shared_hessian_state = shared_state
 
     def preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
         device = torch.device(device)
@@ -630,6 +693,11 @@ class GPTQ:
     def materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
         device = self._select_hessian_target_device(target_device)
 
+        shared_state = getattr(self, "_shared_hessian_state", None)
+        if shared_state is not None and not isinstance(self.module, nn.Embedding):
+            self.materialize_shared_hessian(shared_state, device)
+            return
+
         with self.lock:
             # Embedding path: merge 1D counts
             if isinstance(self.module, nn.Embedding):
@@ -722,6 +790,66 @@ class GPTQ:
             self._device_hessian_partials.clear()
             self._device_sample_counts.clear()
             del result_accum
+
+    def materialize_shared_hessian(self, shared_state, device: torch.device) -> None:
+        """Materialize this task's Hessian from a same-input shared state.
+
+        Multiple GPTQ tasks may point at the same final `H` tensor after this
+        method. The tensor is read-only from the task's perspective once the
+        shared state is clean, so sharing it avoids duplicate materialization.
+        """
+
+        with shared_state["lock"]:
+            hessian = shared_state.get("H")
+            if hessian is not None and not shared_state.get("dirty", False):
+                if hessian.device != device:
+                    hessian = hessian.to(device=device)
+                    shared_state["H"] = hessian
+                self.H = hessian
+                self.nsamples = int(shared_state.get("total_samples", self.nsamples) or 0)
+                self._hessian_dirty = False
+                self._final_hessian_device_hint = hessian.device
+                return
+
+            partials = shared_state["partials"]
+            sample_counts = shared_state["sample_counts"]
+            total_samples = sum(sample_counts.values())
+
+            reuse_buffer = (
+                hessian is not None
+                and hessian.shape == (self.columns, self.columns)
+                and hessian.device == device
+                and hessian.dtype == torch.float32
+            )
+            if reuse_buffer:
+                result_accum = hessian
+                result_accum.zero_()
+            else:
+                torch_sync(device)
+                result_accum = torch.zeros(
+                    (self.columns, self.columns),
+                    dtype=torch.float32,
+                    device=device,
+                )
+
+            if total_samples:
+                for partial in partials.values():
+                    if partial.device != result_accum.device or partial.dtype != torch.float32:
+                        result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                    else:
+                        result_accum.add_(partial)
+                result_accum.mul_(2.0 / float(total_samples))
+
+            shared_state["H"] = result_accum
+            shared_state["dirty"] = False
+            shared_state["total_samples"] = total_samples
+            partials.clear()
+            sample_counts.clear()
+
+            self.H = result_accum
+            self.nsamples = total_samples
+            self._hessian_dirty = False
+            self._final_hessian_device_hint = result_accum.device
 
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
         self.materialize_global_hessian(target_device=target_device)
@@ -908,8 +1036,42 @@ class GPTQ:
         self.module.weight.data = Q
         return scale, zero, g_idx, duration, avg_loss, damp_percent
 
+    def _shared_hessian_inverse_cache_key(self, H: torch.Tensor):
+        """Return an inverse-cache key when this task uses a shared Hessian tensor."""
+
+        key = self._shared_hessian_inverse_key
+        if key is None:
+            return None
+        return key, str(torch.device(H.device)), str(H.dtype), tuple(H.shape)
+
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
+        """Return the GPTQ inverse/Cholesky result, sharing it for same-input groups."""
+
+        cache = self._shared_hessian_inverse_cache
+        cache_lock = self._shared_hessian_inverse_lock
+        cache_key = self._shared_hessian_inverse_cache_key(H)
+        if cache is None or cache_lock is None or cache_key is None:
+            return self._compute_hessian_inverse_uncached(H)
+
+        with cache_lock:
+            cached = cache.get(cache_key)
+            stats = self._shared_hessian_stats
+            if cached is not None:
+                if stats is not None:
+                    stats["inverse_hits"] = int(stats.get("inverse_hits", 0)) + 1
+                return cached
+
+            if stats is not None:
+                stats["inverse_misses"] = int(stats.get("inverse_misses", 0)) + 1
+
+            result = self._compute_hessian_inverse_uncached(H)
+            if result[0] is not None:
+                cache[cache_key] = result
+            return result
+
+    @torch.inference_mode()
+    def _compute_hessian_inverse_uncached(self, H: torch.Tensor):
         # Capture a writable view of the Hessian diagonal so we can restore it between attempts.
         diag_view = H.diagonal()
         orig_diag = diag_view.clone()

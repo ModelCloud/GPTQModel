@@ -738,6 +738,34 @@ class LoopProcessor:
             subset_total,
         )
 
+    def prepare_subset(
+        self,
+        subset: Dict[str, NamedModule],
+        *,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ) -> None:
+        """Override point for per-subset sharing state before forward capture.
+
+        GPTQ uses this lifecycle to prepare same-input Hessian sharing. AWQ uses
+        the same generic lifecycle to prepare same-input activation sharing.
+        Other quantizers can leave the hook as a no-op when they have no
+        per-subset reusable state.
+        """
+
+        del subset, subset_index, subset_total
+
+    def cleanup_subset(
+        self,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        *,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ) -> None:
+        """Override point for dropping per-subset sharing state after workers finish."""
+
+        del subset, subset_index, subset_total
+
     def clear_cache_data(self):
         """Drops transient task data and cached layer inputs after replay."""
 

@@ -2878,6 +2878,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_channel_scale_clamp_min": "opt_channel_scale_clamp_min",
             "opt_channel_scale_clamp_max": "opt_channel_scale_clamp_max",
             "scale_search_chunked_activations": "scale_search_chunked_activations",
+            "enable_shared_hessian_cache": "enable_shared_hessian_cache",
+            "enable_activation_x_mean_cache": "enable_activation_x_mean_cache",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -3106,6 +3108,12 @@ class GPTQConfig(PreProcessorConfig):
         metadata={"help": "Skip heavy computations for fast model loading validation"},
     )
     hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
+    enable_shared_hessian_cache: bool = field(
+        default=True,
+        metadata={
+            "help": "Share same-input GPTQ Hessian accumulation and inverse/Cholesky cache within one processor subset."
+        },
+    )
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.GPTQ,)
@@ -3187,6 +3195,7 @@ class GPTQConfig(PreProcessorConfig):
         meta_payload["mse"] = self.mse
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
+        meta_payload["enable_shared_hessian_cache"] = self.enable_shared_hessian_cache
         meta_payload["hessian"] = {
             "chunk_size": self.hessian.chunk_size,
             "chunk_bytes": self.hessian.chunk_bytes,
@@ -3206,6 +3215,12 @@ class AWQConfig(PreProcessorConfig):
         default=True,
         metadata={
             "help": "Stream and chunk AWQ scale-search activations to reduce peak memory during reference and reconstruction forwards."
+        },
+    )
+    enable_activation_x_mean_cache: bool = field(
+        default=True,
+        metadata={
+            "help": "Share same-input AWQ activation CPU captures and chunked activation x-mean reductions within one processor subset."
         },
     )
 
@@ -3236,6 +3251,7 @@ class AWQConfig(PreProcessorConfig):
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)
         meta_payload["scale_search_chunked_activations"] = self.scale_search_chunked_activations
+        meta_payload["enable_activation_x_mean_cache"] = self.enable_activation_x_mean_cache
 
 
 @dataclass

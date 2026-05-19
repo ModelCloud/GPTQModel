@@ -213,10 +213,254 @@ class AWQProcessor(LoopProcessor):
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
         self._rotary_source_id: Optional[int] = None
+        self._enable_activation_x_mean_cache = bool(getattr(qcfg, "enable_activation_x_mean_cache", True))
+
+        # AWQ same-input activation sharing:
+        # Q/K/V and gate/up projections often receive identical calibration
+        # activations. AWQ does not have a Hessian, but it repeatedly copies
+        # these activations to CPU and reduces abs(input).mean(dim=0) during
+        # scale search. When `QuantizeConfig.enable_activation_x_mean_cache` is
+        # enabled, the caches below deduplicate those two costs while keeping
+        # final replay tensors independent because apply_scale mutates
+        # input_feat_dict values in place. Disabling the toggle restores the
+        # original per-module activation copy and x-mean reduction path.
+        self._shared_activation_lock = threading.Lock()
+        # Per-subset cache of CPU activation copies keyed by source tensor view.
+        self._shared_activation_feature_cache: Dict[Tuple[object, ...], torch.Tensor] = {}
+        # Maps folded replay tensors back to their shared captured source.
+        self._awq_feature_share_keys: Dict[int, Tuple[object, ...]] = {}
+        self._awq_feature_share_keys_by_name: Dict[str, Tuple[object, ...]] = {}
+        # Per-layer cache of chunked x_mean reductions for same-source features.
+        self._awq_x_mean_cache: Dict[Tuple[object, ...], torch.Tensor] = {}
+        self._shared_activation_stats = {
+            "feature_requests": 0,
+            "feature_hits": 0,
+            "feature_misses": 0,
+            "x_mean_requests": 0,
+            "x_mean_hits": 0,
+            "x_mean_misses": 0,
+        }
         self._initialize_sample_counts()
         self._module_forward_kwargs.setdefault("attention_mask", None)
         # Preserve fallback preference so AWQ can optionally fall back when no calibration data or activations are available.
         self.fallback = qcfg.fallback
+
+    @staticmethod
+    def _tensor_cache_fingerprint(tensor: torch.Tensor) -> Tuple[object, ...]:
+        """Build a stable identity key for a tensor view within one capture lifecycle."""
+
+        try:
+            storage_ptr = tensor.untyped_storage().data_ptr()
+        except Exception:
+            storage_ptr = tensor.data_ptr()
+        try:
+            version = tensor._version
+        except RuntimeError:
+            # Inference tensors can omit version counters. The subset-local
+            # cache still includes storage pointer, view metadata, and batch id.
+            version = None
+        return (
+            str(tensor.device),
+            str(tensor.dtype),
+            tuple(tensor.shape),
+            tuple(tensor.stride()),
+            int(tensor.storage_offset()),
+            int(storage_ptr),
+            int(version) if version is not None else None,
+        )
+
+    def prepare_subset(
+        self,
+        subset: Dict[str, NamedModule],
+        *,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ) -> None:
+        """Reset AWQ same-input activation sharing before subset forward capture."""
+
+        del subset, subset_index, subset_total
+        with self._shared_activation_lock:
+            self._shared_activation_feature_cache.clear()
+
+    def cleanup_subset(
+        self,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        *,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ) -> None:
+        """Release AWQ same-input activation sharing after subset processing."""
+
+        del subset, subset_index, subset_total
+        self._clear_awq_activation_caches(clear_feature_cache=True)
+
+    def shared_activation_stats(self, reset: bool = False) -> Dict[str, int]:
+        """Return AWQ activation sharing counters used by targeted regression tests."""
+
+        with self._shared_activation_lock:
+            stats = dict(self._shared_activation_stats)
+            if reset:
+                for key in self._shared_activation_stats:
+                    self._shared_activation_stats[key] = 0
+        return stats
+
+    def _clear_awq_activation_caches(self, *, clear_feature_cache: bool = False) -> None:
+        """Drop AWQ activation caches whose tensors are scoped to one subset or layer."""
+
+        with self._shared_activation_lock:
+            if clear_feature_cache:
+                self._shared_activation_feature_cache.clear()
+            self._awq_feature_share_keys.clear()
+            self._awq_feature_share_keys_by_name.clear()
+            self._awq_x_mean_cache.clear()
+
+    def _activation_feature_cache_key(self, feature: torch.Tensor) -> Tuple[object, ...]:
+        """Return a cache key for AWQ same-input module captures in the current batch."""
+
+        return (
+            "awq-activation-feature",
+            self.current_batch_index(),
+            # CUDA can reuse a freed storage pointer for another activation in
+            # the same subset. Include the live Tensor object's identity so the
+            # cache only deduplicates modules that received the same input
+            # object, not two unrelated tensors with recycled storage metadata.
+            id(feature),
+            self._tensor_cache_fingerprint(feature),
+        )
+
+    def _cache_input_feature(self, feature: torch.Tensor) -> Tuple[torch.Tensor, Optional[Tuple[object, ...]]]:
+        """Copy one AWQ capture to CPU, reusing the copy for identical same-batch inputs."""
+
+        if not self._enable_activation_x_mean_cache:
+            if feature.device.type != "cpu":
+                return feature.detach().cpu(), None
+            return feature.detach(), None
+
+        cache_key = self._activation_feature_cache_key(feature)
+        with self._shared_activation_lock:
+            self._shared_activation_stats["feature_requests"] += 1
+            cached = self._shared_activation_feature_cache.get(cache_key)
+            if cached is not None:
+                self._shared_activation_stats["feature_hits"] += 1
+                return cached, cache_key
+
+        if feature.device.type != "cpu":
+            cached_feature = feature.detach().cpu()
+        else:
+            cached_feature = feature.detach()
+
+        with self._shared_activation_lock:
+            existing = self._shared_activation_feature_cache.get(cache_key)
+            if existing is None:
+                self._shared_activation_feature_cache[cache_key] = cached_feature
+                self._shared_activation_stats["feature_misses"] += 1
+                return cached_feature, cache_key
+
+            self._shared_activation_stats["feature_hits"] += 1
+            return existing, cache_key
+
+    @staticmethod
+    def _feature_share_key(
+        input_cache_keys: List[Optional[Tuple[object, ...]]],
+        feature: torch.Tensor,
+    ) -> Optional[Tuple[object, ...]]:
+        """Map folded AWQ replay features back to the same captured source activations."""
+
+        if not input_cache_keys or any(key is None for key in input_cache_keys):
+            return None
+        return (
+            "awq-feature",
+            tuple(input_cache_keys),
+            str(feature.device),
+            str(feature.dtype),
+            tuple(feature.shape),
+        )
+
+    def _register_feature_share_key(
+        self,
+        module_name: str,
+        feature: torch.Tensor,
+        input_cache_keys: List[Optional[Tuple[object, ...]]],
+    ) -> None:
+        """Remember which folded feature tensors can reuse activation mean computation."""
+
+        if not self._enable_activation_x_mean_cache:
+            return
+
+        share_key = self._feature_share_key(input_cache_keys, feature)
+        if share_key is None:
+            return
+        with self._shared_activation_lock:
+            self._awq_feature_share_keys[id(feature)] = share_key
+            self._awq_feature_share_keys_by_name[module_name] = share_key
+
+    def _activation_x_mean_cache_key(self, inp: torch.Tensor) -> Optional[Tuple[object, ...]]:
+        """Return the cache key for activation means if this input came from a shared capture."""
+
+        if not self._enable_activation_x_mean_cache:
+            return None
+
+        with self._shared_activation_lock:
+            feature_share_key = self._awq_feature_share_keys.get(id(inp))
+        if feature_share_key is None:
+            return None
+        return (
+            "awq-x-mean",
+            feature_share_key,
+            str(inp.device),
+            str(inp.dtype),
+            tuple(inp.shape),
+        )
+
+    def _compute_activation_x_mean(self, inp: torch.Tensor) -> torch.Tensor:
+        """Compute or reuse the chunked per-channel AWQ activation mean.
+
+        This is the AWQ analog to GPTQ Hessian sharing: only the reusable
+        activation reduction is shared. Weight-dependent scale search still runs
+        independently for each AWQ scaling group.
+        """
+
+        cache_key = self._activation_x_mean_cache_key(inp)
+        if cache_key is not None:
+            with self._shared_activation_lock:
+                self._shared_activation_stats["x_mean_requests"] += 1
+                cached = self._awq_x_mean_cache.get(cache_key)
+                if cached is not None:
+                    self._shared_activation_stats["x_mean_hits"] += 1
+                    return cached
+
+        inp_flat = inp.abs().view(-1, inp.shape[-1])
+        num_elements = inp_flat.size(0)
+        num_channels = inp_flat.size(1)
+        float32_size = torch.tensor([], dtype=torch.float32).element_size()
+        element_size_bytes = float32_size  # accumulation happens in FP32
+
+        # Calculate chunk size dynamically based on the available memory budget (default 1 GiB).
+        chunk_size = int(self.max_chunk_memory // (element_size_bytes * num_channels))
+        chunk_size = min(chunk_size, num_elements)
+        chunk_size = max(chunk_size, 1)
+
+        x_sum = torch.zeros(num_channels, dtype=torch.float32, device=inp.device)
+        for i in range(0, num_elements, chunk_size):
+            end = min(i + chunk_size, num_elements)
+            chunk = inp_flat[i:end]
+            x_sum += chunk.to(torch.float32).sum(dim=0)
+
+        x_mean = (x_sum / num_elements).to(inp.dtype)
+        del x_sum
+
+        if cache_key is not None:
+            with self._shared_activation_lock:
+                existing = self._awq_x_mean_cache.get(cache_key)
+                if existing is None:
+                    self._awq_x_mean_cache[cache_key] = x_mean
+                    self._shared_activation_stats["x_mean_misses"] += 1
+                    return x_mean
+
+                self._shared_activation_stats["x_mean_hits"] += 1
+                return existing
+
+        return x_mean
 
     def _get_root_rotary(self) -> Optional[nn.Module]:
         """Returns the model rotary module used to refresh position embeddings."""
@@ -376,24 +620,25 @@ class AWQProcessor(LoopProcessor):
     def _record_input_feature(self, module_name: str, feature: torch.Tensor) -> None:
         """Caches one captured input feature tensor for a named module."""
 
+        if not torch.is_tensor(feature):
+            return
+
         # Preserve a leading sample axis for flattened [seq, hidden] captures so later
         # concatenation produces [samples, seq, hidden] instead of collapsing into one giant sequence.
         if feature.dim() <= 2:
             feature = feature.unsqueeze(0)
 
-        if feature.device.type != "cpu":
-            feature = feature.detach().cpu()
-        else:
-            feature = feature.detach()
+        feature, feature_cache_key = self._cache_input_feature(feature)
 
         with self.lock:
             entry = self.tasks.get(module_name)
             if entry is None:
-                entry = {"inputs": [], "batch_indices": []}
+                entry = {"inputs": [], "batch_indices": [], "input_cache_keys": []}
                 self.tasks[module_name] = entry
             inputs_list = entry.setdefault("inputs", [])
             inputs_list.append(feature)
             entry.setdefault("batch_indices", []).append(self.current_batch_index())
+            entry.setdefault("input_cache_keys", []).append(feature_cache_key)
 
     @staticmethod
     def _can_concat_batch_tensors(tensors: List[torch.Tensor]) -> bool:
@@ -655,11 +900,21 @@ class AWQProcessor(LoopProcessor):
         features: Dict[str, torch.Tensor] = {}
         feature_kwargs: Dict[str, Dict[str, Any]] = {}
         root_buckets: Dict[str, List[torch.Tensor]] = {}
+        latest_ref_counts: Dict[int, int] = {}
+        self._clear_awq_activation_caches(clear_feature_cache=False)
+
+        for name in list(state.modules):
+            entry = self.tasks.get(name) or {}
+            tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
+            if tensors:
+                latest_ref_counts[id(tensors[-1])] = latest_ref_counts.get(id(tensors[-1]), 0) + 1
+
         # Iterate over a snapshot since quantization may mutate state.modules concurrently
         for name in list(state.modules):
             entry = self.tasks.get(name) or {}
             tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
             batch_indices: List[Optional[int]] = entry.get("batch_indices", [])  # type: ignore[arg-type]
+            input_cache_keys: List[Optional[Tuple[object, ...]]] = entry.get("input_cache_keys", [])  # type: ignore[arg-type]
             if not tensors:
                 features[name] = torch.empty(0)
                 feature_kwargs[name] = {}
@@ -667,17 +922,28 @@ class AWQProcessor(LoopProcessor):
             if self._can_concat_batch_tensors(tensors):
                 features[name] = torch.cat(tensors, dim=0)
                 feature_kwargs[name] = self._feature_kwargs_from_batch_indices(batch_indices)
+                self._register_feature_share_key(name, features[name], input_cache_keys)
                 entry["inputs"] = [features[name]]
                 entry["batch_indices"] = [None]
+                entry["input_cache_keys"] = [self._awq_feature_share_keys_by_name.get(name)]
             else:
                 # Variable-length captures such as `[1, 423, H]` and `[1, 36, H]`
                 # cannot be concatenated on dim 0. Keep the latest capture and
                 # reuse metadata from the same batch index so replay stays aligned.
                 features[name] = tensors[-1]
+                if latest_ref_counts.get(id(features[name]), 0) > 1:
+                    # AWQ shared activation cache stores one captured tensor for
+                    # same-input modules, but `apply_scale` mutates
+                    # input_feat_dict values in place. Clone here so q/k/v or
+                    # gate/up replay tensors cannot scale each other.
+                    features[name] = features[name].clone()
                 last_batch_index = batch_indices[-1] if batch_indices else None
+                last_cache_key = input_cache_keys[-1] if input_cache_keys else None
                 feature_kwargs[name] = self._feature_kwargs_from_batch_indices([last_batch_index])
+                self._register_feature_share_key(name, features[name], [last_cache_key])
                 entry["inputs"] = [features[name]]
                 entry["batch_indices"] = [last_batch_index]
+                entry["input_cache_keys"] = [last_cache_key]
             root = name.split(".", 1)[0]
             root_buckets.setdefault(root, []).extend(tensors)
             if features[name] is not None and features[name].numel() > 0:
@@ -746,6 +1012,7 @@ class AWQProcessor(LoopProcessor):
             delattr(self._scale_context, "layer_index")
         if hasattr(self._scale_context, "prev_scale"):
             delattr(self._scale_context, "prev_scale")
+        self._clear_awq_activation_caches(clear_feature_cache=False)
 
     def _refresh_forward_kwargs_from_cache(self) -> None:
         """Refreshes cached kwargs such as masks and rotary embeddings for AWQ search."""
@@ -914,6 +1181,7 @@ class AWQProcessor(LoopProcessor):
                 delattr(self._scale_context, "layer_index")
             if hasattr(self._scale_context, "prev_scale"):
                 delattr(self._scale_context, "prev_scale")
+            self._clear_awq_activation_caches(clear_feature_cache=False)
             return
 
         sanitized_module_config: List[Dict] = []
@@ -994,6 +1262,7 @@ class AWQProcessor(LoopProcessor):
                 delattr(self._scale_context, "layer_index")
             if hasattr(self._scale_context, "prev_scale"):
                 delattr(self._scale_context, "prev_scale")
+            self._clear_awq_activation_caches(clear_feature_cache=False)
             return
 
         sample_groups = []
@@ -1113,6 +1382,7 @@ class AWQProcessor(LoopProcessor):
             delattr(self._scale_context, "layer_index")
         if hasattr(self._scale_context, "prev_scale"):
             delattr(self._scale_context, "prev_scale")
+        self._clear_awq_activation_caches(clear_feature_cache=False)
 
     @torch.inference_mode()
     def _search_best_scale(
@@ -1145,32 +1415,9 @@ class AWQProcessor(LoopProcessor):
         # per output channel so the mean can be computed without allocating the combined tensor.
         w_mean = _compute_awq_weight_mean(layers, self.qcfg.group_size)
 
-        # [STEP 2]: Compute per-channel mean of the input activation with chunking
-        # Stream directly on the source device to avoid creating full CPU copies while still enforcing
-        # a predictable memory bound derived from max_chunk_memory.
-        inp_flat = inp.abs().view(-1, inp.shape[-1])
-        num_elements = inp_flat.size(0)
-        num_channels = inp_flat.size(1)
-        float32_size = torch.tensor([], dtype=torch.float32).element_size()
-        element_size_bytes = float32_size  # accumulation happens in FP32
-
-        # Calculate chunk size dynamically based on the available memory budget (default 1 GiB).
-        chunk_size = int(self.max_chunk_memory // (element_size_bytes * num_channels))
-        chunk_size = min(chunk_size, num_elements)
-        chunk_size = max(chunk_size, 1)
-
-        # Use float32 for sum calculation
-        x_sum = torch.zeros(num_channels, dtype=torch.float32, device=inp.device)
-
-        for i in range(0, num_elements, chunk_size):
-            end = min(i + chunk_size, num_elements)
-            chunk = inp_flat[i:end]
-            # Accumulate each chunk in FP32 to balance precision and memory usage.
-            chunk_sum = chunk.to(torch.float32).sum(dim=0)
-            x_sum += chunk_sum
-
-        x_mean = (x_sum / num_elements).to(inp.dtype)
-        del x_sum
+        # [STEP 2]: Compute or reuse the per-channel activation mean. Same-input
+        # AWQ groups such as q/k/v share this expensive chunked reduction.
+        x_mean = self._compute_activation_x_mean(inp)
 
         # [STEP 3]: Compute output of module
         module_kwargs = self._sanitize_kwargs(kwargs, module2inspect)
@@ -1847,9 +2094,11 @@ class AWQProcessor(LoopProcessor):
         with self.lock:
             entry = self.tasks.get(module.name)
             if entry is None:
-                self.tasks[module.name] = {"inputs": []}
+                self.tasks[module.name] = {"inputs": [], "batch_indices": [], "input_cache_keys": []}
             else:
                 entry.setdefault("inputs", [])
+                entry.setdefault("batch_indices", [])
+                entry.setdefault("input_cache_keys", [])
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports whether preprocessing excluded this module from AWQ work."""

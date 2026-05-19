@@ -454,7 +454,7 @@ def test_stage_layer_forces_sync_finalizers_for_multi_device_awq():
     ) is True
 
 
-def test_stage_layer_keeps_async_finalizers_for_single_device_awq():
+def test_stage_layer_forces_sync_finalizers_for_single_device_awq():
     looper = types.SimpleNamespace(
         gptq_model=types.SimpleNamespace(
             quantize_config=QuantizeConfig(
@@ -470,7 +470,7 @@ def test_stage_layer_keeps_async_finalizers_for_single_device_awq():
     assert _should_drain_finalize_futures_synchronously(
         looper,
         finalize_tasks=[(awq_processor, None, None, None, None)],
-    ) is False
+    ) is True
 
 
 def test_stage_layer_empties_cache_after_sync_paroquant_finalize_only_with_offload():

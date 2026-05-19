@@ -220,6 +220,10 @@ class ModelTest(unittest.TestCase):
     MSE = 0.0
     DYNAMIC = None
     HESSIAN_CHUNK_SIZE = None
+    # Process-level runtime-sharing toggles let model tests A/B quantization
+    # math without using environment variables.
+    ENABLE_SHARED_HESSIAN_CACHE = True
+    ENABLE_AWQ_ACTIVATION_X_MEAN_CACHE = True
     WEIGHT_ONLY = None
     BNB_FORMAT = None
     BNB_BLOCK_SIZE = None
@@ -1530,6 +1534,8 @@ class ModelTest(unittest.TestCase):
             mse=self.MSE,
             dynamic=self.DYNAMIC,
             hessian=HessianConfig(chunk_size=self.HESSIAN_CHUNK_SIZE),
+            enable_shared_hessian_cache=self.ENABLE_SHARED_HESSIAN_CACHE,
+            enable_activation_x_mean_cache=self.ENABLE_AWQ_ACTIVATION_X_MEAN_CACHE,
             moe=self.MOE_CONFIG,
             offload_to_disk=self._mode_specific_test_setting("OFFLOAD_TO_DISK"),
         )
