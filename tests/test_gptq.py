@@ -307,6 +307,19 @@ def test_gptq_hessian_chunk_materialization_direct_copy_preserves_xtx():
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
+def test_gptq_hessian_chunk_size_uses_dtype_itemsize_without_tensor_alloc(monkeypatch):
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float16).eval()
+    qcfg = QuantizeConfig(hessian=HessianConfig(chunk_bytes=64, staging_dtype=torch.float16))
+    gptq = GPTQ(layer, qcfg=qcfg)
+
+    def _reject_tensor_alloc(*args, **kwargs):
+        raise AssertionError("chunk sizing should use dtype.itemsize instead of torch.tensor")
+
+    monkeypatch.setattr(torch, "tensor", _reject_tensor_alloc)
+
+    assert gptq.resolve_hessian_chunk_size(rows=16, stage_dtype=torch.float16) == 4
+
+
 def test_gptq_dense_hessian_ordering_uses_diagonal_view(monkeypatch):
     torch.manual_seed(0)
 

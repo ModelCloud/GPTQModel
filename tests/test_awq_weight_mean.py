@@ -251,6 +251,23 @@ def test_awq_forward_signature_is_cached_for_scale_search(monkeypatch):
     assert signature_calls == 1
 
 
+def test_awq_activation_x_mean_uses_dtype_itemsize_without_tensor_alloc(monkeypatch):
+    torch.manual_seed(0)
+
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=4))
+    processor.max_chunk_memory = 64
+    x = torch.randn(2, 3, 8, dtype=torch.float16)
+
+    def _reject_tensor_alloc(*args, **kwargs):
+        raise AssertionError("x_mean chunk sizing should use dtype.itemsize instead of torch.tensor")
+
+    monkeypatch.setattr(torch, "tensor", _reject_tensor_alloc)
+
+    actual = processor._compute_activation_x_mean(x)
+    expected = x.reshape(-1, x.shape[-1]).to(torch.float32).abs().mean(dim=0).to(x.dtype)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
 def test_generate_node_for_awq_scaling_keeps_kwargs_for_later_nodes():
     kwargs = {
         "attention_mask": torch.ones(1, 1, 36, 36),

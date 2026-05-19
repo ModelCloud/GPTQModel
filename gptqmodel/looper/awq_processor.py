@@ -455,8 +455,7 @@ class AWQProcessor(LoopProcessor):
         inp_flat = inp.reshape(-1, inp.shape[-1])
         num_elements = inp_flat.size(0)
         num_channels = inp_flat.size(1)
-        float32_size = torch.tensor([], dtype=torch.float32).element_size()
-        element_size_bytes = float32_size  # accumulation happens in FP32
+        element_size_bytes = torch.float32.itemsize  # accumulation happens in FP32
 
         # Calculate chunk size dynamically based on the available memory budget (default 1 GiB).
         chunk_size = int(self.max_chunk_memory // (element_size_bytes * num_channels))

@@ -499,7 +499,7 @@ class GPTQ:
 
         bytes_budget = self.qcfg.hessian.chunk_bytes
         if bytes_budget is not None:
-            bytes_per_row = self.columns * torch.tensor([], dtype=stage_dtype).element_size()
+            bytes_per_row = self.columns * stage_dtype.itemsize
             if bytes_per_row > 0:
                 chunk_rows = bytes_budget // bytes_per_row
                 if chunk_rows > 0:
