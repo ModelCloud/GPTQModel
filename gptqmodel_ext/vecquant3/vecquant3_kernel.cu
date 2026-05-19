@@ -139,6 +139,17 @@ __device__ __forceinline__ int unpack_int3_zero(const int *__restrict__ qzeros,
   return (word2 >> (2 + 3 * (idx - 22))) & 0x7;
 }
 
+template <typename scalar_t>
+struct Quant3GroupCache {
+  using scalar2_t = typename scalar_traits<scalar_t>::scalar2_t;
+
+  // One thread owns one output column, so scale/qzero only changes when K
+  // crosses a quantization group boundary.
+  int group;
+  scalar_t scale;
+  scalar2_t zero2;
+};
+
 template <typename scalar_t, int GroupSize, bool FloatAccum>
 __device__ __forceinline__ void accumulate_pair(
     unsigned int packed_pair,
@@ -152,19 +163,23 @@ __device__ __forceinline__ void accumulate_pair(
     const scalar_t *__restrict__ scales,
     const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ deq2,
     int deq_offset,
+    Quant3GroupCache<scalar_t> &group_cache,
     float &acc_float,
     typename scalar_traits<scalar_t>::scalar2_t &acc_input) {
   using traits = scalar_traits<scalar_t>;
   using scalar2_t = typename traits::scalar2_t;
 
   const int group = (absolute_half2_k * 2) / GroupSize;
-  const scalar_t scale = scales[group * width + col];
-  const int zero = unpack_int3_zero(qzeros, group, col, qzeros_stride);
-  const scalar2_t scale2 = traits::make2(scale);
-  const scalar2_t zero2 =
-      traits::make2(traits::mul(traits::from_float(-static_cast<float>(zero)), scale));
+  if (group != group_cache.group) {
+    group_cache.group = group;
+    group_cache.scale = scales[group * width + col];
+    const int zero = unpack_int3_zero(qzeros, group, col, qzeros_stride);
+    group_cache.zero2 = traits::make2(
+        traits::mul(traits::from_float(-static_cast<float>(zero)), group_cache.scale));
+  }
+  const scalar2_t scale2 = traits::make2(group_cache.scale);
   const scalar2_t deq = deq2[(packed_pair & 0x3f) * 32 + deq_offset];
-  const scalar2_t weight = traits::fma2(deq, scale2, zero2);
+  const scalar2_t weight = traits::fma2(deq, scale2, group_cache.zero2);
   if constexpr (FloatAccum) {
     const scalar2_t product = traits::mul2(weight, blockvec[relative_half2_k]);
     acc_float += traits::to_float(product.x) + traits::to_float(product.y);
@@ -229,83 +244,90 @@ __global__ void vecquant3_gptq_gemv_kernel(
   const int absolute_half2_base = blockIdx.x * blockwidth2;
   float acc_float = 0.0f;
   scalar2_t acc_input = traits::make2(traits::from_float(0.0f));
+  Quant3GroupCache<scalar_t> group_cache = {
+      -1,
+      traits::from_float(0.0f),
+      traits::make2(traits::from_float(0.0f)),
+  };
 
   while (k < blockwidth2 && (row + ((k * 3) >> 4)) < qweight_rows) {
     unsigned int tmp1 = as_unsigned(qweight[i]);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp1 >> 0, absolute_half2_base + k + 0, k + 0, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp1 >> 6, absolute_half2_base + k + 1, k + 1, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp1 >> 12, absolute_half2_base + k + 2, k + 2, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp1 >> 18, absolute_half2_base + k + 3, k + 3, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp1 >> 24, absolute_half2_base + k + 4, k + 4, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     i += width;
     unsigned int tmp2 = as_unsigned(qweight[i]);
     unsigned int tmp = (tmp1 >> 30) | ((tmp2 << 2) & 0x3c);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp, absolute_half2_base + k + 5, k + 5, col, width, qzeros_stride,
-        blockvec, qzeros, scales, &deq2[0][0], off, acc_float, acc_input);
+        blockvec, qzeros, scales, &deq2[0][0], off, group_cache,
+        acc_float, acc_input);
     tmp2 >>= 4;
     k += 6;
 
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp2 >> 0, absolute_half2_base + k + 0, k + 0, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp2 >> 6, absolute_half2_base + k + 1, k + 1, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp2 >> 12, absolute_half2_base + k + 2, k + 2, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp2 >> 18, absolute_half2_base + k + 3, k + 3, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     i += width;
     tmp1 = as_unsigned(qweight[i]);
     tmp = (tmp2 >> 24) | ((tmp1 << 4) & 0x30);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp, absolute_half2_base + k + 4, k + 4, col, width, qzeros_stride,
-        blockvec, qzeros, scales, &deq2[0][0], off, acc_float, acc_input);
+        blockvec, qzeros, scales, &deq2[0][0], off, group_cache,
+        acc_float, acc_input);
     tmp1 >>= 2;
     k += 5;
 
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp1 >> 0, absolute_half2_base + k + 0, k + 0, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp1 >> 6, absolute_half2_base + k + 1, k + 1, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp1 >> 12, absolute_half2_base + k + 2, k + 2, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp1 >> 18, absolute_half2_base + k + 3, k + 3, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     accumulate_pair<scalar_t, GroupSize, FloatAccum>(
         tmp1 >> 24, absolute_half2_base + k + 4, k + 4, col, width,
-        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off, acc_float,
-        acc_input);
+        qzeros_stride, blockvec, qzeros, scales, &deq2[0][0], off,
+        group_cache, acc_float, acc_input);
     i += width;
     k += 5;
   }
