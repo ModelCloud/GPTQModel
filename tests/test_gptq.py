@@ -290,6 +290,23 @@ def test_gptq_dense_block_scratch_buffers_are_fully_written(monkeypatch):
     assert baseline_result[4] == poisoned_result[4]
 
 
+def test_gptq_hessian_chunk_materialization_direct_copy_preserves_xtx():
+    torch.manual_seed(0)
+
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float16).eval()
+    qcfg = QuantizeConfig(hessian=HessianConfig(chunk_size=2, staging_dtype=torch.float32))
+    gptq = GPTQ(layer, qcfg=qcfg)
+    matrix = torch.randn(5, 8, dtype=torch.float16)
+
+    actual = gptq.compute_hessian_xtx(matrix)
+    expected = torch.zeros(8, 8, dtype=torch.float32)
+    for start in range(0, matrix.shape[0], 2):
+        chunk = matrix[start:start + 2].to(torch.float32)
+        expected.add_(chunk.T.matmul(chunk))
+
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
 def test_gptq_embedding_loss_uses_scalar_accumulator(monkeypatch):
     torch.manual_seed(0)
 

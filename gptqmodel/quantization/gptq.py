@@ -516,7 +516,9 @@ class GPTQ:
                 stats["staging_misses"] += 1
 
             staging_view = staging_workspace[:rows, :]
-            staging_view.copy_(chunk.to(dtype=stage_dtype))
+            # copy_ performs dtype conversion directly into the leased
+            # workspace, avoiding a full chunk-sized converted temporary.
+            staging_view.copy_(chunk)
 
             if stage_dtype == torch.float32:
                 stats["materialized_requests"] += 1
@@ -548,7 +550,9 @@ class GPTQ:
 
                     try:
                         fp32_view = fp32_workspace[:rows, :]
-                        fp32_view.copy_(staging_view.to(torch.float32))
+                        # Convert directly into the fp32 materialization
+                        # workspace instead of allocating staging_view.float().
+                        fp32_view.copy_(staging_view)
                         yield fp32_view
                     finally:
                         if device.type == "cuda":
