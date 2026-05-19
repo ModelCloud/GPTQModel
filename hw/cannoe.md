@@ -735,9 +735,12 @@ GM/L2 after every K tile.
 One important API detail: `Matmul::IterateAll(gm, ...)` does not take a
 partial-sum flag. Its first argument after `gm` is `enAtomic`, so using
 `k_tile != 0` there still writes partial C through GM rather than accumulating
-in CO1. A guarded synchronous `Iterate(enPartialSum)` plus final `GetTensorC`
-probe compiled, but all eight raw validator workers timed out at 120 seconds.
-That keeps lower-level Cube/L0C control as the active target.
+in CO1. The guarded public `tscm-iterate-getc-diagnostic` strategy now keeps a
+reproducible probe for synchronous `Iterate(enPartialSum)` plus final
+`GetTensorC`; a fresh CANN 9 build loaded successfully, but all eight default
+raw validator workers timed out at 180 seconds with no stderr. That keeps
+lower-level Cube/L0C control, or a different CANN Matmul lifecycle, as the
+active target.
 
 ## Sources
 

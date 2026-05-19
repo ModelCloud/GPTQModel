@@ -306,6 +306,7 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_ITERATE_GETC_DIAGNOSTIC")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC")
@@ -333,6 +334,7 @@ def test_enable_kernel_define_coalesces_experimental_options(tmp_path):
         "-DCANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK=1 "
+        "-DCANNOE_EXPERIMENTAL_TSCM_ITERATE_GETC_DIAGNOSTIC=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC=1 "
@@ -367,6 +369,7 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK")
+    build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_ITERATE_GETC_DIAGNOSTIC")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF")
     build_helper._enable_kernel_define(tmp_path, "CANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC")
@@ -393,6 +396,7 @@ def test_enable_kernel_define_handles_cann9_kernel_cmake(tmp_path):
         "-DCANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_DEQUANT=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK=1 "
+        "-DCANNOE_EXPERIMENTAL_TSCM_ITERATE_GETC_DIAGNOSTIC=1 "
         "-DCANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_HANDOFF=1 "
         "-DCANNOE_EXPERIMENTAL_AIC_TSCM_ZERO_B_DIAGNOSTIC=1 "
@@ -455,6 +459,7 @@ def _strategy_args(strategy: str):
         experimental_tscm_direct_dequant=False,
         experimental_tscm_direct_multik=False,
         experimental_tscm_local_a=False,
+        experimental_tscm_iterate_getc_diagnostic=False,
         experimental_tscm_tbuf_handoff=False,
         experimental_aic_tscm_handoff=False,
         experimental_aic_tscm_zero_b_diagnostic=False,
@@ -496,6 +501,25 @@ def test_public_strategy_tscm_direct_multik_expands_flags():
     assert args.experimental_tscm_runtime_handoff
     assert args.experimental_tscm_direct_dequant
     assert args.experimental_tscm_direct_multik
+    assert not args.experimental_vecout_consumer
+
+
+def test_public_strategy_tscm_iterate_getc_diagnostic_expands_local_a_flags():
+    build_helper = _load_build_helper()
+    args = _strategy_args("tscm-iterate-getc-diagnostic")
+
+    build_helper._resolve_experimental_flags(args, argparse.ArgumentParser())
+
+    assert args.experimental_staged_dequant
+    assert args.experimental_cube_consumer
+    assert args.experimental_mixed_launch
+    assert args.experimental_cann9_vector_dequant
+    assert args.experimental_tscm_consumer
+    assert args.experimental_tscm_runtime_handoff
+    assert args.experimental_tscm_direct_dequant
+    assert args.experimental_tscm_direct_multik
+    assert args.experimental_tscm_local_a
+    assert args.experimental_tscm_iterate_getc_diagnostic
     assert not args.experimental_vecout_consumer
 
 

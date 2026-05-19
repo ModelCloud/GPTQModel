@@ -42,6 +42,11 @@ using CannoeAscendInt4 = AscendC::int4b_t;
 #error "CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK requires TSCM direct dequant"
 #endif
 
+#if defined(CANNOE_EXPERIMENTAL_TSCM_ITERATE_GETC_DIAGNOSTIC) && \
+    (!defined(CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK) || !defined(CANNOE_EXPERIMENTAL_TSCM_LOCAL_A))
+#error "CANNOE_EXPERIMENTAL_TSCM_ITERATE_GETC_DIAGNOSTIC requires TSCM direct multi-K local-A"
+#endif
+
 #if defined(CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF) && \
     !defined(CANNOE_EXPERIMENTAL_TSCM_RUNTIME_HANDOFF)
 #error "CANNOE_EXPERIMENTAL_TSCM_TBUF_HANDOFF requires TSCM runtime handoff"
@@ -659,6 +664,41 @@ public:
             LocalTensor<half> direct_b_tile = cube_probe.GetDirectDequantTile(tiling_);
 #ifdef CANNOE_EXPERIMENTAL_TSCM_DIRECT_MULTIK
             const uint32_t k_tiles = in_features / tiling_->base_k;
+#ifdef CANNOE_EXPERIMENTAL_TSCM_ITERATE_GETC_DIAGNOSTIC
+            for (uint32_t m_tile = 0; m_tile < m_tiles; ++m_tile) {
+                const uint32_t m_begin = m_tile * base_m;
+                const uint32_t m_len_candidate = rows - m_begin;
+                const uint32_t m_len = m_len_candidate < base_m ? m_len_candidate : base_m;
+                for (uint32_t k_tile = 0; k_tile < k_tiles; ++k_tile) {
+                    const uint32_t k_begin = k_tile * tiling_->base_k;
+                    FillDirectBTileKTile(
+                        direct_b_tile,
+                        k_tile,
+                        n_begin,
+                        packed_begin,
+                        packed_end,
+                        packed_stride,
+                        zero_offsets);
+                    LocalTensor<half> b_tscm_tile =
+                        cube_probe.LoadDirectBTileToTscm(direct_b_tile, tiling_, k_tile & 1U);
+                    FillDirectATile(direct_a_tile, m_begin, m_len, k_begin, tiling_->base_k, in_features);
+                    PipeBarrier<PIPE_ALL>();
+                    cube_probe.mm.SetTensorA(direct_a_tile);
+                    cube_probe.mm.SetTensorB(b_tscm_tile, false);
+                    cube_probe.mm.SetTail(static_cast<int32_t>(m_len), static_cast<int32_t>(base_n));
+                    ConfigureCubeBiasForKTile(cube_probe, k_tile, n_begin);
+                    if (!cube_probe.mm.Iterate<true>(k_tile != 0)) {
+                        cube_probe.FreeTscmBTile(b_tscm_tile);
+                        return false;
+                    }
+                    cube_probe.FreeTscmBTile(b_tscm_tile);
+                }
+                const bool sequential_write = CannoeOutputTileIsSequential(m_len, base_n, out_features);
+                cube_probe.mm.GetTensorC<true>(
+                    y_gm_[m_begin * out_features + n_begin], 0, sequential_write);
+            }
+            continue;
+#endif
             const bool use_pipelined_fill = tiling_->base_k >= 128 || k_tiles >= 4;
             if (use_pipelined_fill) {
                 FillDirectBTileKTile(direct_b_tile, 0, n_begin, packed_begin, packed_end, packed_stride, zero_offsets);

@@ -1779,3 +1779,30 @@ activation magnitude is the repeatable failure axis, and sparse ramped inputs
 can still create tile-local non-finites at specific active-K densities. The
 next attempt should target a correct no-GM-partial accumulator lifecycle before
 further tile sweeps.
+
+## 2026-05-19: Cannoe TSCM Iterate GetTensorC Diagnostic Strategy
+
+Status: failed liveness gate; keep the strategy as an opt-in diagnostic only.
+
+Tested change: added the guarded public strategy
+`tscm-iterate-getc-diagnostic`. It expands to the TSCM direct local-A path and
+calls `Matmul::Iterate<true>(k_tile != 0)` for each K tile, followed by one
+final `GetTensorC<true>` per M/N tile. The goal was to test whether CANN 9
+Matmul can keep partial sums in Cube-local storage for the Cannoe fused path
+instead of writing partial C through GM/L2 after every `base_k` tile.
+
+Tested package: `/tmp/cannoe_iter_getc_ws`
+Bridge: `/tmp/cannoe_iter_getc_bridge/a9901d82ae8bd224/gptqmodel_cannoe_ascendc_ops.so`
+
+Artifact: `/tmp/cannoe_iter_getc_default_summary.json`
+
+| Probe | Devices/Cases | Result |
+| --- | --- | --- |
+| TSCM direct local-A `Iterate(enPartialSum)` plus final `GetTensorC` | all 8 default raw cases | 0/8 pass; every worker timed out at 180s with no stderr |
+
+Interpretation: the public KFC Matmul synchronous partial-sum lifecycle still
+does not make forward progress in the Cannoe mixed TSCM runtime setup, even
+when built as a fresh CANN 9 OPP package and loaded through a fresh bridge.
+This reinforces that the target fused kernel likely needs lower-level Cube/L0C
+control or a different CANN Matmul lifecycle, not another wrapper around
+`IterateAll` or the current high-level TSCM direct path.
