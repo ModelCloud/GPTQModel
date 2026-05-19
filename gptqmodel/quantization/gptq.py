@@ -1396,8 +1396,9 @@ class GPTQ:
                 for i in range(count):
                     col_idx = i1 + i
                     d = Hinv_diag[col_idx]
-                    if d > 0:
-                        loss_sum.add_(torch.sum((W1[:, i] - Q1[:, i]) ** 2 / (d ** 2)) / 2)
+                    # hessian_inverse_diag clamps h_eff to a positive floor, so
+                    # d is always positive. Avoid a per-column CUDA scalar bool.
+                    loss_sum.add_(torch.sum((W1[:, i] - Q1[:, i]) ** 2 / (d ** 2)) / 2)
 
                 Q[:, i1:i2] = Q1
 
