@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 import torch
 from torch.utils.cpp_extension import CUDA_HOME
 
@@ -31,6 +32,8 @@ CALIBRATION_TEXTS = [
     "When a JIT extension fails instantly, the root cause is often toolchain discovery rather than CUDA execution.",
     "Quantization logs should clearly distinguish compilation failures from runtime numerical problems.",
 ]
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 #   python tests_ParoQuant.py --mode quantize \
@@ -70,6 +73,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--opt-batch-size", type=int, default=4)
     parser.add_argument("--dtype", choices=("auto", "bfloat16", "float16"), default="bfloat16")
     return parser.parse_args()
+
+
+def _default_args() -> argparse.Namespace:
+    return argparse.Namespace(
+        mode="all",
+        rebuild=False,
+        model="/monster/data/model/Qwen3-0.6B-Base",
+        output_dir="/tmp/paroquant_qwen3_0_6b_test",
+        bits=4,
+        group_size=128,
+        batch_size=1,
+        calibration_samples=8,
+        calibration_concat_size=0,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=1,
+        opt_train_samples=8,
+        opt_validation_samples=1,
+        opt_batch_size=4,
+        dtype="bfloat16",
+    )
 
 
 def print_environment() -> None:
@@ -214,6 +237,24 @@ def main() -> int:
 
     print("\n== Proceed To Quantize Repro ==")
     return run_quantize_repro(args)
+
+
+def test_paroquant_jit_then_quantize_qwen3_0_6b():
+    os.environ.setdefault("GPTQMODEL_EXT_VERBOSE", "1")
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available for ParoQuant repro.")
+
+    args = _default_args()
+    model_path = Path(args.model)
+    if not model_path.exists():
+        pytest.skip(f"Model path missing: {model_path}")
+
+    jit_result = run_jit_repro(rebuild=args.rebuild)
+    assert jit_result == 0, f"ParoQuant JIT repro failed with exit code {jit_result}"
+
+    quant_result = run_quantize_repro(args)
+    assert quant_result == 0, f"ParoQuant quantize repro failed with exit code {quant_result}"
 
 
 if __name__ == "__main__":
