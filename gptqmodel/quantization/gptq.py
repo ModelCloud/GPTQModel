@@ -1452,12 +1452,12 @@ class GPTQ:
                 g_idx = g_idx[invperm]
             elif self.qcfg.act_group_aware:
                 # Reorder scale/zero with inverse global perm (same as dense path)
-                inv_global_perm = invert_perm(global_perm)
-                inv_global_perm_list = inv_global_perm.tolist()
-                temp_scale = [scale[:, i:i+1] for i in inv_global_perm_list]
-                scale = torch.cat(temp_scale, dim=1)
-                temp_zero = [zero[:, i:i+1] for i in inv_global_perm_list]
-                zero = torch.cat(temp_zero, dim=1)
+                inv_global_perm = invert_perm(global_perm).to(device=scale.device)
+                # `scale` and `zero` are already concatenated tensors here, so
+                # reorder columns directly on-device instead of syncing a
+                # permutation list to Python and rebuilding through slices.
+                scale = scale.index_select(1, inv_global_perm)
+                zero = zero.index_select(1, inv_global_perm.to(device=zero.device))
 
             # Cropping if TP padding existed
             if self._tp_pad_cols:

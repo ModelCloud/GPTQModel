@@ -410,7 +410,7 @@ def test_gptq_fallback_quantize_reuses_group_index_builder(monkeypatch):
     assert calls == [(8, 4, g_idx.device, None)]
 
 
-def test_gptq_embedding_act_group_aware_reorders_scale_once(monkeypatch):
+def test_gptq_embedding_act_group_aware_reorders_scale_on_device(monkeypatch):
     torch.manual_seed(0)
 
     layer = nn.Embedding(8, 6, dtype=torch.float32).eval()
@@ -433,7 +433,7 @@ def test_gptq_embedding_act_group_aware_reorders_scale_once(monkeypatch):
     qweight, *_ = gptq.quantize(blocksize=4)
 
     assert qweight.shape == layer.weight.shape
-    assert inverse_group_perm_calls == 1
+    assert inverse_group_perm_calls == 0
 
 
 def test_gptq_embedding_loss_uses_scalar_accumulator(monkeypatch):
