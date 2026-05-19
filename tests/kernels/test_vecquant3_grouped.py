@@ -54,7 +54,8 @@ def _pack_int3_cols(values: torch.Tensor) -> torch.Tensor:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for VecQuant3 grouped kernel test")
 @pytest.mark.parametrize("group_size", [32, 64, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_vecquant3_grouped_gemv_matches_dequant_reference(group_size, dtype):
+@pytest.mark.parametrize("out_features", [96, 256])
+def test_vecquant3_grouped_gemv_matches_dequant_reference(group_size, dtype, out_features):
     if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
         pytest.skip("CUDA BF16 support required")
 
@@ -64,7 +65,6 @@ def test_vecquant3_grouped_gemv_matches_dequant_reference(group_size, dtype):
     maxq = 7
     pack_bits = 32
     in_features = 256
-    out_features = 256
     rank = 64
     groups = in_features // group_size
 

@@ -17,6 +17,7 @@ namespace {
 
 constexpr int kBlockWidth = 256;
 constexpr int kBlockHeight = 24;
+constexpr int kKTileHalf2 = kBlockWidth / 2;
 constexpr int kThreads = kBlockWidth;
 constexpr int kAccumulationFloat32 = 0;
 constexpr int kAccumulationInput = 1;
@@ -172,7 +173,8 @@ __device__ __forceinline__ void accumulate_pair(
   }
 }
 
-template <typename scalar_t, int GroupSize, int LoraMode, bool FloatAccum>
+template <typename scalar_t, int GroupSize, int LoraMode, bool FloatAccum,
+          int KTileHalf2>
 __global__ void vecquant3_gptq_gemv_kernel(
     const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ vec,
     const int *__restrict__ qweight,
@@ -191,16 +193,21 @@ __global__ void vecquant3_gptq_gemv_kernel(
   using traits = scalar_traits<scalar_t>;
   using scalar2_t = typename traits::scalar2_t;
 
-  const int blockwidth2 = kBlockWidth / 2;
-  const int row = kBlockHeight * blockIdx.x;
+  static_assert(KTileHalf2 % 16 == 0,
+                "VecQuant3 K tile must align to GPTQ int3 packing.");
+  constexpr int blockwidth2 = KTileHalf2;
+  constexpr int blockheight = (KTileHalf2 * 3) / 16;
+  const int row = blockheight * blockIdx.x;
   const int col = kBlockWidth * blockIdx.y + threadIdx.x;
-  if (col >= width) {
-    return;
-  }
+  const bool valid_col = col < width;
 
   __shared__ scalar2_t blockvec[blockwidth2];
-  if (threadIdx.x < blockwidth2) {
-    blockvec[threadIdx.x] = vec[blockIdx.x * blockwidth2 + threadIdx.x];
+  const int total_half2 = (qweight_rows / 3) * 16;
+  for (int idx = threadIdx.x; idx < blockwidth2; idx += kThreads) {
+    const int absolute_half2 = blockIdx.x * blockwidth2 + idx;
+    blockvec[idx] = absolute_half2 < total_half2
+                        ? vec[absolute_half2]
+                        : traits::make2(traits::from_float(0.0f));
   }
 
   __shared__ scalar2_t deq2[64][32];
@@ -212,6 +219,10 @@ __global__ void vecquant3_gptq_gemv_kernel(
   }
 
   __syncthreads();
+
+  if (!valid_col) {
+    return;
+  }
 
   int i = width * row + col;
   int k = 0;
@@ -408,7 +419,8 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed(torch::Tensor vec,
   const int rank = LoraMode == kLoraNone ? 0 : static_cast<int>(down.numel());
   const int lora_group =
       LoraMode == kLoraInt8 ? static_cast<int>(lora_group_size) : 1;
-  dim3 blocks((qweight_rows + kBlockHeight - 1) / kBlockHeight,
+  constexpr int q_rows_per_tile = (kKTileHalf2 * 3) / 16;
+  dim3 blocks((qweight_rows + q_rows_per_tile - 1) / q_rows_per_tile,
               (width + kBlockWidth - 1) / kBlockWidth);
   dim3 threads(kThreads);
 
@@ -426,19 +438,22 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed(torch::Tensor vec,
       LoraMode == kLoraInt8 ? reinterpret_cast<const scalar_t *>(up_scales.data_ptr<torch_t>()) : nullptr;
 
   if (group_size == 32) {
-    vecquant3_gptq_gemv_kernel<scalar_t, 32, LoraMode, FloatAccum>
+    vecquant3_gptq_gemv_kernel<scalar_t, 32, LoraMode, FloatAccum,
+                               kKTileHalf2>
         <<<blocks, threads, 0, stream>>>(
         vec_ptr, qweight.data_ptr<int>(), scale_ptr, qzeros.data_ptr<int>(),
         down_ptr, up_ptr, up_qweight_ptr, up_scale_ptr, out.data_ptr<float>(),
         qweight_rows, width, qzeros_stride, rank, lora_group);
   } else if (group_size == 64) {
-    vecquant3_gptq_gemv_kernel<scalar_t, 64, LoraMode, FloatAccum>
+    vecquant3_gptq_gemv_kernel<scalar_t, 64, LoraMode, FloatAccum,
+                               kKTileHalf2>
         <<<blocks, threads, 0, stream>>>(
         vec_ptr, qweight.data_ptr<int>(), scale_ptr, qzeros.data_ptr<int>(),
         down_ptr, up_ptr, up_qweight_ptr, up_scale_ptr, out.data_ptr<float>(),
         qweight_rows, width, qzeros_stride, rank, lora_group);
   } else {
-    vecquant3_gptq_gemv_kernel<scalar_t, 128, LoraMode, FloatAccum>
+    vecquant3_gptq_gemv_kernel<scalar_t, 128, LoraMode, FloatAccum,
+                               kKTileHalf2>
         <<<blocks, threads, 0, stream>>>(
         vec_ptr, qweight.data_ptr<int>(), scale_ptr, qzeros.data_ptr<int>(),
         down_ptr, up_ptr, up_qweight_ptr, up_scale_ptr, out.data_ptr<float>(),
