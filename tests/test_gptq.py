@@ -148,6 +148,40 @@ def test_gptq_act_group_aware_rejects_non_positive_group_size():
         GPTQ(layer, qcfg=qcfg)
 
 
+def test_gptq_dense_loss_uses_scalar_accumulator(monkeypatch):
+    torch.manual_seed(0)
+
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(bits=4, group_size=4, desc_act=False)
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.randn(1, 4, 8), None)
+
+    full_weight_shape = tuple(layer.weight.shape)
+    full_zero_like_calls = 0
+    original_zeros_like = torch.zeros_like
+
+    def _record_zeros_like(input_tensor, *args, **kwargs):
+        nonlocal full_zero_like_calls
+        if tuple(input_tensor.shape) == full_weight_shape:
+            full_zero_like_calls += 1
+        return original_zeros_like(input_tensor, *args, **kwargs)
+
+    # The dense path still needs one full output buffer (Q), but loss reporting
+    # must not allocate a second full weight-shaped tensor.
+    monkeypatch.setattr(torch, "zeros_like", _record_zeros_like)
+
+    qweight, scales, zeros, g_idx, _, avg_loss, _, nsamples = gptq.quantize(blocksize=4)
+
+    assert full_zero_like_calls == 1
+    assert qweight.shape == layer.weight.shape
+    assert scales.shape == zeros.shape == (6, 2)
+    assert g_idx.shape == (8,)
+    assert nsamples == 4
+    assert math.isfinite(avg_loss)
+    assert avg_loss >= 0
+
+
 class TestGPTQAddBatchCPU(ModelTest):
     ######### test_gptq_add_batch_cpu.py ###########
     pytestmark = pytest.mark.skipif(

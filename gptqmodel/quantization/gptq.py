@@ -1547,7 +1547,9 @@ class GPTQ:
         else:
             Hinv, damp = None, 0.0
 
-        Losses = torch.zeros_like(W)
+        # Loss is only reported after quantization; keep a scalar accumulator
+        # instead of a second full weight-sized tensor during GPTQ.
+        loss_sum = W.new_zeros(()) if Hinv is not None else None
         Q = torch.zeros_like(W)
 
         # Use simplified loop when mock_quantization is active
@@ -1663,7 +1665,6 @@ class GPTQ:
                 W1 = W[:, i1:i2].clone()
                 Q1 = torch.zeros_like(W1)
                 Err1 = torch.zeros_like(W1) if Hinv is not None else None
-                Losses1 = torch.zeros_like(W1) if Hinv is not None else None
 
                 if Hinv is not None:
                     Hinv1 = Hinv[i1:i2, i1:i2]
@@ -1692,17 +1693,16 @@ class GPTQ:
                     q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                     Q1[:, i] = q
                     if Hinv is not None:
-                        Losses1[:, i] = (w - q) ** 2 / d**2
+                        loss_sum.add_(torch.sum((w - q) ** 2 / d**2) / 2)
                         err1 = (w - q) / d
                         W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                         Err1[:, i] = err1
 
                 Q[:, i1:i2] = Q1
                 if Hinv is not None:
-                    Losses[:, i1:i2] = Losses1 / 2
                     W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-                del W1, Q1, Err1, Losses1
+                del W1, Q1, Err1
                 if Hinv is not None:
                     del Hinv1
 
@@ -1712,10 +1712,11 @@ class GPTQ:
         if Hinv is not None:
             del Hinv
             if self.nsamples != 0:
-                avg_loss = torch.sum(Losses).item() / self.nsamples
+                loss_sum_item = loss_sum.item()
+                avg_loss = loss_sum_item / self.nsamples
 
                 if math.isnan(avg_loss):
-                    print("Losses sum item:", torch.sum(Losses).item())
+                    print("Losses sum item:", loss_sum_item)
                     if fallback_configured:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
                         self.qcfg.mock_quantization = True
@@ -1731,7 +1732,8 @@ class GPTQ:
         else:
             avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999
 
-        del Losses
+        if loss_sum is not None:
+            del loss_sum
         del self.H
         del W
 
