@@ -182,6 +182,35 @@ def test_gptq_dense_loss_uses_scalar_accumulator(monkeypatch):
     assert avg_loss >= 0
 
 
+def test_gptq_dense_hessian_released_before_output_allocation(monkeypatch):
+    torch.manual_seed(0)
+
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(bits=4, group_size=4, desc_act=False)
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.randn(1, 4, 8), None)
+
+    full_weight_shape = tuple(layer.weight.shape)
+    hessian_states_at_full_alloc = []
+    original_zeros_like = torch.zeros_like
+
+    def _record_hessian_state(input_tensor, *args, **kwargs):
+        if tuple(input_tensor.shape) == full_weight_shape:
+            hessian_states_at_full_alloc.append(getattr(gptq, "H", "missing"))
+        return original_zeros_like(input_tensor, *args, **kwargs)
+
+    # Once Hinv is materialized, the dense Hessian should be gone before GPTQ
+    # allocates the full output buffer and block scratch tensors.
+    monkeypatch.setattr(torch, "zeros_like", _record_hessian_state)
+
+    qweight, *_ = gptq.quantize(blocksize=4)
+
+    assert qweight.shape == layer.weight.shape
+    assert hessian_states_at_full_alloc
+    assert all(state is None for state in hessian_states_at_full_alloc)
+
+
 def test_gptq_embedding_loss_uses_scalar_accumulator(monkeypatch):
     torch.manual_seed(0)
 

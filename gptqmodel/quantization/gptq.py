@@ -1547,6 +1547,13 @@ class GPTQ:
         else:
             Hinv, damp = None, 0.0
 
+        if Hinv is not None:
+            # The dense Hessian is only needed to build Hinv. Drop it before
+            # allocating the full output buffer and block scratch tensors so
+            # peak GPTQ memory does not hold H and Hinv at the same time.
+            del self.H
+            self.H = None
+
         # Loss is only reported after quantization; keep a scalar accumulator
         # instead of a second full weight-sized tensor during GPTQ.
         loss_sum = W.new_zeros(()) if Hinv is not None else None
