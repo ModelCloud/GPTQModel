@@ -1532,15 +1532,23 @@ class AWQProcessor(LoopProcessor):
         oc_batch_size = 256 if org_w_shape[0] % 256 == 0 else 64  # prevent OOM
         assert org_w_shape[0] % oc_batch_size == 0
         w_all = w
-        best_max_val_all = []
         device = w_all.device
+        # Pre-allocate the final clip tensor so chunked output rows do not
+        # require a full-size torch.cat temporary after the search loop.
+        best_max_val_all = torch.empty(
+            (org_w_shape[0], 1, w_all.shape[2], 1),
+            dtype=w_all.dtype,
+            device=device,
+        )
         # Pre-allocate scratch buffers so the inner clamp loop never allocates large temporaries.
         scratch_clamp = torch.empty_like(w_all[:oc_batch_size])
         scratch_quant = torch.empty_like(scratch_clamp)
         input_feat = input_feat.to(device)
 
         for i_b in range(org_w_shape[0] // oc_batch_size):
-            w = w_all[i_b * oc_batch_size: (i_b + 1) * oc_batch_size]
+            row_start = i_b * oc_batch_size
+            row_end = row_start + oc_batch_size
+            w = w_all[row_start:row_end]
 
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
@@ -1563,13 +1571,12 @@ class AWQProcessor(LoopProcessor):
                 cur_best_idx = err < min_errs
                 min_errs[cur_best_idx] = err[cur_best_idx]
                 best_max_val[cur_best_idx] = max_val[cur_best_idx]
-            best_max_val_all.append(best_max_val)
+            best_max_val_all[row_start:row_end].copy_(best_max_val)
 
-        best_max_val = torch.cat(best_max_val_all, dim=0)
         del input_feat
         del org_out
 
-        return best_max_val.squeeze(1)
+        return best_max_val_all.squeeze(1)
 
     def pseudo_quantize_tensor(self, w: torch.Tensor):
         """Simulates AWQ quantization and returns dequantized weights plus scales/zeros."""

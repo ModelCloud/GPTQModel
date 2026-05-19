@@ -82,3 +82,26 @@ def test_awq_clip_consistency(device_name: str, device_str: str):
     tol = 1e-6 if dtype == torch.float32 else 1e-4
     assert torch.allclose(actual.cpu(), expected.cpu(), atol=tol, rtol=tol), \
         f"Inconsistent clip: max diff {(actual - expected).abs().max().item():.3e}"
+
+
+def test_awq_clip_preallocates_chunk_results_without_cat(monkeypatch):
+    processor = _ClipTestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+
+    cat_calls = 0
+    original_cat = torch.cat
+
+    def record_cat(tensors, *args, **kwargs):
+        nonlocal cat_calls
+        cat_calls += 1
+        return original_cat(tensors, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "cat", record_cat)
+
+    w = torch.randn(128, 128, dtype=torch.float32)
+    input_feat = torch.randn(32, 128, dtype=torch.float32)
+    actual = processor._compute_best_clip(w, input_feat, n_grid=4, n_sample_token=16)
+
+    assert actual.shape == (128, 1, 1)
+    assert cat_calls == 0
