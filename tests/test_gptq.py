@@ -381,6 +381,32 @@ def test_gptq_group_index_builder_matches_legacy_python_list():
     torch.testing.assert_close(perm, perm_before, atol=0, rtol=0)
 
 
+def test_gptq_embedding_act_group_aware_reorders_scale_once(monkeypatch):
+    torch.manual_seed(0)
+
+    layer = nn.Embedding(8, 6, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(bits=4, group_size=4, desc_act=False, act_group_aware=True)
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.tensor([[0, 1, 2, 3]], dtype=torch.long), None)
+
+    original_tolist = torch.Tensor.tolist
+    inverse_group_perm_calls = 0
+
+    def _record_tolist(tensor, *args, **kwargs):
+        nonlocal inverse_group_perm_calls
+        if tensor.dtype == torch.long and tensor.dim() == 1 and tensor.numel() == 2:
+            inverse_group_perm_calls += 1
+        return original_tolist(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "tolist", _record_tolist)
+
+    qweight, *_ = gptq.quantize(blocksize=4)
+
+    assert qweight.shape == layer.weight.shape
+    assert inverse_group_perm_calls == 1
+
+
 def test_gptq_embedding_loss_uses_scalar_accumulator(monkeypatch):
     torch.manual_seed(0)
 

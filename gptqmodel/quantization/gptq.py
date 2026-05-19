@@ -1428,8 +1428,6 @@ class GPTQ:
             elif self.qcfg.act_group_aware:
                 inv_final = invert_perm(final_perm)
                 Q = Q[:, inv_final]
-                inv_global_perm = invert_perm(global_perm)
-                inv_global_perm_list = inv_global_perm.tolist()
                 # Note: if you need to keep per-group scale/zero in act_group_aware mode,
                 # reorder them following the dense path approach (shown below after concatenation).
 
