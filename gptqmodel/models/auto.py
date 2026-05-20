@@ -149,6 +149,7 @@ from .definitions.ovis import OvisQModel  # noqa: E402
 from .definitions.ovis2 import Ovis2QModel  # noqa: E402
 from .definitions.ovis2_5 import Ovis2_5QModel  # noqa: E402
 from .definitions.ovis2_6_moe import Ovis2_6_MoeQModel  # noqa: E402
+from .definitions.ovis2_6_moe import Ovis2_6_NextQModel  # noqa: E402
 from .definitions.pangu_alpha import PanguAlphaQModel  # noqa: E402
 from .definitions.phi import PhiQModel  # noqa: E402
 from .definitions.phi3 import Phi3QModel, PhiMoEGPTQForCausalLM  # noqa: E402
@@ -289,6 +290,7 @@ MODEL_MAP = {
     "ovis2": Ovis2QModel,
     "ovis2_5": Ovis2_5QModel,
     "ovis2_6_moe": Ovis2_6_MoeQModel,
+    "ovis2_6_next": Ovis2_6_NextQModel,
     "telechat": TeleChat2QModel,
     "instella": InstellaQModel,
     "mimo": MimoQModel,
