@@ -117,6 +117,7 @@ from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
+from .definitions.interns1 import InternS1QModel  # noqa: E402
 from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
@@ -223,6 +224,7 @@ MODEL_MAP = {
     "baichuan": BaiChuanQModel,
     "internlm": InternLMQModel,
     "internlm2": InternLM2QModel,
+    "interns1": InternS1QModel,
     "internvl_chat": InternVLChatQModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone

@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 05/20/2026 7.1.0-dev `main`: ✨ Added `interns1` model support
 * 05/19/2026 7.1.0-dev `main`: ✨ Added `ovis2_6_moe` model support
 * 05/18/2026 7.1.0-dev `main`: ✨ Added `ovis2_5` model support
 * 05/15/2026 7.1.0-dev `main`: ✨ Added `mimo_v2` model support
@@ -263,7 +264,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | ERNIE 4.5 / MoE / VL MoE | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V/V 4_6 | ✅ | PanGu-α                 | ✅ |
 | XVERSE                   | ✅ | Brumby                          | ✅ | Hymba            | ✅ | Mistral             | ✅ | Qwen 1/2/3/3.5          | ✅ |
 | MiniMax M2               | ✅ | AfMoE                           | ✅ | Bailing-MoE      | ✅ | LFM2-MoE            | ✅ | Marin                   | ✅ |
-| InternVL Chat            | ✅ | Laguna                          | ✅ | Mimo / Mimo V2   | ✅ | Zamba / Zamba2      | ✅ |                         |   |
+| InternVL Chat            | ✅ | Laguna                          | ✅ | Mimo / Mimo V2   | ✅ | Zamba / Zamba2      | ✅ | Intern S1               | ✅  |
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 
