@@ -1368,8 +1368,14 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
                     formatter_cls.support_tokenizer_types = support_tokenizer_types
                 formatter_cls._gptqmodel_tokenizer_backend_patch = True
 
-        if getattr(config, "model_type", None) in {"ovis2_5", "ovis2_6", "ovis2_6_moe"}:
+        if getattr(config, "model_type", None) in {"ovis2_5", "ovis2_6", "ovis2_6_moe", "ovis2_6_next"}:
             register_runtime_automodel_config(config, remote_module, "vit_config", "Siglip2NavitModel")
+
+        if getattr(config, "model_type", None) == "ovis2_6_next":
+            # Compatible with ExpertsRoutingOverride,
+            # as Ovis2_6_Next_Config lacks the `num_experts` and `num_experts_per_tok` attributes.
+            config.num_experts = config.llm_config.num_experts
+            config.num_experts_per_tok = config.llm_config.num_experts_per_tok
 
         if getattr(config, "model_type", None) == "hymba" and remote_module is not None:
             rotary_cls = getattr(remote_module, "LlamaRotaryEmbedding", None)

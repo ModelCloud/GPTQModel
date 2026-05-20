@@ -21,8 +21,7 @@
 
 ## Latest News
 
-* 05/19/2026 7.1.0-dev `main`: ✨ Added `ovis2_6_moe` model support
-* 05/18/2026 7.1.0-dev `main`: ✨ Added `ovis2_5` model support
+* 05/20/2026 7.1.0-dev `main`: ✨ Added `ovis2_5`, `ovis2_6_moe` and `ovis2_6_next` model support
 * 05/15/2026 7.1.0-dev `main`: ✨ Added `mimo_v2` model support
 * 05/13/2026 7.1.0-dev `main`: ✨ Added `minicpmv_4_6` and `DeepSeek V4` model support
 * 05/07/2026 7.1.0-dev `main`: ✨ Added `GLM-4.5V`, `GLM-4.6V`, `Zamba` and `Zamba2` model support
@@ -247,23 +246,23 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
 ## Model Support  
-| Model                    |   |                                 |   |                  |   |                     |   |                         |   |
-|--------------------------|---|---------------------------------|---|------------------|---|---------------------|---|-------------------------|---|
-| Apertus                  | ✅ | EXAONE 3/4                      | ✅ | Dots1            | ✅ | Mistral3            | ✅ | Qwen 2/3/3.5 (Next/MoE) | ✅ |
-| Baichuan                 | ✅ | Falcon (H1 / Mamba)             | ✅ | InternLM 1/2/2.5 | ✅ | Mixtral             | ✅ | Qwen 2/2.5/3 VL         | ✅ |
-| Bloom                    | ✅ | FastVLM                         | ✅ | Kimi K2          | ✅ | MobileLLM           | ✅ | Qwen 2.5/3 Omni         | ✅ |
-| ChatGLM                  | ✅ | Gemma 1-4 / 3n                  | ✅ | Klear            | ✅ | MOSS                | ✅ | RefinedWeb              | ✅ |
-| CodeGen                  | ✅ | GPTBigCode                      | ✅ | LING/RING        | ✅ | MPT                 | ✅ | StableLM                | ✅ |
-| Cohere 1-2               | ✅ | GPT-Neo / NeoX                  | ✅ | Llama 1-3.3      | ✅ | Nemotron H / Omni   | ✅ | StarCoder2              | ✅ |
-| DBRX Converted           | ✅ | GPT-2                           | ✅ | Llama 3.2 VL     | ✅ | Nemotron Ultra      | ✅ | TeleChat2               | ✅ |
-| Deci                     | ✅ | GPT-J                           | ✅ | Llama 4          | ✅ | OPT                 | ✅ | Trinity                 | ✅ |
-| DeepSeek-V2/V3/V4/R1        | ✅ | GPT-OSS                         | ✅ | LongCat Flash    | ✅ | OLMo2 / LLaDA2      | ✅ | Yi                      | ✅ |
-| DeepSeek-V2-Lite         | ✅ | Granite / Granite MoE           | ✅ | LongLLaMA        | ✅ | Ovis 1.6/2/2.5/2.6 MoE | ✅ | Seed-OSS                | ✅ |
-| Dream                    | ✅ | GRIN-MoE                        | ✅ | Instella         | ✅ | Phi 1-4             | ✅ | Voxtral                 | ✅ |
-| ERNIE 4.5 / MoE / VL MoE | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V/V 4_6 | ✅ | PanGu-α                 | ✅ |
-| XVERSE                   | ✅ | Brumby                          | ✅ | Hymba            | ✅ | Mistral             | ✅ | Qwen 1/2/3/3.5          | ✅ |
-| MiniMax M2               | ✅ | AfMoE                           | ✅ | Bailing-MoE      | ✅ | LFM2-MoE            | ✅ | Marin                   | ✅ |
-| InternVL Chat            | ✅ | Laguna                          | ✅ | Mimo / Mimo V2   | ✅ | Zamba / Zamba2      | ✅ |                         |   |
+| Model                    |   |                                 |   |                  |   |                                 |   |                         |   |
+|--------------------------|---|---------------------------------|---|------------------|---|---------------------------------|---|-------------------------|---|
+| Apertus                  | ✅ | EXAONE 3/4                      | ✅ | Dots1            | ✅ | Mistral3                        | ✅ | Qwen 2/3/3.5 (Next/MoE) | ✅ |
+| Baichuan                 | ✅ | Falcon (H1 / Mamba)             | ✅ | InternLM 1/2/2.5 | ✅ | Mixtral                         | ✅ | Qwen 2/2.5/3 VL         | ✅ |
+| Bloom                    | ✅ | FastVLM                         | ✅ | Kimi K2          | ✅ | MobileLLM                       | ✅ | Qwen 2.5/3 Omni         | ✅ |
+| ChatGLM                  | ✅ | Gemma 1-4 / 3n                  | ✅ | Klear            | ✅ | MOSS                            | ✅ | RefinedWeb              | ✅ |
+| CodeGen                  | ✅ | GPTBigCode                      | ✅ | LING/RING        | ✅ | MPT                             | ✅ | StableLM                | ✅ |
+| Cohere 1-2               | ✅ | GPT-Neo / NeoX                  | ✅ | Llama 1-3.3      | ✅ | Nemotron H / Omni               | ✅ | StarCoder2              | ✅ |
+| DBRX Converted           | ✅ | GPT-2                           | ✅ | Llama 3.2 VL     | ✅ | Nemotron Ultra                  | ✅ | TeleChat2               | ✅ |
+| Deci                     | ✅ | GPT-J                           | ✅ | Llama 4          | ✅ | OPT                             | ✅ | Trinity                 | ✅ |
+| DeepSeek-V2/V3/V4/R1        | ✅ | GPT-OSS                         | ✅ | LongCat Flash    | ✅ | OLMo2 / LLaDA2                  | ✅ | Yi                      | ✅ |
+| DeepSeek-V2-Lite         | ✅ | Granite / Granite MoE           | ✅ | LongLLaMA        | ✅ | Ovis 1.6/2/2.5/2.6 MoE/2.6 Next | ✅ | Seed-OSS                | ✅ |
+| Dream                    | ✅ | GRIN-MoE                        | ✅ | Instella         | ✅ | Phi 1-4                         | ✅ | Voxtral                 | ✅ |
+| ERNIE 4.5 / MoE / VL MoE | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V/V 4_6             | ✅ | PanGu-α                 | ✅ |
+| XVERSE                   | ✅ | Brumby                          | ✅ | Hymba            | ✅ | Mistral                         | ✅ | Qwen 1/2/3/3.5          | ✅ |
+| MiniMax M2               | ✅ | AfMoE                           | ✅ | Bailing-MoE      | ✅ | LFM2-MoE                        | ✅ | Marin                   | ✅ |
+| InternVL Chat            | ✅ | Laguna                          | ✅ | Mimo / Mimo V2   | ✅ | Zamba / Zamba2                  | ✅ |                         |   |
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 
