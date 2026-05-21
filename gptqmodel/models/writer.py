@@ -20,7 +20,6 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
-from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
 from ..quantization.config import (
@@ -64,6 +63,8 @@ from ..utils.model import (
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
+from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
+
 
 log = setup_logger()
 

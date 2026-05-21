@@ -6,10 +6,10 @@
 import os.path
 
 import torch
+from model_test import ModelTest
 from PIL import Image
 
-from gptqmodel.quantization.config import MoEConfig, ExpertsRoutingOverride, MOE_ALL_EXPERTS
-from model_test import ModelTest
+from gptqmodel.quantization.config import MOE_ALL_EXPERTS, ExpertsRoutingOverride, MoEConfig
 
 
 class Test(ModelTest):

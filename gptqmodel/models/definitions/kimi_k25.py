@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ...utils.model import get_module
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
-from ...utils.model import get_module
 
 
 class KimiK25QModel(BaseQModel):

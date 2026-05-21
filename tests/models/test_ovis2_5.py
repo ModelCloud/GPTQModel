@@ -6,7 +6,6 @@
 import os.path
 
 import torch
-
 from model_test import ModelTest
 from PIL import Image
 
