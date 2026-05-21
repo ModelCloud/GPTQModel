@@ -19,6 +19,7 @@ constexpr int kBlockWidth = 256;
 constexpr int kBlockHeight = 24;
 constexpr int kKTileHalf2 = kBlockWidth / 2;
 constexpr int kWideKTileHalf2 = kBlockWidth / 4;
+constexpr int kNarrowDecodeKTileHalf2 = kBlockWidth / 8;
 constexpr int kGemmBatchTileRows = 4;
 constexpr int kWideGemmBatchTileRows = 8;
 constexpr int kGemmBatchTileMinWidth = 2048;
@@ -29,6 +30,19 @@ constexpr int kAccumulationInput = 1;
 constexpr int kLoraNone = 0;
 constexpr int kLoraDense = 1;
 constexpr int kLoraInt8 = 2;
+
+int select_gemv_ktile_half2(int64_t bits, int64_t width, int64_t batch_rows) {
+  if (bits == 3) {
+    return kKTileHalf2;
+  }
+  if (width >= kGemmBatchTileMinWidth) {
+    return kWideKTileHalf2;
+  }
+  if (batch_rows == 1) {
+    return kNarrowDecodeKTileHalf2;
+  }
+  return kKTileHalf2;
+}
 
 template <typename scalar_t>
 struct scalar_traits;
@@ -653,7 +667,8 @@ __global__ void vecquant3_gptq_gemv_kernel(
   }
   } else {
     const int row_end = min(row + blockheight, qweight_rows);
-    if constexpr (GroupSize == 128 && KTileHalf2 == kWideKTileHalf2) {
+    if constexpr (GroupSize >= KTileHalf2 * 2 &&
+                  GroupSize % (KTileHalf2 * 2) == 0) {
       const int group = (absolute_half2_base * 2) / GroupSize;
       const scalar_t scale = scales[group * width + col];
       const scalar2_t scale2 = traits::make2(scale);
@@ -890,7 +905,8 @@ __global__ void vecquant3_gptq_gemm_batch_kernel(
   }
   } else {
     const int row_end = min(row + blockheight, qweight_rows);
-    if constexpr (GroupSize == 128 && KTileHalf2 == kWideKTileHalf2) {
+    if constexpr (GroupSize >= KTileHalf2 * 2 &&
+                  GroupSize % (KTileHalf2 * 2) == 0) {
       const int group = (absolute_half2_base * 2) / GroupSize;
       const scalar_t scale = scales[group * width + col];
       const scalar2_t scale2 = traits::make2(scale);
@@ -1005,9 +1021,7 @@ void validate_common_inputs(const torch::Tensor &vec,
   TORCH_CHECK(vec.numel() % 256 == 0,
               "GrassHopper gemv fast path requires in_features divisible by 256");
   const int64_t ktile_half2 =
-      bits == 3 || qweight.size(1) < kGemmBatchTileMinWidth
-          ? kKTileHalf2
-          : kWideKTileHalf2;
+      select_gemv_ktile_half2(bits, qweight.size(1), 1);
   const int64_t q_rows_per_tile = (ktile_half2 * bits) / 16;
   TORCH_CHECK(qweight.size(0) % q_rows_per_tile == 0,
               "GrassHopper gemv qweight rows must align to the K tile");
@@ -1067,9 +1081,7 @@ void validate_gemm_common_inputs(const torch::Tensor &vec,
   TORCH_CHECK(vec.size(1) % 256 == 0,
               "GrassHopper gemm fast path requires in_features divisible by 256");
   const int64_t ktile_half2 =
-      bits == 3 || qweight.size(1) < kGemmBatchTileMinWidth
-          ? kKTileHalf2
-          : kWideKTileHalf2;
+      select_gemv_ktile_half2(bits, qweight.size(1), vec.size(0));
   const int64_t q_rows_per_tile = (ktile_half2 * bits) / 16;
   TORCH_CHECK(qweight.size(0) % q_rows_per_tile == 0,
               "GrassHopper gemm qweight rows must align to the K tile");
@@ -1216,6 +1228,12 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed_bits(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows, output_2d);
   } else {
+    if (batch_rows == 1 && qweight.size(1) < kGemmBatchTileMinWidth) {
+      return launch_vecquant3_gptq_gemv_typed_bits_tile<
+          scalar_t, Bits, LoraMode, FloatAccum, kNarrowDecodeKTileHalf2>(
+          vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
+          group_size, lora_group_size, batch_rows, output_2d);
+    }
     if (qweight.size(1) >= kGemmBatchTileMinWidth) {
       return launch_vecquant3_gptq_gemv_typed_bits_tile<
           scalar_t, Bits, LoraMode, FloatAccum, kWideKTileHalf2>(
