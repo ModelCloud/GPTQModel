@@ -40,6 +40,7 @@ from .gpt_neo import GptNeoQModel
 from .gpt_neox import GPTNeoXQModel
 from .gptj import GptJQModel
 from .grinmoe import GrinMoeQModel
+from .hrm_text import HrmTextQModel
 from .hymba import HymbaQModel
 from .instella import InstellaQModel
 from .internlm import InternLMQModel

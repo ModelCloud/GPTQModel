@@ -237,7 +237,7 @@ class TestMoEModuleName:
         MockModel = TestMockMoEModel.create_mock_model_class(module_tree)
         moe_module_name = MockModel.get_moe_module_name()
 
-        assert moe_module_name == "mlp"
+        assert moe_module_name == ["mlp"]
 
     def test_get_moe_module_name_minimax(self):
         """Test get_moe_module_name() with MiniMax-M2 style tree."""
@@ -257,7 +257,7 @@ class TestMoEModuleName:
         MockModel = TestMockMoEModel.create_mock_model_class(module_tree)
         moe_module_name = MockModel.get_moe_module_name()
 
-        assert moe_module_name == "block_sparse_moe"
+        assert moe_module_name == ["block_sparse_moe"]
 
     def test_get_moe_module_name_no_moe(self):
         """Test get_moe_module_name() with no MoE flag."""
@@ -274,14 +274,14 @@ class TestMoEModuleName:
         MockModel = TestMockMoEModel.create_mock_model_class(module_tree)
         moe_module_name = MockModel.get_moe_module_name()
 
-        assert moe_module_name is None
+        assert moe_module_name == []
 
     def test_get_moe_module_name_none_tree(self):
         """Test get_moe_module_name() with None module_tree."""
         MockModel = TestMockMoEModel.create_mock_model_class(None)
         moe_module_name = MockModel.get_moe_module_name()
 
-        assert moe_module_name is None
+        assert moe_module_name == []
 
 
 class TestMoEFlagConstant:

@@ -113,6 +113,7 @@ from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 from .definitions.gptj import GptJQModel  # noqa: E402
 from .definitions.granitemoehybrid import GraniteMoeHybridQModel
 from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
+from .definitions.hrm_text import HrmTextQModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
@@ -227,6 +228,7 @@ MODEL_MAP = {
     "internlm2": InternLM2QModel,
     "interns1": InternS1QModel,
     "internvl_chat": InternVLChatQModel,
+    "hrm_text": HrmTextQModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone
     "yi": LlamaQModel, # 100% llama clone
