@@ -836,10 +836,6 @@ class _CannoePlanMixin:
         group_size: int,
         zero_offsets: bool = False,
     ) -> CannoeTilingPlan:
-        fast_key = (x_flat.device, x_flat.shape[0], group_size, bool(zero_offsets))
-        if getattr(self, "_cann_hot_plan_fast_key", None) == fast_key:
-            return self._cann_hot_plan
-
         env_key = (
             *_cannoe_env_values(
                 _CANNOE_PREFETCH_ENV,
@@ -858,8 +854,13 @@ class _CannoePlanMixin:
                 _CANNOE_INNER_PRECISE_ENV,
                 _CANNOE_STAGED_DEQUANT_ENV,
                 _CANNOE_CUBE_CONSUMER_ENV,
+                _CANNOE_STAGING_SLOTS_ENV,
             ),
         )
+        fast_key = (x_flat.device, x_flat.shape[0], group_size, bool(zero_offsets), env_key)
+        if getattr(self, "_cann_hot_plan_fast_key", None) == fast_key:
+            return self._cann_hot_plan
+
         hot_key = (x_flat.device, x_flat.shape[0], group_size, bool(zero_offsets), env_key)
         if getattr(self, "_cann_hot_plan_key", None) == hot_key:
             self._last_cann_plan = self._cann_hot_plan

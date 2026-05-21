@@ -885,6 +885,11 @@ Applied follow-up:
   AIV hygiene pattern and removes a plausible source of stale-mask lane
   corruption while fused AIC/AIV handoff work continues.
 
+- The Python plan cache now includes `GPTQMODEL_CANNOE_STAGING_SLOTS` in both
+  the normal and fast hot-cache keys. This keeps ring-depth trials honest:
+  changing the requested ring depth rebuilds the plan and workspace estimate
+  instead of reusing stale two-slot metadata.
+
 Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
 raw validator now avoids unrelated public ACLNN parser failures by creating test
 tensors on CPU, delaying custom OPP exposure until the custom op is called, and

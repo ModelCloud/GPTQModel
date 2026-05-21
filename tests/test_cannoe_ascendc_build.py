@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 import pytest
+import torch
 
 
 def _load_build_helper():
@@ -209,6 +210,36 @@ def test_cannoe_tiling_plan_rejects_invalid_staging_ring(monkeypatch):
             group_size=32,
             device=object(),
         )
+
+
+def test_cannoe_plan_cache_tracks_staging_ring_env(monkeypatch):
+    cannoe = _load_cannoe_module()
+    _patch_runtime_planner(monkeypatch, cannoe)
+
+    Mixin = cannoe.__dict__["_CannoePlanMixin"]
+
+    class DummyCannoePlan(Mixin):
+        in_features = 17408
+        out_features = 5120
+
+        def __init__(self):
+            self._cann_plan_cache = {}
+            self._cann_hot_plan_fast_key = None
+            self._cann_hot_plan_key = None
+            self._cann_hot_plan = None
+            self._last_cann_plan = None
+
+    module = DummyCannoePlan()
+    x_flat = torch.empty((1, 1), device="cpu")
+
+    monkeypatch.setenv("GPTQMODEL_CANNOE_STAGING_SLOTS", "2")
+    plan_two = module._cann_plan(x_flat, group_size=32)
+    monkeypatch.setenv("GPTQMODEL_CANNOE_STAGING_SLOTS", "6")
+    plan_six = module._cann_plan(x_flat, group_size=32)
+
+    assert plan_two.staging_slots == 2
+    assert plan_six.staging_slots == 6
+    assert plan_two is not plan_six
 
 
 def test_raw_validator_finds_embedded_json_after_cann_warning():
