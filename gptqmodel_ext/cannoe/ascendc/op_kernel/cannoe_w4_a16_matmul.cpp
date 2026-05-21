@@ -498,6 +498,14 @@ __aicore__ inline bool CannoeOutputTileIsSequential(uint32_t m_len, uint32_t bas
     return m_len <= 1U || base_n == out_features;
 }
 
+__aicore__ inline void CannoeResetAivVectorMask()
+{
+    if ASCEND_IS_AIV {
+        set_mask_norm();
+        set_vector_mask(-1, -1);
+    }
+}
+
 class CannoeW4A16ScalarKernel {
 public:
     __aicore__ inline void Init(
@@ -554,6 +562,7 @@ public:
         const uint32_t zero_offsets = tiling_->zero_offsets;
         uint32_t physical_core_idx = static_cast<uint32_t>(GetBlockIdx());
         if ASCEND_IS_AIV {
+            CannoeResetAivVectorMask();
             const uint32_t task_ratio = static_cast<uint32_t>(GetTaskRation());
             if (task_ratio > 1) {
                 physical_core_idx /= task_ratio;
@@ -636,6 +645,7 @@ public:
         if (GetSubBlockIdx() != 0) {
             return true;
         }
+        CannoeResetAivVectorMask();
 
         uint32_t physical_core_idx = static_cast<uint32_t>(GetBlockIdx());
         if ASCEND_IS_AIV {
@@ -878,6 +888,7 @@ public:
         if (GetSubBlockIdx() != 0) {
             return true;
         }
+        CannoeResetAivVectorMask();
 
         uint32_t physical_core_idx = static_cast<uint32_t>(GetBlockIdx());
         if ASCEND_IS_AIV {
@@ -1341,6 +1352,7 @@ public:
         LocalTensor<half> a_tscm_tile = tscm_tile[a_slot_offset];
 
         if ASCEND_IS_AIV {
+            CannoeResetAivVectorMask();
             TBuf<TPosition::VECCALC> b_ub_tbuf;
             if (!pipe.InitBuffer(b_ub_tbuf, b_tile_elements * sizeof(half))) {
                 return false;
@@ -1451,6 +1463,7 @@ private:
         if (core_idx != 0) {
             return true;
         }
+        CannoeResetAivVectorMask();
 
         LocalTensor<int32_t> packed = vector_packed_ub_.Get<int32_t>(kDiagnosticWords);
         LocalTensor<half> dequant = vector_half_ub_.Get<half>(kDiagnosticLanes);
@@ -4122,6 +4135,7 @@ __global__ __aicore__ void cannoe_w4_a16_matmul(
 #endif
 #ifdef CANNOE_EXPERIMENTAL_AIC_TSCM_PATH_DIAGNOSTIC
     if ASCEND_IS_AIV {
+        CannoeResetAivVectorMask();
         if (GetBlockIdx() == 0 && GetSubBlockIdx() == 0) {
             GlobalTensor<half> diag_y;
             diag_y.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(y), tiling_data.total_outputs);

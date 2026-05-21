@@ -86,6 +86,24 @@ def test_ascendc_host_tiler_disables_staging_for_unsupported_aic_tscm_shapes():
     assert "if (enable_staged_dequant) {" in text
 
 
+def test_ascendc_kernel_resets_aiv_vector_mask_before_vector_paths():
+    kernel = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext"
+        / "cannoe"
+        / "ascendc"
+        / "op_kernel"
+        / "cannoe_w4_a16_matmul.cpp"
+    )
+    text = kernel.read_text(encoding="utf-8")
+
+    assert "__aicore__ inline void CannoeResetAivVectorMask()" in text
+    assert "set_mask_norm();" in text
+    assert "set_vector_mask(-1, -1);" in text
+    assert "asc_int42half_sync(" in text
+    assert text.count("CannoeResetAivVectorMask();") >= 6
+
+
 def test_komodo_native_prepack_unpacks_source_tiles_on_cpu_for_npu():
     komodo = Path(__file__).resolve().parents[1] / "gptqmodel" / "nn_modules" / "qlinear" / "komodo.py"
     text = komodo.read_text(encoding="utf-8")

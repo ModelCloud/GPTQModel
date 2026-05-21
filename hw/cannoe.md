@@ -879,6 +879,11 @@ Applied follow-up:
   `staging_workspace + cube_system_workspace`. This matches the Ascend C host
   tiler allocation and prevents small Cube-consumer probes from passing the
   memory gate while hiding CANN's 16 MiB Matmul system workspace.
+- The Ascend C kernel now resets AIV vector masks with `set_mask_norm()` and
+  `set_vector_mask(-1, -1)` at vector-side entry points before INT4 dequant,
+  VecOut/TSCM handoff work, and marker diagnostics. This follows SVDQuant's
+  AIV hygiene pattern and removes a plausible source of stale-mask lane
+  corruption while fused AIC/AIV handoff work continues.
 
 Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
 raw validator now avoids unrelated public ACLNN parser failures by creating test
