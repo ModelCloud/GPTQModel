@@ -38,6 +38,27 @@ preserving the massive VRAM reduction from quantized resident weights. Any
 optimization that wins latency by keeping dense dequantized weights around by
 default is a regression, not a kernel success.
 
+## Benchmark Logging Policy
+
+Low-level runtime logs emitted during kernel execution, operator dispatch,
+profiling, or compile/JIT paths must be treated as benchmark noise until proven
+irrelevant. This applies to CANN, CUDA, ROCm, torch runtime bridges, generated
+operator packages, and any custom extension loader.
+
+When a kernel path emits repeated logs, warnings, compile banners, or runtime
+diagnostics inside the measured region, prioritize one of these outcomes before
+accepting timing claims:
+
+1. Remove the log at the source when it is controlled by our code.
+2. Mitigate it with runtime log-level/env controls or by moving compilation and
+   one-time setup outside the measured loop.
+3. Investigate vendor/runtime logs that cannot be silenced and record whether
+   they are emitted during warmup only or during timed iterations.
+
+Logging itself can dominate short kernel timings, distort host-side dispatch
+costs, and hide real regressions. A benchmark that includes repeated accelerator
+runtime logging is not a clean performance signal.
+
 ## Current State
 
 Cannoe is a separate backend, not a mode inside plain Komodo.
