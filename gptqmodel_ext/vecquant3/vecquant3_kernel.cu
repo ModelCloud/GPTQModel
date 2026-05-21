@@ -711,12 +711,26 @@ __global__ void vecquant3_gptq_gemv_kernel(
     }
   } else if constexpr (LoraMode == kLoraInt8) {
     if (blockIdx.x == 0) {
-      for (int r = 0; r < rank; ++r) {
-        const int idx = r * width + col;
-        const scalar_t up_value = traits::mul(
-            traits::from_int(static_cast<int>(up_qweight[idx])),
-            up_scales[idx / lora_group_size]);
-        acc += traits::to_float(traits::mul(down_row[r], up_value));
+      if (width % lora_group_size == 0) {
+        const int scale_stride = width / lora_group_size;
+        int idx = col;
+        int scale_idx = col / lora_group_size;
+        for (int r = 0; r < rank; ++r) {
+          const scalar_t up_value = traits::mul(
+              traits::from_int(static_cast<int>(up_qweight[idx])),
+              up_scales[scale_idx]);
+          acc += traits::to_float(traits::mul(down_row[r], up_value));
+          idx += width;
+          scale_idx += scale_stride;
+        }
+      } else {
+        for (int r = 0; r < rank; ++r) {
+          const int idx = r * width + col;
+          const scalar_t up_value = traits::mul(
+              traits::from_int(static_cast<int>(up_qweight[idx])),
+              up_scales[idx / lora_group_size]);
+          acc += traits::to_float(traits::mul(down_row[r], up_value));
+        }
       }
     }
   }
@@ -940,20 +954,43 @@ __global__ void vecquant3_gptq_gemm_batch_kernel(
       lora_acc[batch_offset] = 0.0f;
     }
     if (blockIdx.x == 0) {
-      for (int r = 0; r < rank; ++r) {
-        const int idx = r * width + col;
-        const scalar_t up_value = traits::mul(
-            traits::from_int(static_cast<int>(up_qweight[idx])),
-            up_scales[idx / lora_group_size]);
-        for (int batch_offset = 0; batch_offset < BatchTileRows;
-             ++batch_offset) {
-          if (batch_offset >= valid_rows) {
-            break;
+      if (width % lora_group_size == 0) {
+        const int scale_stride = width / lora_group_size;
+        int idx = col;
+        int scale_idx = col / lora_group_size;
+        for (int r = 0; r < rank; ++r) {
+          const scalar_t up_value = traits::mul(
+              traits::from_int(static_cast<int>(up_qweight[idx])),
+              up_scales[scale_idx]);
+          for (int batch_offset = 0; batch_offset < BatchTileRows;
+               ++batch_offset) {
+            if (batch_offset >= valid_rows) {
+              break;
+            }
+            const int batch_row = batch_base + batch_offset;
+            const scalar_t down_value = down[batch_row * down_stride + r];
+            lora_acc[batch_offset] +=
+                traits::to_float(traits::mul(down_value, up_value));
           }
-          const int batch_row = batch_base + batch_offset;
-          const scalar_t down_value = down[batch_row * down_stride + r];
-          lora_acc[batch_offset] +=
-              traits::to_float(traits::mul(down_value, up_value));
+          idx += width;
+          scale_idx += scale_stride;
+        }
+      } else {
+        for (int r = 0; r < rank; ++r) {
+          const int idx = r * width + col;
+          const scalar_t up_value = traits::mul(
+              traits::from_int(static_cast<int>(up_qweight[idx])),
+              up_scales[idx / lora_group_size]);
+          for (int batch_offset = 0; batch_offset < BatchTileRows;
+               ++batch_offset) {
+            if (batch_offset >= valid_rows) {
+              break;
+            }
+            const int batch_row = batch_base + batch_offset;
+            const scalar_t down_value = down[batch_row * down_stride + r];
+            lora_acc[batch_offset] +=
+                traits::to_float(traits::mul(down_value, up_value));
+          }
         }
       }
     }
