@@ -105,6 +105,29 @@ def test_ascendc_kernel_resets_aiv_vector_mask_before_vector_paths():
     assert text.count("CannoeResetAivVectorMask();") >= 6
 
 
+def test_ascendc_kernel_barriers_after_cann9_int4_dequant():
+    kernel = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext"
+        / "cannoe"
+        / "ascendc"
+        / "op_kernel"
+        / "cannoe_w4_a16_matmul.cpp"
+    )
+    text = kernel.read_text(encoding="utf-8")
+
+    assert (
+        "static_cast<uint32_t>(kCann9VectorDequantLanes));\n"
+        "        PipeBarrier<PIPE_V>();\n\n"
+        "        b_tile.SetValue(" in text
+    )
+    assert (
+        "static_cast<uint32_t>(kCann9VectorDequantLanes));\n"
+        "        PipeBarrier<PIPE_V>();\n\n"
+        "        const float scale0" in text
+    )
+
+
 def test_komodo_native_prepack_unpacks_source_tiles_on_cpu_for_npu():
     komodo = Path(__file__).resolve().parents[1] / "gptqmodel" / "nn_modules" / "qlinear" / "komodo.py"
     text = komodo.read_text(encoding="utf-8")

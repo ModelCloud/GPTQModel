@@ -2758,6 +2758,7 @@ private:
             reinterpret_cast<__ubuf__ half*>(dequant.GetPhyAddr()),
             reinterpret_cast<__ubuf__ CannoeCapiInt4*>(packed.GetPhyAddr()),
             static_cast<uint32_t>(kCann9VectorDequantLanes));
+        PipeBarrier<PIPE_V>();
 
         b_tile.SetValue(tile_offset, static_cast<half>((static_cast<float>(dequant.GetValue(0)) + offset0) * scale0));
         b_tile.SetValue(
@@ -2875,6 +2876,7 @@ private:
             reinterpret_cast<__ubuf__ half*>(dequant.GetPhyAddr()),
             reinterpret_cast<__ubuf__ CannoeCapiInt4*>(packed.GetPhyAddr()),
             static_cast<uint32_t>(kCann9VectorDequantLanes));
+        PipeBarrier<PIPE_V>();
 
         const float scale0 = static_cast<float>(scales_gm_.GetValue(scale_base));
         const float scale1 = static_cast<float>(scales_gm_.GetValue(scale_base + 1));

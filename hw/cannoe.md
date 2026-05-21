@@ -889,6 +889,11 @@ Applied follow-up:
   the normal and fast hot-cache keys. This keeps ring-depth trials honest:
   changing the requested ring depth rebuilds the plan and workspace estimate
   instead of reusing stale two-slot metadata.
+- CANN9 vector INT4 dequant helpers now fence `PIPE_V` after
+  `asc_int42half_sync()` before scalar code consumes the dequantized UB lanes.
+  SVDQuant's vector path is strict about V-pipe ordering when a UB region is
+  reused or read immediately after vector work; Cannoe now follows the same
+  rule in the vectorized dequant staging helpers.
 
 Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
 raw validator now avoids unrelated public ACLNN parser failures by creating test
