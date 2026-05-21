@@ -51,7 +51,15 @@ from ..utils.looper_helpers import (
     rehome_module_to_device,
     select_forward_devices,
 )
-from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, MoETopKState, set_moe_topk, restore_moe_topk
+from ..utils.model import (
+    MoETopKState,
+    find_modules,
+    get_layers_with_prefixes,
+    get_module,
+    move_to,
+    restore_moe_topk,
+    set_moe_topk, get_module_by_name_prefix,
+)
 from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
@@ -1428,7 +1436,10 @@ class ModuleLooper():
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
-        layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.extract_layers_node())
+        layers, layer_names = get_layers_with_prefixes(
+            self.gptq_model.model,
+            self.gptq_model.extract_layers_node(),
+        )
         region_timer = getattr(self.gptq_model, "quant_region_timer", None)
 
         for p_index, processor in enumerate(self.processors):
@@ -1523,7 +1534,7 @@ class ModuleLooper():
             layers=layers,
             layer_modules=layer_modules,
             planning_layer_modules=planning_layer_modules,
-            layers_prefix=layers_prefix,
+            layer_names=layer_names,
             fallback=fallback,
             shared_kv_cache_dict=shared_kv_cache_dict,
             pb=pb,
@@ -1631,7 +1642,7 @@ class ModuleLooper():
                 capture_only_flags[n] = True  # forward-only modules should not be finalized
         skipped_modules = []
         for name in subset:
-            layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{name}"
+            layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{name}"
 
             # gptq task is created and stored inside processor
             if not isinstance(subset[name], NamedModule):

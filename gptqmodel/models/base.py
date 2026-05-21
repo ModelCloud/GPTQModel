@@ -9,12 +9,14 @@ import json
 import os
 import threading
 import time
-import torch
-import torch._dynamo
-import torch.nn as nn
 from collections import defaultdict
 from contextlib import nullcontext
 from itertools import count
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
+
+import torch
+import torch._dynamo
+import torch.nn as nn
 from tokenicer import Tokenicer
 from transformers import (
     AutoModelForCausalLM,
@@ -24,7 +26,7 @@ from transformers import (
     ProcessorMixin,
     modeling_utils,
 )
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
+
 
 try:  # Optional dependency for huggingface datasets support
     from datasets import Dataset as HFDataset
@@ -68,12 +70,20 @@ from ..utils.device import get_device
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
-from ..utils.model import MODALITY, _module_has_meta_tensors, find_modules, get_module_by_name_prefix, move_to
+from ..utils.model import (
+    MODALITY,
+    _module_has_meta_tensors,
+    find_modules,
+    get_module,
+    get_module_by_name_prefix,
+    move_to,
+)
 from ..utils.model_dequant import infer_block_shape
 from ..utils.structure import (
     LazyTurtle,
     _get_parent_and_leaf_by_path,
     _get_qualified_name,
+    alias_direct_meta_from_turtle_for_submodule,
     alias_from_turtle_for_submodule,
 )
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
@@ -251,6 +261,10 @@ class BaseQModel(nn.Module):
 
     quant_override_files: Dict[str, Union[str | Dict[str, Any]]] = {}
 
+    # Module paths that own meta params/buffers directly, not under child modules.
+    modules_with_direct_meta_tensors: List[str] = []
+    direct_meta_modules: List[str] = []  # Backward-compatible alias.
+
     server = None
 
     support_offload_to_disk = True
@@ -377,22 +391,53 @@ class BaseQModel(nn.Module):
     def extract_layers_node(cls):
         """
         Given a module_tree structure, return the layers_node string.
-        It concatenates everything up to (but not including) the first "#" with '.'.
+        It returns layer paths from each complete module_tree variant.
         Example:
             ["model", "layers", "#", {...}] -> ["model.layers"]
+            [
+                ["model", "L_module", "layers", "#", {...}],
+                ["model", "H_module", "layers", "#", {...}],
+            ]
+                -> ["model.L_module.layers", "model.H_module.layers"]
         """
+        paths = []
+        for tree in cls._iter_module_tree_variants():
+            for path in cls._expand_module_tree_prefixes(tree):
+                if path not in paths:
+                    paths.append(path)
+        return paths
 
-        prefix_parts = []
-        for node in cls.module_tree:
+    @classmethod
+    def _iter_module_tree_variants(cls, module_tree=None) -> List[List[Any]]:
+        """Normalize module_tree into one or more complete tree variants."""
+
+        tree = cls.module_tree if module_tree is None else module_tree
+        if not isinstance(tree, list):
+            return []
+
+        if tree and all(isinstance(item, (list, tuple)) for item in tree):
+            return [list(item) for item in tree]
+
+        return [list(tree)]
+
+    @classmethod
+    def _expand_module_tree_prefixes(cls, tree=None) -> List[str]:
+        """Return the module_tree prefix before `#` as a concrete path."""
+
+        tree = cls.module_tree if tree is None else tree
+        if tree is None:
+            return []
+
+        path = []
+        for node in tree:
             if node == "#":
                 break
-            if isinstance(node, str):
-                module_name, _ = cls._parse_module_flags(node)
-                prefix_parts.append(module_name)
-            else:
-                break  # stop if unexpected nested structure
+            if not isinstance(node, str):
+                break
 
-        return [".".join(prefix_parts)] if prefix_parts else []
+            path.append(node.split(":", 1)[0])
+
+        return [".".join(path)] if path else []
 
     @classmethod
     def _parse_module_aliases(cls, module_spec: str) -> List[str]:
@@ -498,8 +543,10 @@ class BaseQModel(nn.Module):
         """
         if cls.module_tree is None:
             return set()
-
-        return cls._collect_moe_modules_from_tree(cls.module_tree)
+        moe_modules = set()
+        for tree in cls._iter_module_tree_variants():
+            moe_modules.update(cls._collect_moe_modules_from_tree(tree))
+        return moe_modules
 
     @classmethod
     def is_moe_module(cls, module_path: str) -> bool:
@@ -529,7 +576,7 @@ class BaseQModel(nn.Module):
         return False
 
     @classmethod
-    def get_moe_module_name(cls) -> Optional[str]:
+    def get_moe_module_name(cls) -> Optional[List[str]]:
         """
         Get the name of the MoE module from module_tree.
 
@@ -544,28 +591,28 @@ class BaseQModel(nn.Module):
         if cls.module_tree is None:
             return None
 
-        # Find the dict that represents layer structure (after "#")
-        layer_structure = None
-        found_hash = False
-        for item in cls.module_tree:
-            if item == "#":
-                found_hash = True
+        found_names = []
+        for tree in cls._iter_module_tree_variants():
+            layer_structure = None
+            found_hash = False
+            for item in tree:
+                if item == "#":
+                    found_hash = True
+                    continue
+                if found_hash and isinstance(item, dict):
+                    layer_structure = item
+                    break
+
+            if layer_structure is None:
                 continue
-            if found_hash and isinstance(item, dict):
-                layer_structure = item
-                break
 
-        if layer_structure is None:
-            return None
+            for key in layer_structure.keys():
+                if cls.has_moe_flag(key):
+                    module_name, _ = cls._parse_module_flags(key)
+                    if module_name not in found_names:
+                        found_names.append(module_name)
 
-        # Look for a key with :moe flag at the top level of layer structure
-        for key in layer_structure.keys():
-            if cls.has_moe_flag(key):
-                # Extract module name without flags
-                module_name, _ = cls._parse_module_flags(key)
-                return module_name
-
-        return None
+        return found_names
 
     @classmethod
     def build_moe_modules_if_need(cls, model_config, layer_modules, is_awq_quantize: bool = False):
@@ -2622,6 +2669,21 @@ class BaseQModel(nn.Module):
                 )
         return module
 
+    def shell_direct_meta_materialize(
+            self,
+            target_submodule: torch.nn.Module,
+            device: Optional[torch.device] = None,
+    ):
+        with self._turtle_lock:
+            if self.turtle_model is None:
+                return None
+            return alias_direct_meta_from_turtle_for_submodule(
+                target_model=self.model,
+                turtle_model=self.turtle_model,
+                target_submodule=target_submodule,
+                device=device,
+            )
+
     ## overrides nn.module.train()
     # def train(self, mode=True):
     #     old_mode = self.training
@@ -2642,7 +2704,7 @@ class BaseQModel(nn.Module):
     #     else:
     #         log.info(f"{self.__class__.__name__}: `MODEL switching to eval mode.")
     @classmethod
-    def build_layer_modules(cls, tree, include_capture_only: bool = False):
+    def _build_layer_modules_for_tree(cls, tree, include_capture_only: bool = False):
         """
         tree format:
           [<model_name>, <submodule>, "#", { parent_module: ( "child[:!][:grp]", ... ), ... }]
@@ -2867,36 +2929,89 @@ class BaseQModel(nn.Module):
         return out_blocks
 
     @classmethod
-    def get_base_modules(cls, model):
-        """
-        Return list of base modules directly under 'model' but not 'model.layers'.
-        """
-        # Find the index of "#"
-        tree = cls.module_tree
-        try:
-            sharp_idx = tree.index("#")
-        except ValueError:
-            raise ValueError("module_tree must contain '#' to separate hierarchy")
+    def build_layer_modules(cls, tree, include_capture_only: bool = False):
+        blocks = []
+        seen = set()
+        for tree_variant in cls._iter_module_tree_variants(tree):
+            for block in cls._build_layer_modules_for_tree(tree_variant, include_capture_only=include_capture_only):
+                key = tuple(block)
+                # Shared blocks across tree variants should keep first-seen order.
+                if key in seen:
+                    continue
+                seen.add(key)
+                blocks.append(block)
+        return blocks
 
-        assert sharp_idx > 0, "failed to get_base_modules"
-        # root_path = ["model"] or ["model", "language_model"]
-        root_path = [cls._parse_module_flags(node)[0] if isinstance(node, str) else node for node in tree[:sharp_idx-1]]
+    @classmethod
+    def get_modules_with_direct_meta_tensors(cls, model: nn.Module):
+        """
+        Return module paths whose direct params/buffers are materialized outside
+        normal layer/base-module traversal.
+        """
+        out = []
+        module_names = cls.modules_with_direct_meta_tensors or cls.direct_meta_modules or []
+        for module_name in module_names:
+            module = get_module(model, module_name)
+            if isinstance(module, nn.Module):
+                out.append(module_name)
+        return out
+
+    @classmethod
+    def get_direct_meta_modules(cls, model: nn.Module):
+        return cls.get_modules_with_direct_meta_tensors(model)
+
+    @classmethod
+    def get_base_modules(cls, model: nn.Module):
+        """
+        Return list of base modules directly under the root path but not the layer container.
+        """
+        all_prefix_paths = []
+        for tree in cls._iter_module_tree_variants():
+            try:
+                sharp_idx = tree.index("#")
+            except ValueError:
+                raise ValueError("module_tree must contain '#' to separate hierarchy")
+
+            assert sharp_idx > 0, "failed to get_base_modules"
+            for path in cls._expand_module_tree_prefixes(tree):
+                prefix = tuple(path.split("."))
+                if prefix not in all_prefix_paths:
+                    all_prefix_paths.append(prefix)
+
+        if not all_prefix_paths:
+            return []
+
+        exclude_by_parent: Dict[tuple[str, ...], set[str]] = {}
+        for parts in all_prefix_paths:
+            for i in range(len(parts) - 1):
+                parent_path = parts[: i + 1]
+                # Each tree reserves the next path segment for layer traversal.
+                exclude_by_parent.setdefault(parent_path, set()).add(parts[i + 1])
 
         out = []
-        # Traverse each layer in root_path
-        for i in range(len(root_path)):
-            path = root_path[:i + 1]
-            base = model
-            exclude = cls._parse_module_flags(tree[len(path)])[0] if isinstance(tree[len(path)], str) else tree[len(path)]
+        seen = set()
+        for parts in all_prefix_paths:
+            for i in range(len(parts) - 1):
+                path = parts[: i + 1]
+                base = model
+                exclude = exclude_by_parent.get(path, set())
 
-            for node in path:
-                base = getattr(base, node)
+                for node in path:
+                    base = getattr(base, node, None)
+                    if base is None:
+                        break
+                if base is None:
+                    continue
 
-            for name, _ in base.named_children():
-                if name != exclude:
-                    out.append(".".join(path + [name]))
-
-        # print(f"Base Modules: {out}")
+                for name, _ in base.named_children():
+                    # print("name", base, name, exclude)
+                    if name in exclude:
+                        continue
+                    full_name = ".".join((*path, name))
+                    if full_name in seen:
+                        continue
+                    seen.add(full_name)
+                    out.append(full_name)
         return out
 
     def generate_layers_modules_tree_simple(self, node):
