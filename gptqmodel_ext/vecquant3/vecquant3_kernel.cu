@@ -684,14 +684,25 @@ __global__ void vecquant3_gptq_gemv_kernel(
             scale2, zero2, acc_float, acc_input);
       }
     } else {
+      constexpr int qblocks_per_group = GroupSize / 32;
+      scalar2_t scale2 = traits::make2(traits::from_float(0.0f));
+      scalar2_t zero2 = traits::make2(traits::from_float(0.0f));
       for (int qrow = row; qrow < row_end; ++qrow) {
+        const int group = (qrow / Bits) / qblocks_per_group;
+        if (group != group_cache.group) {
+          group_cache.group = group;
+          const scalar_t scale = scales[group * width + col];
+          scale2 = traits::make2(scale);
+          const int zero = unpack_zero<Bits>(qzeros, group, col, qzeros_stride);
+          zero2 = traits::make2(
+              traits::mul(traits::from_float(-static_cast<float>(zero)), scale));
+        }
         const unsigned int packed_word =
             as_unsigned(qweight[qrow * width + col]);
-        accumulate_packed_word<scalar_t, Bits, GroupSize, FloatAccum,
-                               KTileHalf2>(
-            packed_word, qrow, absolute_half2_base, col, width, qzeros_stride,
-            total_half2, blockvec, qzeros, scales, group_cache, acc_float,
-            acc_input);
+        accumulate_packed_word_fixed_group<scalar_t, Bits, FloatAccum,
+                                           KTileHalf2>(
+            packed_word, qrow, absolute_half2_base, total_half2, blockvec,
+            scale2, zero2, acc_float, acc_input);
       }
     }
   }
@@ -936,14 +947,25 @@ __global__ void vecquant3_gptq_gemm_batch_kernel(
             blockvec, scale2, zero2, acc_float, acc_input);
       }
     } else {
+      constexpr int qblocks_per_group = GroupSize / 32;
+      scalar2_t scale2 = traits::make2(traits::from_float(0.0f));
+      scalar2_t zero2 = traits::make2(traits::from_float(0.0f));
       for (int qrow = row; qrow < row_end; ++qrow) {
+        const int group = (qrow / Bits) / qblocks_per_group;
+        if (group != group_cache.group) {
+          group_cache.group = group;
+          const scalar_t scale = scales[group * width + col];
+          scale2 = traits::make2(scale);
+          const int zero = unpack_zero<Bits>(qzeros, group, col, qzeros_stride);
+          zero2 = traits::make2(
+              traits::mul(traits::from_float(-static_cast<float>(zero)), scale));
+        }
         const unsigned int packed_word =
             as_unsigned(qweight[qrow * width + col]);
-        accumulate_packed_word_batch<scalar_t, Bits, GroupSize, FloatAccum,
-                                     BatchTileRows, KTileHalf2>(
-            packed_word, qrow, absolute_half2_base, col, width, qzeros_stride,
-            valid_rows, total_half2, blockvec, qzeros, scales, group_cache,
-            acc_float, acc_input);
+        accumulate_packed_word_batch_fixed_group<
+            scalar_t, Bits, FloatAccum, BatchTileRows, KTileHalf2>(
+            packed_word, qrow, absolute_half2_base, valid_rows, total_half2,
+            blockvec, scale2, zero2, acc_float, acc_input);
       }
     }
   }
