@@ -144,6 +144,16 @@ def _dtype() -> torch.dtype:
     return torch.float16
 
 
+def _to_device(tensor: torch.Tensor, *, device: torch.device, dtype: torch.dtype | None = None) -> torch.Tensor:
+    if dtype is None:
+        dtype = tensor.dtype
+    return tensor.to(device=device, dtype=dtype)
+
+
+def _cpu_randn(shape: torch.Size | tuple[int, ...], *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    return _to_device(torch.randn(shape, dtype=torch.float32, device="cpu"), device=device, dtype=dtype)
+
+
 def _default_device(path: str) -> torch.device:
     if path == "cuda":
         return torch.device("cuda:0")
@@ -212,28 +222,44 @@ def _fill_synthetic_gptq(module, *, device: torch.device, dtype: torch.dtype, se
     torch.manual_seed(seed)
     with torch.no_grad():
         module.qweight.copy_(
-            torch.randint(
-                -(2**31),
-                2**31 - 1,
-                module.qweight.shape,
-                dtype=torch.int32,
+            _to_device(
+                torch.randint(
+                    -(2**31),
+                    2**31 - 1,
+                    module.qweight.shape,
+                    dtype=torch.int32,
+                    device="cpu",
+                ),
                 device=device,
+                dtype=module.qweight.dtype,
             )
         )
         if getattr(module, "qzeros", None) is not None and module.qzeros.numel() > 0:
-            module.qzeros.zero_()
+            module.qzeros.copy_(
+                _to_device(
+                    torch.zeros(module.qzeros.shape, dtype=module.qzeros.dtype, device="cpu"),
+                    device=device,
+                    dtype=module.qzeros.dtype,
+                )
+            )
         module.scales.copy_(
-            (torch.rand(module.scales.shape, dtype=dtype, device=device) * 0.04 + 0.01).to(module.scales.dtype)
+            _to_device(
+                torch.rand(module.scales.shape, dtype=torch.float32, device="cpu") * 0.04 + 0.01,
+                device=device,
+                dtype=module.scales.dtype,
+            )
         )
         module.g_idx.copy_(
-            (torch.arange(module.in_features, dtype=torch.int32, device=device) // module.group_size).to(
-                module.g_idx.dtype
+            _to_device(
+                torch.arange(module.in_features, dtype=torch.int32, device="cpu") // module.group_size,
+                device=device,
+                dtype=module.g_idx.dtype,
             )
         )
         if desc_act:
             _set_supported_act_order_g_idx(module, module.group_size)
         if getattr(module, "bias", None) is not None:
-            module.bias.copy_((torch.randn(module.bias.shape, dtype=dtype, device=device) * 0.03).to(module.bias.dtype))
+            module.bias.copy_(_cpu_randn(module.bias.shape, device=device, dtype=module.bias.dtype) * 0.03)
 
 
 def _build_module(cls, *, args: argparse.Namespace, case: LayerCase, device: torch.device, seed: int):
@@ -254,8 +280,9 @@ def _build_module(cls, *, args: argparse.Namespace, case: LayerCase, device: tor
         pack_dtype=torch.int32,
         register_buffers=True,
         dtype=dtype,
-    ).to(device=device, dtype=dtype)
-    _fill_synthetic_gptq(module, device=device, dtype=dtype, seed=seed, desc_act=bool(args.desc_act))
+    )
+    _fill_synthetic_gptq(module, device=torch.device("cpu"), dtype=dtype, seed=seed, desc_act=bool(args.desc_act))
+    module = module.to(device=device, dtype=dtype)
     module.optimized = True
     module.post_init()
     module.eval()
@@ -297,7 +324,7 @@ def _run_case(
     case = QWEN3_27B_LAYERS[layer_key]
     _reset_peak(device)
     module = _build_module(cls, args=args, case=case, device=device, seed=seed)
-    x = torch.randn(tokens, case.in_features, dtype=dtype, device=device)
+    x = _cpu_randn((tokens, case.in_features), device=device, dtype=dtype)
 
     def forward():
         return module(x)

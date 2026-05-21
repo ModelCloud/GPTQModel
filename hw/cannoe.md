@@ -862,6 +862,20 @@ Useful structural pieces to carry into Cannoe:
   and GM-visibility probes keep showing that generated ACLNN workspace is not a
   safe producer/consumer buffer for mixed AIC/AIV handoff in this lifecycle.
 
+Applied follow-up:
+
+- The staged dequant ring depth is now explicit through
+  `GPTQMODEL_CANNOE_STAGING_SLOTS`. Default runtime behavior remains a two-slot
+  ring for large multi-wave shapes, while both the Python planner and Ascend C
+  host tiler cap allocation to the number of waves that can actually be used.
+  Dense-equivalent one-wave staging remains disabled by the existing guard, so
+  Cannoe does not allocate a temporary that defeats the memory premise of GPTQ.
+- The knob accepts `1..8`, matching the current Cannoe logical block cap. Set
+  `GPTQMODEL_CANNOE_STAGING_SLOTS=6` for SVDQuant-style ring-depth experiments
+  on large shapes without changing the custom-op ABI or staging tensor layout.
+  The workspace formula is now `aligned(base_k * base_n * sizeof(fp16)) *
+  staging_blocks * min(requested_slots, staging_waves)`.
+
 Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
 raw validator now avoids unrelated public ACLNN parser failures by creating test
 tensors on CPU, delaying custom OPP exposure until the custom op is called, and

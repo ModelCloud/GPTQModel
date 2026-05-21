@@ -3,6 +3,8 @@
 #include "register/op_def_registry.h"
 #include "tiling/platform/platform_ascendc.h"
 
+#include <cstdlib>
+
 namespace {
 constexpr size_t kInputX = 0;
 constexpr size_t kInputPackedWeight = 1;
@@ -18,9 +20,11 @@ constexpr size_t kAttrBaseK = 4;
 
 constexpr uint32_t kKernelModeScalar = 0;
 constexpr uint32_t kKernelModeStagedDequant = 1;
-constexpr uint32_t kStagingSlots = 2;
+constexpr uint32_t kDefaultStagingSlots = 2;
+constexpr uint32_t kMaxStagingSlots = 8;
 constexpr uint32_t kMaxLogicalBlocks = 8;
 constexpr uint64_t kStagingAlignmentBytes = 512;
+constexpr const char* kStagingSlotsEnv = "GPTQMODEL_CANNOE_STAGING_SLOTS";
 // 910B CANN reserves this system workspace before the user workspace returned by GetUserWorkspace().
 constexpr uint64_t kCubeSysWorkspaceBytes = 16ULL * 1024ULL * 1024ULL;
 
@@ -79,6 +83,28 @@ uint32_t CeilDivU32(uint32_t value, uint32_t divisor)
         return 0;
     }
     return (value + divisor - 1) / divisor;
+}
+
+uint32_t EnvBoundedU32(const char* name, uint32_t fallback, uint32_t min_value, uint32_t max_value)
+{
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || raw[0] == '\0') {
+        return fallback;
+    }
+    uint64_t value = 0;
+    for (const char* cursor = raw; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            return fallback;
+        }
+        value = value * 10U + static_cast<uint64_t>(*cursor - '0');
+        if (value > static_cast<uint64_t>(max_value)) {
+            return max_value;
+        }
+    }
+    if (value < static_cast<uint64_t>(min_value)) {
+        return fallback;
+    }
+    return static_cast<uint32_t>(value);
 }
 
 uint32_t PickBlockDim(uint32_t packed_words, uint32_t aiv_cores)
@@ -203,16 +229,25 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     if (AttrIsNegative(attrs, kAttrBaseN) != 0 && requested_base_n != 0 && requested_base_k != 0) {
         const uint32_t n_tiles = CeilDivU32(static_cast<uint32_t>(n64), requested_base_n);
         const uint32_t split_k = requested_split_k == 0 ? 1 : requested_split_k;
+        const uint32_t k_tiles = CeilDivU32(static_cast<uint32_t>(k64), requested_base_k);
+        const uint32_t total_stage_tasks =
+            ClampU64ToU32(static_cast<uint64_t>(n_tiles) * static_cast<uint64_t>(split_k) *
+                          static_cast<uint64_t>(k_tiles));
         const uint64_t planned_stage_blocks = static_cast<uint64_t>(n_tiles) * static_cast<uint64_t>(split_k);
         uint32_t staging_blocks =
             planned_stage_blocks < block_dim ? static_cast<uint32_t>(planned_stage_blocks) : block_dim;
         if (staging_blocks == 0) {
             staging_blocks = 1;
         }
+        const uint32_t requested_staging_slots =
+            EnvBoundedU32(kStagingSlotsEnv, kDefaultStagingSlots, 1, kMaxStagingSlots);
+        const uint32_t staging_waves = CeilDivU32(total_stage_tasks == 0 ? 1 : total_stage_tasks, staging_blocks);
+        const uint32_t staging_slots =
+            requested_staging_slots < staging_waves ? requested_staging_slots : staging_waves;
         const uint64_t tile_bytes = AlignUpU64(
             static_cast<uint64_t>(requested_base_k) * static_cast<uint64_t>(requested_base_n) * sizeof(uint16_t),
             kStagingAlignmentBytes);
-        const uint64_t staging_workspace_bytes = tile_bytes * static_cast<uint64_t>(kStagingSlots) *
+        const uint64_t staging_workspace_bytes = tile_bytes * static_cast<uint64_t>(staging_slots) *
             static_cast<uint64_t>(staging_blocks);
         const uint64_t cube_workspace_bytes = cube_workspace_requested != 0 ? kCubeSysWorkspaceBytes : 0;
         const uint64_t workspace_bytes = cube_workspace_bytes + staging_workspace_bytes;
@@ -246,7 +281,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
             if (enable_staged_dequant) {
                 tiling.set_kernel_mode(kKernelModeStagedDequant);
                 tiling.set_staging_blocks(staging_blocks);
-                tiling.set_staging_slots(kStagingSlots);
+                tiling.set_staging_slots(staging_slots);
                 tiling.set_staging_tile_bytes(ClampU64ToU32(tile_bytes));
                 tiling.set_staging_workspace_bytes(ClampU64ToU32(staging_workspace_bytes));
                 tiling.set_staging_workspace_offset(0);

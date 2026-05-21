@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import importlib.util
 import os
 from pathlib import Path
+
+import pytest
 
 
 def _load_build_helper():
@@ -27,6 +30,10 @@ def _load_raw_validator():
     return module
 
 
+def _load_cannoe_module():
+    return importlib.import_module("gptqmodel.nn_modules.qlinear.cannoe")
+
+
 def test_ascendc_host_tiler_caps_logical_blocks():
     host_tiler = (
         Path(__file__).resolve().parents[1]
@@ -40,6 +47,24 @@ def test_ascendc_host_tiler_caps_logical_blocks():
 
     assert "constexpr uint32_t kMaxLogicalBlocks = 8;" in text
     assert "return available_blocks < kMaxLogicalBlocks ? available_blocks : kMaxLogicalBlocks;" in text
+
+
+def test_ascendc_host_tiler_uses_bounded_dynamic_staging_ring():
+    host_tiler = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext"
+        / "cannoe"
+        / "ascendc"
+        / "op_host"
+        / "cannoe_w4_a16_matmul.cpp"
+    )
+    text = host_tiler.read_text(encoding="utf-8")
+
+    assert 'constexpr const char* kStagingSlotsEnv = "GPTQMODEL_CANNOE_STAGING_SLOTS";' in text
+    assert "constexpr uint32_t kDefaultStagingSlots = 2;" in text
+    assert "constexpr uint32_t kMaxStagingSlots = 8;" in text
+    assert "const uint32_t staging_waves = CeilDivU32(" in text
+    assert "tiling.set_staging_slots(staging_slots);" in text
 
 
 def test_ascendc_host_tiler_disables_staging_for_unsupported_aic_tscm_shapes():
@@ -58,6 +83,95 @@ def test_ascendc_host_tiler_disables_staging_for_unsupported_aic_tscm_shapes():
     assert "CANNOE_EXPERIMENTAL_AIC_TSCM_UNSAFE_RUNTIME" in text
     assert "enable_staged_dequant = false;" in text
     assert "if (enable_staged_dequant) {" in text
+
+
+def test_komodo_native_prepack_unpacks_source_tiles_on_cpu_for_npu():
+    komodo = Path(__file__).resolve().parents[1] / "gptqmodel" / "nn_modules" / "qlinear" / "komodo.py"
+    text = komodo.read_text(encoding="utf-8")
+
+    assert "def _native_prepack_source_tensor" in text
+    assert 'target_device.type == "npu" and tensor.device.type == "npu"' in text
+    assert "qweight_source = _native_prepack_source_tensor(self.qweight, device)" in text
+    assert "wf_neg_source = _native_prepack_source_tensor(self.wf_unsqueeze_neg_one, device)" in text
+    assert "packed_tiles_cpu = [] if device.type == \"npu\" else None" in text
+    assert "packed_tiles_cpu.append(packed_tile.detach().to(device=\"cpu\"))" in text
+    assert "packed_weight = torch.cat(packed_tiles_cpu, dim=1).to(device=device).contiguous()" in text
+    assert "weight_perm = input_perm_cpu if weight.device.type == \"cpu\" else input_perm" in text
+
+
+def _patch_runtime_planner(monkeypatch, cannoe):
+    monkeypatch.setattr(cannoe, "_cannoe_device_caps", lambda device: (8, 8, 64 * 1024 * 1024))
+    monkeypatch.setattr(cannoe, "_cannoe_prefetch_max_bytes", lambda device: 8 * 1024 * 1024)
+    monkeypatch.setattr(cannoe, "_cannoe_fused_status", lambda group_size: (True, True, False, None, "test"))
+    monkeypatch.setenv("GPTQMODEL_CANNOE_STAGED_DEQUANT", "1")
+    monkeypatch.setenv("GPTQMODEL_CANNOE_CUBE_CONSUMER", "1")
+
+
+def test_cannoe_tiling_plan_disables_dense_equivalent_single_wave_staging(monkeypatch):
+    cannoe = _load_cannoe_module()
+    _patch_runtime_planner(monkeypatch, cannoe)
+
+    plan = cannoe._cannoe_tiling_plan(
+        rows=1,
+        in_features=128,
+        out_features=128,
+        group_size=32,
+        device=object(),
+    )
+
+    assert plan.vector_dequant_tasks == 1
+    assert not plan.staged_dequant
+    assert plan.staging_slots == 0
+    assert plan.custom_workspace_bytes == 0
+
+
+def test_cannoe_tiling_plan_keeps_default_two_slot_ring_for_large_shapes(monkeypatch):
+    cannoe = _load_cannoe_module()
+    _patch_runtime_planner(monkeypatch, cannoe)
+
+    plan = cannoe._cannoe_tiling_plan(
+        rows=1,
+        in_features=17408,
+        out_features=5120,
+        group_size=32,
+        device=object(),
+    )
+
+    assert plan.staged_dequant
+    assert plan.vector_dequant_tasks > plan.staging_blocks
+    assert plan.staging_slots == 2
+
+
+def test_cannoe_tiling_plan_allows_svdquant_style_six_slot_ring(monkeypatch):
+    cannoe = _load_cannoe_module()
+    _patch_runtime_planner(monkeypatch, cannoe)
+    monkeypatch.setenv("GPTQMODEL_CANNOE_STAGING_SLOTS", "6")
+
+    plan = cannoe._cannoe_tiling_plan(
+        rows=1,
+        in_features=17408,
+        out_features=5120,
+        group_size=32,
+        device=object(),
+    )
+
+    assert plan.staging_slots == 6
+    assert plan.staging_workspace_bytes == plan.staging_tile_bytes * plan.staging_blocks * 6
+
+
+def test_cannoe_tiling_plan_rejects_invalid_staging_ring(monkeypatch):
+    cannoe = _load_cannoe_module()
+    _patch_runtime_planner(monkeypatch, cannoe)
+    monkeypatch.setenv("GPTQMODEL_CANNOE_STAGING_SLOTS", "0")
+
+    with pytest.raises(RuntimeError, match="GPTQMODEL_CANNOE_STAGING_SLOTS"):
+        cannoe._cannoe_tiling_plan(
+            rows=1,
+            in_features=17408,
+            out_features=5120,
+            group_size=32,
+            device=object(),
+        )
 
 
 def test_raw_validator_finds_embedded_json_after_cann_warning():

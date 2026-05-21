@@ -2023,3 +2023,38 @@ Cube/vector ownership with a bounded ring, but the current Cannoe TSCM and
 generated-workspace handoff probes are still unsafe or far too slow. Do not
 retry these exact strategies unless the kernel lifecycle changes to CANN-managed
 KFC/SCM ownership or a lower-level Cube/FIXPIPE path.
+
+## 2026-05-21: CANN 9.1 Qwen Benchmark Runtime Blocker After Setup Fix
+
+Status: setup-path improvement validated; full Qwen fp16 module benchmark still
+blocked by the public native CANN matmul op on this host.
+
+Command:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 GPTQMODEL_CANNOE_STAGED_DEQUANT=1 \
+GPTQMODEL_CANNOE_CUBE_CONSUMER=1 \
+python scripts/benchmark_qwen3_27b_gptq_fp16.py --path cannoe --device npu:0 \
+  --tokens 1 --warmup 3 --iters 10 \
+  --json-output /tmp/cannoe_qwen_after_staging_slots.json
+```
+
+Observed sequence:
+
+- Original synthetic setup failed in `aclnnInplaceRandom` (`561103`) when
+  random tensors were created directly on NPU.
+- After moving random generation to CPU, setup failed in `aclnnInplaceCopy`
+  (`561103`) while copying into NPU module buffers.
+- After filling the module on CPU, lazy native prepack failed in
+  `_right_shift_unpack(...).to(torch.int64)` on NPU (`561103`).
+- After CPU-unpacking source GPTQ tiles for native prepack, setup failed on a
+  sliced packed-tile `copy_` into NPU packed-weight storage (`561103`).
+- After CPU-side packed-tile assembly, the benchmark reached the actual forward
+  path, then failed in `aclnnWeightQuantBatchMatmulV3` with `161002`.
+
+Interpretation: CPU generation plus CPU native-prepack assembly is a useful
+benchmark/setup resilience fix for CANN 9.1. The remaining failure is the
+measured public native runtime op, not a synthetic setup failure and not a
+validated Cannoe staging regression. Re-run this full Qwen benchmark after the
+CANN 9.1 OPP/kernel package issue is fixed, or use a custom Ascend C fused path
+that bypasses `aclnnWeightQuantBatchMatmulV3`.

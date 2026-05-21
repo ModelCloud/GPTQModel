@@ -35,11 +35,13 @@ _CANNOE_V3_ENV = "GPTQMODEL_CANNOE_V3"
 _CANNOE_INNER_PRECISE_ENV = "GPTQMODEL_CANNOE_INNER_PRECISE"
 _CANNOE_STAGED_DEQUANT_ENV = "GPTQMODEL_CANNOE_STAGED_DEQUANT"
 _CANNOE_CUBE_CONSUMER_ENV = "GPTQMODEL_CANNOE_CUBE_CONSUMER"
+_CANNOE_STAGING_SLOTS_ENV = "GPTQMODEL_CANNOE_STAGING_SLOTS"
 _CANNOE_PREPACK_TILE_N_ENV = "GPTQMODEL_CANNOE_PREPACK_TILE_N"
 _CANNOE_BF16_NATIVE_ENV = "GPTQMODEL_CANNOE_BF16_NATIVE"
 # 910B CANN reserves this system workspace before the user workspace returned by GetUserWorkspace().
 _CANNOE_CUBE_WORKSPACE_BYTES = 16 * 1024 * 1024
 _CANNOE_MAX_LOGICAL_BLOCKS = 8
+_CANNOE_DEFAULT_STAGING_SLOTS = 2
 _NPU_PREFETCH_OP_UNSET = object()
 _NPU_PREFETCH_OP = _NPU_PREFETCH_OP_UNSET
 _NPU_WEIGHT_QUANT_OP_UNSET = object()
@@ -168,6 +170,23 @@ def _cannoe_cube_consumer_enabled() -> bool:
     return _cannoe_env_flag(_CANNOE_CUBE_CONSUMER_ENV, default=False)
 
 
+def _cannoe_staging_slots() -> int:
+    raw = _cannoe_env(_CANNOE_STAGING_SLOTS_ENV)
+    if raw is None:
+        return _CANNOE_DEFAULT_STAGING_SLOTS
+    try:
+        value = int(raw)
+    except ValueError as err:
+        raise RuntimeError(
+            f"{_CANNOE_STAGING_SLOTS_ENV} must be an integer between 1 and {_CANNOE_MAX_LOGICAL_BLOCKS}; got `{raw}`."
+        ) from err
+    if value < 1 or value > _CANNOE_MAX_LOGICAL_BLOCKS:
+        raise RuntimeError(
+            f"{_CANNOE_STAGING_SLOTS_ENV} must be between 1 and {_CANNOE_MAX_LOGICAL_BLOCKS}; got `{raw}`."
+        )
+    return value
+
+
 def _cannoe_ascendc_enabled() -> bool:
     return _cannoe_env_flag(_CANNOE_ASCENDC_ENV, default=False)
 
@@ -190,6 +209,7 @@ def _cannoe_native_tuning_requested() -> bool:
             _CANNOE_INNER_PRECISE_ENV,
             _CANNOE_STAGED_DEQUANT_ENV,
             _CANNOE_CUBE_CONSUMER_ENV,
+            _CANNOE_STAGING_SLOTS_ENV,
             _CANNOE_PREPACK_TILE_N_ENV,
         )
     )
@@ -532,10 +552,12 @@ def _cannoe_tiling_plan(
     l0a_tile_bytes = base_m * base_k * 2
     l0b_tile_bytes = dequant_fp16_tile_bytes
     l0c_tile_bytes = base_m * base_n * 4
-    staging_slots = 2
+    requested_staging_slots = _cannoe_staging_slots()
     staging_tile_bytes = _align_up(dequant_fp16_tile_bytes, 512)
     scalar_owner_cap = min(vector_cores, _CANNOE_MAX_LOGICAL_BLOCKS, max(1, out_features // 8))
     staging_blocks = min(scalar_owner_cap, max(1, n_tiles * split_k))
+    staging_waves = _ceil_div(max(1, vector_dequant_tasks), staging_blocks)
+    staging_slots = min(requested_staging_slots, max(1, staging_waves))
     staging_workspace_bytes = staging_tile_bytes * staging_slots * staging_blocks
     cube_workspace_bytes = _CANNOE_CUBE_WORKSPACE_BYTES if cube_consumer_requested else 0
     custom_workspace_bytes = staging_workspace_bytes

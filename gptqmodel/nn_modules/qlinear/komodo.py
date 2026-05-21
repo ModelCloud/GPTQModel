@@ -119,6 +119,12 @@ def _packed_weight_empty_like_tile(tile: torch.Tensor, out_features: int, pack_f
     return tile.new_empty((tile.shape[0], out_features // pack_factor))
 
 
+def _native_prepack_source_tensor(tensor: torch.Tensor, target_device: torch.device) -> torch.Tensor:
+    if target_device.type == "npu" and tensor.device.type == "npu":
+        return tensor.detach().to(device="cpu")
+    return tensor
+
+
 def _npu_int4_ops_available() -> bool:
     try:
         npu_ops = torch.ops.npu
@@ -653,41 +659,64 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         if not supported:
             raise RuntimeError("Komodo native int4 plan requested for an unsupported GPTQ g_idx layout.")
 
+        qweight_source = _native_prepack_source_tensor(self.qweight, device)
+        qzeros_source = _native_prepack_source_tensor(self.qzeros, device)
+        scales_source = _native_prepack_source_tensor(self.scales, device)
+        wf_neg_source = _native_prepack_source_tensor(self.wf_unsqueeze_neg_one, device)
+        wf_zero_source = _native_prepack_source_tensor(self.wf_unsqueeze_zero, device)
+
         input_perm = None
         if input_perm_cpu is not None:
             input_perm = input_perm_cpu.to(device=device, non_blocking=self.g_idx.device.type == "cpu")
 
         tile_n = self._native_prepack_tile_n()
         packed_weight = None
+        packed_tiles_cpu = [] if device.type == "npu" else None
         for start in range(0, self.out_features, tile_n):
             width = min(tile_n, self.out_features - start)
-            qweight_tile = self.qweight.narrow(1, start, width)
+            qweight_tile = qweight_source.narrow(1, start, width)
             weight = torch.bitwise_and(
                 _right_shift_unpack(
                     qweight_tile.unsqueeze(1).expand(-1, self.pack_factor, -1),
-                    self.wf_unsqueeze_neg_one,
+                    wf_neg_source,
                     self.dequant_dtype,
                 ),
                 self.maxq,
             )
             weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).to(torch.int32)
             if input_perm is not None:
-                weight = weight.index_select(0, input_perm)
+                weight_perm = input_perm_cpu if weight.device.type == "cpu" else input_perm
+                weight = weight.index_select(0, weight_perm)
 
             signed_weight = (weight - 8).contiguous()
+            if signed_weight.device != device:
+                signed_weight = signed_weight.to(device=device)
             packed_tile = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
-            if packed_weight is None:
+            if packed_tiles_cpu is not None:
+                packed_tiles_cpu.append(packed_tile.detach().to(device="cpu"))
+            elif packed_weight is None:
                 packed_weight = _packed_weight_empty_like_tile(packed_tile, self.out_features, self.pack_factor)
-            packed_start = start // self.pack_factor
-            packed_width = width // self.pack_factor
-            packed_weight.narrow(1, packed_start, packed_width).copy_(packed_tile)
+                packed_start = start // self.pack_factor
+                packed_width = width // self.pack_factor
+                packed_weight.narrow(1, packed_start, packed_width).copy_(packed_tile)
+            else:
+                packed_start = start // self.pack_factor
+                packed_width = width // self.pack_factor
+                packed_weight.narrow(1, packed_start, packed_width).copy_(packed_tile)
             del weight, signed_weight, packed_tile
 
+        if packed_tiles_cpu is not None and packed_tiles_cpu:
+            packed_weight = torch.cat(packed_tiles_cpu, dim=1).to(device=device).contiguous()
         if packed_weight is None:
             raise RuntimeError("Komodo native int4 plan requested for an empty weight.")
 
-        zeros = self._stream_decode_qzeros().to(device=device)
-        scales = self.scales.to(device=device, dtype=dtype).contiguous()
+        zeros = _right_shift_unpack(
+            qzeros_source.unsqueeze(2).expand(-1, -1, self.pack_factor),
+            wf_zero_source,
+            self.dequant_dtype,
+        )
+        zeros = torch.bitwise_and(zeros, self.maxq).reshape(scales_source.shape)
+        scales = scales_source.to(device=device, dtype=dtype).contiguous()
         offsets = (8 - zeros.to(torch.int32)).to(device=device, dtype=dtype).contiguous()
         native_group_size = _native_int4_group_size(self.group_size, self.in_features)
         if native_group_size is None:
@@ -700,6 +729,12 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         if not supported:
             raise RuntimeError("Komodo group-16 native plan requested for an unsupported GPTQ g_idx layout.")
 
+        qweight_source = _native_prepack_source_tensor(self.qweight, device)
+        qzeros_source = _native_prepack_source_tensor(self.qzeros, device)
+        scales_source = _native_prepack_source_tensor(self.scales, device)
+        wf_neg_source = _native_prepack_source_tensor(self.wf_unsqueeze_neg_one, device)
+        wf_zero_source = _native_prepack_source_tensor(self.wf_unsqueeze_zero, device)
+
         input_perm = None
         if input_perm_cpu is not None:
             input_perm = input_perm_cpu.to(device=device, non_blocking=self.g_idx.device.type == "cpu")
@@ -708,39 +743,57 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
         group_count = self.in_features // group_size
         tile_n = self._native_prepack_tile_n()
         packed_stack = None
+        packed_group_tiles_cpu = [[] for _ in range(group_count)] if device.type == "npu" else None
 
         for start in range(0, self.out_features, tile_n):
             width = min(tile_n, self.out_features - start)
-            qweight_tile = self.qweight.narrow(1, start, width)
+            qweight_tile = qweight_source.narrow(1, start, width)
             weight = torch.bitwise_and(
                 _right_shift_unpack(
                     qweight_tile.unsqueeze(1).expand(-1, self.pack_factor, -1),
-                    self.wf_unsqueeze_neg_one,
+                    wf_neg_source,
                     self.dequant_dtype,
                 ),
                 self.maxq,
             )
             weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).to(torch.int32)
             if input_perm is not None:
-                weight = weight.index_select(0, input_perm)
+                weight_perm = input_perm_cpu if weight.device.type == "cpu" else input_perm
+                weight = weight.index_select(0, weight_perm)
 
             packed_start = start // self.pack_factor
             packed_width = width // self.pack_factor
             for group_idx in range(group_count):
                 signed_weight = (weight.narrow(0, group_idx * group_size, group_size) - 8).contiguous()
+                if signed_weight.device != device:
+                    signed_weight = signed_weight.to(device=device)
                 packed_tile = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
-                if packed_stack is None:
+                if packed_group_tiles_cpu is not None:
+                    packed_group_tiles_cpu[group_idx].append(packed_tile.detach().to(device="cpu"))
+                elif packed_stack is None:
                     packed_stack = packed_tile.new_empty(
                         (group_count, group_size, self.out_features // self.pack_factor)
                     )
-                packed_stack[group_idx].narrow(1, packed_start, packed_width).copy_(packed_tile)
+                    packed_stack[group_idx].narrow(1, packed_start, packed_width).copy_(packed_tile)
+                else:
+                    packed_stack[group_idx].narrow(1, packed_start, packed_width).copy_(packed_tile)
             del weight
 
+        if packed_group_tiles_cpu is not None and all(packed_group_tiles_cpu):
+            packed_stack = torch.stack(
+                [torch.cat(group_tiles, dim=1) for group_tiles in packed_group_tiles_cpu],
+                dim=0,
+            ).to(device=device).contiguous()
         if packed_stack is None:
             raise RuntimeError("Komodo group-16 native plan requested for an empty weight.")
 
-        zeros = self._stream_decode_qzeros().to(device=device)
-        scales = self.scales.to(device=device, dtype=dtype).contiguous()
+        zeros = _right_shift_unpack(
+            qzeros_source.unsqueeze(2).expand(-1, -1, self.pack_factor),
+            wf_zero_source,
+            self.dequant_dtype,
+        )
+        zeros = torch.bitwise_and(zeros, self.maxq).reshape(scales_source.shape)
+        scales = scales_source.to(device=device, dtype=dtype).contiguous()
         offsets = (8 - zeros.to(torch.int32)).to(device=device, dtype=dtype).contiguous()
         packed_groups = tuple(packed_stack.unbind(0))
         scale_stack = scales.unsqueeze(1)
