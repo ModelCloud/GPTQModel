@@ -64,6 +64,7 @@ def test_ascendc_host_tiler_uses_bounded_dynamic_staging_ring():
     assert "constexpr uint32_t kDefaultStagingSlots = 2;" in text
     assert "constexpr uint32_t kMaxStagingSlots = 8;" in text
     assert "const uint32_t staging_waves = CeilDivU32(" in text
+    assert "workspace_bytes < dense_dequant_bytes" in text
     assert "tiling.set_staging_slots(staging_slots);" in text
 
 
@@ -125,6 +126,23 @@ def test_cannoe_tiling_plan_disables_dense_equivalent_single_wave_staging(monkey
     assert plan.custom_workspace_bytes == 0
 
 
+def test_cannoe_tiling_plan_counts_cube_workspace_in_dense_guard(monkeypatch):
+    cannoe = _load_cannoe_module()
+    _patch_runtime_planner(monkeypatch, cannoe)
+
+    plan = cannoe._cannoe_tiling_plan(
+        rows=1,
+        in_features=2048,
+        out_features=2048,
+        group_size=32,
+        device=object(),
+    )
+
+    assert not plan.staged_dequant
+    assert plan.cube_workspace_bytes == 0
+    assert plan.custom_workspace_bytes == 0
+
+
 def test_cannoe_tiling_plan_keeps_default_two_slot_ring_for_large_shapes(monkeypatch):
     cannoe = _load_cannoe_module()
     _patch_runtime_planner(monkeypatch, cannoe)
@@ -140,6 +158,7 @@ def test_cannoe_tiling_plan_keeps_default_two_slot_ring_for_large_shapes(monkeyp
     assert plan.staged_dequant
     assert plan.vector_dequant_tasks > plan.staging_blocks
     assert plan.staging_slots == 2
+    assert plan.custom_workspace_bytes == plan.staging_workspace_bytes + plan.cube_workspace_bytes
 
 
 def test_cannoe_tiling_plan_allows_svdquant_style_six_slot_ring(monkeypatch):

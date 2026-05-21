@@ -253,7 +253,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
         const uint64_t workspace_bytes = cube_workspace_bytes + staging_workspace_bytes;
         const uint64_t dense_dequant_bytes =
             static_cast<uint64_t>(k64) * static_cast<uint64_t>(n64) * sizeof(uint16_t);
-        if (staging_workspace_bytes > 0 && staging_workspace_bytes < dense_dequant_bytes) {
+        if (staging_workspace_bytes > 0 && workspace_bytes < dense_dequant_bytes) {
             bool enable_staged_dequant = true;
 #ifdef CANNOE_EXPERIMENTAL_MIXED_LAUNCH
             tiling_key = GET_TPL_TILING_KEY(kCannoeLaunchModeMixedAicAiv);

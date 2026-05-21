@@ -560,7 +560,7 @@ def _cannoe_tiling_plan(
     staging_slots = min(requested_staging_slots, max(1, staging_waves))
     staging_workspace_bytes = staging_tile_bytes * staging_slots * staging_blocks
     cube_workspace_bytes = _CANNOE_CUBE_WORKSPACE_BYTES if cube_consumer_requested else 0
-    custom_workspace_bytes = staging_workspace_bytes
+    custom_workspace_bytes = staging_workspace_bytes + cube_workspace_bytes
     dense_dequant_bytes = in_features * out_features * 2
     staged_dequant = (
         _cannoe_staged_dequant_enabled()

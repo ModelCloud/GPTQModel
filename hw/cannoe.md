@@ -875,6 +875,10 @@ Applied follow-up:
   on large shapes without changing the custom-op ABI or staging tensor layout.
   The workspace formula is now `aligned(base_k * base_n * sizeof(fp16)) *
   staging_blocks * min(requested_slots, staging_waves)`.
+- The staged/Cube dense guard now counts the full allocated workspace:
+  `staging_workspace + cube_system_workspace`. This matches the Ascend C host
+  tiler allocation and prevents small Cube-consumer probes from passing the
+  memory gate while hiding CANN's 16 MiB Matmul system workspace.
 
 Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
 raw validator now avoids unrelated public ACLNN parser failures by creating test
