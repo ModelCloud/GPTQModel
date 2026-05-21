@@ -1981,3 +1981,45 @@ only discovered OPP tree is still `/usr/local/Ascend/cann-8.5.1/opp`), and
 `torch_npu` started failing import when run under an explicit CANN 9
 environment because `ASCEND_OPP_PATH` could not resolve a matching OPP package.
 Do not treat the failed full-gate candidate as a validated speed result.
+
+## 2026-05-21: SVDQuant-Inspired Cannoe Fused Probes
+
+Status: failed production-speed/correctness gate. Keep these as design
+constraints, not runtime paths.
+
+Context: inspected `Qubitium/svdquant-kernels` local commit `eeed047`, focusing
+on `csrc/kernels/gemm_w4a4/ascend/`. The useful idea is its explicit AIC/AIV
+mixed launch plus ring-style Cube-to-Vector ownership. The raw W4A4 `mad_s4`
+math path is not directly reusable for GPTQ W4A16 Cannoe without activation
+quantization.
+
+CANN 9.1.0-beta.1 host note: public ACLNN setup was not healthy during the
+sweep. Plain `torch.randn(..., device="npu")` failed in `aclnnInplaceNormal`
+with `561103`, and native `npu_weight_quant_batchmatmul` failed in
+`aclnnWeightQuantBatchMatmulV3` with `161002`. The raw validator was updated to
+create random/fill tensors on CPU, delay custom OPP exposure until custom-op
+launch, and use a CPU reference by default. That makes custom-kernel failures
+visible without depending on the broken public ACLNN baseline.
+
+Artifacts:
+
+- `/tmp/cannoe_svdq/parallel_results`
+- `/tmp/cannoe_svdq/parallel_results_cpu_ref`
+- `/tmp/cannoe_svdq/smoke_after_cpu_ref.json`
+
+| NPU | Experiment | Result | Metric / reason |
+| ---: | --- | --- | --- |
+| 0 | `tscm-direct-local-a`, Qwen down | Reject | `507015`; illegal instruction, likely unaligned UUB address |
+| 1 | `tscm-direct-local-a-serial-k`, Qwen down | Reject | `507015`; illegal instruction, likely unaligned UUB address |
+| 2 | `tscm-iterate-getc-diagnostic`, default cases | Reject | hung on a small default case after earlier children |
+| 3 | `aic-tscm-syncall-diagnostic`, Qwen down | Marker-only pass | `349.2921 ms`; no data-path correctness validation |
+| 4 | `aic-tscm-index-diagnostic`, Qwen down | Marker-only pass | `365.6911 ms`; no data-path correctness validation |
+| 5 | `aic-staged-gm-visibility-diagnostic`, Qwen down | Reject | `507015`; D-cache-to-UB bus response error |
+| 6 | `aic-tscm-ping-diagnostic`, Qwen down | Reject | timeout at 60 s |
+| 7 | `aic-tscm-zero-b-diagnostic`, Qwen down | Reject | `507015`; MPU invalid access |
+
+Interpretation: SVDQuant confirms the right design direction is lower-level
+Cube/vector ownership with a bounded ring, but the current Cannoe TSCM and
+generated-workspace handoff probes are still unsafe or far too slow. Do not
+retry these exact strategies unless the kernel lifecycle changes to CANN-managed
+KFC/SCM ownership or a lower-level Cube/FIXPIPE path.

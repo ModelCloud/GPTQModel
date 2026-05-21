@@ -142,12 +142,36 @@ def _emit_json_result(result: dict[str, Any], result_fd: int | None) -> None:
         os.write(result_fd, line.encode("utf-8"))
 
 
-def _apply_custom_opp_env(env: dict[str, str], args: argparse.Namespace) -> None:
+def _prepend_path(env: dict[str, str], name: str, value: Path) -> None:
+    value_text = str(value)
+    existing = [part for part in env.get(name, "").split(os.pathsep) if part and part != value_text]
+    env[name] = os.pathsep.join([value_text, *existing])
+
+
+def _remove_path(env: dict[str, str], name: str, value: Path) -> None:
+    value_text = str(value)
+    existing = [part for part in env.get(name, "").split(os.pathsep) if part and part != value_text]
+    if existing:
+        env[name] = os.pathsep.join(existing)
+    else:
+        env.pop(name, None)
+
+
+def _apply_custom_opp_env(
+    env: dict[str, str],
+    args: argparse.Namespace,
+    *,
+    expose_kernel_package: bool = True,
+) -> None:
     if args.opp_install:
         vendor = Path(args.opp_install).expanduser() / "vendors" / "customize"
         opapi_lib = vendor / "op_api" / "lib" / "libcust_opapi.so"
-        env["ASCEND_CUSTOM_OPP_PATH"] = str(vendor) + os.pathsep + env.get("ASCEND_CUSTOM_OPP_PATH", "")
-        env["LD_LIBRARY_PATH"] = str(opapi_lib.parent) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+        if expose_kernel_package:
+            _prepend_path(env, "ASCEND_CUSTOM_OPP_PATH", vendor)
+            _prepend_path(env, "LD_LIBRARY_PATH", opapi_lib.parent)
+        else:
+            _remove_path(env, "ASCEND_CUSTOM_OPP_PATH", vendor)
+            _remove_path(env, "LD_LIBRARY_PATH", opapi_lib.parent)
         env.setdefault("GPTQMODEL_CANNOE_ASCENDC_OPAPI_LIB", str(opapi_lib))
     if args.opapi_lib:
         env["GPTQMODEL_CANNOE_ASCENDC_OPAPI_LIB"] = str(Path(args.opapi_lib).expanduser())
@@ -314,8 +338,8 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
     import torch_npu  # noqa: F401
 
     torch.npu.set_device(0)
-    torch.ops.load_library(str(bridge_lib))
-    torch.manual_seed(int(case["seed"]))
+    seed = int(case["seed"])
+    torch.manual_seed(seed)
 
     rows = int(case["rows"])
     k = int(case["k"])
@@ -327,32 +351,63 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
     warmup = int(args.warmup)
     iters = int(args.iters)
 
-    x = torch.randn((rows, k), device="npu", dtype=torch.float16)
+    x_cpu = torch.randn((rows, k), dtype=torch.float16)
     input_scale = case.get("input_scale")
     if input_scale is not None:
-        x.mul_(float(input_scale))
+        x_cpu.mul_(float(input_scale))
     active_k = _expand_active_k(case, k)
     one_hot_k = int(case.get("one_hot_k", args.one_hot_k))
     if active_k is not None:
         active_values = _active_values(case, len(active_k))
-        x.zero_()
+        x_cpu.zero_()
         for active_index, active_value in zip(active_k, active_values):
             if active_index < 0 or active_index >= k:
                 raise ValueError(f"active_k entry {active_index} must be in [0, {k})")
-            x[:, active_index] = active_value
+            x_cpu[:, active_index] = active_value
     elif one_hot_k >= 0:
         if one_hot_k >= k:
             raise ValueError(f"one_hot_k={one_hot_k} must be less than k={k}")
-        x.zero_()
-        x[:, one_hot_k] = 1
-    signed_weight = torch.randint(-8, 8, (k, n), device="npu", dtype=torch.int32).contiguous()
+        x_cpu.zero_()
+        x_cpu[:, one_hot_k] = 1
+    signed_weight_cpu = torch.randint(-8, 8, (k, n), dtype=torch.int32).contiguous()
     if args.lane_diagnostic:
-        pattern = torch.arange(-8, 8, device="npu", dtype=torch.int32).repeat(4)
-        signed_weight.zero_()
-        signed_weight[0, : pattern.numel()].copy_(pattern)
+        pattern = torch.arange(-8, 8, dtype=torch.int32).repeat(4)
+        signed_weight_cpu.zero_()
+        signed_weight_cpu[0, : pattern.numel()].copy_(pattern)
+    x = x_cpu.to("npu")
+    signed_weight = signed_weight_cpu.to("npu")
     packed_weight = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
-    scales = torch.full((k // group, n), 0.03125, device="npu", dtype=torch.float16)
-    offsets = torch.zeros((k // group, n), device="npu", dtype=torch.float16)
+    scales_cpu = torch.full((k // group, n), 0.03125, dtype=torch.float16)
+    offsets_cpu = torch.zeros((k // group, n), dtype=torch.float16)
+    scales = scales_cpu.to("npu")
+    offsets = offsets_cpu.to("npu")
+    native = None
+    cpu_reference = None
+    if (
+        args.reference == "cpu"
+        and not (args.path_diagnostic or args.lane_diagnostic or args.tile_fill_diagnostic)
+    ):
+        scale_rows = torch.arange(k, dtype=torch.int64) // group
+        dequant_weight = signed_weight_cpu.to(torch.float32) * scales_cpu[scale_rows].to(torch.float32)
+        if bool(torch.any(offsets_cpu)):
+            dequant_weight = dequant_weight + offsets_cpu[scale_rows].to(torch.float32)
+        cpu_reference = torch.matmul(x_cpu.to(torch.float32), dequant_weight).to(torch.float16)
+    elif not (args.path_diagnostic or args.lane_diagnostic or args.tile_fill_diagnostic):
+        native = torch.ops.npu.npu_weight_quant_batchmatmul(
+            x,
+            packed_weight,
+            scales,
+            offsets,
+            None,
+            None,
+            None,
+            group,
+            1,
+        )
+        torch.npu.synchronize()
+
+    _apply_custom_opp_env(os.environ, args, expose_kernel_package=True)
+    torch.ops.load_library(str(bridge_lib))
 
     def custom_call() -> torch.Tensor:
         return torch.ops.gptqmodel_cannoe.cannoe_w4_a16_matmul(
@@ -539,19 +594,13 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
     custom_ms = (time.perf_counter() - start) * 1000.0 / max(1, iters)
     if custom is None:
         custom = custom_call()
-    native = torch.ops.npu.npu_weight_quant_batchmatmul(
-        x,
-        packed_weight,
-        scales,
-        offsets,
-        None,
-        None,
-        None,
-        group,
-        1,
-    )
-    torch.npu.synchronize()
-    diff = (custom - native).abs()
+    if args.reference == "cpu":
+        assert cpu_reference is not None
+        reference = cpu_reference.to(custom.device)
+    else:
+        assert native is not None
+        reference = native
+    diff = (custom - reference).abs()
     finite_mask = torch.isfinite(diff)
     finite_diff = diff[finite_mask]
     diff_nonfinite_count = int(diff.numel() - finite_diff.numel())
@@ -602,7 +651,7 @@ def _worker_impl(args: argparse.Namespace, result_fd: int | None) -> int:
 
 def _launch_worker(device: int, case: dict[str, Any], args: argparse.Namespace) -> subprocess.Popen[str]:
     env = os.environ.copy()
-    _apply_custom_opp_env(env, args)
+    _apply_custom_opp_env(env, args, expose_kernel_package=False)
     if not args.no_quiet_cann_logs:
         _apply_quiet_cann_env(env)
     env["ASCEND_RT_VISIBLE_DEVICES"] = str(device)
@@ -620,6 +669,8 @@ def _launch_worker(device: int, case: dict[str, Any], args: argparse.Namespace) 
         str(args.max_abs),
         "--mean-abs",
         str(args.mean_abs),
+        "--reference",
+        str(args.reference),
         "--warmup",
         str(args.warmup),
         "--iters",
@@ -629,6 +680,10 @@ def _launch_worker(device: int, case: dict[str, Any], args: argparse.Namespace) 
     ]
     if args.no_quiet_cann_logs:
         cmd.append("--no-quiet-cann-logs")
+    if args.opp_install:
+        cmd.extend(["--opp-install", str(args.opp_install)])
+    if args.opapi_lib:
+        cmd.extend(["--opapi-lib", str(args.opapi_lib)])
     if args.lane_diagnostic:
         cmd.append("--lane-diagnostic")
     if args.tile_fill_diagnostic:
@@ -778,6 +833,15 @@ def main() -> int:
     )
     parser.add_argument("--max-abs", type=float, default=0.02)
     parser.add_argument("--mean-abs", type=float, default=0.004)
+    parser.add_argument(
+        "--reference",
+        choices=("cpu", "npu"),
+        default="cpu",
+        help=(
+            "Reference path for accuracy checks. The CPU path avoids unrelated public ACLNN "
+            "parser failures during raw custom-op sweeps."
+        ),
+    )
     parser.add_argument("--warmup", type=int, default=0, help="Untimed custom-op warmup calls per worker.")
     parser.add_argument("--iters", type=int, default=1, help="Timed custom-op calls per worker.")
     parser.add_argument("--one-hot-k", type=int, default=-1, help="Use one-hot activations at this K index for diagnostics.")

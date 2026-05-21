@@ -838,9 +838,58 @@ ACLNN workspace are not a safe AIC handoff mechanism in this mixed launch. The
 next fused attempt should use CANN/Matmul-managed KFC/SCM buffer ownership or a
 lower-level Cube API path for the producer-consumer buffer.
 
+## 2026-05-21: SVDQuant 910B Kernel Lessons
+
+I inspected `Qubitium/svdquant-kernels` at local commit `eeed047` after cloning
+from https://github.com/Qubitium/svdquant-kernels. The relevant Ascend source is
+`csrc/kernels/gemm_w4a4/ascend/`: it is a W4A4 SVDQuant kernel, not a GPTQ
+W4A16 kernel, so the raw math path is not directly portable to Cannoe without
+activation quantization and a different accuracy contract.
+
+Useful structural pieces to carry into Cannoe:
+
+- Use explicit AIC/AIV mixed launch ownership. SVDQuant uses a cube-side INT4
+  main path and vector-side scale/finalization work instead of relying on a
+  high-level matmul call per K tile.
+- Use a bounded ring handoff between Cube and Vector work. SVDQuant stages
+  int32 partials in a small ring, then AIV applies per-block scales and casts to
+  FP16. That maps to our desired design better than writing full dequantized
+  FP16 weights through GM/L2.
+- Keep scale lifetime tied to K blocks. Their per-64-K block scales force a
+  drain after each K block, which is a useful model for GPTQ group-scale
+  scheduling even though the data type contract differs.
+- Avoid manual user-workspace AIV-to-AIC sharing for the fused path. Our marker
+  and GM-visibility probes keep showing that generated ACLNN workspace is not a
+  safe producer/consumer buffer for mixed AIC/AIV handoff in this lifecycle.
+
+Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
+raw validator now avoids unrelated public ACLNN parser failures by creating test
+tensors on CPU, delaying custom OPP exposure until the custom op is called, and
+using a CPU reference by default. `--reference npu` remains available when the
+native `aclnnWeightQuantBatchMatmulV3` path is healthy.
+
+| NPU | Experiment | Result | Metric |
+| ---: | --- | --- | --- |
+| 0 | `tscm-direct-local-a`, Qwen down | Rejected | `507015`; AICore illegal instruction / unaligned UUB |
+| 1 | `tscm-direct-local-a-serial-k`, Qwen down | Rejected | `507015`; AICore illegal instruction / unaligned UUB |
+| 2 | `tscm-iterate-getc-diagnostic`, default cases | Rejected | hung on a small default case after earlier children; killed manually |
+| 3 | `aic-tscm-syncall-diagnostic`, Qwen down | Passed marker diagnostic only | `349.2921 ms`, markers `[914, 1, 1, 16, 128, 256, 8, 8, ...]` |
+| 4 | `aic-tscm-index-diagnostic`, Qwen down | Passed marker diagnostic only | `365.6911 ms`, markers `[913, 1, 1, 16, 128, 256, 8, 8, ...]` |
+| 5 | `aic-staged-gm-visibility-diagnostic`, Qwen down | Rejected | `507015`; D-cache-to-UB bus response error |
+| 6 | `aic-tscm-ping-diagnostic`, Qwen down | Rejected | timeout at 60 s |
+| 7 | `aic-tscm-zero-b-diagnostic`, Qwen down | Rejected | `507015`; MPU invalid access |
+
+The actionable result is not a production speed win yet. It is a design
+constraint: the next real fused attempt should emulate SVDQuant's low-level
+Cube plus vector lifecycle and ring ownership, not keep pushing high-level
+Matmul/TSCM or ACLNN user-workspace handoffs. The currently passing marker
+diagnostics prove mixed launch registration and tiling metadata can work, but
+they do not validate data movement or matmul correctness.
+
 ## Sources
 
 - Local 910B notes: `hw/ascend_910b.md`
 - Torch-NPU and CANN 9 API scan: `hw/torch_npu_cann_9_api_scan.md`
 - arXiv 2601.16536, "W4A16 Mixed-Precision Matrix Multiplication on Decoupled
   Architecture": https://arxiv.org/abs/2601.16536
+- SVDQuant kernels for Ascend/NVIDIA: https://github.com/Qubitium/svdquant-kernels
