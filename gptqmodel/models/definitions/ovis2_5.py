@@ -21,17 +21,6 @@ class Ovis2_5QModel(BaseQModel):
 
     pre_lm_head_norm_module = "llm.model.model.norm"
 
-    # HF_CONVERSION_MAP_REVERSED = (
-    #     # Ovis 2.5 builds the SigLIP visual backbone via `AutoModel`, whose
-    #     # runtime shell exposes `visual_tokenizer.vit.*` directly, while
-    #     # checkpoint tensors still live under `visual_tokenizer.vit.vision_model.*`.
-    #     SimpleNamespace(
-    #         source_patterns=[r"^visual_tokenizer\.vit\.(?!vision_model\.)(.+)$"],
-    #         target_patterns=[r"^visual_tokenizer.vit.vision_model.\1"],
-    #         operations=[],
-    #     ),
-    # )
-
     module_tree = [
         "llm",
         "model",
@@ -93,22 +82,6 @@ class Ovis2_5QModel(BaseQModel):
 
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path)
-
-    @staticmethod
-    def process_vision_info(
-            conversations: list[dict] | list[list[dict]],
-    ) -> Optional[list[Image.Image]]:
-        vision_infos = extract_vision_info(conversations)
-        # Read images
-        image_inputs = []
-        for vision_info in vision_infos:
-            if "image" in vision_info or "image_url" in vision_info:
-                image_inputs.append(fetch_image(vision_info))
-            else:
-                raise ValueError("image, image_url should in content.")
-        if len(image_inputs) == 0:
-            image_inputs = None
-        return image_inputs
 
     @staticmethod
     def replace_image_with_pil(sample):

@@ -117,6 +117,7 @@ from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
+from .definitions.interns1 import InternS1QModel  # noqa: E402
 from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
@@ -148,6 +149,7 @@ from .definitions.ovis import OvisQModel  # noqa: E402
 from .definitions.ovis2 import Ovis2QModel  # noqa: E402
 from .definitions.ovis2_5 import Ovis2_5QModel  # noqa: E402
 from .definitions.ovis2_6_moe import Ovis2_6_MoeQModel  # noqa: E402
+from .definitions.ovis2_6_moe import Ovis2_6_NextQModel  # noqa: E402
 from .definitions.pangu_alpha import PanguAlphaQModel  # noqa: E402
 from .definitions.phi import PhiQModel  # noqa: E402
 from .definitions.phi3 import Phi3QModel, PhiMoEGPTQForCausalLM  # noqa: E402
@@ -223,6 +225,7 @@ MODEL_MAP = {
     "baichuan": BaiChuanQModel,
     "internlm": InternLMQModel,
     "internlm2": InternLM2QModel,
+    "interns1": InternS1QModel,
     "internvl_chat": InternVLChatQModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone
@@ -287,6 +290,7 @@ MODEL_MAP = {
     "ovis2": Ovis2QModel,
     "ovis2_5": Ovis2_5QModel,
     "ovis2_6_moe": Ovis2_6_MoeQModel,
+    "ovis2_6_next": Ovis2_6_NextQModel,
     "telechat": TeleChat2QModel,
     "instella": InstellaQModel,
     "mimo": MimoQModel,

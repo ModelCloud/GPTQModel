@@ -44,6 +44,7 @@ from .hymba import HymbaQModel
 from .instella import InstellaQModel
 from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
+from .interns1 import InternS1QModel
 from .internvl_chat import InternVLChatQModel
 from .llama4 import Llama4QModel
 from .mimo import MimoQModel
@@ -62,6 +63,7 @@ from .opt import OptQModel
 from .ovis import OvisQModel
 from .ovis2_5 import Ovis2_5QModel
 from .ovis2_6_moe import Ovis2_6_MoeQModel
+from .ovis2_6_moe import Ovis2_6_NextQModel
 from .phi import PhiQModel
 from .phi3 import Phi3QModel
 from .qwen import QwenQModel

@@ -8,6 +8,7 @@ from torch import nn
 
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from .ovis2_5 import Ovis2_5QModel
+from ...quantization import METHOD
 
 
 class Ovis2_6_MoeQModel(Ovis2_5QModel):
@@ -73,3 +74,44 @@ class Ovis2_6_MoeQModel(Ovis2_5QModel):
         # resolving nonexistent checkpoint keys.
         self._materialize_missing_vision_post_layernorm(torch.device(self.quantize_config.device))
         super().pre_quantize_generate_hook_start()
+
+
+class Ovis2_6_NextQModel(Ovis2_6_MoeQModel):
+    layer_modules_strict = False
+
+    module_tree = [
+        "llm",
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            # Token mixers
+            "self_attn": ("q_norm:!", "k_norm:!", "q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "linear_attn": ("norm:!", "conv1d:!", "in_proj_qkvz:0", "in_proj_ba:!:0", "out_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            # MLP / MoE
+            "mlp:moe": {
+                # MoE router + shared expert (Qwen3NextSparseMoeBlock)
+                "gate": ("gate:!",),  # router gate linear
+                "shared_expert_gate": ("shared_expert_gate:!",),
+                # <-- single (1, N) logic projections should not be quantized
+                "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+
+                # Experts list with dynamic index
+                "experts:0": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
+            },
+        },
+    ]
+
+    module_tree_overrides = {
+        METHOD.AWQ: [
+            {
+                "mlp:moe": {
+                    "gate": ("gate",),
+                }
+            }
+        ]
+    }
