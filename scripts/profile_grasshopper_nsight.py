@@ -173,14 +173,17 @@ def _kernel_shape(args: argparse.Namespace) -> tuple[int, int, int, int]:
     else:
         ktile_half2 = 128
     batch_tile_rows = 1
-    if args.mode == "gemm" and args.batch >= 2 and args.out_features >= 2048:
-        if (
-            args.bits != 3
-            and args.batch >= 8
-            and (args.out_features >= 8192 or args.in_features >= 8192)
-        ):
-            batch_tile_rows = 8
-        else:
+    if args.mode == "gemm" and args.batch >= 2:
+        if args.out_features >= 2048:
+            if (
+                args.bits != 3
+                and args.batch >= 8
+                and (args.out_features >= 8192 or args.in_features >= 8192)
+            ):
+                batch_tile_rows = 8
+            else:
+                batch_tile_rows = 4
+        elif args.batch >= 4:
             batch_tile_rows = 4
     q_rows_per_tile = (ktile_half2 * args.bits) // 16
     qweight_rows = (args.in_features // 32) * args.bits

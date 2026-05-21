@@ -1593,7 +1593,8 @@ torch::Tensor launch_vecquant3_gptq_gemm(torch::Tensor vec,
 
   const bool use_float_accum = accumulation_type == kAccumulationFloat32;
   const bool use_batch_tiled =
-      batch_rows >= 2 && qweight.size(1) >= kGemmBatchTileMinWidth;
+      batch_rows >= 2 && (qweight.size(1) >= kGemmBatchTileMinWidth ||
+                          batch_rows >= kGemmBatchTileRows);
   if (vec.scalar_type() == torch::kFloat16) {
     if (use_float_accum) {
       if (use_batch_tiled) {

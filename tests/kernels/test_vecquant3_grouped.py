@@ -317,7 +317,8 @@ def test_vecquant3_grouped_gemm_matches_dequant_reference(bits, group_size, dtyp
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for VecQuant3 grouped kernel test")
 @pytest.mark.parametrize("bits", [3, 4, 8])
-def test_vecquant3_grouped_gemm_tiled_matches_gemv_loop(bits):
+@pytest.mark.parametrize("out_features", [256, 2048])
+def test_vecquant3_grouped_gemm_tiled_matches_gemv_loop(bits, out_features):
     torch.manual_seed(53)
     device = torch.device("cuda:0")
     dtype = torch.float16
@@ -325,7 +326,6 @@ def test_vecquant3_grouped_gemm_tiled_matches_gemv_loop(bits):
     lora_group_size = 128
     batch_size = 4
     in_features = 256
-    out_features = 2048
     rank = 32
     groups = in_features // group_size
 
