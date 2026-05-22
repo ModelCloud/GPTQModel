@@ -53,7 +53,6 @@ from ..utils.looper_helpers import (
 )
 from ..utils.model import (
     MoETopKState,
-    find_modules,
     get_layers_with_prefixes,
     get_module,
     move_to,
