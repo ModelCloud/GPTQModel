@@ -168,7 +168,7 @@ def _kernel_shape(args: argparse.Namespace) -> tuple[int, int, int, int]:
         ktile_half2 = 128
     elif (
         args.mode == "gemm"
-        and args.bits == 8
+        and args.bits in (4, 8)
         and args.group_size == 64
         and args.batch >= 8
         and args.out_features >= 2048
