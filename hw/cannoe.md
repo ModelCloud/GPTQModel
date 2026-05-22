@@ -894,6 +894,10 @@ Applied follow-up:
   SVDQuant's vector path is strict about V-pipe ordering when a UB region is
   reused or read immediately after vector work; Cannoe now follows the same
   rule in the vectorized dequant staging helpers.
+- Native GPTQ/AWQ forwards now use the env-aware `_cann_plan()` hot cache
+  directly instead of a second `_cann_native_hot_plan` bypass. This keeps
+  staging slots, base tile sizes, prefetch, and fused-path toggles coherent
+  during ring-depth and workspace sweeps.
 
 Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
 raw validator now avoids unrelated public ACLNN parser failures by creating test

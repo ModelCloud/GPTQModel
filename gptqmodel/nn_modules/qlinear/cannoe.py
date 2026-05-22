@@ -1030,25 +1030,11 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             device=x_flat.device, dtype=compute_dtype
         )
         zero_offsets = bool(self.sym)
-        plan = self._cann_native_hot_plan
-        if (
-            plan is None
-            or self._cann_native_hot_device != x_flat.device
-            or plan.rows != x_flat.shape[0]
-            or plan.group_size != native_group_size
-            or plan.zero_offsets != zero_offsets
-        ):
-            plan = self._cann_plan(
-                x_flat,
-                native_group_size,
-                zero_offsets=zero_offsets,
-            )
-            if not plan.fused_available and not plan.prefetch_enabled:
-                self._cann_native_hot_device = x_flat.device
-                self._cann_native_hot_plan = plan
-            else:
-                self._cann_native_hot_device = None
-                self._cann_native_hot_plan = None
+        plan = self._cann_plan(
+            x_flat,
+            native_group_size,
+            zero_offsets=zero_offsets,
+        )
         if input_perm is not None:
             x_flat = x_flat.index_select(1, input_perm)
         fuse_bias = self.bias is not None and _fuse_bias_enabled()
@@ -1638,21 +1624,7 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
             x_flat = x_flat.contiguous()
 
         packed_weight, scales, offsets, native_group_size, _ = self._native_plan(device=device, dtype=compute_dtype)
-        plan = self._cann_native_hot_plan
-        if (
-            plan is None
-            or self._cann_native_hot_device != x_flat.device
-            or plan.rows != x_flat.shape[0]
-            or plan.group_size != native_group_size
-            or plan.zero_offsets
-        ):
-            plan = self._cann_plan(x_flat, native_group_size)
-            if not plan.fused_available and not plan.prefetch_enabled:
-                self._cann_native_hot_device = x_flat.device
-                self._cann_native_hot_plan = plan
-            else:
-                self._cann_native_hot_device = None
-                self._cann_native_hot_plan = None
+        plan = self._cann_plan(x_flat, native_group_size)
         output = None
         # Group-32 AWQ probes showed a wider drift envelope when CANN fused bias.
         fuse_bias = self.bias is not None and _fuse_bias_enabled() and native_group_size == 128

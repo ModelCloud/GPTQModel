@@ -265,6 +265,15 @@ def test_cannoe_plan_cache_tracks_staging_ring_env(monkeypatch):
     assert plan_two is not plan_six
 
 
+def test_cannoe_native_forwards_use_env_aware_plan_cache():
+    cannoe = Path(__file__).resolve().parents[1] / "gptqmodel" / "nn_modules" / "qlinear" / "cannoe.py"
+    text = cannoe.read_text(encoding="utf-8")
+
+    assert "plan = self._cann_native_hot_plan" not in text
+    assert "self._cann_native_hot_plan = plan" not in text
+    assert text.count("plan = self._cann_plan(") >= 2
+
+
 def test_raw_validator_finds_embedded_json_after_cann_warning():
     validator = _load_raw_validator()
     text = (
