@@ -14,6 +14,14 @@ from gptqmodel.utils.torch import HAS_NPU
 
 
 pytestmark = pytest.mark.skipif(not HAS_NPU, reason="Ascend NPU is required")
+NPU_TEST_DEVICE = "npu:0"
+
+
+def _test_npu_device() -> torch.device:
+    device = torch.device(NPU_TEST_DEVICE)
+    if HAS_NPU:
+        torch.npu.set_device(device)
+    return device
 
 
 def _spd_matrix(size: int, seed: int) -> torch.Tensor:
@@ -23,7 +31,7 @@ def _spd_matrix(size: int, seed: int) -> torch.Tensor:
 
 
 def test_npu_inverse_cholesky_factor_matches_cpu_reference():
-    device = torch.device("npu:0")
+    device = _test_npu_device()
 
     for size in (8, 64, 128):
         matrix_cpu = _spd_matrix(size, seed=1000 + size)
@@ -46,7 +54,7 @@ def test_npu_inverse_cholesky_factor_matches_cpu_reference():
 
 
 def test_npu_inverse_cholesky_factor_rejects_non_positive_definite_matrix():
-    matrix = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32, device="npu:0")
+    matrix = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32, device=_test_npu_device())
 
     with pytest.raises(torch._C._LinAlgError):
         npu_inverse_cholesky_factor(matrix)
@@ -64,15 +72,16 @@ def test_gptq_npu_hessian_inverse_avoids_torch_npu_cpu_fallback_warnings():
         if not HAS_NPU:
             raise RuntimeError("Ascend NPU is not available")
 
-        torch.npu.set_device(0)
+        npu_test_device = "npu:0"
+        torch.npu.set_device(npu_test_device)
         torch.manual_seed(0)
 
-        module = nn.Linear(16, 16, bias=False, device="npu:0", dtype=torch.float16)
+        module = nn.Linear(16, 16, bias=False, device=npu_test_device, dtype=torch.float16)
         gptq = GPTQ(module, qcfg=QuantizeConfig(damp_percent=0.05, damp_auto_increment=0.05))
 
         base = torch.randn(16, 16, dtype=torch.float32)
         hessian_cpu = base.matmul(base.T) + torch.eye(16, dtype=torch.float32) * 0.25
-        hessian = hessian_cpu.to(device="npu:0")
+        hessian = hessian_cpu.to(device=npu_test_device)
 
         factor, damp = gptq.hessian_inverse(hessian)
         torch.npu.synchronize()
@@ -90,12 +99,10 @@ def test_gptq_npu_hessian_inverse_avoids_torch_npu_cpu_fallback_warnings():
         """
     )
 
-    env = os.environ.copy()
-    env.setdefault("ASCEND_RT_VISIBLE_DEVICES", "0")
     proc = subprocess.run(
         [sys.executable, "-c", script],
         cwd=os.getcwd(),
-        env=env,
+        env=os.environ.copy(),
         text=True,
         capture_output=True,
         timeout=60,

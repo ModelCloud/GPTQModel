@@ -1,5 +1,4 @@
 import copy
-import os
 import sys
 import warnings
 
@@ -29,12 +28,7 @@ from gptqmodel.utils.importer import auto_select_device, get_kernel_for_backend,
 from gptqmodel.utils.torch import HAS_NPU, last_npu_device_by_pci_bus_order
 
 
-def _default_npu_test_device() -> str:
-    selected = last_npu_device_by_pci_bus_order()
-    return str(selected) if selected is not None else "npu:0"
-
-
-NPU_TEST_DEVICE = os.environ.get("GPTQMODEL_TEST_NPU_DEVICE", _default_npu_test_device())
+NPU_TEST_DEVICE = "npu:0"
 NPU_CPU_FALLBACK_MARKERS = (
     "not currently supported on the NPU backend",
     "fall back to run on the CPU",
