@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+import importlib
 import os
 import sys
 import threading
@@ -583,11 +584,7 @@ def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
     layer = model.model.layers[0]
     replace_module_with_hooked_legacy(layer)
 
-    try:
-        from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-        is_causal_conv1d_available = True
-    except ImportError:
-        is_causal_conv1d_available = False
+    is_causal_conv1d_available = importlib.util.find_spec("causal_conv1d") is not None
 
     device = "cuda" if is_causal_conv1d_available else "cpu"
     quant_cfg = _make_quant_config(device)
