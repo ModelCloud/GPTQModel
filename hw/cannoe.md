@@ -898,6 +898,12 @@ Applied follow-up:
   directly instead of a second `_cann_native_hot_plan` bypass. This keeps
   staging slots, base tile sizes, prefetch, and fused-path toggles coherent
   during ring-depth and workspace sweeps.
+- Plan-affecting environment names are centralized in
+  `_CANNOE_PLAN_ENV_NAMES`, and the native tuning detector extends that same
+  list for non-tiling native-pack knobs. Future SVDQuant-style sweeps for ring
+  depth, base tile sizes, prefetch windows, fused-op selection, and
+  inner-precise mode now share one cache-key source of truth, which avoids
+  stale plan reuse when a new performance or VRAM knob is added.
 
 Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
 raw validator now avoids unrelated public ACLNN parser failures by creating test

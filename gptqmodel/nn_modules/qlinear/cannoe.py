@@ -38,6 +38,29 @@ _CANNOE_CUBE_CONSUMER_ENV = "GPTQMODEL_CANNOE_CUBE_CONSUMER"
 _CANNOE_STAGING_SLOTS_ENV = "GPTQMODEL_CANNOE_STAGING_SLOTS"
 _CANNOE_PREPACK_TILE_N_ENV = "GPTQMODEL_CANNOE_PREPACK_TILE_N"
 _CANNOE_BF16_NATIVE_ENV = "GPTQMODEL_CANNOE_BF16_NATIVE"
+_CANNOE_PLAN_ENV_NAMES = (
+    _CANNOE_PREFETCH_ENV,
+    _CANNOE_PREFETCH_MAX_BYTES_ENV,
+    _CANNOE_PREFETCH_MIN_BYTES_ENV,
+    _CANNOE_ACTIVE_CORES_ENV,
+    _CANNOE_SPLIT_K_ENV,
+    _CANNOE_MIN_SPLIT_K_RATIO_ENV,
+    _CANNOE_BASE_N_ENV,
+    _CANNOE_BASE_K_ENV,
+    _CANNOE_FUSED_ENV,
+    _CANNOE_FUSED_REQUIRE_ENV,
+    _CANNOE_FUSED_OP_ENV,
+    _CANNOE_ASCENDC_ENV,
+    _CANNOE_V3_ENV,
+    _CANNOE_INNER_PRECISE_ENV,
+    _CANNOE_STAGED_DEQUANT_ENV,
+    _CANNOE_CUBE_CONSUMER_ENV,
+    _CANNOE_STAGING_SLOTS_ENV,
+)
+_CANNOE_NATIVE_TUNING_ENV_NAMES = (
+    *_CANNOE_PLAN_ENV_NAMES,
+    _CANNOE_PREPACK_TILE_N_ENV,
+)
 # 910B CANN reserves this system workspace before the user workspace returned by GetUserWorkspace().
 _CANNOE_CUBE_WORKSPACE_BYTES = 16 * 1024 * 1024
 _CANNOE_MAX_LOGICAL_BLOCKS = 8
@@ -80,6 +103,10 @@ def _cannoe_env_flag(env_name: str, default: bool = False) -> bool:
 
 def _cannoe_env_values(*env_names: str) -> tuple[str | None, ...]:
     return tuple(_cannoe_env(name) for name in env_names)
+
+
+def _cannoe_plan_env_key() -> tuple[str | None, ...]:
+    return _cannoe_env_values(*_CANNOE_PLAN_ENV_NAMES)
 
 
 @dataclass(frozen=True)
@@ -192,27 +219,7 @@ def _cannoe_ascendc_enabled() -> bool:
 
 
 def _cannoe_native_tuning_requested() -> bool:
-    return any(
-        _cannoe_env(name) is not None
-        for name in (
-            _CANNOE_PREFETCH_ENV,
-            _CANNOE_ACTIVE_CORES_ENV,
-            _CANNOE_SPLIT_K_ENV,
-            _CANNOE_MIN_SPLIT_K_RATIO_ENV,
-            _CANNOE_BASE_N_ENV,
-            _CANNOE_BASE_K_ENV,
-            _CANNOE_FUSED_ENV,
-            _CANNOE_FUSED_REQUIRE_ENV,
-            _CANNOE_FUSED_OP_ENV,
-            _CANNOE_ASCENDC_ENV,
-            _CANNOE_V3_ENV,
-            _CANNOE_INNER_PRECISE_ENV,
-            _CANNOE_STAGED_DEQUANT_ENV,
-            _CANNOE_CUBE_CONSUMER_ENV,
-            _CANNOE_STAGING_SLOTS_ENV,
-            _CANNOE_PREPACK_TILE_N_ENV,
-        )
-    )
+    return any(_cannoe_env(name) is not None for name in _CANNOE_NATIVE_TUNING_ENV_NAMES)
 
 
 def _cannoe_inner_precise(rows: int, in_features: int, out_features: int, group_size: int) -> int:
@@ -836,27 +843,7 @@ class _CannoePlanMixin:
         group_size: int,
         zero_offsets: bool = False,
     ) -> CannoeTilingPlan:
-        env_key = (
-            *_cannoe_env_values(
-                _CANNOE_PREFETCH_ENV,
-                _CANNOE_PREFETCH_MAX_BYTES_ENV,
-                _CANNOE_PREFETCH_MIN_BYTES_ENV,
-                _CANNOE_ACTIVE_CORES_ENV,
-                _CANNOE_SPLIT_K_ENV,
-                _CANNOE_MIN_SPLIT_K_RATIO_ENV,
-                _CANNOE_BASE_N_ENV,
-                _CANNOE_BASE_K_ENV,
-                _CANNOE_FUSED_ENV,
-                _CANNOE_FUSED_REQUIRE_ENV,
-                _CANNOE_FUSED_OP_ENV,
-                _CANNOE_ASCENDC_ENV,
-                _CANNOE_V3_ENV,
-                _CANNOE_INNER_PRECISE_ENV,
-                _CANNOE_STAGED_DEQUANT_ENV,
-                _CANNOE_CUBE_CONSUMER_ENV,
-                _CANNOE_STAGING_SLOTS_ENV,
-            ),
-        )
+        env_key = _cannoe_plan_env_key()
         fast_key = (x_flat.device, x_flat.shape[0], group_size, bool(zero_offsets), env_key)
         if getattr(self, "_cann_hot_plan_fast_key", None) == fast_key:
             return self._cann_hot_plan

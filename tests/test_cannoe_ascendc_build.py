@@ -35,6 +35,45 @@ def _load_cannoe_module():
     return importlib.import_module("gptqmodel.nn_modules.qlinear.cannoe")
 
 
+def test_cannoe_plan_env_key_tracks_all_plan_knobs(monkeypatch):
+    cannoe = _load_cannoe_module()
+    expected_names = (
+        "GPTQMODEL_CANNOE_PREFETCH",
+        "GPTQMODEL_CANNOE_PREFETCH_MAX_BYTES",
+        "GPTQMODEL_CANNOE_PREFETCH_MIN_BYTES",
+        "GPTQMODEL_CANNOE_ACTIVE_CORES",
+        "GPTQMODEL_CANNOE_SPLIT_K",
+        "GPTQMODEL_CANNOE_MIN_SPLIT_K_RATIO",
+        "GPTQMODEL_CANNOE_BASE_N",
+        "GPTQMODEL_CANNOE_BASE_K",
+        "GPTQMODEL_CANNOE_FUSED",
+        "GPTQMODEL_CANNOE_FUSED_REQUIRE",
+        "GPTQMODEL_CANNOE_FUSED_OP",
+        "GPTQMODEL_CANNOE_ASCENDC",
+        "GPTQMODEL_CANNOE_V3",
+        "GPTQMODEL_CANNOE_INNER_PRECISE",
+        "GPTQMODEL_CANNOE_STAGED_DEQUANT",
+        "GPTQMODEL_CANNOE_CUBE_CONSUMER",
+        "GPTQMODEL_CANNOE_STAGING_SLOTS",
+    )
+
+    assert cannoe._CANNOE_PLAN_ENV_NAMES == expected_names
+    assert cannoe._CANNOE_NATIVE_TUNING_ENV_NAMES == (
+        *expected_names,
+        "GPTQMODEL_CANNOE_PREPACK_TILE_N",
+    )
+
+    for index, env_name in enumerate(expected_names):
+        for candidate in expected_names:
+            monkeypatch.delenv(candidate, raising=False)
+        baseline = cannoe._cannoe_plan_env_key()
+        monkeypatch.setenv(env_name, str(index + 1))
+        changed = cannoe._cannoe_plan_env_key()
+
+        assert changed != baseline
+        assert changed[index] == str(index + 1)
+
+
 def test_ascendc_host_tiler_caps_logical_blocks():
     host_tiler = (
         Path(__file__).resolve().parents[1]

@@ -175,13 +175,28 @@ def test_cannoe_staged_dequant_plan_is_opt_in_and_bounded(monkeypatch):
         device=torch.device("cpu"),
     )
 
-    assert cube_plan.staged_dequant is True
-    assert cube_plan.cube_consumer is True
+    assert cube_plan.staged_dequant is False
+    assert cube_plan.cube_consumer is False
     assert cube_plan.base_k == 128
-    assert cube_plan.cube_workspace_bytes == 16 * 1024 * 1024
+    assert cube_plan.cube_workspace_bytes == 0
     assert cube_plan.staging_workspace_offset == 0
-    assert cube_plan.custom_workspace_bytes == cube_plan.staging_workspace_bytes
-    assert cube_plan.custom_workspace_bytes < cube_plan.in_features * cube_plan.out_features * 2
+    assert cube_plan.custom_workspace_bytes == 0
+
+    large_cube_plan = _cannoe_tiling_plan(
+        rows=8,
+        in_features=17408,
+        out_features=5120,
+        group_size=32,
+        device=torch.device("cpu"),
+    )
+
+    assert large_cube_plan.staged_dequant is True
+    assert large_cube_plan.cube_consumer is True
+    assert large_cube_plan.cube_workspace_bytes == 16 * 1024 * 1024
+    assert large_cube_plan.custom_workspace_bytes == (
+        large_cube_plan.staging_workspace_bytes + large_cube_plan.cube_workspace_bytes
+    )
+    assert large_cube_plan.custom_workspace_bytes < large_cube_plan.in_features * large_cube_plan.out_features * 2
 
     n256_cube_plan = _cannoe_tiling_plan(
         rows=8,
@@ -469,8 +484,8 @@ def test_cannoe_env_controls_plan(monkeypatch):
 
     plan = _cannoe_tiling_plan(
         rows=8,
-        in_features=8192,
-        out_features=1024,
+        in_features=17408,
+        out_features=5120,
         group_size=32,
         device=torch.device("cpu"),
     )
