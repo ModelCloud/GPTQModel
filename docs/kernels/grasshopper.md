@@ -20,12 +20,28 @@ plus Nsight Compute for promoted changes.
 | 2026-05-22 | `f5bb54ef` | Group128 3-bit wide batch tile | Batch GEMM 3-bit group128 uses the 8-row wide batch tile for batch8 wide-feature shapes, halving grid z-slices and split-K atomics from `2048 -> 1024` CTAs. Nsight improved `180.480 us -> 179.136 us`, instructions dropped `88.16M -> 78.05M`, registers/thread rose `40 -> 47`, and host median improved `0.2355 ms -> 0.2200 ms` with final-source rebuild at `0.2306 ms`. Adjacent 3-bit group64 stayed on the 4-row layout with median `0.2278 ms`. |
 | 2026-05-22 | `524c0064` | Group64 3-bit wide batch tile | Batch GEMM 3-bit group64 also uses the 8-row wide batch tile for batch8 wide-feature shapes, reducing grid z-slices and split-K atomics from `2048 -> 1024` CTAs. Nsight improved `183.968 us -> 181.216 us`, instructions dropped `89.57M -> 78.75M`, registers/thread rose `40 -> 47`, and host median improved `0.2284 ms -> 0.2228 ms`. Adjacent 3-bit group32 stayed on the 4-row layout with median `0.2360 ms`. |
 | 2026-05-22 | `1d97212a` | Group32 3-bit wide batch tile | Batch GEMM 3-bit group32 now also uses the 8-row wide batch tile for batch8 wide-feature shapes, reducing grid z-slices and split-K atomics from `2048 -> 1024` CTAs. Nsight improved `189.856 us -> 184.640 us`, instructions dropped `92.39M -> 80.16M`, registers/thread rose `40 -> 47`, and host median improved `0.2360 ms -> 0.2244 ms`. |
+| 2026-05-22 | `790a7eb4` | Full-tile fixed-group batch decode | Batch GEMM 4/8-bit fixed-group tiles now use a full-K-tile path and a full-batch-row path when there is no K tail and `valid_rows == BatchTileRows`, removing inner-loop tail and row-validity checks on Qwen3-32B batch8 group64/group128 shapes. Nsight group128 `5120x25600` batch8 improved `292.320 us -> 223.680 us`; FMA-pipe instructions dropped `35.14M -> 33.98M`, registers/thread rose `32 -> 48`, and host median improved `0.3399 ms -> 0.2827 ms`. |
+
+## External Kernel Lessons
+
+- The requested `https://github.com/qubitium/SVDQuant` repository was not
+  accessible during the study. Public SVDQuant-related code and docs from
+  Nunchaku/DeepCompressor were used instead.
+- Nunchaku's useful lesson for GrassHopper is low-rank fusion around shared
+  data movement: down-projection/quantize share input, and up-projection/4-bit
+  compute share output. That matches GrassHopper's decode-LoRA advantage on
+  single-row Qwen3-32B sweeps.
+- The current Marlin gap is not primarily LoRA. Nsight shows the Qwen3-32B
+  batch8 wide MLP path is dominated by base dequant/reduction work and
+  split-K output atomics, so promoted probes should first reduce inner-loop
+  base decode work without losing fixed-group tiling.
 
 ## Benchmark Sweeps
 
 | Date | Sweep | Finding |
 | --- | --- | --- |
 | 2026-05-22 | Qwen3-32B GPTQ 4-bit fp16 vs Marlin, groups 32/64/128, rows 1 and 8, rank64 dense LoRA | No broad Marlin displacement yet. On `NVIDIA PG506-230 sm_80`, projection-sum decode base is near parity/slower (`1.016x-1.085x` GH/Marlin), but decode LoRA is faster (`0.763x-0.784x` including LoRA-A, `0.728x-0.742x` with precomputed down). Batch8 remains the blocker: base is `1.783x-1.829x` slower and LoRA-total is `1.223x-1.246x` slower. The largest regressions are Qwen3-32B MLP/down batch8 projections, where GrassHopper is about `2.62x-2.68x` slower than Marlin despite faster narrow k/v projections. |
+| 2026-05-22 | Qwen3-32B row8 post full-tile fast path, groups 64/128, rank64 dense LoRA | Positive but not a full Marlin beat yet. Group64 row8 projection-sum base improved `1.2672 ms -> 1.1018 ms` (`1.783x -> 1.531x` GH/Marlin) and LoRA-total improved `1.6993 ms -> 1.4838 ms` (`1.223x -> 1.073x`). Group128 row8 base improved `1.2892 ms -> 1.1264 ms` (`1.825x -> 1.592x`) and LoRA-total improved `1.6968 ms -> 1.4751 ms` (`1.228x -> 1.080x`). |
 
 ### Qwen3-32B vs Marlin Projection Sum
 
@@ -58,6 +74,25 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID python scripts/benchmark_grasshopper_vs_marlin_qwen
 | 128 | 8 | lora_precomputed_down | 1.4223 | 1.1213 | 1.268x |
 | 128 | 8 | lora_total | 1.6968 | 1.3819 | 1.228x |
 
+### Post Full-Tile Fixed-Group Fast Path
+
+Commands:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID python scripts/benchmark_grasshopper_vs_marlin_qwen3_32b.py \
+  --rows 8 --group-size <64|128> --rank 64 --warmup 20 --iters 80 \
+  --json-out /tmp/grasshopper_marlin_qwen3_32b_g<group>_fp16_after_full_tile.json
+```
+
+| Group | Rows | Mode | GrassHopper total ms | Marlin total ms | GH / Marlin |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 64 | 8 | base | 1.1018 | 0.7199 | 1.531x |
+| 64 | 8 | lora_precomputed_down | 1.2206 | 1.1238 | 1.086x |
+| 64 | 8 | lora_total | 1.4838 | 1.3824 | 1.073x |
+| 128 | 8 | base | 1.1264 | 0.7076 | 1.592x |
+| 128 | 8 | lora_precomputed_down | 1.2324 | 1.1151 | 1.105x |
+| 128 | 8 | lora_total | 1.4751 | 1.3655 | 1.080x |
+
 ## Rejected Probes
 
 | Date | Probe | Result |
@@ -72,6 +107,8 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID python scripts/benchmark_grasshopper_vs_marlin_qwen
 | 2026-05-22 | Apply quant-group segment iteration to all 4/8-bit dynamic group sizes | Rejected. The broad change helped group32 but regressed batch8 4-bit 8192x8192 group64 median `0.2141 ms -> 0.2200 ms`; refined the promoted path to `GroupSize == 32` batched GEMM only. |
 | 2026-05-22 | Apply group32 quant-group segment iteration to single-row GEMV | Rejected. 4-bit GEMV 8192x8192 group32 median regressed `0.1119 ms -> 0.1238 ms`; the extra loop structure hurt single-row decode despite reducing group checks. |
 | 2026-05-22 | Use a 32-half2 K tile for batch8 8-bit group32 GEMM | Rejected. Batch8 8192x8192 group32 median regressed `0.2200 ms -> 0.2273 ms`; doubling split-K CTAs and atomics outweighed less per-CTA group work. |
+| 2026-05-22 | Coarsen group128 split-K with two adjacent K chunks per CTA | Rejected. Qwen3-32B `5120x25600` batch8 group128 median regressed `0.3399 ms -> 0.3878 ms`; halving atomics did not offset the extra loop/synchronization work and lower scheduling granularity. |
+| 2026-05-22 | Route group128 wide batch through a 128-half2 tile with a two-group fixed-scale path | Rejected. It improved over the old baseline but regressed against the promoted full-tile 64-half2 path: Qwen3-32B `5120x25600` batch8 group128 median `0.2827 ms -> 0.2941 ms`. |
 
 ## Promotion Rule
 
