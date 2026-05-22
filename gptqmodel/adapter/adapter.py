@@ -221,6 +221,23 @@ class Lora(Adapter):
 
         # native quantized model/eora is float16 for gptq but for training, we may load the model as bfloat16 for accuracy
         lora_A, lora_B = self._forward_lora_tensors(x)
+        if (
+            lora_A.dim() == 2
+            and lora_B.dim() == 2
+            and x.shape[-1] == lora_A.shape[0]
+            and lora_A.shape[1] == lora_B.shape[0]
+            and out.shape[-1] == lora_B.shape[1]
+            and (
+                not torch.is_grad_enabled()
+                or not any(t.requires_grad for t in (x, out, lora_A, lora_B))
+            )
+        ):
+            out_shape = out.shape
+            x_2d = x.reshape(-1, x.shape[-1])
+            out_2d = out.reshape(-1, out.shape[-1])
+            if x_2d.shape[0] == out_2d.shape[0]:
+                lora_down = torch.matmul(x_2d, lora_A)
+                return torch.addmm(out_2d, lora_down, lora_B, beta=1.0, alpha=1.0, out=out_2d).reshape(out_shape)
 
         # fix batch for lora
         # Some kernels do not reshape x, such as marlin / exllama / exllamav2.

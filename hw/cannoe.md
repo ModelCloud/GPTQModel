@@ -952,6 +952,21 @@ Applied follow-up:
   custom workspace size. This is required for SVDQuant-style experiments because
   a fast-looking timing is not actionable unless it is tied to the actual
   kernel/lifecycle path that produced it.
+- SVDQuant's LoRA epilogue pattern is now applied to the generic runtime LoRA
+  adapter path: the low-rank down projection is still materialized as the small
+  `[M, R]` tensor, but the LoRA-up projection accumulates directly into the
+  existing output with `addmm(..., out=out_2d)` instead of materializing a full
+  `[M, N]` LoRA update and then adding it. This is not the true Cannoe fused
+  INT4 dequant-to-Cube kernel target, but it is a validated low-risk memory and
+  launch reduction for LoRA inference on all quantized kernels using the common
+  adapter.
+- 2026-05-22 NPU0 rank-16 synthetic Qwen3 27B LoRA gate after the epilogue
+  change: Cannoe total `1.2826 ms` with `down_proj=0.3210 ms`,
+  `max_abs=0.0625`, and `max_rel=0.0162107`. The immediately previous same
+  harness measured Cannoe LoRA total `1.3415 ms` with `down_proj=0.3409 ms`.
+  The no-LoRA full Qwen guard remained stable at `0.9597 ms` total with
+  `live_src=0.0` for every layer, so this change is scoped to adapter-bearing
+  inference.
 
 Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
 raw validator now avoids unrelated public ACLNN parser failures by creating test

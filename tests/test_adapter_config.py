@@ -26,6 +26,8 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import unittest  # noqa: E402
 
+import torch  # noqa: E402
+
 
 lora = "lora"
 
@@ -124,3 +126,21 @@ class TestExtensionConfig(unittest.TestCase):
         assert qconfig.bits == bits
         assert qconfig.adapter == eora_config
         assert qconfig.adapter.rank == rank
+
+    def test_lora_apply_matches_dense_update(self):
+        torch.manual_seed(9001)
+        x = torch.randn(2, 3, 5, dtype=torch.float16)
+        base = torch.randn(2, 3, 7, dtype=torch.float16)
+        adapter = Lora(
+            rank=4,
+            lora_A=torch.randn(5, 4, dtype=torch.float16),
+            lora_B=torch.randn(4, 7, dtype=torch.float16),
+        )
+
+        expected = base.clone()
+        update = ((x.reshape(-1, 5) @ adapter.lora_A) @ adapter.lora_B).reshape_as(expected)
+        expected.add_(update)
+
+        actual = adapter.apply(x=x, out=base.clone())
+
+        torch.testing.assert_close(actual, expected, atol=1e-3, rtol=3e-3)
