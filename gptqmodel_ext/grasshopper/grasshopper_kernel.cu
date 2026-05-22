@@ -352,6 +352,37 @@ __device__ __forceinline__ void accumulate_pair_batch_fixed_group(
   }
 }
 
+template <typename scalar_t, int Bits, bool FloatAccum, int BatchTileRows,
+          int KTileHalf2>
+__device__ __forceinline__ void accumulate_pair_batch_fixed_group_full_rows(
+    unsigned int packed_pair,
+    int relative_half2_k,
+    const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ blockvec,
+    typename scalar_traits<scalar_t>::scalar2_t scale2,
+    typename scalar_traits<scalar_t>::scalar2_t zero2,
+    float (&acc_float)[BatchTileRows],
+    typename scalar_traits<scalar_t>::scalar2_t (&acc_input)[BatchTileRows]) {
+  static_assert(Bits == 4 || Bits == 8,
+                "Fixed group decode is only used for 4/8-bit GPTQ.");
+  using traits = scalar_traits<scalar_t>;
+  using scalar2_t = typename traits::scalar2_t;
+  constexpr int mask = (1 << Bits) - 1;
+  const scalar2_t deq =
+      traits::make2(traits::from_int(packed_pair & mask),
+                    traits::from_int((packed_pair >> Bits) & mask));
+  const scalar2_t weight = traits::fma2(deq, scale2, zero2);
+#pragma unroll
+  for (int row = 0; row < BatchTileRows; ++row) {
+    const scalar2_t input = blockvec[row * KTileHalf2 + relative_half2_k];
+    if constexpr (FloatAccum) {
+      const scalar2_t product = traits::mul2(weight, input);
+      acc_float[row] += traits::to_float(product.x) + traits::to_float(product.y);
+    } else {
+      acc_input[row] = traits::fma2(weight, input, acc_input[row]);
+    }
+  }
+}
+
 template <typename scalar_t, int Bits, int GroupSize, bool FloatAccum,
           int KTileHalf2>
 __device__ __forceinline__ void accumulate_packed_word(
@@ -506,6 +537,67 @@ __device__ __forceinline__ void accumulate_packed_word_batch_fixed_group(
                                       BatchTileRows, KTileHalf2>(
         packed_pair, absolute_half2 - absolute_half2_base, valid_rows,
         blockvec, scale2, zero2, acc_float, acc_input);
+  }
+}
+
+template <typename scalar_t, int Bits, bool FloatAccum, int BatchTileRows,
+          int KTileHalf2>
+__device__ __forceinline__ void
+accumulate_packed_word_batch_fixed_group_full_tile(
+    unsigned int packed_word,
+    int relative_qrow,
+    int valid_rows,
+    const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ blockvec,
+    typename scalar_traits<scalar_t>::scalar2_t scale2,
+    typename scalar_traits<scalar_t>::scalar2_t zero2,
+    float (&acc_float)[BatchTileRows],
+    typename scalar_traits<scalar_t>::scalar2_t (&acc_input)[BatchTileRows]) {
+  static_assert(Bits == 4 || Bits == 8,
+                "Fixed group decode is only used for 4/8-bit GPTQ.");
+  constexpr int pairs_per_word = 16 / Bits;
+  constexpr int pair_bits = Bits * 2;
+  constexpr unsigned int pair_mask = (1u << pair_bits) - 1u;
+  const int relative_half2_word_base =
+      (relative_qrow / Bits) * 16 + (relative_qrow % Bits) * pairs_per_word;
+
+#pragma unroll
+  for (int pair = 0; pair < pairs_per_word; ++pair) {
+    const unsigned int packed_pair =
+        (packed_word >> (pair * pair_bits)) & pair_mask;
+    accumulate_pair_batch_fixed_group<scalar_t, Bits, FloatAccum,
+                                      BatchTileRows, KTileHalf2>(
+        packed_pair, relative_half2_word_base + pair, valid_rows, blockvec,
+        scale2, zero2, acc_float, acc_input);
+  }
+}
+
+template <typename scalar_t, int Bits, bool FloatAccum, int BatchTileRows,
+          int KTileHalf2>
+__device__ __forceinline__ void
+accumulate_packed_word_batch_fixed_group_full_tile_full_rows(
+    unsigned int packed_word,
+    int relative_qrow,
+    const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ blockvec,
+    typename scalar_traits<scalar_t>::scalar2_t scale2,
+    typename scalar_traits<scalar_t>::scalar2_t zero2,
+    float (&acc_float)[BatchTileRows],
+    typename scalar_traits<scalar_t>::scalar2_t (&acc_input)[BatchTileRows]) {
+  static_assert(Bits == 4 || Bits == 8,
+                "Fixed group decode is only used for 4/8-bit GPTQ.");
+  constexpr int pairs_per_word = 16 / Bits;
+  constexpr int pair_bits = Bits * 2;
+  constexpr unsigned int pair_mask = (1u << pair_bits) - 1u;
+  const int relative_half2_word_base =
+      (relative_qrow / Bits) * 16 + (relative_qrow % Bits) * pairs_per_word;
+
+#pragma unroll
+  for (int pair = 0; pair < pairs_per_word; ++pair) {
+    const unsigned int packed_pair =
+        (packed_word >> (pair * pair_bits)) & pair_mask;
+    accumulate_pair_batch_fixed_group_full_rows<scalar_t, Bits, FloatAccum,
+                                                BatchTileRows, KTileHalf2>(
+        packed_pair, relative_half2_word_base + pair, blockvec, scale2, zero2,
+        acc_float, acc_input);
   }
 }
 
@@ -938,13 +1030,37 @@ __global__ void grasshopper_gptq_gemm_batch_kernel(
       const int zero = unpack_zero<Bits>(qzeros, group, col, qzeros_stride);
       const scalar2_t zero2 = traits::make2(
           traits::mul(traits::from_float(-static_cast<float>(zero)), scale));
-      for (int qrow = row; qrow < row_end; ++qrow) {
-        const unsigned int packed_word =
-            as_unsigned(qweight[qrow * width + col]);
-        accumulate_packed_word_batch_fixed_group<
-            scalar_t, Bits, FloatAccum, BatchTileRows, KTileHalf2>(
-            packed_word, qrow, absolute_half2_base, valid_rows, total_half2,
-            blockvec, scale2, zero2, acc_float, acc_input);
+      if (absolute_half2_base + KTileHalf2 <= total_half2) {
+        if (valid_rows == BatchTileRows) {
+          for (int qrow_offset = 0; qrow_offset < blockheight; ++qrow_offset) {
+            const int qrow = row + qrow_offset;
+            const unsigned int packed_word =
+                as_unsigned(qweight[qrow * width + col]);
+            accumulate_packed_word_batch_fixed_group_full_tile_full_rows<
+                scalar_t, Bits, FloatAccum, BatchTileRows, KTileHalf2>(
+                packed_word, qrow_offset, blockvec, scale2, zero2, acc_float,
+                acc_input);
+          }
+        } else {
+          for (int qrow_offset = 0; qrow_offset < blockheight; ++qrow_offset) {
+            const int qrow = row + qrow_offset;
+            const unsigned int packed_word =
+                as_unsigned(qweight[qrow * width + col]);
+            accumulate_packed_word_batch_fixed_group_full_tile<
+                scalar_t, Bits, FloatAccum, BatchTileRows, KTileHalf2>(
+                packed_word, qrow_offset, valid_rows, blockvec, scale2, zero2,
+                acc_float, acc_input);
+          }
+        }
+      } else {
+        for (int qrow = row; qrow < row_end; ++qrow) {
+          const unsigned int packed_word =
+              as_unsigned(qweight[qrow * width + col]);
+          accumulate_packed_word_batch_fixed_group<
+              scalar_t, Bits, FloatAccum, BatchTileRows, KTileHalf2>(
+              packed_word, qrow, absolute_half2_base, valid_rows, total_half2,
+              blockvec, scale2, zero2, acc_float, acc_input);
+        }
       }
     } else {
       if constexpr (GroupSize == 32 || (GroupSize == 64 && Bits == 8)) {
