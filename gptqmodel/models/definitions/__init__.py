@@ -60,6 +60,7 @@ from .mllama import MLlamaQModel
 from .mobilellm import MobileLLMQModel
 from .moss import MossQModel
 from .mpt import MptQModel
+from .nemotron_labs_diffusion import NemotronLabsDiffusionQModel
 from .opt import OptQModel
 from .ovis import OvisQModel
 from .ovis2_5 import Ovis2_5QModel
