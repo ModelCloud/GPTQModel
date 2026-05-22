@@ -1032,14 +1032,27 @@ __global__ void grasshopper_gptq_gemm_batch_kernel(
           traits::mul(traits::from_float(-static_cast<float>(zero)), scale));
       if (absolute_half2_base + KTileHalf2 <= total_half2) {
         if (valid_rows == BatchTileRows) {
-          for (int qrow_offset = 0; qrow_offset < blockheight; ++qrow_offset) {
-            const int qrow = row + qrow_offset;
-            const unsigned int packed_word =
-                as_unsigned(qweight[qrow * width + col]);
-            accumulate_packed_word_batch_fixed_group_full_tile_full_rows<
-                scalar_t, Bits, FloatAccum, BatchTileRows, KTileHalf2>(
-                packed_word, qrow_offset, blockvec, scale2, zero2, acc_float,
-                acc_input);
+          if constexpr (GroupSize == 128) {
+#pragma unroll
+            for (int qrow_offset = 0; qrow_offset < blockheight; ++qrow_offset) {
+              const int qrow = row + qrow_offset;
+              const unsigned int packed_word =
+                  as_unsigned(qweight[qrow * width + col]);
+              accumulate_packed_word_batch_fixed_group_full_tile_full_rows<
+                  scalar_t, Bits, FloatAccum, BatchTileRows, KTileHalf2>(
+                  packed_word, qrow_offset, blockvec, scale2, zero2, acc_float,
+                  acc_input);
+            }
+          } else {
+            for (int qrow_offset = 0; qrow_offset < blockheight; ++qrow_offset) {
+              const int qrow = row + qrow_offset;
+              const unsigned int packed_word =
+                  as_unsigned(qweight[qrow * width + col]);
+              accumulate_packed_word_batch_fixed_group_full_tile_full_rows<
+                  scalar_t, Bits, FloatAccum, BatchTileRows, KTileHalf2>(
+                  packed_word, qrow_offset, blockvec, scale2, zero2, acc_float,
+                  acc_input);
+            }
           }
         } else {
           for (int qrow_offset = 0; qrow_offset < blockheight; ++qrow_offset) {
