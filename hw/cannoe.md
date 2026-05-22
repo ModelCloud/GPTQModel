@@ -692,6 +692,18 @@ Validation kept the same drift envelope and improved BF16 GPTQ totals:
 The FP16 GPTQ group-size/act-order regression stayed clean on NPU1:
 `1.458037ms`, max abs drift `0.03125`.
 
+SVDQuant's 910B path keeps scale metadata short-lived: each K-block loads scale
+rows into UB, consumes them, and reuses the local storage. Cannoe now applies a
+safe version of the same memory rule to its BF16 native direct plan. When
+`GPTQMODEL_CANNOE_BF16_NATIVE=1` explicitly forces direct BF16 native
+execution for BF16-resident Cannoe modules, eager prepack builds the BF16
+scale/offset plan directly instead of first creating an FP16 native plan and
+then retaining BF16-converted scale/offset copies. If source weights were
+already dropped and only an FP16 packed plan exists, the forced BF16 path
+converts that metadata once and evicts the stale FP16 scale/offset backing. In
+the default shape-auto policy, Cannoe keeps the FP16 backing plan so larger
+non-direct BF16 shapes can still fall back to the FP16 native CANN call.
+
 ## CANN Profiling Read
 
 ## CANN 9.1-beta1 Kernel Surface

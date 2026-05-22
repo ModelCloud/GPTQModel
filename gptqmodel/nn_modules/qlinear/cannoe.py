@@ -14,7 +14,10 @@ from .komodo import (
     KomodoLinear,
     _KOMODO_PREPACK_TILE_N_ENV,
     _assert_fp16_inference_input,
+    _eager_native_prepack_enabled,
     _fuse_bias_enabled,
+    _native_int4_enabled,
+    _npu_int4_ops_available,
     _weight_quant_matmul,
 )
 
@@ -741,6 +744,121 @@ class _CannoePlanMixin:
     def _cannoe_update_plain_native_binding(self) -> None:
         return None
 
+    def _cannoe_bf16_direct_candidate_for_rows(self, rows: int) -> bool:
+        if hasattr(self, "_cannoe_plain_native_bf16_direct_candidate"):
+            return self._cannoe_plain_native_bf16_direct_candidate(rows=rows)
+        if hasattr(self, "_awq_bf16_direct_candidate"):
+            return self._awq_bf16_direct_candidate(rows=rows)
+        return False
+
+    def _cannoe_bf16_native_plan_for(self, *, device: torch.device):
+        key = self._native_key(device=device, dtype=torch.bfloat16)
+        if self._cannoe_plain_native_bf16_plan_key == key:
+            return self._cannoe_plain_native_bf16_plan
+
+        forced_direct = _cannoe_env_flag(_CANNOE_BF16_NATIVE_ENV, default=False)
+        native_cache = getattr(self, "_native_plan_cache", {})
+        cached = native_cache.get(key)
+        if cached is not None:
+            self._cannoe_plain_native_bf16_plan_key = key
+            self._cannoe_plain_native_bf16_plan = cached
+            return cached
+
+        source_available = (
+            not getattr(self, "_native_source_dropped", False)
+            and getattr(self, "_native_source_available", lambda: False)()
+        )
+        if forced_direct and source_available:
+            plan = self._native_plan(device=device, dtype=torch.bfloat16)
+            self._cannoe_plain_native_bf16_plan_key = key
+            self._cannoe_plain_native_bf16_plan = plan
+            return plan
+
+        fp16_key = self._native_key(device=device, dtype=torch.float16)
+        fp16_plan = native_cache.get(fp16_key)
+        if fp16_plan is None:
+            fp16_plan = self._native_plan(device=device, dtype=torch.float16)
+
+        packed_weight, scales, offsets, native_group_size, input_perm = fp16_plan
+        plan = (
+            packed_weight,
+            scales.to(dtype=torch.bfloat16).contiguous(),
+            offsets.to(dtype=torch.bfloat16).contiguous(),
+            native_group_size,
+            input_perm,
+        )
+        native_cache[key] = plan
+        module_scales = getattr(self, "scales", None)
+        if (
+            forced_direct
+            and getattr(self, "_native_source_dropped", False)
+            and isinstance(module_scales, torch.Tensor)
+            and module_scales.dtype == torch.bfloat16
+        ):
+            native_cache.pop(fp16_key, None)
+            if getattr(self, "_cannoe_plain_native_plan_key", None) == fp16_key:
+                self._cannoe_plain_native_plan_key = None
+                self._cannoe_plain_native_plan = None
+
+        self._cannoe_plain_native_bf16_plan_key = key
+        self._cannoe_plain_native_bf16_plan = plan
+        return plan
+
+    def _cannoe_maybe_eager_bf16_native_prepack(self) -> bool:
+        if not _eager_native_prepack_enabled() or not _native_int4_enabled() or not _npu_int4_ops_available():
+            return False
+        if not _cannoe_env_flag(_CANNOE_BF16_NATIVE_ENV, default=False):
+            return False
+        if (
+            getattr(self, "_native_source_dropped", False)
+            or not getattr(self, "_native_source_available", lambda: False)()
+        ):
+            return False
+        module_scales = getattr(self, "scales", None)
+        if not isinstance(module_scales, torch.Tensor) or module_scales.dtype != torch.bfloat16:
+            return False
+        if not self._cannoe_bf16_direct_candidate_for_rows(rows=1):
+            return False
+
+        device = self.runtime_device()
+        if device is None:
+            return False
+        device = torch.device(device)
+        if device.type != "npu":
+            return False
+
+        key = self._native_key(device=device, dtype=torch.bfloat16)
+        if key in self._native_plan_cache or key in getattr(self, "_native_plan_pending", {}):
+            return True
+
+        plan = self._build_native_plan(device=device, dtype=torch.bfloat16)
+        self._native_plan_cache[key] = plan
+        self._cannoe_plain_native_bf16_plan_key = key
+        self._cannoe_plain_native_bf16_plan = plan
+        self._maybe_drop_native_source_weights(force=True)
+        return True
+
+    def _maybe_eager_native_prepack(self) -> bool:
+        if self._cannoe_maybe_eager_bf16_native_prepack():
+            return True
+        return super()._maybe_eager_native_prepack()
+
+    def _can_use_native_int4(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
+        if (
+            x.dtype == torch.bfloat16
+            and compute_dtype == torch.float16
+            and not self.training
+            and not x.requires_grad
+            and x.device.type == "npu"
+            and self.bits == 4
+            and x.shape[-1] == self.in_features
+            and getattr(self, "_cannoe_plain_native_passthrough", False)
+            and self._cannoe_bf16_direct_candidate_for_rows(rows=x.reshape(-1, x.shape[-1]).shape[0])
+            and self._native_key(device=x.device, dtype=torch.bfloat16) in self._native_plan_cache
+        ):
+            return True
+        return super()._can_use_native_int4(x, compute_dtype)
+
     def _normalize_cannoe_prepack_tile_n(self, tile_n: int) -> int:
         if self.out_features % self.pack_factor != 0:
             return super()._native_prepack_tile_n()
@@ -948,24 +1066,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         return plan
 
     def _cannoe_plain_native_bf16_plan_for(self, *, device: torch.device):
-        key = self._native_key(device=device, dtype=torch.bfloat16)
-        if self._cannoe_plain_native_bf16_plan_key == key:
-            return self._cannoe_plain_native_bf16_plan
-
-        packed_weight, scales, offsets, native_group_size, input_perm = self._cannoe_plain_native_plan_for(
-            device=device,
-            dtype=torch.float16,
-        )
-        plan = (
-            packed_weight,
-            scales.to(dtype=torch.bfloat16).contiguous(),
-            offsets.to(dtype=torch.bfloat16).contiguous(),
-            native_group_size,
-            input_perm,
-        )
-        self._cannoe_plain_native_bf16_plan_key = key
-        self._cannoe_plain_native_bf16_plan = plan
-        return plan
+        return self._cannoe_bf16_native_plan_for(device=device)
 
     def _cannoe_plain_native_matmul(self):
         matmul_op = self._cannoe_plain_native_matmul_op
@@ -1490,24 +1591,7 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
         return rows <= 512 and self.in_features <= 8192 and self.out_features <= 8192
 
     def _awq_bf16_native_plan(self, *, device: torch.device):
-        key = self._native_key(device=device, dtype=torch.bfloat16)
-        if self._cannoe_plain_native_bf16_plan_key == key:
-            return self._cannoe_plain_native_bf16_plan
-
-        packed_weight, scales, offsets, native_group_size, input_perm = self._native_plan(
-            device=device,
-            dtype=torch.float16,
-        )
-        plan = (
-            packed_weight,
-            scales.to(dtype=torch.bfloat16).contiguous(),
-            offsets.to(dtype=torch.bfloat16).contiguous(),
-            native_group_size,
-            input_perm,
-        )
-        self._cannoe_plain_native_bf16_plan_key = key
-        self._cannoe_plain_native_bf16_plan = plan
-        return plan
+        return self._cannoe_bf16_native_plan_for(device=device)
 
     def _awq_native_matmul(self):
         matmul_op = self._cannoe_plain_native_matmul_op

@@ -74,6 +74,136 @@ def test_cannoe_plan_env_key_tracks_all_plan_knobs(monkeypatch):
         assert changed[index] == str(index + 1)
 
 
+def test_cannoe_bf16_native_plan_builds_direct_when_forced_and_source_available(monkeypatch):
+    cannoe = _load_cannoe_module()
+    monkeypatch.setenv("GPTQMODEL_CANNOE_BF16_NATIVE", "1")
+    Mixin = cannoe.__dict__["_CannoePlanMixin"]
+
+    class DummyCannoePlan(Mixin):
+        def __init__(self):
+            self._native_plan_cache = {}
+            self._native_source_dropped = False
+            self._cannoe_plain_native_bf16_plan_key = None
+            self._cannoe_plain_native_bf16_plan = None
+            self.scales = torch.ones((1, 4), dtype=torch.bfloat16)
+            self.calls = []
+
+        def _native_key(self, *, device, dtype):
+            return torch.device(device), dtype
+
+        def _native_source_available(self):
+            return True
+
+        def _native_plan(self, *, device, dtype):
+            self.calls.append(dtype)
+            plan = (
+                torch.empty((1, 1), dtype=torch.int32),
+                torch.empty((1, 4), dtype=dtype),
+                torch.empty((1, 4), dtype=dtype),
+                32,
+                None,
+            )
+            self._native_plan_cache[self._native_key(device=device, dtype=dtype)] = plan
+            return plan
+
+    module = DummyCannoePlan()
+    plan = module._cannoe_bf16_native_plan_for(device=torch.device("cpu"))
+
+    assert module.calls == [torch.bfloat16]
+    assert plan[1].dtype == torch.bfloat16
+    assert plan[2].dtype == torch.bfloat16
+    assert (torch.device("cpu"), torch.bfloat16) in module._native_plan_cache
+    assert (torch.device("cpu"), torch.float16) not in module._native_plan_cache
+
+
+def test_cannoe_bf16_native_plan_keeps_fp16_backing_for_auto_shape_policy(monkeypatch):
+    cannoe = _load_cannoe_module()
+    monkeypatch.delenv("GPTQMODEL_CANNOE_BF16_NATIVE", raising=False)
+    Mixin = cannoe.__dict__["_CannoePlanMixin"]
+
+    class DummyCannoePlan(Mixin):
+        def __init__(self):
+            fp16_key = self._native_key(device=torch.device("cpu"), dtype=torch.float16)
+            self._native_plan_cache = {
+                fp16_key: (
+                    torch.empty((1, 1), dtype=torch.int32),
+                    torch.empty((1, 4), dtype=torch.float16),
+                    torch.empty((1, 4), dtype=torch.float16),
+                    32,
+                    None,
+                )
+            }
+            self._native_source_dropped = True
+            self._cannoe_plain_native_plan_key = fp16_key
+            self._cannoe_plain_native_plan = self._native_plan_cache[fp16_key]
+            self._cannoe_plain_native_bf16_plan_key = None
+            self._cannoe_plain_native_bf16_plan = None
+            self.scales = torch.ones((1, 4), dtype=torch.bfloat16)
+
+        def _native_key(self, *, device, dtype):
+            return torch.device(device), dtype
+
+        def _native_source_available(self):
+            return False
+
+        def _native_plan(self, *, device, dtype):
+            raise AssertionError("source-dropped fallback should use the cached fp16 packed plan")
+
+    module = DummyCannoePlan()
+    plan = module._cannoe_bf16_native_plan_for(device=torch.device("cpu"))
+
+    assert plan[1].dtype == torch.bfloat16
+    assert plan[2].dtype == torch.bfloat16
+    assert (torch.device("cpu"), torch.bfloat16) in module._native_plan_cache
+    assert (torch.device("cpu"), torch.float16) in module._native_plan_cache
+    assert module._cannoe_plain_native_plan_key == (torch.device("cpu"), torch.float16)
+    assert module._cannoe_plain_native_plan is module._native_plan_cache[(torch.device("cpu"), torch.float16)]
+
+
+def test_cannoe_bf16_native_plan_replaces_fp16_backing_when_forced(monkeypatch):
+    cannoe = _load_cannoe_module()
+    monkeypatch.setenv("GPTQMODEL_CANNOE_BF16_NATIVE", "1")
+    Mixin = cannoe.__dict__["_CannoePlanMixin"]
+
+    class DummyCannoePlan(Mixin):
+        def __init__(self):
+            fp16_key = self._native_key(device=torch.device("cpu"), dtype=torch.float16)
+            self._native_plan_cache = {
+                fp16_key: (
+                    torch.empty((1, 1), dtype=torch.int32),
+                    torch.empty((1, 4), dtype=torch.float16),
+                    torch.empty((1, 4), dtype=torch.float16),
+                    32,
+                    None,
+                )
+            }
+            self._native_source_dropped = True
+            self._cannoe_plain_native_plan_key = fp16_key
+            self._cannoe_plain_native_plan = self._native_plan_cache[fp16_key]
+            self._cannoe_plain_native_bf16_plan_key = None
+            self._cannoe_plain_native_bf16_plan = None
+            self.scales = torch.ones((1, 4), dtype=torch.bfloat16)
+
+        def _native_key(self, *, device, dtype):
+            return torch.device(device), dtype
+
+        def _native_source_available(self):
+            return False
+
+        def _native_plan(self, *, device, dtype):
+            raise AssertionError("source-dropped fallback should use the cached fp16 packed plan")
+
+    module = DummyCannoePlan()
+    plan = module._cannoe_bf16_native_plan_for(device=torch.device("cpu"))
+
+    assert plan[1].dtype == torch.bfloat16
+    assert plan[2].dtype == torch.bfloat16
+    assert (torch.device("cpu"), torch.bfloat16) in module._native_plan_cache
+    assert (torch.device("cpu"), torch.float16) not in module._native_plan_cache
+    assert module._cannoe_plain_native_plan_key is None
+    assert module._cannoe_plain_native_plan is None
+
+
 def test_ascendc_host_tiler_caps_logical_blocks():
     host_tiler = (
         Path(__file__).resolve().parents[1]
