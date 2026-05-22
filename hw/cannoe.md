@@ -938,10 +938,16 @@ Applied follow-up:
   already empty for symmetric GPTQ because the native path derives the constant
   offset tensor. Asymmetric GPTQ still uses the parent Komodo source/device
   checks because it needs real zero-point data.
+- After symmetric native prepack succeeds, Cannoe now drops the derivable
+  `qzeros` and `wf_unsqueeze_zero` buffers as well as the remaining native
+  sources. This keeps source lifetime closer to SVDQuant's device-side
+  lifecycle: only values consumed by the runtime plan stay live after the
+  packed CANN plan exists.
 - The Qwen3 27B synthetic benchmark now reports native plan memory,
-  dense-FP16-equivalent weight memory, and source-drop state next to timing
-  results. This keeps speed work tied to the quantization premise: the retained
-  runtime plan must stay far below a full dense FP16 weight.
+  live source memory, dense-FP16-equivalent weight memory, and source-drop state
+  next to timing results. This keeps speed work tied to the quantization
+  premise: the retained runtime plan must stay far below a full dense FP16
+  weight.
 
 Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
 raw validator now avoids unrelated public ACLNN parser failures by creating test

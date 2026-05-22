@@ -1088,6 +1088,8 @@ class _CannoePlanMixin:
 class CannoeLinear(_CannoePlanMixin, KomodoLinear):
     """Cannoe Ascend CANN experiment based on Komodo's packed int4 plan."""
 
+    _symmetric_native_source_buffer_names = ("qweight", "scales", "g_idx", "wf_unsqueeze_neg_one")
+
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_CANNOE]
     SUPPORTS_METHODS = KomodoLinear.SUPPORTS_METHODS
     SUPPORTS_FORMATS = {fmt: 0 for fmt in KomodoLinear.SUPPORTS_FORMATS}
@@ -1133,6 +1135,7 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
         self._cannoe_plain_native_matmul_op = None
         self._cannoe_plain_native_grouped_matmul_op = None
         self._cannoe_plain_native_fuse_bias = _fuse_bias_enabled()
+        self._cannoe_original_native_source_buffer_names = self._native_source_buffer_names
         self._cannoe_plain_native_group16_grouped_key = None
         self._cannoe_plain_native_group16_grouped = False
         self._cannoe_update_plain_native_binding()
@@ -1191,6 +1194,22 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             and self.in_features <= 8192
             and self.out_features <= 8192
         )
+
+    def _maybe_drop_native_source_weights(self, *, force: bool = False) -> None:
+        if self.sym and self.group_size != 16:
+            original_names = self._native_source_buffer_names
+            self._native_source_buffer_names = self._symmetric_native_source_buffer_names
+            try:
+                super()._maybe_drop_native_source_weights(force=force)
+            finally:
+                self._native_source_buffer_names = original_names
+            if getattr(self, "_native_source_dropped", False):
+                for name in ("qzeros", "wf_unsqueeze_zero"):
+                    tensor = getattr(self, name, None)
+                    if isinstance(tensor, torch.Tensor):
+                        setattr(self, name, tensor.detach().new_empty((0,)))
+            return
+        super()._maybe_drop_native_source_weights(force=force)
 
     def _build_native_plan(self, *, device: torch.device, dtype: torch.dtype):
         if not self.sym:

@@ -691,8 +691,10 @@ def test_qwen_benchmark_reports_native_plan_memory():
     assert '"dense_fp16_weight_mb"' in text
     assert '"source_dropped"' in text
     assert '"plan_MB"' in text
+    assert '"live_src"' in text
     assert '"dense_MB"' in text
     assert '"src_drop"' in text
+    assert "_cannoe_original_native_source_buffer_names" in text
 
 
 def test_cannoe_symmetric_native_plan_skips_qzeros_unpack():
@@ -724,6 +726,16 @@ def test_cannoe_symmetric_native_eligibility_does_not_require_qzeros_device():
     assert "self._cannoe_symmetric_native_sources_ready(device=device)" in can_prefetch
     assert "return super()._can_use_native_int4(x, compute_dtype)" in can_use
     assert "return super()._can_prefetch_native_plan" in can_prefetch
+
+
+def test_cannoe_symmetric_source_drop_removes_derivable_zero_buffers():
+    cannoe = _load_cannoe_module()
+    source = inspect.getsource(cannoe.CannoeLinear._maybe_drop_native_source_weights)
+
+    assert "_symmetric_native_source_buffer_names" in source
+    assert 'for name in ("qzeros", "wf_unsqueeze_zero")' in source
+    assert "tensor.detach().new_empty((0,))" in source
+    assert "super()._maybe_drop_native_source_weights(force=force)" in source
 
 
 def test_raw_validator_emit_json_result_to_saved_fd():

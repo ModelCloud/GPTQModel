@@ -172,7 +172,10 @@ def _tensor_bytes(tensor: torch.Tensor) -> int:
 
 def _module_source_bytes(module: torch.nn.Module) -> int:
     total = 0
-    for name in getattr(module, "_native_source_buffer_names", ()):
+    names = set(getattr(module, "_native_source_buffer_names", ()))
+    names.update(getattr(module, "_cannoe_original_native_source_buffer_names", ()))
+    names.update(getattr(module, "_symmetric_native_source_buffer_names", ()))
+    for name in names:
         tensor = getattr(module, name, None)
         if isinstance(tensor, torch.Tensor):
             total += _tensor_bytes(tensor)
@@ -368,7 +371,20 @@ def _run_case(
 
 
 def _format_table(rows: list[dict]) -> str:
-    headers = ("layer", "M", "K", "N", "first_ms", "mean_ms", "TFLOP/s", "peak_MB", "plan_MB", "dense_MB", "src_drop")
+    headers = (
+        "layer",
+        "M",
+        "K",
+        "N",
+        "first_ms",
+        "mean_ms",
+        "TFLOP/s",
+        "peak_MB",
+        "plan_MB",
+        "live_src",
+        "dense_MB",
+        "src_drop",
+    )
     table = []
     for row in rows:
         peak = row["peak_allocated_mb"]
@@ -383,6 +399,7 @@ def _format_table(rows: list[dict]) -> str:
                 f'{row["tflops"]:.2f}',
                 "" if peak is None else f"{peak:.1f}",
                 f'{row["native_plan_mb"]:.1f}',
+                f'{row["live_source_mb"]:.1f}',
                 f'{row["dense_fp16_weight_mb"]:.1f}',
                 "Y" if row["source_dropped"] else "N",
             )
