@@ -99,7 +99,7 @@ class MoELifecycleHooks:
             return None
 
         # Get the module by name
-        moe_block = getattr(layer_module, moe_module_name, None)
+        moe_block = getattr(layer_module, moe_module_name[0], None)
 
         return moe_block
 
