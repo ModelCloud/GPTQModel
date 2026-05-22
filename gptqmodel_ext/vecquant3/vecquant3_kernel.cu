@@ -947,10 +947,11 @@ __global__ void vecquant3_gptq_gemm_batch_kernel(
             blockvec, scale2, zero2, acc_float, acc_input);
       }
     } else {
-      if constexpr (GroupSize == 32) {
+      if constexpr (GroupSize == 32 || (GroupSize == 64 && Bits == 8)) {
+        constexpr int qrows_per_group = (GroupSize / 32) * Bits;
         for (int qrow = row; qrow < row_end;) {
-          const int group = qrow / Bits;
-          const int group_end = min(row_end, (group + 1) * Bits);
+          const int group = qrow / qrows_per_group;
+          const int group_end = min(row_end, (group + 1) * qrows_per_group);
           const scalar_t scale = scales[group * width + col];
           const scalar2_t scale2 = traits::make2(scale);
           const int zero = unpack_zero<Bits>(qzeros, group, col, qzeros_stride);
