@@ -1477,7 +1477,7 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits(
     int64_t batch_rows) {
   if constexpr (Bits == 3) {
     const int64_t in_features = (qweight.size(0) / Bits) * 32;
-    if ((group_size == 64 || group_size == 128) &&
+    if ((group_size == 32 || group_size == 64 || group_size == 128) &&
         batch_rows >= kWideGemmBatchTileRows &&
         qweight.size(1) >= kGemmBatchTileMinWidth &&
         (qweight.size(1) >= kWideGemmBatchTileMinFeature ||
