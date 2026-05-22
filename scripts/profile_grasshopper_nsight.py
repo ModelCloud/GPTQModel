@@ -187,7 +187,7 @@ def _kernel_shape(args: argparse.Namespace) -> tuple[int, int, int, int]:
             if (
                 args.batch >= 8
                 and (args.out_features >= 8192 or args.in_features >= 8192)
-                and (args.bits != 3 or args.group_size == 128)
+                and (args.bits != 3 or args.group_size in (64, 128))
             ):
                 batch_tile_rows = 8
             else:
