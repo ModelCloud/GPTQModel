@@ -13,11 +13,15 @@ from .komodo import (
     AwqKomodoLinear,
     KomodoLinear,
     _KOMODO_PREPACK_TILE_N_ENV,
+    _native_int4_group_size,
+    _native_prepack_source_tensor,
+    _packed_weight_empty_like_tile,
     _assert_fp16_inference_input,
     _eager_native_prepack_enabled,
     _fuse_bias_enabled,
     _native_int4_enabled,
     _npu_int4_ops_available,
+    _right_shift_unpack,
     _weight_quant_matmul,
 )
 
@@ -1104,6 +1108,71 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
             and self.in_features <= 8192
             and self.out_features <= 8192
         )
+
+    def _build_native_plan(self, *, device: torch.device, dtype: torch.dtype):
+        if not self.sym:
+            return super()._build_native_plan(device=device, dtype=dtype)
+
+        supported, input_perm_cpu = self._native_g_idx_plan()
+        if not supported:
+            raise RuntimeError("Cannoe native int4 plan requested for an unsupported GPTQ g_idx layout.")
+
+        qweight_source = _native_prepack_source_tensor(self.qweight, device)
+        scales_source = _native_prepack_source_tensor(self.scales, device)
+        wf_neg_source = _native_prepack_source_tensor(self.wf_unsqueeze_neg_one, device)
+
+        input_perm = None
+        if input_perm_cpu is not None:
+            input_perm = input_perm_cpu.to(device=device, non_blocking=self.g_idx.device.type == "cpu")
+
+        tile_n = self._native_prepack_tile_n()
+        packed_weight = None
+        packed_tiles_cpu = [] if device.type == "npu" else None
+        for start in range(0, self.out_features, tile_n):
+            width = min(tile_n, self.out_features - start)
+            qweight_tile = qweight_source.narrow(1, start, width)
+            weight = torch.bitwise_and(
+                _right_shift_unpack(
+                    qweight_tile.unsqueeze(1).expand(-1, self.pack_factor, -1),
+                    wf_neg_source,
+                    self.dequant_dtype,
+                ),
+                self.maxq,
+            )
+            weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).to(torch.int32)
+            if input_perm is not None:
+                weight_perm = input_perm_cpu if weight.device.type == "cpu" else input_perm
+                weight = weight.index_select(0, weight_perm)
+
+            signed_weight = (weight - 8).contiguous()
+            if signed_weight.device != device:
+                signed_weight = signed_weight.to(device=device)
+            packed_tile = torch.ops.npu.npu_convert_weight_to_int4pack(signed_weight)
+            if packed_tiles_cpu is not None:
+                packed_tiles_cpu.append(packed_tile.detach().to(device="cpu"))
+            elif packed_weight is None:
+                packed_weight = _packed_weight_empty_like_tile(packed_tile, self.out_features, self.pack_factor)
+                packed_start = start // self.pack_factor
+                packed_width = width // self.pack_factor
+                packed_weight.narrow(1, packed_start, packed_width).copy_(packed_tile)
+            else:
+                packed_start = start // self.pack_factor
+                packed_width = width // self.pack_factor
+                packed_weight.narrow(1, packed_start, packed_width).copy_(packed_tile)
+            del weight, signed_weight, packed_tile
+
+        if packed_tiles_cpu is not None and packed_tiles_cpu:
+            packed_weight = torch.cat(packed_tiles_cpu, dim=1).to(device=device).contiguous()
+        if packed_weight is None:
+            raise RuntimeError("Cannoe native int4 plan requested for an empty weight.")
+
+        scales = scales_source.to(device=device, dtype=dtype).contiguous()
+        offsets = torch.empty(scales.shape, device=device, dtype=dtype).fill_(8)
+        native_group_size = _native_int4_group_size(self.group_size, self.in_features)
+        if native_group_size is None:
+            raise RuntimeError("Cannoe native int4 plan requested for an unsupported group size.")
+
+        return packed_weight, scales, offsets, native_group_size, input_perm
 
     def _native_forward(self, x: torch.Tensor):
         _assert_fp16_or_bf16_inference_input(x, self.__class__.__name__)

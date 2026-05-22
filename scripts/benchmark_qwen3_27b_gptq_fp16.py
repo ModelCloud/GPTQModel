@@ -166,6 +166,35 @@ def _peak_mb(device: torch.device) -> float | None:
     return None
 
 
+def _tensor_bytes(tensor: torch.Tensor) -> int:
+    return int(tensor.numel() * tensor.element_size())
+
+
+def _module_source_bytes(module: torch.nn.Module) -> int:
+    total = 0
+    for name in getattr(module, "_native_source_buffer_names", ()):
+        tensor = getattr(module, name, None)
+        if isinstance(tensor, torch.Tensor):
+            total += _tensor_bytes(tensor)
+    return total
+
+
+def _module_native_plan_bytes(module: torch.nn.Module) -> int:
+    total = 0
+    for plan_cache_name in ("_native_plan_cache", "_native_group16_plan_cache"):
+        for plan in getattr(module, plan_cache_name, {}).values():
+            for item in plan:
+                if isinstance(item, torch.Tensor):
+                    total += _tensor_bytes(item)
+                elif isinstance(item, (tuple, list)):
+                    total += sum(_tensor_bytes(tensor) for tensor in item if isinstance(tensor, torch.Tensor))
+    return total
+
+
+def _bytes_to_mb(value: int) -> float:
+    return float(value) / (1024.0 * 1024.0)
+
+
 def _resolve_linear_cls(path: str, cuda_kernel: str):
     if path == "cannoe":
         os.environ.setdefault("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
@@ -311,6 +340,9 @@ def _run_case(
     y = forward()
     _sync(device)
     flops = 2.0 * tokens * case.in_features * case.out_features
+    native_plan_bytes = _module_native_plan_bytes(module)
+    live_source_bytes = _module_source_bytes(module)
+    dense_fp16_bytes = case.in_features * case.out_features * torch.empty((), dtype=torch.float16).element_size()
     return {
         **asdict(case),
         "layer_key": layer_key,
@@ -328,11 +360,15 @@ def _run_case(
         "tflops": flops / (mean_ms * 1e9) if mean_ms > 0 else float("inf"),
         "output_shape": list(y.shape),
         "peak_allocated_mb": _peak_mb(device),
+        "native_plan_mb": _bytes_to_mb(native_plan_bytes),
+        "live_source_mb": _bytes_to_mb(live_source_bytes),
+        "dense_fp16_weight_mb": _bytes_to_mb(dense_fp16_bytes),
+        "source_dropped": bool(getattr(module, "_native_source_dropped", False)),
     }
 
 
 def _format_table(rows: list[dict]) -> str:
-    headers = ("layer", "M", "K", "N", "first_ms", "mean_ms", "TFLOP/s", "peak_MB")
+    headers = ("layer", "M", "K", "N", "first_ms", "mean_ms", "TFLOP/s", "peak_MB", "plan_MB", "dense_MB", "src_drop")
     table = []
     for row in rows:
         peak = row["peak_allocated_mb"]
@@ -346,6 +382,9 @@ def _format_table(rows: list[dict]) -> str:
                 f'{row["mean_ms"]:.4f}',
                 f'{row["tflops"]:.2f}',
                 "" if peak is None else f"{peak:.1f}",
+                f'{row["native_plan_mb"]:.1f}',
+                f'{row["dense_fp16_weight_mb"]:.1f}',
+                "Y" if row["source_dropped"] else "N",
             )
         )
     widths = [len(item) for item in headers]

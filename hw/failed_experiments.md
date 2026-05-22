@@ -45,3 +45,30 @@ Interpretation:
   Re-test the custom-op package after fixing CANN 9.1 beta custom-op workspace
   registration or after rebuilding the bridge/package pair in a known-good
   custom-op install layout.
+
+## Cannoe Native Symmetric Offset Elision
+
+Context:
+
+- Hypothesis: for symmetric GPTQ, the public CANN
+  `npu_weight_quant_batchmatmul` path might accept `offsets=None` or a
+  broadcast-shaped constant offset tensor, allowing Cannoe to avoid retaining
+  full per-group/per-output offset memory.
+- Environment: CANN `/usr/local/Ascend/cann-9.1.0-beta.1`, visible devices
+  limited to NPU0-6, probe executed on visible NPU0.
+
+Failed probes:
+
+| Probe | Shape | Result | Metric data |
+|---|---|---|---|
+| `offsets=None` with `K=32,N=8,group=32` | one group | Rejected | CANN error: `antiquant_group_size can be either 0 or a multiple of 32 within the range 32 to weight_k_dim - 1` |
+| `offsets=None` with `K=64,N=64,group=32` | two groups | Accepted but wrong | full-offset mean abs output `5.8015`, no-offset mean abs output `0.6635`, max diff `9.6484` |
+| Broadcast offsets `(1,N)`, `(G,1)`, scalar `(1,)`, and empty `(0,)` with `K=64,N=64,group=32` | two groups | Rejected | each failed in `aclnnWeightQuantBatchMatmulV2` with status `161002` |
+
+Interpretation:
+
+- The public native CANN op requires a full offset tensor for correct symmetric
+  GPTQ semantics. Do not pass `None` and do not attempt offset broadcasting.
+- The viable optimization is narrower: skip reading and unpacking `qzeros`
+  during Cannoe symmetric prepack, then generate the required full constant
+  `offsets=8` tensor directly.

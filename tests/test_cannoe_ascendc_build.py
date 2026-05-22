@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.util
+import inspect
 import os
 from pathlib import Path
 
@@ -678,6 +679,31 @@ def test_qwen_benchmark_quiet_logs_do_not_redirect_process_fds():
     assert "sys.excepthook" not in text
     assert 'os.environ.setdefault("ASCEND_GLOBAL_LOG_LEVEL", "3")' in text
     assert 'os.environ.setdefault("ASCEND_SLOG_PRINT_TO_STDOUT", "0")' in text
+
+
+def test_qwen_benchmark_reports_native_plan_memory():
+    benchmark = Path(__file__).resolve().parents[1] / "scripts" / "benchmark_qwen3_27b_gptq_fp16.py"
+    text = benchmark.read_text(encoding="utf-8")
+
+    assert "def _module_native_plan_bytes" in text
+    assert '"native_plan_mb"' in text
+    assert '"live_source_mb"' in text
+    assert '"dense_fp16_weight_mb"' in text
+    assert '"source_dropped"' in text
+    assert '"plan_MB"' in text
+    assert '"dense_MB"' in text
+    assert '"src_drop"' in text
+
+
+def test_cannoe_symmetric_native_plan_skips_qzeros_unpack():
+    cannoe = _load_cannoe_module()
+    source = inspect.getsource(cannoe.CannoeLinear._build_native_plan)
+
+    assert "if not self.sym:" in source
+    assert "return super()._build_native_plan" in source
+    assert "torch.empty(scales.shape, device=device, dtype=dtype).fill_(8)" in source
+    assert "qzeros_source" not in source
+    assert "wf_zero_source" not in source
 
 
 def test_raw_validator_emit_json_result_to_saved_fd():

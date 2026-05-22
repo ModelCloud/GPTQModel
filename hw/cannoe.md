@@ -924,6 +924,18 @@ Applied follow-up:
   depth, base tile sizes, prefetch windows, fused-op selection, and
   inner-precise mode now share one cache-key source of truth, which avoids
   stale plan reuse when a new performance or VRAM knob is added.
+- Symmetric GPTQ native prepack now follows the same "do not carry derivable
+  data" rule used in SVDQuant-style kernels: Cannoe skips `qzeros` unpacking
+  and generates the required full `offsets=8` tensor directly. The public CANN
+  W4A16 op still requires a full offset tensor, so this is a cold-prepack
+  temporary-memory and CPU-side unpack reduction, not an offset ABI change.
+  The offset tensor is allocated as a plain contiguous tensor rather than
+  `full_like(scales)` so torch-npu does not emit internal-format warnings in
+  the benchmark path.
+- The Qwen3 27B synthetic benchmark now reports native plan memory,
+  dense-FP16-equivalent weight memory, and source-drop state next to timing
+  results. This keeps speed work tied to the quantization premise: the retained
+  runtime plan must stay far below a full dense FP16 weight.
 
 Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
 raw validator now avoids unrelated public ACLNN parser failures by creating test
