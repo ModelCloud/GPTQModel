@@ -155,3 +155,60 @@ Interpretation:
   the default fused-bias path.
 - Keep the plain-native large down projection on the inherited `1024` prepack
   tile for CANN 9.1 beta.
+
+## Cannoe LoRA Layout Normalization Probe
+
+Context:
+
+- Hypothesis: SVDQuant's host-side LoRA-up layout normalization could transfer
+  to the common GPTQModel adapter path by making dense LoRA A/B tensors
+  contiguous once before repeated projection calls. This would avoid strided
+  matmul/layout handling when HF-loaded `lora_A.weight.T` remains a view.
+- Environment: CANN `/usr/local/Ascend/cann-9.1.0-beta.1`, visible devices
+  limited to NPU0-6, probes executed on visible NPU0 with Qwen3 27B synthetic
+  GPTQ fp16 projection shapes and rank-16 dense LoRA.
+
+Failed probe:
+
+| Probe | Result | Metric data |
+|---|---|---|
+| One-time contiguous normalization for dense LoRA A/B in common adapter path | Regressed speed | Monkey-patched old strided path total `1.1735 ms`, down `0.3013 ms`; contiguous-normalized path total `1.2223 ms`, down `0.3241 ms`; drift `max_abs=0.0` |
+
+Interpretation:
+
+- Do not force dense LoRA A/B contiguous in the generic adapter path on Ascend
+  910B. The NPU matmul path handles the strided views well enough that the
+  extra retained contiguous copies slow the Qwen projection gate and increase
+  adapter memory lifetime.
+- Keep SVDQuant's layout lesson scoped to raw custom kernels that require a
+  specific physical operand layout. GPTQModel already stores `lora_B` as
+  `[R, N]`, so adding another cached/transposed layout would work against the
+  quantization memory goal.
+
+## Cannoe Plain-Native Plan Capture Probe
+
+Context:
+
+- Hypothesis: SVDQuant-style explicit ownership might still translate into a
+  small Python-side win for the production Cannoe path by capturing the
+  plain-native packed plan and `npu_weight_quant_batchmatmul` op once in the
+  bound forward, instead of resolving them through helper methods on every
+  decode call.
+- Environment: CANN `/usr/local/Ascend/cann-9.1.0-beta.1`, visible devices
+  limited to NPU0-6, probe executed on visible NPU0 with Qwen3 27B synthetic
+  GPTQ fp16 `down_proj`, group-size 32, no LoRA, warmup 20, iters 120.
+
+Failed probe:
+
+| Probe | Result | Metric data |
+|---|---|---|
+| Monkey-patched same-module captured plan/op forward for `down_proj` | Timing-neutral | Baseline bound down `0.267681 ms`; captured-plan down `0.267697 ms`; `max_abs=0.0` |
+
+Interpretation:
+
+- Do not complicate the production plain-native path with another captured
+  closure or bound-forward variant. The steady-state cost is dominated by the
+  CANN W4A16 op and packed-plan shape, not Python helper lookup.
+- Keep the explicit AIC/AIV ownership lesson aimed at the true Ascend C fused
+  path where it can remove GM/L2 movement, not at micro-optimizing the current
+  public native call wrapper.
