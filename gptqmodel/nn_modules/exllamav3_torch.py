@@ -70,8 +70,14 @@ def _half_scalar_from_bits(bits: int) -> float:
     return float(struct.unpack("<e", packed)[0])
 
 
+# ExLlamaV3's torch fallback decodes packed codebook values with shift
+# operations. Keep those shifts behind helpers so Ascend 910B/CANN 9.1 beta can
+# use arithmetic equivalents for operators that torch-npu does not expose as
+# native device kernels, while CPU/CUDA/XPU keep the standard bitwise ops.
 def _torch_shift_factor(shifts: int | torch.Tensor, device: torch.device) -> int | torch.Tensor:
     if torch.is_tensor(shifts):
+        # Tensor shifts must be materialized on the target device; otherwise the
+        # NPU arithmetic fallback would introduce cross-device operands.
         shifts_i64 = shifts.to(device=device, dtype=torch.int64)
         return torch.pow(torch.full_like(shifts_i64, 2), shifts_i64)
     return 1 << int(shifts)
@@ -81,6 +87,9 @@ def _torch_right_shift(values: torch.Tensor, shifts: int | torch.Tensor) -> torc
     if values.device.type != "npu":
         return torch.bitwise_right_shift(values, shifts)
 
+    # CANN 9.1 beta on Ascend 910B may not provide bitwise_right_shift kernels
+    # for these tensor paths. floor_divide by powers of two preserves arithmetic
+    # right-shift behavior for signed packed int tensors and stays on-device.
     shifted = torch.floor_divide(values.to(torch.int64), _torch_shift_factor(shifts, values.device))
     return shifted.to(values.dtype)
 
@@ -89,6 +98,8 @@ def _torch_left_shift(values: torch.Tensor, shifts: int | torch.Tensor) -> torch
     if values.device.type != "npu":
         return torch.bitwise_left_shift(values, shifts)
 
+    # Mirror left shift as multiplication by powers of two on NPU to avoid
+    # missing-kernel or CPU-fallback paths in torch-npu.
     shifted = values.to(torch.int64) * _torch_shift_factor(shifts, values.device)
     return shifted.to(values.dtype)
 

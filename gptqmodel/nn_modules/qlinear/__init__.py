@@ -28,8 +28,14 @@ from ...utils.safe import THREADPOOLCTL
 log = setup_logger()
 
 
+# Packed quantized weights are unpacked through shift operations in several
+# kernels. Keep those shifts behind helpers so Ascend 910B/CANN 9.1 beta can use
+# arithmetic equivalents for operators that torch-npu does not expose as native
+# device kernels, while CPU/CUDA/XPU keep the standard bitwise ops.
 def _torch_shift_factor(shifts: int | t.Tensor, device: t.device) -> int | t.Tensor:
     if t.is_tensor(shifts):
+        # Tensor shifts must be materialized on the target device; otherwise the
+        # NPU arithmetic fallback would introduce cross-device operands.
         shifts_i64 = shifts.to(device=device, dtype=t.int64)
         return t.pow(t.full_like(shifts_i64, 2), shifts_i64)
     return 1 << int(shifts)
@@ -39,6 +45,9 @@ def _torch_right_shift(values: t.Tensor, shifts: int | t.Tensor) -> t.Tensor:
     if values.device.type != "npu":
         return t.bitwise_right_shift(values, shifts)
 
+    # CANN 9.1 beta on Ascend 910B may not provide bitwise_right_shift kernels
+    # for these tensor paths. floor_divide by powers of two preserves arithmetic
+    # right-shift behavior for signed packed int tensors and stays on-device.
     shifted = t.floor_divide(values.to(t.int64), _torch_shift_factor(shifts, values.device))
     return shifted.to(values.dtype)
 
@@ -47,6 +56,8 @@ def _torch_left_shift(values: t.Tensor, shifts: int | t.Tensor) -> t.Tensor:
     if values.device.type != "npu":
         return t.bitwise_left_shift(values, shifts)
 
+    # Mirror left shift as multiplication by powers of two on NPU to avoid
+    # missing-kernel or CPU-fallback paths in torch-npu.
     shifted = values.to(t.int64) * _torch_shift_factor(shifts, values.device)
     return shifted.to(values.dtype)
 
