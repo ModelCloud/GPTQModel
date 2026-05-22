@@ -218,6 +218,14 @@ The next Cannoe implementation should prioritize these public CANN 9 paths:
   `M=8,K=128,N=8192,base_k=128` probe had `max_abs=0.00390625` and mean drift
   `5.9e-7`. Timings remained close to run noise, with `K=512,base_k=128` around
   `27.89-27.94 ms`.
+- SVDQuant's useful transferable lesson is to keep scale/offset metadata
+  lifetimes block-local and branch symmetric INT4 paths away from offset
+  tensors entirely. Cannoe now keeps the direct CANN9 vector-dequant tile fill,
+  single-word direct fallback, staged producer, and M=1 decode scalar fallback
+  on explicit no-offset branches when `zero_offsets != 0`. That removes offset
+  GM reads and the `x_sum * offset` accumulation from symmetric Qwen-style GPTQ
+  decode while leaving asymmetric/nonzero-offset GPTQ on the previous hoisted
+  offset path.
 - Added fused-bias support to the direct TSCM runtime path. The kernel now uses
   CANN Matmul's split-K bias convention: `SetBias` before the first K tile for
   each output tile and `ClearBias` before later accumulating K tiles. NPU0

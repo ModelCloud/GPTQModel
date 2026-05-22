@@ -1714,50 +1714,74 @@ private:
                 const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
                 const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
                 const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
-                const float offset0 = OffsetValue(scale_base, zero_offsets);
-                const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
-                const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
-                const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
-                const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
-                const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
-                const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
-                const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
-                for (uint32_t k = group_k_begin; k < group_k_end; ++k) {
-                    const uint32_t tile_k = k - k_begin;
-                    const uint32_t dequant_base = tile_k * packed_cols * 8 + packed_offset * 8;
-                    const uint32_t b_base = tile_k * base_n + tile_n;
-                    b_tile.SetValue(
-                        b_base,
-                        static_cast<half>(
-                            (static_cast<float>(dequant_tile.GetValue(dequant_base)) + offset0) * scale0));
-                    b_tile.SetValue(
-                        b_base + 1,
-                        static_cast<half>(
-                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 1)) + offset1) * scale1));
-                    b_tile.SetValue(
-                        b_base + 2,
-                        static_cast<half>(
-                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 2)) + offset2) * scale2));
-                    b_tile.SetValue(
-                        b_base + 3,
-                        static_cast<half>(
-                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 3)) + offset3) * scale3));
-                    b_tile.SetValue(
-                        b_base + 4,
-                        static_cast<half>(
-                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 4)) + offset4) * scale4));
-                    b_tile.SetValue(
-                        b_base + 5,
-                        static_cast<half>(
-                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 5)) + offset5) * scale5));
-                    b_tile.SetValue(
-                        b_base + 6,
-                        static_cast<half>(
-                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 6)) + offset6) * scale6));
-                    b_tile.SetValue(
-                        b_base + 7,
-                        static_cast<half>(
-                            (static_cast<float>(dequant_tile.GetValue(dequant_base + 7)) + offset7) * scale7));
+                if (zero_offsets != 0) {
+                    for (uint32_t k = group_k_begin; k < group_k_end; ++k) {
+                        const uint32_t tile_k = k - k_begin;
+                        const uint32_t dequant_base = tile_k * packed_cols * 8 + packed_offset * 8;
+                        const uint32_t b_base = tile_k * base_n + tile_n;
+                        b_tile.SetValue(
+                            b_base, static_cast<half>(static_cast<float>(dequant_tile.GetValue(dequant_base)) * scale0));
+                        b_tile.SetValue(
+                            b_base + 1, static_cast<half>(static_cast<float>(dequant_tile.GetValue(dequant_base + 1)) * scale1));
+                        b_tile.SetValue(
+                            b_base + 2, static_cast<half>(static_cast<float>(dequant_tile.GetValue(dequant_base + 2)) * scale2));
+                        b_tile.SetValue(
+                            b_base + 3, static_cast<half>(static_cast<float>(dequant_tile.GetValue(dequant_base + 3)) * scale3));
+                        b_tile.SetValue(
+                            b_base + 4, static_cast<half>(static_cast<float>(dequant_tile.GetValue(dequant_base + 4)) * scale4));
+                        b_tile.SetValue(
+                            b_base + 5, static_cast<half>(static_cast<float>(dequant_tile.GetValue(dequant_base + 5)) * scale5));
+                        b_tile.SetValue(
+                            b_base + 6, static_cast<half>(static_cast<float>(dequant_tile.GetValue(dequant_base + 6)) * scale6));
+                        b_tile.SetValue(
+                            b_base + 7, static_cast<half>(static_cast<float>(dequant_tile.GetValue(dequant_base + 7)) * scale7));
+                    }
+                } else {
+                    const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));
+                    const float offset1 = static_cast<float>(offsets_gm_.GetValue(scale_base + 1));
+                    const float offset2 = static_cast<float>(offsets_gm_.GetValue(scale_base + 2));
+                    const float offset3 = static_cast<float>(offsets_gm_.GetValue(scale_base + 3));
+                    const float offset4 = static_cast<float>(offsets_gm_.GetValue(scale_base + 4));
+                    const float offset5 = static_cast<float>(offsets_gm_.GetValue(scale_base + 5));
+                    const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
+                    const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
+                    for (uint32_t k = group_k_begin; k < group_k_end; ++k) {
+                        const uint32_t tile_k = k - k_begin;
+                        const uint32_t dequant_base = tile_k * packed_cols * 8 + packed_offset * 8;
+                        const uint32_t b_base = tile_k * base_n + tile_n;
+                        b_tile.SetValue(
+                            b_base,
+                            static_cast<half>(
+                                (static_cast<float>(dequant_tile.GetValue(dequant_base)) + offset0) * scale0));
+                        b_tile.SetValue(
+                            b_base + 1,
+                            static_cast<half>(
+                                (static_cast<float>(dequant_tile.GetValue(dequant_base + 1)) + offset1) * scale1));
+                        b_tile.SetValue(
+                            b_base + 2,
+                            static_cast<half>(
+                                (static_cast<float>(dequant_tile.GetValue(dequant_base + 2)) + offset2) * scale2));
+                        b_tile.SetValue(
+                            b_base + 3,
+                            static_cast<half>(
+                                (static_cast<float>(dequant_tile.GetValue(dequant_base + 3)) + offset3) * scale3));
+                        b_tile.SetValue(
+                            b_base + 4,
+                            static_cast<half>(
+                                (static_cast<float>(dequant_tile.GetValue(dequant_base + 4)) + offset4) * scale4));
+                        b_tile.SetValue(
+                            b_base + 5,
+                            static_cast<half>(
+                                (static_cast<float>(dequant_tile.GetValue(dequant_base + 5)) + offset5) * scale5));
+                        b_tile.SetValue(
+                            b_base + 6,
+                            static_cast<half>(
+                                (static_cast<float>(dequant_tile.GetValue(dequant_base + 6)) + offset6) * scale6));
+                        b_tile.SetValue(
+                            b_base + 7,
+                            static_cast<half>(
+                                (static_cast<float>(dequant_tile.GetValue(dequant_base + 7)) + offset7) * scale7));
+                    }
                 }
             }
         }
@@ -2575,6 +2599,21 @@ private:
         const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
         const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
         const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+        if (zero_offsets != 0) {
+            FillDirectBTileWordValuesNoOffset(
+                b_tile,
+                tile_offset,
+                word,
+                scale0,
+                scale1,
+                scale2,
+                scale3,
+                scale4,
+                scale5,
+                scale6,
+                scale7);
+            return;
+        }
         const float offset0 = OffsetValue(scale_base, zero_offsets);
         const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
         const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
@@ -2700,6 +2739,29 @@ private:
         const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
         const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
         const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+        if (zero_offsets != 0) {
+            FillDirectBTileWordVectorValues(
+                b_tile,
+                tile_offset,
+                word,
+                scale0,
+                scale1,
+                scale2,
+                scale3,
+                scale4,
+                scale5,
+                scale6,
+                scale7,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f);
+            return;
+        }
         const float offset0 = OffsetValue(scale_base, zero_offsets);
         const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
         const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
@@ -2844,6 +2906,17 @@ private:
         const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
         const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
         const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+        if (zero_offsets != 0) {
+            staged_weight_gm_.SetValue(stage_offset, static_cast<half>(DequantLaneNoOffset(word, 0, scale0)));
+            staged_weight_gm_.SetValue(stage_offset + 1, static_cast<half>(DequantLaneNoOffset(word, 1, scale1)));
+            staged_weight_gm_.SetValue(stage_offset + 2, static_cast<half>(DequantLaneNoOffset(word, 2, scale2)));
+            staged_weight_gm_.SetValue(stage_offset + 3, static_cast<half>(DequantLaneNoOffset(word, 3, scale3)));
+            staged_weight_gm_.SetValue(stage_offset + 4, static_cast<half>(DequantLaneNoOffset(word, 4, scale4)));
+            staged_weight_gm_.SetValue(stage_offset + 5, static_cast<half>(DequantLaneNoOffset(word, 5, scale5)));
+            staged_weight_gm_.SetValue(stage_offset + 6, static_cast<half>(DequantLaneNoOffset(word, 6, scale6)));
+            staged_weight_gm_.SetValue(stage_offset + 7, static_cast<half>(DequantLaneNoOffset(word, 7, scale7)));
+            return;
+        }
         const float offset0 = OffsetValue(scale_base, zero_offsets);
         const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
         const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
@@ -2886,6 +2959,25 @@ private:
         const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
         const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
         const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
+        if (zero_offsets != 0) {
+            staged_weight_gm_.SetValue(
+                stage_offset, static_cast<half>(static_cast<float>(dequant.GetValue(0)) * scale0));
+            staged_weight_gm_.SetValue(
+                stage_offset + 1, static_cast<half>(static_cast<float>(dequant.GetValue(1)) * scale1));
+            staged_weight_gm_.SetValue(
+                stage_offset + 2, static_cast<half>(static_cast<float>(dequant.GetValue(2)) * scale2));
+            staged_weight_gm_.SetValue(
+                stage_offset + 3, static_cast<half>(static_cast<float>(dequant.GetValue(3)) * scale3));
+            staged_weight_gm_.SetValue(
+                stage_offset + 4, static_cast<half>(static_cast<float>(dequant.GetValue(4)) * scale4));
+            staged_weight_gm_.SetValue(
+                stage_offset + 5, static_cast<half>(static_cast<float>(dequant.GetValue(5)) * scale5));
+            staged_weight_gm_.SetValue(
+                stage_offset + 6, static_cast<half>(static_cast<float>(dequant.GetValue(6)) * scale6));
+            staged_weight_gm_.SetValue(
+                stage_offset + 7, static_cast<half>(static_cast<float>(dequant.GetValue(7)) * scale7));
+            return;
+        }
         const float offset0 = OffsetValue(scale_base, zero_offsets);
         const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
         const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
@@ -2970,66 +3062,92 @@ private:
                 const float scale15 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 5));
                 const float scale16 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 6));
                 const float scale17 = static_cast<float>(scales_gm_.GetValue(scale_base1 + 7));
-                const float offset00 = OffsetValue(scale_base0, zero_offsets);
-                const float offset01 = OffsetValue(scale_base0 + 1, zero_offsets);
-                const float offset02 = OffsetValue(scale_base0 + 2, zero_offsets);
-                const float offset03 = OffsetValue(scale_base0 + 3, zero_offsets);
-                const float offset04 = OffsetValue(scale_base0 + 4, zero_offsets);
-                const float offset05 = OffsetValue(scale_base0 + 5, zero_offsets);
-                const float offset06 = OffsetValue(scale_base0 + 6, zero_offsets);
-                const float offset07 = OffsetValue(scale_base0 + 7, zero_offsets);
-                const float offset10 = OffsetValue(scale_base1, zero_offsets);
-                const float offset11 = OffsetValue(scale_base1 + 1, zero_offsets);
-                const float offset12 = OffsetValue(scale_base1 + 2, zero_offsets);
-                const float offset13 = OffsetValue(scale_base1 + 3, zero_offsets);
-                const float offset14 = OffsetValue(scale_base1 + 4, zero_offsets);
-                const float offset15 = OffsetValue(scale_base1 + 5, zero_offsets);
-                const float offset16 = OffsetValue(scale_base1 + 6, zero_offsets);
-                const float offset17 = OffsetValue(scale_base1 + 7, zero_offsets);
+                if (zero_offsets != 0) {
+                    for (uint32_t k = k_begin; k < k_end; ++k) {
+                        const float x_value = static_cast<float>(x_gm_.GetValue(x_offset + k));
+                        const uint32_t word0 =
+                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                        const uint32_t word1 =
+                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col + 1));
+                        acc00 += x_value * DequantLaneNoOffset(word0, 0, scale00);
+                        acc01 += x_value * DequantLaneNoOffset(word0, 1, scale01);
+                        acc02 += x_value * DequantLaneNoOffset(word0, 2, scale02);
+                        acc03 += x_value * DequantLaneNoOffset(word0, 3, scale03);
+                        acc04 += x_value * DequantLaneNoOffset(word0, 4, scale04);
+                        acc05 += x_value * DequantLaneNoOffset(word0, 5, scale05);
+                        acc06 += x_value * DequantLaneNoOffset(word0, 6, scale06);
+                        acc07 += x_value * DequantLaneNoOffset(word0, 7, scale07);
+                        acc10 += x_value * DequantLaneNoOffset(word1, 0, scale10);
+                        acc11 += x_value * DequantLaneNoOffset(word1, 1, scale11);
+                        acc12 += x_value * DequantLaneNoOffset(word1, 2, scale12);
+                        acc13 += x_value * DequantLaneNoOffset(word1, 3, scale13);
+                        acc14 += x_value * DequantLaneNoOffset(word1, 4, scale14);
+                        acc15 += x_value * DequantLaneNoOffset(word1, 5, scale15);
+                        acc16 += x_value * DequantLaneNoOffset(word1, 6, scale16);
+                        acc17 += x_value * DequantLaneNoOffset(word1, 7, scale17);
+                    }
+                } else {
+                    const float offset00 = static_cast<float>(offsets_gm_.GetValue(scale_base0));
+                    const float offset01 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 1));
+                    const float offset02 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 2));
+                    const float offset03 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 3));
+                    const float offset04 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 4));
+                    const float offset05 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 5));
+                    const float offset06 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 6));
+                    const float offset07 = static_cast<float>(offsets_gm_.GetValue(scale_base0 + 7));
+                    const float offset10 = static_cast<float>(offsets_gm_.GetValue(scale_base1));
+                    const float offset11 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 1));
+                    const float offset12 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 2));
+                    const float offset13 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 3));
+                    const float offset14 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 4));
+                    const float offset15 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 5));
+                    const float offset16 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 6));
+                    const float offset17 = static_cast<float>(offsets_gm_.GetValue(scale_base1 + 7));
 
-                // Offset is constant within a quant group, so M1 can apply its
-                // contribution once after accumulating the signed INT4 lanes.
-                float x_sum = 0.0f;
-                for (uint32_t k = k_begin; k < k_end; ++k) {
-                    const float x_value = static_cast<float>(x_gm_.GetValue(x_offset + k));
-                    x_sum += x_value;
-                    const uint32_t word0 =
-                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
-                    const uint32_t word1 =
-                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col + 1));
-                    acc00 += x_value * DequantLaneNoOffset(word0, 0, scale00);
-                    acc01 += x_value * DequantLaneNoOffset(word0, 1, scale01);
-                    acc02 += x_value * DequantLaneNoOffset(word0, 2, scale02);
-                    acc03 += x_value * DequantLaneNoOffset(word0, 3, scale03);
-                    acc04 += x_value * DequantLaneNoOffset(word0, 4, scale04);
-                    acc05 += x_value * DequantLaneNoOffset(word0, 5, scale05);
-                    acc06 += x_value * DequantLaneNoOffset(word0, 6, scale06);
-                    acc07 += x_value * DequantLaneNoOffset(word0, 7, scale07);
-                    acc10 += x_value * DequantLaneNoOffset(word1, 0, scale10);
-                    acc11 += x_value * DequantLaneNoOffset(word1, 1, scale11);
-                    acc12 += x_value * DequantLaneNoOffset(word1, 2, scale12);
-                    acc13 += x_value * DequantLaneNoOffset(word1, 3, scale13);
-                    acc14 += x_value * DequantLaneNoOffset(word1, 4, scale14);
-                    acc15 += x_value * DequantLaneNoOffset(word1, 5, scale15);
-                    acc16 += x_value * DequantLaneNoOffset(word1, 6, scale16);
-                    acc17 += x_value * DequantLaneNoOffset(word1, 7, scale17);
+                    // Offset is constant within a quant group, so M1 can apply its
+                    // contribution once after accumulating the signed INT4 lanes.
+                    float x_sum = 0.0f;
+                    for (uint32_t k = k_begin; k < k_end; ++k) {
+                        const float x_value = static_cast<float>(x_gm_.GetValue(x_offset + k));
+                        x_sum += x_value;
+                        const uint32_t word0 =
+                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                        const uint32_t word1 =
+                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col + 1));
+                        acc00 += x_value * DequantLaneNoOffset(word0, 0, scale00);
+                        acc01 += x_value * DequantLaneNoOffset(word0, 1, scale01);
+                        acc02 += x_value * DequantLaneNoOffset(word0, 2, scale02);
+                        acc03 += x_value * DequantLaneNoOffset(word0, 3, scale03);
+                        acc04 += x_value * DequantLaneNoOffset(word0, 4, scale04);
+                        acc05 += x_value * DequantLaneNoOffset(word0, 5, scale05);
+                        acc06 += x_value * DequantLaneNoOffset(word0, 6, scale06);
+                        acc07 += x_value * DequantLaneNoOffset(word0, 7, scale07);
+                        acc10 += x_value * DequantLaneNoOffset(word1, 0, scale10);
+                        acc11 += x_value * DequantLaneNoOffset(word1, 1, scale11);
+                        acc12 += x_value * DequantLaneNoOffset(word1, 2, scale12);
+                        acc13 += x_value * DequantLaneNoOffset(word1, 3, scale13);
+                        acc14 += x_value * DequantLaneNoOffset(word1, 4, scale14);
+                        acc15 += x_value * DequantLaneNoOffset(word1, 5, scale15);
+                        acc16 += x_value * DequantLaneNoOffset(word1, 6, scale16);
+                        acc17 += x_value * DequantLaneNoOffset(word1, 7, scale17);
+                    }
+                    acc00 += x_sum * offset00 * scale00;
+                    acc01 += x_sum * offset01 * scale01;
+                    acc02 += x_sum * offset02 * scale02;
+                    acc03 += x_sum * offset03 * scale03;
+                    acc04 += x_sum * offset04 * scale04;
+                    acc05 += x_sum * offset05 * scale05;
+                    acc06 += x_sum * offset06 * scale06;
+                    acc07 += x_sum * offset07 * scale07;
+                    acc10 += x_sum * offset10 * scale10;
+                    acc11 += x_sum * offset11 * scale11;
+                    acc12 += x_sum * offset12 * scale12;
+                    acc13 += x_sum * offset13 * scale13;
+                    acc14 += x_sum * offset14 * scale14;
+                    acc15 += x_sum * offset15 * scale15;
+                    acc16 += x_sum * offset16 * scale16;
+                    acc17 += x_sum * offset17 * scale17;
                 }
-                acc00 += x_sum * offset00 * scale00;
-                acc01 += x_sum * offset01 * scale01;
-                acc02 += x_sum * offset02 * scale02;
-                acc03 += x_sum * offset03 * scale03;
-                acc04 += x_sum * offset04 * scale04;
-                acc05 += x_sum * offset05 * scale05;
-                acc06 += x_sum * offset06 * scale06;
-                acc07 += x_sum * offset07 * scale07;
-                acc10 += x_sum * offset10 * scale10;
-                acc11 += x_sum * offset11 * scale11;
-                acc12 += x_sum * offset12 * scale12;
-                acc13 += x_sum * offset13 * scale13;
-                acc14 += x_sum * offset14 * scale14;
-                acc15 += x_sum * offset15 * scale15;
-                acc16 += x_sum * offset16 * scale16;
-                acc17 += x_sum * offset17 * scale17;
             }
 
             StoreRow(row_offset + n_base0, acc00, acc01, acc02, acc03, acc04, acc05, acc06, acc07);
@@ -3059,40 +3177,56 @@ private:
                 const float scale5 = static_cast<float>(scales_gm_.GetValue(scale_base + 5));
                 const float scale6 = static_cast<float>(scales_gm_.GetValue(scale_base + 6));
                 const float scale7 = static_cast<float>(scales_gm_.GetValue(scale_base + 7));
-                const float offset0 = OffsetValue(scale_base, zero_offsets);
-                const float offset1 = OffsetValue(scale_base + 1, zero_offsets);
-                const float offset2 = OffsetValue(scale_base + 2, zero_offsets);
-                const float offset3 = OffsetValue(scale_base + 3, zero_offsets);
-                const float offset4 = OffsetValue(scale_base + 4, zero_offsets);
-                const float offset5 = OffsetValue(scale_base + 5, zero_offsets);
-                const float offset6 = OffsetValue(scale_base + 6, zero_offsets);
-                const float offset7 = OffsetValue(scale_base + 7, zero_offsets);
+                if (zero_offsets != 0) {
+                    for (uint32_t k = k_begin; k < k_end; ++k) {
+                        const float x_value = static_cast<float>(x_gm_.GetValue(x_offset + k));
+                        const uint32_t word =
+                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                        acc0 += x_value * DequantLaneNoOffset(word, 0, scale0);
+                        acc1 += x_value * DequantLaneNoOffset(word, 1, scale1);
+                        acc2 += x_value * DequantLaneNoOffset(word, 2, scale2);
+                        acc3 += x_value * DequantLaneNoOffset(word, 3, scale3);
+                        acc4 += x_value * DequantLaneNoOffset(word, 4, scale4);
+                        acc5 += x_value * DequantLaneNoOffset(word, 5, scale5);
+                        acc6 += x_value * DequantLaneNoOffset(word, 6, scale6);
+                        acc7 += x_value * DequantLaneNoOffset(word, 7, scale7);
+                    }
+                } else {
+                    const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));
+                    const float offset1 = static_cast<float>(offsets_gm_.GetValue(scale_base + 1));
+                    const float offset2 = static_cast<float>(offsets_gm_.GetValue(scale_base + 2));
+                    const float offset3 = static_cast<float>(offsets_gm_.GetValue(scale_base + 3));
+                    const float offset4 = static_cast<float>(offsets_gm_.GetValue(scale_base + 4));
+                    const float offset5 = static_cast<float>(offsets_gm_.GetValue(scale_base + 5));
+                    const float offset6 = static_cast<float>(offsets_gm_.GetValue(scale_base + 6));
+                    const float offset7 = static_cast<float>(offsets_gm_.GetValue(scale_base + 7));
 
-                // Offset is constant within a quant group, so M1 can apply its
-                // contribution once after accumulating the signed INT4 lanes.
-                float x_sum = 0.0f;
-                for (uint32_t k = k_begin; k < k_end; ++k) {
-                    const float x_value = static_cast<float>(x_gm_.GetValue(x_offset + k));
-                    x_sum += x_value;
-                    const uint32_t word =
-                        static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
-                    acc0 += x_value * DequantLaneNoOffset(word, 0, scale0);
-                    acc1 += x_value * DequantLaneNoOffset(word, 1, scale1);
-                    acc2 += x_value * DequantLaneNoOffset(word, 2, scale2);
-                    acc3 += x_value * DequantLaneNoOffset(word, 3, scale3);
-                    acc4 += x_value * DequantLaneNoOffset(word, 4, scale4);
-                    acc5 += x_value * DequantLaneNoOffset(word, 5, scale5);
-                    acc6 += x_value * DequantLaneNoOffset(word, 6, scale6);
-                    acc7 += x_value * DequantLaneNoOffset(word, 7, scale7);
+                    // Offset is constant within a quant group, so M1 can apply its
+                    // contribution once after accumulating the signed INT4 lanes.
+                    float x_sum = 0.0f;
+                    for (uint32_t k = k_begin; k < k_end; ++k) {
+                        const float x_value = static_cast<float>(x_gm_.GetValue(x_offset + k));
+                        x_sum += x_value;
+                        const uint32_t word =
+                            static_cast<uint32_t>(packed_weight_gm_.GetValue(k * packed_stride + packed_col));
+                        acc0 += x_value * DequantLaneNoOffset(word, 0, scale0);
+                        acc1 += x_value * DequantLaneNoOffset(word, 1, scale1);
+                        acc2 += x_value * DequantLaneNoOffset(word, 2, scale2);
+                        acc3 += x_value * DequantLaneNoOffset(word, 3, scale3);
+                        acc4 += x_value * DequantLaneNoOffset(word, 4, scale4);
+                        acc5 += x_value * DequantLaneNoOffset(word, 5, scale5);
+                        acc6 += x_value * DequantLaneNoOffset(word, 6, scale6);
+                        acc7 += x_value * DequantLaneNoOffset(word, 7, scale7);
+                    }
+                    acc0 += x_sum * offset0 * scale0;
+                    acc1 += x_sum * offset1 * scale1;
+                    acc2 += x_sum * offset2 * scale2;
+                    acc3 += x_sum * offset3 * scale3;
+                    acc4 += x_sum * offset4 * scale4;
+                    acc5 += x_sum * offset5 * scale5;
+                    acc6 += x_sum * offset6 * scale6;
+                    acc7 += x_sum * offset7 * scale7;
                 }
-                acc0 += x_sum * offset0 * scale0;
-                acc1 += x_sum * offset1 * scale1;
-                acc2 += x_sum * offset2 * scale2;
-                acc3 += x_sum * offset3 * scale3;
-                acc4 += x_sum * offset4 * scale4;
-                acc5 += x_sum * offset5 * scale5;
-                acc6 += x_sum * offset6 * scale6;
-                acc7 += x_sum * offset7 * scale7;
             }
 
             StoreRow(row_offset + n_base, acc0, acc1, acc2, acc3, acc4, acc5, acc6, acc7);

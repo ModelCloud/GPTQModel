@@ -297,6 +297,25 @@ def test_ascendc_kernel_barriers_after_cann9_int4_dequant():
     )
 
 
+def test_ascendc_kernel_zero_offset_paths_skip_offset_fetches():
+    kernel = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext"
+        / "cannoe"
+        / "ascendc"
+        / "op_kernel"
+        / "cannoe_w4_a16_matmul.cpp"
+    )
+    text = kernel.read_text(encoding="utf-8")
+
+    assert "if (zero_offsets != 0) {\n            FillDirectBTileWordValuesNoOffset(" in text
+    assert "if (zero_offsets != 0) {\n            staged_weight_gm_.SetValue(stage_offset" in text
+    assert "if (zero_offsets != 0) {\n                    for (uint32_t k = group_k_begin;" in text
+    assert "if (zero_offsets != 0) {\n                    for (uint32_t k = k_begin; k < k_end; ++k)" in text
+    assert "const float offset00 = static_cast<float>(offsets_gm_.GetValue(scale_base0));" in text
+    assert "const float offset0 = static_cast<float>(offsets_gm_.GetValue(scale_base));" in text
+
+
 def test_komodo_native_prepack_unpacks_source_tiles_on_cpu_for_npu():
     komodo = Path(__file__).resolve().parents[1] / "gptqmodel" / "nn_modules" / "qlinear" / "komodo.py"
     text = komodo.read_text(encoding="utf-8")
