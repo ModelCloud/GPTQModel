@@ -306,6 +306,68 @@ def get_module_by_name_prefix(model, module_name: Union[List[str], str]):
     return None, ""
 
 
+def get_layers_with_prefixes(model, module_name: Union[List[str], str]):
+    """Resolve one or more layer containers into a flat layer list plus per-layer names.
+
+    Existing model definitions often expose a single `layers` ModuleList, but some
+    architectures split the decoder into multiple stacks that still need to be
+    quantized as one ordered sequence. This helper flattens every matching layer
+    container while preserving the source prefix for each layer.
+    """
+
+    module_name_list = module_name if isinstance(module_name, list) else [module_name]
+
+    layers = []
+    layer_names = []
+    seen_container_ids = set()
+
+    for prefix in module_name_list:
+        if not prefix:
+            continue
+        try:
+            module = get_module_by_name(model, prefix)
+        except ValueError:
+            module = None
+        if module is None:
+            continue
+
+        container_id = id(module)
+        if container_id in seen_container_ids:
+            continue
+        seen_container_ids.add(container_id)
+
+        if isinstance(module, (nn.ModuleList, list, tuple)):
+            for local_index, layer in enumerate(module):
+                if isinstance(layer, nn.Module):
+                    layers.append(layer)
+                    layer_names.append(f"{prefix}.{local_index}")
+        elif isinstance(module, nn.Module):
+            layers.append(module)
+            layer_names.append(prefix)
+
+    if layers:
+        return layers, layer_names
+
+    module, prefix = get_module_by_name_prefix(model, module_name_list)
+    if module is None:
+        return None, []
+    if isinstance(module, (nn.ModuleList, list, tuple)):
+        return list(module), [f"{prefix}.{index}" for index in range(len(module))]
+    return [module], [prefix]
+
+
+def get_layer_name(layer_names: Union[List[str], str, None], layer_index: int) -> str:
+    """Return the concrete full layer path for one flattened layer index."""
+
+    if not layer_names:
+        return ""
+    if isinstance(layer_names, str):
+        return layer_names
+    if layer_index < len(layer_names):
+        return layer_names[layer_index]
+    return layer_names[-1]
+
+
 def get_module_by_name_suffix(model, module_name: str):
     for name, module in model.named_modules():
         if name.endswith(module_name):

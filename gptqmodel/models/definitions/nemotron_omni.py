@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import inspect
 
-from .nemotron_h import NemotronHQModel
-from .._const import CPU
 from ...utils.model import move_to
 from ...utils.offload import offload_to_disk
+from .._const import CPU
+from .nemotron_h import NemotronHQModel
 
 
 class NemotronOmniQModel(NemotronHQModel):

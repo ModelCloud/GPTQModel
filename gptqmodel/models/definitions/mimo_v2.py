@@ -9,8 +9,8 @@ from torch import nn
 
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
-from ..base import BaseQModel
 from ...utils.torch import CPU
+from ..base import BaseQModel
 
 
 class MimoV2QModel(BaseQModel):

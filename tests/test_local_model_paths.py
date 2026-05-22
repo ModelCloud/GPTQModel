@@ -1,16 +1,18 @@
 import copy
 import json
+from types import SimpleNamespace
+
 import pytest
 import torch
+from safetensors.torch import save_file
+from transformers import GenerationConfig
+
 from gptqmodel.models import GPTQModel, auto, loader
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.utils import BACKEND, PROFILE
 from gptqmodel.utils import model as model_utils
 from gptqmodel.utils.hf import INTERNAL_HF_GGUF_FILE_KWARG
 from gptqmodel.utils.structure import LazyTurtle
-from safetensors.torch import save_file
-from transformers import GenerationConfig
-from types import SimpleNamespace
 
 
 def test_load_treats_missing_absolute_path_as_local(monkeypatch):

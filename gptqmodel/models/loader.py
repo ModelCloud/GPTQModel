@@ -6,18 +6,20 @@
 from __future__ import annotations
 
 import copy
-import numpy as np
 import os
 import shutil
 import time
-import torch
-import transformers
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
 from typing import Dict, List, Optional, Union
 
+import numpy as np
+import torch
+import transformers
+
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.structure import LazyTurtle, print_module_tree
+
 
 if ensure_modelscope_available():
     from modelscope import snapshot_download
@@ -69,6 +71,7 @@ from ..utils.model import (
     find_config_seq_len,
     find_modules,
     get_checkpoints,
+    get_layers_with_prefixes,
     get_module_by_name_prefix,
     gptqmodel_post_init,
     load_checkpoint_in_model_then_tie_weights,
@@ -1210,7 +1213,7 @@ def ModelLoader(cls):
 
             extract_layers_node = cls.extract_layers_node()
             # Get the first layer to determine layer type
-            layers, _ = get_module_by_name_prefix(model, extract_layers_node)
+            layers, _ = get_layers_with_prefixes(model, extract_layers_node)
 
             modules = find_modules(model)
             ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
@@ -1452,7 +1455,7 @@ def ModelLoader(cls):
 
         log.info(f"Loader: device = {device}")
         if explicit_device_map is None:
-            layers, _ = get_module_by_name_prefix(model, extract_layers_node)
+            layers, _ = get_layers_with_prefixes(model, extract_layers_node)
             num_gpus = 1
             if device is DEVICE.CUDA:
                 num_gpus = torch.cuda.device_count()

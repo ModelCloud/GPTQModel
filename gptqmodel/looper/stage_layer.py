@@ -36,7 +36,7 @@ from ..looper.qqq_processor import QQQProcessor
 from ..utils.device import get_device, get_device_new
 from ..utils.looper_helpers import normalize_device_like
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
-from ..utils.model import find_modules, get_module
+from ..utils.model import find_modules, get_layer_name, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
@@ -49,11 +49,11 @@ def _find_last_quantized_layer_index(
     looper: "ModuleLooper",
     *,
     layer_modules: List[List[str]],
-    layers_prefix: Optional[str],
+    layer_names: Optional[List[str]],
     layer_count: int,
 ) -> Optional[int]:
     """Return the highest layer index whose tracked modules are not all dynamically skipped."""
-    if looper.gptq_model.quantize_config.lm_head or not layers_prefix:
+    if looper.gptq_model.quantize_config.lm_head or not layer_names:
         return None
 
     layer_module_names = {
@@ -67,8 +67,9 @@ def _find_last_quantized_layer_index(
 
     last_quantized_layer_index = -1
     for candidate_layer_index in range(layer_count):
+        layer_name = get_layer_name(layer_names, candidate_layer_index)
         for module_name in layer_module_names:
-            module_full_name = f"{layers_prefix}.{candidate_layer_index}.{module_name}"
+            module_full_name = f"{layer_name}.{module_name}"
             # If at least one module in this layer is not dynamically excluded,
             # the layer still needs forward/quantization work.
             if looper.gptq_model.quantize_config.dynamic_get(layer_name=module_full_name) != False:
@@ -387,7 +388,7 @@ def run_layer_stage(
     layers: List[torch.nn.Module],
     layer_modules: List[List[str]],
     planning_layer_modules: List[List[str]],
-    layers_prefix: Optional[str],
+    layer_names: Optional[List[str]],
     fallback,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
     pb,
@@ -403,7 +404,7 @@ def run_layer_stage(
     last_quantized_layer_index = _find_last_quantized_layer_index(
         looper,
         layer_modules=layer_modules,
-        layers_prefix=layers_prefix,
+        layer_names=layer_names,
         layer_count=layer_count,
     )
 
@@ -436,10 +437,12 @@ def run_layer_stage(
             layer_title = "Quantizing lm_head"
             module = get_module(looper.gptq_model.model, key=looper.gptq_model.lm_head)
             pristine_group_module = None
+            layer_name = ""
         else:
             layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
             module = layers[layer_index]
             pristine_group_module = None
+            layer_name = get_layer_name(layer_names, layer_index)
 
         pb.title(layer_title).subtitle("").draw()
         if durable_progress_logs:
@@ -483,8 +486,8 @@ def run_layer_stage(
 
             layers[layer_index] = module
 
-            if layers_prefix:
-                layer_descriptor = f"{layers_prefix}.{layer_index}"
+            if layer_name:
+                layer_descriptor = layer_name
             else:
                 layer_descriptor = str(layer_index)
 
@@ -530,7 +533,7 @@ def run_layer_stage(
                 full=full,
                 is_lm_head_module=is_lm_head_module,
                 layer_index=layer_index,
-                layers_prefix=layers_prefix,
+                layers_prefix=layer_name,
                 fallback=fallback,
             )
             if durable_progress_logs:

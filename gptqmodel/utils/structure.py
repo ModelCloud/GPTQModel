@@ -801,7 +801,7 @@ class LazyTurtle:
         )
         # Lazy checkpoint name resolution must come from model-definition truth.
         self._module_tree = copy.deepcopy(module_tree)
-        self._module_tree_layer_prefix, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
+        self._module_tree_layer_prefixes, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
         # Resolve runtime->checkpoint aliases once up front so per-tensor
         # lookups can apply the same mapping order as HF loading.
         conversion_aliases = (
@@ -1023,6 +1023,30 @@ class LazyTurtle:
         log.info("Module: Total direct tensors materialized from lazy checkpoint source: %s", materialized)
         return materialized
 
+    def materialize_direct_meta_tensors(
+        self,
+        *,
+        target_model: nn.Module,
+        target_submodule: nn.Module,
+        device: Optional[torch.device] = None,
+    ):
+        """Materialize only direct meta params/buffers for one shell submodule."""
+
+        if device is not None:
+            device = torch.device(device)
+            if device.type == "meta":
+                raise ValueError("materialize_direct_meta_tensors() does not support meta target devices.")
+
+        path = _get_qualified_name(target_model, target_submodule)
+        with self._lock, torch.inference_mode():
+            self._materialize_direct_meta_tensors(
+                shell_sub=target_submodule,
+                module_path=path,
+                param_cache={},
+                buffer_cache={},
+            )
+            return target_submodule
+
     def _load_weight_map(self, model_local_path: str) -> Dict[str, str]:
         from .model import get_checkpoints
 
@@ -1237,13 +1261,21 @@ class LazyTurtle:
         return tuple(paths)
 
     @classmethod
-    def _build_moe_alias_specs(cls, module_tree: Optional[Any]) -> tuple[tuple[str, ...], tuple[_MoEAliasSpec, ...]]:
+    def _iter_module_tree_variants(cls, module_tree: Optional[Any]) -> tuple[list[Any], ...]:
+        if not isinstance(module_tree, list):
+            return ()
+        if module_tree and all(isinstance(item, (list, tuple)) for item in module_tree):
+            return tuple(list(item) for item in module_tree)
+        return (list(module_tree),)
+
+    @classmethod
+    def _build_moe_alias_specs(cls, module_tree: Optional[Any]) -> tuple[tuple[tuple[str, ...], ...], tuple[_MoEAliasSpec, ...]]:
         """Extract runtime/checkpoint MoE aliases directly from the model definition's `module_tree`."""
 
         if not isinstance(module_tree, list):
             return (), ()
 
-        layer_prefix: list[str] = []
+        layer_prefixes: list[tuple[str, ...]] = []
         specs: list[_MoEAliasSpec] = []
         seen_specs: set[
             tuple[
@@ -1254,13 +1286,6 @@ class LazyTurtle:
                 tuple[tuple[tuple[str, ...], ...], ...],
             ]
         ] = set()
-
-        for item in module_tree:
-            if item == "#":
-                break
-            if isinstance(item, str):
-                aliases, _flags = cls._parse_module_spec(item)
-                layer_prefix.append(aliases[0])
 
         def walk(node: Any, path: tuple[Any, ...], moe_root: Optional[tuple[tuple[str, ...], ...]]) -> None:
             if isinstance(node, dict):
@@ -1330,23 +1355,37 @@ class LazyTurtle:
                 for item in node:
                     walk(item, path, moe_root)
 
-        found_hash = False
-        for item in module_tree:
-            if item == "#":
-                found_hash = True
-                continue
-            if not found_hash:
-                continue
-            walk(item, (), None)
+        for tree_variant in cls._iter_module_tree_variants(module_tree):
+            layer_prefix: list[str] = []
+            for item in tree_variant:
+                if item == "#":
+                    break
+                if isinstance(item, str):
+                    layer_prefix.append(item.split(":", 1)[0])
+            if layer_prefix:
+                prefix_tuple = tuple(layer_prefix)
+                if prefix_tuple not in layer_prefixes:
+                    layer_prefixes.append(prefix_tuple)
 
-        return tuple(layer_prefix), tuple(specs)
+            found_hash = False
+            for item in tree_variant:
+                if item == "#":
+                    found_hash = True
+                    continue
+                if not found_hash:
+                    continue
+                walk(item, (), None)
+
+        return tuple(layer_prefixes), tuple(specs)
 
     def _split_layer_relative_path(self, name: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Return `(layer_prefix_with_index, relative_parts)` for a runtime or checkpoint tensor path."""
 
         parts = tuple(part for part in name.split(".") if part)
-        prefix = self._module_tree_layer_prefix
-        if prefix:
+        prefixes = getattr(self, "_module_tree_layer_prefixes", ()) or ()
+        for prefix in prefixes:
+            if not prefix:
+                continue
             max_start = len(parts) - len(prefix)
             for start in range(max_start + 1):
                 end = start + len(prefix)
@@ -1917,11 +1956,25 @@ class LazyTurtle:
             preferred_dims.extend(dim for dim in range(candidate.ndim) if dim not in preferred_dims)
 
             for dim in preferred_dims:
-                if candidate.shape[dim] % 2 != 0:
-                    continue
-                split_tensor = candidate.chunk(2, dim=dim)[split_index].contiguous()
-                if tuple(split_tensor.shape) == expected_shape:
-                    return split_tensor
+                split_counts = []
+                expected_dim = expected_shape[dim] if dim < len(expected_shape) else None
+                if expected_dim:
+                    inferred_split_count = candidate.shape[dim] // expected_dim
+                    if (
+                        inferred_split_count > 1
+                        and candidate.shape[dim] % expected_dim == 0
+                        and inferred_split_count not in split_counts
+                    ):
+                        split_counts.append(inferred_split_count)
+                if 2 not in split_counts:
+                    split_counts.append(2)
+
+                for split_count in split_counts:
+                    if split_index >= split_count or candidate.shape[dim] % split_count != 0:
+                        continue
+                    split_tensor = candidate.chunk(split_count, dim=dim)[split_index].contiguous()
+                    if tuple(split_tensor.shape) == expected_shape:
+                        return split_tensor
 
         return None
 
@@ -2541,6 +2594,27 @@ def alias_from_turtle_for_submodule(
         target_submodule=target_submodule,
         device=device,
         non_blocking=non_blocking,
+    )
+
+
+def alias_direct_meta_from_turtle_for_submodule(
+    target_model: torch.nn.Module,
+    turtle_model: "LazyTurtle",
+    target_submodule: torch.nn.Module,
+    *,
+    device: Optional[torch.device] = None,
+):
+    """Materialize only direct meta params/buffers for one shell submodule."""
+
+    if not hasattr(turtle_model, "materialize_direct_meta_tensors"):
+        raise TypeError(
+            f"Expected LazyTurtle-compatible source, got `{type(turtle_model).__name__}`."
+        )
+
+    return turtle_model.materialize_direct_meta_tensors(
+        target_model=target_model,
+        target_submodule=target_submodule,
+        device=device,
     )
 
 def _is_meta_tensor(t: torch.Tensor) -> bool:

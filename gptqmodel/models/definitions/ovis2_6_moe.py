@@ -6,9 +6,9 @@
 import torch
 from torch import nn
 
+from ...quantization import METHOD
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from .ovis2_5 import Ovis2_5QModel
-from ...quantization import METHOD
 
 
 class Ovis2_6_MoeQModel(Ovis2_5QModel):

@@ -19,7 +19,7 @@ from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.looper_helpers import device_ctx, select_forward_devices
 from ..utils.logger import setup_logger
-from ..utils.model import get_module_by_name_prefix, move_to, nested_move_to
+from ..utils.model import get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.torch import CPU, META
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
@@ -35,6 +35,15 @@ class StageInputsCapture:
         self.looper = looper
         self.gptq_model = looper.gptq_model
         self.logger = logger or setup_logger()
+
+    def _materialize_modules_with_direct_meta_tensors(self, device: torch.device) -> None:
+        for module_name in self.gptq_model.get_modules_with_direct_meta_tensors(self.gptq_model.model):
+            module = get_module(self.gptq_model.model, module_name)
+            if isinstance(module, torch.nn.Module):
+                self.gptq_model.shell_direct_meta_materialize(
+                    target_submodule=module,
+                    device=device,
+                )
 
     def cache_inputs(
         self,
@@ -173,6 +182,9 @@ class StageInputsCapture:
             # but the first model input embedding call we use a simple model register forwar hook
             # and wait for the first instance this callback is called
             raise STOP_FORWARD_EXCEPTION
+
+        # Parameters attached to the shell root must be ready before embedding forward.
+        self._materialize_modules_with_direct_meta_tensors(cur_layer_device)
 
         ori_outside_layer_module_devices: Dict[str, torch.device] = {}
         for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
