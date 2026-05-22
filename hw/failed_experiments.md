@@ -98,3 +98,31 @@ Interpretation:
   default. Even the q-like zero-drift shape slowed in the full module gate on
   CANN 9.1 beta. Keep the existing planned-path/direct probes as diagnostics
   only unless a same-gate retest shows a clear win.
+
+## Cannoe SVDQuant Raw Launcher And Global Tile Probes
+
+Context:
+
+- Hypothesis: SVDQuant's 910B launcher style could let Cannoe bypass custom-op
+  ACLNN workspace validation and call a generated `aclrtlaunch_*` entry point
+  directly, while a broader `tile_n=768` policy might improve all Qwen shapes.
+- Environment: CANN `/usr/local/Ascend/cann-9.1.0-beta.1`, visible devices
+  limited to NPU0-6, probes executed on visible NPU0.
+
+Failed or non-actionable probes:
+
+| Probe | Result | Metric data |
+|---|---|---|
+| Search local Cannoe generated package for raw launch symbols | No runtime hook to use | `libcust_opapi.so` exports only `aclnnCannoeW4A16Matmul` and `aclnnCannoeW4A16MatmulGetWorkspaceSize`; generated artifacts exposed no `aclrtlaunch_*` symbol or header |
+| Full Qwen3 27B Cannoe gate with `GPTQMODEL_KOMODO_PREPACK_TILE_N=768` | Too noisy for a global default | initial sweep total `1.0076 ms`, but paired confirms were baseline `1.0981 ms` vs tile768 `1.0908 ms`, then baseline `1.1477 ms` vs tile768 `1.1209 ms` |
+| Large down-only sweep with `tile_n=4096` | Memory regression | down `0.2773 ms`, similar to `1024`/`1536`, but peak rose to `355.4 MB` versus `239.2 MB` |
+
+Interpretation:
+
+- SVDQuant still points in the right architectural direction: raw launch,
+  explicit AIC/AIV ownership, and bounded device-side rings. Cannoe cannot adopt
+  the raw-launch part without changing the Ascend C build to retain/export the
+  generated launch stub.
+- Do not set a global `768` prepack tile policy. For CANN 9.1 beta, the useful
+  production adjustment is narrower: let the bound plain-native Qwen down shape
+  inherit parent `1024`, and keep non-plain planned/fused experiments isolated.

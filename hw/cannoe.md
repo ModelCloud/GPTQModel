@@ -457,17 +457,16 @@ positive-`base_k` fallback shape.
   `q=0.0772`, `k=0.0730`, `v=0.0709`, `gate=0.2214`, `up=0.2188`,
   `down=0.2757`; JSON artifact
   `/tmp/cannoe_qwen3_27b_full_gate_after_tscm_unroll.json`.
-- The large GPTQ down-projection default prepack tile is now narrowed further to
-  `tile_n=320` for `group_size=32`, `K>=16384`, and `4096<=N<=8192`. This keeps
-  the plain native CANN fast path while reducing cold prepack workspace for the
-  Qwen3 27B down shape. The NPU0 down-only sweep found `tile_n=320` at
-  `0.2568 ms`, `241.8 MB` peak versus the previous `tile_n=512` at
-  `0.2765 ms`, `244.9 MB` peak in the same sweep. Full Qwen3 27B FP16 gate
-  repeats remained noisy but favored the new tile: `tile_n=320` totals
-  `0.9288 ms` and `0.9161 ms`, while `GPTQMODEL_KOMODO_PREPACK_TILE_N=512`
-  totals were `0.9718 ms` and `1.0140 ms`. Count this as a validated native
-  CANN fast-path retune and cold/prepack memory improvement, not a substitute
-  for the true fused Ascend C dequant-to-Cube kernel target.
+- The 2026-05-19 large GPTQ down-projection `tile_n=320` retune is now scoped to
+  the non-plain Cannoe planned/fused path only. On CANN 9.1 beta, the bound
+  plain-native down-only sweep found the parent Komodo default tile back in
+  front: `tile_n=320` measured `0.2852 ms`, while `tile_n=1024` measured
+  `0.2772 ms` and `tile_n=1536` measured `0.2768 ms` with the same
+  `239.2 MB` peak. `tile_n=4096` was not useful because it held similar speed
+  (`0.2773 ms`) but spiked peak memory to `355.4 MB`. Cannoe plain-native now
+  lets large Qwen down projections inherit `tile_n=1024`; the old `320` guard
+  remains for the heavier planned/fused experiments until they have a better
+  validated tile policy.
 - A planned-path `inner_precise` probe for the same Qwen3 27B down shape did not
   validate. Down-only NPU0 measurements were: default plain-native `0.2625 ms`,
   forced planned `inner_precise=0` `0.2756 ms`, and forced planned

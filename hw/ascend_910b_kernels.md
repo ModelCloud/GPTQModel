@@ -119,15 +119,15 @@ python scripts/benchmark_qwen3_27b_gptq_fp16.py \
   --json-output /tmp/cannoe_qwen3_27b_full_gate.json
 ```
 
-2026-05-19 NPU0 down-projection prepack retune: Cannoe now uses
-`prepack_tile_n=320` by default for large GPTQ down-style group-32 projections
-(`K>=16384`, `4096<=N<=8192`). The Qwen3 27B down-only sweep measured
-`tile_n=320` at `0.2568 ms`, `241.8 MB` peak versus the previous `tile_n=512`
-at `0.2765 ms`, `244.9 MB` peak. Full projection gate repeats remained noisy
-but favored `320`: totals `0.9288 ms` and `0.9161 ms` versus forced `512`
-totals `0.9718 ms` and `1.0140 ms`. The planned `inner_precise` path failed for
-this down shape (`0.2756 ms` at `inner_precise=0`, `0.2901 ms` at
-`inner_precise=1`), so the runtime keeps the bound plain-native fast path.
+2026-05-22 CANN 9.1 beta down-projection prepack retune update: the 2026-05-19
+`prepack_tile_n=320` rule is no longer used by the bound plain-native Cannoe
+path. A fresh Qwen3 27B down-only sweep measured `tile_n=320` at `0.2852 ms`,
+while `tile_n=1024` measured `0.2772 ms` and `tile_n=1536` measured
+`0.2768 ms`, all at `239.2 MB` peak. `tile_n=4096` was similar speed
+(`0.2773 ms`) but raised peak memory to `355.4 MB`. Plain-native Cannoe now
+inherits the parent `1024` tile for this shape; the old `320` rule remains only
+for non-plain planned/fused experiments until that path has a validated runtime
+winner.
 
 ### Dense-Cache Guard
 

@@ -973,7 +973,7 @@ class _CannoePlanMixin:
                 and self.in_features >= 16384
                 and 4096 <= self.out_features <= 8192
             ):
-                return 320
+                return None if plain_passthrough else 320
             if plain_passthrough:
                 return None
             if self.group_size == 32 and (

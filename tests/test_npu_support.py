@@ -437,9 +437,10 @@ def test_cannoe_tiling_plan_inner_precise_auto_shape_policy(monkeypatch):
     assert balanced.inner_precise == 0
 
 
-def test_cannoe_gptq_large_down_projection_uses_narrow_prepack_tile(monkeypatch):
+def test_cannoe_gptq_large_down_projection_prepack_tile_policy(monkeypatch):
     monkeypatch.delenv("GPTQMODEL_CANNOE_PREPACK_TILE_N", raising=False)
     monkeypatch.delenv("GPTQMODEL_KOMODO_PREPACK_TILE_N", raising=False)
+    monkeypatch.delenv("GPTQMODEL_CANNOE_STAGED_DEQUANT", raising=False)
 
     q_proj = CannoeLinear(
         bits=4,
@@ -464,7 +465,21 @@ def test_cannoe_gptq_large_down_projection_uses_narrow_prepack_tile(monkeypatch)
         register_buffers=True,
     )
     assert q_proj._native_prepack_tile_n() == 1024
-    assert down_proj._native_prepack_tile_n() == 320
+    assert down_proj._native_prepack_tile_n() == 1024
+
+    monkeypatch.setenv("GPTQMODEL_CANNOE_STAGED_DEQUANT", "1")
+    planned_down_proj = CannoeLinear(
+        bits=4,
+        group_size=32,
+        sym=True,
+        desc_act=False,
+        in_features=17408,
+        out_features=5120,
+        bias=False,
+        pack_dtype=torch.int32,
+        register_buffers=True,
+    )
+    assert planned_down_proj._native_prepack_tile_n() == 320
 
 
 def test_cannoe_default_fused_op_names_include_msopgen_aliases(monkeypatch):
