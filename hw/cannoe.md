@@ -932,6 +932,12 @@ Applied follow-up:
   The offset tensor is allocated as a plain contiguous tensor rather than
   `full_like(scales)` so torch-npu does not emit internal-format warnings in
   the benchmark path.
+- The same rule is now applied to native-plan eligibility: symmetric Cannoe
+  only requires `qweight`, `scales`, `g_idx`, and `wf_unsqueeze_neg_one` to be
+  live on NPU before prepack or first forward. `qzeros` may be CPU-resident or
+  already empty for symmetric GPTQ because the native path derives the constant
+  offset tensor. Asymmetric GPTQ still uses the parent Komodo source/device
+  checks because it needs real zero-point data.
 - The Qwen3 27B synthetic benchmark now reports native plan memory,
   dense-FP16-equivalent weight memory, and source-drop state next to timing
   results. This keeps speed work tied to the quantization premise: the retained

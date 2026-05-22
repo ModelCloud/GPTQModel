@@ -845,7 +845,49 @@ class _CannoePlanMixin:
     def _maybe_eager_native_prepack(self) -> bool:
         if self._cannoe_maybe_eager_bf16_native_prepack():
             return True
+        if self._cannoe_maybe_eager_symmetric_native_prepack():
+            return True
         return super()._maybe_eager_native_prepack()
+
+    def _cannoe_symmetric_native_sources_ready(self, *, device: torch.device) -> bool:
+        if not self.sym:
+            return False
+        required_names = ("qweight", "scales", "g_idx", "wf_unsqueeze_neg_one")
+        for name in required_names:
+            tensor = getattr(self, name, None)
+            if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+                return False
+        return self.qweight.device == device and self.scales.device == device
+
+    def _cannoe_maybe_eager_symmetric_native_prepack(self) -> bool:
+        if not self.sym or self.group_size == 16:
+            return False
+        if not _eager_native_prepack_enabled() or not _native_int4_enabled() or not _npu_int4_ops_available():
+            return False
+        if getattr(self, "_native_source_dropped", False):
+            return False
+
+        device = self.runtime_device()
+        if device is None:
+            return False
+        device = torch.device(device)
+        if device.type != "npu":
+            return False
+        if not self._cannoe_symmetric_native_sources_ready(device=device):
+            return False
+
+        dtype = torch.float16
+        key = self._native_key(device=device, dtype=dtype)
+        if key in self._native_plan_cache or key in getattr(self, "_native_plan_pending", {}):
+            return True
+        supported, _ = self._native_g_idx_plan()
+        if not supported:
+            return False
+
+        plan = self._build_native_plan(device=device, dtype=dtype)
+        self._native_plan_cache[key] = plan
+        self._maybe_drop_native_source_weights(force=True)
+        return True
 
     def _can_use_native_int4(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
         if (
@@ -861,7 +903,48 @@ class _CannoePlanMixin:
             and self._native_key(device=x.device, dtype=torch.bfloat16) in self._native_plan_cache
         ):
             return True
+        if (
+            self.sym
+            and _native_int4_enabled()
+            and _npu_int4_ops_available()
+            and not self.training
+            and not x.requires_grad
+            and x.device.type == "npu"
+            and compute_dtype == torch.float16
+            and self.bits == 4
+            and x.shape[-1] == self.in_features
+        ):
+            key = self._native_key(device=x.device, dtype=compute_dtype)
+            if key in self._native_plan_cache:
+                return True
+            if getattr(self, "_native_source_dropped", False):
+                return False
+            if not self._cannoe_symmetric_native_sources_ready(device=x.device):
+                return False
+            supported, _ = self._native_g_idx_plan()
+            return supported
         return super()._can_use_native_int4(x, compute_dtype)
+
+    def _can_prefetch_native_plan(
+        self, *, device: torch.device, dtype: torch.dtype, allow_training: bool = False
+    ) -> bool:
+        if self.sym:
+            if not _native_int4_enabled() or not _npu_int4_ops_available():
+                return False
+            if (self.training and not allow_training) or dtype != torch.float16 or device.type != "npu":
+                return False
+            if self.bits != 4:
+                return False
+            key = self._native_key(device=device, dtype=dtype)
+            if key in self._native_plan_cache:
+                return True
+            if getattr(self, "_native_source_dropped", False):
+                return False
+            if not self._cannoe_symmetric_native_sources_ready(device=device):
+                return False
+            supported, _ = self._native_g_idx_plan()
+            return supported
+        return super()._can_prefetch_native_plan(device=device, dtype=dtype, allow_training=allow_training)
 
     def _normalize_cannoe_prepack_tile_n(self, tile_n: int) -> int:
         if self.out_features % self.pack_factor != 0:

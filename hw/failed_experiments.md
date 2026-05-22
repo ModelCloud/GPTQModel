@@ -64,11 +64,13 @@ Failed probes:
 | `offsets=None` with `K=32,N=8,group=32` | one group | Rejected | CANN error: `antiquant_group_size can be either 0 or a multiple of 32 within the range 32 to weight_k_dim - 1` |
 | `offsets=None` with `K=64,N=64,group=32` | two groups | Accepted but wrong | full-offset mean abs output `5.8015`, no-offset mean abs output `0.6635`, max diff `9.6484` |
 | Broadcast offsets `(1,N)`, `(G,1)`, scalar `(1,)`, and empty `(0,)` with `K=64,N=64,group=32` | two groups | Rejected | each failed in `aclnnWeightQuantBatchMatmulV2` with status `161002` |
+| Full logical-shape offsets backed by one scalar with zero strides | `K=64,N=64,group=32` | Rejected | contiguous full offsets passed; `expand_as()` and `torch.as_strided(..., stride=(0,0))` both failed in `aclnnWeightQuantBatchMatmulV2` with status `161002` |
 
 Interpretation:
 
 - The public native CANN op requires a full offset tensor for correct symmetric
-  GPTQ semantics. Do not pass `None` and do not attempt offset broadcasting.
+  GPTQ semantics. Do not pass `None`, do not attempt offset broadcasting, and
+  do not use zero-stride logical full-shape offsets.
 - The viable optimization is narrower: skip reading and unpacking `qzeros`
   during Cannoe symmetric prepack, then generate the required full constant
   `offsets=8` tensor directly.

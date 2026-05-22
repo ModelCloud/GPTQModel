@@ -706,6 +706,26 @@ def test_cannoe_symmetric_native_plan_skips_qzeros_unpack():
     assert "wf_zero_source" not in source
 
 
+def test_cannoe_symmetric_native_eligibility_does_not_require_qzeros_device():
+    cannoe = _load_cannoe_module()
+    source_ready = inspect.getsource(cannoe.CannoeLinear._cannoe_symmetric_native_sources_ready)
+    eager_prepack = inspect.getsource(cannoe.CannoeLinear._cannoe_maybe_eager_symmetric_native_prepack)
+    can_use = inspect.getsource(cannoe.CannoeLinear._can_use_native_int4)
+    can_prefetch = inspect.getsource(cannoe.CannoeLinear._can_prefetch_native_plan)
+
+    assert 'required_names = ("qweight", "scales", "g_idx", "wf_unsqueeze_neg_one")' in source_ready
+    assert "qzeros" not in source_ready
+    assert "self._cannoe_maybe_eager_symmetric_native_prepack()" in inspect.getsource(
+        cannoe.CannoeLinear._maybe_eager_native_prepack
+    )
+    assert "self._cannoe_symmetric_native_sources_ready(device=device)" in eager_prepack
+    assert "self._native_source_available" not in eager_prepack
+    assert "self._cannoe_symmetric_native_sources_ready(device=x.device)" in can_use
+    assert "self._cannoe_symmetric_native_sources_ready(device=device)" in can_prefetch
+    assert "return super()._can_use_native_int4(x, compute_dtype)" in can_use
+    assert "return super()._can_prefetch_native_plan" in can_prefetch
+
+
 def test_raw_validator_emit_json_result_to_saved_fd():
     validator = _load_raw_validator()
     read_fd, write_fd = os.pipe()
