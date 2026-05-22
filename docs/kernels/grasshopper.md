@@ -21,6 +21,43 @@ plus Nsight Compute for promoted changes.
 | 2026-05-22 | `524c0064` | Group64 3-bit wide batch tile | Batch GEMM 3-bit group64 also uses the 8-row wide batch tile for batch8 wide-feature shapes, reducing grid z-slices and split-K atomics from `2048 -> 1024` CTAs. Nsight improved `183.968 us -> 181.216 us`, instructions dropped `89.57M -> 78.75M`, registers/thread rose `40 -> 47`, and host median improved `0.2284 ms -> 0.2228 ms`. Adjacent 3-bit group32 stayed on the 4-row layout with median `0.2360 ms`. |
 | 2026-05-22 | `1d97212a` | Group32 3-bit wide batch tile | Batch GEMM 3-bit group32 now also uses the 8-row wide batch tile for batch8 wide-feature shapes, reducing grid z-slices and split-K atomics from `2048 -> 1024` CTAs. Nsight improved `189.856 us -> 184.640 us`, instructions dropped `92.39M -> 80.16M`, registers/thread rose `40 -> 47`, and host median improved `0.2360 ms -> 0.2244 ms`. |
 
+## Benchmark Sweeps
+
+| Date | Sweep | Finding |
+| --- | --- | --- |
+| 2026-05-22 | Qwen3-32B GPTQ 4-bit fp16 vs Marlin, groups 32/64/128, rows 1 and 8, rank64 dense LoRA | No broad Marlin displacement yet. On `NVIDIA PG506-230 sm_80`, projection-sum decode base is near parity/slower (`1.016x-1.085x` GH/Marlin), but decode LoRA is faster (`0.763x-0.784x` including LoRA-A, `0.728x-0.742x` with precomputed down). Batch8 remains the blocker: base is `1.783x-1.829x` slower and LoRA-total is `1.223x-1.246x` slower. The largest regressions are Qwen3-32B MLP/down batch8 projections, where GrassHopper is about `2.62x-2.68x` slower than Marlin despite faster narrow k/v projections. |
+
+### Qwen3-32B vs Marlin Projection Sum
+
+Command template:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID python scripts/benchmark_grasshopper_vs_marlin_qwen3_32b.py \
+  --rows 1,8 --group-size <32|64|128> --rank 64 --warmup 20 --iters 80 \
+  --json-out /tmp/grasshopper_marlin_qwen3_32b_g<group>_fp16.json
+```
+
+| Group | Rows | Mode | GrassHopper total ms | Marlin total ms | GH / Marlin |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 32 | 1 | base | 0.7864 | 0.7250 | 1.085x |
+| 32 | 1 | lora_precomputed_down | 0.8069 | 1.0885 | 0.741x |
+| 32 | 1 | lora_total | 1.0660 | 1.3588 | 0.784x |
+| 32 | 8 | base | 1.3179 | 0.7204 | 1.829x |
+| 32 | 8 | lora_precomputed_down | 1.4305 | 1.1121 | 1.286x |
+| 32 | 8 | lora_total | 1.7019 | 1.3655 | 1.246x |
+| 64 | 1 | base | 0.7721 | 0.7117 | 1.085x |
+| 64 | 1 | lora_precomputed_down | 0.8049 | 1.0849 | 0.742x |
+| 64 | 1 | lora_total | 1.0634 | 1.3660 | 0.778x |
+| 64 | 8 | base | 1.2672 | 0.7107 | 1.783x |
+| 64 | 8 | lora_precomputed_down | 1.4264 | 1.1167 | 1.277x |
+| 64 | 8 | lora_total | 1.6993 | 1.3896 | 1.223x |
+| 128 | 1 | base | 0.7209 | 0.7096 | 1.016x |
+| 128 | 1 | lora_precomputed_down | 0.7956 | 1.0926 | 0.728x |
+| 128 | 1 | lora_total | 1.0476 | 1.3737 | 0.763x |
+| 128 | 8 | base | 1.2892 | 0.7066 | 1.825x |
+| 128 | 8 | lora_precomputed_down | 1.4223 | 1.1213 | 1.268x |
+| 128 | 8 | lora_total | 1.6968 | 1.3819 | 1.228x |
+
 ## Rejected Probes
 
 | Date | Probe | Result |
