@@ -2,19 +2,19 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-from typing import Dict, Optional
+from typing import Dict
 
 import requests
-from PIL import Image
 import torch
+from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
-from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+
 
 class Ovis2_5QModel(BaseQModel):
     loader = AutoModelForCausalLM

@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-from gptqmodel.quantization.config import MoEConfig, ExpertsRoutingOverride
 from model_test import ModelTest
+
+from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 
 
 class TestMimo(ModelTest):

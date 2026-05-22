@@ -27,7 +27,14 @@ from ..models._const import CPU, SUPPORTS_MODULE_TYPES
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..quantization.config import BitsAndBytesConfig, FP8Config, GGUFConfig, RTNConfig
 from ..utils.logger import setup_logger
-from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to
+from ..utils.model import (
+    find_modules,
+    get_layer_name,
+    get_layers_with_prefixes,
+    get_module,
+    get_module_by_name_prefix,
+    move_to,
+)
 from ..utils.offload import offload_to_disk
 
 
@@ -49,7 +56,7 @@ class WeightOnlyLooper:
         layer_module: torch.nn.Module,
         full: Dict[str, torch.nn.Module],
         layer_index: int,
-        layers_prefix: Optional[str],
+        layer_path: Optional[str],
         module_name: str,
         is_lm_head_module: bool,
     ) -> Optional[NamedModule]:
@@ -65,7 +72,7 @@ class WeightOnlyLooper:
         if isinstance(resolved, NamedModule):
             return resolved
 
-        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{module_name}"
+        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layer_path}.{module_name}"
         named = NamedModule(
             resolved,
             name=module_name,
@@ -132,10 +139,18 @@ class WeightOnlyLooper:
         # decoder-cache state while layers are being replaced.
         self.gptq_model.model.config.use_cache = False
 
-        layers, layers_prefix = get_module_by_name_prefix(
+        layers, layer_names = get_layers_with_prefixes(
             self.gptq_model.model,
             self.gptq_model.extract_layers_node(),
         )
+
+        for module_name in self.gptq_model.get_modules_with_direct_meta_tensors(self.gptq_model.model):
+            module = get_module(self.gptq_model.model, module_name)
+            if module is not None:
+                self.gptq_model.shell_direct_meta_materialize(
+                    target_submodule=module,
+                    device=CPU,
+                )
 
         if quant_config.offload_to_disk:
             log.info("Offloading base modules to disk...")
@@ -181,6 +196,10 @@ class WeightOnlyLooper:
                 else:
                     module = layers[layer_index]
                     subsets = layer_modules
+                    # Flattened layer names preserve the source stack for split decoders.
+                    layer_name = get_layer_name(layer_names, layer_index)
+                if is_lm_head_module:
+                    layer_name = None
 
                 module = self.gptq_model.pre_quantize(module)
                 if not is_lm_head_module:
@@ -204,7 +223,7 @@ class WeightOnlyLooper:
                             layer_module=module,
                             full=full,
                             layer_index=layer_index,
-                            layers_prefix=layers_prefix,
+                            layer_path=layer_name,
                             module_name=module_name,
                             is_lm_head_module=is_lm_head_module,
                         )

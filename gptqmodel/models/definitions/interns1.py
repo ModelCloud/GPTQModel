@@ -7,7 +7,6 @@ from typing import Dict
 
 import requests
 from PIL import Image
-
 from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
