@@ -24,6 +24,27 @@ from ci_gpu import (
 ERROR_PATTERN = re.compile(
     r"nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in"
 )
+DEFAULT_ASCEND_RT_VISIBLE_DEVICES = "7"
+
+
+def is_ascend_npu_test(test_script: str) -> bool:
+    return "npu" in re.split(r"[/_.-]+", test_script.removesuffix(".py"))
+
+
+def configure_ascend_npu_test_env(env: dict[str, str], test_script: str) -> bool:
+    if not is_ascend_npu_test(test_script):
+        return False
+
+    visible_devices = env.get("ASCEND_RT_VISIBLE_DEVICES", "").strip()
+    if not visible_devices:
+        visible_devices = env.get("GPTQMODEL_TEST_ASCEND_RT_VISIBLE_DEVICES", DEFAULT_ASCEND_RT_VISIBLE_DEVICES)
+        env["ASCEND_RT_VISIBLE_DEVICES"] = visible_devices
+
+    if "GPTQMODEL_TEST_NPU_DEVICE" not in env and visible_devices and "," not in visible_devices:
+        env["GPTQMODEL_TEST_NPU_DEVICE"] = "npu:0"
+
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    return True
 
 
 def kill_process_group(proc: subprocess.Popen[str]) -> None:
@@ -112,6 +133,11 @@ def run_tests(args: argparse.Namespace) -> int:
         env["CUDA_VISIBLE_DEVICES"] = ""
         print("CUDA_VISIBLE_DEVICES=")
 
+    ascend_npu_test = configure_ascend_npu_test_env(env, args.test_script)
+    if ascend_npu_test:
+        print(f"ASCEND_RT_VISIBLE_DEVICES={env.get('ASCEND_RT_VISIBLE_DEVICES', '')}")
+        print(f"GPTQMODEL_TEST_NPU_DEVICE={env.get('GPTQMODEL_TEST_NPU_DEVICE', '')}")
+
     if args.xpu_mode:
         maybe_uninstall_vllm()
 
@@ -138,17 +164,16 @@ def run_tests(args: argparse.Namespace) -> int:
         start_new_session=True,
     )
 
-    keepalive_endpoint = f"{normalize_base_url(args.base_url)}/keepalive"
-    keepalive_payload = build_job_request(
-        runner_name=args.runner,
-        run_id=args.run_id,
-        test_name=args.test_script,
-    )
-
     monitor_thread = None
     monitor_stop = None
     monitor_state = {"forced_exit_code": 0}
-    if env.get("CUDA_VISIBLE_DEVICES", ""):
+    if env.get("CUDA_VISIBLE_DEVICES", "") and not ascend_npu_test:
+        keepalive_endpoint = f"{normalize_base_url(args.base_url)}/keepalive"
+        keepalive_payload = build_job_request(
+            runner_name=args.runner,
+            run_id=args.run_id,
+            test_name=args.test_script,
+        )
         monitor_thread, monitor_stop, monitor_state = start_keepalive_monitor(
             proc=proc,
             keepalive_endpoint=keepalive_endpoint,

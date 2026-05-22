@@ -10,10 +10,37 @@ import pytest
 import torch
 
 from gptqmodel.quantization.npu_linalg import npu_inverse_cholesky_factor
-from gptqmodel.utils.torch import HAS_NPU
+from gptqmodel.utils.torch import HAS_NPU, last_npu_device_by_pci_bus_order
 
 
 pytestmark = pytest.mark.skipif(not HAS_NPU, reason="Ascend NPU is required")
+DEFAULT_ASCEND_RT_VISIBLE_DEVICES = "7"
+
+
+def _default_npu_test_device() -> str:
+    selected = last_npu_device_by_pci_bus_order()
+    return str(selected) if selected is not None else "npu:0"
+
+
+NPU_TEST_DEVICE = os.environ.get("GPTQMODEL_TEST_NPU_DEVICE", _default_npu_test_device())
+
+
+def _test_npu_device() -> torch.device:
+    device = torch.device(NPU_TEST_DEVICE)
+    if HAS_NPU:
+        torch.npu.set_device(device)
+    return device
+
+
+def _default_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    visible_devices = env.get("ASCEND_RT_VISIBLE_DEVICES", "").strip()
+    if not visible_devices:
+        visible_devices = env.get("GPTQMODEL_TEST_ASCEND_RT_VISIBLE_DEVICES", DEFAULT_ASCEND_RT_VISIBLE_DEVICES)
+        env["ASCEND_RT_VISIBLE_DEVICES"] = visible_devices
+    if "GPTQMODEL_TEST_NPU_DEVICE" not in env and visible_devices and "," not in visible_devices:
+        env["GPTQMODEL_TEST_NPU_DEVICE"] = "npu:0"
+    return env
 
 
 def _spd_matrix(size: int, seed: int) -> torch.Tensor:
@@ -23,7 +50,7 @@ def _spd_matrix(size: int, seed: int) -> torch.Tensor:
 
 
 def test_npu_inverse_cholesky_factor_matches_cpu_reference():
-    device = torch.device("npu:0")
+    device = _test_npu_device()
 
     for size in (8, 64, 128):
         matrix_cpu = _spd_matrix(size, seed=1000 + size)
@@ -46,7 +73,7 @@ def test_npu_inverse_cholesky_factor_matches_cpu_reference():
 
 
 def test_npu_inverse_cholesky_factor_rejects_non_positive_definite_matrix():
-    matrix = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32, device="npu:0")
+    matrix = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32, device=_test_npu_device())
 
     with pytest.raises(torch._C._LinAlgError):
         npu_inverse_cholesky_factor(matrix)
@@ -55,6 +82,7 @@ def test_npu_inverse_cholesky_factor_rejects_non_positive_definite_matrix():
 def test_gptq_npu_hessian_inverse_avoids_torch_npu_cpu_fallback_warnings():
     script = textwrap.dedent(
         """
+        import os
         import torch
         import torch.nn as nn
         from gptqmodel.quantization.config import QuantizeConfig
@@ -64,15 +92,16 @@ def test_gptq_npu_hessian_inverse_avoids_torch_npu_cpu_fallback_warnings():
         if not HAS_NPU:
             raise RuntimeError("Ascend NPU is not available")
 
-        torch.npu.set_device(0)
+        npu_test_device = os.environ.get("GPTQMODEL_TEST_NPU_DEVICE", "npu:0")
+        torch.npu.set_device(npu_test_device)
         torch.manual_seed(0)
 
-        module = nn.Linear(16, 16, bias=False, device="npu:0", dtype=torch.float16)
+        module = nn.Linear(16, 16, bias=False, device=npu_test_device, dtype=torch.float16)
         gptq = GPTQ(module, qcfg=QuantizeConfig(damp_percent=0.05, damp_auto_increment=0.05))
 
         base = torch.randn(16, 16, dtype=torch.float32)
         hessian_cpu = base.matmul(base.T) + torch.eye(16, dtype=torch.float32) * 0.25
-        hessian = hessian_cpu.to(device="npu:0")
+        hessian = hessian_cpu.to(device=npu_test_device)
 
         factor, damp = gptq.hessian_inverse(hessian)
         torch.npu.synchronize()
@@ -90,8 +119,7 @@ def test_gptq_npu_hessian_inverse_avoids_torch_npu_cpu_fallback_warnings():
         """
     )
 
-    env = os.environ.copy()
-    env.setdefault("ASCEND_RT_VISIBLE_DEVICES", "0")
+    env = _default_subprocess_env()
     proc = subprocess.run(
         [sys.executable, "-c", script],
         cwd=os.getcwd(),
