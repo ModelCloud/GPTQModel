@@ -206,7 +206,7 @@ def _kernel_shape(args: argparse.Namespace) -> tuple[int, int, int, int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="GrassHopper/VecQuant3 Nsight profiling driver."
+        description="GrassHopper Nsight profiling driver."
     )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--mode", choices=("gemv", "gemm"), default="gemv")
@@ -245,7 +245,7 @@ def main() -> None:
         f"batch_tile_rows={batch_tile_rows}"
     )
 
-    extension.load("vecquant3")
+    extension.load("grasshopper")
     dtype = _dtype(args.dtype)
     accumulation = _accumulation(args.accumulation, dtype)
     tensors = _make_case(args, device)

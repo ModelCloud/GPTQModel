@@ -4,7 +4,7 @@
 #include <torch/library.h>
 #include <torch/types.h>
 
-torch::Tensor vecquant3_gptq_gemv_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemv_cuda(torch::Tensor vec,
                                        torch::Tensor qweight,
                                        torch::Tensor scales,
                                        torch::Tensor qzeros,
@@ -12,7 +12,7 @@ torch::Tensor vecquant3_gptq_gemv_cuda(torch::Tensor vec,
                                        int64_t accumulation_type,
                                        int64_t bits);
 
-torch::Tensor vecquant3_gptq_gemv_lora_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemv_lora_cuda(torch::Tensor vec,
                                             torch::Tensor qweight,
                                             torch::Tensor scales,
                                             torch::Tensor qzeros,
@@ -22,7 +22,7 @@ torch::Tensor vecquant3_gptq_gemv_lora_cuda(torch::Tensor vec,
                                             int64_t accumulation_type,
                                             int64_t bits);
 
-torch::Tensor vecquant3_gptq_gemv_lora_int8_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemv_lora_int8_cuda(torch::Tensor vec,
                                                  torch::Tensor qweight,
                                                  torch::Tensor scales,
                                                  torch::Tensor qzeros,
@@ -34,7 +34,7 @@ torch::Tensor vecquant3_gptq_gemv_lora_int8_cuda(torch::Tensor vec,
                                                  int64_t accumulation_type,
                                                  int64_t bits);
 
-torch::Tensor vecquant3_gptq_gemm_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemm_cuda(torch::Tensor vec,
                                        torch::Tensor qweight,
                                        torch::Tensor scales,
                                        torch::Tensor qzeros,
@@ -42,7 +42,7 @@ torch::Tensor vecquant3_gptq_gemm_cuda(torch::Tensor vec,
                                        int64_t accumulation_type,
                                        int64_t bits);
 
-torch::Tensor vecquant3_gptq_gemm_lora_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemm_lora_cuda(torch::Tensor vec,
                                             torch::Tensor qweight,
                                             torch::Tensor scales,
                                             torch::Tensor qzeros,
@@ -52,7 +52,7 @@ torch::Tensor vecquant3_gptq_gemm_lora_cuda(torch::Tensor vec,
                                             int64_t accumulation_type,
                                             int64_t bits);
 
-torch::Tensor vecquant3_gptq_gemm_lora_int8_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemm_lora_int8_cuda(torch::Tensor vec,
                                                  torch::Tensor qweight,
                                                  torch::Tensor scales,
                                                  torch::Tensor qzeros,
@@ -66,18 +66,18 @@ torch::Tensor vecquant3_gptq_gemm_lora_int8_cuda(torch::Tensor vec,
 
 namespace {
 
-torch::Tensor vecquant3_gptq_gemv_dispatch(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemv_dispatch(torch::Tensor vec,
                                            torch::Tensor qweight,
                                            torch::Tensor scales,
                                            torch::Tensor qzeros,
                                            int64_t group_size,
                                            int64_t accumulation_type,
                                            int64_t bits) {
-  return vecquant3_gptq_gemv_cuda(vec, qweight, scales, qzeros, group_size,
+  return grasshopper_gptq_gemv_cuda(vec, qweight, scales, qzeros, group_size,
                                   accumulation_type, bits);
 }
 
-torch::Tensor vecquant3_gptq_gemv_lora_dispatch(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemv_lora_dispatch(torch::Tensor vec,
                                                 torch::Tensor qweight,
                                                 torch::Tensor scales,
                                                 torch::Tensor qzeros,
@@ -86,11 +86,11 @@ torch::Tensor vecquant3_gptq_gemv_lora_dispatch(torch::Tensor vec,
                                                 int64_t group_size,
                                                 int64_t accumulation_type,
                                                 int64_t bits) {
-  return vecquant3_gptq_gemv_lora_cuda(vec, qweight, scales, qzeros, down, up,
+  return grasshopper_gptq_gemv_lora_cuda(vec, qweight, scales, qzeros, down, up,
                                        group_size, accumulation_type, bits);
 }
 
-torch::Tensor vecquant3_gptq_gemv_lora_int8_dispatch(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemv_lora_int8_dispatch(torch::Tensor vec,
                                                      torch::Tensor qweight,
                                                      torch::Tensor scales,
                                                      torch::Tensor qzeros,
@@ -101,23 +101,23 @@ torch::Tensor vecquant3_gptq_gemv_lora_int8_dispatch(torch::Tensor vec,
                                                      int64_t lora_group_size,
                                                      int64_t accumulation_type,
                                                      int64_t bits) {
-  return vecquant3_gptq_gemv_lora_int8_cuda(
+  return grasshopper_gptq_gemv_lora_int8_cuda(
       vec, qweight, scales, qzeros, down, up_qweight, up_scales, group_size,
       lora_group_size, accumulation_type, bits);
 }
 
-torch::Tensor vecquant3_gptq_gemm_dispatch(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemm_dispatch(torch::Tensor vec,
                                            torch::Tensor qweight,
                                            torch::Tensor scales,
                                            torch::Tensor qzeros,
                                            int64_t group_size,
                                            int64_t accumulation_type,
                                            int64_t bits) {
-  return vecquant3_gptq_gemm_cuda(vec, qweight, scales, qzeros, group_size,
+  return grasshopper_gptq_gemm_cuda(vec, qweight, scales, qzeros, group_size,
                                   accumulation_type, bits);
 }
 
-torch::Tensor vecquant3_gptq_gemm_lora_dispatch(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemm_lora_dispatch(torch::Tensor vec,
                                                 torch::Tensor qweight,
                                                 torch::Tensor scales,
                                                 torch::Tensor qzeros,
@@ -126,11 +126,11 @@ torch::Tensor vecquant3_gptq_gemm_lora_dispatch(torch::Tensor vec,
                                                 int64_t group_size,
                                                 int64_t accumulation_type,
                                                 int64_t bits) {
-  return vecquant3_gptq_gemm_lora_cuda(vec, qweight, scales, qzeros, down, up,
+  return grasshopper_gptq_gemm_lora_cuda(vec, qweight, scales, qzeros, down, up,
                                        group_size, accumulation_type, bits);
 }
 
-torch::Tensor vecquant3_gptq_gemm_lora_int8_dispatch(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemm_lora_int8_dispatch(torch::Tensor vec,
                                                      torch::Tensor qweight,
                                                      torch::Tensor scales,
                                                      torch::Tensor qzeros,
@@ -141,14 +141,14 @@ torch::Tensor vecquant3_gptq_gemm_lora_int8_dispatch(torch::Tensor vec,
                                                      int64_t lora_group_size,
                                                      int64_t accumulation_type,
                                                      int64_t bits) {
-  return vecquant3_gptq_gemm_lora_int8_cuda(
+  return grasshopper_gptq_gemm_lora_int8_cuda(
       vec, qweight, scales, qzeros, down, up_qweight, up_scales, group_size,
       lora_group_size, accumulation_type, bits);
 }
 
 }  // namespace
 
-TORCH_LIBRARY(gptqmodel_vecquant3, m) {
+TORCH_LIBRARY(gptqmodel_grasshopper, m) {
   m.def("gemv(Tensor vec, Tensor qweight, Tensor scales, Tensor qzeros, int group_size, int accumulation_type=0, int bits=3) -> Tensor");
   m.def("gemv_lora(Tensor vec, Tensor qweight, Tensor scales, Tensor qzeros, Tensor down, Tensor up, int group_size, int accumulation_type=0, int bits=3) -> Tensor");
   m.def("gemv_lora_int8(Tensor vec, Tensor qweight, Tensor scales, Tensor qzeros, Tensor down, Tensor up_qweight, Tensor up_scales, int group_size, int lora_group_size, int accumulation_type=0, int bits=3) -> Tensor");
@@ -157,11 +157,11 @@ TORCH_LIBRARY(gptqmodel_vecquant3, m) {
   m.def("gemm_lora_int8(Tensor vec, Tensor qweight, Tensor scales, Tensor qzeros, Tensor down, Tensor up_qweight, Tensor up_scales, int group_size, int lora_group_size, int accumulation_type=0, int bits=3) -> Tensor");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_vecquant3, CUDA, m) {
-  m.impl("gemv", &vecquant3_gptq_gemv_dispatch);
-  m.impl("gemv_lora", &vecquant3_gptq_gemv_lora_dispatch);
-  m.impl("gemv_lora_int8", &vecquant3_gptq_gemv_lora_int8_dispatch);
-  m.impl("gemm", &vecquant3_gptq_gemm_dispatch);
-  m.impl("gemm_lora", &vecquant3_gptq_gemm_lora_dispatch);
-  m.impl("gemm_lora_int8", &vecquant3_gptq_gemm_lora_int8_dispatch);
+TORCH_LIBRARY_IMPL(gptqmodel_grasshopper, CUDA, m) {
+  m.impl("gemv", &grasshopper_gptq_gemv_dispatch);
+  m.impl("gemv_lora", &grasshopper_gptq_gemv_lora_dispatch);
+  m.impl("gemv_lora_int8", &grasshopper_gptq_gemv_lora_int8_dispatch);
+  m.impl("gemm", &grasshopper_gptq_gemm_dispatch);
+  m.impl("gemm_lora", &grasshopper_gptq_gemm_lora_dispatch);
+  m.impl("gemm_lora_int8", &grasshopper_gptq_gemm_lora_int8_dispatch);
 }

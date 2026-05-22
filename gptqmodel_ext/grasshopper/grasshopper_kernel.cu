@@ -511,7 +511,7 @@ __device__ __forceinline__ void accumulate_packed_word_batch_fixed_group(
 
 template <typename scalar_t, int Bits, int GroupSize, int LoraMode,
           bool FloatAccum, int KTileHalf2>
-__global__ void vecquant3_gptq_gemv_kernel(
+__global__ void grasshopper_gptq_gemv_kernel(
     const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ vec,
     const int *__restrict__ qweight,
     const scalar_t *__restrict__ scales,
@@ -751,7 +751,7 @@ __global__ void vecquant3_gptq_gemv_kernel(
 
 template <typename scalar_t, int Bits, int GroupSize, int LoraMode,
           bool FloatAccum, int KTileHalf2, int BatchTileRows>
-__global__ void vecquant3_gptq_gemm_batch_kernel(
+__global__ void grasshopper_gptq_gemm_batch_kernel(
     const typename scalar_traits<scalar_t>::scalar2_t *__restrict__ vec,
     const int *__restrict__ qweight,
     const scalar_t *__restrict__ scales,
@@ -1187,7 +1187,7 @@ void validate_gemm_common_inputs(const torch::Tensor &vec,
 
 template <typename scalar_t, int Bits, int LoraMode, bool FloatAccum,
           int KTileHalf2>
-torch::Tensor launch_vecquant3_gptq_gemv_typed_bits_tile(
+torch::Tensor launch_grasshopper_gptq_gemv_typed_bits_tile(
     torch::Tensor vec,
     torch::Tensor qweight,
     torch::Tensor scales,
@@ -1260,7 +1260,7 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed_bits_tile(
                                  : nullptr;
 
   if (group_size == 32) {
-    vecquant3_gptq_gemv_kernel<scalar_t, Bits, 32, LoraMode, FloatAccum,
+    grasshopper_gptq_gemv_kernel<scalar_t, Bits, 32, LoraMode, FloatAccum,
                                KTileHalf2>
         <<<blocks, threads, 0, stream>>>(
         vec_ptr, qweight.data_ptr<int>(), scale_ptr, qzeros.data_ptr<int>(),
@@ -1268,7 +1268,7 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed_bits_tile(
         qweight_rows, width, qzeros_stride, vec_stride_half2, down_stride,
         out_stride, rank, lora_group);
   } else if (group_size == 64) {
-    vecquant3_gptq_gemv_kernel<scalar_t, Bits, 64, LoraMode, FloatAccum,
+    grasshopper_gptq_gemv_kernel<scalar_t, Bits, 64, LoraMode, FloatAccum,
                                KTileHalf2>
         <<<blocks, threads, 0, stream>>>(
         vec_ptr, qweight.data_ptr<int>(), scale_ptr, qzeros.data_ptr<int>(),
@@ -1276,7 +1276,7 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed_bits_tile(
         qweight_rows, width, qzeros_stride, vec_stride_half2, down_stride,
         out_stride, rank, lora_group);
   } else {
-    vecquant3_gptq_gemv_kernel<scalar_t, Bits, 128, LoraMode, FloatAccum,
+    grasshopper_gptq_gemv_kernel<scalar_t, Bits, 128, LoraMode, FloatAccum,
                                KTileHalf2>
         <<<blocks, threads, 0, stream>>>(
         vec_ptr, qweight.data_ptr<int>(), scale_ptr, qzeros.data_ptr<int>(),
@@ -1290,7 +1290,7 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed_bits_tile(
 }
 
 template <typename scalar_t, int Bits, int LoraMode, bool FloatAccum>
-torch::Tensor launch_vecquant3_gptq_gemv_typed_bits(
+torch::Tensor launch_grasshopper_gptq_gemv_typed_bits(
     torch::Tensor vec,
     torch::Tensor qweight,
     torch::Tensor scales,
@@ -1304,24 +1304,24 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed_bits(
     int64_t batch_rows,
     bool output_2d) {
   if constexpr (Bits == 3) {
-    return launch_vecquant3_gptq_gemv_typed_bits_tile<
+    return launch_grasshopper_gptq_gemv_typed_bits_tile<
         scalar_t, Bits, LoraMode, FloatAccum, kKTileHalf2>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows, output_2d);
   } else {
     if (batch_rows == 1 && qweight.size(1) < kGemmBatchTileMinWidth) {
-      return launch_vecquant3_gptq_gemv_typed_bits_tile<
+      return launch_grasshopper_gptq_gemv_typed_bits_tile<
           scalar_t, Bits, LoraMode, FloatAccum, kNarrowDecodeKTileHalf2>(
           vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
           group_size, lora_group_size, batch_rows, output_2d);
     }
     if (qweight.size(1) >= kGemmBatchTileMinWidth) {
-      return launch_vecquant3_gptq_gemv_typed_bits_tile<
+      return launch_grasshopper_gptq_gemv_typed_bits_tile<
           scalar_t, Bits, LoraMode, FloatAccum, kWideKTileHalf2>(
           vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
           group_size, lora_group_size, batch_rows, output_2d);
     }
-    return launch_vecquant3_gptq_gemv_typed_bits_tile<
+    return launch_grasshopper_gptq_gemv_typed_bits_tile<
         scalar_t, Bits, LoraMode, FloatAccum, kKTileHalf2>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows, output_2d);
@@ -1329,7 +1329,7 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed_bits(
 }
 
 template <typename scalar_t, int LoraMode, bool FloatAccum>
-torch::Tensor launch_vecquant3_gptq_gemv_typed(
+torch::Tensor launch_grasshopper_gptq_gemv_typed(
     torch::Tensor vec,
     torch::Tensor qweight,
     torch::Tensor scales,
@@ -1344,18 +1344,18 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed(
     bool output_2d,
     int64_t bits) {
   if (bits == 3) {
-    return launch_vecquant3_gptq_gemv_typed_bits<scalar_t, 3, LoraMode,
+    return launch_grasshopper_gptq_gemv_typed_bits<scalar_t, 3, LoraMode,
                                                 FloatAccum>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows, output_2d);
   }
   if (bits == 4) {
-    return launch_vecquant3_gptq_gemv_typed_bits<scalar_t, 4, LoraMode,
+    return launch_grasshopper_gptq_gemv_typed_bits<scalar_t, 4, LoraMode,
                                                 FloatAccum>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows, output_2d);
   }
-  return launch_vecquant3_gptq_gemv_typed_bits<scalar_t, 8, LoraMode,
+  return launch_grasshopper_gptq_gemv_typed_bits<scalar_t, 8, LoraMode,
                                               FloatAccum>(
       vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
       group_size, lora_group_size, batch_rows, output_2d);
@@ -1363,7 +1363,7 @@ torch::Tensor launch_vecquant3_gptq_gemv_typed(
 
 template <typename scalar_t, int Bits, int LoraMode, bool FloatAccum,
           int KTileHalf2, int BatchTileRows>
-torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits_tile(
+torch::Tensor launch_grasshopper_gptq_gemm_batch_typed_bits_tile(
     torch::Tensor vec,
     torch::Tensor qweight,
     torch::Tensor scales,
@@ -1430,7 +1430,7 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits_tile(
                                  : nullptr;
 
   if (group_size == 32) {
-    vecquant3_gptq_gemm_batch_kernel<scalar_t, Bits, 32, LoraMode, FloatAccum,
+    grasshopper_gptq_gemm_batch_kernel<scalar_t, Bits, 32, LoraMode, FloatAccum,
                                      KTileHalf2, BatchTileRows>
         <<<blocks, threads, 0, stream>>>(
             vec_ptr, qweight.data_ptr<int>(), scale_ptr,
@@ -1439,7 +1439,7 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits_tile(
             qzeros_stride, vec_stride_half2, down_stride, out_stride, rows,
             rank, lora_group);
   } else if (group_size == 64) {
-    vecquant3_gptq_gemm_batch_kernel<scalar_t, Bits, 64, LoraMode, FloatAccum,
+    grasshopper_gptq_gemm_batch_kernel<scalar_t, Bits, 64, LoraMode, FloatAccum,
                                      KTileHalf2, BatchTileRows>
         <<<blocks, threads, 0, stream>>>(
             vec_ptr, qweight.data_ptr<int>(), scale_ptr,
@@ -1448,7 +1448,7 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits_tile(
             qzeros_stride, vec_stride_half2, down_stride, out_stride, rows,
             rank, lora_group);
   } else {
-    vecquant3_gptq_gemm_batch_kernel<scalar_t, Bits, 128, LoraMode, FloatAccum,
+    grasshopper_gptq_gemm_batch_kernel<scalar_t, Bits, 128, LoraMode, FloatAccum,
                                      KTileHalf2, BatchTileRows>
         <<<blocks, threads, 0, stream>>>(
             vec_ptr, qweight.data_ptr<int>(), scale_ptr,
@@ -1463,7 +1463,7 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits_tile(
 }
 
 template <typename scalar_t, int Bits, int LoraMode, bool FloatAccum>
-torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits(
+torch::Tensor launch_grasshopper_gptq_gemm_batch_typed_bits(
     torch::Tensor vec,
     torch::Tensor qweight,
     torch::Tensor scales,
@@ -1482,13 +1482,13 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits(
         qweight.size(1) >= kGemmBatchTileMinWidth &&
         (qweight.size(1) >= kWideGemmBatchTileMinFeature ||
          in_features >= kWideGemmBatchTileMinFeature)) {
-      return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
+      return launch_grasshopper_gptq_gemm_batch_typed_bits_tile<
           scalar_t, Bits, LoraMode, FloatAccum, kKTileHalf2,
           kWideGemmBatchTileRows>(
           vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
           group_size, lora_group_size, batch_rows);
     }
-    return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
+    return launch_grasshopper_gptq_gemm_batch_typed_bits_tile<
         scalar_t, Bits, LoraMode, FloatAccum, kKTileHalf2,
         kGemmBatchTileRows>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
@@ -1503,26 +1503,26 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits(
       if (use_wide_batch_tile) {
         if constexpr (Bits == 4 || Bits == 8) {
           if (group_size == 64) {
-            return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
+            return launch_grasshopper_gptq_gemm_batch_typed_bits_tile<
                 scalar_t, Bits, LoraMode, FloatAccum, kNarrowDecodeKTileHalf2,
                 kWideGemmBatchTileRows>(
                 vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
                 group_size, lora_group_size, batch_rows);
           }
         }
-        return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
+        return launch_grasshopper_gptq_gemm_batch_typed_bits_tile<
             scalar_t, Bits, LoraMode, FloatAccum, kWideKTileHalf2,
             kWideGemmBatchTileRows>(
             vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
             group_size, lora_group_size, batch_rows);
       }
-      return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
+      return launch_grasshopper_gptq_gemm_batch_typed_bits_tile<
           scalar_t, Bits, LoraMode, FloatAccum, kWideKTileHalf2,
           kGemmBatchTileRows>(
           vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
           group_size, lora_group_size, batch_rows);
     }
-    return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
+    return launch_grasshopper_gptq_gemm_batch_typed_bits_tile<
         scalar_t, Bits, LoraMode, FloatAccum, kKTileHalf2,
         kGemmBatchTileRows>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
@@ -1531,7 +1531,7 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits(
 }
 
 template <typename scalar_t, int LoraMode, bool FloatAccum>
-torch::Tensor launch_vecquant3_gptq_gemm_batch_typed(
+torch::Tensor launch_grasshopper_gptq_gemm_batch_typed(
     torch::Tensor vec,
     torch::Tensor qweight,
     torch::Tensor scales,
@@ -1545,25 +1545,25 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed(
     int64_t batch_rows,
     int64_t bits) {
   if (bits == 3) {
-    return launch_vecquant3_gptq_gemm_batch_typed_bits<scalar_t, 3, LoraMode,
+    return launch_grasshopper_gptq_gemm_batch_typed_bits<scalar_t, 3, LoraMode,
                                                       FloatAccum>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows);
   }
   if (bits == 4) {
-    return launch_vecquant3_gptq_gemm_batch_typed_bits<scalar_t, 4, LoraMode,
+    return launch_grasshopper_gptq_gemm_batch_typed_bits<scalar_t, 4, LoraMode,
                                                       FloatAccum>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows);
   }
-  return launch_vecquant3_gptq_gemm_batch_typed_bits<scalar_t, 8, LoraMode,
+  return launch_grasshopper_gptq_gemm_batch_typed_bits<scalar_t, 8, LoraMode,
                                                     FloatAccum>(
       vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
       group_size, lora_group_size, batch_rows);
 }
 
 template <int LoraMode>
-torch::Tensor launch_vecquant3_gptq_gemv(torch::Tensor vec,
+torch::Tensor launch_grasshopper_gptq_gemv(torch::Tensor vec,
                                          torch::Tensor qweight,
                                          torch::Tensor scales,
                                          torch::Tensor qzeros,
@@ -1579,67 +1579,67 @@ torch::Tensor launch_vecquant3_gptq_gemv(torch::Tensor vec,
                          accumulation_type, bits);
   if constexpr (LoraMode == kLoraDense) {
     TORCH_CHECK(down.is_cuda() && up.is_cuda(),
-                "vecquant3 gemv_lora requires CUDA LoRA tensors");
+                "grasshopper gemv_lora requires CUDA LoRA tensors");
     TORCH_CHECK(down.scalar_type() == vec.scalar_type() &&
                     up.scalar_type() == vec.scalar_type(),
-                "vecquant3 gemv_lora LoRA dtype must match vec dtype");
+                "grasshopper gemv_lora LoRA dtype must match vec dtype");
     TORCH_CHECK(down.dim() == 1,
-                "vecquant3 gemv_lora down must be a rank vector");
+                "grasshopper gemv_lora down must be a rank vector");
     TORCH_CHECK(up.dim() == 2 && up.size(0) == down.numel() &&
                     up.size(1) == qweight.size(1),
-                "vecquant3 gemv_lora up must be [rank, out_features]");
+                "grasshopper gemv_lora up must be [rank, out_features]");
     TORCH_CHECK(down.is_contiguous() && up.is_contiguous(),
-                "vecquant3 gemv_lora LoRA tensors must be contiguous");
+                "grasshopper gemv_lora LoRA tensors must be contiguous");
   } else if constexpr (LoraMode == kLoraInt8) {
     TORCH_CHECK(down.is_cuda() && up_qweight.is_cuda() && up_scales.is_cuda(),
-                "vecquant3 gemv_lora_int8 requires CUDA LoRA tensors");
+                "grasshopper gemv_lora_int8 requires CUDA LoRA tensors");
     TORCH_CHECK(down.scalar_type() == vec.scalar_type() &&
                     up_scales.scalar_type() == vec.scalar_type(),
-                "vecquant3 gemv_lora_int8 down/up scales dtype must match vec dtype");
+                "grasshopper gemv_lora_int8 down/up scales dtype must match vec dtype");
     TORCH_CHECK(up_qweight.scalar_type() == torch::kInt8,
-                "vecquant3 gemv_lora_int8 up_qweight must be int8");
+                "grasshopper gemv_lora_int8 up_qweight must be int8");
     TORCH_CHECK(down.dim() == 1,
-                "vecquant3 gemv_lora_int8 down must be a rank vector");
+                "grasshopper gemv_lora_int8 down must be a rank vector");
     TORCH_CHECK(up_qweight.dim() == 1 && up_scales.dim() == 1,
-                "vecquant3 gemv_lora_int8 up_qweight and up_scales must be flat tensors");
+                "grasshopper gemv_lora_int8 up_qweight and up_scales must be flat tensors");
     TORCH_CHECK(lora_group_size > 0 && lora_group_size <= INT32_MAX,
-                "vecquant3 gemv_lora_int8 lora_group_size must be positive");
+                "grasshopper gemv_lora_int8 lora_group_size must be positive");
     const int64_t expected_up_values = down.numel() * qweight.size(1);
     TORCH_CHECK(up_qweight.numel() >= expected_up_values,
-                "vecquant3 gemv_lora_int8 up_qweight is too small for [rank, out_features]");
+                "grasshopper gemv_lora_int8 up_qweight is too small for [rank, out_features]");
     TORCH_CHECK(
         up_scales.numel() >=
             (expected_up_values + lora_group_size - 1) / lora_group_size,
-        "vecquant3 gemv_lora_int8 up_scales is too small for grouped int8 LoRA-B");
+        "grasshopper gemv_lora_int8 up_scales is too small for grouped int8 LoRA-B");
     TORCH_CHECK(down.is_contiguous() && up_qweight.is_contiguous() &&
                     up_scales.is_contiguous(),
-                "vecquant3 gemv_lora_int8 LoRA tensors must be contiguous");
+                "grasshopper gemv_lora_int8 LoRA tensors must be contiguous");
   }
 
   const bool use_float_accum = accumulation_type == kAccumulationFloat32;
   if (vec.scalar_type() == torch::kFloat16) {
     if (use_float_accum) {
-      return launch_vecquant3_gptq_gemv_typed<half, LoraMode, true>(
+      return launch_grasshopper_gptq_gemv_typed<half, LoraMode, true>(
           vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
           group_size, lora_group_size, 1, false, bits);
     }
-    return launch_vecquant3_gptq_gemv_typed<half, LoraMode, false>(
+    return launch_grasshopper_gptq_gemv_typed<half, LoraMode, false>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, 1, false, bits);
   }
 
   if (use_float_accum) {
-    return launch_vecquant3_gptq_gemv_typed<__nv_bfloat16, LoraMode, true>(
+    return launch_grasshopper_gptq_gemv_typed<__nv_bfloat16, LoraMode, true>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, 1, false, bits);
   }
-  return launch_vecquant3_gptq_gemv_typed<__nv_bfloat16, LoraMode, false>(
+  return launch_grasshopper_gptq_gemv_typed<__nv_bfloat16, LoraMode, false>(
       vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
       group_size, lora_group_size, 1, false, bits);
 }
 
 template <int LoraMode>
-torch::Tensor launch_vecquant3_gptq_gemm(torch::Tensor vec,
+torch::Tensor launch_grasshopper_gptq_gemm(torch::Tensor vec,
                                          torch::Tensor qweight,
                                          torch::Tensor scales,
                                          torch::Tensor qzeros,
@@ -1656,41 +1656,41 @@ torch::Tensor launch_vecquant3_gptq_gemm(torch::Tensor vec,
   const int64_t batch_rows = vec.size(0);
   if constexpr (LoraMode == kLoraDense) {
     TORCH_CHECK(down.is_cuda() && up.is_cuda(),
-                "vecquant3 gemm_lora requires CUDA LoRA tensors");
+                "grasshopper gemm_lora requires CUDA LoRA tensors");
     TORCH_CHECK(down.scalar_type() == vec.scalar_type() &&
                     up.scalar_type() == vec.scalar_type(),
-                "vecquant3 gemm_lora LoRA dtype must match vec dtype");
+                "grasshopper gemm_lora LoRA dtype must match vec dtype");
     TORCH_CHECK(down.dim() == 2 && down.size(0) == batch_rows,
-                "vecquant3 gemm_lora down must be [batch, rank]");
+                "grasshopper gemm_lora down must be [batch, rank]");
     TORCH_CHECK(up.dim() == 2 && up.size(0) == down.size(1) &&
                     up.size(1) == qweight.size(1),
-                "vecquant3 gemm_lora up must be [rank, out_features]");
+                "grasshopper gemm_lora up must be [rank, out_features]");
     TORCH_CHECK(down.is_contiguous() && up.is_contiguous(),
-                "vecquant3 gemm_lora LoRA tensors must be contiguous");
+                "grasshopper gemm_lora LoRA tensors must be contiguous");
   } else if constexpr (LoraMode == kLoraInt8) {
     TORCH_CHECK(down.is_cuda() && up_qweight.is_cuda() && up_scales.is_cuda(),
-                "vecquant3 gemm_lora_int8 requires CUDA LoRA tensors");
+                "grasshopper gemm_lora_int8 requires CUDA LoRA tensors");
     TORCH_CHECK(down.scalar_type() == vec.scalar_type() &&
                     up_scales.scalar_type() == vec.scalar_type(),
-                "vecquant3 gemm_lora_int8 down/up scales dtype must match vec dtype");
+                "grasshopper gemm_lora_int8 down/up scales dtype must match vec dtype");
     TORCH_CHECK(up_qweight.scalar_type() == torch::kInt8,
-                "vecquant3 gemm_lora_int8 up_qweight must be int8");
+                "grasshopper gemm_lora_int8 up_qweight must be int8");
     TORCH_CHECK(down.dim() == 2 && down.size(0) == batch_rows,
-                "vecquant3 gemm_lora_int8 down must be [batch, rank]");
+                "grasshopper gemm_lora_int8 down must be [batch, rank]");
     TORCH_CHECK(up_qweight.dim() == 1 && up_scales.dim() == 1,
-                "vecquant3 gemm_lora_int8 up_qweight and up_scales must be flat tensors");
+                "grasshopper gemm_lora_int8 up_qweight and up_scales must be flat tensors");
     TORCH_CHECK(lora_group_size > 0 && lora_group_size <= INT32_MAX,
-                "vecquant3 gemm_lora_int8 lora_group_size must be positive");
+                "grasshopper gemm_lora_int8 lora_group_size must be positive");
     const int64_t expected_up_values = down.size(1) * qweight.size(1);
     TORCH_CHECK(up_qweight.numel() >= expected_up_values,
-                "vecquant3 gemm_lora_int8 up_qweight is too small for [rank, out_features]");
+                "grasshopper gemm_lora_int8 up_qweight is too small for [rank, out_features]");
     TORCH_CHECK(
         up_scales.numel() >=
             (expected_up_values + lora_group_size - 1) / lora_group_size,
-        "vecquant3 gemm_lora_int8 up_scales is too small for grouped int8 LoRA-B");
+        "grasshopper gemm_lora_int8 up_scales is too small for grouped int8 LoRA-B");
     TORCH_CHECK(down.is_contiguous() && up_qweight.is_contiguous() &&
                     up_scales.is_contiguous(),
-                "vecquant3 gemm_lora_int8 LoRA tensors must be contiguous");
+                "grasshopper gemm_lora_int8 LoRA tensors must be contiguous");
   }
 
   const bool use_float_accum = accumulation_type == kAccumulationFloat32;
@@ -1700,62 +1700,62 @@ torch::Tensor launch_vecquant3_gptq_gemm(torch::Tensor vec,
   if (vec.scalar_type() == torch::kFloat16) {
     if (use_float_accum) {
       if (use_batch_tiled) {
-        return launch_vecquant3_gptq_gemm_batch_typed<half, LoraMode, true>(
+        return launch_grasshopper_gptq_gemm_batch_typed<half, LoraMode, true>(
             vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
             group_size, lora_group_size, batch_rows, bits);
       }
-      return launch_vecquant3_gptq_gemv_typed<half, LoraMode, true>(
+      return launch_grasshopper_gptq_gemv_typed<half, LoraMode, true>(
           vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
           group_size, lora_group_size, batch_rows, true, bits);
     }
     if (use_batch_tiled) {
-      return launch_vecquant3_gptq_gemm_batch_typed<half, LoraMode, false>(
+      return launch_grasshopper_gptq_gemm_batch_typed<half, LoraMode, false>(
           vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
           group_size, lora_group_size, batch_rows, bits);
     }
-    return launch_vecquant3_gptq_gemv_typed<half, LoraMode, false>(
+    return launch_grasshopper_gptq_gemv_typed<half, LoraMode, false>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows, true, bits);
   }
 
   if (use_float_accum) {
     if (use_batch_tiled) {
-        return launch_vecquant3_gptq_gemm_batch_typed<__nv_bfloat16, LoraMode,
+        return launch_grasshopper_gptq_gemm_batch_typed<__nv_bfloat16, LoraMode,
                                                    true>(
           vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
           group_size, lora_group_size, batch_rows, bits);
     }
-    return launch_vecquant3_gptq_gemv_typed<__nv_bfloat16, LoraMode, true>(
+    return launch_grasshopper_gptq_gemv_typed<__nv_bfloat16, LoraMode, true>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows, true, bits);
   }
   if (use_batch_tiled) {
-    return launch_vecquant3_gptq_gemm_batch_typed<__nv_bfloat16, LoraMode,
+    return launch_grasshopper_gptq_gemm_batch_typed<__nv_bfloat16, LoraMode,
                                                  false>(
         vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
         group_size, lora_group_size, batch_rows, bits);
   }
-  return launch_vecquant3_gptq_gemv_typed<__nv_bfloat16, LoraMode, false>(
+  return launch_grasshopper_gptq_gemv_typed<__nv_bfloat16, LoraMode, false>(
       vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
       group_size, lora_group_size, batch_rows, true, bits);
 }
 
 }  // namespace
 
-torch::Tensor vecquant3_gptq_gemv_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemv_cuda(torch::Tensor vec,
                                        torch::Tensor qweight,
                                        torch::Tensor scales,
                                        torch::Tensor qzeros,
                                        int64_t group_size,
                                        int64_t accumulation_type,
                                        int64_t bits) {
-  return launch_vecquant3_gptq_gemv<kLoraNone>(
+  return launch_grasshopper_gptq_gemv<kLoraNone>(
       vec.reshape({-1}), qweight, scales, qzeros, torch::Tensor(),
       torch::Tensor(), torch::Tensor(), torch::Tensor(), group_size, 0,
       accumulation_type, bits);
 }
 
-torch::Tensor vecquant3_gptq_gemv_lora_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemv_lora_cuda(torch::Tensor vec,
                                             torch::Tensor qweight,
                                             torch::Tensor scales,
                                             torch::Tensor qzeros,
@@ -1764,13 +1764,13 @@ torch::Tensor vecquant3_gptq_gemv_lora_cuda(torch::Tensor vec,
                                             int64_t group_size,
                                             int64_t accumulation_type,
                                             int64_t bits) {
-  return launch_vecquant3_gptq_gemv<kLoraDense>(
+  return launch_grasshopper_gptq_gemv<kLoraDense>(
       vec.reshape({-1}), qweight, scales, qzeros, down.reshape({-1}), up,
       torch::Tensor(), torch::Tensor(), group_size, 0, accumulation_type,
       bits);
 }
 
-torch::Tensor vecquant3_gptq_gemv_lora_int8_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemv_lora_int8_cuda(torch::Tensor vec,
                                                  torch::Tensor qweight,
                                                  torch::Tensor scales,
                                                  torch::Tensor qzeros,
@@ -1781,26 +1781,26 @@ torch::Tensor vecquant3_gptq_gemv_lora_int8_cuda(torch::Tensor vec,
                                                  int64_t lora_group_size,
                                                  int64_t accumulation_type,
                                                  int64_t bits) {
-  return launch_vecquant3_gptq_gemv<kLoraInt8>(
+  return launch_grasshopper_gptq_gemv<kLoraInt8>(
       vec.reshape({-1}), qweight, scales, qzeros, down.reshape({-1}),
       torch::Tensor(), up_qweight.reshape({-1}), up_scales.reshape({-1}),
       group_size, lora_group_size, accumulation_type, bits);
 }
 
-torch::Tensor vecquant3_gptq_gemm_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemm_cuda(torch::Tensor vec,
                                        torch::Tensor qweight,
                                        torch::Tensor scales,
                                        torch::Tensor qzeros,
                                        int64_t group_size,
                                        int64_t accumulation_type,
                                        int64_t bits) {
-  return launch_vecquant3_gptq_gemm<kLoraNone>(
+  return launch_grasshopper_gptq_gemm<kLoraNone>(
       vec, qweight, scales, qzeros, torch::Tensor(), torch::Tensor(),
       torch::Tensor(), torch::Tensor(), group_size, 0, accumulation_type,
       bits);
 }
 
-torch::Tensor vecquant3_gptq_gemm_lora_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemm_lora_cuda(torch::Tensor vec,
                                             torch::Tensor qweight,
                                             torch::Tensor scales,
                                             torch::Tensor qzeros,
@@ -1809,12 +1809,12 @@ torch::Tensor vecquant3_gptq_gemm_lora_cuda(torch::Tensor vec,
                                             int64_t group_size,
                                             int64_t accumulation_type,
                                             int64_t bits) {
-  return launch_vecquant3_gptq_gemm<kLoraDense>(
+  return launch_grasshopper_gptq_gemm<kLoraDense>(
       vec, qweight, scales, qzeros, down, up, torch::Tensor(),
       torch::Tensor(), group_size, 0, accumulation_type, bits);
 }
 
-torch::Tensor vecquant3_gptq_gemm_lora_int8_cuda(torch::Tensor vec,
+torch::Tensor grasshopper_gptq_gemm_lora_int8_cuda(torch::Tensor vec,
                                                  torch::Tensor qweight,
                                                  torch::Tensor scales,
                                                  torch::Tensor qzeros,
@@ -1825,7 +1825,7 @@ torch::Tensor vecquant3_gptq_gemm_lora_int8_cuda(torch::Tensor vec,
                                                  int64_t lora_group_size,
                                                  int64_t accumulation_type,
                                                  int64_t bits) {
-  return launch_vecquant3_gptq_gemm<kLoraInt8>(
+  return launch_grasshopper_gptq_gemm<kLoraInt8>(
       vec, qweight, scales, qzeros, down, torch::Tensor(),
       up_qweight.reshape({-1}), up_scales.reshape({-1}), group_size,
       lora_group_size, accumulation_type, bits);

@@ -10,7 +10,7 @@ import torch  # noqa: E402
 
 from gptqmodel.adapter.quant import dequantize_tensor_groupwise_int8, quantize_tensor_groupwise_int8  # noqa: E402
 from gptqmodel.nn_modules.triton_utils.dequant import quant_matmul as dequant_quant_matmul  # noqa: E402
-from gptqmodel.utils import grasshopper, vecquant3  # noqa: E402
+from gptqmodel.utils import grasshopper  # noqa: E402
 
 
 def _pack_int3_rows(values: torch.Tensor) -> torch.Tensor:
@@ -91,12 +91,12 @@ def _input_accum_atol(bits: int, dtype: torch.dtype) -> float:
     return 3e-1 if bits == 8 else 5e-2
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for VecQuant3 grouped kernel test")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GrassHopper grouped kernel test")
 @pytest.mark.parametrize("bits", [3, 4, 8])
 @pytest.mark.parametrize("group_size", [32, 64, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("out_features", [96, 256])
-def test_vecquant3_grouped_gemv_matches_dequant_reference(bits, group_size, dtype, out_features):
+def test_grasshopper_grouped_gemv_matches_dequant_reference(bits, group_size, dtype, out_features):
     if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
         pytest.skip("CUDA BF16 support required")
 
@@ -118,11 +118,11 @@ def test_vecquant3_grouped_gemv_matches_dequant_reference(bits, group_size, dtyp
     x = x.to(dtype=dtype)
 
     expected = dequant_quant_matmul(x.reshape(1, -1), qweight, scales, qzeros, g_idx, bits, pack_bits, maxq).reshape(-1).float()
-    actual = vecquant3.gemv(x, qweight, scales, qzeros, group_size, accumulation_dtype=torch.float32, bits=bits)
+    actual = grasshopper.gemv(x, qweight, scales, qzeros, group_size, accumulation_dtype=torch.float32, bits=bits)
     float_atol = _base_atol(bits, dtype)
     torch.testing.assert_close(actual, expected, rtol=0, atol=float_atol)
 
-    actual_input_accum = vecquant3.gemv(x, qweight, scales, qzeros, group_size, accumulation_dtype=dtype, bits=bits)
+    actual_input_accum = grasshopper.gemv(x, qweight, scales, qzeros, group_size, accumulation_dtype=dtype, bits=bits)
     input_atol = _input_accum_atol(bits, dtype)
     torch.testing.assert_close(actual_input_accum, expected, rtol=0, atol=input_atol)
 
@@ -132,14 +132,14 @@ def test_vecquant3_grouped_gemv_matches_dequant_reference(bits, group_size, dtyp
     lora_term = (down.reshape(-1, 1) * lora_b).float().sum(dim=0)
 
     expected_lora = actual + lora_term
-    actual_lora = vecquant3.gemv_lora(
+    actual_lora = grasshopper.gemv_lora(
         x, qweight, scales, qzeros, down, lora_b, group_size, accumulation_dtype=torch.float32, bits=bits
     )
     lora_atol = 3e-3 if dtype == torch.float16 else 2e-2
     torch.testing.assert_close(actual_lora, expected_lora, rtol=0, atol=lora_atol)
 
     expected_lora_input_accum = actual_input_accum + lora_term
-    actual_lora_input_accum = vecquant3.gemv_lora(
+    actual_lora_input_accum = grasshopper.gemv_lora(
         x, qweight, scales, qzeros, down, lora_b, group_size, accumulation_dtype="input", bits=bits
     )
     torch.testing.assert_close(actual_lora_input_accum, expected_lora_input_accum, rtol=0, atol=lora_atol)
@@ -163,7 +163,7 @@ def test_vecquant3_grouped_gemv_matches_dequant_reference(bits, group_size, dtyp
         lora_int8_term = (down.reshape(-1, 1) * up_dequant).float().sum(dim=0)
 
         expected_lora_int8 = actual + lora_int8_term
-        actual_lora_int8 = vecquant3.gemv_lora_int8(
+        actual_lora_int8 = grasshopper.gemv_lora_int8(
             x,
             qweight,
             scales,
@@ -181,7 +181,7 @@ def test_vecquant3_grouped_gemv_matches_dequant_reference(bits, group_size, dtyp
         torch.testing.assert_close(actual_lora_int8, expected_lora_int8, rtol=0, atol=int8_lora_atol)
 
         expected_lora_int8_input_accum = actual_input_accum + lora_int8_term
-        actual_lora_int8_input_accum = vecquant3.gemv_lora_int8(
+        actual_lora_int8_input_accum = grasshopper.gemv_lora_int8(
             x,
             qweight,
             scales,
@@ -203,12 +203,12 @@ def test_vecquant3_grouped_gemv_matches_dequant_reference(bits, group_size, dtyp
         )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for VecQuant3 grouped kernel test")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GrassHopper grouped kernel test")
 @pytest.mark.parametrize("bits", [3, 4, 8])
 @pytest.mark.parametrize("group_size", [32, 64, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("out_features", [96, 256])
-def test_vecquant3_grouped_gemm_matches_dequant_reference(bits, group_size, dtype, out_features):
+def test_grasshopper_grouped_gemm_matches_dequant_reference(bits, group_size, dtype, out_features):
     if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
         pytest.skip("CUDA BF16 support required")
 
@@ -230,11 +230,11 @@ def test_vecquant3_grouped_gemm_matches_dequant_reference(bits, group_size, dtyp
     g_idx = (torch.arange(in_features, device=device, dtype=torch.int32) // group_size).contiguous()
 
     expected = dequant_quant_matmul(x, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq).float()
-    actual = vecquant3.gemm(x, qweight, scales, qzeros, group_size, accumulation_dtype=torch.float32, bits=bits)
+    actual = grasshopper.gemm(x, qweight, scales, qzeros, group_size, accumulation_dtype=torch.float32, bits=bits)
     float_atol = _base_atol(bits, dtype)
     torch.testing.assert_close(actual, expected, rtol=0, atol=float_atol)
 
-    actual_input_accum = vecquant3.gemm(x, qweight, scales, qzeros, group_size, accumulation_dtype=dtype, bits=bits)
+    actual_input_accum = grasshopper.gemm(x, qweight, scales, qzeros, group_size, accumulation_dtype=dtype, bits=bits)
     input_atol = _input_accum_atol(bits, dtype)
     torch.testing.assert_close(actual_input_accum, expected, rtol=0, atol=input_atol)
 
@@ -244,14 +244,14 @@ def test_vecquant3_grouped_gemm_matches_dequant_reference(bits, group_size, dtyp
     lora_term = (down @ lora_b).float()
 
     expected_lora = actual + lora_term
-    actual_lora = vecquant3.gemm_lora(
+    actual_lora = grasshopper.gemm_lora(
         x, qweight, scales, qzeros, down, lora_b, group_size, accumulation_dtype=torch.float32, bits=bits
     )
     lora_atol = 3e-3 if dtype == torch.float16 else 2e-2
     torch.testing.assert_close(actual_lora, expected_lora, rtol=0, atol=lora_atol)
 
     expected_lora_input_accum = actual_input_accum + lora_term
-    actual_lora_input_accum = vecquant3.gemm_lora(
+    actual_lora_input_accum = grasshopper.gemm_lora(
         x, qweight, scales, qzeros, down, lora_b, group_size, accumulation_dtype="input", bits=bits
     )
     torch.testing.assert_close(actual_lora_input_accum, expected_lora_input_accum, rtol=0, atol=lora_atol)
@@ -275,7 +275,7 @@ def test_vecquant3_grouped_gemm_matches_dequant_reference(bits, group_size, dtyp
         lora_int8_term = (down @ up_dequant).float()
 
         expected_lora_int8 = actual + lora_int8_term
-        actual_lora_int8 = vecquant3.gemm_lora_int8(
+        actual_lora_int8 = grasshopper.gemm_lora_int8(
             x,
             qweight,
             scales,
@@ -293,7 +293,7 @@ def test_vecquant3_grouped_gemm_matches_dequant_reference(bits, group_size, dtyp
         torch.testing.assert_close(actual_lora_int8, expected_lora_int8, rtol=0, atol=int8_lora_atol)
 
         expected_lora_int8_input_accum = actual_input_accum + lora_int8_term
-        actual_lora_int8_input_accum = vecquant3.gemm_lora_int8(
+        actual_lora_int8_input_accum = grasshopper.gemm_lora_int8(
             x,
             qweight,
             scales,
@@ -315,10 +315,10 @@ def test_vecquant3_grouped_gemm_matches_dequant_reference(bits, group_size, dtyp
         )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for VecQuant3 grouped kernel test")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GrassHopper grouped kernel test")
 @pytest.mark.parametrize("bits", [3, 4, 8])
 @pytest.mark.parametrize("out_features", [256, 2048])
-def test_vecquant3_grouped_gemm_tiled_matches_gemv_loop(bits, out_features):
+def test_grasshopper_grouped_gemm_tiled_matches_gemv_loop(bits, out_features):
     torch.manual_seed(53)
     device = torch.device("cuda:0")
     dtype = torch.float16
@@ -339,11 +339,11 @@ def test_vecquant3_grouped_gemm_tiled_matches_gemv_loop(bits, out_features):
 
     expected = torch.stack(
         [
-            vecquant3.gemv(sample, qweight, scales, qzeros, group_size, accumulation_dtype=torch.float32, bits=bits)
+            grasshopper.gemv(sample, qweight, scales, qzeros, group_size, accumulation_dtype=torch.float32, bits=bits)
             for sample in x
         ]
     )
-    actual = vecquant3.gemm(x, qweight, scales, qzeros, group_size, accumulation_dtype=torch.float32, bits=bits)
+    actual = grasshopper.gemm(x, qweight, scales, qzeros, group_size, accumulation_dtype=torch.float32, bits=bits)
     torch.testing.assert_close(actual, expected, rtol=0, atol=3e-3)
 
     lora_a = (torch.randn(in_features, rank, device=device, dtype=dtype) * 0.01).contiguous()
@@ -351,7 +351,7 @@ def test_vecquant3_grouped_gemm_tiled_matches_gemv_loop(bits, out_features):
     down = (x @ lora_a).contiguous()
     expected_lora = torch.stack(
         [
-            vecquant3.gemv_lora(
+            grasshopper.gemv_lora(
                 x[row],
                 qweight,
                 scales,
@@ -365,7 +365,7 @@ def test_vecquant3_grouped_gemm_tiled_matches_gemv_loop(bits, out_features):
             for row in range(batch_size)
         ]
     )
-    actual_lora = vecquant3.gemm_lora(
+    actual_lora = grasshopper.gemm_lora(
         x, qweight, scales, qzeros, down, lora_b, group_size, accumulation_dtype=torch.float32, bits=bits
     )
     torch.testing.assert_close(actual_lora, expected_lora, rtol=0, atol=4e-3)
@@ -379,7 +379,7 @@ def test_vecquant3_grouped_gemm_tiled_matches_gemv_loop(bits, out_features):
     up_scales = up_scales.to(device=device, non_blocking=True).contiguous()
     expected_lora_int8 = torch.stack(
         [
-            vecquant3.gemv_lora_int8(
+            grasshopper.gemv_lora_int8(
                 x[row],
                 qweight,
                 scales,
@@ -396,7 +396,7 @@ def test_vecquant3_grouped_gemm_tiled_matches_gemv_loop(bits, out_features):
             for row in range(batch_size)
         ]
     )
-    actual_lora_int8 = vecquant3.gemm_lora_int8(
+    actual_lora_int8 = grasshopper.gemm_lora_int8(
         x,
         qweight,
         scales,
@@ -413,15 +413,15 @@ def test_vecquant3_grouped_gemm_tiled_matches_gemv_loop(bits, out_features):
     torch.testing.assert_close(actual_lora_int8, expected_lora_int8, rtol=0, atol=4e-3)
 
 
-def test_vecquant3_accumulation_dtype_validation():
-    assert vecquant3._normalize_accumulation_dtype(torch.float32, torch.float16) == 0
-    assert vecquant3._normalize_accumulation_dtype("input", torch.float16) == 1
-    assert vecquant3._normalize_accumulation_dtype("bf16", torch.bfloat16) == 1
-    assert vecquant3._normalize_bits(3) == 3
-    assert vecquant3._normalize_bits(4) == 4
-    assert vecquant3._normalize_bits(8) == 8
+def test_grasshopper_accumulation_dtype_validation():
+    assert grasshopper._normalize_accumulation_dtype(torch.float32, torch.float16) == 0
+    assert grasshopper._normalize_accumulation_dtype("input", torch.float16) == 1
+    assert grasshopper._normalize_accumulation_dtype("bf16", torch.bfloat16) == 1
+    assert grasshopper._normalize_bits(3) == 3
+    assert grasshopper._normalize_bits(4) == 4
+    assert grasshopper._normalize_bits(8) == 8
     assert grasshopper.SUPPORTED_BITS == (3, 4, 8)
     with pytest.raises(ValueError, match="accumulation_dtype"):
-        vecquant3._normalize_accumulation_dtype("bf16", torch.float16)
+        grasshopper._normalize_accumulation_dtype("bf16", torch.float16)
     with pytest.raises(ValueError, match="3, 4, or 8"):
-        vecquant3._normalize_bits(2)
+        grasshopper._normalize_bits(2)
