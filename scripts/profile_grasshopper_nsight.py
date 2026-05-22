@@ -166,6 +166,15 @@ def _kernel_shape(args: argparse.Namespace) -> tuple[int, int, int, int]:
     single_row_gemv = args.mode == "gemv" or args.batch == 1
     if args.bits == 3:
         ktile_half2 = 128
+    elif (
+        args.mode == "gemm"
+        and args.bits == 8
+        and args.group_size == 64
+        and args.batch >= 8
+        and args.out_features >= 2048
+        and (args.out_features >= 8192 or args.in_features >= 8192)
+    ):
+        ktile_half2 = 32
     elif args.out_features >= 2048:
         ktile_half2 = 64
     elif single_row_gemv:

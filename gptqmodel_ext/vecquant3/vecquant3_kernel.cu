@@ -1489,6 +1489,15 @@ torch::Tensor launch_vecquant3_gptq_gemm_batch_typed_bits(
           (qweight.size(1) >= kWideGemmBatchTileMinFeature ||
            in_features >= kWideGemmBatchTileMinFeature);
       if (use_wide_batch_tile) {
+        if constexpr (Bits == 8) {
+          if (group_size == 64) {
+            return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
+                scalar_t, Bits, LoraMode, FloatAccum, kNarrowDecodeKTileHalf2,
+                kWideGemmBatchTileRows>(
+                vec, qweight, scales, qzeros, down, up, up_qweight, up_scales,
+                group_size, lora_group_size, batch_rows);
+          }
+        }
         return launch_vecquant3_gptq_gemm_batch_typed_bits_tile<
             scalar_t, Bits, LoraMode, FloatAccum, kWideKTileHalf2,
             kWideGemmBatchTileRows>(
