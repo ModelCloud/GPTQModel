@@ -669,6 +669,17 @@ def test_raw_validator_quiet_cann_env_defaults_preserve_overrides():
     assert env["ASCEND_SLOG_PRINT_TO_STDOUT"] == "0"
 
 
+def test_qwen_benchmark_quiet_logs_do_not_redirect_process_fds():
+    benchmark = Path(__file__).resolve().parents[1] / "scripts" / "benchmark_qwen3_27b_gptq_fp16.py"
+    text = benchmark.read_text(encoding="utf-8")
+
+    assert "os.dup2" not in text
+    assert "os.devnull" not in text
+    assert "sys.excepthook" not in text
+    assert 'os.environ.setdefault("ASCEND_GLOBAL_LOG_LEVEL", "3")' in text
+    assert 'os.environ.setdefault("ASCEND_SLOG_PRINT_TO_STDOUT", "0")' in text
+
+
 def test_raw_validator_emit_json_result_to_saved_fd():
     validator = _load_raw_validator()
     read_fd, write_fd = os.pipe()
