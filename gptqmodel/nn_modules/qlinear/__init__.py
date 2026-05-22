@@ -27,6 +27,41 @@ from ...utils.safe import THREADPOOLCTL
 
 log = setup_logger()
 
+
+# Packed quantized weights are unpacked through shift operations in several
+# kernels. Keep those shifts behind helpers so Ascend 910B/CANN 9.1 beta can use
+# arithmetic equivalents for operators that torch-npu does not expose as native
+# device kernels, while CPU/CUDA/XPU keep the standard bitwise ops.
+def _torch_shift_factor(shifts: int | t.Tensor, device: t.device) -> int | t.Tensor:
+    if t.is_tensor(shifts):
+        # Tensor shifts must be materialized on the target device; otherwise the
+        # NPU arithmetic fallback would introduce cross-device operands.
+        shifts_i64 = shifts.to(device=device, dtype=t.int64)
+        return t.pow(t.full_like(shifts_i64, 2), shifts_i64)
+    return 1 << int(shifts)
+
+
+def _torch_right_shift(values: t.Tensor, shifts: int | t.Tensor) -> t.Tensor:
+    if values.device.type != "npu":
+        return t.bitwise_right_shift(values, shifts)
+
+    # CANN 9.1 beta on Ascend 910B may not provide bitwise_right_shift kernels
+    # for these tensor paths. floor_divide by powers of two preserves arithmetic
+    # right-shift behavior for signed packed int tensors and stays on-device.
+    shifted = t.floor_divide(values.to(t.int64), _torch_shift_factor(shifts, values.device))
+    return shifted.to(values.dtype)
+
+
+def _torch_left_shift(values: t.Tensor, shifts: int | t.Tensor) -> t.Tensor:
+    if values.device.type != "npu":
+        return t.bitwise_left_shift(values, shifts)
+
+    # Mirror left shift as multiplication by powers of two on NPU to avoid
+    # missing-kernel or CPU-fallback paths in torch-npu.
+    shifted = values.to(t.int64) * _torch_shift_factor(shifts, values.device)
+    return shifted.to(values.dtype)
+
+
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BACKENDS: List[BACKEND] = None
     SUPPORTS_METHODS: List[METHOD] = None
@@ -806,14 +841,14 @@ class PackableQuantLinear(GPTQQuantLinear):
             )
 
         if self.bits in [2, 4, 8]:
-            zeros = t.bitwise_right_shift(
+            zeros = _torch_right_shift(
                 t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
                 self.wf_unsqueeze_zero  # self.wf.unsqueeze(0),
             ).to(self.dequant_dtype)
             zeros = t.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
 
             weight = t.bitwise_and(
-                t.bitwise_right_shift(
+                _torch_right_shift(
                     t.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
                     self.wf_unsqueeze_neg_one  # self.wf.unsqueeze(-1)
                 ).to(self.dequant_dtype),
@@ -823,9 +858,9 @@ class PackableQuantLinear(GPTQQuantLinear):
             zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
                 -1, -1, -1, 12
             )
-            zeros = zeros >> self.wf_unsqueeze_zero  # self.wf.unsqueeze(0)
-            zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | ((zeros[:, :, 1, 0] << 2) & 0x4)
-            zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | ((zeros[:, :, 2, 0] << 1) & 0x6)
+            zeros = _torch_right_shift(zeros, self.wf_unsqueeze_zero)  # self.wf.unsqueeze(0)
+            zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | (_torch_left_shift(zeros[:, :, 1, 0], 2) & 0x4)
+            zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | (_torch_left_shift(zeros[:, :, 2, 0], 1) & 0x6)
             zeros = zeros & 0x7
             zeros = t.cat(
                 [zeros[:, :, 0, :11], zeros[:, :, 1, 1:12], zeros[:, :, 2, 1:11]],
@@ -835,9 +870,9 @@ class PackableQuantLinear(GPTQQuantLinear):
             weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1, self.qweight.shape[1]).expand(
                 -1, -1, 12, -1
             )
-            weight = (weight >> self.wf_unsqueeze_neg_one) & 0x7  # self.wf.unsqueeze(-1)
-            weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | ((weight[:, 1, 0] << 2) & 0x4)
-            weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
+            weight = _torch_right_shift(weight, self.wf_unsqueeze_neg_one) & 0x7  # self.wf.unsqueeze(-1)
+            weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | (_torch_left_shift(weight[:, 1, 0], 2) & 0x4)
+            weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | (_torch_left_shift(weight[:, 2, 0], 1) & 0x6)
             weight = weight & 0x7
             weight = t.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
