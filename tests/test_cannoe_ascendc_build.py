@@ -686,10 +686,16 @@ def test_qwen_benchmark_reports_native_plan_memory():
     text = benchmark.read_text(encoding="utf-8")
 
     assert "def _module_native_plan_bytes" in text
+    assert "def _module_cannoe_metadata" in text
     assert '"native_plan_mb"' in text
     assert '"live_source_mb"' in text
     assert '"dense_fp16_weight_mb"' in text
     assert '"source_dropped"' in text
+    assert '"cannoe_path"' in text
+    assert '"cannoe_plan_strategy"' in text
+    assert '"cannoe_plan_inner_precise"' in text
+    assert '"cannoe_plan_workspace_mb"' in text
+    assert '"cpath"' in text
     assert '"plan_MB"' in text
     assert '"live_src"' in text
     assert '"dense_MB"' in text

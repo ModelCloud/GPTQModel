@@ -948,6 +948,11 @@ Applied follow-up:
   next to timing results. This keeps speed work tied to the quantization
   premise: the retained runtime plan must stay far below a full dense FP16
   weight.
+- The same benchmark also records the selected Cannoe runtime path and, when a
+  planned Cannoe path is active, the plan strategy, `inner_precise` mode, and
+  custom workspace size. This is required for SVDQuant-style experiments because
+  a fast-looking timing is not actionable unless it is tied to the actual
+  kernel/lifecycle path that produced it.
 
 Parallel validation used one experiment per NPU with CANN 9.1.0-beta.1. The
 raw validator now avoids unrelated public ACLNN parser failures by creating test

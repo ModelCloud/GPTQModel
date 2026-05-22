@@ -198,6 +198,18 @@ def _bytes_to_mb(value: int) -> float:
     return float(value) / (1024.0 * 1024.0)
 
 
+def _module_cannoe_metadata(module: torch.nn.Module) -> dict:
+    plan = getattr(module, "_last_cann_plan", None)
+    return {
+        "cannoe_path": getattr(module, "_last_cann_path", None),
+        "cannoe_plan_strategy": getattr(plan, "strategy", None),
+        "cannoe_plan_inner_precise": getattr(plan, "inner_precise", None),
+        "cannoe_plan_workspace_mb": None
+        if plan is None
+        else _bytes_to_mb(int(getattr(plan, "custom_workspace_bytes", 0))),
+    }
+
+
 def _resolve_linear_cls(path: str, cuda_kernel: str):
     if path == "cannoe":
         os.environ.setdefault("GPTQMODEL_KOMODO_NATIVE_INT4", "1")
@@ -348,6 +360,7 @@ def _run_case(
     dense_fp16_bytes = case.in_features * case.out_features * torch.empty((), dtype=torch.float16).element_size()
     return {
         **asdict(case),
+        **_module_cannoe_metadata(module),
         "layer_key": layer_key,
         "tokens": tokens,
         "path": args.path,
@@ -373,6 +386,7 @@ def _run_case(
 def _format_table(rows: list[dict]) -> str:
     headers = (
         "layer",
+        "cpath",
         "M",
         "K",
         "N",
@@ -391,6 +405,7 @@ def _format_table(rows: list[dict]) -> str:
         table.append(
             (
                 row["name"],
+                str(row.get("cannoe_path") or "-"),
                 str(row["tokens"]),
                 str(row["in_features"]),
                 str(row["out_features"]),

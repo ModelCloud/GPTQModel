@@ -74,3 +74,27 @@ Interpretation:
 - The viable optimization is narrower: skip reading and unpacking `qzeros`
   during Cannoe symmetric prepack, then generate the required full constant
   `offsets=8` tensor directly.
+
+## Cannoe Plain-Native Inner-Precise Auto
+
+Context:
+
+- Hypothesis: reuse the existing q-like `inner_precise=1` shape policy in the
+  bound plain-native fp16 path, so q-proj could get the optional CANN precision
+  mode without routing through the heavier planned path.
+- Environment: CANN `/usr/local/Ascend/cann-9.1.0-beta.1`, visible devices
+  limited to NPU0-6, probes executed on visible NPU0.
+
+Failed probe:
+
+| Probe | Result | Metric data |
+|---|---|---|
+| Qwen q-proj same-module forced `inner_precise=0` vs auto | Correct but not useful | `max_abs=0.0`, `mean_abs=0.0`, path `plain_native_bound` |
+| Full Qwen3 27B Cannoe gate with plain-native auto `inner_precise` | Regressed speed | total mean `1.1885 ms`; q `0.1253`, k `0.1060`, v `0.1018`, gate `0.2525`, up `0.2810`, down `0.3219`; all `live_src=0.0` |
+
+Interpretation:
+
+- Do not pass optional `inner_precise` from the bound plain-native fp16 path by
+  default. Even the q-like zero-drift shape slowed in the full module gate on
+  CANN 9.1 beta. Keep the existing planned-path/direct probes as diagnostics
+  only unless a same-gate retest shows a clear win.
