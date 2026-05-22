@@ -70,6 +70,40 @@ def _half_scalar_from_bits(bits: int) -> float:
     return float(struct.unpack("<e", packed)[0])
 
 
+# ExLlamaV3's torch fallback decodes packed codebook values with shift
+# operations. Keep those shifts behind helpers so Ascend 910B/CANN 9.1 beta can
+# use arithmetic equivalents for operators that torch-npu does not expose as
+# native device kernels, while CPU/CUDA/XPU keep the standard bitwise ops.
+def _torch_shift_factor(shifts: int | torch.Tensor, device: torch.device) -> int | torch.Tensor:
+    if torch.is_tensor(shifts):
+        # Tensor shifts must be materialized on the target device; otherwise the
+        # NPU arithmetic fallback would introduce cross-device operands.
+        shifts_i64 = shifts.to(device=device, dtype=torch.int64)
+        return torch.pow(torch.full_like(shifts_i64, 2), shifts_i64)
+    return 1 << int(shifts)
+
+
+def _torch_right_shift(values: torch.Tensor, shifts: int | torch.Tensor) -> torch.Tensor:
+    if values.device.type != "npu":
+        return torch.bitwise_right_shift(values, shifts)
+
+    # CANN 9.1 beta on Ascend 910B may not provide bitwise_right_shift kernels
+    # for these tensor paths. floor_divide by powers of two preserves arithmetic
+    # right-shift behavior for signed packed int tensors and stays on-device.
+    shifted = torch.floor_divide(values.to(torch.int64), _torch_shift_factor(shifts, values.device))
+    return shifted.to(values.dtype)
+
+
+def _torch_left_shift(values: torch.Tensor, shifts: int | torch.Tensor) -> torch.Tensor:
+    if values.device.type != "npu":
+        return torch.bitwise_left_shift(values, shifts)
+
+    # Mirror left shift as multiplication by powers of two on NPU to avoid
+    # missing-kernel or CPU-fallback paths in torch-npu.
+    shifted = values.to(torch.int64) * _torch_shift_factor(shifts, values.device)
+    return shifted.to(values.dtype)
+
+
 _EXL3_MUL1_INV = _half_scalar_from_bits(0x1EEE)
 _EXL3_MUL1_BIAS = _half_scalar_from_bits(0xC931)
 
@@ -117,7 +151,7 @@ def _codebook_lut(
         halves = torch.stack(
             (
                 (raw & 0xFFFF).to(torch.uint16),
-                ((raw >> 16) & 0xFFFF).to(torch.uint16),
+                (_torch_right_shift(raw, 16) & 0xFFFF).to(torch.uint16),
             ),
             dim=-1,
         ).contiguous()
@@ -130,7 +164,7 @@ def _codebook_lut(
         halves = torch.stack(
             (
                 (raw & 0xFFFF).to(torch.uint16),
-                ((raw >> 16) & 0xFFFF).to(torch.uint16),
+                (_torch_right_shift(raw, 16) & 0xFFFF).to(torch.uint16),
             ),
             dim=-1,
         ).contiguous()
@@ -141,9 +175,9 @@ def _codebook_lut(
         raw = (values * _EXL3_MUL1_MULT) & 0xFFFFFFFF
         byte_sum = (
             (raw & 0xFF)
-            + ((raw >> 8) & 0xFF)
-            + ((raw >> 16) & 0xFF)
-            + ((raw >> 24) & 0xFF)
+            + (_torch_right_shift(raw, 8) & 0xFF)
+            + (_torch_right_shift(raw, 16) & 0xFF)
+            + (_torch_right_shift(raw, 24) & 0xFF)
         )
         accum = (byte_sum + _EXL3_MUL1_ACC).to(torch.uint16).contiguous()
         floats = accum.view(torch.float16).to(torch.float32)
@@ -297,23 +331,23 @@ class ExllamaV3TorchLinear(nn.Module):
             bit_in_word = bit_offset % 16
             if bit_in_word + bits <= 16:
                 shift = 16 - bit_in_word - bits
-                value = (words[..., word_idx] >> shift) & mask
+                value = _torch_right_shift(words[..., word_idx], shift) & mask
             else:
                 bits_first = 16 - bit_in_word
                 bits_second = bits - bits_first
-                high = (words[..., word_idx] & ((1 << bits_first) - 1)) << bits_second
-                low = words[..., word_idx + 1] >> (16 - bits_second)
+                high = _torch_left_shift(words[..., word_idx] & ((1 << bits_first) - 1), bits_second)
+                low = _torch_right_shift(words[..., word_idx + 1], 16 - bits_second)
                 value = (high | low) & mask
             symbols[..., pos::16] = value.to(torch.long)
 
         warmup = (16 + bits - 1) // bits - 1
         state = torch.zeros_like(symbols[..., 0], dtype=torch.long)
         for idx in range(256 - warmup, 256):
-            state = ((state << bits) | symbols[..., idx]) & 0xFFFF
+            state = (_torch_left_shift(state, bits) | symbols[..., idx]) & 0xFFFF
 
         encoded = torch.empty_like(symbols)
         for idx in range(256):
-            state = ((state << bits) | symbols[..., idx]) & 0xFFFF
+            state = (_torch_left_shift(state, bits) | symbols[..., idx]) & 0xFFFF
             encoded[..., idx] = state
 
         return encoded
