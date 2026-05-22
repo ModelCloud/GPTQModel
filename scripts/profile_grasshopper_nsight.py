@@ -185,9 +185,9 @@ def _kernel_shape(args: argparse.Namespace) -> tuple[int, int, int, int]:
     if args.mode == "gemm" and args.batch >= 2:
         if args.out_features >= 2048:
             if (
-                args.bits != 3
-                and args.batch >= 8
+                args.batch >= 8
                 and (args.out_features >= 8192 or args.in_features >= 8192)
+                and (args.bits != 3 or args.group_size == 128)
             ):
                 batch_tile_rows = 8
             else:
