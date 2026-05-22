@@ -15,6 +15,7 @@ plus Nsight Compute for promoted changes.
 | 2026-05-21 | `80d6bfdb` | Multi-group 4/8-bit decode | Multi-group tiles compute the quant group once per qweight row and reuse the fixed-group decoder. Nsight batch8 8192x1024 group128 improved `55.55 us -> 49.25 us`, instructions dropped `15.58M -> 11.91M`, and registers/thread dropped `32 -> 31`. Host medians improved: GEMV 8192x8192 group64 `0.1337 ms -> 0.1228 ms`; batch8 8192x1024 group128 `0.0974 ms -> 0.0887 ms`; batch8 8192x8192 group64 `0.2402 ms -> 0.2144 ms`. |
 | 2026-05-22 | `683d9125` | Group32 batched multi-group decode | Batch GEMM group32 tiles iterate qweight rows by quant-group segment, avoiding per-row group recomputation only where each tile crosses many groups. Nsight batch8 4-bit 8192x8192 group32 improved `168.352 us -> 164.736 us`, instructions dropped `83.61M -> 80.30M`, registers/thread rose `31 -> 32`, and host median improved `0.2277 ms -> 0.2099 ms`. Nearby group64 remained neutral (`0.2141 ms -> 0.2137 ms`). |
 | 2026-05-22 | `8b572f51` | Group64 8-bit batched multi-group decode | Batch GEMM now uses quant-group segment iteration for the 8-bit group64 dynamic-group path. Nsight batch8 8192x8192 improved `189.632 us -> 170.848 us`, instructions dropped `93.03M -> 80.94M`, registers/thread dropped `30 -> 28`, and host median improved `0.2493 ms -> 0.2187 ms` with final-source rebuild at `0.2320 ms`. Adjacent 4-bit group32 stayed `0.2099 ms`; 4-bit group64 remained comparable at `0.2150 ms`. |
+| 2026-05-22 | `e8afa845` | Group64 8-bit fixed-group K tile | Batch GEMM 8-bit group64 now uses a 32-half2 K tile so each CTA covers exactly one quant group and takes the fixed-group decode path. Nsight improved the previous segment path `170.848 us -> 163.264 us`, host median improved `0.2320 ms -> 0.2127 ms`, and issue/throughput rose `78.96% -> 82.96%`. |
 
 ## Rejected Probes
 
@@ -29,6 +30,7 @@ plus Nsight Compute for promoted changes.
 | 2026-05-22 | Use an 8-row batch tile for narrow-output batch16 4-bit GEMM | Rejected. Batch16 8192x1024 group128 median regressed `0.1129 ms -> 0.1269 ms`; the existing 4-row tile keeps better kernel efficiency for narrow output. |
 | 2026-05-22 | Apply quant-group segment iteration to all 4/8-bit dynamic group sizes | Rejected. The broad change helped group32 but regressed batch8 4-bit 8192x8192 group64 median `0.2141 ms -> 0.2200 ms`; refined the promoted path to `GroupSize == 32` batched GEMM only. |
 | 2026-05-22 | Apply group32 quant-group segment iteration to single-row GEMV | Rejected. 4-bit GEMV 8192x8192 group32 median regressed `0.1119 ms -> 0.1238 ms`; the extra loop structure hurt single-row decode despite reducing group checks. |
+| 2026-05-22 | Use a 32-half2 K tile for batch8 8-bit group32 GEMM | Rejected. Batch8 8192x8192 group32 median regressed `0.2200 ms -> 0.2273 ms`; doubling split-K CTAs and atomics outweighed less per-CTA group work. |
 
 ## Promotion Rule
 
