@@ -40,9 +40,6 @@ def configure_ascend_npu_test_env(env: dict[str, str], test_script: str) -> bool
         visible_devices = env.get("GPTQMODEL_TEST_ASCEND_RT_VISIBLE_DEVICES", DEFAULT_ASCEND_RT_VISIBLE_DEVICES)
         env["ASCEND_RT_VISIBLE_DEVICES"] = visible_devices
 
-    if "GPTQMODEL_TEST_NPU_DEVICE" not in env and visible_devices and "," not in visible_devices:
-        env["GPTQMODEL_TEST_NPU_DEVICE"] = "npu:0"
-
     env["CUDA_VISIBLE_DEVICES"] = ""
     return True
 
@@ -136,7 +133,6 @@ def run_tests(args: argparse.Namespace) -> int:
     ascend_npu_test = configure_ascend_npu_test_env(env, args.test_script)
     if ascend_npu_test:
         print(f"ASCEND_RT_VISIBLE_DEVICES={env.get('ASCEND_RT_VISIBLE_DEVICES', '')}")
-        print(f"GPTQMODEL_TEST_NPU_DEVICE={env.get('GPTQMODEL_TEST_NPU_DEVICE', '')}")
 
     if args.xpu_mode:
         maybe_uninstall_vllm()
