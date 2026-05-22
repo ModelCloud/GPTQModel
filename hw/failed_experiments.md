@@ -126,3 +126,32 @@ Interpretation:
 - Do not set a global `768` prepack tile policy. For CANN 9.1 beta, the useful
   production adjustment is narrower: let the bound plain-native Qwen down shape
   inherit parent `1024`, and keep non-plain planned/fused experiments isolated.
+
+## Cannoe Down-Projection SVDQuant Follow-Up Probes
+
+Context:
+
+- Hypothesis: after the successful common LoRA `addmm(out=...)` epilogue,
+  decode-only `M=1` LoRA could be faster with a vector-shaped `addmv` epilogue,
+  and down-projection bias might be faster outside the public CANN W4A16 op.
+- Environment: CANN `/usr/local/Ascend/cann-9.1.0-beta.1`, visible devices
+  limited to NPU0-6, probes executed on visible NPU0.
+
+Failed or non-actionable probes:
+
+| Probe | Result | Metric data |
+|---|---|---|
+| Monkey-patched rank-16 LoRA decode epilogue using `addmv` when `M=1` | Regressed | Current `addmm` path total `1.3145 ms`, down `0.3209 ms`; `addmv` total `1.5600 ms`, down `0.3641 ms`; drift unchanged enough to evaluate speed |
+| `GPTQMODEL_KOMODO_FUSE_BIAS=0` in Cannoe AB Qwen3 27B GPTQ fp16 | Not a stable default win | No-fused-bias total `1.0403 ms`, down `0.2789 ms`, max_abs `0.015625`; paired default fused-bias total `0.9809 ms`, down `0.2916 ms`, max_abs `0.0625` |
+| Down-only retest of inherited plain-native tile | Confirms current policy | `tile_n=1024` down `0.2733 ms`; `1536` down `0.2856 ms`; `2048` down `0.2788 ms`; all `239.2 MB` peak |
+
+Interpretation:
+
+- Keep the common LoRA `addmm(out=...)` epilogue. Do not add a decode-only
+  `addmv` branch on Ascend 910B; the smaller mathematical shape loses to the
+  existing GEMM-shaped runtime path.
+- Keep fused bias enabled by default. Disabling it can reduce one down-only
+  number and drift in the AB harness, but the paired full-shape total favored
+  the default fused-bias path.
+- Keep the plain-native large down projection on the inherited `1024` prepack
+  tile for CANN 9.1 beta.
