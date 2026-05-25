@@ -41,6 +41,8 @@ from .gpt_neox import GPTNeoXQModel
 from .gptj import GptJQModel
 from .grinmoe import GrinMoeQModel
 from .hrm_text import HrmTextQModel
+from .hunyuan_v1_dense import HunYuanDenseV1QModel
+from .hunyuan_v1_moe import HunYuanMoEV1QModel
 from .hymba import HymbaQModel
 from .instella import InstellaQModel
 from .internlm import InternLMQModel
