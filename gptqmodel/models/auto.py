@@ -114,6 +114,8 @@ from .definitions.gptj import GptJQModel  # noqa: E402
 from .definitions.granitemoehybrid import GraniteMoeHybridQModel
 from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hrm_text import HrmTextQModel  # noqa: E402
+from .definitions.hunyuan_v1_dense import HunYuanDenseV1QModel  # noqa: E402
+from .definitions.hunyuan_v1_moe import HunYuanMoEV1QModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
@@ -230,6 +232,8 @@ MODEL_MAP = {
     "interns1": InternS1QModel,
     "internvl_chat": InternVLChatQModel,
     "hrm_text": HrmTextQModel,
+    "hunyuan_v1_dense": HunYuanDenseV1QModel,
+    "hunyuan_v1_moe": HunYuanMoEV1QModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone
     "yi": LlamaQModel, # 100% llama clone
