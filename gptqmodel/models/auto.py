@@ -453,25 +453,6 @@ def _get_config_load_kwargs(kwargs: dict) -> dict:
     return get_hf_gguf_load_kwargs(kwargs)
 
 
-def _normalize_supported_model_type(config) -> str:
-    model_type = config.model_type.lower()
-    config_class_name = type(config).__name__
-
-    if model_type == "qwen3_5":
-        if config_class_name == "Qwen3_5TextConfig":
-            return "qwen3_5_text"
-        if not hasattr(config, "text_config") and not hasattr(config, "vision_config"):
-            return "qwen3_5_text"
-
-    if model_type == "qwen3_5_moe":
-        if config_class_name == "Qwen3_5MoeTextConfig":
-            return "qwen3_5_moe_text"
-        if not hasattr(config, "text_config") and not hasattr(config, "vision_config"):
-            return "qwen3_5_moe_text"
-
-    return model_type
-
-
 def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_load_kwargs):
     if "gguf_file" not in config_load_kwargs:
         model_dir = normalize_model_id_or_path_for_hf_gguf(
