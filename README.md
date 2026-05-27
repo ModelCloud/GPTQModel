@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 05/25/2026 7.1.0-dev `main`: ✨ Added `hy_3` and `ministral3` model support
 * 05/25/2026 7.1.0-dev `main`: ✨ Added `hunyuan_v1_dense` and `hunyuan_v1_moe` model support
 * 05/21/2026 7.1.0-dev `main`: ✨ Added `nemotron_labs_diffusion` model support
 * 05/20/2026 7.1.0-dev `main`: ✨ Added `interns1`, `ovis2_5`, `ovis2_6_moe` and `ovis2_6_next` model support
