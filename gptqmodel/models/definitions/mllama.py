@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForPreTraining
+from transformers import AutoModelForCausalLM, AutoModelForPreTraining
 
 from ..base import BaseQModel
 
@@ -27,3 +27,25 @@ class MLlamaQModel(BaseQModel):
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
+
+
+class MLlamaTextQModel(MLlamaQModel):
+    loader = AutoModelForCausalLM
+
+    pre_lm_head_norm_module = "model.norm"
+    rotary_embedding = "model.rotary_emb"
+
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+        },
+    ]
+
+
+__all__ = ["MLlamaQModel", "MLlamaTextQModel"]

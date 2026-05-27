@@ -49,7 +49,7 @@ from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
 from .interns1 import InternS1QModel
 from .internvl_chat import InternVLChatQModel
-from .llama4 import Llama4QModel
+from .llama4 import Llama4QModel, Llama4TextQModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel
 from .minicpm_o import MiniCPMOQModel
@@ -58,7 +58,7 @@ from .minicpmv_4_6 import MiniCPMV4_6QModel
 from .minimax_m2 import MiniMaxM2GPTQ
 from .mimo_v2 import MimoV2QModel
 from .mixtral import MixtralQModel
-from .mllama import MLlamaQModel
+from .mllama import MLlamaQModel, MLlamaTextQModel
 from .mobilellm import MobileLLMQModel
 from .moss import MossQModel
 from .mpt import MptQModel
@@ -97,6 +97,6 @@ from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .mistral3 import Mistral3GPTQ
 from .afmoe import AfMoeQModel
 from .glm4v import Glm4vGPTQ
-from .glm4v_moe import Glm4vMoeQModel
+from .glm4v_moe import Glm4vMoeQModel, Glm4vMoeTextQModel
 from .voxtral import VoxtralGPTQ
 from .glm4_moe_lite import Glm4MoeLiteQModel

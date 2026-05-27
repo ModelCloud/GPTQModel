@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForImageTextToText
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
@@ -40,3 +40,32 @@ class Llama4QModel(BaseQModel):
             },
         }
     ]
+
+
+class Llama4TextQModel(Llama4QModel):
+    loader = AutoModelForCausalLM
+
+    pre_lm_head_norm_module = "model.norm"
+    rotary_embedding = "model.rotary_emb"
+
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "feed_forward:moe": {
+                "router": ("router:!",),
+                "experts:0": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
+                "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            },
+        },
+    ]
+
+
+__all__ = ["Llama4QModel", "Llama4TextQModel"]
