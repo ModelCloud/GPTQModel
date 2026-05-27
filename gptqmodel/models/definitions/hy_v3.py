@@ -33,7 +33,6 @@ class HYV3QModel(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "gate": ("gate:!",),
-                "e_score_correction_bias": ("e_score_correction_bias:!",),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
