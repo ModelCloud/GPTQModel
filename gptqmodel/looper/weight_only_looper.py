@@ -171,6 +171,10 @@ class WeightOnlyLooper:
 
         layer_count = len(layers)
         total_layers = layer_count + (1 if quant_config.lm_head else 0)
+        pb = log.pb(range(total_layers)).manual().set(show_left_steps=1)
+        pb.title(f"Weight-only quantization ({total_layers} layers)")
+        self.processor.layer_count = layer_count
+        self.processor.pb = pb
         preprocessor = None
         if getattr(quant_config, "preprocessors", None):
             preprocessor = ModulePreProcessor(
@@ -200,6 +204,15 @@ class WeightOnlyLooper:
                     layer_name = get_layer_name(layer_names, layer_index)
                 if is_lm_head_module:
                     layer_name = None
+
+                if pb is not None:
+                    layer_title = (
+                        "Weight-only quantizing lm_head"
+                        if is_lm_head_module
+                        else f"Weight-only quantizing layer {layer_index} of {layer_count - 1}"
+                    )
+                    pb.current_iter_step = layer_index
+                    pb.title(layer_title).subtitle("").draw()
 
                 module = self.gptq_model.pre_quantize(module)
                 if not is_lm_head_module:
@@ -270,7 +283,12 @@ class WeightOnlyLooper:
                     self.gptq_model.post_quantize(module)
                 else:
                     layers[layer_index] = self.gptq_model.post_quantize(module)
+                if pb is not None:
+                    pb.current_iter_step = layer_index + 1
+                    pb.draw()
         finally:
+            if pb is not None:
+                pb.close()
             self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
         total_log = {self.processor.name(): self.processor.log}

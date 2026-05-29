@@ -1553,6 +1553,73 @@ def test_sync_all_meta_reports_logbar_progress(monkeypatch):
     assert fake_logger.progress.closed is True
 
 
+def test_copy_checkpoint_tensors_into_submodule_reports_load_progress(tmp_path, monkeypatch):
+    class _FakeProgress:
+        def __init__(self):
+            self.current_iter_step = 0
+            self.titles = []
+            self.subtitles = []
+            self.draw_calls = []
+            self.closed = False
+
+        def manual(self):
+            return self
+
+        def set(self, **_kwargs):
+            return self
+
+        def title(self, value):
+            self.titles.append(value)
+            return self
+
+        def subtitle(self, value):
+            self.subtitles.append(value)
+            return self
+
+        def draw(self, force: bool = False):
+            self.draw_calls.append((self.current_iter_step, force))
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class _FakeLogger:
+        def __init__(self):
+            self.progress = _FakeProgress()
+            self.iterable = None
+
+        def pb(self, iterable, *, output_interval=None):
+            del output_interval
+            self.iterable = list(iterable)
+            return self.progress
+
+    source_model = _HybridWrapper(width=8)
+    shell_model = _HybridWrapper(width=8)
+    source = _build_lazy_turtle_from_module(tmp_path, source_model)
+    fake_logger = _FakeLogger()
+
+    monkeypatch.setattr(structure_module, "log", fake_logger)
+
+    source._copy_checkpoint_tensors_into_submodule(
+        target_model=shell_model,
+        target_submodule=shell_model.block,
+        module_path="block",
+        device=torch.device("cpu"),
+        recurse=True,
+        non_blocking=False,
+    )
+
+    assert fake_logger.iterable == [0, 1, 2]
+    assert fake_logger.progress.titles == ["Loading checkpoint tensors (3)"]
+    assert fake_logger.progress.subtitles[0] == "block: 0/3"
+    assert "dt_bias: 1/3" in fake_logger.progress.subtitles
+    assert "inner.weight: 2/3" in fake_logger.progress.subtitles
+    assert "dt_scale: 3/3" in fake_logger.progress.subtitles
+    assert fake_logger.progress.draw_calls[0] == (0, True)
+    assert fake_logger.progress.draw_calls[-1] == (3, False)
+    assert fake_logger.progress.closed is True
+
+
 def test_streaming_state_dict_pads_safetensors_header_to_8_bytes(tmp_path):
     model = nn.Linear(3, 5, bias=False)
     state_dict = get_state_dict_for_save(model)
