@@ -3,7 +3,6 @@
 
 from types import SimpleNamespace
 
-import torch
 from torch import nn
 
 import gptqmodel.looper.weight_only_looper as weight_only_looper_module
