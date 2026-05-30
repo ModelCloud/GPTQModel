@@ -278,3 +278,108 @@ def test_dequantize_model_fp8_honors_ignored_layers(tmp_path):
     expected_quant = quant_weight.to(torch.bfloat16) / quant_scale_inv.to(torch.bfloat16)
     torch.testing.assert_close(quant_out, expected_quant)
     torch.testing.assert_close(ignored_out, ignored_weight)
+
+
+@pytest.mark.skipif(
+    not hasattr(torch, "float8_e8m0fnu"),
+    reason="float8_e8m0fnu dtype not available",
+)
+def test_dequantize_model_fp8_dequantizes_deepseek_v4_packed_experts(tmp_path):
+    model_dir = tmp_path / "deepseek_v4_fp4_experts"
+    output_dir = tmp_path / "deepseek_v4_fp4_experts_out"
+    model_dir.mkdir()
+
+    config = {
+        "architectures": ["DeepseekV4ForCausalLM"],
+        "model_type": "deepseek_v4",
+        "expert_dtype": "fp4",
+        "quantization_config": {
+            "quant_method": "fp8",
+            "fmt": "e4m3",
+            "scale_fmt": "ue8m0",
+            "weight_block_size": [128, 128],
+        },
+    }
+    (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    # Logical FP4 codes 0..15 repeated once, packed as low/high nibbles.
+    packed_bytes = torch.tensor(
+        [[lo | (hi << 4) for lo, hi in zip(range(0, 16, 2), range(1, 16, 2))] * 2],
+        dtype=torch.uint8,
+    )
+    weight = packed_bytes.view(torch.int8)
+    scale = torch.tensor([[2.0]], dtype=torch.float32).to(torch.float8_e8m0fnu)
+
+    weight_key = "layers.0.ffn.experts.0.w1.weight"
+    scale_key = "layers.0.ffn.experts.0.w1.scale"
+    shard_name = "model.safetensors"
+    save_file({weight_key: weight, scale_key: scale}, str(model_dir / shard_name))
+    _write_index(model_dir, shard_name, [weight_key, scale_key])
+
+    dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
+
+    with safe_open(output_dir / shard_name, framework="pt", device="cpu") as reader:
+        assert set(reader.keys()) == {weight_key}
+        output = reader.get_tensor(weight_key)
+
+    fp4_table = torch.tensor(
+        [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ],
+        dtype=torch.float32,
+    )
+    expected = (fp4_table.repeat(2).view(1, 32) * 2.0).to(torch.bfloat16)
+    assert output.dtype is torch.bfloat16
+    torch.testing.assert_close(output, expected)
+
+
+@pytest.mark.skipif(
+    not hasattr(torch, "float8_e8m0fnu"),
+    reason="float8_e8m0fnu dtype not available",
+)
+def test_dequantize_model_fp8_does_not_treat_other_models_as_deepseek_v4(tmp_path):
+    model_dir = tmp_path / "non_deepseek_v4_fp8"
+    output_dir = tmp_path / "non_deepseek_v4_fp8_out"
+    model_dir.mkdir()
+
+    config = {
+        "architectures": ["TestModel"],
+        "model_type": "not_deepseek_v4",
+        "quantization_config": {
+            "quant_method": "fp8",
+            "fmt": "e4m3",
+            "scale_fmt": "ue8m0",
+            "weight_block_size": [128, 128],
+        },
+    }
+    (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    weight_key = "layers.0.ffn.experts.0.w1.weight"
+    scale_key = "layers.0.ffn.experts.0.w1.scale"
+    weight = torch.zeros((1, 16), dtype=torch.int8)
+    scale = torch.ones((1, 1), dtype=torch.float32).to(torch.float8_e8m0fnu)
+    shard_name = "model.safetensors"
+    save_file({weight_key: weight, scale_key: scale}, str(model_dir / shard_name))
+    _write_index(model_dir, shard_name, [weight_key, scale_key])
+
+    dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
+
+    with safe_open(output_dir / shard_name, framework="pt", device="cpu") as reader:
+        assert set(reader.keys()) == {weight_key, scale_key}
+        assert reader.get_tensor(weight_key).dtype is torch.int8
+        assert reader.get_tensor(scale_key).dtype is torch.bfloat16
