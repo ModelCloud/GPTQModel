@@ -39,6 +39,10 @@ class _FakeProgress:
         self.draw_calls.append((self.current_iter_step, force))
         return self
 
+    def next(self):
+        self.current_iter_step += 1
+        return self
+
     def close(self):
         self.closed = True
 
@@ -46,12 +50,22 @@ class _FakeProgress:
 class _FakeLogger:
     def __init__(self):
         self.progress = _FakeProgress()
+        self.progresses = []
         self.iterable = None
+        self.iterables = []
 
     def pb(self, iterable, *, output_interval=None):
         del output_interval
-        self.iterable = list(iterable)
-        return self.progress
+        iterable_list = list(iterable)
+        self.iterables.append(iterable_list)
+        if self.iterable is None:
+            self.iterable = iterable_list
+        if not self.progresses:
+            progress = self.progress
+        else:
+            progress = _FakeProgress()
+        self.progresses.append(progress)
+        return progress
 
     def info(self, *_args, **_kwargs):
         return None
@@ -205,6 +219,17 @@ def test_weight_only_looper_reports_logbar_progress(monkeypatch):
     assert fake_logger.progress.draw_calls[0] == (0, False)
     assert fake_logger.progress.draw_calls[-1] == (2, False)
     assert fake_logger.progress.closed is True
+    assert fake_logger.iterables == [[0, 1], [0], [0]]
+    assert fake_logger.progresses[1].titles == [
+        "Layer 0 Submodule finalize 0/1",
+        "Layer 0 Finalize 1/1",
+    ]
+    assert fake_logger.progresses[2].titles == [
+        "Layer 1 Submodule finalize 0/1",
+        "Layer 1 Finalize 1/1",
+    ]
+    assert fake_logger.progresses[1].closed is True
+    assert fake_logger.progresses[2].closed is True
 
 
 def test_weight_only_looper_quantizes_subset_across_multiple_devices(monkeypatch):

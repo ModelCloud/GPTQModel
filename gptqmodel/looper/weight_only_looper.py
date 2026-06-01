@@ -14,6 +14,7 @@ optionally offload.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from concurrent.futures import as_completed
@@ -30,6 +31,7 @@ from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..quantization.config import BitsAndBytesConfig, FP8Config, GGUFConfig, RTNConfig, VramStrategy
+from ..utils import has_gil_disabled
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.logger import log_time_block, setup_logger
@@ -58,10 +60,7 @@ class WeightOnlyLooper:
         self.processor = processor
         self._quant_devices = self._resolve_quant_devices()
         self._quant_device_rr = 0
-        self._dense_device_rr = 0
-        self._moe_group_device_rr = 0
         self._module_device_map: Dict[str, torch.device] = {}
-        self._moe_group_device_map: Dict[str, torch.device] = {}
         self._quant_device_lock = threading.Lock()
         self._resolve_strategy_device_pools()
 
@@ -171,38 +170,143 @@ class WeightOnlyLooper:
             return None
         return f"{prefix}.experts.{expert_id}"
 
-    def _select_strategy_device_for_module(self, named_module: NamedModule) -> Optional[torch.device]:
-        """Apply dense/MoE VRAM strategy before falling back to generic round-robin."""
+    @staticmethod
+    def _collect_assignable_moe_group_keys(moe_groups: Dict[str, List[str]]) -> List[str]:
+        """Return expert families that should stay co-located on one device."""
 
-        module_name = getattr(named_module, "name", None) or getattr(named_module, "full_name", None)
-        moe_group_key = self._extract_moe_group_key(module_name) or self._extract_moe_group_key(
-            getattr(named_module, "full_name", None)
+        assignable_group_keys: List[str] = []
+        for group_key, module_names in moe_groups.items():
+            suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
+            if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
+                assignable_group_keys.append(group_key)
+        return assignable_group_keys
+
+    @staticmethod
+    def _normalize_planning_module_name(module_name: str) -> str:
+        """Strip model-tree annotations so planning blocks match live module names."""
+
+        return module_name.split(":", 1)[0]
+
+    def _collect_dense_groups(
+        self,
+        layer_candidate_names: List[str],
+        layer_moe_group_key_by_name: Dict[str, Optional[str]],
+        planning_layer_modules: Optional[List[List[str]]],
+    ) -> Dict[str, List[str]]:
+        """Collect dense modules into model-tree-defined calculation groups."""
+
+        remaining_dense_names = [
+            module_name
+            for module_name in layer_candidate_names
+            if layer_moe_group_key_by_name.get(module_name) is None
+        ]
+        remaining_dense_set = set(remaining_dense_names)
+        dense_groups: Dict[str, List[str]] = {}
+
+        if planning_layer_modules:
+            for block_index, block in enumerate(planning_layer_modules):
+                block_dense_names: List[str] = []
+                block_seen = set()
+                for block_entry in block:
+                    module_name = self._normalize_planning_module_name(block_entry)
+                    if module_name in block_seen or module_name not in remaining_dense_set:
+                        continue
+                    block_seen.add(module_name)
+                    if layer_moe_group_key_by_name.get(module_name) is not None:
+                        continue
+                    block_dense_names.append(module_name)
+
+                if block_dense_names:
+                    dense_groups[f"planning:{block_index}"] = block_dense_names
+                    for module_name in block_dense_names:
+                        remaining_dense_set.discard(module_name)
+
+        for module_name in remaining_dense_names:
+            if module_name not in remaining_dense_set:
+                continue
+            dense_groups[module_name] = [module_name]
+            remaining_dense_set.discard(module_name)
+
+        return dense_groups
+
+    def _build_layer_strategy_device_map(
+        self,
+        *,
+        full: Dict[str, torch.nn.Module],
+        planning_layer_modules: Optional[List[List[str]]],
+    ) -> Dict[str, torch.device]:
+        """Build the dense/MoE preferred-device map for one layer."""
+
+        dense_strategy_active = self._dense_vram_strategy_explicit
+        moe_strategy_active = self._moe_vram_strategy_explicit
+        if not dense_strategy_active and not moe_strategy_active:
+            return {}
+
+        layer_candidate_names = list(full.keys())
+        moe_group_key_by_name = {
+            module_name: self._extract_moe_group_key(module_name)
+            for module_name in layer_candidate_names
+        }
+        moe_groups: Dict[str, List[str]] = {}
+        for module_name, group_key in moe_group_key_by_name.items():
+            if group_key is not None:
+                moe_groups.setdefault(group_key, []).append(module_name)
+
+        dense_groups = self._collect_dense_groups(
+            layer_candidate_names,
+            moe_group_key_by_name,
+            planning_layer_modules,
+        )
+        preferred_devices: Dict[str, torch.device] = {}
+        dense_devices = [
+            device for device in self._dense_quant_devices
+            if device is not None and getattr(device, "type", None) != "cpu"
+        ] or list(self._dense_quant_devices)
+        moe_devices = [
+            device for device in self._moe_quant_devices
+            if device is not None and getattr(device, "type", None) != "cpu"
+        ] or list(self._moe_quant_devices)
+
+        if dense_strategy_active and dense_groups and dense_devices:
+            dense_group_keys = list(dense_groups.keys())
+            for group_index, group_key in enumerate(dense_group_keys):
+                # Dense EXCLUSIVE pins the serial path to the first dense
+                # device; BALANCED spreads model-tree calculation groups.
+                target_device = (
+                    dense_devices[group_index % len(dense_devices)]
+                    if self._dense_vram_strategy == VramStrategy.BALANCED and len(dense_devices) > 1
+                    else dense_devices[0]
+                )
+                for module_name in dense_groups[group_key]:
+                    preferred_devices[module_name] = target_device
+
+        if moe_strategy_active and moe_groups and moe_devices:
+            assignable_group_keys = self._collect_assignable_moe_group_keys(moe_groups)
+            for group_index, group_key in enumerate(assignable_group_keys):
+                # MoE BALANCED spreads expert families across the MoE pool;
+                # every projection in one expert family stays co-located.
+                target_device = (
+                    moe_devices[group_index % len(moe_devices)]
+                    if self._moe_vram_strategy == VramStrategy.BALANCED and len(moe_devices) > 1
+                    else moe_devices[0]
+                )
+                for module_name in moe_groups[group_key]:
+                    preferred_devices[module_name] = target_device
+
+        gil_env = os.environ.get("PYTHON_GIL")
+        gil_disabled = has_gil_disabled()
+        free_threaded_parallel_quant_eligible = bool(gil_disabled and len(self._moe_quant_devices) > 0)
+        log.info(
+            "ModuleLooper: MoE quant runtime dense_pool=%s moe_pool=%s "
+            "PYTHON_GIL=%s gil_disabled=%s free_threaded_parallel_quant_eligible=%s",
+            dense_devices,
+            moe_devices,
+            gil_env,
+            gil_disabled,
+            free_threaded_parallel_quant_eligible,
         )
 
-        if moe_group_key is not None and self._moe_vram_strategy_explicit and self._moe_quant_devices:
-            cached = self._moe_group_device_map.get(moe_group_key)
-            if cached is not None:
-                return cached
-            # MoE BALANCED spreads expert families across the MoE pool; each
-            # expert family keeps all projections on the same device.
-            if self._moe_vram_strategy == VramStrategy.BALANCED and len(self._moe_quant_devices) > 1:
-                device = self._moe_quant_devices[self._moe_group_device_rr % len(self._moe_quant_devices)]
-                self._moe_group_device_rr += 1
-            else:
-                device = self._moe_quant_devices[0]
-            self._moe_group_device_map[moe_group_key] = device
-            return device
-
-        if self._dense_vram_strategy_explicit and self._dense_quant_devices:
-            # Dense EXCLUSIVE pins attention/router/shared/dense MLP work to
-            # the first dense device; BALANCED round-robins dense modules.
-            if self._dense_vram_strategy == VramStrategy.BALANCED and len(self._dense_quant_devices) > 1:
-                device = self._dense_quant_devices[self._dense_device_rr % len(self._dense_quant_devices)]
-                self._dense_device_rr += 1
-                return device
-            return self._dense_quant_devices[0]
-
-        return None
+        return preferred_devices
 
     def _assign_quant_device_for_module(self, named_module: NamedModule, fallback_device: torch.device) -> torch.device:
         """Pick and memoize the quantization device for one named module."""
@@ -220,20 +324,13 @@ class WeightOnlyLooper:
 
             preferred_device = normalize_device_like(named_module.state.get("preferred_quant_device"))
             if preferred_device is not None and any(device == preferred_device for device in self._quant_devices):
+                # Dense/MoE strategy placement is planned before this point,
+                # matching ModuleLooper's preferred-device handoff.
                 device = preferred_device
                 emit_device_telemetry(
                     "weight_only_quant_device_preferred_hint",
                     module=key,
                     target_device=device,
-                )
-            elif (strategy_device := self._select_strategy_device_for_module(named_module)) is not None:
-                device = strategy_device
-                emit_device_telemetry(
-                    "weight_only_quant_device_strategy",
-                    module=key,
-                    target_device=device,
-                    dense_strategy=self._dense_vram_strategy.value,
-                    moe_strategy=self._moe_vram_strategy.value,
                 )
             elif len(self._quant_devices) <= 1:
                 device = self._quant_devices[0]
@@ -402,6 +499,44 @@ class WeightOnlyLooper:
         }
         use_parallel_finalize = len(finalize_tasks) > 1 and len(unique_targets) > 1
 
+        finalize_count = len(finalize_tasks)
+        finalize_pb = log.pb(range(finalize_count)).manual().set(show_left_steps=False)
+        known_layers = sorted(
+            {
+                getattr(named, "layer_index", None)
+                for named, _, _ in finalize_tasks
+                if getattr(named, "layer_index", None) is not None
+            }
+        )
+        includes_unknown = any(getattr(named, "layer_index", None) is None for named, _, _ in finalize_tasks)
+        layer_heading = "Layer ?"
+        if known_layers:
+            sample_layers = ", ".join(str(idx) for idx in known_layers[:3])
+            if len(known_layers) > 3:
+                sample_layers += ", ..."
+            suffix = ", ?" if includes_unknown else ""
+            prefix = "Layer" if len(known_layers) == 1 else "Layers"
+            layer_heading = f"{prefix} {sample_layers}{suffix}"
+        elif includes_unknown:
+            layer_heading = "Layer ?"
+
+        finalize_pb.title(
+            f"{layer_heading} Submodule finalize 0/{finalize_count}"
+        ).subtitle("Waiting for completions...").draw()
+
+        completed = 0
+
+        def _advance_finalize_progress(named: NamedModule, module_label: str) -> None:
+            nonlocal completed
+
+            completed += 1
+            layer_idx = getattr(named, "layer_index", None)
+            layer_label = f"Layer {layer_idx}" if layer_idx is not None else "Layer ?"
+            finalize_pb.next()
+            finalize_pb.title(
+                f"{layer_label} Finalize {completed}/{finalize_count}"
+            ).subtitle(f"{self.processor.name()}: {module_label}").draw()
+
         emit_device_telemetry(
             "weight_only_finalize_subset",
             module_count=len(finalize_tasks),
@@ -409,22 +544,28 @@ class WeightOnlyLooper:
             parallel=use_parallel_finalize,
         )
 
-        if not use_parallel_finalize:
-            for named, active_qcfg, _target_device in finalize_tasks:
-                self._finalize_quantized_module(named, active_qcfg)
-            return
+        try:
+            if not use_parallel_finalize:
+                for named, active_qcfg, _target_device in finalize_tasks:
+                    module_label = self._finalize_quantized_module(named, active_qcfg)
+                    _advance_finalize_progress(named, module_label)
+                return
 
-        futures = [
-            DEVICE_THREAD_POOL.submit(
-                target_device,
-                self._finalize_quantized_module,
-                named,
-                active_qcfg,
-            )
-            for named, active_qcfg, target_device in finalize_tasks
-        ]
-        for future in as_completed(futures):
-            future.result()
+            future_map = {
+                DEVICE_THREAD_POOL.submit(
+                    target_device,
+                    self._finalize_quantized_module,
+                    named,
+                    active_qcfg,
+                ): named
+                for named, active_qcfg, target_device in finalize_tasks
+            }
+            for future in as_completed(future_map):
+                named = future_map[future]
+                module_label = future.result()
+                _advance_finalize_progress(named, module_label)
+        finally:
+            finalize_pb.close()
 
     def _quantize_subset_modules(
         self,
@@ -582,6 +723,16 @@ class WeightOnlyLooper:
             is_awq_quantize=False,
             include_capture_only=False,
         )
+        full_layer_modules = getattr(self.gptq_model, "full_layer_modules", None)
+        if callable(full_layer_modules):
+            planning_layer_modules = full_layer_modules(
+                model_config=self.gptq_model.model.config,
+                is_awq_quantize=False,
+                include_capture_only=False,
+            )
+        else:
+            planning_layer_modules = layer_modules
+
         if not quant_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
 
@@ -644,6 +795,11 @@ class WeightOnlyLooper:
                 # transforms so quantization targets the final layer layout.
                 materialize_model(module)
                 full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
+                layer_strategy_modules = None if is_lm_head_module else planning_layer_modules
+                layer_strategy_device_map = self._build_layer_strategy_device_map(
+                    full=full,
+                    planning_layer_modules=layer_strategy_modules,
+                )
 
                 self.processor.collect_memory_info(layer_index)
                 for subset_names in subsets:
@@ -659,6 +815,17 @@ class WeightOnlyLooper:
                         )
                         if named is None:
                             continue
+
+                        preferred_device = layer_strategy_device_map.get(module_name)
+                        if preferred_device is not None:
+                            # Weight-only has no SubsetPlan, so store the same
+                            # preferred-device hint ModuleLooper would consume.
+                            named.state["preferred_quant_device"] = preferred_device
+                            emit_device_telemetry(
+                                "weight_only_strategy_preferred_device",
+                                module=named.full_name,
+                                target_device=preferred_device,
+                            )
 
                         if preprocessor is not None:
                             preprocessor.preprocess(named)
