@@ -801,7 +801,7 @@ class LazyTurtle:
         )
         # Lazy checkpoint name resolution must come from model-definition truth.
         self._module_tree = copy.deepcopy(module_tree)
-        self._module_tree_layer_prefix, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
+        self._module_tree_layer_prefixes, self._moe_alias_specs = self._build_moe_alias_specs(self._module_tree)
         # Resolve runtime->checkpoint aliases once up front so per-tensor
         # lookups can apply the same mapping order as HF loading.
         conversion_aliases = (
@@ -1022,6 +1022,30 @@ class LazyTurtle:
 
         log.info("Module: Total direct tensors materialized from lazy checkpoint source: %s", materialized)
         return materialized
+
+    def materialize_direct_meta_tensors(
+        self,
+        *,
+        target_model: nn.Module,
+        target_submodule: nn.Module,
+        device: Optional[torch.device] = None,
+    ):
+        """Materialize only direct meta params/buffers for one shell submodule."""
+
+        if device is not None:
+            device = torch.device(device)
+            if device.type == "meta":
+                raise ValueError("materialize_direct_meta_tensors() does not support meta target devices.")
+
+        path = _get_qualified_name(target_model, target_submodule)
+        with self._lock, torch.inference_mode():
+            self._materialize_direct_meta_tensors(
+                shell_sub=target_submodule,
+                module_path=path,
+                param_cache={},
+                buffer_cache={},
+            )
+            return target_submodule
 
     def _load_weight_map(self, model_local_path: str) -> Dict[str, str]:
         from .model import get_checkpoints
@@ -1255,13 +1279,21 @@ class LazyTurtle:
         return tuple(paths)
 
     @classmethod
-    def _build_moe_alias_specs(cls, module_tree: Optional[Any]) -> tuple[tuple[str, ...], tuple[_MoEAliasSpec, ...]]:
+    def _iter_module_tree_variants(cls, module_tree: Optional[Any]) -> tuple[list[Any], ...]:
+        if not isinstance(module_tree, list):
+            return ()
+        if module_tree and all(isinstance(item, (list, tuple)) for item in module_tree):
+            return tuple(list(item) for item in module_tree)
+        return (list(module_tree),)
+
+    @classmethod
+    def _build_moe_alias_specs(cls, module_tree: Optional[Any]) -> tuple[tuple[tuple[str, ...], ...], tuple[_MoEAliasSpec, ...]]:
         """Extract runtime/checkpoint MoE aliases directly from the model definition's `module_tree`."""
 
         if not isinstance(module_tree, list):
             return (), ()
 
-        layer_prefix: list[str] = []
+        layer_prefixes: list[tuple[str, ...]] = []
         specs: list[_MoEAliasSpec] = []
         seen_specs: set[
             tuple[
@@ -1272,13 +1304,6 @@ class LazyTurtle:
                 tuple[tuple[tuple[str, ...], ...], ...],
             ]
         ] = set()
-
-        for item in module_tree:
-            if item == "#":
-                break
-            if isinstance(item, str):
-                aliases, _flags = cls._parse_module_spec(item)
-                layer_prefix.append(aliases[0])
 
         def walk(node: Any, path: tuple[Any, ...], moe_root: Optional[tuple[tuple[str, ...], ...]]) -> None:
             if isinstance(node, dict):
@@ -1348,23 +1373,37 @@ class LazyTurtle:
                 for item in node:
                     walk(item, path, moe_root)
 
-        found_hash = False
-        for item in module_tree:
-            if item == "#":
-                found_hash = True
-                continue
-            if not found_hash:
-                continue
-            walk(item, (), None)
+        for tree_variant in cls._iter_module_tree_variants(module_tree):
+            layer_prefix: list[str] = []
+            for item in tree_variant:
+                if item == "#":
+                    break
+                if isinstance(item, str):
+                    layer_prefix.append(item.split(":", 1)[0])
+            if layer_prefix:
+                prefix_tuple = tuple(layer_prefix)
+                if prefix_tuple not in layer_prefixes:
+                    layer_prefixes.append(prefix_tuple)
 
-        return tuple(layer_prefix), tuple(specs)
+            found_hash = False
+            for item in tree_variant:
+                if item == "#":
+                    found_hash = True
+                    continue
+                if not found_hash:
+                    continue
+                walk(item, (), None)
+
+        return tuple(layer_prefixes), tuple(specs)
 
     def _split_layer_relative_path(self, name: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Return `(layer_prefix_with_index, relative_parts)` for a runtime or checkpoint tensor path."""
 
         parts = tuple(part for part in name.split(".") if part)
-        prefix = self._module_tree_layer_prefix
-        if prefix:
+        prefixes = getattr(self, "_module_tree_layer_prefixes", ()) or ()
+        for prefix in prefixes:
+            if not prefix:
+                continue
             max_start = len(parts) - len(prefix)
             for start in range(max_start + 1):
                 end = start + len(prefix)
@@ -1900,24 +1939,11 @@ class LazyTurtle:
 
         expected_shape = tuple(expected_shape)
 
-        # Some checkpoints store expert projections as (out, in) while others store
-        # them as (in, out). Keep both candidates and let the defused leaf shape be
-        # the final arbiter instead of hard-coding one model family's layout.
-        candidates: list[tuple[torch.Tensor, bool]] = [(tensor, False)]
-        if tensor.ndim == 2:
-            transposed = tensor.transpose(0, 1).contiguous()
-            if prefer_transposed is True:
-                candidates = [(transposed, True), (tensor, False)]
-            elif prefer_transposed is None and transposed.shape != tensor.shape:
-                candidates.append((transposed, True))
-            elif prefer_transposed is False and transposed.shape != tensor.shape:
-                candidates.append((transposed, True))
-
-        for candidate, used_transpose in candidates:
+        def try_candidate(candidate: torch.Tensor, *, used_transpose: bool) -> Optional[torch.Tensor]:
             if split_index is None:
                 if tuple(candidate.shape) == expected_shape:
                     return candidate.contiguous()
-                continue
+                return None
 
             preferred_dims: list[int] = []
             mapped_split_dim = split_dim
@@ -1935,13 +1961,47 @@ class LazyTurtle:
             preferred_dims.extend(dim for dim in range(candidate.ndim) if dim not in preferred_dims)
 
             for dim in preferred_dims:
-                if candidate.shape[dim] % 2 != 0:
-                    continue
-                split_tensor = candidate.chunk(2, dim=dim)[split_index].contiguous()
-                if tuple(split_tensor.shape) == expected_shape:
-                    return split_tensor
+                split_counts = []
+                expected_dim = expected_shape[dim] if dim < len(expected_shape) else None
+                if expected_dim:
+                    inferred_split_count = candidate.shape[dim] // expected_dim
+                    if (
+                        inferred_split_count > 1
+                        and candidate.shape[dim] % expected_dim == 0
+                        and inferred_split_count not in split_counts
+                    ):
+                        split_counts.append(inferred_split_count)
+                if 2 not in split_counts:
+                    split_counts.append(2)
 
-        return None
+                for split_count in split_counts:
+                    if split_index >= split_count or candidate.shape[dim] % split_count != 0:
+                        continue
+                    split_tensor = candidate.chunk(split_count, dim=dim)[split_index].contiguous()
+                    if tuple(split_tensor.shape) == expected_shape:
+                        return split_tensor
+
+            return None
+
+        # Some checkpoints store expert projections as (out, in) while others store
+        # them as (in, out). Try one layout at a time so the transpose copy is only
+        # materialized when the first candidate cannot satisfy the target shape.
+        if tensor.ndim == 2 and prefer_transposed is True:
+            # Honor explicit layout hints first; fall back only if shape/split checks fail.
+            transposed = tensor.transpose(0, 1).contiguous()
+            matched = try_candidate(transposed, used_transpose=True)
+            if matched is not None:
+                return matched
+            return try_candidate(tensor, used_transpose=False)
+
+        # Most checkpoint tensors already match the shell shape; avoid an eager transpose copy.
+        matched = try_candidate(tensor, used_transpose=False)
+        if matched is not None or tensor.ndim != 2 or tensor.shape[0] == tensor.shape[1]:
+            return matched
+
+        # Last resort for rectangular weights whose checkpoint layout is opposite of the shell.
+        transposed = tensor.transpose(0, 1).contiguous()
+        return try_candidate(transposed, used_transpose=True)
 
     @staticmethod
     def _resolve_prefer_transposed_hint(
@@ -2135,124 +2195,149 @@ class LazyTurtle:
                 continue
             grouped_names.setdefault(shard, []).append(("buffer", rel_name, full_name, expert_index, split_index, split_dim))
 
-        with torch.inference_mode():
-            for shard, entries in grouped_names.items():
-                shard_path = os.path.join(self.model_local_path, shard)
-                with safe_open(shard_path, framework="pt", device="cpu") as handler:
-                    for kind, rel_name, full_name, expert_index, split_index, split_dim in entries:
-                        target_tensor = t_params.get(rel_name) if kind == "param" else t_bufs.get(rel_name)
-                        expected_shape = tuple(target_tensor.shape) if target_tensor is not None else None
-                        prefer_transposed = self._resolve_prefer_transposed_hint(
-                            target_model=target_model,
-                            module_path=module_path,
-                            rel_name=rel_name,
-                            modules_by_name=modules_by_name,
-                        )
-                        checkpoint_tensor = handler.get_tensor(full_name)
-                        tensor = self._transform_checkpoint_tensor(
-                            checkpoint_tensor,
-                            expert_index=expert_index,
-                            split_index=split_index,
-                            split_dim=split_dim,
-                            expected_shape=expected_shape,
-                            prefer_transposed=prefer_transposed,
-                        )
-                        if tensor is None:
-                            raise RuntimeError(self._materialization_issue_message(
-                                phase="submodule materialization",
-                                kind=kind,
+        total_entries = sum(len(entries) for entries in grouped_names.values())
+        progress = None
+        loaded_entries = 0
+        if total_entries:
+            progress = log.pb(range(total_entries)).manual().set(show_left_steps=False)
+            module_label = module_path or "<root>"
+            progress.title(f"Loading checkpoint tensors ({total_entries})")
+            progress.subtitle(f"{module_label}: 0/{total_entries}")
+            progress.draw(force=True)
+
+        try:
+            with torch.inference_mode():
+                for shard, entries in grouped_names.items():
+                    shard_path = os.path.join(self.model_local_path, shard)
+                    with safe_open(shard_path, framework="pt", device="cpu") as handler:
+                        for kind, rel_name, full_name, expert_index, split_index, split_dim in entries:
+                            if progress is not None:
+                                progress.current_iter_step = loaded_entries
+                                progress.subtitle(f"{rel_name}: {loaded_entries + 1}/{total_entries}")
+                                progress.draw()
+                            target_tensor = t_params.get(rel_name) if kind == "param" else t_bufs.get(rel_name)
+                            expected_shape = tuple(target_tensor.shape) if target_tensor is not None else None
+                            prefer_transposed = self._resolve_prefer_transposed_hint(
+                                target_model=target_model,
                                 module_path=module_path,
                                 rel_name=rel_name,
-                                reason="checkpoint tensor could not be reshaped into the target layout",
-                                full_name=full_name,
-                                source_shape=tuple(checkpoint_tensor.shape),
-                                target_shape=expected_shape,
+                                modules_by_name=modules_by_name,
+                            )
+                            checkpoint_tensor = handler.get_tensor(full_name)
+                            tensor = self._transform_checkpoint_tensor(
+                                checkpoint_tensor,
                                 expert_index=expert_index,
                                 split_index=split_index,
                                 split_dim=split_dim,
-                            ))
-                        if kind == "param":
-                            target_param = t_params.get(rel_name)
-                            if target_param is None:
+                                expected_shape=expected_shape,
+                                prefer_transposed=prefer_transposed,
+                            )
+                            if tensor is None:
                                 raise RuntimeError(self._materialization_issue_message(
                                     phase="submodule materialization",
                                     kind=kind,
                                     module_path=module_path,
                                     rel_name=rel_name,
-                                    reason="target tensor disappeared before materialization",
+                                    reason="checkpoint tensor could not be reshaped into the target layout",
                                     full_name=full_name,
-                                    source_shape=tuple(tensor.shape),
+                                    source_shape=tuple(checkpoint_tensor.shape),
+                                    target_shape=expected_shape,
                                     expert_index=expert_index,
                                     split_index=split_index,
                                     split_dim=split_dim,
                                 ))
-                            if target_param.shape != tensor.shape:
-                                raise RuntimeError(self._materialization_issue_message(
-                                    phase="submodule materialization",
-                                    kind=kind,
-                                    module_path=module_path,
-                                    rel_name=rel_name,
-                                    reason="target tensor shape does not match the transformed checkpoint tensor",
-                                    full_name=full_name,
-                                    source_shape=tuple(tensor.shape),
-                                    target_shape=tuple(target_param.shape),
-                                    expert_index=expert_index,
-                                    split_index=split_index,
-                                    split_dim=split_dim,
-                                ))
-                            target_param_new = _ensure_target_storage_on_device_(target_param, device)
-                            if target_param_new is not target_param:
+                            if kind == "param":
+                                target_param = t_params.get(rel_name)
+                                if target_param is None:
+                                    raise RuntimeError(self._materialization_issue_message(
+                                        phase="submodule materialization",
+                                        kind=kind,
+                                        module_path=module_path,
+                                        rel_name=rel_name,
+                                        reason="target tensor disappeared before materialization",
+                                        full_name=full_name,
+                                        source_shape=tuple(tensor.shape),
+                                        expert_index=expert_index,
+                                        split_index=split_index,
+                                        split_dim=split_dim,
+                                    ))
+                                if target_param.shape != tensor.shape:
+                                    raise RuntimeError(self._materialization_issue_message(
+                                        phase="submodule materialization",
+                                        kind=kind,
+                                        module_path=module_path,
+                                        rel_name=rel_name,
+                                        reason="target tensor shape does not match the transformed checkpoint tensor",
+                                        full_name=full_name,
+                                        source_shape=tuple(tensor.shape),
+                                        target_shape=tuple(target_param.shape),
+                                        expert_index=expert_index,
+                                        split_index=split_index,
+                                        split_dim=split_dim,
+                                    ))
+                                target_param_new = _ensure_target_storage_on_device_(target_param, device)
+                                if target_param_new is not target_param:
+                                    t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+                                    setattr(t_parent, leaf, target_param_new)
+                                    target_param = target_param_new
+                                source = tensor.detach()
+                                if source.dtype != target_param.dtype:
+                                    source = source.to(dtype=target_param.dtype)
+                                target_param.detach().copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                            else:
+                                target_buffer = t_bufs.get(rel_name)
                                 t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
-                                setattr(t_parent, leaf, target_param_new)
-                                target_param = target_param_new
-                            source = tensor.detach()
-                            if source.dtype != target_param.dtype:
-                                source = source.to(dtype=target_param.dtype)
-                            target_param.detach().copy_(source, non_blocking=(non_blocking and source.is_pinned()))
-                            continue
+                                persistent = leaf not in getattr(t_parent, "_non_persistent_buffers_set", set())
 
-                        target_buffer = t_bufs.get(rel_name)
-                        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
-                        persistent = leaf not in getattr(t_parent, "_non_persistent_buffers_set", set())
+                                source = tensor.detach()
+                                if target_buffer is None:
+                                    new_buffer = source.to(device=device)
+                                    t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
+                                    t_bufs[rel_name] = new_buffer
+                                else:
+                                    if tuple(target_buffer.shape) != tuple(source.shape):
+                                        raise RuntimeError(self._materialization_issue_message(
+                                            phase="submodule materialization",
+                                            kind=kind,
+                                            module_path=module_path,
+                                            rel_name=rel_name,
+                                            reason="target tensor shape does not match the transformed checkpoint tensor",
+                                            full_name=full_name,
+                                            source_shape=tuple(source.shape),
+                                            target_shape=tuple(target_buffer.shape),
+                                            expert_index=expert_index,
+                                            split_index=split_index,
+                                            split_dim=split_dim,
+                                        ))
 
-                        source = tensor.detach()
-                        if target_buffer is None:
-                            new_buffer = source.to(device=device)
-                            t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
-                            t_bufs[rel_name] = new_buffer
-                            continue
+                                    if getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
+                                        new_buffer = torch.empty_like(target_buffer, device=device)
+                                        new_buffer.copy_(
+                                            source.to(dtype=new_buffer.dtype),
+                                            non_blocking=(non_blocking and source.is_pinned()),
+                                        )
+                                        t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
+                                        t_bufs[rel_name] = new_buffer
+                                    elif target_buffer.device != device:
+                                        new_buffer = torch.empty_like(target_buffer, device=device)
+                                        new_buffer.copy_(
+                                            source.to(dtype=new_buffer.dtype),
+                                            non_blocking=(non_blocking and source.is_pinned()),
+                                        )
+                                        t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
+                                        t_bufs[rel_name] = new_buffer
+                                    else:
+                                        if source.dtype != target_buffer.dtype:
+                                            source = source.to(dtype=target_buffer.dtype)
+                                        target_buffer.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
 
-                        if tuple(target_buffer.shape) != tuple(source.shape):
-                            raise RuntimeError(self._materialization_issue_message(
-                                phase="submodule materialization",
-                                kind=kind,
-                                module_path=module_path,
-                                rel_name=rel_name,
-                                reason="target tensor shape does not match the transformed checkpoint tensor",
-                                full_name=full_name,
-                                source_shape=tuple(source.shape),
-                                target_shape=tuple(target_buffer.shape),
-                                expert_index=expert_index,
-                                split_index=split_index,
-                                split_dim=split_dim,
-                            ))
-
-                        if getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
-                            new_buffer = torch.empty_like(target_buffer, device=device)
-                            new_buffer.copy_(source.to(dtype=new_buffer.dtype), non_blocking=(non_blocking and source.is_pinned()))
-                            t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
-                            t_bufs[rel_name] = new_buffer
-                            continue
-
-                        if target_buffer.device != device:
-                            new_buffer = torch.empty_like(target_buffer, device=device)
-                            new_buffer.copy_(source.to(dtype=new_buffer.dtype), non_blocking=(non_blocking and source.is_pinned()))
-                            t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
-                            t_bufs[rel_name] = new_buffer
-                        else:
-                            if source.dtype != target_buffer.dtype:
-                                source = source.to(dtype=target_buffer.dtype)
-                            target_buffer.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                            loaded_entries += 1
+                            if progress is not None:
+                                progress.current_iter_step = loaded_entries
+                                progress.draw()
+        finally:
+            if progress is not None:
+                progress.close()
 
         self._restore_missing_nonpersistent_buffers(
             target_model=target_model,
@@ -2559,6 +2644,27 @@ def alias_from_turtle_for_submodule(
         target_submodule=target_submodule,
         device=device,
         non_blocking=non_blocking,
+    )
+
+
+def alias_direct_meta_from_turtle_for_submodule(
+    target_model: torch.nn.Module,
+    turtle_model: "LazyTurtle",
+    target_submodule: torch.nn.Module,
+    *,
+    device: Optional[torch.device] = None,
+):
+    """Materialize only direct meta params/buffers for one shell submodule."""
+
+    if not hasattr(turtle_model, "materialize_direct_meta_tensors"):
+        raise TypeError(
+            f"Expected LazyTurtle-compatible source, got `{type(turtle_model).__name__}`."
+        )
+
+    return turtle_model.materialize_direct_meta_tensors(
+        target_model=target_model,
+        target_submodule=target_submodule,
+        device=device,
     )
 
 def _is_meta_tensor(t: torch.Tensor) -> bool:

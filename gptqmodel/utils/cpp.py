@@ -9,7 +9,6 @@ import hashlib
 import logging
 import math
 import os
-import pcre
 import platform
 import shutil
 import subprocess
@@ -19,13 +18,16 @@ import time
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
-from torch.utils.cpp_extension import CUDA_HOME, _get_build_directory, _get_cuda_arch_flags, load
 from typing import Callable, Optional, Sequence
 
+import pcre
 import torch
+from torch.utils.cpp_extension import CUDA_HOME, _get_build_directory, _get_cuda_arch_flags, load
+
 from .env import env_flag
 from .jit_compile_baselines import get_jit_compile_baseline_seconds
 from .logger import setup_logger
+
 
 log = logging.getLogger(__name__)
 

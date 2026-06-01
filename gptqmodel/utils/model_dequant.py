@@ -36,6 +36,25 @@ LOG = logging.getLogger(__name__)
 _FLOAT8_DTYPES = available_float8_dtypes()
 _FLOAT8_FORMAT_NAMES = frozenset(available_float8_dtype_names())
 _NVFP4_STORAGE_DTYPES = (torch.uint8, *available_float4_packed_dtypes())
+_DEEPSEEK_V4_FP4_BLOCK_SIZE = 32
+_DEEPSEEK_V4_FP4_TABLE = (
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
+)
 
 if TYPE_CHECKING:
     from compressed_tensors.compressors.base import BaseCompressor
@@ -77,6 +96,76 @@ def finalize_for_save(tensor: torch.Tensor, target_dtype: torch.dtype) -> torch.
     else:
         tensor_cpu = tensor_cpu.contiguous()
     return tensor_cpu
+
+
+def _is_deepseek_v4_routed_expert_weight_key(
+    key: str,
+    *,
+    model_type: Optional[str],
+) -> bool:
+    return (
+        str(model_type or "").strip().lower() == "deepseek_v4"
+        and key.endswith(".weight")
+        and ".experts." in key
+        and ".shared_experts." not in key
+    )
+
+
+def dequantize_deepseek_v4_fp4_expert(
+    tensor: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    target_dtype: torch.dtype = torch.bfloat16,
+    row_chunk_size: int = 256,
+) -> torch.Tensor:
+    """Dequantize DeepSeek-V4 routed expert E2M1-FP4 weights.
+
+    DeepSeek-V4-Pro stores routed experts as two FP4 nibbles packed in each I8
+    element and per-row, per-32-logical-column E8M0 scales. This is distinct
+    from the torchao NVFP4 layout used by other checkpoints.
+    """
+
+    if tensor.dtype != torch.int8:
+        raise ValueError(
+            f"DeepSeek-V4 FP4 expert weights must be int8, got {tensor.dtype}"
+        )
+    if tensor.ndim != 2 or scale.ndim != 2:
+        raise ValueError("DeepSeek-V4 FP4 expert weight and scale tensors must be 2D")
+
+    out_dim, packed_in_dim = tensor.shape
+    logical_in_dim = packed_in_dim * 2
+    if logical_in_dim % _DEEPSEEK_V4_FP4_BLOCK_SIZE != 0:
+        raise ValueError(
+            f"DeepSeek-V4 FP4 logical input dim {logical_in_dim} must be divisible by "
+            f"{_DEEPSEEK_V4_FP4_BLOCK_SIZE}"
+        )
+    expected_scale_shape = (out_dim, logical_in_dim // _DEEPSEEK_V4_FP4_BLOCK_SIZE)
+    if tuple(scale.shape) != expected_scale_shape:
+        raise ValueError(
+            f"DeepSeek-V4 FP4 scale shape {tuple(scale.shape)} does not match expected "
+            f"{expected_scale_shape} for weight shape {tuple(tensor.shape)}"
+        )
+
+    table = torch.tensor(_DEEPSEEK_V4_FP4_TABLE, dtype=torch.float32, device=tensor.device)
+    result = torch.empty((out_dim, logical_in_dim), dtype=target_dtype, device=tensor.device)
+    row_chunk_size = max(1, int(row_chunk_size))
+
+    for start in range(0, out_dim, row_chunk_size):
+        end = min(start + row_chunk_size, out_dim)
+        packed = tensor[start:end].view(torch.uint8)
+        low = packed & 0x0F
+        high = (packed >> 4) & 0x0F
+        codes = torch.stack((low, high), dim=-1).reshape(
+            end - start,
+            logical_in_dim,
+        ).long()
+        scale_expanded = scale[start:end].to(torch.float32).repeat_interleave(
+            _DEEPSEEK_V4_FP4_BLOCK_SIZE,
+            dim=1,
+        )
+        result[start:end] = (table[codes] * scale_expanded).to(target_dtype)
+
+    return result
 
 
 def normalize_device(device: Optional[str]) -> Optional[str]:
@@ -799,6 +888,7 @@ def convert_fp8_shard(
     target_dtype: torch.dtype,
     *,
     block_shape: Optional[Tuple[int, int]],
+    model_type: Optional[str] = None,
     scale_semantics: str = "heuristic",
     tensor_lookup: Optional[_ShardTensorLookup] = None,
     ignored_layers: Iterable[str] = (),
@@ -814,7 +904,30 @@ def convert_fp8_shard(
         if _tensor_key_matches_ignored_layer(key, ignored_layers):
             continue
 
-        if key.endswith(".weight") and tensor.dtype in _FLOAT8_DTYPES:
+        if (
+            _is_deepseek_v4_routed_expert_weight_key(key, model_type=model_type)
+            and tensor.dtype == torch.int8
+        ):
+            scale_key = key[:-len(".weight")] + ".scale"
+            if tensor_lookup is None or not tensor_lookup.has_tensor(
+                scale_key, local_reader=reader, local_keys=reader_keys
+            ):
+                raise KeyError(f"Missing DeepSeek-V4 FP4 expert scale tensor for {key}")
+            scale = tensor_lookup.get_tensor(
+                scale_key, local_reader=reader, local_keys=reader_keys
+            )
+            LOG.debug(
+                "Using scale tensor '%s' for DeepSeek-V4 FP4 expert weight '%s'",
+                scale_key,
+                key,
+            )
+            deq = dequantize_deepseek_v4_fp4_expert(
+                tensor,
+                scale,
+                target_dtype=target_dtype,
+            )
+            tensors[key] = finalize_for_save(deq, target_dtype)
+        elif key.endswith(".weight") and tensor.dtype in _FLOAT8_DTYPES:
             scale_key = key + "_scale_inv"
             scale_tensor = None
             scale_inv = None
@@ -923,15 +1036,38 @@ def convert_fp8_shard(
                 weight_tensor = tensor_lookup.get_tensor(
                     weight_key, local_reader=reader, local_keys=reader_keys
                 )
-                if weight_tensor.dtype in _FLOAT8_DTYPES:
+                if weight_tensor.dtype in _FLOAT8_DTYPES or (
+                    weight_tensor.dtype == torch.int8
+                    and _is_deepseek_v4_routed_expert_weight_key(
+                        weight_key,
+                        model_type=model_type,
+                    )
+                ):
                     # Mirror the `_scale_inv` handling so exported BF16 checkpoints
-                    # keep only dense weights, not FP8 reconstruction metadata.
-                    LOG.debug("Dropping auxiliary FP8 tensor '%s' after dequantization", key)
+                    # keep only dense weights, not FP8/FP4 reconstruction metadata.
+                    LOG.debug(
+                        "Dropping auxiliary quantization tensor '%s' after dequantization",
+                        key,
+                    )
                     continue
-            elif weight_key in reader_keys and reader.get_tensor(weight_key).dtype in _FLOAT8_DTYPES:
+            elif weight_key in reader_keys:
+                weight_tensor = reader.get_tensor(weight_key)
+                should_drop_scale = weight_tensor.dtype in _FLOAT8_DTYPES or (
+                    weight_tensor.dtype == torch.int8
+                    and _is_deepseek_v4_routed_expert_weight_key(
+                        weight_key,
+                        model_type=model_type,
+                    )
+                )
+                if not should_drop_scale:
+                    tensors[key] = finalize_for_save(tensor, target_dtype)
+                    continue
                 # Mirror the `_scale_inv` handling so exported BF16 checkpoints
-                # keep only dense weights, not FP8 reconstruction metadata.
-                LOG.debug("Dropping auxiliary FP8 tensor '%s' after dequantization", key)
+                # keep only dense weights, not FP8/FP4 reconstruction metadata.
+                LOG.debug(
+                    "Dropping auxiliary quantization tensor '%s' after dequantization",
+                    key,
+                )
                 continue
             tensors[key] = finalize_for_save(tensor, target_dtype)
         else:
@@ -1361,6 +1497,7 @@ def dequantize_model(
                         reader,
                         target_dtype,
                         block_shape=block_shape,
+                        model_type=config.get("model_type"),
                         scale_semantics=fp8_scale_semantics,
                         tensor_lookup=tensor_lookup,
                         ignored_layers=ignored_layers,

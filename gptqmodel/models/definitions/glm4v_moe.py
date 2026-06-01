@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from .glm4v import Glm4vGPTQ
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from .glm4v import Glm4vGPTQ
 
 
 class Glm4vMoeQModel(Glm4vGPTQ):

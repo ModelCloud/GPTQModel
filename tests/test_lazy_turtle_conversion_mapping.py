@@ -10,10 +10,10 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 
+from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
 from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ
 from gptqmodel.models.definitions.mixtral import MixtralQModel
 from gptqmodel.models.definitions.ovis import OvisQModel
-from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
 from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel
@@ -602,6 +602,52 @@ def test_lazy_turtle_preserves_chunk_weight_converter_split_info(tmp_path):
         1,
         0,
     )
+
+
+def test_lazy_turtle_materializes_four_way_chunk_converter_slice(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightConverterStub(
+                source_patterns="attn.gqkv_proj.weight",
+                target_patterns=[
+                    "self_attn.gate_proj.weight",
+                    "self_attn.q_proj.weight",
+                    "self_attn.k_proj.weight",
+                    "self_attn.v_proj.weight",
+                ],
+                operations=[Chunk(dim=0)],
+            )
+        ]
+    )
+
+    checkpoint_tensor = torch.arange(24, dtype=torch.float32).reshape(8, 3)
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "model.layers.0.attn.gqkv_proj.weight": checkpoint_tensor,
+        },
+        hf_conversion_map_reversed=reversed_map,
+    )
+
+    assert turtle._resolve_checkpoint_tensor_source(
+        "model.layers.0.self_attn",
+        "q_proj.weight",
+    ) == (
+        "model.layers.0.attn.gqkv_proj.weight",
+        None,
+        1,
+        0,
+    )
+
+    materialized = LazyTurtle._transform_checkpoint_tensor(
+        checkpoint_tensor,
+        expert_index=None,
+        split_index=1,
+        split_dim=0,
+        expected_shape=(2, 3),
+    )
+
+    assert torch.equal(materialized, checkpoint_tensor.chunk(4, dim=0)[1])
 
 
 def test_lazy_turtle_resolves_ernie_text_vision_defused_experts_from_converter(tmp_path):

@@ -40,6 +40,9 @@ from .gpt_neo import GptNeoQModel
 from .gpt_neox import GPTNeoXQModel
 from .gptj import GptJQModel
 from .grinmoe import GrinMoeQModel
+from .hrm_text import HrmTextQModel
+from .hunyuan_v1_dense import HunYuanDenseV1QModel
+from .hunyuan_v1_moe import HunYuanMoEV1QModel
 from .hymba import HymbaQModel
 from .instella import InstellaQModel
 from .internlm import InternLMQModel
@@ -59,6 +62,7 @@ from .mllama import MLlamaQModel
 from .mobilellm import MobileLLMQModel
 from .moss import MossQModel
 from .mpt import MptQModel
+from .nemotron_labs_diffusion import NemotronLabsDiffusionQModel
 from .opt import OptQModel
 from .ovis import OvisQModel
 from .ovis2_5 import Ovis2_5QModel

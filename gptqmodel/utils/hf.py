@@ -3,16 +3,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import inspect
 import json
-import numpy as np
 import os
 import shutil
 import sys
-import transformers
 import warnings
-from accelerate import init_empty_weights
 from contextlib import contextmanager
 from functools import lru_cache
+from typing import Any, Optional
+
+import numpy as np
+import torch
+import transformers
+from accelerate import init_empty_weights
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -22,10 +26,7 @@ from transformers import (
     PreTrainedModel,
 )
 from transformers.models.auto.tokenization_auto import get_tokenizer_config, tokenizer_class_from_name
-from typing import Any, Optional
 
-import inspect
-import torch
 from ..nn_modules.qlinear.gguf import (
     PRISM_Q1_0_G128_BLOCK_SIZE,
     PRISM_Q1_0_G128_NAME,
@@ -36,13 +37,16 @@ from ..nn_modules.qlinear.gguf import (
 )
 from ..utils import _MONKEY_PATCH_LOCK, internal_gguf
 
+
 # Compatibility wrapper for no_init_weights across different transformers versions
 # transformers >= 5.0.0: from transformers.initialization import no_init_weights
 # transformers < 5.0.0: from transformers.modeling_utils import no_init_weights
 try:
     from transformers.initialization import no_init_weights
 except ImportError:
-    from transformers.modeling_utils import no_init_weights# Compatibility wrapper for no_init_weights across different transformers versions
+    from transformers.modeling_utils import (
+        no_init_weights,  # Compatibility wrapper for no_init_weights across different transformers versions
+    )
 
 # transformers >= 5.0.0: from transformers import PreTrainedConfig
 # transformers < 5.0.0: from transformers import PretrainedConfig

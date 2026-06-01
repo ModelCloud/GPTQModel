@@ -5,6 +5,7 @@
 
 import contextlib
 import importlib
+import os
 import time
 from contextlib import contextmanager
 from enum import Enum
@@ -84,9 +85,21 @@ try:
 except Exception:
     HAS_MPS = False
 
+
+def _ascend_runtime_env_ready() -> bool:
+    # torch_npu may report available before the CANN environment is fully
+    # sourced. Requiring the standard Ascend paths avoids import-time lazy
+    # initialization failures when the Python package is installed but the
+    # runtime is not usable in this shell.
+    return any(
+        os.environ.get(name)
+        for name in ("ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME", "ASCEND_OPP_PATH")
+    )
+
+
 try:
     importlib.import_module("torch_npu")
-    HAS_NPU = torch.npu.is_available()
+    HAS_NPU = _ascend_runtime_env_ready() and torch.npu.is_available()
 except Exception:
     HAS_NPU = False
 
@@ -455,20 +468,62 @@ def last_npu_device_by_pci_bus_order() -> Optional[torch.device]:
 
 ALL_DEVICES = torch_devices()
 
-if HAS_CUDA:
-    ALL_STREAMS = [torch.cuda.Stream(device=device) for device in ALL_DEVICES]
-elif HAS_XPU:
-    ALL_STREAMS = [torch.xpu.Stream(device=device) for device in ALL_DEVICES]
-elif HAS_NPU:
-    ALL_STREAMS = [torch.npu.Stream(device=device) for device in ALL_DEVICES]
-else:
-    ALL_STREAMS = [contextlib.nullcontext()]
+
+class _LazyAcceleratorStreams:
+    """Create accelerator streams only when a caller actually needs them."""
+
+    def __init__(self, devices: List[torch.device]):
+        self._devices = devices
+        self._streams: List[Optional[object]] = [None] * len(devices)
+
+    def __len__(self):
+        return max(1, len(self._devices))
+
+    def __iter__(self):
+        for index in range(len(self)):
+            yield self[index]
+
+    def __getitem__(self, index: int):
+        if not self._devices:
+            if index == 0:
+                return contextlib.nullcontext()
+            raise IndexError(index)
+
+        stream = self._streams[index]
+        if stream is not None:
+            return stream
+
+        device = self._devices[index]
+        if device.type == "cuda":
+            stream = torch.cuda.Stream(device=device)
+        elif device.type == "xpu":
+            stream = torch.xpu.Stream(device=device)
+        elif device.type == "npu":
+            stream = torch.npu.Stream(device=device)
+        else:
+            stream = contextlib.nullcontext()
+        self._streams[index] = stream
+        return stream
+
+
+class _LazyAcceleratorStreamRef:
+    """Reference one lazy stream without materializing it at import time."""
+
+    def __init__(self, streams: _LazyAcceleratorStreams, index: int):
+        self._streams = streams
+        self._index = index
+
+    def get(self):
+        return self._streams[self._index]
+
+
+ALL_STREAMS = _LazyAcceleratorStreams(ALL_DEVICES)
 
 DEVICE_0 = auto_select_torch_device(index=0)
 # device_1 may be same as device_0 if there is only 1 visible/active device
 DEVICE_1 = auto_select_torch_device(index=1)
 
-DEVICE_0_STREAM = ALL_STREAMS[0]
+DEVICE_0_STREAM = _LazyAcceleratorStreamRef(ALL_STREAMS, 0)
 
 NEXT_DEVICE_INDEX = 0
 
@@ -494,6 +549,8 @@ NEXT_DEVICE_INDEX = 0
 #     return device
 
 def torch_streamCtx(stream) -> StreamContext:
+    if isinstance(stream, _LazyAcceleratorStreamRef):
+        stream = stream.get()
     if HAS_CUDA:
         return torch.cuda.stream(stream)
     if HAS_XPU:

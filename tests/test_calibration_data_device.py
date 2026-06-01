@@ -16,13 +16,16 @@ This feature allows specifying where calibration data is stored during quantizat
 """
 
 import os
+import types
+import unittest
+
 import pytest
 import torch
 import torch.nn as nn
-import types
-import unittest
+
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization import QuantizeConfig
+
 
 # Model path for integration tests - can be overridden via environment variable
 _INTEGRATION_MODEL_ID = os.environ.get(

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+import importlib
 import os
 import sys
 import threading
@@ -583,7 +584,10 @@ def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
     layer = model.model.layers[0]
     replace_module_with_hooked_legacy(layer)
 
-    quant_cfg = _make_quant_config()
+    is_causal_conv1d_available = importlib.util.find_spec("causal_conv1d") is not None
+
+    device = "cuda" if is_causal_conv1d_available else "cpu"
+    quant_cfg = _make_quant_config(device)
 
     class _DummyQwen3_5Model:
         moe_lifecycle_hooks = Qwen3_5_MoeQModel.moe_lifecycle_hooks
@@ -632,7 +636,7 @@ def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
     ]
     assert subset_names[-1] == "mlp.experts.3.up_proj"
 
-    layer_inputs = [[torch.randn(1, 4, cfg.hidden_size)]]
+    layer_inputs = [[torch.randn(1, 4, cfg.hidden_size).to(device)]]
     full_modules = find_modules(layer)
     subset = looper.create_named_modules(
         module=layer,
@@ -665,7 +669,7 @@ def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
         layer_input_kwargs=[{}],
         position_ids=[None],
         attention_masks=[None],
-        cur_layer_device=torch.device("cpu"),
+        cur_layer_device=torch.device(device),
         is_lm_head_module=False,
         layer_descriptor="layers.0",
         layer_title="subset-check",

@@ -121,6 +121,10 @@ def normalize_test_name(name: str) -> str:
     return strip_py_suffix(name.removeprefix("tests/"))
 
 
+def is_npu_test_name(name: str) -> bool:
+    return "npu" in re.split(r"[/_.-]+", normalize_test_name(name))
+
+
 def test_path_from_name(test_name: str, tests_root: str | Path = "tests") -> Path:
     normalized = normalize_test_name(test_name)
     return Path(tests_root) / f"{normalized}.py"
@@ -372,7 +376,8 @@ def resolve_test_runtime(test_name: str, tests_root: str | Path = "tests") -> Te
     normalized = normalize_test_name(test_name)
     test_path = test_path_from_name(normalized, tests_root=tests_root)
     xpu_mode = "xpu" in normalized
-    skip_gpu_allocation = xpu_mode or has_no_gpu_marker(test_path)
+    npu_mode = is_npu_test_name(normalized)
+    skip_gpu_allocation = xpu_mode or npu_mode or has_no_gpu_marker(test_path)
     return TestRuntime(
         test_name=normalized,
         test_path=str(test_path),

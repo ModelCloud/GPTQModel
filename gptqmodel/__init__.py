@@ -6,6 +6,7 @@
 import os
 import sys
 
+
 # isort: off
 from ._banner import get_startup_banner  # noqa: E402
 from .utils import _MONKEY_PATCH_LOCK  # noqa: E402
@@ -175,12 +176,12 @@ def _build_device_thread_pool():
             "cpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
         },
         workers={
-            "cuda:per": 1,
+            "cuda:per": 4,
             "xpu:per": 1,
             "npu:per": 1,
-            "mps": 1,
-            "cpu": 1,  # count + 1, fixed pool size > 1 check when count=3
-            "model_loader:cpu": 1,
+            "mps": 8,
+            "cpu": min(12, max(1, (os.cpu_count() or 1) + 1 // 2)),  # count + 1, fixed pool size > 1 check when count=3
+            "model_loader:cpu": 2,
         },
         empty_cache_every_n=512,
     )
