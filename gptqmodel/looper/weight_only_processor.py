@@ -86,12 +86,16 @@ class WeightOnlyProcessor(LoopProcessor):
     def quantize_module(
         self,
         module: NamedModule,
+        *,
+        device: Optional[torch.device] = None,
     ) -> Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig]:
         """Clones per-module config, quantizes weights, and logs the result."""
 
         qcfg_clone = clone_weight_only_config_for_module(self.qcfg, module.full_name)
         if qcfg_clone is None:
             return None
+        if device is not None:
+            qcfg_clone.device = device
 
         if self._uses_direct_pack(qcfg_clone):
             start_time = time.time()
