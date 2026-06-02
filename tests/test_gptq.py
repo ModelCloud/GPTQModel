@@ -17,7 +17,7 @@ from models.model_test import ModelTest
 
 from gptqmodel.quantization import gptq as gptq_mod
 from gptqmodel.quantization.config import FallbackStrategy, HessianConfig, QuantizeConfig
-from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.quantization.gptq import GPTQ, get_number_of_rows_and_cols
 
 
 def _make_module(hidden_dim: int, device: torch.device) -> nn.Linear:
@@ -138,6 +138,19 @@ def test_gptq_act_group_aware_accepts_effective_columns_with_tail_group():
 
     gptq = GPTQ(layer, qcfg=qcfg)
     assert gptq.columns == 10
+
+
+def test_gptq_base_quant_linear_like_shape_without_import():
+    class BaseQuantLinear(nn.Module):
+        __module__ = "gptqmodel.nn_modules.qlinear"
+
+    class FakeQuantLinear(BaseQuantLinear):
+        def __init__(self):
+            super().__init__()
+            self.in_features = 8
+            self.out_features = 19
+
+    assert get_number_of_rows_and_cols(FakeQuantLinear()) == (8, 19)
 
 
 def test_gptq_act_group_aware_rejects_non_positive_group_size():

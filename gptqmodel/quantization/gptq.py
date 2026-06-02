@@ -129,6 +129,14 @@ def _device_supports_bfloat16(device: torch.device) -> bool:
     return support
 
 
+def _is_base_quant_linear_like(layer: nn.Module) -> bool:
+    # Avoid importing BaseQuantLinear here; qlinear imports quantization code.
+    return any(
+        cls.__module__ == "gptqmodel.nn_modules.qlinear" and cls.__name__ == "BaseQuantLinear"
+        for cls in type(layer).__mro__
+    )
+
+
 def get_number_of_rows_and_cols(layer: nn.Module):
     # return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
     if isinstance(layer, NamedModule):
@@ -140,7 +148,8 @@ def get_number_of_rows_and_cols(layer: nn.Module):
     elif isinstance(layer, nn.Embedding):
         V, D = layer.weight.shape
         return D, V  # rows = embedding_dim, cols = vocab_size (token axis)
-    elif "QuantLinear" in type(layer).__name__:
+    elif _is_base_quant_linear_like(layer):
+        # BaseQuantLinear exposes dimensions without a normal dense weight.
         return layer.in_features, layer.out_features
     else:
         # weight shape is (n_out, n_in)

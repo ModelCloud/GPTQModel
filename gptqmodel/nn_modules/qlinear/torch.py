@@ -760,7 +760,29 @@ class TorchQuantEmbeddings(TorchLinear):
 
     SUPPORTS_TRAINING = False
     SUPPORTS_ADAPTERS = []
+    SUPPORTS_BACKENDS = [BACKEND.TORCH]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20}
+    SUPPORTS_BITS = [2, 3, 4, 8]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_AUTO_PADDING = True
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+
+    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
+
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    REQUIRES_FORMAT_V2 = True
+
+    # for transformers/optimum tests compat
     QUANT_TYPE = "torch"
+
 
     def forward(self, input_ids: torch.Tensor):
         weights = self.dequantize_weight()
