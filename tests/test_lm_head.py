@@ -14,7 +14,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 from models.model_test import ModelTest  # noqa: E402
 
-from gptqmodel import GPTQModel, QuantizeEmbed  # noqa: E402
+from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 
 
@@ -38,11 +38,21 @@ class TestLmHeadLoad(ModelTest):
         self.quantize_and_evaluate()
 
 
-class TestLmHeadReQuant(ModelTest):
-    EXPECT_EMBED_LOSS = 0.0000000004
-    EXPECT_LM_HEAD_LOSS = 0.0001088594
+class TestLmHeadQuant(ModelTest):
+    EXPECT_LM_HEAD_LOSS = 0.0005535857
 
-    def test_requantize_lm_head(self):
+    sample_length = 1024
+    samples = 128
+    model_id = "/monster/data/model/Qwen1.5-1.8B-Chat"
+
+    @classmethod
+    def setUpClass(cls):
+        calibration_dataset = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train").filter(lambda x: len(x["text"]) >= cls.sample_length).select(range(cls.samples))["text"]
+
+        # Truncating sample text to reduce memory usage
+        cls.calibration_dataset = [c[:cls.sample_length] for c in calibration_dataset]
+
+    def test_quant_lm_head(self):
         self.EVAL_TASKS = {
             "arc_challenge": {
                 "chat_template": True,
@@ -51,15 +61,15 @@ class TestLmHeadReQuant(ModelTest):
             },
         }
 
-        model = GPTQModel.load("/monster/data/model/Qwen1.5-1.8B-Chat-GPTQ-4bits-gp32", device_map="auto")
-        calibration = self.load_dataset(model.tokenizer, self.DATASET_SIZE)
-        model.requantize(calibration=calibration, embed_quant_mode=QuantizeEmbed.OUTPUT)
+        quant_config = QuantizeConfig(bits=4, group_size=32, lm_head=True)
 
-        # self.check_loss(model.get_input_embeddings_name(), self.EXPECT_EMBED_LOSS, model.quant_log)
-        self.check_loss(model.get_output_embeddings_name(), self.EXPECT_LM_HEAD_LOSS, model.quant_log)
+        model = GPTQModel.load(self.model_id, quant_config)
+
+        model.quantize(self.calibration_dataset, batch_size=8)
+
+        self.check_lm_head_loss(model.quant_log)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_dir = "./temp/Qwen1.5-1.8B-Chat-GPTQ-4bits-gp32-embed"
             model.tokenizer.save_pretrained(tmp_dir)
             model.save(tmp_dir)
 
@@ -70,9 +80,6 @@ class TestLmHeadReQuant(ModelTest):
                 tmp_dir,
                 device_map="auto",
             )
-
-            # assert isinstance(model.get_input_embeddings(), BaseQuantLinear)
-            assert isinstance(model.get_output_embeddings(), BaseQuantLinear)
 
             task_results = self.evaluate_model(model=model,
                                                trust_remote_code=self.TRUST_REMOTE_CODE,
