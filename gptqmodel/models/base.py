@@ -985,6 +985,7 @@ class BaseQModel(nn.Module):
                 batch_size=batch_size,
                 backend=backend,
                 calibration_concat_separator=calibration_concat_separator,
+                embed_quant_mode=embed_quant_mode,
             )
         else:
             if calibration is None:
@@ -1206,6 +1207,7 @@ class BaseQModel(nn.Module):
         batch_size: int,
         backend: Optional[BACKEND],
         calibration_concat_separator: Optional[str],
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
     ):
         del calibration_concat_size, calibration_sort, batch_size, calibration_concat_separator
 
@@ -1235,7 +1237,7 @@ class BaseQModel(nn.Module):
             tokenizer=self.tokenizer,
             qcfg=self.quantize_config,
         )
-        module_looper = WeightOnlyLooper(model=self, processor=processor)
+        module_looper = WeightOnlyLooper(model=self, processor=processor, embed_quant_mode=embed_quant_mode)
 
         gc_context = (
             DEVICE_THREAD_POOL.no_auto_gc()
@@ -1558,13 +1560,21 @@ class BaseQModel(nn.Module):
                 # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
                 #untie_weights(self.model)
 
-                self.save_quantized(
-                    save_dir=save_dir,
-                    safetensors_metadata=safetensors_metadata,
-                    max_shard_size=max_shard_size,
-                    meta_quantizer=meta_quantizer,
-                    eora_path=eora_path,
-                    split_by=split_by)
+                if getattr(self, "_model_free_weight_only_embeddings_only", False):
+                    self.save_quantized_embeddings(
+                        save_dir=save_dir,
+                        safetensors_metadata=safetensors_metadata,
+                        max_shard_size=max_shard_size,
+                        meta_quantizer=meta_quantizer,
+                    )
+                else:
+                    self.save_quantized(
+                        save_dir=save_dir,
+                        safetensors_metadata=safetensors_metadata,
+                        max_shard_size=max_shard_size,
+                        meta_quantizer=meta_quantizer,
+                        eora_path=eora_path,
+                        split_by=split_by)
 
                 # overwrite quant_override_files
                 for name, value in self.quant_override_files.items():

@@ -512,6 +512,9 @@ def create_quant_module(
         # print(f"offloading named module: {module.full_name}")
         submodule = submodule.module
 
+    if isinstance(submodule, nn.Embedding):
+        linear_cls = TorchQuantEmbeddings
+
     # submodule may be BaseQuantLinear, and the next QuantLinear is selected because of in_features/out_features
     # mismatch and other reasons.
     # In this case, need to call list_buffer() to get the device.

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import collections
 import copy
 import csv
 import json
@@ -58,6 +59,7 @@ from ..utils.hf import (
 )
 from ..utils.logger import setup_logger
 from ..utils.model import (
+    OffloadTensorRef,
     TensorSource,
     copy_py_files,
     find_modules,
@@ -296,7 +298,6 @@ def _load_tensors_by_prefixes(
 
 
 def _tensor_source_from_tensor(name: str, tensor: torch.Tensor) -> TensorSource:
-    # Create a TensorSource wrapper so the merged tensor behaves like original state_dict entries.
     # Wrap a raw tensor into a TensorSource so it can be merged into state_dict.
     return TensorSource(
         name=name,
@@ -304,6 +305,168 @@ def _tensor_source_from_tensor(name: str, tensor: torch.Tensor) -> TensorSource:
         shape=tuple(tensor.shape),
         source=tensor,
     )
+
+
+_SAFETENSORS_DTYPE_TO_TORCH = {
+    "BOOL": torch.bool,
+    "U8": torch.uint8,
+    "I8": torch.int8,
+    "I16": torch.int16,
+    "I32": torch.int32,
+    "I64": torch.int64,
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "F32": torch.float32,
+    "F64": torch.float64,
+}
+if hasattr(torch, "float8_e4m3fn"):
+    _SAFETENSORS_DTYPE_TO_TORCH["F8_E4M3"] = torch.float8_e4m3fn
+if hasattr(torch, "float8_e5m2"):
+    _SAFETENSORS_DTYPE_TO_TORCH["F8_E5M2"] = torch.float8_e5m2
+
+
+def _torch_dtype_from_safetensors(dtype_name: str) -> torch.dtype:
+    dtype = _SAFETENSORS_DTYPE_TO_TORCH.get(str(dtype_name).upper())
+    if dtype is None:
+        raise NotImplementedError(f"Unsupported source safetensors dtype for model-free save: {dtype_name}")
+    return dtype
+
+
+def _model_free_replacement_state_dict(model, turtle_model, replacement_prefixes: List[str]) -> Dict[str, TensorSource]:
+    """Build a low-memory save state dict from original checkpoint tensors plus replacements."""
+
+    if turtle_model is None or not hasattr(turtle_model, "_weight_map") or not hasattr(turtle_model, "model_local_path"):
+        raise ValueError("Model-free replacement save requires a LazyTurtle checkpoint source.")
+
+    prefixes = sorted({prefix for prefix in replacement_prefixes if isinstance(prefix, str) and prefix})
+    checkpoint_prefixes = set(prefixes)
+    resolver = getattr(turtle_model, "_resolve_checkpoint_module_path", None)
+    if callable(resolver):
+        for prefix in prefixes:
+            try:
+                checkpoint_prefixes.add(resolver(prefix))
+            except Exception:
+                pass
+    tensor_resolver = getattr(turtle_model, "_resolve_checkpoint_tensor_source", None)
+    if callable(tensor_resolver):
+        for prefix in prefixes:
+            for leaf in ("weight", "bias"):
+                try:
+                    checkpoint_name, _expert_index, _split_index, _split_dim = tensor_resolver(prefix, leaf)
+                except Exception:
+                    checkpoint_name = None
+                if checkpoint_name:
+                    if checkpoint_name.endswith(f".{leaf}"):
+                        checkpoint_prefixes.add(checkpoint_name[: -(len(leaf) + 1)])
+                    else:
+                        checkpoint_prefixes.add(checkpoint_name)
+    prefix_dots = tuple(f"{prefix}." for prefix in sorted(checkpoint_prefixes))
+    state_dict: Dict[str, TensorSource] = collections.OrderedDict()
+
+    shard_to_names: Dict[str, List[str]] = collections.OrderedDict()
+    for tensor_name, shard_name in turtle_model._weight_map.items():
+        if tensor_name in checkpoint_prefixes or tensor_name.startswith(prefix_dots):
+            continue
+        shard_to_names.setdefault(shard_name, []).append(tensor_name)
+
+    for shard_name, tensor_names in shard_to_names.items():
+        shard_path = os.path.join(turtle_model.model_local_path, shard_name)
+        with safe_open(shard_path, framework="pt", device="cpu") as handler:
+            for tensor_name in tensor_names:
+                tensor_slice = handler.get_slice(tensor_name)
+                dtype = _torch_dtype_from_safetensors(tensor_slice.get_dtype())
+                shape = tuple(tensor_slice.get_shape())
+                source = OffloadTensorRef(
+                    path=os.path.abspath(shard_path),
+                    torch_dtype=dtype,
+                    shape=shape,
+                    format="safetensors",
+                    weight_name=tensor_name,
+                    data_offsets=None,
+                )
+                state_dict[tensor_name] = TensorSource(
+                    name=tensor_name,
+                    torch_dtype=dtype,
+                    shape=shape,
+                    source=source,
+                )
+
+    replacement_count = 0
+    for prefix in prefixes:
+        try:
+            module = model.get_submodule(prefix)
+        except AttributeError:
+            log.warn(f"Model-free save: replacement module `{prefix}` is not present in the model tree.")
+            continue
+        for rel_name, tensor in module.state_dict().items():
+            tensor_name = f"{prefix}.{rel_name}" if rel_name else prefix
+            state_dict[tensor_name] = _tensor_source_from_tensor(tensor_name, tensor.detach())
+            replacement_count += 1
+
+    log.info(
+        "Model-free save: using original checkpoint tensors with %s replacement tensor(s) from %s module(s).",
+        replacement_count,
+        len(prefixes),
+    )
+    return state_dict
+
+
+def _model_free_embedding_replacement_state_dict(
+    model,
+    turtle_model,
+    embedding_prefixes: List[str],
+) -> Dict[str, TensorSource]:
+    """Build a low-memory state dict that only replaces quantized embedding tensors."""
+
+    prefixes = sorted({prefix for prefix in embedding_prefixes if isinstance(prefix, str) and prefix})
+    if not prefixes:
+        raise ValueError("Embedding replacement save requires at least one embedding prefix.")
+    log.info("Model-free embedding save: replacing checkpoint tensors for %s embedding module(s).", len(prefixes))
+    return _model_free_replacement_state_dict(model, turtle_model, prefixes)
+
+
+def _parse_max_shard_size(value: Optional[Union[int, str]]) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    match = _MAX_SHARD_SIZE_RE.fullmatch(value)
+    if not match:
+        raise ValueError(f"Invalid max_shard_size value: {value}")
+    base = int(match.group(1))
+    suffix = match.group(2).upper()
+    multiplier = 1
+    if suffix.startswith("K"):
+        multiplier = 1024
+    elif suffix.startswith("M"):
+        multiplier = 1024 ** 2
+    elif suffix.startswith("G"):
+        multiplier = 1024 ** 3
+    elif suffix.startswith("T"):
+        multiplier = 1024 ** 4
+    elif suffix.startswith("P"):
+        multiplier = 1024 ** 5
+    return base * multiplier
+
+
+def _normalize_safetensors_metadata(meta: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    if meta is None:
+        return {}
+    if not isinstance(meta, dict):
+        raise TypeError("safetensors_metadata must be a dictionary.")
+    normalized: Dict[str, str] = {}
+    for key, value in meta.items():
+        try:
+            new_key = str(key)
+            new_value = str(value)
+        except Exception as exc:
+            raise TypeError(
+                f"safetensors_metadata: both keys and values must be strings and conversion failed for ({key}, {value}): {exc}"
+            )
+        if new_key in normalized:
+            log.warn(f"Duplicate metadata key '{new_key}' after conversion to string; overwriting previous value.")
+        normalized[new_key] = new_value
+    return normalized
 
 
 def _merge_prefix_tensors_into_state_dict(
@@ -596,6 +759,140 @@ def ModelWriter(cls):
 
     cls.eora_save = _eora_save
 
+    def save_quantized_embeddings(
+            self,
+            save_dir: str,
+            safetensors_metadata: Optional[Dict[str, str]] = None,
+            max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
+            meta_quantizer: Optional[str] = None,
+    ):
+        """Save an embeddings-only quantized checkpoint by replacing source checkpoint tensors."""
+        os.makedirs(save_dir, exist_ok=True)
+
+        if not self.quantized:
+            raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
+
+        embedding_replacement_prefixes = sorted(
+            {
+                prefix
+                for prefix in getattr(self, "_model_free_weight_only_embedding_replacement_prefixes", set())
+                if isinstance(prefix, str) and prefix
+            }
+        )
+        replacement_prefixes = sorted(
+            {
+                prefix
+                for prefix in getattr(self, "_model_free_weight_only_replacement_prefixes", set())
+                if isinstance(prefix, str) and prefix
+            }
+        )
+        if not embedding_replacement_prefixes:
+            raise ValueError("Embedding-only save requires quantized embedding replacement prefixes.")
+        if set(replacement_prefixes) - set(embedding_replacement_prefixes):
+            raise ValueError("Embedding-only save cannot handle non-embedding replacement prefixes.")
+        if (
+            self.turtle_model is None
+            or not hasattr(self.turtle_model, "_weight_map")
+            or not hasattr(self.turtle_model, "model_local_path")
+        ):
+            raise ValueError("Embedding-only save requires a LazyTurtle checkpoint source.")
+
+        pre_quantized_size_mb = get_model_files_size(self.model_local_path)
+        pre_quantized_size_gb = pre_quantized_size_mb / 1024
+
+        quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
+        if meta_quantizer:
+            if len(meta_quantizer.split(":")) == 2:
+                quantizers.append(meta_quantizer.replace(" ", ""))
+            else:
+                log.warn(f"meta_quantizer: '{meta_quantizer}' format is invalid, expected: 'quantizer_name:version'")
+
+        self.quantize_config.meta_set_versionable(key=META_FIELD_QUANTIZER, value=quantizers)
+        self.quantize_config.meta_set(key=META_FIELD_URI, value=META_VALUE_URI)
+        self.quantize_config.meta_set(key=META_FIELD_DAMP_PERCENT, value=getattr(self.quantize_config, "damp_percent", None))
+        self.quantize_config.meta_set(
+            key=META_FIELD_DAMP_AUTO_INCREMENT,
+            value=getattr(self.quantize_config, "damp_auto_increment", None),
+        )
+        self.quantize_config.meta_set(key=META_FIELD_STATIC_GROUPS, value=getattr(self.quantize_config, "static_groups", None))
+        self.quantize_config.meta_set(key=META_FIELD_TRUE_SEQUENTIAL, value=self.quantize_config.true_sequential)
+        self.quantize_config.meta_set(key=META_FIELD_MSE, value=getattr(self.quantize_config, "mse", None))
+        self.quantize_config.meta_set(key=META_FIELD_GPTAQ_ENABLED, value=None)
+        self.quantize_config.meta_set(key=META_FIELD_FOEM_ENABLED, value=None)
+        self.quantize_config.meta_set(key=META_FIELD_ACT_GROUP_AWARE, value=getattr(self.quantize_config, "act_group_aware", None))
+
+        sanitize_model_config(self.model.config)
+        config = copy.deepcopy(self.model.config)
+        quantize_config = copy.deepcopy(self.quantize_config)
+        config.quantization_config = quantize_config.to_dict()
+        self.model.config = config
+
+        generation_config = getattr(self.model, "generation_config", None)
+        self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+        gen_config_path = os.path.join(save_dir, "generation_config.json")
+        if sanitize_generation_config_file(gen_config_path):
+            log.info("Model: Sanitized `generation_config.json` before packaging.")
+        quantize_config.save_pretrained(save_dir)
+        if hasattr(self, "processor") and isinstance(self.processor, ProcessorMixin):
+            self.processor.save_pretrained(save_dir)
+        if generation_config is not None:
+            self.model.generation_config = generation_config
+
+        state_dict = _model_free_embedding_replacement_state_dict(
+            self.model,
+            self.turtle_model,
+            embedding_replacement_prefixes,
+        )
+        metadata_dict = _normalize_safetensors_metadata(safetensors_metadata)
+        metadata_dict["format"] = "pt"
+        max_shard_size_bytes = _parse_max_shard_size(max_shard_size)
+        model_base_name = "model"
+        model_save_name = model_base_name + ".safetensors"
+        expected_files, tensor_to_filename, total_size_bytes = streaming_state_dict_to_shards(
+            state_dict,
+            save_dir=save_dir,
+            model_base_name=model_base_name,
+            single_file_name=model_save_name,
+            metadata=metadata_dict,
+            max_shard_size=max_shard_size_bytes,
+        )
+        _cleanup_saved_weight_files(
+            save_dir=save_dir,
+            expected_files=expected_files,
+            model_base_name=model_base_name,
+            model_save_name=model_save_name,
+        )
+
+        if len(expected_files) > 1:
+            index = {
+                "metadata": {"total_size": total_size_bytes},
+                "weight_map": tensor_to_filename,
+            }
+            with open(join(save_dir, model_save_name + ".index.json"), "w", encoding="utf-8") as f:
+                f.write(json.dumps(index, indent=2, sort_keys=True) + "\n")
+        else:
+            index_save_path = join(save_dir, model_save_name + ".index.json")
+            if os.path.exists(index_save_path):
+                os.remove(index_save_path)
+
+        state_dict.clear()
+        if not self.load_quantized_model:
+            total_size_mb = total_size_bytes / (1024 * 1024)
+            total_size_gb = total_size_mb / 1024
+            size_diff_mb = pre_quantized_size_mb - total_size_mb
+            size_diff_gb = size_diff_mb / 1024
+            percent_diff = (size_diff_mb / pre_quantized_size_mb) * 100
+            log.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
+            log.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
+            log.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
+
+        if self.trust_remote_code:
+            copy_py_files(save_dir, model_id_or_path=self.model_local_path)
+        if self.tokenizer:
+            self.tokenizer.save_pretrained(save_dir)
+
+    cls.save_quantized_embeddings = save_quantized_embeddings
+
     def save_quantized(
             self,
             save_dir: str,
@@ -796,8 +1093,29 @@ def ModelWriter(cls):
             self.processor.save_pretrained(save_dir)
         # --- end config save block ---
 
-        # Due to shell/turtle state, we need to sync the modules from turtle to shell
-        if not self.load_quantized_model:
+        replacement_prefixes = sorted(
+            {
+                prefix
+                for prefix in getattr(self, "_model_free_weight_only_replacement_prefixes", set())
+                if isinstance(prefix, str) and prefix
+            }
+        )
+        checkpoint_source_available = bool(
+            self.turtle_model is not None
+            and hasattr(self.turtle_model, "_weight_map")
+            and hasattr(self.turtle_model, "model_local_path")
+        )
+        model_free_replacement_save = bool(
+            replacement_prefixes
+            and checkpoint_source_available
+        )
+        if replacement_prefixes and not model_free_replacement_save:
+            log.info("Model-free save: checkpoint source unavailable; falling back to regular state_dict save.")
+
+        # Due to shell/turtle state, we need to sync the modules from turtle to shell.
+        # Model-free replacement saves keep the original checkpoint tensors as
+        # streaming references and only inject the newly quantized module tensors.
+        if not self.load_quantized_model and not model_free_replacement_save:
             alias_all_from_turtle_if_meta(shell_model=self.model, turtle_model=self.turtle_model)
             materialized_layers = _materialize_meta_layers_from_turtle(self.model, self.turtle_model)
             if materialized_layers:
@@ -807,7 +1125,14 @@ def ModelWriter(cls):
                 log.info("Model save: materialized %s remaining meta params from turtle source.", restored_meta)
 
         offload_root = self.quantize_config.offload_to_disk_path if getattr(self.quantize_config, "offload_to_disk", False) else None
-        state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
+        if model_free_replacement_save:
+            state_dict = _model_free_replacement_state_dict(
+                self.model,
+                self.turtle_model,
+                replacement_prefixes,
+            )
+        else:
+            state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
         copy_tensor_files, prefix_entries = _normalize_out_of_model_tensors_entries(
             getattr(self, "out_of_model_tensors", None)
         )

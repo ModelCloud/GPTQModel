@@ -24,6 +24,8 @@ def get_number_of_rows_and_cols(layer: nn.Module) -> Tuple[int, int]:
 
     if isinstance(layer, transformers.Conv1D):
         return layer.weight.shape[1], layer.weight.shape[0]
+    if isinstance(layer, nn.Embedding):
+        return layer.weight.shape[1], layer.weight.shape[0]
 
     return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 
@@ -78,8 +80,8 @@ class RTN:
     def validate_module(module: nn.Module) -> None:
         assert isinstance(
             module,
-            (nn.Linear, nn.Conv1d, nn.Conv2d, transformers.Conv1D),
-        ), f"We supports only linear and convolutional layers. actual = `{module}`"
+            (nn.Embedding, nn.Linear, nn.Conv1d, nn.Conv2d, transformers.Conv1D),
+        ), f"We supports only embedding, linear, and convolutional layers. actual = `{module}`"
 
     def clone_module(self, device: Optional[torch.device] = None) -> torch.Tensor:
         if device is None:
@@ -89,6 +91,8 @@ class RTN:
         if isinstance(self.module, _ConvNd):
             clone = clone.flatten(1)
         if isinstance(self.module, transformers.pytorch_utils.Conv1D):
+            clone = clone.t()
+        if isinstance(self.module, nn.Embedding):
             clone = clone.t()
         if self._tp_pad_cols:
             pad = torch.zeros(
@@ -179,7 +183,7 @@ class RTN:
 
         g_idx = torch.arange(valid_cols, device=quantized.device, dtype=torch.int32) // effective_group_size
 
-        if isinstance(self.module, transformers.Conv1D):
+        if isinstance(self.module, (nn.Embedding, transformers.Conv1D)):
             quantized = quantized.t()
 
         if quantized.shape != self.module.weight.shape:
