@@ -189,11 +189,17 @@ class StageInputsCapture:
         # Parameters attached to the shell root must be ready before embedding forward.
         self._materialize_modules_with_direct_meta_tensors(cur_layer_device)
 
+        input_embeddings_name = self.gptq_model.get_input_embeddings_name()
+
         ori_outside_layer_module_devices: Dict[str, torch.device] = {}
         for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
 
             if module is None:
+                continue
+
+            if embed_quant_mode is not None and module_name == input_embeddings_name:
+                # Do not move embeddings to the CPU when quantizing them.
                 continue
 
             m_device = get_device(module)
@@ -218,12 +224,12 @@ class StageInputsCapture:
                         if "pixel_values" in example.keys()
                         else cur_layer_device
                     )
-                if (
-                    embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
-                    and "input_ids" in example
-                ):
-                    src_inputs.append([move_to(example["input_ids"], device=data_device)])
                 example = self.gptq_model.move_input_capture_example(example, data_device)
+                if (
+                        embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+                        and "input_ids" in example
+                ):
+                    src_inputs.append([move_to(example["input_ids"], device=self.gptq_model.quantize_config.device)])
                 try:
                     with ctx(
                         DEVICE_THREAD_POOL.read_lock(self.gptq_model.quantize_config.device),

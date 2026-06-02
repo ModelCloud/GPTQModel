@@ -244,7 +244,7 @@ class ModelTest(unittest.TestCase):
     GENERATE_EVAL_SIZE_MAX = 128
     APPLY_CHAT_TEMPLATE = False
 
-    LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
+    LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
 
     @classmethod
     def setUpClass(cls):
@@ -254,7 +254,7 @@ class ModelTest(unittest.TestCase):
             model_id = model_id.strip()
             if os.path.isabs(model_id) and not os.path.isdir(model_id):
                 raise unittest.SkipTest(f"Model path missing: {model_id}")
-    EXPECT_LM_HEAD_LOSS = None
+
     STOP_AFTER_LAYER: Optional[int] = None
     MOE_CONFIG: Optional[MoEConfig] = None
     OFFLOAD_TO_DISK: bool = True
@@ -2105,18 +2105,22 @@ class ModelTest(unittest.TestCase):
                 return key
         return None
 
-    def check_lm_head_loss(self, quant_log: List[Dict[str, any]]):
-        final_log = quant_log[-1]
-        if final_log["module"] == "lm_head":
-            loss_value = float(final_log["loss"])
-            diff_pct = (loss_value / self.EXPECT_LM_HEAD_LOSS) * 100
-            print(f"lm_head loss: {loss_value} diff {diff_pct:.2f}%")
-            negative_pct = 100 * (1 - self.LM_HEAD_LOSS_MAX_DELTA_PERCENT)
-            positive_pct = 100 * (1 + self.LM_HEAD_LOSS_MAX_DELTA_PERCENT)
+    def check_loss(self, target_name: str, expect_value, quant_log: List):
+        target_log = next(
+            (log for log in quant_log if log.get("module") == target_name),
+            None,
+        )
+
+        if target_log:
+            loss_value = float(target_log["loss"])
+            diff_pct = (loss_value / expect_value) * 100
+            print(f"{target_name} loss: {loss_value} diff {diff_pct:.2f}%")
+            negative_pct = 100 * (1 - self.LOSS_MAX_DELTA_PERCENT)
+            positive_pct = 100 * (1 + self.LOSS_MAX_DELTA_PERCENT)
             self.assertTrue(negative_pct <= diff_pct <= positive_pct,
-                            f"lm_head loss: {loss_value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+                            f"{target_name} loss: {loss_value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
         else:
-            raise ValueError("No quantization for lm_head module")
+            raise ValueError(F"No quantization for {target_name} module")
 
     def clear_directory(self, directory_path):
         for item in os.listdir(directory_path):

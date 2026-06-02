@@ -1553,7 +1553,7 @@ class ModuleLooper():
         self._run_pre_quantize_analysis(
             layers=layers,
             layer_modules=layer_modules,
-            layers_prefix=layers_prefix,
+            layers_prefix=layer_names[0], # TODO `layer_names` may contain multiple `layer_prefix` entries
         )
 
         if self.gptq_model.quantize_config.offload_to_disk:

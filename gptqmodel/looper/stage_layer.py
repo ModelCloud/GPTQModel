@@ -463,10 +463,12 @@ def run_layer_stage(
             layer_title = "Quantizing input embeddings"
             module = looper.gptq_model.get_input_embeddings()
             pristine_group_module = None
+            layer_name = ""
         elif is_output_embeddings_module:
             layer_title = "Quantizing output embeddings"
             module = looper.gptq_model.get_output_embeddings()
             pristine_group_module = None
+            layer_name = ""
         elif is_lm_head_module:
             layer_title = "Quantizing lm_head"
             module = get_module(looper.gptq_model.model, key=looper.gptq_model.lm_head)

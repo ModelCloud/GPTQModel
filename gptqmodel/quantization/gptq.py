@@ -140,7 +140,8 @@ def get_number_of_rows_and_cols(layer: nn.Module):
     elif isinstance(layer, nn.Embedding):
         V, D = layer.weight.shape
         return D, V  # rows = embedding_dim, cols = vocab_size (token axis)
-    elif "QuantLinear" in type(layer).__name__:
+    elif hasattr(layer, "in_features") and hasattr(layer, "out_features"):
+        # BaseQuantLinear has `in_features` and `out_features`.
         return layer.in_features, layer.out_features
     else:
         # weight shape is (n_out, n_in)
