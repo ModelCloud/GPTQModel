@@ -631,6 +631,25 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 ```
 
 
+### RTN Embedding-Only Quantization
+
+RTN weight-only quantization can update only the input/output embedding modules without quantizing decoder layers. This path loads only the target embedding tensors from the source checkpoint and `save()` writes a new checkpoint by replacing the corresponding embedding safetensors entries.
+
+```python
+from gptqmodel import GPTQModel
+from gptqmodel.quantization import QuantizeEmbed, RTNConfig
+
+model_id = "/path/of/Llama-3.2-1B-Instruct"
+quant_config = RTNConfig(bits=4, group_size=128)
+
+model = GPTQModel.load(model_id, quant_config)
+model.quantize(batch_size=1, embed_quant_mode=QuantizeEmbed.BOTH)
+# `/path/of/Llama-3.2-1B-Instruct-RTN` is an already quantized model; 
+# `save_quantized_embeddings()` will replace its embedding module.
+model.save_quantized_embeddings("/path/of/Llama-3.2-1B-Instruct-RTN")
+```
+
+
 ### Experimental Features
 
 #### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original)

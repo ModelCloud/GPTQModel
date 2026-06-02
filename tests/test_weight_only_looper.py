@@ -10,7 +10,7 @@ from torch import nn
 
 import gptqmodel.looper.weight_only_looper as weight_only_looper_module
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
-from gptqmodel.quantization.config import RTNConfig, VramStrategy
+from gptqmodel.quantization.config import QuantizeEmbed, RTNConfig, VramStrategy
 
 
 class _FakeProgress:
@@ -125,7 +125,9 @@ class _TinyModel(nn.Module):
             model_type="tiny_weight_only_progress",
             tie_word_embeddings=False,
         )
+        self.embed_tokens = nn.Embedding(8, 4)
         self.layers = nn.ModuleList([_TinyLayer(), _TinyLayer()])
+        self.lm_head = nn.Linear(4, 8, bias=False)
 
 
 class _FakeQModel:
@@ -136,6 +138,7 @@ class _FakeQModel:
         self.lm_head = "lm_head"
         self.tokenizer = None
         self.quant_log = None
+        self.turtle_model = None
 
     def extract_layers_node(self):
         return ["layers"]
@@ -151,6 +154,18 @@ class _FakeQModel:
 
     def post_quantize(self, module):
         return module
+
+    def get_input_embeddings_name(self):
+        return "embed_tokens"
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def get_output_embeddings_name(self):
+        return "lm_head"
+
+    def get_output_embeddings(self):
+        return self.model.lm_head
 
 
 class _FakeProcessor:
@@ -182,6 +197,14 @@ class _FakeProcessor:
     def finalize(self, *, model):
         del model
         self.finalize_called = True
+
+
+class _FakeRTNProcessor(_FakeProcessor):
+    def quantize_module(self, module, *, device=None):
+        self.quantized.append(module.full_name)
+        self.quant_devices.append(device)
+        self.qcfg.device = device if device is not None else self.qcfg.device
+        return self.qcfg
 
 
 def test_weight_only_looper_reports_logbar_progress(monkeypatch):
@@ -281,6 +304,52 @@ def test_weight_only_looper_quantizes_subset_across_multiple_devices(monkeypatch
     ]
 
 
+def test_weight_only_looper_quantizes_regular_module_model_free(monkeypatch):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = False
+    fake_logger = _FakeLogger()
+    processor = _FakeRTNProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.model.layers = nn.ModuleList([_TinyLayer()])
+    checkpoint_calls = []
+
+    class _FakeTurtle:
+        def checkpoint_tensors_for_submodule(self, *, target_model, target_submodule, recurse):
+            checkpoint_calls.append(
+                {
+                    "target_model": target_model,
+                    "target_submodule": target_submodule,
+                    "recurse": recurse,
+                }
+            )
+            return {}
+
+    model.turtle_model = _FakeTurtle()
+
+    monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (list(model.model.layers), ["layers.0"]),
+    )
+
+    looper = WeightOnlyLooper(model=model, processor=processor)
+    looper.loop()
+
+    assert processor.quantized == ["layers.0.linear"]
+    assert processor.finalized == [("layers.0.linear", torch.device("cpu"))]
+    assert processor.memory_calls == [0]
+    assert checkpoint_calls == [
+        {
+            "target_model": model.model,
+            "target_submodule": model.model.layers[0].linear,
+            "recurse": False,
+        }
+    ]
+    assert model._model_free_weight_only_replacement_prefixes == {"layers.0.linear"}
+    assert not hasattr(model, "_model_free_weight_only_embedding_replacement_prefixes")
+
+
 def test_weight_only_looper_applies_compute_device_filter(monkeypatch):
     qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cuda:0")
     qcfg.lm_head = False
@@ -348,4 +417,76 @@ def test_weight_only_looper_respects_dense_and_moe_vram_strategy_devices(monkeyp
         ("layers.0.mlp.experts.1.gate_proj", torch.device("cuda:2")),
         ("layers.0.mlp.experts.1.up_proj", torch.device("cuda:2")),
         ("layers.0.mlp.shared_expert.down_proj", torch.device("cuda:0")),
+    ]
+
+
+def test_weight_only_looper_quantizes_embeddings_only(monkeypatch):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    fake_logger = _FakeLogger()
+    processor = _FakeRTNProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+
+    monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (list(model.model.layers), ["layers.0", "layers.1"]),
+    )
+
+    looper = WeightOnlyLooper(model=model, processor=processor, embed_quant_mode=QuantizeEmbed.BOTH, embeddings_only=True)
+    total_log = looper.loop()
+
+    assert total_log == {"fake_weight_only": []}
+    assert processor.quantized == ["embed_tokens", "lm_head"]
+    assert processor.memory_calls == []
+    assert processor.finalize_called is True
+    assert model.quant_log == []
+    assert model._model_free_weight_only_embedding_replacement_prefixes == {"embed_tokens", "lm_head"}
+    assert model._model_free_weight_only_replacement_prefixes == {"embed_tokens", "lm_head"}
+    assert qcfg.dynamic["embed_tokens"]["bits"] == 8
+    assert qcfg.dynamic["lm_head"]["bits"] == 8
+    assert qcfg.dynamic["-:^linear$"] is False
+    assert fake_logger.iterable == [0, 1]
+    assert fake_logger.progress.titles == [
+        "Weight-only quantization (2 layers)",
+        "Weight-only quantizing input embeddings",
+        "Weight-only quantizing output embeddings",
+    ]
+
+
+def test_weight_only_looper_quantizes_embeddings_and_regular_modules(monkeypatch):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = False
+    fake_logger = _FakeLogger()
+    processor = _FakeRTNProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.model.layers = nn.ModuleList([_TinyLayer()])
+
+    monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (list(model.model.layers), ["layers.0"]),
+    )
+
+    looper = WeightOnlyLooper(
+        model=model,
+        processor=processor,
+        embed_quant_mode=QuantizeEmbed.INPUT,
+        embeddings_only=False,
+    )
+    looper.loop()
+
+    assert processor.quantized == ["embed_tokens", "layers.0.linear"]
+    assert processor.memory_calls == [0]
+    assert processor.finalize_called is True
+    assert model._model_free_weight_only_embedding_replacement_prefixes == {"embed_tokens"}
+    assert model._model_free_weight_only_replacement_prefixes == {"embed_tokens", "layers.0.linear"}
+    assert qcfg.dynamic["embed_tokens"]["bits"] == 8
+    assert "-:^linear$" not in qcfg.dynamic
+    assert fake_logger.iterable == [0, 1]
+    assert fake_logger.progress.titles[:3] == [
+        "Weight-only quantization (2 layers)",
+        "Weight-only quantizing input embeddings",
+        "Weight-only quantizing layer 0 of 0",
     ]
