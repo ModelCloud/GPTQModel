@@ -82,6 +82,6 @@ class TestLmHeadQuant(ModelTest):
             )
 
             task_results = self.evaluate_model(model=model,
-                                               trust_remote_code=self.TRUST_REMOTE_CODE,
-                                               delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
+                                        trust_remote_code=self.TRUST_REMOTE_CODE,
+                                        delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
             self.check_results(task_results)
