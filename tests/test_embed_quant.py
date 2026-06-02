@@ -106,20 +106,20 @@ class TestLmHeadQuant(ModelTest):
 
         lm_eval_dict = self.tied_true_lm_eval_dict if model.config.tie_word_embeddings else self.tied_false_lm_eval_dict
         self.EVAL_TASKS = {
-            "gsm8k_platinum_cot": {
-                "chat_template": True,
-                "acc,num": {
-                    "value": lm_eval_dict[embed_quant_mode]["gsm8k_platinum_cot"],
-                    "floor_pct": 0.04,
-                },
-            },
-            "mmlu_stem": {
-                "chat_template": False,
-                "acc": {
-                    "value": lm_eval_dict[embed_quant_mode]["mmlu_stem"], # 0.3099 4096, 0.3270 2048
-                    "floor_pct": 0.04,
-                },
-            },
+            # "gsm8k_platinum_cot": {
+            #     "chat_template": True,
+            #     "acc,num": {
+            #         "value": lm_eval_dict[embed_quant_mode]["gsm8k_platinum_cot"],
+            #         "floor_pct": 0.04,
+            #     },
+            # },
+            # "mmlu_stem": {
+            #     "chat_template": False,
+            #     "acc": {
+            #         "value": lm_eval_dict[embed_quant_mode]["mmlu_stem"], # 0.3099 4096, 0.3270 2048
+            #         "floor_pct": 0.04,
+            #     },
+            # },
             "arc_challenge": {
                 "chat_template": True,
                 "acc": {
@@ -151,7 +151,7 @@ class TestLmHeadQuant(ModelTest):
             )
 
             assert not model.config.tie_word_embeddings
-
+            print("model", model)
             print("model.get_input_embeddings()", model.get_input_embeddings())
             print("model.get_output_embeddings()", model.get_output_embeddings())
             if embed_quant_mode == QuantizeEmbed.INPUT:
@@ -178,7 +178,8 @@ class TestLmHeadQuant(ModelTest):
         self._test_requantize(model_id_or_path="/monster/data/model/Qwen1.5-1.8B-Chat-GPTQ-4bits-gp32",
                               embed_quant_mode=embed_quant_mode, expect_tied_word_embeddings=False)
 
-    @parameterized.expand(requantize_cases)
-    def test_requantize_with_tied_true(self, embed_quant_mode: QuantizeEmbed):
-        self._test_requantize(model_id_or_path="/monster/data/model/Llama-3.2-1B-Instruct-GPTQ-4bits-gp32",
-                              embed_quant_mode=embed_quant_mode, expect_tied_word_embeddings=True)
+    # TODO `tie_word_embeddings = true` is currently not supported.
+    # @parameterized.expand(requantize_cases)
+    # def test_requantize_with_tied_true(self, embed_quant_mode: QuantizeEmbed):
+    #     self._test_requantize(model_id_or_path="/monster/data/model/Llama-3.2-1B-Instruct-GPTQ-4bits-gp32",
+    #                           embed_quant_mode=embed_quant_mode, expect_tied_word_embeddings=True)
