@@ -18,7 +18,6 @@ from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig, QuantizeEmbed
-from gptqmodel.utils.eval import EVAL  # noqa: E402
 
 
 # class TestLmHeadLoad(ModelTest):
