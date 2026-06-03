@@ -5,12 +5,12 @@
 
 from __future__ import annotations
 
+from huggingface_hub import create_repo
 from transformers.utils import hub as transformers_hub
 from transformers.utils import logging as transformers_logging
 
 
 cached_file = transformers_hub.cached_file
-create_repo = transformers_hub.create_repo
 has_file = transformers_hub.has_file
 hf_hub_download = transformers_hub.hf_hub_download
 list_repo_tree = transformers_hub.list_repo_tree
