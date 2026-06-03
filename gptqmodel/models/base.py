@@ -54,7 +54,6 @@ from ..quantization.config import (
     VramStrategy,
     dynamic_get,
     resolve_quant_format,
-    QuantizeEmbedConfig,
 )
 from ..quantization.dtype import (
     available_float8_dtypes,
@@ -789,12 +788,12 @@ class BaseQModel(nn.Module):
         # minimum length of calibration data, default is 10
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
-        embed_quant_config: Optional[QuantizeEmbedConfig] = None,
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
 
-        if embed_quant_config is None and self.quantized:
+        if embed_quant_mode is None and self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
         timer = getattr(self, "quant_region_timer", None)
@@ -986,7 +985,7 @@ class BaseQModel(nn.Module):
                 batch_size=batch_size,
                 backend=backend,
                 calibration_concat_separator=calibration_concat_separator,
-                embed_quant_config=embed_quant_config,
+                embed_quant_mode=embed_quant_mode,
             )
         else:
             if calibration is None:
@@ -1001,7 +1000,7 @@ class BaseQModel(nn.Module):
                 backend=backend,
                 adapter_calibration_dataset=adapter_calibration_dataset,
                 calibration_concat_separator=calibration_concat_separator,
-                embed_quant_config=embed_quant_config,
+                embed_quant_mode=embed_quant_mode,
             )
 
         timer = getattr(self, "quant_region_timer", None)
@@ -1051,7 +1050,7 @@ class BaseQModel(nn.Module):
         backend: Optional[BACKEND],
         adapter_calibration_dataset,
         calibration_concat_separator: Optional[str],
-        embed_quant_config: Optional[QuantizeEmbedConfig] = None,
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
     ):
         from ..adapter.adapter import Lora
         from ..looper.eora_processor import EoraProcessor
@@ -1185,7 +1184,7 @@ class BaseQModel(nn.Module):
                 )
             )
 
-        module_looper = ModuleLooper(self, processors=processors, embed_quant_config=embed_quant_config)
+        module_looper = ModuleLooper(self, processors=processors, embed_quant_mode=embed_quant_mode)
 
         gc_context = (
             DEVICE_THREAD_POOL.no_auto_gc()
@@ -1208,7 +1207,7 @@ class BaseQModel(nn.Module):
         batch_size: int,
         backend: Optional[BACKEND],
         calibration_concat_separator: Optional[str],
-        embed_quant_config: Optional[QuantizeEmbedConfig] = None,
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
     ):
         del calibration_concat_size, calibration_sort, batch_size, calibration_concat_separator
 
@@ -1238,7 +1237,7 @@ class BaseQModel(nn.Module):
             tokenizer=self.tokenizer,
             qcfg=self.quantize_config,
         )
-        module_looper = WeightOnlyLooper(model=self, processor=processor, embed_quant_config=embed_quant_config)
+        module_looper = WeightOnlyLooper(model=self, processor=processor, embed_quant_mode=embed_quant_mode)
 
         gc_context = (
             DEVICE_THREAD_POOL.no_auto_gc()
