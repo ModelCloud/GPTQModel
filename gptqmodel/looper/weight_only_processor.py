@@ -12,7 +12,7 @@ import torch
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import CPU, normalize_device
+from ..models._const import CPU
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
     PROCESS_LOG_LAYER,
@@ -180,7 +180,7 @@ class WeightOnlyProcessor(LoopProcessor):
                     module=model.model,
                     submodule=module,
                     sym=active_qcfg.sym,
-                    device=normalize_device(active_qcfg.device),
+                    device=active_qcfg.device,
                     lm_head_name=model.lm_head,
                     pack_dtype=active_qcfg.pack_dtype,
                     format=resolve_quant_format(active_qcfg.format, active_qcfg.method),

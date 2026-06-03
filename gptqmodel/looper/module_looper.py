@@ -36,12 +36,7 @@ from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
-from ..quantization.config import (
-    METHOD,
-    QuantizeEmbed,
-    VramStrategy,
-    QuantizeEmbedConfig,
-)
+from ..quantization.config import METHOD, QuantizeEmbed, VramStrategy
 from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.ctx import ctx
 from ..utils.device_telemetry import emit_device_telemetry
@@ -174,12 +169,12 @@ class ModuleLooper():
     instance so tasks such as module reloading, forward passes, and finalisation
     reuse the same worker threads.
     """
-    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], embed_quant_config: Optional[QuantizeEmbedConfig] = None):
+    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], embed_quant_mode: Optional[QuantizeEmbed] = None):
         """Initialize loop state, device policy, and callback wiring."""
 
         self.processors = processors
         self.gptq_model = model
-        self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
+        self.embed_quant_mode = embed_quant_mode
 
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()

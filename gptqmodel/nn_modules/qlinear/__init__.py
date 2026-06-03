@@ -425,7 +425,7 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def validate_device(cls, device: DEVICE):
-        assert isinstance(device, DEVICE), f"Unknown device type: {device}"
+        assert isinstance(device, DEVICE)
 
         if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
