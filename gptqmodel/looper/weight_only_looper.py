@@ -837,6 +837,10 @@ class WeightOnlyLooper:
                 "Weight-only input/output embeddings fast quantization currently supports RTNConfig only."
         )
         embed_only = bool(embedding_targets) and self.embed_only
+        if embed_only:
+            quant_config.offload_to_disk = False
+            log.info("`embed_only` does not support `offload_to_disk=True`; setting `offload_to_disk` to `False`.")
+
         self._configure_embedding_dynamic_defaults(embedding_targets)
         embedding_target_names = {name for name, _module, _label in embedding_targets}
         if not embed_only and quant_config.lm_head and self.gptq_model.lm_head not in embedding_target_names:

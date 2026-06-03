@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import collections
 import copy
 import json
 import os
@@ -9,12 +8,12 @@ from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
+from safetensors import safe_open
 from safetensors.torch import save_file
 
 from gptqmodel.models import writer as writer_module
-from gptqmodel.models.writer import ModelWriter, _embedding_replacement_state_dict
+from gptqmodel.models.writer import ModelWriter, _save_embedding_replacement_safetensors
 from gptqmodel.quantization.config import FORMAT, METHOD
-from gptqmodel.utils.model import OffloadTensorRef
 
 
 class _DummyKernel:
@@ -135,51 +134,67 @@ def _patch_save_io(monkeypatch, captured):
     monkeypatch.setattr(writer_module, "streaming_state_dict_to_shards", fake_stream_state_dict_to_shards)
 
 
-def test_save_quantized_embeddings_uses_embedding_replacement_helper(tmp_path, monkeypatch):
+def test_save_quantized_embeddings_uses_embedding_shard_replacement_helper(tmp_path, monkeypatch):
     captured = {}
     writer = _build_writer(tmp_path)
     writer._embedding_replacement_prefixes = {"embed_tokens", "lm_head"}
     _patch_save_io(monkeypatch, captured)
 
-    def fake_embedding_helper(model, turtle_model, prefixes):
-        captured["embedding_helper"] = {
+    def fake_embedding_helper(model, turtle_model, prefixes, *, save_dir, metadata):
+        captured["embedding_shard_helper"] = {
             "model": model,
             "turtle_model": turtle_model,
             "prefixes": list(prefixes),
+            "save_dir": save_dir,
+            "metadata": metadata,
         }
-        return collections.OrderedDict()
+        return ["model.safetensors"], {"embed_tokens.qweight": "model.safetensors"}, 0, ["embed_tokens.weight"]
 
-    def fail_regular_helper(*_args, **_kwargs):
-        raise AssertionError("regular model-free replacement helper should not be used")
+    def fail_streaming_shards(*_args, **_kwargs):
+        raise AssertionError("embedding-only save should not rewrite all tensors through streaming_state_dict_to_shards")
 
-    monkeypatch.setattr(writer_module, "_embedding_replacement_state_dict", fake_embedding_helper)
-    monkeypatch.setattr(writer_module, "_replacement_state_dict", fail_regular_helper)
+    monkeypatch.setattr(writer_module, "_save_embedding_replacement_safetensors", fake_embedding_helper)
+    monkeypatch.setattr(writer_module, "streaming_state_dict_to_shards", fail_streaming_shards)
+    monkeypatch.setattr(
+        writer_module,
+        "_cleanup_saved_weight_files",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("embedding-only save should not clean up untouched shards")
+        ),
+    )
 
-    writer.save_quantized_embeddings(save_dir=str(tmp_path / "save"), max_shard_size=None)
+    save_dir = tmp_path / "save"
+    writer.save_quantized_embeddings(save_dir=str(save_dir), max_shard_size=None)
 
-    assert captured["embedding_helper"] == {
+    assert captured["embedding_shard_helper"] == {
         "model": writer.model,
         "turtle_model": writer.turtle_model,
         "prefixes": ["embed_tokens", "lm_head"],
+        "save_dir": str(save_dir),
+        "metadata": {"format": "pt"},
     }
     assert "alias_all_called" not in captured
-    assert captured["stream_state_dict"] == collections.OrderedDict()
 
 
-def test_embedding_replacement_state_dict_replaces_embedding_tensor_and_streams_others(tmp_path):
+def test_embedding_replacement_safetensors_only_rewrites_affected_shard(tmp_path, monkeypatch):
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     save_file(
         {
             "embed_tokens.weight": torch.ones(4, 3, dtype=torch.float16),
+        },
+        str(source_dir / "model-00001-of-00002.safetensors"),
+    )
+    save_file(
+        {
             "layers.0.linear.weight": torch.arange(6, dtype=torch.float16).reshape(2, 3),
         },
-        str(source_dir / "model.safetensors"),
+        str(source_dir / "model-00002-of-00002.safetensors"),
     )
     turtle_model = SimpleNamespace(
         _weight_map={
-            "embed_tokens.weight": "model.safetensors",
-            "layers.0.linear.weight": "model.safetensors",
+            "embed_tokens.weight": "model-00001-of-00002.safetensors",
+            "layers.0.linear.weight": "model-00002-of-00002.safetensors",
         },
         model_local_path=str(source_dir),
     )
@@ -187,14 +202,51 @@ def test_embedding_replacement_state_dict_replaces_embedding_tensor_and_streams_
     model.embed_tokens = nn.Module()
     model.embed_tokens.register_buffer("qweight", torch.ones(2, 2, dtype=torch.int32))
     model.embed_tokens.register_buffer("scales", torch.ones(3, 1, dtype=torch.float16))
+    saved_files = []
 
-    state_dict = _embedding_replacement_state_dict(model, turtle_model, ["embed_tokens"])
+    original_save_file = writer_module.save_file
 
-    assert "embed_tokens.weight" not in state_dict
-    assert torch.equal(state_dict["embed_tokens.qweight"].source, model.embed_tokens.qweight)
-    assert torch.equal(state_dict["embed_tokens.scales"].source, model.embed_tokens.scales)
-    source = state_dict["layers.0.linear.weight"].source
-    assert isinstance(source, OffloadTensorRef)
-    assert source.format == "safetensors"
-    assert source.weight_name == "layers.0.linear.weight"
-    assert source.shape == (2, 3)
+    def tracking_save_file(tensors, filename, metadata=None):
+        saved_files.append(os.path.basename(filename))
+        return original_save_file(tensors, filename, metadata=metadata)
+
+    monkeypatch.setattr(writer_module, "save_file", tracking_save_file)
+
+    save_dir = tmp_path / "save"
+    save_dir.mkdir()
+    save_file(
+        {
+            "embed_tokens.weight": torch.full((4, 3), 2, dtype=torch.float16),
+        },
+        str(save_dir / "model-00001-of-00002.safetensors"),
+    )
+    save_file(
+        {
+            "layers.0.linear.weight": torch.arange(6, dtype=torch.float16).reshape(2, 3),
+        },
+        str(save_dir / "model-00002-of-00002.safetensors"),
+    )
+
+    rewritten_files, tensor_to_filename, total_size, removed_tensor_names = _save_embedding_replacement_safetensors(
+        model,
+        turtle_model,
+        ["embed_tokens"],
+        save_dir=str(save_dir),
+        metadata={"format": "pt"},
+    )
+
+    assert saved_files == ["model-00001-of-00002.safetensors"]
+    assert rewritten_files == ["model-00001-of-00002.safetensors"]
+    assert removed_tensor_names == ["embed_tokens.weight"]
+    assert total_size > 0
+    with safe_open(str(save_dir / "model-00001-of-00002.safetensors"), framework="pt", device="cpu") as handler:
+        keys = set(handler.keys())
+        assert "embed_tokens.weight" not in keys
+        assert keys == {"embed_tokens.qweight", "embed_tokens.scales"}
+    with safe_open(str(save_dir / "model-00002-of-00002.safetensors"), framework="pt", device="cpu") as handler:
+        assert set(handler.keys()) == {"layers.0.linear.weight"}
+        assert torch.equal(handler.get_tensor("layers.0.linear.weight"), torch.arange(6, dtype=torch.float16).reshape(2, 3))
+    assert tensor_to_filename == {
+        "embed_tokens.qweight": "model-00001-of-00002.safetensors",
+        "embed_tokens.scales": "model-00001-of-00002.safetensors",
+    }
