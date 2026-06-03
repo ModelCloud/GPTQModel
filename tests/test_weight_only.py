@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from gptqmodel.models._const import DEVICE, normalize_device
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
@@ -280,7 +281,6 @@ def _build_rtn_gguf_module(
 
 def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    device_type = device.type
 
     native = _TinyModel().to(device=device, dtype=torch.float16).eval()
     original_state = copy.deepcopy(native.state_dict())
@@ -293,7 +293,7 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
         sym=True,
         smooth=smooth,
         offload_to_disk=False,
-        device=device_type,
+        device=normalize_device(device),
     )
 
     model = _TinyQModel(
@@ -400,7 +400,6 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
     quality: str | None,
 ):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    device_type = device.type
     public_format = GGUFBits.from_string(bits).to_public_format()
 
     native = _TinyModel().to(device=device, dtype=torch.float16).eval()
@@ -409,7 +408,7 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
         format=public_format,
         smoother=None,
         offload_to_disk=False,
-        device=device_type,
+        device=normalize_device(device),
     )
 
     model = _TinyQModel(
@@ -427,7 +426,7 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
     assert model.quantize_config.bits == bit_width
     assert model.quantize_config.quant_method == METHOD.GGUF
     assert model.quantize_config.export_quant_method() == METHOD.GGUF
-    expected_kernel = GGUFTritonKernel if device_type == "cuda" else GGUFTorchLinear
+    expected_kernel = GGUFTritonKernel if device.type == "cuda" else GGUFTorchLinear
     assert model.qlinear_kernel is expected_kernel
 
     qmodules = find_modules(model.model, [model.qlinear_kernel])
@@ -452,7 +451,6 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
 
 def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    device_type = device.type
 
     native = _TinyModel().to(device=device, dtype=torch.float16).eval()
 
@@ -461,7 +459,7 @@ def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):
         format="q_k_m",
         smoother=SmoothMAD(k=2.25),
         offload_to_disk=False,
-        device=device_type,
+        device=normalize_device(device),
     )
 
     model = _TinyQModel(
