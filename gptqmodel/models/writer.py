@@ -584,6 +584,35 @@ def _normalize_safetensors_metadata(meta: Optional[Dict[str, Any]]) -> Dict[str,
     return normalized
 
 
+def _update_embedding_dynamic_config_files(save_dir: str, quantize_config) -> None:
+    dynamic = copy.deepcopy(getattr(quantize_config, "dynamic", None))
+    if dynamic is None:
+        return
+
+    quant_config_path = os.path.join(save_dir, "quantize_config.json")
+    if os.path.exists(quant_config_path):
+        with open(quant_config_path, "r", encoding="utf-8") as f:
+            quant_config_payload = json.load(f)
+    else:
+        quant_config_payload = {}
+    quant_config_payload["dynamic"] = dynamic
+    with open(quant_config_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(quant_config_payload, indent=2, sort_keys=True) + "\n")
+
+    config_path = os.path.join(save_dir, "config.json")
+    if not os.path.exists(config_path):
+        return
+    with open(config_path, "r", encoding="utf-8") as f:
+        config_payload = json.load(f)
+    quantization_config = config_payload.get("quantization_config")
+    if not isinstance(quantization_config, dict):
+        quantization_config = {}
+    quantization_config["dynamic"] = dynamic
+    config_payload["quantization_config"] = quantization_config
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(config_payload, indent=2, sort_keys=True) + "\n")
+
+
 def _merge_prefix_tensors_into_state_dict(
     prefixes: List[str], model_local_path: str, state_dict: Dict[str, TensorSource]
 ) -> None:
@@ -926,6 +955,8 @@ def ModelWriter(cls):
                 f.write(json.dumps(index, indent=2, sort_keys=True) + "\n")
         elif len(rewritten_files) > 1:
             log.warn("Embedding save: no safetensors index found in `%s`; updated shards only.", save_dir)
+
+        _update_embedding_dynamic_config_files(save_dir, self.quantize_config)
 
         total_size_mb = total_size_bytes / (1024 * 1024)
         log.info(f"Embedding save: Rewritten shard size: {total_size_mb:.2f}MB")

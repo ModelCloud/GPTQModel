@@ -698,22 +698,12 @@ class WeightOnlyLooper:
             return
 
         quant_config = self.gptq_model.quantize_config
-        embeddings_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
+        embeddings_quant_config = {"bits": 8, "group_size": 32}
         if quant_config.dynamic is None:
             quant_config.dynamic = {}
         for module_name, _module, _label in targets:
             if quant_config.dynamic_get(module_name, default=None) is None:
                 quant_config.dynamic[module_name] = embeddings_quant_config
-
-    def _configure_embed_only_dynamic_exclusions(self, layer_modules: List[List[str]]) -> None:
-        """Persist dynamic exclusions so embeddings-only checkpoints reload as hybrids."""
-
-        quant_config = self.gptq_model.quantize_config
-        if quant_config.dynamic is None:
-            quant_config.dynamic = {}
-        for module_name in sorted({name for block in layer_modules for name in block}):
-            pattern = f"-:^{re.escape(module_name)}$"
-            quant_config.dynamic.setdefault(pattern, False)
 
     def _load_direct_checkpoint_tensors(
         self,
@@ -912,8 +902,6 @@ class WeightOnlyLooper:
             layer_modules = [sum(layer_modules, [])]
 
         layer_count = len(layers)
-        if embed_only:
-            self._configure_embed_only_dynamic_exclusions(layer_modules)
         quant_lm_head_in_loop = bool(
             not embed_only and quant_config.lm_head and self.gptq_model.lm_head not in embedding_target_names
         )

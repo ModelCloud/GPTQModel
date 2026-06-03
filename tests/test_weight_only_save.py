@@ -138,6 +138,9 @@ def test_save_quantized_embeddings_uses_embedding_shard_replacement_helper(tmp_p
     captured = {}
     writer = _build_writer(tmp_path)
     writer._embedding_replacement_prefixes = {"embed_tokens", "lm_head"}
+    writer.quantize_config.dynamic = {
+        "embed_tokens": {"bits": 8, "group_size": 32},
+    }
     _patch_save_io(monkeypatch, captured)
 
     def fake_embedding_helper(model, turtle_model, prefixes, *, save_dir, metadata):
@@ -164,6 +167,11 @@ def test_save_quantized_embeddings_uses_embedding_shard_replacement_helper(tmp_p
     )
 
     save_dir = tmp_path / "save"
+    save_dir.mkdir()
+    with open(save_dir / "config.json", "w", encoding="utf-8") as handle:
+        json.dump({"model_type": "dummy", "quantization_config": {"bits": 4}}, handle)
+    with open(save_dir / "quantize_config.json", "w", encoding="utf-8") as handle:
+        json.dump({"bits": 4}, handle)
     writer.save_quantized_embeddings(save_dir=str(save_dir), max_shard_size=None)
 
     assert captured["embedding_shard_helper"] == {
@@ -174,6 +182,12 @@ def test_save_quantized_embeddings_uses_embedding_shard_replacement_helper(tmp_p
         "metadata": {"format": "pt"},
     }
     assert "alias_all_called" not in captured
+    with open(save_dir / "config.json", "r", encoding="utf-8") as handle:
+        config_payload = json.load(handle)
+    with open(save_dir / "quantize_config.json", "r", encoding="utf-8") as handle:
+        quant_config_payload = json.load(handle)
+    assert config_payload["quantization_config"]["dynamic"] == writer.quantize_config.dynamic
+    assert quant_config_payload["dynamic"] == writer.quantize_config.dynamic
 
 
 def test_embedding_replacement_safetensors_only_rewrites_affected_shard(tmp_path, monkeypatch):

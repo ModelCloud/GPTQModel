@@ -448,7 +448,6 @@ def test_weight_only_looper_quantizes_embeddings_only(monkeypatch):
     assert model._embedding_replacement_prefixes == {"embed_tokens", "lm_head"}
     assert qcfg.dynamic["embed_tokens"]["bits"] == 8
     assert qcfg.dynamic["lm_head"]["bits"] == 8
-    assert qcfg.dynamic["-:^linear$"] is False
     assert fake_logger.iterable == [0, 1]
     assert fake_logger.progress.titles == [
         "Weight-only quantization (2 layers)",
