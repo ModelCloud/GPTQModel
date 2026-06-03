@@ -11,9 +11,8 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from gptqmodel.models.base import BaseQModel
 from gptqmodel.models import writer as writer_module
-from gptqmodel.models.writer import ModelWriter, _model_free_embedding_replacement_state_dict
+from gptqmodel.models.writer import ModelWriter, _embedding_replacement_state_dict
 from gptqmodel.quantization.config import FORMAT, METHOD
 from gptqmodel.utils.model import OffloadTensorRef
 
@@ -136,46 +135,10 @@ def _patch_save_io(monkeypatch, captured):
     monkeypatch.setattr(writer_module, "streaming_state_dict_to_shards", fake_stream_state_dict_to_shards)
 
 
-def test_base_save_routes_embedding_only_to_dedicated_save(tmp_path):
-    captured = {}
-
-    def save_quantized_embeddings(**kwargs):
-        captured["embedding_save"] = kwargs
-
-    def save_quantized(**_kwargs):
-        raise AssertionError("regular save_quantized should not be used for embedding-only quantization")
-
-    model = SimpleNamespace(
-        quantized=True,
-        _model_free_weight_only_embeddings_only=True,
-        save_quantized_embeddings=save_quantized_embeddings,
-        save_quantized=save_quantized,
-        quant_override_files={},
-    )
-
-    BaseQModel.save(
-        model,
-        save_dir=str(tmp_path / "save"),
-        safetensors_metadata={"source": "test"},
-        max_shard_size=None,
-        meta_quantizer="unit:test",
-        eora_path=str(tmp_path / "eora"),
-        split_by="layer",
-    )
-
-    assert captured["embedding_save"] == {
-        "save_dir": str(tmp_path / "save"),
-        "safetensors_metadata": {"source": "test"},
-        "max_shard_size": None,
-        "meta_quantizer": "unit:test",
-    }
-
-
 def test_save_quantized_embeddings_uses_embedding_replacement_helper(tmp_path, monkeypatch):
     captured = {}
     writer = _build_writer(tmp_path)
-    writer._model_free_weight_only_replacement_prefixes = {"embed_tokens", "lm_head"}
-    writer._model_free_weight_only_embedding_replacement_prefixes = {"embed_tokens", "lm_head"}
+    writer._embedding_replacement_prefixes = {"embed_tokens", "lm_head"}
     _patch_save_io(monkeypatch, captured)
 
     def fake_embedding_helper(model, turtle_model, prefixes):
@@ -189,8 +152,8 @@ def test_save_quantized_embeddings_uses_embedding_replacement_helper(tmp_path, m
     def fail_regular_helper(*_args, **_kwargs):
         raise AssertionError("regular model-free replacement helper should not be used")
 
-    monkeypatch.setattr(writer_module, "_model_free_embedding_replacement_state_dict", fake_embedding_helper)
-    monkeypatch.setattr(writer_module, "_model_free_replacement_state_dict", fail_regular_helper)
+    monkeypatch.setattr(writer_module, "_embedding_replacement_state_dict", fake_embedding_helper)
+    monkeypatch.setattr(writer_module, "_replacement_state_dict", fail_regular_helper)
 
     writer.save_quantized_embeddings(save_dir=str(tmp_path / "save"), max_shard_size=None)
 
@@ -198,38 +161,6 @@ def test_save_quantized_embeddings_uses_embedding_replacement_helper(tmp_path, m
         "model": writer.model,
         "turtle_model": writer.turtle_model,
         "prefixes": ["embed_tokens", "lm_head"],
-    }
-    assert "alias_all_called" not in captured
-    assert captured["stream_state_dict"] == collections.OrderedDict()
-
-
-def test_save_quantized_uses_regular_replacement_helper_for_non_embedding_prefix(tmp_path, monkeypatch):
-    captured = {}
-    writer = _build_writer(tmp_path)
-    writer._model_free_weight_only_replacement_prefixes = {"embed_tokens", "layers.0.linear"}
-    writer._model_free_weight_only_embedding_replacement_prefixes = {"embed_tokens"}
-    _patch_save_io(monkeypatch, captured)
-
-    def fail_embedding_helper(*_args, **_kwargs):
-        raise AssertionError("embedding-only replacement helper should not be used")
-
-    def fake_regular_helper(model, turtle_model, prefixes):
-        captured["regular_helper"] = {
-            "model": model,
-            "turtle_model": turtle_model,
-            "prefixes": list(prefixes),
-        }
-        return collections.OrderedDict()
-
-    monkeypatch.setattr(writer_module, "_model_free_embedding_replacement_state_dict", fail_embedding_helper)
-    monkeypatch.setattr(writer_module, "_model_free_replacement_state_dict", fake_regular_helper)
-
-    writer.save_quantized(save_dir=str(tmp_path / "save"), max_shard_size=None)
-
-    assert captured["regular_helper"] == {
-        "model": writer.model,
-        "turtle_model": writer.turtle_model,
-        "prefixes": ["embed_tokens", "layers.0.linear"],
     }
     assert "alias_all_called" not in captured
     assert captured["stream_state_dict"] == collections.OrderedDict()
@@ -257,7 +188,7 @@ def test_embedding_replacement_state_dict_replaces_embedding_tensor_and_streams_
     model.embed_tokens.register_buffer("qweight", torch.ones(2, 2, dtype=torch.int32))
     model.embed_tokens.register_buffer("scales", torch.ones(3, 1, dtype=torch.float16))
 
-    state_dict = _model_free_embedding_replacement_state_dict(model, turtle_model, ["embed_tokens"])
+    state_dict = _embedding_replacement_state_dict(model, turtle_model, ["embed_tokens"])
 
     assert "embed_tokens.weight" not in state_dict
     assert torch.equal(state_dict["embed_tokens.qweight"].source, model.embed_tokens.qweight)

@@ -10,7 +10,12 @@ from torch import nn
 
 import gptqmodel.looper.weight_only_looper as weight_only_looper_module
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
-from gptqmodel.quantization.config import QuantizeEmbed, RTNConfig, VramStrategy
+from gptqmodel.quantization.config import (
+    QuantizeEmbed,
+    RTNConfig,
+    VramStrategy,
+    QuantizeEmbedConfig,
+)
 
 
 class _FakeProgress:
@@ -304,7 +309,7 @@ def test_weight_only_looper_quantizes_subset_across_multiple_devices(monkeypatch
     ]
 
 
-def test_weight_only_looper_quantizes_regular_module_model_free(monkeypatch):
+def test_weight_only_looper_quantizes_regular_module(monkeypatch):
     qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
     qcfg.lm_head = False
     fake_logger = _FakeLogger()
@@ -346,8 +351,7 @@ def test_weight_only_looper_quantizes_regular_module_model_free(monkeypatch):
             "recurse": False,
         }
     ]
-    assert model._model_free_weight_only_replacement_prefixes == {"layers.0.linear"}
-    assert not hasattr(model, "_model_free_weight_only_embedding_replacement_prefixes")
+    assert not hasattr(model, "_embedding_replacement_prefixes")
 
 
 def test_weight_only_looper_applies_compute_device_filter(monkeypatch):
@@ -433,7 +437,7 @@ def test_weight_only_looper_quantizes_embeddings_only(monkeypatch):
         lambda _model, _nodes: (list(model.model.layers), ["layers.0", "layers.1"]),
     )
 
-    looper = WeightOnlyLooper(model=model, processor=processor, embed_quant_mode=QuantizeEmbed.BOTH, embeddings_only=True)
+    looper = WeightOnlyLooper(model=model, processor=processor, embed_quant_config=QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.BOTH, embed_only=True))
     total_log = looper.loop()
 
     assert total_log == {"fake_weight_only": []}
@@ -441,8 +445,7 @@ def test_weight_only_looper_quantizes_embeddings_only(monkeypatch):
     assert processor.memory_calls == []
     assert processor.finalize_called is True
     assert model.quant_log == []
-    assert model._model_free_weight_only_embedding_replacement_prefixes == {"embed_tokens", "lm_head"}
-    assert model._model_free_weight_only_replacement_prefixes == {"embed_tokens", "lm_head"}
+    assert model._embedding_replacement_prefixes == {"embed_tokens", "lm_head"}
     assert qcfg.dynamic["embed_tokens"]["bits"] == 8
     assert qcfg.dynamic["lm_head"]["bits"] == 8
     assert qcfg.dynamic["-:^linear$"] is False
@@ -472,16 +475,14 @@ def test_weight_only_looper_quantizes_embeddings_and_regular_modules(monkeypatch
     looper = WeightOnlyLooper(
         model=model,
         processor=processor,
-        embed_quant_mode=QuantizeEmbed.INPUT,
-        embeddings_only=False,
+        embed_quant_config=QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.INPUT, embed_only=False)
     )
     looper.loop()
 
     assert processor.quantized == ["embed_tokens", "layers.0.linear"]
     assert processor.memory_calls == [0]
     assert processor.finalize_called is True
-    assert model._model_free_weight_only_embedding_replacement_prefixes == {"embed_tokens"}
-    assert model._model_free_weight_only_replacement_prefixes == {"embed_tokens", "layers.0.linear"}
+    assert model._embedding_replacement_prefixes == {"embed_tokens"}
     assert qcfg.dynamic["embed_tokens"]["bits"] == 8
     assert "-:^linear$" not in qcfg.dynamic
     assert fake_logger.iterable == [0, 1]
