@@ -477,6 +477,15 @@ def _save_embedding_replacement_safetensors(
     drop_by_shard: Dict[str, set[str]] = collections.OrderedDict()
     replacements_by_shard: Dict[str, Dict[str, torch.Tensor]] = collections.OrderedDict()
     removed_tensor_names: List[str] = []
+    existing_weight_map: Dict[str, str] = {}
+    index_path = os.path.join(save_dir, "model.safetensors.index.json")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            index_payload = json.load(f)
+        maybe_weight_map = index_payload.get("weight_map", {})
+        if isinstance(maybe_weight_map, dict):
+            existing_weight_map = {str(k): str(v) for k, v in maybe_weight_map.items()}
+
 
     for prefix in prefixes:
         checkpoint_prefixes = _checkpoint_prefixes_for_replacement(prefix, turtle_model)
@@ -488,6 +497,16 @@ def _save_embedding_replacement_safetensors(
                     removed_tensor_names.append(tensor_name)
                 if shard_name not in matched_shards:
                     matched_shards.append(shard_name)
+
+        for leaf in ("weight", "bias"):
+            runtime_tensor_name = f"{prefix}.{leaf}"
+            runtime_shard = existing_weight_map.get(runtime_tensor_name)
+            if runtime_shard:
+                drop_by_shard.setdefault(runtime_shard, set()).add(runtime_tensor_name)
+                if runtime_tensor_name not in removed_tensor_names:
+                    removed_tensor_names.append(runtime_tensor_name)
+                if runtime_shard not in matched_shards:
+                    matched_shards.append(runtime_shard)
 
         if not matched_shards:
             raise ValueError(f"Could not find checkpoint tensor for embedding module `{prefix}`.")
@@ -1164,29 +1183,8 @@ def ModelWriter(cls):
             self.processor.save_pretrained(save_dir)
         # --- end config save block ---
 
-        replacement_prefixes = sorted(
-            {
-                prefix
-                for prefix in getattr(self, "_model_free_weight_only_replacement_prefixes", set())
-                if isinstance(prefix, str) and prefix
-            }
-        )
-        checkpoint_source_available = bool(
-            self.turtle_model is not None
-            and hasattr(self.turtle_model, "_weight_map")
-            and hasattr(self.turtle_model, "model_local_path")
-        )
-        model_free_replacement_save = bool(
-            replacement_prefixes
-            and checkpoint_source_available
-        )
-        if replacement_prefixes and not model_free_replacement_save:
-            log.info("Model-free save: checkpoint source unavailable; falling back to regular state_dict save.")
-
-        # Due to shell/turtle state, we need to sync the modules from turtle to shell.
-        # Model-free replacement saves keep the original checkpoint tensors as
-        # streaming references and only inject the newly quantized module tensors.
-        if not self.load_quantized_model and not model_free_replacement_save:
+        # Due to shell/turtle state, we need to sync the modules from turtle to shell
+        if not self.load_quantized_model:
             alias_all_from_turtle_if_meta(shell_model=self.model, turtle_model=self.turtle_model)
             materialized_layers = _materialize_meta_layers_from_turtle(self.model, self.turtle_model)
             if materialized_layers:
@@ -1196,14 +1194,7 @@ def ModelWriter(cls):
                 log.info("Model save: materialized %s remaining meta params from turtle source.", restored_meta)
 
         offload_root = self.quantize_config.offload_to_disk_path if getattr(self.quantize_config, "offload_to_disk", False) else None
-        if model_free_replacement_save:
-            state_dict = _model_free_replacement_state_dict(
-                self.model,
-                self.turtle_model,
-                replacement_prefixes,
-            )
-        else:
-            state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
+        state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
         copy_tensor_files, prefix_entries = _normalize_out_of_model_tensors_entries(
             getattr(self, "out_of_model_tensors", None)
         )

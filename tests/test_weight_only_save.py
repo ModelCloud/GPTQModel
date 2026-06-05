@@ -151,7 +151,12 @@ def test_save_quantized_embeddings_uses_embedding_shard_replacement_helper(tmp_p
             "save_dir": save_dir,
             "metadata": metadata,
         }
-        return ["model.safetensors"], {"embed_tokens.qweight": "model.safetensors"}, 0, ["embed_tokens.weight"]
+        return (
+            ["model.safetensors"],
+            {"embed_tokens.qweight": "model.safetensors", "lm_head.qweight": "model.safetensors"},
+            0,
+            ["embed_tokens.weight", "lm_head.weight"],
+        )
 
     def fail_streaming_shards(*_args, **_kwargs):
         raise AssertionError("embedding-only save should not rewrite all tensors through streaming_state_dict_to_shards")
@@ -172,6 +177,18 @@ def test_save_quantized_embeddings_uses_embedding_shard_replacement_helper(tmp_p
         json.dump({"model_type": "dummy", "quantization_config": {"bits": 4}}, handle)
     with open(save_dir / "quantize_config.json", "w", encoding="utf-8") as handle:
         json.dump({"bits": 4}, handle)
+    with open(save_dir / "model.safetensors.index.json", "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "metadata": {"total_size": 1},
+                "weight_map": {
+                    "embed_tokens.weight": "model.safetensors",
+                    "lm_head.weight": "model.safetensors",
+                    "layers.0.linear.weight": "model.safetensors",
+                },
+            },
+            handle,
+        )
     writer.save_quantized_embeddings(save_dir=str(save_dir), max_shard_size=None)
 
     assert captured["embedding_shard_helper"] == {
@@ -186,8 +203,15 @@ def test_save_quantized_embeddings_uses_embedding_shard_replacement_helper(tmp_p
         config_payload = json.load(handle)
     with open(save_dir / "quantize_config.json", "r", encoding="utf-8") as handle:
         quant_config_payload = json.load(handle)
+    with open(save_dir / "model.safetensors.index.json", "r", encoding="utf-8") as handle:
+        index_payload = json.load(handle)
     assert config_payload["quantization_config"]["dynamic"] == writer.quantize_config.dynamic
     assert quant_config_payload["dynamic"] == writer.quantize_config.dynamic
+    assert "embed_tokens.weight" not in index_payload["weight_map"]
+    assert "lm_head.weight" not in index_payload["weight_map"]
+    assert index_payload["weight_map"]["embed_tokens.qweight"] == "model.safetensors"
+    assert index_payload["weight_map"]["lm_head.qweight"] == "model.safetensors"
+    assert index_payload["weight_map"]["layers.0.linear.weight"] == "model.safetensors"
 
 
 def test_embedding_replacement_safetensors_only_rewrites_affected_shard(tmp_path, monkeypatch):
@@ -264,3 +288,70 @@ def test_embedding_replacement_safetensors_only_rewrites_affected_shard(tmp_path
         "embed_tokens.qweight": "model-00001-of-00002.safetensors",
         "embed_tokens.scales": "model-00001-of-00002.safetensors",
     }
+
+
+def test_embedding_replacement_removes_runtime_dense_weight_from_existing_index(tmp_path, monkeypatch):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    save_file(
+        {"embed_tokens.weight": torch.ones(4, 3, dtype=torch.float16)},
+        str(source_dir / "model-00001-of-00002.safetensors"),
+    )
+    turtle_model = SimpleNamespace(
+        _weight_map={"embed_tokens.weight": "model-00001-of-00002.safetensors"},
+        model_local_path=str(source_dir),
+    )
+
+    def resolve_checkpoint_tensor_source(prefix, leaf):
+        if prefix == "lm_head" and leaf == "weight":
+            return "embed_tokens.weight", None, None, None
+        return None, None, None, None
+
+    turtle_model._resolve_checkpoint_tensor_source = resolve_checkpoint_tensor_source
+    model = nn.Module()
+    model.lm_head = nn.Module()
+    model.lm_head.register_buffer("qweight", torch.ones(2, 2, dtype=torch.int32))
+    model.lm_head.register_buffer("scales", torch.ones(3, 1, dtype=torch.float16))
+
+    save_dir = tmp_path / "save"
+    save_dir.mkdir()
+    save_file(
+        {"embed_tokens.weight": torch.full((4, 3), 2, dtype=torch.float16)},
+        str(save_dir / "model-00001-of-00002.safetensors"),
+    )
+    save_file(
+        {
+            "lm_head.weight": torch.full((4, 3), 3, dtype=torch.float16),
+            "layers.0.linear.weight": torch.arange(6, dtype=torch.float16).reshape(2, 3),
+        },
+        str(save_dir / "model-00002-of-00002.safetensors"),
+    )
+    with open(save_dir / "model.safetensors.index.json", "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "metadata": {"total_size": 1},
+                "weight_map": {
+                    "embed_tokens.weight": "model-00001-of-00002.safetensors",
+                    "lm_head.weight": "model-00002-of-00002.safetensors",
+                    "layers.0.linear.weight": "model-00002-of-00002.safetensors",
+                },
+            },
+            handle,
+        )
+
+    rewritten_files, tensor_to_filename, _total_size, removed_tensor_names = _save_embedding_replacement_safetensors(
+        model,
+        turtle_model,
+        ["lm_head"],
+        save_dir=str(save_dir),
+        metadata={"format": "pt"},
+    )
+
+    assert rewritten_files == ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+    assert removed_tensor_names == ["embed_tokens.weight", "lm_head.weight"]
+    assert tensor_to_filename["lm_head.qweight"] == "model-00001-of-00002.safetensors"
+    assert tensor_to_filename["lm_head.scales"] == "model-00001-of-00002.safetensors"
+    with safe_open(str(save_dir / "model-00001-of-00002.safetensors"), framework="pt", device="cpu") as handler:
+        assert set(handler.keys()) == {"lm_head.qweight", "lm_head.scales"}
+    with safe_open(str(save_dir / "model-00002-of-00002.safetensors"), framework="pt", device="cpu") as handler:
+        assert set(handler.keys()) == {"layers.0.linear.weight"}
