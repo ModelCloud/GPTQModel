@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 05/25/2026 7.1.0-dev `main`: ✨ Added `hy_3` and `ministral3` model support
 * 05/25/2026 7.1.0-dev `main`: ✨ Added `hunyuan_v1_dense` and `hunyuan_v1_moe` model support
 * 05/21/2026 7.1.0-dev `main`: ✨ Added `nemotron_labs_diffusion` model support
 * 05/20/2026 7.1.0-dev `main`: ✨ Added `interns1`, `ovis2_5`, `ovis2_6_moe` and `ovis2_6_next` model support
@@ -251,7 +252,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 
 | Model                    |   |                                 |  |                  |  |                                 |  |                        |   |
 |--------------------------|---|---------------------------------|--|------------------|--|---------------------------------|--|------------------------|---|
-| Apertus                  | ✅ | EXAONE 3/4                      | ✅ | Dots1            | ✅ | Mistral3                        | ✅ | Qwen 2/3/3.5 (Next/MoE) | ✅ |
+| Apertus                  | ✅ | EXAONE 3/4                      | ✅ | Dots1            | ✅ | Mistral3 / Ministral3           | ✅ | Qwen 2/3/3.5 (Next/MoE) | ✅ |
 | Baichuan                 | ✅ | Falcon (H1 / Mamba)             | ✅ | InternLM 1/2/2.5 | ✅ | Mixtral                         | ✅ | Qwen 2/2.5/3 VL        | ✅ |
 | Bloom                    | ✅ | FastVLM                         | ✅ | Kimi K2          | ✅ | MobileLLM                       | ✅ | Qwen 2.5/3 Omni        | ✅ |
 | ChatGLM                  | ✅ | Gemma 1-4 / 3n                  | ✅ | Klear            | ✅ | MOSS                            | ✅ | RefinedWeb             | ✅ |
@@ -266,7 +267,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | XVERSE                   | ✅ | Brumby                          | ✅ | Hymba            | ✅ | Mistral                         | ✅ | Qwen 1/2/3/3.5         | ✅ |
 | MiniMax M2               | ✅ | AfMoE                           | ✅ | Bailing-MoE      | ✅ | LFM2-MoE                        | ✅ | Marin                  | ✅ |
 | InternVL Chat            | ✅ | Laguna                          | ✅ | Mimo / Mimo V2   | ✅ | Zamba / Zamba2                  | ✅ | Intern S1              | ✅ |
-| HunYuan V1 Dense / MoE   | ✅ |                           |  |    |  |                  |  |                |   |
+| HunYuan V1 Dense / MoE   | ✅ | HY-V3                           | ✅ |    |  |                  |  |                |   |
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 

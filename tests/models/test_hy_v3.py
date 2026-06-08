@@ -6,8 +6,8 @@
 from model_test import ModelTest
 
 
-class TestHunyuanV1Dense(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/HY-MT1.5-1.8B" # tencent/HY-MT1.5-1.8B
+class TestHyV3(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Hy-MT2-30B-A3B" # tencent/Hy-MT2-30B-A3B
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
@@ -24,5 +24,5 @@ class TestHunyuanV1Dense(ModelTest):
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
-    def test_hunyuan_v1_dense(self):
+    def test_hy_v3(self):
         self.quantize_and_evaluate()
