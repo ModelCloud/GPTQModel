@@ -2438,6 +2438,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         "leading in some cases to slower forwarding or vram OOM"}
     )
 
+    # CPU worker count for weight-only quantization. None keeps the automatic
+    # policy: RTN CPU quantization uses multiple workers only when Python's GIL
+    # is disabled, or when the runtime environment explicitly overrides it.
+    weight_only_quant_threads: Optional[int] = field(
+        default=None,
+        metadata={"help": "CPU worker count for weight-only quantization. None = auto."},
+    )
+
     # User-facing dense-pool strategy. The dense pool owns the serial path:
     # qkv, z, out_proj, norms, router, shared expert, and dense MLP modules.
     dense_vram_strategy: VramStrategy = field(
@@ -2630,6 +2638,13 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         )
         self.gc_mode = _normalize_gc_mode(self.gc_mode)
         self.moe = _normalize_moe_config(self.moe)
+        if self.weight_only_quant_threads is not None:
+            try:
+                self.weight_only_quant_threads = int(self.weight_only_quant_threads)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("QuantizeConfig: `weight_only_quant_threads` must be a positive integer or None.") from exc
+            if self.weight_only_quant_threads < 1:
+                raise ValueError("QuantizeConfig: `weight_only_quant_threads` must be a positive integer or None.")
 
         # Normalize calibration_data_device to canonical form if it's a specific device (not "balanced")
         if self.calibration_data_device is not None:
@@ -2840,6 +2855,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "gc_mode": "gc_mode",
             "wait_for_submodule_finalizers": "wait_for_submodule_finalizers",
             "auto_forward_data_parallel": "auto_forward_data_parallel",
+            "weight_only_quant_threads": "weight_only_quant_threads",
             "dense_vram_strategy": "dense_vram_strategy",
             "dense_vram_strategy_devices": "dense_vram_strategy_devices",
             "moe_vram_strategy": "moe_vram_strategy",
@@ -2978,6 +2994,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         meta_payload["gc_mode"] = self.gc_mode.value if isinstance(self.gc_mode, GcMode) else self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
+        meta_payload["weight_only_quant_threads"] = self.weight_only_quant_threads
         meta_payload["dense_vram_strategy"] = (
             self.dense_vram_strategy.value
             if isinstance(self.dense_vram_strategy, VramStrategy)
@@ -3974,6 +3991,7 @@ class GGUFConfig(PreProcessorConfig):
                 "gc_mode",
                 "wait_for_submodule_finalizers",
                 "auto_forward_data_parallel",
+                "weight_only_quant_threads",
                 "dense_vram_strategy",
                 "dense_vram_strategy_devices",
                 "moe_vram_strategy",

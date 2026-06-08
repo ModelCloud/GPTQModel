@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # GPU=-1
+import threading
 from dataclasses import fields
 from inspect import signature
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -21,6 +23,8 @@ from gptqmodel.quantization.config import (
     SmoothMAD,
     TensorParallelPadderConfig,
 )
+from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
+from gptqmodel.models._const import CPU
 
 
 def test_quantize_config_weight_only_round_trip():
@@ -64,6 +68,49 @@ def test_rtn_quantize_config_defaults_to_no_smoother():
     reloaded = QuantizeConfig.from_quant_config(payload)
     assert isinstance(reloaded, RTNConfig)
     assert reloaded.smooth is None
+
+
+def test_rtn_weight_only_quant_threads_round_trip():
+    cfg = RTNConfig(bits=4, group_size=128, weight_only_quant_threads=8)
+
+    payload = cfg.to_dict()
+    assert payload["meta"]["weight_only_quant_threads"] == 8
+
+    reloaded = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(reloaded, RTNConfig)
+    assert reloaded.weight_only_quant_threads == 8
+
+
+def test_weight_only_looper_parallelizes_cpu_rtn_with_configured_threads():
+    qcfg = RTNConfig(bits=4, group_size=128, weight_only_quant_threads=2)
+    looper = WeightOnlyLooper.__new__(WeightOnlyLooper)
+    looper.gptq_model = SimpleNamespace(quantize_config=qcfg)
+    looper._quant_with_rtn = True
+    looper._quant_devices = [CPU]
+    looper._quant_device_rr = 0
+    looper._module_device_map = {}
+    looper._quant_device_lock = threading.Lock()
+
+    barrier = threading.Barrier(2)
+    seen_threads = set()
+    seen_lock = threading.Lock()
+
+    def quantize_named_module(named, target_device):
+        with seen_lock:
+            seen_threads.add(threading.current_thread().name)
+        barrier.wait(timeout=5)
+        return named, qcfg
+
+    looper._quantize_named_module = quantize_named_module
+
+    modules = [
+        SimpleNamespace(name="a", full_name="layer.a", state={}),
+        SimpleNamespace(name="b", full_name="layer.b", state={}),
+    ]
+    results = looper._quantize_subset_modules(modules)
+
+    assert [named.full_name for named, _ in results] == ["layer.a", "layer.b"]
+    assert len(seen_threads) == 2
 
 
 def test_rtn_quantize_config_supports_awq_export_round_trip():

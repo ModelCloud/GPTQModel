@@ -18,7 +18,7 @@ import os
 import re
 import threading
 import time
-from concurrent.futures import as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -432,6 +432,28 @@ class WeightOnlyLooper:
         self._move_named_module_to_cpu(named)
         return named, active_qcfg
 
+    def _resolve_cpu_rtn_worker_count(
+        self,
+        task_specs: List[Tuple[NamedModule, torch.device]],
+    ) -> int:
+        """Resolve CPU RTN worker count for the current layer/subset only."""
+
+        if not self._quant_with_rtn or len(task_specs) <= 1:
+            return 1
+        if any((normalize_device_like(target_device) or CPU).type != CPU.type for _, target_device in task_specs):
+            return 1
+
+        quant_config = self.gptq_model.quantize_config
+        configured_threads = getattr(quant_config, "weight_only_quant_threads", None)
+
+        if configured_threads is not None:
+            return min(len(task_specs), max(1, int(configured_threads)))
+
+        if not has_gil_disabled():
+            return 1
+
+        return min(len(task_specs), max(1, os.cpu_count() or 1))
+
     @torch.inference_mode()
     def _finalize_quantized_module(
         self,
@@ -601,10 +623,31 @@ class WeightOnlyLooper:
             return []
 
         if len(self._quant_devices) <= 1 or len(task_specs) <= 1:
-            for named, target_device in task_specs:
-                quantized, active_qcfg = self._quantize_named_module(named, target_device)
-                if active_qcfg is not None:
-                    results_by_name[quantized.full_name] = (quantized, active_qcfg)
+            cpu_rtn_workers = self._resolve_cpu_rtn_worker_count(task_specs)
+            if cpu_rtn_workers <= 1:
+                for named, target_device in task_specs:
+                    quantized, active_qcfg = self._quantize_named_module(named, target_device)
+                    if active_qcfg is not None:
+                        results_by_name[quantized.full_name] = (quantized, active_qcfg)
+            else:
+                emit_device_telemetry(
+                    "weight_only_cpu_rtn_parallel_quant",
+                    module_count=len(task_specs),
+                    workers=cpu_rtn_workers,
+                )
+                with ThreadPoolExecutor(max_workers=cpu_rtn_workers, thread_name_prefix="rtn cpu quant") as executor:
+                    future_map = {
+                        executor.submit(
+                            self._quantize_named_module,
+                            named,
+                            target_device,
+                        ): named
+                        for named, target_device in task_specs
+                    }
+                    for future in as_completed(future_map):
+                        quantized, active_qcfg = future.result()
+                        if active_qcfg is not None:
+                            results_by_name[quantized.full_name] = (quantized, active_qcfg)
         else:
             future_map = {
                 DEVICE_THREAD_POOL.submit(
@@ -720,11 +763,20 @@ class WeightOnlyLooper:
         checkpoint_tensors = None
         turtle_model = getattr(self.gptq_model, "turtle_model", None)
         if turtle_model is not None and hasattr(turtle_model, "checkpoint_tensors_for_submodule"):
-            checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
-                target_model=self.gptq_model.model,
-                target_submodule=module,
-                recurse=False,
-            )
+            turtle_lock = getattr(self.gptq_model, "_turtle_lock", None)
+            if turtle_lock is None:
+                checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
+                    target_model=self.gptq_model.model,
+                    target_submodule=module,
+                    recurse=False,
+                )
+            else:
+                with turtle_lock:
+                    checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
+                        target_model=self.gptq_model.model,
+                        target_submodule=module,
+                        recurse=False,
+                    )
 
         if not checkpoint_tensors:
             needs_materialize = False
@@ -992,6 +1044,8 @@ class WeightOnlyLooper:
                 )
 
                 self.processor.collect_memory_info(layer_index)
+                layer_named_modules: List[NamedModule] = []
+                layer_seen_module_names: set[str] = set()
                 for subset_names in subsets:
                     subset_named_modules: List[NamedModule] = []
                     for module_name in subset_names:
@@ -1029,9 +1083,24 @@ class WeightOnlyLooper:
                                 if prepared is not named.module:
                                     named.module = prepared
 
-                        subset_named_modules.append(named)
+                        if self._quant_with_rtn:
+                            if named.full_name in layer_seen_module_names:
+                                continue
+                            layer_seen_module_names.add(named.full_name)
+                            layer_named_modules.append(named)
+                        else:
+                            subset_named_modules.append(named)
 
-                    self._finalize_subset_modules(self._quantize_subset_modules(subset_named_modules))
+                    if not self._quant_with_rtn:
+                        self._finalize_subset_modules(self._quantize_subset_modules(subset_named_modules))
+
+                if self._quant_with_rtn:
+                    emit_device_telemetry(
+                        "weight_only_rtn_layer_quant",
+                        layer_index=layer_index,
+                        module_count=len(layer_named_modules),
+                    )
+                    self._finalize_subset_modules(self._quantize_subset_modules(layer_named_modules))
 
                 # Submodule-level offload may swap packed tensors to meta/disk placeholders.
                 # Skip the layer-wide CPU move in that case to avoid `.to()` on meta buffers.
