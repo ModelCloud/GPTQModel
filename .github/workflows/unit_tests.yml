@@ -60,9 +60,9 @@ env:
   # must include 8.0 in addition to the newer targets.
   TORCH_CUDA_ARCH_LIST: 8.0;8.6;8.9;9.0;12.0
   PYTORCH_ALLOC_CONF: 'expandable_segments:True'
-  RUNNER: 10.0.13.31
+  RUNNER: 10.0.13.254
   XEON5: 10.0.14.249
-  GPU_ALLOCATOR_URL: http://10.0.13.31/gpu
+  GPU_ALLOCATOR_URL: http://10.0.13.254/gpu
   LOGBAR_ANIMATION: '0'
   CUDA_VERSION: 130
   UV_TORCH_BACKEND: cu130
@@ -231,7 +231,7 @@ jobs:
   check-torch:
     runs-on: [ self-hosted, xeon5 ]
     container:
-      image: 10.0.13.31:5000/nvidia/cuda:130-ubuntu24.04_0415
+      image: 10.0.13.254:5000/nvidia/cuda:130-ubuntu24.04_0415
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /monster/ci/env/entrypoint.sh:/entrypoint.sh
@@ -279,7 +279,7 @@ jobs:
           fi
           if python -VV 2>&1 | grep -q '3\.14.*free-threading'; then
             echo "[INFO] Python 3.14t detected, installing torchao..."
-            uv pip install http://10.0.13.31/files/torchao-0.18.0+git13cd013d6-cp314-cp314t-linux_x86_64.whl
+            uv pip install http://10.0.13.254/files/torchao-0.18.0+git13cd013d6-cp314-cp314t-linux_x86_64.whl
           else
             echo "[INFO] Current Python is not 3.14t, skip torchao."
           fi
@@ -310,7 +310,7 @@ jobs:
           fi
           if python -VV 2>&1 | grep -q '3\.14.*free-threading'; then
             echo "[INFO] Python 3.14t detected, installing torchao..."
-            uv pip install http://10.0.13.31/files/torchao-0.18.0+git13cd013d6-cp314-cp314t-linux_x86_64.whl
+            uv pip install http://10.0.13.254/files/torchao-0.18.0+git13cd013d6-cp314-cp314t-linux_x86_64.whl
           else
             echo "[INFO] Current Python is not 3.14t, skip torchao."
           fi
