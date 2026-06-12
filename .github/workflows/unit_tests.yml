@@ -231,7 +231,7 @@ jobs:
   check-torch:
     runs-on: [ self-hosted, xeon5 ]
     container:
-      image: 10.0.13.254:5000/nvidia/cuda:130-ubuntu24.04_0415
+      image: 10.0.13.254:5000/nvidia/cuda:130-ubuntu24.04_0325
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /monster/ci/env/entrypoint.sh:/entrypoint.sh
