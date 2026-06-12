@@ -317,6 +317,17 @@ jobs:
           
           ${{ matrix.install_cmd }}
 
+  debug-docker:
+    runs-on: [ self-hosted, xeon5 ]
+    steps:
+      - run: |
+          hostname
+          whoami
+          echo "DOCKER_HOST=$DOCKER_HOST"
+          docker context ls
+          docker info
+          docker pull 10.0.13.254:5000/nvidia/cuda:130-ubuntu24.04_0325
+
   setuptools-compatibility:
     uses: ./.github/workflows/setuptools_compatibility_reusable.yml
     with:
