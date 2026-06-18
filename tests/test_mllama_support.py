@@ -8,8 +8,8 @@ import torch
 from torch import nn
 
 from gptqmodel.models.definitions.mllama import MLlamaQModel
-from gptqmodel.utils.structure import LazyTurtle
 from gptqmodel.utils.model import get_layers_with_prefixes
+from gptqmodel.utils.structure import LazyTurtle
 
 
 class _Attention(nn.Module):
@@ -47,6 +47,17 @@ class _Rotary(nn.Module):
     def forward(self, x, position_ids=None):
         shape = (*x.shape[:2], x.shape[-1] // 2)
         return x.new_zeros(shape), x.new_zeros(shape)
+
+
+class _RecordingEmbedding(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(8, 4, device="meta"))
+        self.last_input_device = None
+
+    def forward(self, input_ids):
+        self.last_input_device = input_ids.device
+        return torch.zeros((*input_ids.shape, 4))
 
 
 class _LanguageModel(nn.Module):
@@ -182,15 +193,15 @@ def test_mllama_run_input_capture_moves_input_ids_to_embedding_device():
         offload_to_disk_path="/tmp/unused",
     )
 
+    embedding = _RecordingEmbedding()
     language_model = instance.model.model.language_model
-    language_model.embed_tokens = language_model.embed_tokens.to("meta")
+    language_model.embed_tokens = embedding
 
     example = {
         "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
         "attention_mask": torch.ones((1, 3), dtype=torch.bool),
     }
 
-    try:
-        instance.run_input_capture(example, use_cache=False, data_device=torch.device("cpu"))
-    except RuntimeError as exc:
-        assert "produced meta inputs_embeds" in str(exc)
+    instance.run_input_capture(example, use_cache=False, data_device=torch.device("cpu"))
+
+    assert embedding.last_input_device == torch.device("meta")

@@ -20,6 +20,8 @@ class MLlamaQModel(BaseQModel):
     loader = AutoModelForPreTraining
 
     pre_lm_head_norm_module = "model.language_model.norm"
+    # Current Transformers shells use `model.language_model.*`, while the
+    # released Mllama checkpoints store those tensors under `language_model.model.*`.
     HF_CONVERSION_MAP_REVERSED = (
         SimpleNamespace(
             source_patterns=[r"model\.language_model"],
@@ -71,21 +73,16 @@ class MLlamaQModel(BaseQModel):
     ]
 
     @classmethod
-    def _resolve_multimodal_layout(cls, model):
-        for prefix in ("model", "language_model"):
-            core_model = get_module(model, prefix)
-            if core_model is None:
-                continue
-            if hasattr(core_model, "language_model"):
-                return prefix, core_model, core_model.language_model
-            if hasattr(core_model, "model"):
-                return prefix, core_model, core_model.model
+    def _resolve_language_model(cls, model):
+        for prefix in ("model.language_model", "language_model.model"):
+            language_model = get_module(model, prefix)
+            if language_model is not None:
+                return language_model
 
         raise AttributeError("Unable to resolve an Mllama language model layout.")
 
     def _core_language_model(self):
-        _, _, language_model = self._resolve_multimodal_layout(self.model)
-        return language_model
+        return self._resolve_language_model(self.model)
 
     def _materialize_language_module(self, language_model, attr_name: str):
         module = getattr(language_model, attr_name, None)
@@ -148,6 +145,9 @@ class MLlamaQModel(BaseQModel):
         if torch.is_tensor(embedding_weight) and input_ids.device != embedding_weight.device:
             input_ids = input_ids.to(device=embedding_weight.device)
 
+        # Input capture only needs the tensors entering the first decoder layer.
+        # Calling it directly avoids the multimodal wrapper's mask construction
+        # path, which can inspect meta tensors during lazy quantization.
         inputs_embeds = language_model.embed_tokens(input_ids)
         if getattr(inputs_embeds, "is_meta", False):
             raise RuntimeError("Mllama input capture produced meta inputs_embeds after materializing embed_tokens.")
