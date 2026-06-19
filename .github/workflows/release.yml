@@ -80,7 +80,7 @@ jobs:
         - /monster/ci/env:/opt/env
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -127,7 +127,7 @@ jobs:
     if: ${{ inputs.github_vm == true }}
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
