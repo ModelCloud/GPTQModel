@@ -55,6 +55,28 @@ def _prepare_gemma4_unified_replay_kwargs(model_def, layer, layer_input, additio
     return additional_inputs
 
 
+# Shared decoder layout for both the composite (``gemma4_unified``) and text-only
+# (``gemma4_unified_text``) variants: the standard Gemma sandwich-norm decoder with
+# per-projection q/k/v norms. Unlike the per-layer-input Gemma 4 variants there is no
+# per-layer input gate/projection, so those module-tree entries are intentionally absent.
+_GEMMA4_UNIFIED_DECODER = {
+    "input_layernorm": ("input_layernorm:!",),
+    "self_attn": (
+        "q_norm:!",
+        "q_proj:0",
+        "k_norm:!",
+        "k_proj:0",
+        "v_norm:!",
+        "v_proj:0",
+        "o_proj:1",
+    ),
+    "post_attention_layernorm": ("post_attention_layernorm:!",),
+    "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
+    "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+    "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
+}
+
+
 class Gemma4UnifiedForConditionalGenerationGPTQ(BaseQModel):
     """Quantization definition for Gemma 4 unified (multimodal) checkpoints.
 
@@ -75,22 +97,34 @@ class Gemma4UnifiedForConditionalGenerationGPTQ(BaseQModel):
         "language_model",
         "layers",
         "#",
-        {
-            "input_layernorm": ("input_layernorm:!",),
-            "self_attn": (
-                "q_norm:!",
-                "q_proj:0",
-                "k_norm:!",
-                "k_proj:0",
-                "v_norm:!",
-                "v_proj:0",
-                "o_proj:1",
-            ),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-            "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
-        },
+        _GEMMA4_UNIFIED_DECODER,
+    ]
+
+    def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+        """Refresh Gemma 4 unified rope kwargs during cached layer replay."""
+
+        return _prepare_gemma4_unified_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
+
+
+class Gemma4UnifiedTextQModel(BaseQModel):
+    """Quantization definition for text-only Gemma 4 unified checkpoints (``gemma4_unified_text``).
+
+    ``Gemma4UnifiedTextModel`` is the standalone language stack of the unified family, so its
+    decoder layers live at ``model.layers`` (no ``language_model`` nesting) with the norm and
+    rotary embedding at ``model.norm`` / ``model.rotary_emb``. The quantizable layout is identical
+    to the composite variant, mirroring how ``gemma4_text`` parallels ``gemma4``.
+    """
+
+    layer_modules_strict = False
+    support_batch_quantize = False
+    pre_lm_head_norm_module = "model.norm"
+    rotary_embedding = "model.rotary_emb"
+
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        _GEMMA4_UNIFIED_DECODER,
     ]
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
