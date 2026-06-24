@@ -6,7 +6,7 @@
 from types import SimpleNamespace
 
 import torch
-from transformers import AutoModelForPreTraining
+from transformers import AutoModelForCausalLM, AutoModelForPreTraining
 
 from ...utils.model import get_module, move_to
 from ...utils.offload import offload_to_disk
@@ -170,3 +170,25 @@ class MLlamaQModel(BaseQModel):
             use_cache=use_cache,
             position_embeddings=position_embeddings,
         )
+
+
+class MLlamaTextQModel(MLlamaQModel):
+    loader = AutoModelForCausalLM
+
+    pre_lm_head_norm_module = "model.norm"
+    rotary_embedding = "model.rotary_emb"
+
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+        },
+    ]
+
+
+__all__ = ["MLlamaQModel", "MLlamaTextQModel"]
