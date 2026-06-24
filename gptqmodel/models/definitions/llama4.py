@@ -62,7 +62,6 @@ class Llama4TextQModel(Llama4QModel):
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
                 "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
             },
         },
     ]

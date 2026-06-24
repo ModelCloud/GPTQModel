@@ -47,6 +47,8 @@ class Glm4vMoeQModel(Glm4vGPTQ):
 class Glm4vMoeTextQModel(Glm4vMoeQModel):
     loader = AutoModel
 
+    require_load_processor = False
+
     pre_lm_head_norm_module = "norm"
     rotary_embedding = "rotary_emb"
 
@@ -71,6 +73,14 @@ class Glm4vMoeTextQModel(Glm4vMoeQModel):
             },
         },
     ]
+
+    @classmethod
+    def get_base_modules(cls, model):
+        return [
+            name
+            for name, _ in model.named_children()
+            if name != "layers"
+        ]
 
 
 __all__ = ["Glm4vMoeQModel", "Glm4vMoeTextQModel"]
