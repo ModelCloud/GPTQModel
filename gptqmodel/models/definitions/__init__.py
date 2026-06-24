@@ -30,6 +30,7 @@ from .gemma2 import Gemma2QModel
 from .gemma3 import Gemma3QModel
 from .gemma3n import Gemma3nForConditionalGenerationGPTQ, Gemma3nTextQModel
 from .gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel
+from .gemma4_unified import Gemma4UnifiedForConditionalGenerationGPTQ, Gemma4UnifiedTextQModel
 from .glm import GlmQModel
 from .glmasr import GlmASRGPTQ
 from .glm_ocr import GlmOCRGPTQ
