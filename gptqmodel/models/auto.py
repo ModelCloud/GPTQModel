@@ -97,11 +97,12 @@ from .definitions.gemma2 import Gemma2QModel  # noqa: E402
 from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel  # noqa: E402
 from .definitions.gemma3n import Gemma3nForConditionalGenerationGPTQ, Gemma3nTextQModel  # noqa: E402
 from .definitions.gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel  # noqa: E402
+from .definitions.gemma4_unified import Gemma4UnifiedForConditionalGenerationGPTQ, Gemma4UnifiedTextQModel  # noqa: E402
 from .definitions.glm import GlmQModel  # noqa: E402
 from .definitions.glm4_moe import GLM4MoEGPTQ  # noqa: E402
 from .definitions.glm4_moe_lite import Glm4MoeLiteQModel  # noqa: E402
 from .definitions.glm4v import Glm4vGPTQ  # noqa: E402
-from .definitions.glm4v_moe import Glm4vMoeQModel  # noqa: E402
+from .definitions.glm4v_moe import Glm4vMoeQModel, Glm4vMoeTextQModel  # noqa: E402
 from .definitions.glm_moe_dsa import GlmMoeDsaQModel  # noqa: E402
 from .definitions.glm_ocr import GlmOCRGPTQ  # noqa: E402
 from .definitions.glmasr import GlmASRGPTQ  # noqa: E402
@@ -129,7 +130,7 @@ from .definitions.laguna import LagunaQModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
 from .definitions.llada2 import LLaDA2MoeQModel
 from .definitions.llama import LlamaQModel  # noqa: E402
-from .definitions.llama4 import Llama4QModel  # noqa: E402
+from .definitions.llama4 import Llama4QModel, Llama4TextQModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashQModel  # noqa: E402
 from .definitions.mimo import MimoQModel  # noqa: E402
@@ -143,7 +144,7 @@ from .definitions.minimax_m2 import MiniMaxM2GPTQ  # noqa: E402
 from .definitions.ministral3 import Ministral3GPTQ  # noqa: E402
 from .definitions.mistral3 import Mistral3GPTQ
 from .definitions.mixtral import MixtralQModel  # noqa: E402
-from .definitions.mllama import MLlamaQModel  # noqa: E402
+from .definitions.mllama import MLlamaQModel, MLlamaTextQModel  # noqa: E402
 from .definitions.mobilellm import MobileLLMQModel  # noqa: E402
 from .definitions.moss import MossQModel  # noqa: E402
 from .definitions.mpt import MptQModel  # noqa: E402
@@ -208,6 +209,7 @@ MODEL_MAP = {
     "gpt2": GPT2QModel,
     "llama": LlamaQModel,
     "llama4": Llama4QModel,
+    "llama4_text": Llama4TextQModel,
     "opt": OptQModel,
     "moss": MossQModel,
     "chatglm": ChatGLMQModel,
@@ -215,6 +217,7 @@ MODEL_MAP = {
     "glm4": GlmQModel,
     "glm4v": Glm4vGPTQ,
     "glm4v_moe": Glm4vMoeQModel,
+    "glm4v_moe_text": Glm4vMoeTextQModel,
     "glmasr": GlmASRGPTQ,
     "glm_ocr": GlmOCRGPTQ,
     "glm4_moe": GLM4MoEGPTQ,
@@ -258,6 +261,8 @@ MODEL_MAP = {
     "gemma3n": Gemma3nForConditionalGenerationGPTQ,
     "gemma4_text": Gemma4TextQModel,
     "gemma4": Gemma4ForConditionalGenerationGPTQ,
+    "gemma4_unified_text": Gemma4UnifiedTextQModel,
+    "gemma4_unified": Gemma4UnifiedForConditionalGenerationGPTQ,
     "phi": PhiQModel,
     "phi3": Phi3QModel,
     "phi4mm": Phi4MMGPTQ,
@@ -291,6 +296,7 @@ MODEL_MAP = {
     "exaone4": Exaone4QModel,
     "grinmoe": GrinMoeQModel,
     "mllama": MLlamaQModel,
+    "mllama_text_model": MLlamaTextQModel,
     "marin": Qwen3QModel,
     "granite": LlamaQModel, # 100% llama clone
     "granitemoehybrid": GraniteMoeHybridQModel,
