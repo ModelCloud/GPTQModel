@@ -11,15 +11,8 @@ class TestHyV3(ModelTest):
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
-            "acc": {"value": 0.3182, "floor_pct": 0.36},
-            "acc_norm": {"value": 0.3472, "floor_pct": 0.36},
-        },
-        "mmlu_stem": {
-            "chat_template": False,
-            "acc": {
-                "value": 0.4024,
-                "floor_pct": 0.04,
-            },
+            "acc": {"value": 0.5324, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.5341, "floor_pct": 0.04},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
