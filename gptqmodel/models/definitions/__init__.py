@@ -44,6 +44,7 @@ from .grinmoe import GrinMoeQModel
 from .hrm_text import HrmTextQModel
 from .hunyuan_v1_dense import HunYuanDenseV1QModel
 from .hunyuan_v1_moe import HunYuanMoEV1QModel
+from .hy_v3 import HYV3QModel
 from .hymba import HymbaQModel
 from .instella import InstellaQModel
 from .internlm import InternLMQModel
@@ -57,6 +58,7 @@ from .minicpm_o import MiniCPMOQModel
 from .minicpmv import MiniCPMVQModel
 from .minicpmv_4_6 import MiniCPMV4_6QModel
 from .minimax_m2 import MiniMaxM2GPTQ
+from .ministral3 import Ministral3GPTQ
 from .mimo_v2 import MimoV2QModel
 from .mixtral import MixtralQModel
 from .mllama import MLlamaQModel, MLlamaTextQModel

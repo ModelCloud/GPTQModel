@@ -117,6 +117,7 @@ from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hrm_text import HrmTextQModel  # noqa: E402
 from .definitions.hunyuan_v1_dense import HunYuanDenseV1QModel  # noqa: E402
 from .definitions.hunyuan_v1_moe import HunYuanMoEV1QModel  # noqa: E402
+from .definitions.hy_v3 import HYV3QModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
@@ -140,6 +141,7 @@ from .definitions.minicpm_o import MiniCPMOQModel  # noqa: E402
 from .definitions.minicpmv import MiniCPMVQModel  # noqa: E402
 from .definitions.minicpmv_4_6 import MiniCPMV4_6QModel  # noqa: E402
 from .definitions.minimax_m2 import MiniMaxM2GPTQ  # noqa: E402
+from .definitions.ministral3 import Ministral3GPTQ  # noqa: E402
 from .definitions.mistral3 import Mistral3GPTQ
 from .definitions.mixtral import MixtralQModel  # noqa: E402
 from .definitions.mllama import MLlamaQModel, MLlamaTextQModel  # noqa: E402
@@ -237,6 +239,7 @@ MODEL_MAP = {
     "hrm_text": HrmTextQModel,
     "hunyuan_v1_dense": HunYuanDenseV1QModel,
     "hunyuan_v1_moe": HunYuanMoEV1QModel,
+    "hy_v3": HYV3QModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone
     "yi": LlamaQModel, # 100% llama clone
@@ -272,6 +275,7 @@ MODEL_MAP = {
     "minicpmv4_6": MiniCPMV4_6QModel,
     "minimax": MiniMaxM2GPTQ,
     "minimax_m2": MiniMaxM2GPTQ,
+    "ministral3": Ministral3GPTQ,
     "qwen2_moe": Qwen2MoeQModel,
     "qwen3_moe": Qwen3MoeQModel,
     "qwen3_next": Qwen3NextGPTQ,
