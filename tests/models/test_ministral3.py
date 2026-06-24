@@ -7,9 +7,9 @@ from model_test import ModelTest
 
 
 class TestMinistral3(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Ministral-3-3B-Instruct-2512-TextOnly" # "Aratako/Ministral-3-3B-Instruct-2512-TextOnly"
-    NATIVE_ARC_CHALLENGE_ACC = 0.4974
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5256
+    NATIVE_MODEL_ID = "/monster/data/model/Ministral-3-3B-Instruct-2512-TextOnly-BF16" # "Aratako/Ministral-3-3B-Instruct-2512-TextOnly"
+    NATIVE_ARC_CHALLENGE_ACC = 0.5870
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.6032
     NATIVE_ARC_CHALLENGE_ACC_SLOW = NATIVE_ARC_CHALLENGE_ACC
     NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
     NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
