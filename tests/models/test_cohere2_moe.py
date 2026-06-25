@@ -3,9 +3,6 @@
 
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import ExpertsRoutingOverride, Fallback, MoEConfig, VramStrategy
-from gptqmodel.utils.backend import BACKEND
-
 
 class TestCohere2Moe(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/North-Mini-Code-1.0" # CohereLabs/North-Mini-Code-1.0
