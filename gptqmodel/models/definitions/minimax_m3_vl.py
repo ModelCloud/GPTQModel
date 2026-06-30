@@ -8,23 +8,6 @@ from transformers import AutoModelForImageTextToText
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
-
-def _register_defuser_model_type():
-    try:
-        from defuser.model_registry import MODEL_CONFIG
-        from defuser.utils.common import MIN_SUPPORTED_TRANSFORMERS_VERSION
-    except Exception:
-        return
-
-    MODEL_CONFIG.setdefault(
-        "minimax_m3_vl",
-        {"min_transformers_version": MIN_SUPPORTED_TRANSFORMERS_VERSION},
-    )
-
-
-_register_defuser_model_type()
-
-
 class MiniMaxM3VLGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
     require_load_processor = False
