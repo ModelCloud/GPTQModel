@@ -1855,6 +1855,57 @@ class LazyTurtle:
 
         return None, None, None, None
 
+    def _resolve_concat_checkpoint_tensor_sources(
+        self,
+        module_path: str,
+        rel_name: str,
+    ) -> Optional[tuple[list[str], int]]:
+        """Resolve one fused runtime tensor backed by several split checkpoint tensors."""
+
+        combined_name = self._join_tensor_name(module_path, rel_name)
+
+        for converter in self._runtime_to_checkpoint_converters:
+            if "Concatenate" not in converter.operation_names:
+                continue
+            if len(converter.source_patterns) != 1 or len(converter.target_patterns) < 2:
+                continue
+
+            runtime_pattern = converter.source_patterns[0]
+            if _LazyWeightRenaming(runtime_pattern, runtime_pattern).rename_source_key(combined_name)[1] is None:
+                continue
+
+            checkpoint_names = []
+            for checkpoint_pattern in converter.target_patterns:
+                renamed, matched_pattern = _LazyWeightRenaming(
+                    runtime_pattern,
+                    checkpoint_pattern,
+                ).rename_source_key(combined_name)
+                if matched_pattern is None or renamed == combined_name:
+                    checkpoint_names = []
+                    break
+
+                resolved_name = None
+                for candidate in self._runtime_to_checkpoint_alias_candidates(renamed):
+                    if candidate in self._weight_map:
+                        resolved_name = candidate
+                        break
+                if resolved_name is None:
+                    checkpoint_names = []
+                    break
+                checkpoint_names.append(resolved_name)
+
+            if len(checkpoint_names) != len(converter.target_patterns):
+                continue
+
+            concat_dim = 0
+            for operation in converter.operations:
+                if type(operation).__name__ == "Concatenate":
+                    concat_dim = getattr(operation, "dim", 0)
+                    break
+            return checkpoint_names, concat_dim
+
+        return None
+
     def _resolve_direct_checkpoint_tensor_source(
         self,
         module_path: str,
@@ -2130,7 +2181,14 @@ class LazyTurtle:
         missing_nonpersistent_buffers: list[tuple[str, str]] = []
 
         grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
+        concat_entries: list[tuple[str, str, list[str], int]] = []
         for rel_name in t_params:
+            concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, rel_name)
+            if concat_source is not None:
+                full_names, concat_dim = concat_source
+                concat_entries.append(("param", rel_name, full_names, concat_dim))
+                continue
+
             full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
             if full_name is None:
                 continue
@@ -2153,6 +2211,12 @@ class LazyTurtle:
             grouped_names.setdefault(shard, []).append(("param", rel_name, full_name, expert_index, split_index, split_dim))
 
         for rel_name, target_buffer in list(t_bufs.items()):
+            concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, rel_name)
+            if concat_source is not None:
+                full_names, concat_dim = concat_source
+                concat_entries.append(("buffer", rel_name, full_names, concat_dim))
+                continue
+
             full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
             if full_name is None:
                 full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
@@ -2177,7 +2241,7 @@ class LazyTurtle:
                 continue
             grouped_names.setdefault(shard, []).append(("buffer", rel_name, full_name, expert_index, split_index, split_dim))
 
-        total_entries = sum(len(entries) for entries in grouped_names.values())
+        total_entries = sum(len(entries) for entries in grouped_names.values()) + len(concat_entries)
         progress = None
         loaded_entries = 0
         if total_entries:
@@ -2189,6 +2253,112 @@ class LazyTurtle:
 
         try:
             with torch.inference_mode():
+                for kind, rel_name, full_names, concat_dim in concat_entries:
+                    if progress is not None:
+                        progress.current_iter_step = loaded_entries
+                        progress.subtitle(f"{rel_name}: {loaded_entries + 1}/{total_entries}")
+                        progress.draw()
+
+                    target_tensor = t_params.get(rel_name) if kind == "param" else t_bufs.get(rel_name)
+                    expected_shape = tuple(target_tensor.shape) if target_tensor is not None else None
+                    parts = []
+                    for full_name in full_names:
+                        shard = self._weight_map.get(full_name)
+                        if shard is None:
+                            raise RuntimeError(
+                                self._materialization_issue_message(
+                                    phase="submodule materialization",
+                                    kind=kind,
+                                    module_path=module_path,
+                                    rel_name=rel_name,
+                                    reason="checkpoint tensor mapping resolved to a missing shard",
+                                    full_name=full_name,
+                                    target_shape=expected_shape,
+                                )
+                            )
+                        shard_path = os.path.join(self.model_local_path, shard)
+                        with safe_open(shard_path, framework="pt", device="cpu") as handler:
+                            parts.append(handler.get_tensor(full_name))
+
+                    try:
+                        tensor = torch.cat(parts, dim=concat_dim).contiguous()
+                    except Exception as exc:
+                        raise RuntimeError(
+                            self._materialization_issue_message(
+                                phase="submodule materialization",
+                                kind=kind,
+                                module_path=module_path,
+                                rel_name=rel_name,
+                                reason=f"checkpoint tensors could not be concatenated: {exc}",
+                                full_name=", ".join(full_names),
+                                target_shape=expected_shape,
+                            )
+                        ) from exc
+
+                    if expected_shape is not None and tuple(tensor.shape) != expected_shape:
+                        raise RuntimeError(
+                            self._materialization_issue_message(
+                                phase="submodule materialization",
+                                kind=kind,
+                                module_path=module_path,
+                                rel_name=rel_name,
+                                reason="concatenated checkpoint tensor shape does not match target tensor",
+                                full_name=", ".join(full_names),
+                                source_shape=tuple(tensor.shape),
+                                target_shape=expected_shape,
+                            )
+                        )
+
+                    if kind == "param":
+                        target_param = t_params.get(rel_name)
+                        if target_param is None:
+                            raise RuntimeError(
+                                self._materialization_issue_message(
+                                    phase="submodule materialization",
+                                    kind=kind,
+                                    module_path=module_path,
+                                    rel_name=rel_name,
+                                    reason="target tensor disappeared before materialization",
+                                    full_name=", ".join(full_names),
+                                    source_shape=tuple(tensor.shape),
+                                )
+                            )
+                        target_param_new = _ensure_target_storage_on_device_(target_param, device)
+                        if target_param_new is not target_param:
+                            t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+                            setattr(t_parent, leaf, target_param_new)
+                            target_param = target_param_new
+                        source = tensor.detach()
+                        if source.dtype != target_param.dtype:
+                            source = source.to(dtype=target_param.dtype)
+                        target_param.detach().copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                    else:
+                        target_buffer = t_bufs.get(rel_name)
+                        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+                        persistent = leaf not in getattr(t_parent, "_non_persistent_buffers_set", set())
+                        source = tensor.detach()
+                        if target_buffer is None:
+                            new_buffer = source.to(device=device)
+                            t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
+                            t_bufs[rel_name] = new_buffer
+                        elif getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta":
+                            new_buffer = torch.empty_like(target_buffer, device=device)
+                            new_buffer.copy_(
+                                source.to(dtype=new_buffer.dtype),
+                                non_blocking=(non_blocking and source.is_pinned()),
+                            )
+                            t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
+                            t_bufs[rel_name] = new_buffer
+                        else:
+                            if source.dtype != target_buffer.dtype:
+                                source = source.to(dtype=target_buffer.dtype)
+                            target_buffer.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+
+                    loaded_entries += 1
+                    if progress is not None:
+                        progress.current_iter_step = loaded_entries
+                        progress.draw()
+
                 for shard, entries in grouped_names.items():
                     shard_path = os.path.join(self.model_local_path, shard)
                     with safe_open(shard_path, framework="pt", device="cpu") as handler:
@@ -2457,6 +2627,66 @@ class LazyTurtle:
                 if not _is_meta_tensor(shell_param):
                     continue
 
+                concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, name)
+                if concat_source is not None:
+                    full_names, concat_dim = concat_source
+                    parts = []
+                    for full_name in full_names:
+                        shard = self._weight_map.get(full_name)
+                        if shard is None:
+                            raise RuntimeError(self._materialization_issue_message(
+                                phase="direct-meta sync",
+                                kind="param",
+                                module_path=module_path,
+                                rel_name=name,
+                                reason="checkpoint tensor mapping resolved to a missing shard",
+                                full_name=full_name,
+                                target_shape=tuple(shell_param.shape),
+                            ))
+                        source_path = os.path.join(self.model_local_path, shard)
+                        with safe_open(source_path, framework="pt", device="cpu") as handler:
+                            parts.append(handler.get_tensor(full_name))
+
+                    try:
+                        source_param = torch.cat(parts, dim=concat_dim).contiguous()
+                    except Exception as exc:
+                        raise RuntimeError(self._materialization_issue_message(
+                            phase="direct-meta sync",
+                            kind="param",
+                            module_path=module_path,
+                            rel_name=name,
+                            reason=f"checkpoint tensors could not be concatenated: {exc}",
+                            full_name=", ".join(full_names),
+                            target_shape=tuple(shell_param.shape),
+                        )) from exc
+
+                    if shell_param.shape != source_param.shape:
+                        raise RuntimeError(self._materialization_issue_message(
+                            phase="direct-meta sync",
+                            kind="param",
+                            module_path=module_path,
+                            rel_name=name,
+                            reason="concatenated checkpoint tensor shape does not match target tensor",
+                            full_name=", ".join(full_names),
+                            source_shape=tuple(source_param.shape),
+                            target_shape=tuple(shell_param.shape),
+                        ))
+
+                    cache_key = (",".join(full_names), None, None, concat_dim, shell_param.dtype, shell_param.requires_grad)
+                    new_param = param_cache.get(cache_key)
+                    if new_param is None:
+                        if source_param.dtype != shell_param.dtype:
+                            source_param = source_param.to(dtype=shell_param.dtype)
+                        new_param = nn.Parameter(
+                            source_param.clone(),
+                            requires_grad=shell_param.requires_grad,
+                        )
+                        param_cache[cache_key] = new_param
+
+                    shell_sub.register_parameter(name, new_param)
+                    synced += 1
+                    continue
+
                 full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, name)
                 if full_name is None:
                     continue
@@ -2532,6 +2762,64 @@ class LazyTurtle:
 
             for name, shell_buffer in list(dict(shell_sub.named_buffers(recurse=False)).items()):
                 if not _is_meta_tensor(shell_buffer):
+                    continue
+
+                concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, name)
+                if concat_source is not None:
+                    full_names, concat_dim = concat_source
+                    parts = []
+                    for full_name in full_names:
+                        shard = self._weight_map.get(full_name)
+                        if shard is None:
+                            raise RuntimeError(self._materialization_issue_message(
+                                phase="direct-meta sync",
+                                kind="buffer",
+                                module_path=module_path,
+                                rel_name=name,
+                                reason="checkpoint tensor mapping resolved to a missing shard",
+                                full_name=full_name,
+                                target_shape=tuple(shell_buffer.shape),
+                            ))
+                        source_path = os.path.join(self.model_local_path, shard)
+                        with safe_open(source_path, framework="pt", device="cpu") as handler:
+                            parts.append(handler.get_tensor(full_name))
+
+                    try:
+                        source_buffer = torch.cat(parts, dim=concat_dim).contiguous()
+                    except Exception as exc:
+                        raise RuntimeError(self._materialization_issue_message(
+                            phase="direct-meta sync",
+                            kind="buffer",
+                            module_path=module_path,
+                            rel_name=name,
+                            reason=f"checkpoint tensors could not be concatenated: {exc}",
+                            full_name=", ".join(full_names),
+                            target_shape=tuple(shell_buffer.shape),
+                        )) from exc
+
+                    if shell_buffer.shape != source_buffer.shape:
+                        raise RuntimeError(self._materialization_issue_message(
+                            phase="direct-meta sync",
+                            kind="buffer",
+                            module_path=module_path,
+                            rel_name=name,
+                            reason="concatenated checkpoint tensor shape does not match target tensor",
+                            full_name=", ".join(full_names),
+                            source_shape=tuple(source_buffer.shape),
+                            target_shape=tuple(shell_buffer.shape),
+                        ))
+
+                    persistent = name not in getattr(shell_sub, "_non_persistent_buffers_set", set())
+                    cache_key = (",".join(full_names), None, None, concat_dim, shell_buffer.dtype)
+                    new_buffer = buffer_cache.get(cache_key)
+                    if new_buffer is None:
+                        if source_buffer.dtype != shell_buffer.dtype:
+                            source_buffer = source_buffer.to(dtype=shell_buffer.dtype)
+                        new_buffer = source_buffer.clone()
+                        buffer_cache[cache_key] = new_buffer
+
+                    shell_sub.register_buffer(name, new_buffer, persistent=persistent)
+                    synced += 1
                     continue
 
                 full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, name)
