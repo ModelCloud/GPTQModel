@@ -21,7 +21,8 @@
 
 ## Latest News
 
-* 06/26/2026 7.1.0-dev `main`: ✨ Added `minimax_m3_vl` / MiniMax M3 model support
+* 06/30/2026 7.1.0-dev `main`: ✨ Added `minimax_m3_vl` / MiniMax M3 model support
+* 06/25/2026 7.1.0-dev `main`: ✨ Added `cohere2_moe` model support
 * 05/25/2026 7.1.0-dev `main`: ✨ Added `hy_3` and `ministral3` model support
 * 05/25/2026 7.1.0-dev `main`: ✨ Added `hunyuan_v1_dense` and `hunyuan_v1_moe` model support
 * 05/21/2026 7.1.0-dev `main`: ✨ Added `nemotron_labs_diffusion` model support
@@ -258,7 +259,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | Bloom                    | ✅ | FastVLM                         | ✅ | Kimi K2          | ✅ | MobileLLM                       | ✅ | Qwen 2.5/3 Omni        | ✅ |
 | ChatGLM                  | ✅ | Gemma 1-4 / 3n                  | ✅ | Klear            | ✅ | MOSS                            | ✅ | RefinedWeb             | ✅ |
 | CodeGen                  | ✅ | GPTBigCode                      | ✅ | LING/RING        | ✅ | MPT                             | ✅ | StableLM               | ✅ |
-| Cohere 1-2               | ✅ | GPT-Neo / NeoX                  | ✅ | Llama 1-3.3      | ✅ | Nemotron H / Omni               | ✅ | StarCoder2             | ✅ |
+| Cohere 1-2 / 2 MoE       | ✅ | GPT-Neo / NeoX                  | ✅ | Llama 1-3.3      | ✅ | Nemotron H / Omni               | ✅ | StarCoder2             | ✅ |
 | DBRX Converted           | ✅ | GPT-2                           | ✅ | Llama 3.2 VL     | ✅ | Nemotron Ultra / Labs-Diffusion               | ✅ | TeleChat2              | ✅ |
 | Deci                     | ✅ | GPT-J                           | ✅ | Llama 4          | ✅ | OPT                             | ✅ | Trinity                | ✅ |
 | DeepSeek-V2/V3/V4/R1     | ✅ | GPT-OSS                         | ✅ | LongCat Flash    | ✅ | OLMo2 / LLaDA2                  | ✅ | Yi                     | ✅ |
