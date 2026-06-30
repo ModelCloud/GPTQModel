@@ -124,6 +124,50 @@ class _LayerShell(nn.Module):
         self.mlp = _MlpShell()
 
 
+class _FusedDenseMlpShell(nn.Module):
+    def __init__(self, hidden_dim: int = 4, intermediate_dim: int = 3):
+        super().__init__()
+        self.gate_up_proj = nn.Linear(hidden_dim, 2 * intermediate_dim, bias=False, device="meta")
+
+
+class _FusedDenseLayerShell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = _FusedDenseMlpShell()
+
+
+class _MiniMaxM3Shell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="minimax_m3_vl")
+        self.model = nn.Module()
+        self.model.language_model = nn.Module()
+        self.model.language_model.layers = nn.ModuleList([_FusedDenseLayerShell()])
+
+
+class _MiniMaxM3SharedExpertsMlpShell(nn.Module):
+    def __init__(self, hidden_dim: int = 4, intermediate_dim: int = 3):
+        super().__init__()
+        self.shared_experts = nn.Module()
+        self.shared_experts.gate_up_proj = nn.Linear(hidden_dim, 2 * intermediate_dim, bias=False, device="meta")
+
+
+class _MiniMaxM3SharedExpertsLayerShell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = _MiniMaxM3SharedExpertsMlpShell()
+
+
+class _MiniMaxM3SharedExpertsShell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="minimax_m3_vl")
+        self.model = nn.Module()
+        self.model.language_model = nn.Module()
+        self.model.language_model.layers = nn.ModuleList([nn.Identity() for _ in range(4)])
+        self.model.language_model.layers.append(_MiniMaxM3SharedExpertsLayerShell())
+
+
 class _DeepseekV4Shell(nn.Module):
     base_model_prefix = "model"
 
@@ -968,6 +1012,137 @@ def test_lazy_turtle_materializes_defused_deepseek_v4_expert_linears_from_w123_a
     assert torch.equal(expert.gate_proj.weight, checkpoint_tensors["model.layers.0.mlp.experts.0.w1.weight"])
     assert torch.equal(expert.up_proj.weight, checkpoint_tensors["model.layers.0.mlp.experts.0.w3.weight"])
     assert torch.equal(expert.down_proj.weight, checkpoint_tensors["model.layers.0.mlp.experts.0.w2.weight"])
+
+
+def test_lazy_turtle_materializes_fused_dense_mlp_from_split_gate_up_checkpoint(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightRenamingStub(
+                r"^language_model\.model\.",
+                r"model.language_model.",
+            ),
+            _WeightConverterStub(
+                source_patterns=[
+                    "mlp.gate_proj.weight",
+                    "mlp.up_proj.weight",
+                ],
+                target_patterns="mlp.gate_up_proj.weight",
+                operations=[Concatenate(dim=0)],
+            ),
+        ]
+    )
+    assert reversed_map is not None
+
+    gate = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    up = torch.arange(12, 24, dtype=torch.float32).reshape(3, 4)
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "language_model.model.layers.0.mlp.gate_proj.weight": gate,
+            "language_model.model.layers.0.mlp.up_proj.weight": up,
+        },
+        hf_conversion_map_reversed=reversed_map,
+    )
+
+    shell = _MiniMaxM3Shell()
+    target_submodule = shell.model.language_model.layers[0]
+    turtle._copy_checkpoint_tensors_into_submodule(
+        target_model=shell,
+        target_submodule=target_submodule,
+        module_path="model.language_model.layers.0",
+        device=torch.device("cpu"),
+        recurse=True,
+        non_blocking=False,
+    )
+
+    weight = target_submodule.mlp.gate_up_proj.weight
+    assert weight.device.type != "meta"
+    assert torch.equal(weight, torch.cat([gate, up], dim=0))
+
+
+def test_lazy_turtle_sync_all_meta_materializes_fused_dense_mlp_from_split_gate_up_checkpoint(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightRenamingStub(
+                r"^language_model\.model\.",
+                r"model.language_model.",
+            ),
+            _WeightConverterStub(
+                source_patterns=[
+                    "mlp.gate_proj.weight",
+                    "mlp.up_proj.weight",
+                ],
+                target_patterns="mlp.gate_up_proj.weight",
+                operations=[Concatenate(dim=0)],
+            ),
+        ]
+    )
+    assert reversed_map is not None
+
+    gate = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    up = torch.arange(12, 24, dtype=torch.float32).reshape(3, 4)
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "language_model.model.layers.0.mlp.gate_proj.weight": gate,
+            "language_model.model.layers.0.mlp.up_proj.weight": up,
+        },
+        hf_conversion_map_reversed=reversed_map,
+    )
+
+    shell = _MiniMaxM3Shell()
+    materialized = turtle.sync_all_meta(shell_model=shell, tie_after=False)
+
+    weight = shell.model.language_model.layers[0].mlp.gate_up_proj.weight
+    assert materialized == 1
+    assert weight.device.type != "meta"
+    assert torch.equal(weight, torch.cat([gate, up], dim=0))
+
+
+def test_lazy_turtle_direct_meta_sync_materializes_minimax_m3_shared_expert_gate_up(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightRenamingStub(
+                r"^language_model\.model\.",
+                r"model.language_model.",
+            ),
+            _WeightRenamingStub(
+                r"\.block_sparse_moe\.shared_experts\.",
+                r".mlp.shared_experts.",
+            ),
+            _WeightConverterStub(
+                source_patterns=[
+                    "mlp.shared_experts.gate_proj.weight",
+                    "mlp.shared_experts.up_proj.weight",
+                ],
+                target_patterns="mlp.shared_experts.gate_up_proj.weight",
+                operations=[Concatenate(dim=0)],
+            ),
+        ]
+    )
+    assert reversed_map is not None
+
+    gate = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    up = torch.arange(12, 24, dtype=torch.float32).reshape(3, 4)
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "language_model.model.layers.4.block_sparse_moe.shared_experts.gate_proj.weight": gate,
+            "language_model.model.layers.4.block_sparse_moe.shared_experts.up_proj.weight": up,
+        },
+        hf_conversion_map_reversed=reversed_map,
+    )
+
+    shell = _MiniMaxM3SharedExpertsShell()
+    leaf = shell.model.language_model.layers[4].mlp.shared_experts.gate_up_proj
+    turtle.materialize_direct_meta_tensors(
+        target_model=shell,
+        target_submodule=leaf,
+        device=torch.device("cpu"),
+    )
+
+    assert leaf.weight.device.type != "meta"
+    assert torch.equal(leaf.weight, torch.cat([gate, up], dim=0))
 
 
 def test_lazy_turtle_falls_back_to_legacy_checkpoint_conversion_mapping(tmp_path, monkeypatch):
