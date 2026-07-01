@@ -129,6 +129,7 @@ from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
 from .definitions.laguna import LagunaQModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
+from .definitions.lfm2_vl import LFM2VLQModel  # noqa: E402
 from .definitions.llada2 import LLaDA2MoeQModel
 from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel, Llama4TextQModel  # noqa: E402
@@ -334,6 +335,7 @@ MODEL_MAP = {
     "bailing_moe": BailingMoeQModel,
     "bailing_hybrid": BailingMoeQModel,
     "lfm2_moe": LFM2MoeQModel,
+    "lfm2_vl": LFM2VLQModel,
     "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
     "afmoe": AfMoeQModel,
