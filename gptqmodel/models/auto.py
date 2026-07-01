@@ -128,6 +128,7 @@ from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
 from .definitions.laguna import LagunaQModel  # noqa: E402
+from .definitions.lfm2 import LFM2QModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
 from .definitions.llada2 import LLaDA2MoeQModel
 from .definitions.llama import LlamaQModel  # noqa: E402
@@ -331,6 +332,7 @@ MODEL_MAP = {
     "nemotronh_nano_omni_reasoning_v3": NemotronOmniQModel,
     "bailing_moe": BailingMoeQModel,
     "bailing_hybrid": BailingMoeQModel,
+    "lfm2": LFM2QModel,
     "lfm2_moe": LFM2MoeQModel,
     "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
