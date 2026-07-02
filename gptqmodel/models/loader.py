@@ -545,7 +545,6 @@ def ModelLoader(cls):
         model_init_kwargs_without_internal["trust_remote_code"] = trust_remote_code
 
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs_without_internal, **hf_gguf_load_kwargs)
-        print("config", config)
 
         defuser.replace_fused_blocks(config.model_type)
 
@@ -722,8 +721,6 @@ def ModelLoader(cls):
 
         if quantize_config.offload_to_disk:
             shell_config = copy.deepcopy(config)
-            print("shell_config", shell_config)
-            print("shell_config", shell_config.vision_config)
             try:
                 model = build_shell_model(cls.loader, config=shell_config, **model_init_kwargs_without_internal)
             except RuntimeError as exc:

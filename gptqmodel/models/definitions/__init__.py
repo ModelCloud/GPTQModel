@@ -52,6 +52,7 @@ from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
 from .interns1 import InternS1QModel
 from .internvl_chat import InternVLChatQModel
+from .lfm2_vl import LFM2VLQModel
 from .llama4 import Llama4QModel, Llama4TextQModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel
