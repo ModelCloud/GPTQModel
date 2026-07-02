@@ -743,6 +743,35 @@ class BaseQModel(nn.Module):
         # print(f"full layer_modules: {full}")
         return full
 
+    @classmethod
+    def should_quantize_layer(
+        cls,
+        layer: nn.Module,
+        layer_name: str,
+        layer_index: int | None,
+        quantize_config: BaseQuantizeConfig,
+    ) -> bool:
+        """Return whether a decoder layer should be quantized during calibration."""
+        return True
+
+    @classmethod
+    def should_quantize_module(
+        cls,
+        model: nn.Module,
+        module_name: str,
+        module: nn.Module,
+        quantize_config: BaseQuantizeConfig,
+    ) -> bool:
+        """
+        Return whether a concrete module should be replaced with a quantized module.
+
+        `module_tree` describes reusable suffixes inside decoder layers, but some
+        model families use different layer subclasses under the same layer list.
+        Model definitions can override this hook when a suffix is quantizable only
+        for specific layer subclasses.
+        """
+        return True
+
     def prepare_dataset(
         self,
         calibration_dataset: Union[

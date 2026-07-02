@@ -18,6 +18,7 @@ from ..base import BaseQModel
 class MLlamaQModel(BaseQModel):
     # AutoModelForPreTraining return a correct MLlamaForConditionalGeneration for mllama.
     loader = AutoModelForPreTraining
+    _cross_attention_decoder_layer = "MllamaCrossAttentionDecoderLayer"
 
     pre_lm_head_norm_module = "model.language_model.norm"
     # Current Transformers shells use `model.language_model.*`, while the
@@ -80,6 +81,45 @@ class MLlamaQModel(BaseQModel):
                 return language_model
 
         raise AttributeError("Unable to resolve an Mllama language model layout.")
+
+    @classmethod
+    def _decoder_layer_context_for_module_name(cls, model, module_name: str):
+        for layers_node in cls.extract_layers_node():
+            prefix = f"{layers_node}."
+            if not module_name.startswith(prefix):
+                continue
+
+            layer_index = module_name[len(prefix):].split(".", 1)[0]
+            if layer_index.isdigit():
+                layer_name = f"{layers_node}.{layer_index}"
+                return get_module(model, layer_name), layer_name, int(layer_index)
+
+        return None, "", None
+
+    @classmethod
+    def _is_cross_attention_decoder_layer(cls, layer):
+        return (
+            layer is not None
+            and layer.__class__.__name__.lower() == cls._cross_attention_decoder_layer.lower()
+        )
+
+    @classmethod
+    def should_quantize_layer(cls, layer, layer_name, layer_index, quantize_config):
+        # Mllama cross-attention decoder layers consume vision features. They are
+        # not quantized today, so their child modules must also stay dense when
+        # loading or re-saving a quantized checkpoint.
+        if cls._is_cross_attention_decoder_layer(layer):
+            return False
+
+        return super().should_quantize_layer(layer, layer_name, layer_index, quantize_config)
+
+    @classmethod
+    def should_quantize_module(cls, model, module_name, module, quantize_config):
+        decoder_layer, layer_name, layer_index = cls._decoder_layer_context_for_module_name(model, module_name)
+        if decoder_layer is not None:
+            return cls.should_quantize_layer(decoder_layer, layer_name, layer_index, quantize_config)
+
+        return super().should_quantize_module(model, module_name, module, quantize_config)
 
     def _core_language_model(self):
         return self._resolve_language_model(self.model)
