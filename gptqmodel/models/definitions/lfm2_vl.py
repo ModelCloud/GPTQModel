@@ -3,9 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from types import SimpleNamespace
 from typing import Dict
 
+import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers.masking_utils import create_causal_mask
 
 from ...utils.calibration import batched
 from ...utils.model import MODALITY, move_to, nested_move_to
@@ -16,6 +19,17 @@ from ..base import BaseQModel
 
 class LFM2VLQModel(BaseQModel):
     loader = AutoModelForImageTextToText
+    HF_CONVERSION_MAP_REVERSED = (
+        # LFM2-VL mounts `Siglip2VisionModel` directly at `model.vision_tower`.
+        # Runtime shell paths therefore expose `model.vision_tower.*`, while
+        # original checkpoint tensors keep SigLIP2's base prefix under
+        # `model.vision_tower.vision_model.*`.
+        SimpleNamespace(
+            source_patterns=[r"^model\.vision_tower\.(?!vision_model\.)(.+)$"],
+            target_patterns=[r"^model.vision_tower.vision_model.\1"],
+            operations=[],
+        ),
+    )
 
     pre_lm_head_norm_module = "model.language_model.embedding_norm"
     rotary_embedding = "model.language_model.rotary_emb"
@@ -123,9 +137,40 @@ class LFM2VLQModel(BaseQModel):
             example[key] = nested_move_to(value, device=data_device)
 
         return self.finalize_input_capture_example(example)
-    #
-    # def run_input_capture(self, example, use_cache: bool, data_device):
-    #     return self.model.generate(**example, max_new_tokens=1)
+
+    def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer,
+            layer_input,
+            additional_inputs,
+            target_device,
+        )
+        attention_mask = additional_inputs.get("attention_mask")
+        if attention_mask is None:
+            return additional_inputs
+
+        if not getattr(layer, "is_attention_layer", False):
+            if torch.is_tensor(attention_mask) and attention_mask.dtype != torch.bool:
+                additional_inputs["attention_mask"] = attention_mask.bool()
+            return additional_inputs
+
+        if not layer_input or not torch.is_tensor(layer_input[0]):
+            return additional_inputs
+
+        layer_config = getattr(layer, "config", None)
+        if layer_config is None:
+            layer_config = getattr(getattr(layer, "self_attn", None), "config", None)
+        if layer_config is None:
+            return additional_inputs
+
+        additional_inputs["attention_mask"] = create_causal_mask(
+            config=layer_config,
+            inputs_embeds=layer_input[0],
+            attention_mask=attention_mask,
+            past_key_values=additional_inputs.get("past_key_values"),
+            position_ids=additional_inputs.get("position_ids"),
+        )
+        return additional_inputs
 
 
 __all__ = ["LFM2VLQModel"]
