@@ -20,7 +20,8 @@
 </p>
 
 ## Latest News
-* 01/07/2026 7.1.0-dev `main`: ✨ Added `lfm2` model support
+
+* 02/07/2026 7.1.0-dev `main`: ✨ Added `lfm2` and `lfm2_vl` model support
 * 06/30/2026 7.1.0-dev `main`: ✨ Added `minimax_m3_vl` / MiniMax M3 model support
 * 06/25/2026 7.1.0-dev `main`: ✨ Added `cohere2_moe` model support
 * 05/25/2026 7.1.0-dev `main`: ✨ Added `hy_3` and `ministral3` model support
@@ -267,7 +268,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | Dream                    | ✅ | GRIN-MoE                        | ✅ | Instella         | ✅ | Phi 1-4                         | ✅ | Voxtral                | ✅ |
 | ERNIE 4.5 / MoE / VL MoE | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V/V 4_6             | ✅ | PanGu-α                | ✅ |
 | XVERSE                   | ✅ | Brumby                          | ✅ | Hymba            | ✅ | Mistral                         | ✅ | Qwen 1/2/3/3.5         | ✅ |
-| MiniMax M2/M3            | ✅ | AfMoE                           | ✅ | Bailing-MoE      | ✅ | LFM2 / LFM2-MoE                 | ✅ | Marin                  | ✅ |
+| MiniMax M2/M3            | ✅ | AfMoE                           | ✅ | Bailing-MoE      | ✅ | LFM2 / LFM2-VL / LFM2-MoE                 | ✅ | Marin                  | ✅ |
 | InternVL Chat            | ✅ | Laguna                          | ✅ | Mimo / Mimo V2   | ✅ | Zamba / Zamba2                  | ✅ | Intern S1              | ✅ |
 | HunYuan V1 Dense / MoE   | ✅ | HY-V3                           | ✅ |    |  |                  |  |                |   |
 
