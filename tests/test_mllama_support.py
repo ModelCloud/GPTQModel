@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from gptqmodel.models.definitions.mllama import MLlamaQModel
-from gptqmodel.utils.model import get_layers_with_prefixes
+from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 from gptqmodel.utils.structure import LazyTurtle
 
 
@@ -43,6 +43,10 @@ class _DecoderLayer(nn.Module):
         return hidden_states
 
 
+class MllamaCrossAttentionDecoderLayer(_DecoderLayer):
+    pass
+
+
 class _Rotary(nn.Module):
     def forward(self, x, position_ids=None):
         shape = (*x.shape[:2], x.shape[-1] // 2)
@@ -61,30 +65,55 @@ class _RecordingEmbedding(nn.Module):
 
 
 class _LanguageModel(nn.Module):
-    def __init__(self):
+    def __init__(self, layers=None):
         super().__init__()
         self.embed_tokens = nn.Embedding(8, 4)
-        self.layers = nn.ModuleList([_DecoderLayer(), _DecoderLayer()])
+        self.layers = nn.ModuleList(layers or [_DecoderLayer(), _DecoderLayer()])
         self.norm = nn.LayerNorm(4)
         self.rotary_emb = _Rotary()
 
 
 class _CurrentMllamaWrapper(nn.Module):
-    def __init__(self):
+    def __init__(self, language_model=None):
         super().__init__()
         self.model = nn.Module()
-        self.model.language_model = _LanguageModel()
+        self.model.language_model = language_model or _LanguageModel()
         self.model.vision_model = nn.Identity()
         self.model.multi_modal_projector = nn.Linear(4, 4, bias=False)
         self.lm_head = nn.Linear(4, 4, bias=False)
 
 
 class _LegacyMllamaWrapper(nn.Module):
-    def __init__(self):
+    def __init__(self, language_model=None):
         super().__init__()
         self.language_model = nn.Module()
-        self.language_model.model = _LanguageModel()
+        self.language_model.model = language_model or _LanguageModel()
         self.lm_head = nn.Linear(4, 4, bias=False)
+
+
+def _loader_selected_modules(model):
+    qcfg = SimpleNamespace(lm_head=False, dynamic=None)
+    config = SimpleNamespace()
+    extract_layers_node = MLlamaQModel.extract_layers_node()
+    ignore_modules = [MLlamaQModel.lm_head] + MLlamaQModel.get_base_modules(model)
+    simple_layer_modules = MLlamaQModel.simple_layer_modules(config, qcfg)
+    modules = find_modules(model)
+
+    for name in list(modules.keys()):
+        if not any(name.startswith(prefix) for prefix in extract_layers_node) or any(
+            name.startswith(ignore_module) for ignore_module in ignore_modules
+        ) or all(
+            not name.endswith(ignore_module)
+            for sublist in simple_layer_modules
+            for ignore_module in sublist
+        ):
+            del modules[name]
+            continue
+
+        if not MLlamaQModel.should_quantize_module(model, name, modules[name], qcfg):
+            del modules[name]
+
+    return modules
 
 
 def test_mllama_module_tree_supports_current_transformers_layout():
@@ -120,6 +149,44 @@ def test_mllama_module_tree_keeps_legacy_language_model_layout():
         "language_model.model.layers.0",
         "language_model.model.layers.1",
     ]
+
+
+def test_mllama_loader_selection_skips_current_cross_attention_decoder_layers():
+    model = _CurrentMllamaWrapper(
+        _LanguageModel(layers=[_DecoderLayer(), MllamaCrossAttentionDecoderLayer()])
+    )
+
+    modules = _loader_selected_modules(model)
+
+    assert "model.language_model.layers.0.mlp.down_proj" in modules
+    assert "model.language_model.layers.0.self_attn.q_proj" in modules
+    assert "model.language_model.layers.1.mlp.down_proj" not in modules
+    assert "model.language_model.layers.1.self_attn.q_proj" not in modules
+
+
+def test_mllama_loader_selection_skips_legacy_cross_attention_decoder_layers():
+    model = _LegacyMllamaWrapper(
+        _LanguageModel(layers=[_DecoderLayer(), MllamaCrossAttentionDecoderLayer()])
+    )
+
+    modules = _loader_selected_modules(model)
+
+    assert "language_model.model.layers.0.mlp.down_proj" in modules
+    assert "language_model.model.layers.0.self_attn.q_proj" in modules
+    assert "language_model.model.layers.1.mlp.down_proj" not in modules
+    assert "language_model.model.layers.1.self_attn.q_proj" not in modules
+
+
+def test_mllama_quantize_layer_skips_cross_attention_decoder_layers():
+    qcfg = SimpleNamespace()
+
+    assert MLlamaQModel.should_quantize_layer(_DecoderLayer(), "layers.0", 0, qcfg)
+    assert not MLlamaQModel.should_quantize_layer(
+        MllamaCrossAttentionDecoderLayer(),
+        "layers.1",
+        1,
+        qcfg,
+    )
 
 
 def test_mllama_pre_quantize_hooks_materialize_text_input_modules():

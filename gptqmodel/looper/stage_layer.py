@@ -453,8 +453,12 @@ def run_layer_stage(
                 layer_title,
             )
 
-        if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
-            # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
+        if not looper.gptq_model.should_quantize_layer(
+            module,
+            layer_name,
+            layer_index,
+            looper.gptq_model.quantize_config,
+        ):
             continue
 
         module = looper.gptq_model.pre_quantize(module)

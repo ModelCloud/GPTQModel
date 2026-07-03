@@ -958,7 +958,11 @@ def ModelWriter(cls):
                     if name is not self.lm_head:
                         log.info(f"The layer {name} is not quantized.")
                     del modules[name]
+                    continue
 
+                if not self.should_quantize_module(model, name, modules[name], qcfg):
+                    log.info(f"The layer {name} is not quantized.")
+                    del modules[name]
 
             make_quant(
                 model,

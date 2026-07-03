@@ -1231,6 +1231,11 @@ def ModelLoader(cls):
                     if name is not cls.lm_head:
                         log.info(f"The layer {name} is not quantized.")
                     del modules[name]
+                    continue
+
+                if not cls.should_quantize_module(model, name, modules[name], qcfg):
+                    log.info(f"The layer {name} is not quantized.")
+                    del modules[name]
 
             if format_code == FORMAT.EXL3:
                 if not isinstance(qcfg.tensor_storage, dict) or not qcfg.tensor_storage:
