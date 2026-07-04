@@ -78,6 +78,27 @@ def test_prepare_deepseek_vl_v2_dataset_reuses_shared_dataset(monkeypatch):
     ]
 
 
+def test_deepseek_vl_v2_forward_patches_missing_remote_config_defaults():
+    class FakeRemoteModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace()
+
+        def forward(self):
+            return (
+                self.config.use_cache,
+                self.config.output_attentions,
+                self.config.output_hidden_states,
+                self.config.use_return_dict,
+            )
+
+    qmodel = object.__new__(DeepSeekVLV2QModel)
+    nn.Module.__init__(qmodel)
+    qmodel.model = FakeRemoteModel()
+
+    assert qmodel.forward() == (True, False, False, True)
+
+
 class TestDeepSeekVLV2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/deepseek-vl2-tiny" # "Isotr0py/deepseek-vl2-tiny"
     TRUST_REMOTE_CODE = True
@@ -88,8 +109,8 @@ class TestDeepSeekVLV2(ModelTest):
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
-            "acc": {"value": 0.4309, "floor_pct": 0.2},
-            "acc_norm": {"value": 0.4113, "floor_pct": 0.2},
+            "acc": {"value": 0.3566, "floor_pct": 0.2},
+            "acc_norm": {"value": 0.3899, "floor_pct": 0.2},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)

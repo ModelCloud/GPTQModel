@@ -83,7 +83,26 @@ class DeepSeekVLV2QModel(BaseQModel):
                 nn.Parameter(parameter.to(device=device), requires_grad=parameter.requires_grad),
             )
 
+    def _ensure_remote_config_defaults(self) -> None:
+        config = getattr(self.model, "config", None)
+        if config is None:
+            return
+
+        for name, value in (
+            ("use_cache", True),
+            ("output_attentions", False),
+            ("output_hidden_states", False),
+            ("use_return_dict", True),
+        ):
+            if not hasattr(config, name):
+                setattr(config, name, value)
+
+    def forward(self, *args, **kwargs):
+        self._ensure_remote_config_defaults()
+        return super().forward(*args, **kwargs)
+
     def pre_quantize_generate_hook_start(self):
+        self._ensure_remote_config_defaults()
         if self.turtle_model is not None:
             self.shell_direct_meta_materialize(target_submodule=self.model, device=self.quantize_config.device)
         language_model = self.model.language.model
