@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 04/07/2026 7.1.0-dev `main`: ✨ Added `deepseek_vl_v2` model support
 * 02/07/2026 7.1.0-dev `main`: ✨ Added `lfm2` and `lfm2_vl` model support
 * 06/30/2026 7.1.0-dev `main`: ✨ Added `minimax_m3_vl` / MiniMax M3 model support
 * 06/25/2026 7.1.0-dev `main`: ✨ Added `cohere2_moe` model support

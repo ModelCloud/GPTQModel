@@ -64,7 +64,6 @@ __all__ = [
     "get_hf_config_dtype",
     "normalize_torch_dtype_kwarg",
     "normalize_hf_config_compat",
-    "patch_deepseek_vl_v2_remote_code_before_config_load",
     "prepare_remote_code_compat",
     "prepare_remote_model_init_compat",
     "has_native_transformers_causallm_support",
