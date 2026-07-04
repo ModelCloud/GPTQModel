@@ -12,7 +12,6 @@ os.environ.setdefault("HF_MODULES_CACHE", "/tmp/hf_modules")
 from gptqmodel.models.definitions.deepseek_vl_v2 import DeepSeekVLV2QModel  # noqa: E402
 from model_test import ModelTest  # noqa: E402
 from ovis import image_to_test_dataset  # noqa: E402
-from PIL import Image  # noqa: E402
 import torch  # noqa: E402
 from torch import nn  # noqa: E402
 
