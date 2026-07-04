@@ -26,6 +26,13 @@ if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from .module_looper import ModuleLooper
 
 
+_VISION_INPUT_KEYS = frozenset(("pixel_values", "images"))
+
+
+def _has_vision_inputs(example: Dict[str, Any]) -> bool:
+    return any(key in example for key in _VISION_INPUT_KEYS)
+
+
 class StageInputsCapture:
     """Capture layer inputs so processors can reuse cached activations."""
 
@@ -204,7 +211,6 @@ class StageInputsCapture:
 
         self.gptq_model.pre_quantize_generate_hook_start()
 
-        # TODO: why data_device sometimes set to cuda (self.gptq_model.quantize_config.device) and sometimes to CPU (cur_layer_device)?
         try:
             for batch_index, example in enumerate(calibration_data, start=1):
                 if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
@@ -212,7 +218,7 @@ class StageInputsCapture:
                 else:
                     data_device = (
                         self.gptq_model.quantize_config.device
-                        if "pixel_values" in example.keys()
+                        if _has_vision_inputs(example)
                         else cur_layer_device
                     )
                 example = self.gptq_model.move_input_capture_example(example, data_device)
