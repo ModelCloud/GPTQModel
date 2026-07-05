@@ -64,6 +64,7 @@ from ..utils.hf import (  # noqa: E402
     get_hf_gguf_load_kwargs,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
+    patch_remote_code_before_config_load,
     resolve_trust_remote_code,
 )
 from ..utils.hub import list_repo_files  # noqa: E402
@@ -85,6 +86,7 @@ from .definitions.decilm import DeciLMQModel  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
 from .definitions.deepseek_v4 import DeepSeekV4QModel  # noqa: E402
+from .definitions.deepseek_vl_v2 import DeepSeekVLV2QModel  # noqa: E402
 from .definitions.dots1 import Dots1QModel  # noqa: E402
 from .definitions.dream import DreamQModel  # noqa: E402
 from .definitions.ernie4_5 import Ernie4_5QModel  # noqa: E402
@@ -297,6 +299,7 @@ MODEL_MAP = {
     "deepseek_v2": DeepSeekV2QModel,
     "deepseek_v3": DeepSeekV3QModel,
     "deepseek_v4": DeepSeekV4QModel,
+    "deepseek_vl_v2": DeepSeekVLV2QModel,
     "dots1": Dots1QModel,
     "exaone": ExaOneQModel,
     "exaone4": Exaone4QModel,
@@ -475,6 +478,7 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
             api_name="check_and_get_model_definition",
         )
     trust_remote_code = resolve_trust_remote_code(model_dir, trust_remote_code=trust_remote_code)
+    patch_remote_code_before_config_load(model_dir)
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
@@ -529,6 +533,7 @@ class GPTQModel:
 
         model_cfg = None
         if not (treat_as_local_path and not isdir(model_id_or_path)):
+            patch_remote_code_before_config_load(model_id_or_path)
             model_cfg = AutoConfig.from_pretrained(
                 model_id_or_path,
                 trust_remote_code=trust_remote_code,

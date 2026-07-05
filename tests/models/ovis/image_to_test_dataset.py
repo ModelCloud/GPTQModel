@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
+from gptqmodel.models.definitions.deepseek_vl_v2 import DeepSeekVLV2QModel
 from gptqmodel.models.definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
 from gptqmodel.models.definitions.interns1 import InternS1QModel
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
@@ -59,6 +60,17 @@ def format_qwen2_vl_dataset(image, assistant):
     ]
 
 
+def format_deepseek_vl_v2_dataset(image, assistant):
+    return [
+        {
+            "role": "<|User|>",
+            "content": "<image>\ngenerate a caption for this image",
+            "images": [image],
+        },
+        {"role": "<|Assistant|>", "content": assistant},
+    ]
+
+
 def format_qwen2_5_omni_dataset(image, assistant):
     return [
         {
@@ -91,6 +103,10 @@ def prepare_dataset(format_func, n_sample: int = 20) -> list[list[dict]]:
     ]
 
 
+def prepare_deepseek_vl_v2_dataset(n_sample: int = 20) -> list[list[dict]]:
+    return prepare_dataset(format_deepseek_vl_v2_dataset, n_sample=n_sample)
+
+
 def get_calib_dataset(model):
     if isinstance(model, OvisQModel):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
@@ -119,5 +135,8 @@ def get_calib_dataset(model):
 
     if isinstance(model, BaseQwen2_5_OmniGPTQ):
         return prepare_dataset(format_qwen2_5_omni_dataset, n_sample=20)
+
+    if isinstance(model, DeepSeekVLV2QModel):
+        return prepare_deepseek_vl_v2_dataset(n_sample=20)
 
     raise NotImplementedError(f"Unsupported MODEL: {model.__class__}")
