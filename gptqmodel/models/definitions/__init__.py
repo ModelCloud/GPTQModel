@@ -20,6 +20,7 @@ from .decilm import DeciLMQModel
 from .deepseek_v2 import DeepSeekV2QModel
 from .deepseek_v3 import DeepSeekV3QModel
 from .deepseek_v4 import DeepSeekV4QModel
+from .deepseek_ocr2 import DeepSeekOCR2QModel
 from .deepseek_vl_v2 import DeepSeekVLV2QModel
 from .dots1 import Dots1QModel
 from .dream import DreamQModel
