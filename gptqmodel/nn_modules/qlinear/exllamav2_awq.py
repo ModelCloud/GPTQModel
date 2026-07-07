@@ -41,7 +41,9 @@ class AwqExllamaV2Linear(AWQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA] # ROCm has broken accuracies issues
-    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
+    # Windows verified: kernel JIT-compiles with MSVC + CUDA 12.4 and produces
+    # output identical to the Triton kernels (benchmarks in #2937).
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
