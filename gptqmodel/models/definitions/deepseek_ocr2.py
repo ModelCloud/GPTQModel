@@ -69,8 +69,7 @@ class DeepSeekOCR2QModel(BaseQModel):
 
     def pre_quantize_generate_hook_start(self):
         core_model = self.model.model
-        if self.turtle_model is not None:
-            self.shell_direct_meta_materialize(target_submodule=core_model, device=self.quantize_config.device)
+        self.shell_direct_meta_materialize(target_submodule=core_model, device=self.quantize_config.device)
         language_model = core_model.language_model
         self.shell_module_materialize(language_model.embed_tokens, self.quantize_config.device)
         self.shell_module_materialize(language_model.norm, self.quantize_config.device)
