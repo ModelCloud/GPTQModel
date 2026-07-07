@@ -1627,32 +1627,36 @@ def _collect_state_dict_with_offload(model: nn.Module, offload_root: str) -> Dic
             source = param
         state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=source)
 
-    for name, buf in model.named_buffers():
-        if name in state_dict:
-            continue
-
-        # If the buffer is non-persistent, it does not need to be written to state_dict.
-        module_path, leaf = _split_parameter_path(name)
-        module = get_module_by_name(model, module_path)
-        if hasattr(module, "_non_persistent_buffers_set") and leaf in module._non_persistent_buffers_set:
-            continue
-
-        if getattr(buf, "is_meta", False) or buf.device.type == "meta":
-            source = _resolve_offload_entry(
-                offload_root,
-                module_path,
-                leaf,
-                buf.dtype,
-                tuple(buf.shape),
-                index_cache,
-            )
-            if source is None:
-                raise FileNotFoundError(
-                    f"Offloaded buffer '{name}' not found in offload directory '{offload_root}'."
+    # Walk the module tree ONCE and collect persistent buffers directly from each
+    # module. This avoids the previous O(N^2) behavior where every buffer triggered
+    # a full `get_module_by_name()` -> `named_modules()` traversal of the entire
+    # model (N buffers x N modules), which made saving large MoE models (e.g. 46K
+    # modules / ~200K buffers) take hours of pure-Python CPU work.
+    for module_name, module in model.named_modules():
+        non_persistent = getattr(module, "_non_persistent_buffers_set", ())
+        for buffer_name, buf in module.named_buffers(recurse=False):
+            if buffer_name in non_persistent:
+                continue
+            name = f"{module_name}.{buffer_name}" if module_name else buffer_name
+            if name in state_dict:
+                continue
+            module_path, leaf = _split_parameter_path(name)
+            if getattr(buf, "is_meta", False) or buf.device.type == "meta":
+                source = _resolve_offload_entry(
+                    offload_root,
+                    module_path,
+                    leaf,
+                    buf.dtype,
+                    tuple(buf.shape),
+                    index_cache,
                 )
-        else:
-            source = buf
-        state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=source)
+                if source is None:
+                    raise FileNotFoundError(
+                        f"Offloaded buffer '{name}' not found in offload directory '{offload_root}'."
+                    )
+            else:
+                source = buf
+            state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=source)
 
     return state_dict
 
@@ -1670,17 +1674,18 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
         state_dict = collections.OrderedDict()
         for name, param in model.named_parameters():
             state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=param)
-        for name, buf in model.named_buffers():
-            if name in state_dict:
-                continue
-
-            # If the buffer is non-persistent, it does not need to be written to state_dict.
-            module_path, leaf = _split_parameter_path(name)
-            module = get_module_by_name(model, module_path)
-            if hasattr(module, "_non_persistent_buffers_set") and leaf in module._non_persistent_buffers_set:
-                continue
-
-            state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
+        # Walk the module tree ONCE to collect persistent buffers. The previous
+        # implementation called `get_module_by_name()` per buffer, which is O(N^2)
+        # (N buffers x N modules) and dominates save time for large models.
+        for module_name, module in model.named_modules():
+            non_persistent = getattr(module, "_non_persistent_buffers_set", ())
+            for buffer_name, buf in module.named_buffers(recurse=False):
+                if buffer_name in non_persistent:
+                    continue
+                name = f"{module_name}.{buffer_name}" if module_name else buffer_name
+                if name in state_dict:
+                    continue
+                state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
 
     ptrs = collections.defaultdict(list)
     for name, entry in state_dict.items():
