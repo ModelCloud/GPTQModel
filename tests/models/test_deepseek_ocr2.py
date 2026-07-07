@@ -35,7 +35,6 @@ class TestDeepSeekOCR2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/DeepSeek-OCR-2"  # deepseek-community/DeepSeek-OCR-2
     LOAD_BACKEND = BACKEND.AUTO
     USE_FLASH_ATTN = False
-    OFFLOAD_TO_DISK = False
 
     EVAL_TASKS_SLOW = {
         "arc_challenge": {

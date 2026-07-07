@@ -6,7 +6,6 @@
 from typing import Any, Dict
 
 import torch
-from torch import nn
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
@@ -20,6 +19,8 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 class DeepSeekOCR2QModel(BaseQModel):
     loader = AutoModelForImageTextToText
+    modules_with_direct_meta_tensors = ["model"]
+
     require_load_processor = True
     support_batch_quantize = False
 
@@ -31,7 +32,6 @@ class DeepSeekOCR2QModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.language_model.norm"
     rotary_embedding = "model.language_model.rotary_emb"
-    _direct_parameter_names = ("view_separator",)
 
     module_tree = [
         "model",
@@ -67,32 +67,20 @@ class DeepSeekOCR2QModel(BaseQModel):
                 base_modules.append(module_name)
         return base_modules
 
-    def _move_direct_parameters(self, device: torch.device) -> None:
-        core_model = getattr(self.model, "model", self.model)
-        for name in self._direct_parameter_names:
-            parameter = getattr(core_model, name, None)
-            if not isinstance(parameter, nn.Parameter) or parameter.device == device:
-                continue
-            setattr(
-                core_model,
-                name,
-                nn.Parameter(parameter.to(device=device), requires_grad=parameter.requires_grad),
-            )
-
     def pre_quantize_generate_hook_start(self):
         core_model = self.model.model
+        if self.turtle_model is not None:
+            self.shell_direct_meta_materialize(target_submodule=core_model, device=self.quantize_config.device)
         language_model = core_model.language_model
         self.shell_module_materialize(language_model.embed_tokens, self.quantize_config.device)
         self.shell_module_materialize(language_model.norm, self.quantize_config.device)
         self.shell_module_materialize(language_model.rotary_emb, self.quantize_config.device)
         self.shell_module_materialize(core_model.vision_tower, self.quantize_config.device)
         self.shell_module_materialize(core_model.multi_modal_projector, self.quantize_config.device)
-        self._move_direct_parameters(torch.device(self.quantize_config.device))
 
     def pre_quantize_generate_hook_end(self):
         core_model = self.model.model
         language_model = core_model.language_model
-        self._move_direct_parameters(CPU)
         if self.quantize_config.offload_to_disk:
             offload_to_disk(
                 model=language_model,

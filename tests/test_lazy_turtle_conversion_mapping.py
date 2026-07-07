@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 
+from gptqmodel.models.definitions.deepseek_ocr2 import DeepSeekOCR2QModel
 from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
 from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ
 from gptqmodel.models.definitions.mixtral import MixtralQModel
@@ -97,6 +98,26 @@ class _DeepseekV4DummyModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace(model_type="deepseek_v4")
+
+
+class _DeepseekOCR2DirectParamShell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="deepseek_ocr2")
+        self.model = nn.Module()
+        self.model.view_separator = nn.Parameter(torch.empty(4, device="meta", dtype=torch.bfloat16))
+
+
+class _DeepseekOCR2VisionProjectorShell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="deepseek_ocr2")
+        self.model = nn.Module()
+        self.model.vision_tower = nn.Module()
+        self.model.vision_tower.sam_encoder = nn.Module()
+        self.model.vision_tower.sam_encoder.patch_embed = nn.Module()
+        self.model.vision_tower.sam_encoder.patch_embed.projection = nn.Linear(2, 2, device="meta")
+        self.model.multi_modal_projector = nn.Linear(2, 2, device="meta")
 
 
 class _ExpertParamShell(nn.Module):
@@ -1202,6 +1223,64 @@ def test_base_qmodel_prefers_manual_hf_conversion_map_reversed(tmp_path, monkeyp
     )
 
     _assert_gemma3_alias_resolution(turtle)
+
+
+def test_deepseek_ocr2_direct_meta_view_separator_uses_checkpoint_misspelling(tmp_path):
+    source = torch.arange(4, dtype=torch.bfloat16)
+    shell = _DeepseekOCR2DirectParamShell()
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {"model.view_seperator": source},
+        hf_conversion_map_reversed=DeepSeekOCR2QModel.resolve_hf_conversion_map_reversed(target_model=shell),
+        target_model=shell,
+    )
+
+    turtle.materialize_direct_meta_tensors(
+        target_model=shell,
+        target_submodule=shell.model,
+        device=torch.device("cpu"),
+    )
+
+    assert shell.model.view_separator.device.type == "cpu"
+    assert torch.equal(shell.model.view_separator, source)
+
+
+def test_deepseek_ocr2_materializes_vision_tower_from_legacy_checkpoint_paths(tmp_path):
+    vision_weight = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+    vision_bias = torch.arange(2, dtype=torch.float32)
+    projector_weight = torch.arange(4, 8, dtype=torch.float32).reshape(2, 2)
+    projector_bias = torch.arange(2, 4, dtype=torch.float32)
+    shell = _DeepseekOCR2VisionProjectorShell()
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "model.sam_model.patch_embed.proj.weight": vision_weight,
+            "model.sam_model.patch_embed.proj.bias": vision_bias,
+            "model.projector.layers.weight": projector_weight,
+            "model.projector.layers.bias": projector_bias,
+        },
+        hf_conversion_map_reversed=DeepSeekOCR2QModel.resolve_hf_conversion_map_reversed(target_model=shell),
+        target_model=shell,
+    )
+
+    turtle.materialize_submodule(
+        target_model=shell,
+        target_submodule=shell.model.vision_tower,
+        device=torch.device("cpu"),
+    )
+    turtle.materialize_submodule(
+        target_model=shell,
+        target_submodule=shell.model.multi_modal_projector,
+        device=torch.device("cpu"),
+    )
+
+    projection = shell.model.vision_tower.sam_encoder.patch_embed.projection
+    assert projection.weight.device.type == "cpu"
+    assert torch.equal(projection.weight, vision_weight)
+    assert torch.equal(projection.bias, vision_bias)
+    assert shell.model.multi_modal_projector.weight.device.type == "cpu"
+    assert torch.equal(shell.model.multi_modal_projector.weight, projector_weight)
+    assert torch.equal(shell.model.multi_modal_projector.bias, projector_bias)
 
 
 def test_gemma3_definition_hf_conversion_map_reversed_fixes_shell_vision_paths(tmp_path):
