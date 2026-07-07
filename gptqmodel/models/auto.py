@@ -87,6 +87,7 @@ from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
 from .definitions.deepseek_v4 import DeepSeekV4QModel  # noqa: E402
 from .definitions.deepseek_ocr2 import DeepSeekOCR2QModel  # noqa: E402
+from .definitions.deepseek_vl import DeepSeekVLQModel  # noqa: E402
 from .definitions.deepseek_vl_v2 import DeepSeekVLV2QModel  # noqa: E402
 from .definitions.dots1 import Dots1QModel  # noqa: E402
 from .definitions.dream import DreamQModel  # noqa: E402
@@ -301,6 +302,7 @@ MODEL_MAP = {
     "deepseek_v3": DeepSeekV3QModel,
     "deepseek_v4": DeepSeekV4QModel,
     "deepseek_ocr2": DeepSeekOCR2QModel,
+    "deepseek_vl": DeepSeekVLQModel,
     "deepseek_vl_v2": DeepSeekVLV2QModel,
     "dots1": Dots1QModel,
     "exaone": ExaOneQModel,
