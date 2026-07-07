@@ -1627,11 +1627,9 @@ def _collect_state_dict_with_offload(model: nn.Module, offload_root: str) -> Dic
             source = param
         state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=source)
 
-    # Walk the module tree ONCE and collect persistent buffers directly from each
-    # module. This avoids the previous O(N^2) behavior where every buffer triggered
-    # a full `get_module_by_name()` -> `named_modules()` traversal of the entire
-    # model (N buffers x N modules), which made saving large MoE models (e.g. 46K
-    # modules / ~200K buffers) take hours of pure-Python CPU work.
+    # Collect persistent buffers in a single module-tree walk: each module owns
+    # its own buffers via `named_buffers(recurse=False)`, and non-persistent ones
+    # are skipped inline against `_non_persistent_buffers_set`.
     for module_name, module in model.named_modules():
         non_persistent = getattr(module, "_non_persistent_buffers_set", ())
         for buffer_name, buf in module.named_buffers(recurse=False):
@@ -1674,9 +1672,8 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
         state_dict = collections.OrderedDict()
         for name, param in model.named_parameters():
             state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=param)
-        # Walk the module tree ONCE to collect persistent buffers. The previous
-        # implementation called `get_module_by_name()` per buffer, which is O(N^2)
-        # (N buffers x N modules) and dominates save time for large models.
+        # Collect persistent buffers in a single module-tree walk, skipping
+        # non-persistent buffers inline via `_non_persistent_buffers_set`.
         for module_name, module in model.named_modules():
             non_persistent = getattr(module, "_non_persistent_buffers_set", ())
             for buffer_name, buf in module.named_buffers(recurse=False):
