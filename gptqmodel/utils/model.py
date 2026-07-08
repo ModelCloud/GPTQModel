@@ -1732,10 +1732,77 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
         )
     return state_dict
 
+
+def _checkpoint_tensor_keys(checkpoint: str | os.PathLike) -> Optional[set[str]]:
+    # accelerate.load_checkpoint_in_model() does not return the checkpoint key
+    # set. Read only metadata/index keys here so tie_weights() can distinguish
+    # tensors that were truly absent from tensors that were loaded separately.
+    checkpoint = os.fspath(checkpoint)
+
+    if os.path.isfile(checkpoint):
+        if checkpoint.endswith(".json"):
+            with open(checkpoint, encoding="utf-8") as f:
+                index = json.load(f)
+            weight_map = index.get("weight_map", index)
+            if isinstance(weight_map, dict):
+                return set(weight_map)
+            return None
+
+        if checkpoint.endswith(".safetensors"):
+            with safe_open(checkpoint, framework="pt", device="cpu") as handler:
+                return set(handler.keys())
+
+        return None
+
+    if not os.path.isdir(checkpoint):
+        return None
+
+    safetensors_path = os.path.join(checkpoint, "model.safetensors")
+    if os.path.isfile(safetensors_path):
+        with safe_open(safetensors_path, framework="pt", device="cpu") as handler:
+            return set(handler.keys())
+
+    index_files = [name for name in os.listdir(checkpoint) if name.endswith(".index.json")]
+    if len(index_files) != 1:
+        return None
+
+    with open(os.path.join(checkpoint, index_files[0]), encoding="utf-8") as f:
+        index = json.load(f)
+    weight_map = index.get("weight_map", index)
+    if isinstance(weight_map, dict):
+        return set(weight_map)
+    return None
+
+
+def _tie_weights_after_checkpoint_load(model, checkpoint: str | os.PathLike | None) -> None:
+    # Match transformers.from_pretrained(): when both sides of a tied-weight
+    # pair are present in the checkpoint, tie_weights(missing_keys=...) checks
+    # whether their loaded values are equal and skips tying if they differ.
+    # This preserves checkpoints whose config incorrectly advertises tied
+    # embeddings while storing a distinct lm_head.
+    missing_keys = None
+    if checkpoint is not None:
+        checkpoint_keys = _checkpoint_tensor_keys(checkpoint)
+        if checkpoint_keys is not None:
+            missing_keys = set(model.state_dict().keys()) - checkpoint_keys
+
+    if missing_keys is None:
+        model.tie_weights()
+        return
+
+    try:
+        model.tie_weights(missing_keys=missing_keys)
+    except TypeError:
+        model.tie_weights()
+
+
 # Call tied_weights() after load_checkpoint_in_model() to have the weights tied correctly.
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
+    checkpoint = kwargs.get("checkpoint")
+    if checkpoint is None and args:
+        checkpoint = args[0]
     accelerate.load_checkpoint_in_model(model, *args, **kwargs)
-    model.tie_weights()
+    _tie_weights_after_checkpoint_load(model, checkpoint)
 
 
 # 32MB read/write i/o buffer

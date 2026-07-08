@@ -259,7 +259,7 @@ class TestDeepSeekVL(ModelTest):
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/pipeline-cat-chonk.jpeg"},
+                    {"type": "image", "image": image},
                     {"type": "text", "text": "What does this picture show?"},
                 ],
             },
@@ -273,8 +273,7 @@ class TestDeepSeekVL(ModelTest):
             return_tensors="pt",
         ).to(model.device, dtype=model.dtype)
 
-        generated_ids = model.generate(**inputs, max_new_tokens=128)
-        print("ggg", generated_ids)
+        generated_ids = model.generate(**inputs, max_new_tokens=128, do_sample=False)
         generated_ids_trimmed = [
             out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
         ]

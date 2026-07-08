@@ -25,18 +25,6 @@ class DeepSeekVLQModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.language_model.norm"
     rotary_embedding = "model.language_model.rotary_emb"
-    # layer_modules_strict = False
-
-    # HF_CONVERSION_MAP_REVERSED = (
-    #     # DeepSeek-VL mounts `SiglipVisionModel` at `model.vision_model`.
-    #     # Runtime shell paths expose `model.vision_model.*`, while the original
-    #     # checkpoint keeps SigLIP's base prefix under `model.vision_model.vision_model.*`.
-    #     SimpleNamespace(
-    #         source_patterns=[r"^model\.vision_model\.(?!vision_model\.)(.+)$"],
-    #         target_patterns=[r"^model.vision_model.vision_model.\1"],
-    #         operations=[],
-    #     ),
-    # )
 
     module_tree = [
         "model",
