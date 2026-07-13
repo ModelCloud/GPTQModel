@@ -5,6 +5,7 @@
 
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ...utils.model import move_to
 
 
 class GlmMoeDsaQModel(BaseQModel):
@@ -51,5 +52,18 @@ class GlmMoeDsaQModel(BaseQModel):
             },
         },
     ]
+
+    def update_layer_replay_kwargs_from_output(self, layer, layer_output, layer_input_kwargs, target_device):
+        """Propagate DSA top-k indices from full indexer layers to following shared layers."""
+
+        if not isinstance(layer_output, tuple) or len(layer_output) < 2:
+            return layer_input_kwargs
+
+        topk_indices = layer_output[1]
+        if topk_indices is None:
+            return layer_input_kwargs
+
+        layer_input_kwargs["prev_topk_indices"] = move_to(topk_indices, device=target_device)
+        return layer_input_kwargs
 
 __all__ = ["GlmMoeDsaQModel"]

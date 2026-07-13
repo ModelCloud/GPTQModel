@@ -8,7 +8,7 @@ import copy
 import threading
 import time
 from contextlib import contextmanager
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch.nn import parallel as torch_parallel
@@ -60,9 +60,6 @@ def torch_replicate(
         return _THREAD_SAFE_PARALLEL.replicate(module, normalized_devices, detach=detach)
 
 log = setup_logger()
-
-
-from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
@@ -436,6 +433,16 @@ def forward_batch_worker(
 
     if (reuse_kv or write_shared_kv_cache) and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:
         kv_next = module_output[-1]
+
+    if gptq_model is not None and module_output is not None:
+        update_replay_kwargs = getattr(gptq_model, "update_layer_replay_kwargs_from_output", None)
+        if callable(update_replay_kwargs):
+            update_replay_kwargs(
+                layer=module,
+                layer_output=module_output,
+                layer_input_kwargs=layer_input_kwargs,
+                target_device=module_device,
+            )
 
     result_output = None
     if need_output and module_output is not None:
