@@ -6,7 +6,7 @@ from gptqmodel import WeightOnlyConfig
 from model_test import ModelTest
 
 
-class TestGlmOCR(ModelTest):
+class TestGlmMoEDSA(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/GLM-5.2-504B-BF16" # 0xSero/GLM-5.2-504B
     NATIVE_ARC_CHALLENGE_ACC = 0.3302
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3455
@@ -25,11 +25,8 @@ class TestGlmOCR(ModelTest):
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
-    # MODEL_COMPAT_FAST_LAYER_POSITION = "first"
+    MODEL_COMPAT_FAST_LAYER_POSITION = "first"
     USE_FLASH_ATTN = False
-    SAVE_PATH = "./temp/glm_5_2_504B-TEST-full"
-    WEIGHT_ONLY=WeightOnlyConfig()
 
-    def test_glm_ocr(self):
+    def test_glm_moe_dsa(self):
         self.quantize_and_evaluate()
-        # print(self.evaluate_model(self.SAVE_PATH))
