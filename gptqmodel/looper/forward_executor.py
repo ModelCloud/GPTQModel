@@ -329,6 +329,22 @@ class ForwardExecutor:
                 ):
                     shared_kv_cache_dict[layer_index] = module_output[-1]
 
+                if module_output is not None:
+                    calib_device_cfg = self.looper.gptq_model.quantize_config.calibration_data_device
+                    target_device = input_device if calib_device_cfg is not None else cur_layer_device
+                    update_replay_kwargs = getattr(
+                        self.looper.gptq_model,
+                        "update_layer_replay_kwargs_from_output",
+                        None,
+                    )
+                    if callable(update_replay_kwargs):
+                        update_replay_kwargs(
+                            layer=module,
+                            layer_output=module_output,
+                            layer_input_kwargs=layer_input_kwargs[batch_idx],
+                            target_device=target_device,
+                        )
+
                 if need_outputs and module_output is not None:
                     primary = module_output[0] if isinstance(module_output, tuple) else module_output
                     # Move output back to the same device where input was stored
