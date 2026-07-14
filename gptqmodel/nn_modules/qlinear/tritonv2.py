@@ -19,6 +19,37 @@ from .torch import TorchLinear
 log = setup_logger()
 
 
+def _validate_g_idx_bounds(
+    g_idx: Optional[torch.Tensor],
+    scales: Optional[torch.Tensor],
+    layer_name: str = "TritonV2Linear",
+) -> None:
+    """Reject checkpoint ``g_idx`` that would index the group buffers out of bounds.
+
+    The Triton dequant kernel resolves each row's group as
+    ``groups = where(g_idx < 0, g_idx + num_groups, g_idx)`` and then loads
+    ``scales``/``qzeros`` at that group with no upper-bound guard, where
+    ``num_groups = scales.shape[0]``. A value outside ``[-num_groups, num_groups)``
+    therefore indexes past the buffer, causing an out-of-bounds device read
+    (denial of service, possible adjacent-memory disclosure) when an untrusted
+    checkpoint is loaded. This mirrors the safe faulting of the Torch backend's
+    ``scales[g_idx]`` gather, but validates once at load rather than per forward.
+    """
+    if g_idx is None or scales is None or g_idx.numel() == 0:
+        return
+
+    num_groups = scales.shape[0]
+    g_min = int(g_idx.min())
+    g_max = int(g_idx.max())
+    if g_min < -num_groups or g_max >= num_groups:
+        raise ValueError(
+            f"{layer_name}: checkpoint g_idx is out of range for {num_groups} "
+            f"scale group(s) (got min={g_min}, max={g_max}, valid "
+            f"[{-num_groups}, {num_groups - 1}]); the group index would read "
+            f"scales/qzeros out of bounds."
+        )
+
+
 class TritonV2Linear(TorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TRITON]
     SUPPORTS_METHODS = [METHOD.GPTQ]
@@ -131,6 +162,16 @@ class TritonV2Linear(TorchLinear):
         #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
         #                               device=self.g_idx.device)
         super().post_init()
+
+        # The Triton dequant kernel indexes the per-group scales/qzeros buffers
+        # with the checkpoint's g_idx and performs no upper-bound check (only a
+        # negative-value wrap), so a crafted g_idx entry >= num_groups reads out
+        # of bounds on the device (CWE-125). Validate once here at load — the
+        # Torch backend's scales[g_idx] gather already faults safely on the same
+        # input — instead of letting the raw value reach the kernel.
+        _validate_g_idx_bounds(
+            self.g_idx, self.scales, layer_name=type(self).__name__
+        )
 
     def forward(self, x):
         from ..triton_utils.dequant import QuantLinearFunction
