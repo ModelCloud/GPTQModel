@@ -423,6 +423,7 @@ def _is_quant_auxiliary_tensor_key(key: str) -> bool:
             "_scale_inv",
             ".scale",
             ".weight_scale",
+            ".weight_scale_2",
             ".weight_absmax",
             ".weight_quant_map",
             ".weight_nested_absmax",
@@ -606,18 +607,21 @@ def infer_block_shape(weight_shape: Tuple[int, int], scale_tensor: torch.Tensor)
 
         raise ValueError("unable to infer block size from 1D scale tensor")
 
-        raise ValueError("unsupported scale tensor rank for block size inference")
+    raise ValueError("unsupported scale tensor rank for block size inference")
 
 
 def detect_format(model_path: Path, config: dict) -> str:
     quant_cfg = config.get("quantization_config", {}) or {}
     method = (quant_cfg.get("method") or quant_cfg.get("quant_method") or "").lower()
     format_name = (quant_cfg.get("format") or "").lower()
+    variant_name = (quant_cfg.get("variant") or "").lower()
+    quant_algo = str(quant_cfg.get("quant_algo") or quant_cfg.get("algorithm") or "").lower()
 
     files, _ = list_safetensor_files(model_path)
     if not files:
         raise FileNotFoundError("No .safetensors files found in model directory")
 
+    # legacy/local checkpoints that do not persist a useful quantization_config.
     with safe_open(model_path / files[0], framework="pt", device="cpu") as reader:
         keys = list(reader.keys())
         # Prefer dtype-based detection
@@ -660,6 +664,22 @@ def detect_format(model_path: Path, config: dict) -> str:
             )
             return "gptq" if has_g else "awq"
 
+    if format_name == "nvfp4" or (
+        method == "modelopt"
+        and (
+            format_name in {"nvfp4", "fp4"}
+            or variant_name == "nvfp4"
+            or quant_algo == "nvfp4"
+        )
+    ):
+        LOG.debug(
+            "Detected NVFP4 format via config method=%s format=%s variant=%s quant_algo=%s",
+            method,
+            format_name,
+            variant_name,
+            quant_algo,
+        )
+        return "nvfp4"
     if format_name in _FLOAT8_FORMAT_NAMES:
         LOG.debug("Detected FP8 format via config format=%s", format_name)
         return "fp8"
@@ -1079,9 +1099,11 @@ def convert_nvfp4_shard(
     reader,
     target_dtype: torch.dtype,
     *,
+    tensor_lookup: Optional[_ShardTensorLookup] = None,
     ignored_layers: Iterable[str] = (),
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
+    reader_keys = set(reader.keys())
     for key in reader.keys():
         tensor = reader.get_tensor(key)
         ignored_tensor = _handle_ignored_tensor(key, tensor, target_dtype, ignored_layers)
@@ -1093,9 +1115,41 @@ def convert_nvfp4_shard(
 
         if key.endswith(".weight") and tensor.dtype in _NVFP4_STORAGE_DTYPES:
             scale_key = key + "_scale"
-            if scale_key not in reader.keys():
+            # ModelOpt checkpoints may shard weight and scale tensors separately.
+            if tensor_lookup is None:
+                has_scale = scale_key in reader_keys
+            else:
+                has_scale = tensor_lookup.has_tensor(
+                    scale_key,
+                    local_reader=reader,
+                    local_keys=reader_keys,
+                )
+            if not has_scale:
                 raise KeyError(f"Missing scale tensor for {key}")
-            scale = reader.get_tensor(scale_key)
+            if tensor_lookup is None:
+                scale = reader.get_tensor(scale_key)
+            else:
+                scale = tensor_lookup.get_tensor(
+                    scale_key,
+                    local_reader=reader,
+                    local_keys=reader_keys,
+                )
+
+            scale_2_key = key + "_scale_2"
+            # ModelOpt stores an optional global scale in weight_scale_2.
+            if tensor_lookup is not None and tensor_lookup.has_tensor(
+                scale_2_key,
+                local_reader=reader,
+                local_keys=reader_keys,
+            ):
+                scale_2 = tensor_lookup.get_tensor(
+                    scale_2_key,
+                    local_reader=reader,
+                    local_keys=reader_keys,
+                )
+                scale = scale.to(torch.float32) * scale_2.to(torch.float32)
+            elif scale_2_key in reader_keys:
+                scale = scale.to(torch.float32) * reader.get_tensor(scale_2_key).to(torch.float32)
             LOG.debug("Using scale tensor '%s' for NVFP4 weight '%s'", scale_key, key)
             deq = dequantize_f4_e2m1(
                 tensor,
@@ -1104,7 +1158,7 @@ def convert_nvfp4_shard(
                 target_dtype=target_dtype,
             )
             tensors[key] = finalize_for_save(deq, target_dtype)
-        elif key.endswith(".weight_scale"):
+        elif key.endswith((".weight_scale", ".weight_scale_2")):
             LOG.debug("Dropping auxiliary NVFP4 tensor '%s' after dequantization", key)
             continue
         else:
@@ -1483,7 +1537,7 @@ def dequantize_model(
             device=open_device,
             weight_map=index.get("weight_map", {}) if isinstance(index, dict) else None,
         )
-        if fmt == "fp8"
+        if fmt in {"fp8", "nvfp4"}
         else None
     )
 
@@ -1515,6 +1569,7 @@ def dequantize_model(
                     tensors = convert_nvfp4_shard(
                         reader,
                         target_dtype,
+                        tensor_lookup=tensor_lookup,
                         ignored_layers=ignored_layers,
                     )
             elif fmt == "awq":
