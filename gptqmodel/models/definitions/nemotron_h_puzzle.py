@@ -118,9 +118,6 @@ class NemotronHPuzzleQModel(NemotronHQModel):
         return additional_inputs
 
     def monkey_patch(self):
-        if not self.load_quantized_model:
-            return
-
         from transformers.utils.import_utils import (
             is_causal_conv1d_available,
             is_mamba_2_ssm_available,
@@ -161,6 +158,34 @@ class NemotronHPuzzleQModel(NemotronHQModel):
 
             return self.torch_forward(hidden_states, cache_params, attention_mask)
 
+        def moe(self, hidden_states, topk_indices, topk_weights):
+            final_hidden_states = torch.zeros_like(hidden_states, dtype=topk_weights.dtype)
+            expert_mask = torch.nn.functional.one_hot(topk_indices, num_classes=len(self.experts))
+            expert_mask = expert_mask.permute(2, 0, 1)
+
+            for expert_idx, expert in enumerate(self.experts):
+                mask = expert_mask[expert_idx]
+                token_indices, weight_indices = torch.where(mask)
+
+                if token_indices.numel() > 0:
+                    expert_weights = topk_weights[token_indices, weight_indices]
+                    expert_input = hidden_states[token_indices]
+                    expert_output = expert(expert_input)
+                    weighted_output = expert_output * expert_weights.unsqueeze(-1)
+                    final_hidden_states.index_add_(0, token_indices, weighted_output)
+                else:
+                    # The remote implementation reads `down_proj.weight.dtype`
+                    # only to type a zero input. QuantLinear backends such as
+                    # Marlin intentionally store packed weights without exposing
+                    # a dense `.weight`; the routed hidden-state dtype is already
+                    # the correct expert input dtype.
+                    dummy_input = torch.zeros_like(hidden_states[0]).unsqueeze(0)
+                    final_hidden_states = final_hidden_states + expert(dummy_input)
+
+            return final_hidden_states.type(hidden_states.dtype)
+
         for layer in self.model.model.layers:
             if layer.mixer.__class__.__name__ == "NemotronHMamba2Mixer":
                 type(layer.mixer).forward = forward
+            elif layer.mixer.__class__.__name__ == "NemotronHMoE":
+                type(layer.mixer).moe = moe

@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 
 import torch
+from torch import nn
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.nemotron_h_puzzle import NemotronHPuzzleQModel
@@ -139,3 +140,48 @@ def test_nemotron_h_puzzle_replay_keeps_mamba_padding_mask():
     )
 
     assert replay_kwargs["attention_mask"] is padding_mask
+
+
+class _WeightlessLinear(nn.Module):
+    """QuantLinear-shaped test double which intentionally has no dense weight."""
+
+    def forward(self, hidden_states):
+        return hidden_states
+
+
+class _WeightlessExpert(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.up_proj = _WeightlessLinear()
+        self.down_proj = _WeightlessLinear()
+
+    def forward(self, hidden_states):
+        return self.down_proj(self.up_proj(hidden_states))
+
+
+class NemotronHMoE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.experts = nn.ModuleList([_WeightlessExpert(), _WeightlessExpert()])
+
+
+def test_nemotron_h_puzzle_empty_expert_does_not_require_dense_weight():
+    moe = NemotronHMoE()
+    model_def = SimpleNamespace(
+        model=SimpleNamespace(
+            model=SimpleNamespace(
+                layers=[SimpleNamespace(mixer=moe)],
+            )
+        )
+    )
+    NemotronHPuzzleQModel.monkey_patch(model_def)
+
+    hidden_states = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.bfloat16)
+    # Only expert 0 is routed; expert 1 exercises the empty-expert branch.
+    topk_indices = torch.zeros((2, 1), dtype=torch.long)
+    topk_weights = torch.ones((2, 1), dtype=torch.bfloat16)
+
+    output = moe.moe(hidden_states, topk_indices, topk_weights)
+
+    assert torch.equal(output, hidden_states)
+    assert not hasattr(moe.experts[1].down_proj, "weight")

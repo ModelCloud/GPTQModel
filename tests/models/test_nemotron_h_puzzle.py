@@ -19,13 +19,14 @@ class TestNemotronHPuzzle(ModelTest):
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
-            "acc": {"value": 0.197098976109215, "floor_pct": 0.36},
-            "acc_norm": {"value": 0.2235494880546075, "floor_pct": 0.36},
+            "acc": {"value": 0.4880, "floor_pct": 0.36},
+            "acc_norm": {"value": 0.4462, "floor_pct": 0.36},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
     MODEL_COMPAT_FAST_LAYER_COUNT = 10
+    EVAL_SINGLE_GPU = False
 
     def test_nemotron_ultra(self):
         self.quantize_and_evaluate()
