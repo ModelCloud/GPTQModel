@@ -158,6 +158,7 @@ from .definitions.moss import MossQModel  # noqa: E402
 from .definitions.mpt import MptQModel  # noqa: E402
 from .definitions.nemotron_labs_diffusion import NemotronLabsDiffusionQModel  # noqa: E402
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
+from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
 from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
@@ -338,6 +339,7 @@ MODEL_MAP = {
     "longcat_flash": LongCatFlashQModel,
     "llava_qwen2": LlavaQwen2QModel,
     "nemotron_h": NemotronHQModel,
+    "nemotron_h_puzzle": NemotronHPuzzleQModel,
     "nemotron_labs_diffusion": NemotronLabsDiffusionQModel,
     "nemotronh_nano_omni_reasoning_v3": NemotronOmniQModel,
     "bailing_moe": BailingMoeQModel,
