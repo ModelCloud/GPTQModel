@@ -5,8 +5,6 @@
 
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import ExpertsRoutingOverride, Fallback, MoEConfig, VramStrategy
-
 
 class TestNemotronHPuzzle(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16" # nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16
