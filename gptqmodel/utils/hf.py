@@ -253,7 +253,6 @@ def _normalize_repo_file_paths(file_names) -> list[str]:
 
 
 def _infer_single_gguf_file(file_names) -> Optional[str]:
-    print("file_names", file_names)
     normalized_files = _normalize_repo_file_paths(file_names)
     gguf_files = sorted(file_name for file_name in normalized_files if file_name.lower().endswith(".gguf"))
     if len(gguf_files) != 1:
@@ -287,7 +286,6 @@ def _resolve_hf_gguf_artifact(model_id_or_path: str) -> Optional[tuple[str, str]
 
     if os.path.isdir(model_id_or_path):
         inferred_gguf_file = _infer_single_gguf_file(_iter_local_repo_files(model_id_or_path))
-        print("inferred_gguf_file", inferred_gguf_file)
         if inferred_gguf_file is not None:
             return os.path.normpath(model_id_or_path), inferred_gguf_file
         return None
@@ -492,7 +490,6 @@ def normalize_model_id_or_path_for_hf_gguf(
         return None
 
     resolved = _resolve_hf_gguf_artifact(str(model_id_or_path))
-    print("resolved", resolved)
     if resolved is None:
         return model_id_or_path
 
