@@ -253,6 +253,7 @@ def _normalize_repo_file_paths(file_names) -> list[str]:
 
 
 def _infer_single_gguf_file(file_names) -> Optional[str]:
+    print("file_names", file_names)
     normalized_files = _normalize_repo_file_paths(file_names)
     gguf_files = sorted(file_name for file_name in normalized_files if file_name.lower().endswith(".gguf"))
     if len(gguf_files) != 1:
@@ -286,6 +287,7 @@ def _resolve_hf_gguf_artifact(model_id_or_path: str) -> Optional[tuple[str, str]
 
     if os.path.isdir(model_id_or_path):
         inferred_gguf_file = _infer_single_gguf_file(_iter_local_repo_files(model_id_or_path))
+        print("inferred_gguf_file", inferred_gguf_file)
         if inferred_gguf_file is not None:
             return os.path.normpath(model_id_or_path), inferred_gguf_file
         return None
@@ -329,18 +331,21 @@ def _load_gguf_checkpoint_torch_direct(
     gguf_checkpoint_path,
     return_tensors: bool = False,
     model_to_load=None,
+    torch_dtype=None,
 ):
     if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled():
         return original_load_gguf_checkpoint(
             gguf_checkpoint_path,
             return_tensors=return_tensors,
             model_to_load=model_to_load,
+            torch_dtype=torch_dtype,
         )
 
     parsed_parameters = original_load_gguf_checkpoint(
         gguf_checkpoint_path,
         return_tensors=False,
         model_to_load=model_to_load,
+        torch_dtype=torch_dtype,
     )
     config = parsed_parameters.get("config", {})
     model_type = config.get("model_type")
@@ -349,6 +354,7 @@ def _load_gguf_checkpoint_torch_direct(
             gguf_checkpoint_path,
             return_tensors=True,
             model_to_load=model_to_load,
+            torch_dtype=torch_dtype,
         )
 
     processor_cls = gguf_utils.TENSOR_PROCESSORS.get(model_type, gguf_utils.TensorProcessor)
@@ -357,11 +363,15 @@ def _load_gguf_checkpoint_torch_direct(
             gguf_checkpoint_path,
             return_tensors=True,
             model_to_load=model_to_load,
+            torch_dtype=torch_dtype,
         )
 
     processor = processor_cls(config=config)
     tensor_key_mapping = gguf_utils.get_gguf_hf_weights_map(model_to_load, processor)
     target_device = internal_gguf._resolve_torch_dequant_device()
+    dequantize_kwargs = {"device": target_device}
+    if torch_dtype is not None:
+        dequantize_kwargs["dtype"] = torch_dtype
     reader = internal_gguf.GGUFReader(gguf_checkpoint_path)
     parsed_parameters["tensors"] = {}
 
@@ -370,7 +380,7 @@ def _load_gguf_checkpoint_torch_direct(
         weights = internal_gguf.dequantize_to_torch(
             tensor.data,
             tensor.tensor_type,
-            device=target_device,
+            **dequantize_kwargs,
         )
 
         result = processor.process(
@@ -402,7 +412,7 @@ def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
 
         original_load_gguf_checkpoint = gguf_utils.load_gguf_checkpoint
 
-        def _wrapped_load_gguf_checkpoint(gguf_checkpoint_path, return_tensors=False, model_to_load=None):
+        def _wrapped_load_gguf_checkpoint(gguf_checkpoint_path, return_tensors=False, model_to_load=None, torch_dtype=None):
             try:
                 return _load_gguf_checkpoint_torch_direct(
                     gguf_utils=gguf_utils,
@@ -410,6 +420,7 @@ def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
                     gguf_checkpoint_path=gguf_checkpoint_path,
                     return_tensors=return_tensors,
                     model_to_load=model_to_load,
+                    torch_dtype=torch_dtype,
                 )
             except Exception as exc:
                 log.debug(
@@ -421,6 +432,7 @@ def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
                     gguf_checkpoint_path,
                     return_tensors=return_tensors,
                     model_to_load=model_to_load,
+                    torch_dtype=torch_dtype,
                 )
 
         gguf_utils._gptqmodel_original_load_gguf_checkpoint = original_load_gguf_checkpoint
@@ -480,6 +492,7 @@ def normalize_model_id_or_path_for_hf_gguf(
         return None
 
     resolved = _resolve_hf_gguf_artifact(str(model_id_or_path))
+    print("resolved", resolved)
     if resolved is None:
         return model_id_or_path
 

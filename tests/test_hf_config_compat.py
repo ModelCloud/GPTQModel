@@ -109,13 +109,14 @@ def test_patch_transformers_prism_gguf_compat_wraps_load_checkpoint_for_torch_lo
     import transformers.modeling_gguf_pytorch_utils as gguf_utils
     from transformers.utils import import_utils as hf_import_utils
 
-    calls = {"direct": 0}
+    calls = {"direct": 0, "torch_dtype": None}
 
     def _original_load_gguf_checkpoint(*args, **kwargs):
         return {"variant": "original"}
 
     def _direct_loader(**kwargs):
         calls["direct"] += 1
+        calls["torch_dtype"] = kwargs["torch_dtype"]
         return {"variant": "direct", "path": kwargs["gguf_checkpoint_path"]}
 
     monkeypatch.setenv("GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER", "1")
@@ -129,9 +130,15 @@ def test_patch_transformers_prism_gguf_compat_wraps_load_checkpoint_for_torch_lo
     monkeypatch.setattr(hf_utils, "_load_gguf_checkpoint_torch_direct", _direct_loader)
 
     hf_utils._patch_transformers_prism_gguf_compat(api_name="test")
-    result = gguf_utils.load_gguf_checkpoint("bonsai.gguf", return_tensors=True, model_to_load=object())
+    result = gguf_utils.load_gguf_checkpoint(
+        "bonsai.gguf",
+        return_tensors=True,
+        model_to_load=object(),
+        torch_dtype=torch.bfloat16,
+    )
 
     assert calls["direct"] == 1
+    assert calls["torch_dtype"] is torch.bfloat16
     assert result == {"variant": "direct", "path": "bonsai.gguf"}
 
 
