@@ -8,6 +8,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from gptqmodel.quantization.dtype import dequantize_f4_e2m1
 from gptqmodel.utils.model_dequant import (
     convert_awq_file,
     convert_bitsandbytes_shard,
@@ -15,8 +16,15 @@ from gptqmodel.utils.model_dequant import (
     convert_gptq_file,
     convert_nvfp4_shard,
     dequantize_model,
+    detect_format,
     finalize_for_save,
 )
+
+
+try:
+    from torchao.prototype.mx_formats.nvfp4_tensor import nvfp4_quantize
+except Exception:
+    nvfp4_quantize = None
 
 
 def _write_index(model_dir, shard_name: str, keys: list[str]) -> None:
@@ -278,6 +286,94 @@ def test_dequantize_model_fp8_honors_ignored_layers(tmp_path):
     expected_quant = quant_weight.to(torch.bfloat16) / quant_scale_inv.to(torch.bfloat16)
     torch.testing.assert_close(quant_out, expected_quant)
     torch.testing.assert_close(ignored_out, ignored_weight)
+
+
+def test_detect_format_modelopt_nvfp4_uses_quant_algo_config(tmp_path):
+    model_dir = tmp_path / "modelopt_nvfp4_config_detect"
+    model_dir.mkdir()
+
+    config = {
+        "architectures": ["TestModel"],
+        "quantization_config": {
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+        },
+    }
+    (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    save_file({"dense.weight": torch.ones(2, 2, dtype=torch.bfloat16)}, str(model_dir / "model.safetensors"))
+
+    assert detect_format(model_dir, config) == "nvfp4"
+
+
+@pytest.mark.skipif(nvfp4_quantize is None, reason="torchao NVFP4 support required")
+def test_dequantize_model_modelopt_nvfp4_resolves_scales_from_other_shard(tmp_path):
+    model_dir = tmp_path / "modelopt_nvfp4_cross_shard"
+    output_dir = tmp_path / "modelopt_nvfp4_cross_shard_out"
+    model_dir.mkdir()
+
+    config = {
+        "architectures": ["TestModel"],
+        "quantization_config": {
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+        },
+    }
+    (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    torch.manual_seed(0)
+    dense = torch.randn(4, 16, dtype=torch.float32)
+    scales, packed = nvfp4_quantize(dense, block_size=16)
+    global_scale = torch.tensor(2.0, dtype=torch.float32)
+    bias = torch.randn(4, dtype=torch.float32)
+
+    weight_shard = "model-00001-of-00002.safetensors"
+    scale_shard = "model-00002-of-00002.safetensors"
+    save_file({"linear.weight": packed.cpu(), "linear.bias": bias}, str(model_dir / weight_shard))
+    save_file(
+        {
+            "linear.weight_scale": scales.cpu(),
+            "linear.weight_scale_2": global_scale,
+        },
+        str(model_dir / scale_shard),
+    )
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "linear.weight": weight_shard,
+                    "linear.bias": weight_shard,
+                    "linear.weight_scale": scale_shard,
+                    "linear.weight_scale_2": scale_shard,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
+
+    with safe_open(output_dir / weight_shard, framework="pt", device="cpu") as reader:
+        assert set(reader.keys()) == {"linear.weight", "linear.bias"}
+        weight_out = reader.get_tensor("linear.weight")
+        bias_out = reader.get_tensor("linear.bias")
+
+    expected_scale = scales.cpu().to(torch.float32) * global_scale
+    expected = dequantize_f4_e2m1(
+        packed.cpu(),
+        scale=expected_scale,
+        axis=None,
+        target_dtype=torch.bfloat16,
+    )
+    assert weight_out.dtype is torch.bfloat16
+    torch.testing.assert_close(weight_out, expected, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(bias_out, bias.to(torch.bfloat16))
+    assert not (output_dir / scale_shard).exists()
+
+    output_index = json.loads((output_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
+    assert output_index["weight_map"] == {
+        "linear.weight": weight_shard,
+        "linear.bias": weight_shard,
+    }
 
 
 @pytest.mark.skipif(

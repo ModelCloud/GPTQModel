@@ -16,6 +16,7 @@ from gptqmodel.quantization.config import (
     VramStrategy,
     QuantizeEmbedConfig,
 )
+from gptqmodel.quantization.config import RTNConfig, VramStrategy
 
 
 class _FakeProgress:

@@ -176,6 +176,41 @@ def test_glm_moe_dsa_tiny_model_matches_definition():
     assert hasattr(expert0, "down_proj")
 
 
+def test_glm_moe_dsa_replay_propagates_topk_indices_to_shared_indexer_layer():
+    config = _tiny_glm_moe_dsa_config()
+    config.indexer_types = ["full", "full", "full", "shared"]
+    config.index_topk = 4
+    model = GlmMoeDsaForCausalLM(config).eval()
+    model_def = GlmMoeDsaQModel.__new__(GlmMoeDsaQModel)
+
+    hidden_states = torch.randn(1, 8, config.hidden_size)
+    position_ids = torch.arange(hidden_states.shape[1], dtype=torch.long).unsqueeze(0)
+    position_embeddings = model.model.rotary_emb(hidden_states, position_ids=position_ids)
+    layer_kwargs = {
+        "attention_mask": None,
+        "position_ids": position_ids,
+        "position_embeddings": position_embeddings,
+        "use_cache": False,
+    }
+
+    with torch.no_grad(), pytest.raises(ValueError, match="Shared DSA layers require top-k indices"):
+        model.model.layers[3](hidden_states, **layer_kwargs)
+
+    with torch.no_grad():
+        for layer in model.model.layers:
+            layer_output = layer(hidden_states, **layer_kwargs)
+            hidden_states = layer_output[0]
+            model_def.update_layer_replay_kwargs_from_output(
+                layer=layer,
+                layer_output=layer_output,
+                layer_input_kwargs=layer_kwargs,
+                target_device=torch.device("cpu"),
+            )
+
+    assert isinstance(layer_kwargs["prev_topk_indices"], torch.Tensor)
+    assert layer_kwargs["prev_topk_indices"].shape == (1, 8, config.index_topk)
+
+
 def test_glm_moe_dsa_lazy_turtle_restores_rotary_buffers_from_module_init(tmp_path):
     source_model = GlmMoeDsaForCausalLM(_tiny_glm_moe_dsa_config())
     convert_model(source_model, cleanup_original=False)

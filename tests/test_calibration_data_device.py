@@ -110,6 +110,15 @@ class TestCalibrationDataDeviceConfig(unittest.TestCase):
 # STAGE INPUTS CAPTURE TESTS - Test real cache_inputs method
 # ============================================================================
 
+
+def test_stage_inputs_capture_detects_deepseek_images_key():
+    from gptqmodel.looper.stage_inputs_capture import _has_vision_inputs
+
+    assert _has_vision_inputs({"pixel_values": torch.zeros(1)})
+    assert _has_vision_inputs({"images": torch.zeros(1)})
+    assert not _has_vision_inputs({"input_ids": torch.zeros(1)})
+
+
 class _DummyLooperForCapture:
     """Minimal fake ModuleLooper for testing StageInputsCapture."""
 

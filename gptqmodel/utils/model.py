@@ -1636,32 +1636,34 @@ def _collect_state_dict_with_offload(model: nn.Module, offload_root: str) -> Dic
             source = param
         state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=source)
 
-    for name, buf in model.named_buffers():
-        if name in state_dict:
-            continue
-
-        # If the buffer is non-persistent, it does not need to be written to state_dict.
-        module_path, leaf = _split_parameter_path(name)
-        module = get_module_by_name(model, module_path)
-        if hasattr(module, "_non_persistent_buffers_set") and leaf in module._non_persistent_buffers_set:
-            continue
-
-        if getattr(buf, "is_meta", False) or buf.device.type == "meta":
-            source = _resolve_offload_entry(
-                offload_root,
-                module_path,
-                leaf,
-                buf.dtype,
-                tuple(buf.shape),
-                index_cache,
-            )
-            if source is None:
-                raise FileNotFoundError(
-                    f"Offloaded buffer '{name}' not found in offload directory '{offload_root}'."
+    # Collect persistent buffers in a single module-tree walk: each module owns
+    # its own buffers via `named_buffers(recurse=False)`, and non-persistent ones
+    # are skipped inline against `_non_persistent_buffers_set`.
+    for module_name, module in model.named_modules():
+        non_persistent = getattr(module, "_non_persistent_buffers_set", ())
+        for buffer_name, buf in module.named_buffers(recurse=False):
+            if buffer_name in non_persistent:
+                continue
+            name = f"{module_name}.{buffer_name}" if module_name else buffer_name
+            if name in state_dict:
+                continue
+            module_path, leaf = _split_parameter_path(name)
+            if getattr(buf, "is_meta", False) or buf.device.type == "meta":
+                source = _resolve_offload_entry(
+                    offload_root,
+                    module_path,
+                    leaf,
+                    buf.dtype,
+                    tuple(buf.shape),
+                    index_cache,
                 )
-        else:
-            source = buf
-        state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=source)
+                if source is None:
+                    raise FileNotFoundError(
+                        f"Offloaded buffer '{name}' not found in offload directory '{offload_root}'."
+                    )
+            else:
+                source = buf
+            state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=source)
 
     return state_dict
 
@@ -1679,17 +1681,17 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
         state_dict = collections.OrderedDict()
         for name, param in model.named_parameters():
             state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=param)
-        for name, buf in model.named_buffers():
-            if name in state_dict:
-                continue
-
-            # If the buffer is non-persistent, it does not need to be written to state_dict.
-            module_path, leaf = _split_parameter_path(name)
-            module = get_module_by_name(model, module_path)
-            if hasattr(module, "_non_persistent_buffers_set") and leaf in module._non_persistent_buffers_set:
-                continue
-
-            state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
+        # Collect persistent buffers in a single module-tree walk, skipping
+        # non-persistent buffers inline via `_non_persistent_buffers_set`.
+        for module_name, module in model.named_modules():
+            non_persistent = getattr(module, "_non_persistent_buffers_set", ())
+            for buffer_name, buf in module.named_buffers(recurse=False):
+                if buffer_name in non_persistent:
+                    continue
+                name = f"{module_name}.{buffer_name}" if module_name else buffer_name
+                if name in state_dict:
+                    continue
+                state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
 
     ptrs = collections.defaultdict(list)
     for name, entry in state_dict.items():
@@ -1741,10 +1743,77 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
         )
     return state_dict
 
+
+def _checkpoint_tensor_keys(checkpoint: str | os.PathLike) -> Optional[set[str]]:
+    # accelerate.load_checkpoint_in_model() does not return the checkpoint key
+    # set. Read only metadata/index keys here so tie_weights() can distinguish
+    # tensors that were truly absent from tensors that were loaded separately.
+    checkpoint = os.fspath(checkpoint)
+
+    if os.path.isfile(checkpoint):
+        if checkpoint.endswith(".json"):
+            with open(checkpoint, encoding="utf-8") as f:
+                index = json.load(f)
+            weight_map = index.get("weight_map", index)
+            if isinstance(weight_map, dict):
+                return set(weight_map)
+            return None
+
+        if checkpoint.endswith(".safetensors"):
+            with safe_open(checkpoint, framework="pt", device="cpu") as handler:
+                return set(handler.keys())
+
+        return None
+
+    if not os.path.isdir(checkpoint):
+        return None
+
+    safetensors_path = os.path.join(checkpoint, "model.safetensors")
+    if os.path.isfile(safetensors_path):
+        with safe_open(safetensors_path, framework="pt", device="cpu") as handler:
+            return set(handler.keys())
+
+    index_files = [name for name in os.listdir(checkpoint) if name.endswith(".index.json")]
+    if len(index_files) != 1:
+        return None
+
+    with open(os.path.join(checkpoint, index_files[0]), encoding="utf-8") as f:
+        index = json.load(f)
+    weight_map = index.get("weight_map", index)
+    if isinstance(weight_map, dict):
+        return set(weight_map)
+    return None
+
+
+def _tie_weights_after_checkpoint_load(model, checkpoint: str | os.PathLike | None) -> None:
+    # Match transformers.from_pretrained(): when both sides of a tied-weight
+    # pair are present in the checkpoint, tie_weights(missing_keys=...) checks
+    # whether their loaded values are equal and skips tying if they differ.
+    # This preserves checkpoints whose config incorrectly advertises tied
+    # embeddings while storing a distinct lm_head.
+    missing_keys = None
+    if checkpoint is not None:
+        checkpoint_keys = _checkpoint_tensor_keys(checkpoint)
+        if checkpoint_keys is not None:
+            missing_keys = set(model.state_dict().keys()) - checkpoint_keys
+
+    if missing_keys is None:
+        model.tie_weights()
+        return
+
+    try:
+        model.tie_weights(missing_keys=missing_keys)
+    except TypeError:
+        model.tie_weights()
+
+
 # Call tied_weights() after load_checkpoint_in_model() to have the weights tied correctly.
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
+    checkpoint = kwargs.get("checkpoint")
+    if checkpoint is None and args:
+        checkpoint = args[0]
     accelerate.load_checkpoint_in_model(model, *args, **kwargs)
-    model.tie_weights()
+    _tie_weights_after_checkpoint_load(model, checkpoint)
 
 
 # 32MB read/write i/o buffer

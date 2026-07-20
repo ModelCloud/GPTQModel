@@ -6,7 +6,7 @@
 from model_test import ModelTest
 
 
-class TestNemotronUltra(ModelTest):
+class TestHunyuanV1Dense(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/HY-MT1.5-1.8B" # tencent/HY-MT1.5-1.8B
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
@@ -24,6 +24,5 @@ class TestNemotronUltra(ModelTest):
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
-    def test_nemotron_ultra(self):
-        # self.quantize_and_evaluate()
-        print(self.evaluate_model(self.SAVE_PATH))
+    def test_hunyuan_v1_dense(self):
+        self.quantize_and_evaluate()

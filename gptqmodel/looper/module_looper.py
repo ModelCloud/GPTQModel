@@ -57,7 +57,6 @@ from ..utils.looper_helpers import (
     select_forward_devices,
 )
 from ..utils.model import (
-    find_modules,
     untie_word_embeddings,
     MoETopKState,
     get_layers_with_prefixes,
@@ -66,7 +65,6 @@ from ..utils.model import (
     restore_moe_topk,
     set_moe_topk, get_module_by_name_prefix,
 )
-
 from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)

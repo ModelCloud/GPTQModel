@@ -64,6 +64,7 @@ from ..utils.hf import (  # noqa: E402
     get_hf_gguf_load_kwargs,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
+    patch_remote_code_before_config_load,
     resolve_trust_remote_code,
 )
 from ..utils.hub import list_repo_files  # noqa: E402
@@ -78,12 +79,16 @@ from .definitions.bloom import BloomQModel  # noqa: E402
 from .definitions.brumby import BrumbyQModel  # noqa: E402
 from .definitions.chatglm import ChatGLMQModel  # noqa: E402
 from .definitions.codegen import CodeGenQModel  # noqa: E402
+from .definitions.cohere2_moe import Cohere2MoeQModel  # noqa: E402
 from .definitions.dbrx import DbrxQModel  # noqa: E402
 from .definitions.dbrx_converted import DbrxConvertedQModel  # noqa: E402
 from .definitions.decilm import DeciLMQModel  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
 from .definitions.deepseek_v4 import DeepSeekV4QModel  # noqa: E402
+from .definitions.deepseek_ocr2 import DeepSeekOCR2QModel  # noqa: E402
+from .definitions.deepseek_vl import DeepSeekVLQModel  # noqa: E402
+from .definitions.deepseek_vl_v2 import DeepSeekVLV2QModel  # noqa: E402
 from .definitions.dots1 import Dots1QModel  # noqa: E402
 from .definitions.dream import DreamQModel  # noqa: E402
 from .definitions.ernie4_5 import Ernie4_5QModel  # noqa: E402
@@ -97,11 +102,12 @@ from .definitions.gemma2 import Gemma2QModel  # noqa: E402
 from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel  # noqa: E402
 from .definitions.gemma3n import Gemma3nForConditionalGenerationGPTQ, Gemma3nTextQModel  # noqa: E402
 from .definitions.gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel  # noqa: E402
+from .definitions.gemma4_unified import Gemma4UnifiedForConditionalGenerationGPTQ, Gemma4UnifiedTextQModel  # noqa: E402
 from .definitions.glm import GlmQModel  # noqa: E402
 from .definitions.glm4_moe import GLM4MoEGPTQ  # noqa: E402
 from .definitions.glm4_moe_lite import Glm4MoeLiteQModel  # noqa: E402
 from .definitions.glm4v import Glm4vGPTQ  # noqa: E402
-from .definitions.glm4v_moe import Glm4vMoeQModel  # noqa: E402
+from .definitions.glm4v_moe import Glm4vMoeQModel, Glm4vMoeTextQModel  # noqa: E402
 from .definitions.glm_moe_dsa import GlmMoeDsaQModel  # noqa: E402
 from .definitions.glm_ocr import GlmOCRGPTQ  # noqa: E402
 from .definitions.glmasr import GlmASRGPTQ  # noqa: E402
@@ -116,6 +122,7 @@ from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hrm_text import HrmTextQModel  # noqa: E402
 from .definitions.hunyuan_v1_dense import HunYuanDenseV1QModel  # noqa: E402
 from .definitions.hunyuan_v1_moe import HunYuanMoEV1QModel  # noqa: E402
+from .definitions.hy_v3 import HYV3QModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
@@ -125,10 +132,12 @@ from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
 from .definitions.laguna import LagunaQModel  # noqa: E402
+from .definitions.lfm2 import LFM2QModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
+from .definitions.lfm2_vl import LFM2VLQModel  # noqa: E402
 from .definitions.llada2 import LLaDA2MoeQModel
 from .definitions.llama import LlamaQModel  # noqa: E402
-from .definitions.llama4 import Llama4QModel  # noqa: E402
+from .definitions.llama4 import Llama4QModel, Llama4TextQModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashQModel  # noqa: E402
 from .definitions.mimo import MimoQModel  # noqa: E402
@@ -139,14 +148,17 @@ from .definitions.minicpm_o import MiniCPMOQModel  # noqa: E402
 from .definitions.minicpmv import MiniCPMVQModel  # noqa: E402
 from .definitions.minicpmv_4_6 import MiniCPMV4_6QModel  # noqa: E402
 from .definitions.minimax_m2 import MiniMaxM2GPTQ  # noqa: E402
+from .definitions.minimax_m3_vl import MiniMaxM3VLGPTQ  # noqa: E402
+from .definitions.ministral3 import Ministral3GPTQ  # noqa: E402
 from .definitions.mistral3 import Mistral3GPTQ
 from .definitions.mixtral import MixtralQModel  # noqa: E402
-from .definitions.mllama import MLlamaQModel  # noqa: E402
+from .definitions.mllama import MLlamaQModel, MLlamaTextQModel  # noqa: E402
 from .definitions.mobilellm import MobileLLMQModel  # noqa: E402
 from .definitions.moss import MossQModel  # noqa: E402
 from .definitions.mpt import MptQModel  # noqa: E402
 from .definitions.nemotron_labs_diffusion import NemotronLabsDiffusionQModel  # noqa: E402
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
+from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
 from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
@@ -206,6 +218,7 @@ MODEL_MAP = {
     "gpt2": GPT2QModel,
     "llama": LlamaQModel,
     "llama4": Llama4QModel,
+    "llama4_text": Llama4TextQModel,
     "opt": OptQModel,
     "moss": MossQModel,
     "chatglm": ChatGLMQModel,
@@ -213,6 +226,7 @@ MODEL_MAP = {
     "glm4": GlmQModel,
     "glm4v": Glm4vGPTQ,
     "glm4v_moe": Glm4vMoeQModel,
+    "glm4v_moe_text": Glm4vMoeTextQModel,
     "glmasr": GlmASRGPTQ,
     "glm_ocr": GlmOCRGPTQ,
     "glm4_moe": GLM4MoEGPTQ,
@@ -222,6 +236,7 @@ MODEL_MAP = {
     "codegen": CodeGenQModel,
     "cohere": LlamaQModel, # 100% llama clone
     "cohere2": LlamaQModel, # 100% llama clone
+    "cohere2_moe": Cohere2MoeQModel,
     "refinedWebModel": RwgQModel,
     "refinedWeb": RwgQModel,
     "falcon": RwgQModel,
@@ -234,6 +249,7 @@ MODEL_MAP = {
     "hrm_text": HrmTextQModel,
     "hunyuan_v1_dense": HunYuanDenseV1QModel,
     "hunyuan_v1_moe": HunYuanMoEV1QModel,
+    "hy_v3": HYV3QModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone
     "yi": LlamaQModel, # 100% llama clone
@@ -255,6 +271,8 @@ MODEL_MAP = {
     "gemma3n": Gemma3nForConditionalGenerationGPTQ,
     "gemma4_text": Gemma4TextQModel,
     "gemma4": Gemma4ForConditionalGenerationGPTQ,
+    "gemma4_unified_text": Gemma4UnifiedTextQModel,
+    "gemma4_unified": Gemma4UnifiedForConditionalGenerationGPTQ,
     "phi": PhiQModel,
     "phi3": Phi3QModel,
     "phi4mm": Phi4MMGPTQ,
@@ -267,6 +285,8 @@ MODEL_MAP = {
     "minicpmv4_6": MiniCPMV4_6QModel,
     "minimax": MiniMaxM2GPTQ,
     "minimax_m2": MiniMaxM2GPTQ,
+    "minimax_m3_vl": MiniMaxM3VLGPTQ,
+    "ministral3": Ministral3GPTQ,
     "qwen2_moe": Qwen2MoeQModel,
     "qwen3_moe": Qwen3MoeQModel,
     "qwen3_next": Qwen3NextGPTQ,
@@ -282,11 +302,15 @@ MODEL_MAP = {
     "deepseek_v2": DeepSeekV2QModel,
     "deepseek_v3": DeepSeekV3QModel,
     "deepseek_v4": DeepSeekV4QModel,
+    "deepseek_ocr2": DeepSeekOCR2QModel,
+    "deepseek_vl": DeepSeekVLQModel,
+    "deepseek_vl_v2": DeepSeekVLV2QModel,
     "dots1": Dots1QModel,
     "exaone": ExaOneQModel,
     "exaone4": Exaone4QModel,
     "grinmoe": GrinMoeQModel,
     "mllama": MLlamaQModel,
+    "mllama_text_model": MLlamaTextQModel,
     "marin": Qwen3QModel,
     "granite": LlamaQModel, # 100% llama clone
     "granitemoehybrid": GraniteMoeHybridQModel,
@@ -315,11 +339,14 @@ MODEL_MAP = {
     "longcat_flash": LongCatFlashQModel,
     "llava_qwen2": LlavaQwen2QModel,
     "nemotron_h": NemotronHQModel,
+    "nemotron_h_puzzle": NemotronHPuzzleQModel,
     "nemotron_labs_diffusion": NemotronLabsDiffusionQModel,
     "nemotronh_nano_omni_reasoning_v3": NemotronOmniQModel,
     "bailing_moe": BailingMoeQModel,
     "bailing_hybrid": BailingMoeQModel,
+    "lfm2": LFM2QModel,
     "lfm2_moe": LFM2MoeQModel,
+    "lfm2_vl": LFM2VLQModel,
     "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
     "afmoe": AfMoeQModel,
@@ -449,25 +476,6 @@ def _get_config_load_kwargs(kwargs: dict) -> dict:
     return get_hf_gguf_load_kwargs(kwargs)
 
 
-def _normalize_supported_model_type(config) -> str:
-    model_type = config.model_type.lower()
-    config_class_name = type(config).__name__
-
-    if model_type == "qwen3_5":
-        if config_class_name == "Qwen3_5TextConfig":
-            return "qwen3_5_text"
-        if not hasattr(config, "text_config") and not hasattr(config, "vision_config"):
-            return "qwen3_5_text"
-
-    if model_type == "qwen3_5_moe":
-        if config_class_name == "Qwen3_5MoeTextConfig":
-            return "qwen3_5_moe_text"
-        if not hasattr(config, "text_config") and not hasattr(config, "vision_config"):
-            return "qwen3_5_moe_text"
-
-    return model_type
-
-
 def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_load_kwargs):
     if "gguf_file" not in config_load_kwargs:
         model_dir = normalize_model_id_or_path_for_hf_gguf(
@@ -476,6 +484,7 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
             api_name="check_and_get_model_definition",
         )
     trust_remote_code = resolve_trust_remote_code(model_dir, trust_remote_code=trust_remote_code)
+    patch_remote_code_before_config_load(model_dir)
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
@@ -530,6 +539,7 @@ class GPTQModel:
 
         model_cfg = None
         if not (treat_as_local_path and not isdir(model_id_or_path)):
+            patch_remote_code_before_config_load(model_id_or_path)
             model_cfg = AutoConfig.from_pretrained(
                 model_id_or_path,
                 trust_remote_code=trust_remote_code,

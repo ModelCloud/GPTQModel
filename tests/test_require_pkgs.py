@@ -37,6 +37,12 @@ def test_check_versions_accepts_satisfied_requirements(monkeypatch):
     loader.check_versions(DummyModel, ["transformers<=4.44.2"])
 
 
+def test_check_versions_accepts_bare_package_requirement(monkeypatch):
+    monkeypatch.setattr(loader, "version", lambda pkg: "2.8.3")
+
+    loader.check_versions(DummyModel, ["flash-attn"])
+
+
 def test_check_versions_rejects_unsatisfied_requirements(monkeypatch):
     monkeypatch.setattr(loader, "version", lambda pkg: "4.50.0")
 
@@ -52,6 +58,16 @@ def test_check_versions_rejects_missing_package(monkeypatch):
 
     with pytest.raises(ValueError, match="not installed"):
         loader.check_versions(DummyModel, ["retention>=1.0.7"])
+
+
+def test_check_versions_rejects_missing_bare_package(monkeypatch):
+    def fake_version(pkg):
+        raise PackageNotFoundError(pkg)
+
+    monkeypatch.setattr(loader, "version", fake_version)
+
+    with pytest.raises(ValueError, match="requires package flash-attn"):
+        loader.check_versions(DummyModel, ["flash-attn"])
 
 
 def test_check_versions_handles_multiple_requirements(monkeypatch):

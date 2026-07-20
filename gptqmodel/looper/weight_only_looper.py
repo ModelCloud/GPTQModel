@@ -15,7 +15,6 @@ optionally offload.
 from __future__ import annotations
 
 import os
-import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed

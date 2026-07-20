@@ -28,7 +28,7 @@ jobs:
     outputs:
       versions: ${{ steps.parser.outputs.versions || '[]' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           repository: ${{ inputs.repo || github.repository }}
           ref: ${{ inputs.ref || github.ref }}
@@ -58,7 +58,7 @@ jobs:
         version: ${{ fromJSON(needs.prepare-setuptools.outputs.versions) }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           repository: ${{ inputs.repo || github.repository }}
           ref: ${{ inputs.ref || github.ref }}

@@ -258,10 +258,13 @@ def parse_version_string(version_str: str):
 
 
 def parse_requirement(req):
+    req = req.strip()
     for op in [">=", "<=", ">", "<", "=="]:
         if op in req:
             pkg, version_required = req.split(op, 1)
             return pkg.strip(), op, version_required.strip()
+    if req:
+        return req, None, None
     raise ValueError(f"Unsupported version constraint in: {req}")
 
 
@@ -354,9 +357,13 @@ def check_versions(model_class, requirements: List[str]):
         pkg, operator, version_required = parse_requirement(req)
         try:
             installed_version = version(pkg)
+            if operator is None:
+                continue
             if not compare_versions(installed_version, version_required, operator):
                 raise ValueError(f"{model_class} requires version {req}, but current {pkg} version is {installed_version} ")
         except PackageNotFoundError:
+            if operator is None:
+                raise ValueError(f"{model_class} requires package {pkg}, but {pkg} not installed.")
             raise ValueError(f"{model_class} requires version {req}, but {pkg} not installed.")
 
 
@@ -1282,6 +1289,11 @@ def ModelLoader(cls):
                     # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
                         log.info(f"The layer {name} is not quantized.")
+                    del modules[name]
+                    continue
+
+                if not cls.should_quantize_module(model, name, modules[name], qcfg):
+                    log.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
             if format_code == FORMAT.EXL3:

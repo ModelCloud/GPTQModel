@@ -329,18 +329,21 @@ def _load_gguf_checkpoint_torch_direct(
     gguf_checkpoint_path,
     return_tensors: bool = False,
     model_to_load=None,
+    torch_dtype=None,
 ):
     if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled():
         return original_load_gguf_checkpoint(
             gguf_checkpoint_path,
             return_tensors=return_tensors,
             model_to_load=model_to_load,
+            torch_dtype=torch_dtype,
         )
 
     parsed_parameters = original_load_gguf_checkpoint(
         gguf_checkpoint_path,
         return_tensors=False,
         model_to_load=model_to_load,
+        torch_dtype=torch_dtype,
     )
     config = parsed_parameters.get("config", {})
     model_type = config.get("model_type")
@@ -349,6 +352,7 @@ def _load_gguf_checkpoint_torch_direct(
             gguf_checkpoint_path,
             return_tensors=True,
             model_to_load=model_to_load,
+            torch_dtype=torch_dtype,
         )
 
     processor_cls = gguf_utils.TENSOR_PROCESSORS.get(model_type, gguf_utils.TensorProcessor)
@@ -357,11 +361,15 @@ def _load_gguf_checkpoint_torch_direct(
             gguf_checkpoint_path,
             return_tensors=True,
             model_to_load=model_to_load,
+            torch_dtype=torch_dtype,
         )
 
     processor = processor_cls(config=config)
     tensor_key_mapping = gguf_utils.get_gguf_hf_weights_map(model_to_load, processor)
     target_device = internal_gguf._resolve_torch_dequant_device()
+    dequantize_kwargs = {"device": target_device}
+    if torch_dtype is not None:
+        dequantize_kwargs["dtype"] = torch_dtype
     reader = internal_gguf.GGUFReader(gguf_checkpoint_path)
     parsed_parameters["tensors"] = {}
 
@@ -370,7 +378,7 @@ def _load_gguf_checkpoint_torch_direct(
         weights = internal_gguf.dequantize_to_torch(
             tensor.data,
             tensor.tensor_type,
-            device=target_device,
+            **dequantize_kwargs,
         )
 
         result = processor.process(
@@ -402,7 +410,7 @@ def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
 
         original_load_gguf_checkpoint = gguf_utils.load_gguf_checkpoint
 
-        def _wrapped_load_gguf_checkpoint(gguf_checkpoint_path, return_tensors=False, model_to_load=None):
+        def _wrapped_load_gguf_checkpoint(gguf_checkpoint_path, return_tensors=False, model_to_load=None, torch_dtype=None):
             try:
                 return _load_gguf_checkpoint_torch_direct(
                     gguf_utils=gguf_utils,
@@ -410,6 +418,7 @@ def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
                     gguf_checkpoint_path=gguf_checkpoint_path,
                     return_tensors=return_tensors,
                     model_to_load=model_to_load,
+                    torch_dtype=torch_dtype,
                 )
             except Exception as exc:
                 log.debug(
@@ -421,6 +430,7 @@ def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
                     gguf_checkpoint_path,
                     return_tensors=return_tensors,
                     model_to_load=model_to_load,
+                    torch_dtype=torch_dtype,
                 )
 
         gguf_utils._gptqmodel_original_load_gguf_checkpoint = original_load_gguf_checkpoint
@@ -1003,6 +1013,159 @@ def _patch_transformers_remote_code_compat() -> None:
 
             PreTrainedModel.__getattr__ = __getattr__
             PreTrainedModel._gptqmodel_missing_all_tied_weights_patch = True
+
+
+def _is_deepseek_vl_v2_model_path(model_id_or_path: Optional[str]) -> bool:
+    if not isinstance(model_id_or_path, str) or not os.path.isdir(model_id_or_path):
+        return False
+
+    config_path = os.path.join(model_id_or_path, "config.json")
+    if not os.path.exists(config_path):
+        return False
+
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception:
+        return False
+
+    return str(config.get("model_type", "")).lower() == "deepseek_vl_v2"
+
+
+def patch_remote_code_before_config_load(model_id_or_path: Optional[str]) -> None:
+    # Must run before AutoConfig.from_pretrained(..., trust_remote_code=True):
+    # DeepSeek-VL2 imports the remote modeling modules while loading config, so
+    # applying this patch after config load is already too late.
+    if not _is_deepseek_vl_v2_model_path(model_id_or_path):
+        return
+
+    try:
+        import transformers.modeling_utils as modeling_utils
+        from transformers.utils import is_flash_attn_2_available
+    except Exception:
+        return
+
+    try:
+        import transformers.models.llama.modeling_llama as modeling_llama
+    except Exception:
+        modeling_llama = None
+
+    with _MONKEY_PATCH_LOCK:
+        if not hasattr(modeling_utils, "is_flash_attn_2_available"):
+            # DeepSeek-VL2's SigLIP remote code imports this helper from the
+            # transformers 4.x location.
+            modeling_utils.is_flash_attn_2_available = is_flash_attn_2_available
+
+        if modeling_llama is None or not hasattr(modeling_llama, "LlamaAttention"):
+            return
+
+        original_llama_attention = modeling_llama.LlamaAttention
+
+        if getattr(original_llama_attention, "_gptqmodel_deepseek_vl2_compat", False):
+            modeling_llama.LlamaFlashAttention2 = original_llama_attention
+            return
+
+        class DeepSeekVLV2CompatLlamaAttention(original_llama_attention):
+            _gptqmodel_deepseek_vl2_compat = True
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.rotary_emb = modeling_llama.LlamaRotaryEmbedding(self.config)
+
+            def forward(
+                self,
+                hidden_states,
+                position_embeddings=None,
+                attention_mask=None,
+                past_key_values=None,
+                **kwargs,
+            ):
+                old_style = any(
+                    key in kwargs
+                    for key in ("position_ids", "past_key_value", "output_attentions", "use_cache")
+                )
+                if not old_style:
+                    return super().forward(
+                        hidden_states,
+                        position_embeddings=position_embeddings,
+                        attention_mask=attention_mask,
+                        past_key_values=past_key_values,
+                        **kwargs,
+                    )
+
+                position_ids = kwargs.pop("position_ids", None)
+                past_key_value = kwargs.pop("past_key_value", None)
+                output_attentions = kwargs.pop("output_attentions", False)
+                use_cache = kwargs.pop("use_cache", False)
+                if past_key_values is None:
+                    past_key_values = past_key_value
+
+                input_shape = hidden_states.shape[:-1]
+                hidden_shape = (*input_shape, -1, self.head_dim)
+                query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+                if position_embeddings is None:
+                    if position_ids is None:
+                        position_ids = torch.arange(
+                            hidden_states.shape[1],
+                            device=hidden_states.device,
+                        ).unsqueeze(0)
+                    position_embeddings = self.rotary_emb(value_states, position_ids)
+                cos, sin = position_embeddings
+                query_states, key_states = modeling_llama.apply_rotary_pos_emb(
+                    query_states,
+                    key_states,
+                    cos,
+                    sin,
+                )
+
+                if past_key_values is not None:
+                    if hasattr(past_key_values, "update"):
+                        key_states, value_states = past_key_values.update(
+                            key_states,
+                            value_states,
+                            self.layer_idx,
+                        )
+                        present_key_value = past_key_values
+                    else:
+                        key_states = torch.cat([past_key_values[0], key_states], dim=2)
+                        value_states = torch.cat([past_key_values[1], value_states], dim=2)
+                        present_key_value = (key_states, value_states)
+                else:
+                    present_key_value = (key_states, value_states) if use_cache else None
+
+                key_states = modeling_llama.repeat_kv(key_states, self.num_key_value_groups)
+                value_states = modeling_llama.repeat_kv(value_states, self.num_key_value_groups)
+
+                if output_attentions:
+                    attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scaling
+                    if attention_mask is not None:
+                        attn_weights = attn_weights + attention_mask
+                    attn_weights = torch.nn.functional.softmax(
+                        attn_weights,
+                        dim=-1,
+                        dtype=torch.float32,
+                    ).to(query_states.dtype)
+                    attn_output = torch.matmul(attn_weights, value_states)
+                else:
+                    attn_weights = None
+                    attn_output = torch.nn.functional.scaled_dot_product_attention(
+                        query_states,
+                        key_states,
+                        value_states,
+                        attn_mask=attention_mask,
+                        dropout_p=0.0 if not self.training else self.attention_dropout,
+                        is_causal=attention_mask is None and query_states.shape[2] > 1,
+                    )
+
+                attn_output = attn_output.transpose(1, 2).reshape(*input_shape, -1).contiguous()
+                attn_output = self.o_proj(attn_output)
+                return attn_output, attn_weights, present_key_value
+
+        modeling_llama.LlamaAttention = DeepSeekVLV2CompatLlamaAttention
+        modeling_llama.LlamaFlashAttention2 = DeepSeekVLV2CompatLlamaAttention
 
 
 def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:

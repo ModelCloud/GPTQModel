@@ -13,12 +13,16 @@ from .bloom import BloomQModel
 from .brumby import BrumbyQModel
 from .chatglm import ChatGLMQModel
 from .codegen import CodeGenQModel
+from .cohere2_moe import Cohere2MoeQModel
 from .dbrx import DbrxQModel
 from .dbrx_converted import DbrxConvertedQModel
 from .decilm import DeciLMQModel
 from .deepseek_v2 import DeepSeekV2QModel
 from .deepseek_v3 import DeepSeekV3QModel
 from .deepseek_v4 import DeepSeekV4QModel
+from .deepseek_ocr2 import DeepSeekOCR2QModel
+from .deepseek_vl import DeepSeekVLQModel
+from .deepseek_vl_v2 import DeepSeekVLV2QModel
 from .dots1 import Dots1QModel
 from .dream import DreamQModel
 from .exaone import ExaOneQModel
@@ -30,6 +34,7 @@ from .gemma2 import Gemma2QModel
 from .gemma3 import Gemma3QModel
 from .gemma3n import Gemma3nForConditionalGenerationGPTQ, Gemma3nTextQModel
 from .gemma4 import Gemma4ForConditionalGenerationGPTQ, Gemma4TextQModel
+from .gemma4_unified import Gemma4UnifiedForConditionalGenerationGPTQ, Gemma4UnifiedTextQModel
 from .glm import GlmQModel
 from .glmasr import GlmASRGPTQ
 from .glm_ocr import GlmOCRGPTQ
@@ -43,26 +48,31 @@ from .grinmoe import GrinMoeQModel
 from .hrm_text import HrmTextQModel
 from .hunyuan_v1_dense import HunYuanDenseV1QModel
 from .hunyuan_v1_moe import HunYuanMoEV1QModel
+from .hy_v3 import HYV3QModel
 from .hymba import HymbaQModel
 from .instella import InstellaQModel
 from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
 from .interns1 import InternS1QModel
 from .internvl_chat import InternVLChatQModel
-from .llama4 import Llama4QModel
+from .lfm2_vl import LFM2VLQModel
+from .llama4 import Llama4QModel, Llama4TextQModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel
 from .minicpm_o import MiniCPMOQModel
 from .minicpmv import MiniCPMVQModel
 from .minicpmv_4_6 import MiniCPMV4_6QModel
 from .minimax_m2 import MiniMaxM2GPTQ
+from .minimax_m3_vl import MiniMaxM3VLGPTQ
+from .ministral3 import Ministral3GPTQ
 from .mimo_v2 import MimoV2QModel
 from .mixtral import MixtralQModel
-from .mllama import MLlamaQModel
+from .mllama import MLlamaQModel, MLlamaTextQModel
 from .mobilellm import MobileLLMQModel
 from .moss import MossQModel
 from .mpt import MptQModel
 from .nemotron_labs_diffusion import NemotronLabsDiffusionQModel
+from .nemotron_h_puzzle import NemotronHPuzzleQModel
 from .opt import OptQModel
 from .ovis import OvisQModel
 from .ovis2_5 import Ovis2_5QModel
@@ -97,6 +107,6 @@ from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .mistral3 import Mistral3GPTQ
 from .afmoe import AfMoeQModel
 from .glm4v import Glm4vGPTQ
-from .glm4v_moe import Glm4vMoeQModel
+from .glm4v_moe import Glm4vMoeQModel, Glm4vMoeTextQModel
 from .voxtral import VoxtralGPTQ
 from .glm4_moe_lite import Glm4MoeLiteQModel

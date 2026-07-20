@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from transformers import AutoModel
+
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from .glm4v import Glm4vGPTQ
 
@@ -42,4 +44,43 @@ class Glm4vMoeQModel(Glm4vGPTQ):
     ]
 
 
-__all__ = ["Glm4vMoeQModel"]
+class Glm4vMoeTextQModel(Glm4vMoeQModel):
+    loader = AutoModel
+
+    require_load_processor = False
+
+    pre_lm_head_norm_module = "norm"
+    rotary_embedding = "rotary_emb"
+
+    module_tree = [
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp:moe": {
+                "gate": ("gate:!",),
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
+                "shared_experts": {
+                    "gate_proj": ("gate_proj:0",),
+                    "up_proj": ("up_proj:0",),
+                    "down_proj": ("down_proj:1",),
+                },
+                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            },
+        },
+    ]
+
+    @classmethod
+    def get_base_modules(cls, model):
+        return [
+            name
+            for name, _ in model.named_children()
+            if name != "layers"
+        ]
+
+
+__all__ = ["Glm4vMoeQModel", "Glm4vMoeTextQModel"]

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import torch
@@ -93,6 +95,19 @@ def _exllamav2_extra_cuda_cflags() -> list[str]:
     )
 
 
+def _exllamav2_extra_ldflags() -> list[str]:
+    # q_gemm.cu / q_gemm_awq.cu call cublasHgemm. On Linux the symbol resolves
+    # at load time, but the MSVC linker needs the import library explicitly or
+    # the build fails with `LNK2019: unresolved external symbol cublasHgemm`.
+    # Mirrors _extra_ldflags in gptqmodel/exllamav3/ext.py.
+    if sys.platform != "win32":
+        return []
+    flags = ["cublas.lib"]
+    if sys.base_prefix != sys.prefix:
+        flags.append(f"/LIBPATH:{os.path.join(sys.base_prefix, 'libs')}")
+    return flags
+
+
 def _exllamav2_awq_extra_cflags() -> list[str]:
     return default_jit_cflags(opt_level=None, enable_bf16=True)
 
@@ -120,6 +135,7 @@ _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     extra_cflags=_exllamav2_gptq_extra_cflags,
     extra_cuda_cflags=_exllamav2_gptq_extra_cuda_cflags,
     extra_include_paths=_exllamav2_include_paths,
+    extra_ldflags=_exllamav2_extra_ldflags,
     force_rebuild_env="GPTQMODEL_EXLLAMAV2_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
@@ -142,6 +158,7 @@ _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     extra_cflags=_exllamav2_awq_extra_cflags,
     extra_cuda_cflags=_exllamav2_awq_extra_cuda_cflags,
     extra_include_paths=_exllamav2_include_paths,
+    extra_ldflags=_exllamav2_extra_ldflags,
     force_rebuild_env="GPTQMODEL_EXLLAMAV2_AWQ_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
