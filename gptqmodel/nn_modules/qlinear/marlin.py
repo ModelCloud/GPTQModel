@@ -16,6 +16,7 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
+import os
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -51,6 +52,27 @@ from ...utils.rocm import IS_ROCM
 
 
 log = setup_logger()
+
+
+# Sample process-level routing policy once when each MarlinLinear is created;
+# the native dispatcher still makes the final hardware/shape decision per call.
+_PACKED_PREFILL_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL"
+_PACKED_PREFILL_MIN_ROWS_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL_MIN_ROWS"
+_PACKED_PREFILL_CONFIG_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL_CONFIG"
+_PACKED_PREFILL_MIN_ROWS_DEFAULT = 1024
+
+
+def _packed_prefill_enabled() -> bool:
+    """Enable conservative automatic packed-prefill routing by default."""
+    return env_flag(_PACKED_PREFILL_ENV, default=True)
+
+
+def _should_use_packed_prefill(x: torch.Tensor, min_rows: int) -> bool:
+    """Route only genuine multi-token work to the packed prefill kernel."""
+    if x.ndim >= 3 and x.shape[-2] == 1:
+        return False
+    rows = x.numel() // x.shape[-1]
+    return rows >= min_rows
 
 
 class MarlinLinear(GPTQQuantLinear):
@@ -113,6 +135,27 @@ class MarlinLinear(GPTQQuantLinear):
 
         self.compute_dtype = kwargs.get("dtype") or torch.float16
         self.fp32 = env_flag("GPTQMODEL_MARLIN_USE_FP32", default=True)
+        self.packed_prefill = _packed_prefill_enabled()
+        try:
+            self.packed_prefill_min_rows = int(
+                os.environ.get(
+                    _PACKED_PREFILL_MIN_ROWS_ENV,
+                    str(_PACKED_PREFILL_MIN_ROWS_DEFAULT),
+                )
+            )
+            self.packed_prefill_config = int(
+                os.environ.get(_PACKED_PREFILL_CONFIG_ENV, "0")
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"{_PACKED_PREFILL_MIN_ROWS_ENV} and {_PACKED_PREFILL_CONFIG_ENV} must be integers."
+            ) from exc
+        if self.packed_prefill_min_rows < 1:
+            raise ValueError(
+                f"{_PACKED_PREFILL_MIN_ROWS_ENV} must be a positive integer."
+            )
+        if not 0 <= self.packed_prefill_config <= 4:
+            raise ValueError(f"{_PACKED_PREFILL_CONFIG_ENV} must be between 0 and 4.")
 
         super().__init__(
             bits=bits,
@@ -131,6 +174,12 @@ class MarlinLinear(GPTQQuantLinear):
         if not self.fp32:
             log.warn.once(
                 "Kernel: GPTQMODEL_MARLIN_USE_FP32 is disabled. Marlin will use reduced-precision reduction.")
+        if self.packed_prefill:
+            log.info.once(
+                "Kernel: automatic packed Marlin W4A16 prefill routing is enabled; "
+                "decode and unsupported shapes use ordinary Marlin, with no "
+                "dense-weight cache."
+            )
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
@@ -315,6 +364,10 @@ class MarlinLinear(GPTQQuantLinear):
         if self.bias is not None and self.bias.dtype != x.dtype:
             self.bias.data = self.bias.data.to(dtype=x.dtype)
 
+        use_packed_prefill = self.packed_prefill and _should_use_packed_prefill(
+            x,
+            self.packed_prefill_min_rows,
+        )
         out = apply_gptq_marlin_linear(
             input=x.contiguous() if self.is_lm_head else x,
             weight=self.qweight,
@@ -330,6 +383,8 @@ class MarlinLinear(GPTQQuantLinear):
             bias=self.bias,
             use_fp32_reduce=self.fp32,
             use_atomics=False, # reduces accuracy with slightly faster performance
+            use_packed_prefill=use_packed_prefill,
+            packed_prefill_config=self.packed_prefill_config,
         )
 
         if self.adapter:

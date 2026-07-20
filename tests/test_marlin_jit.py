@@ -71,6 +71,7 @@ def test_gptq_marlin_gemm_dispatches_fp16_to_torch_ops(monkeypatch):
     def fake_gemm(*args):
         captured["dtype"] = args[0].dtype
         captured["shape"] = (args[11], args[12])
+        captured["packed_prefill"] = args[-2:]
         return torch.full((args[11], args[12]), 3.0, dtype=args[0].dtype)
 
     fp16_loader.ops["gptq_marlin_gemm_fp16"] = fake_gemm
@@ -93,11 +94,17 @@ def test_gptq_marlin_gemm_dispatches_fp16_to_torch_ops(monkeypatch):
         size_m=2,
         size_n=64,
         size_k=128,
+        use_packed_prefill=True,
+        packed_prefill_config=2,
     )
 
     assert fp16_loader.op_calls == ["gptq_marlin_gemm_fp16"]
     assert bf16_loader.op_calls == []
-    assert captured == {"dtype": torch.float16, "shape": (2, 64)}
+    assert captured == {
+        "dtype": torch.float16,
+        "shape": (2, 64),
+        "packed_prefill": (True, 2),
+    }
     assert out.shape == (2, 64)
     assert out.dtype == torch.float16
 

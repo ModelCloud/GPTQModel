@@ -14,7 +14,7 @@ torch::Tensor gptq_marlin_gemm_bf16(
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
     vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
-    bool is_zp_float);
+    bool is_zp_float, bool use_packed_prefill, int64_t packed_prefill_config);
 
 namespace {
 
@@ -28,12 +28,13 @@ torch::Tensor gptq_marlin_gemm_bf16_dispatch(
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor workspace,
     int64_t b_q_type_id, int64_t size_m, int64_t size_n, int64_t size_k,
     bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
-    bool is_zp_float) {
+    bool is_zp_float, bool use_packed_prefill, int64_t packed_prefill_config) {
   return gptq_marlin_gemm_bf16(
       a, c_or_none, b_q_weight, b_bias_or_none, b_scales, global_scale_or_none,
       b_zeros_or_none, g_idx_or_none, perm_or_none, workspace,
       static_cast<vllm::ScalarTypeId>(b_q_type_id), size_m, size_n, size_k,
-      is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float);
+      is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float,
+      use_packed_prefill, packed_prefill_config);
 }
 
 torch::Tensor gptq_marlin_repack_dispatch(torch::Tensor b_q_weight,
@@ -55,7 +56,8 @@ TORCH_LIBRARY(gptqmodel_marlin_bf16, m) {
       "gptq_marlin_gemm_bf16(Tensor a, Tensor? c, Tensor b_q_weight, Tensor? b_bias, Tensor b_scales, "
       "Tensor? global_scale, Tensor? b_zeros, Tensor? g_idx, Tensor? perm, Tensor workspace, int b_q_type_id, "
       "int size_m, int size_n, int size_k, bool is_k_full=True, bool use_atomic_add=False, "
-      "bool use_fp32_reduce=False, bool is_zp_float=False) -> Tensor");
+      "bool use_fp32_reduce=False, bool is_zp_float=False, bool use_packed_prefill=False, "
+      "int packed_prefill_config=0) -> Tensor");
   m.def("gptq_marlin_repack(Tensor b_q_weight, Tensor perm, int size_k, int size_n, int num_bits) -> Tensor");
   m.def("awq_marlin_repack(Tensor b_q_weight, int size_k, int size_n, int num_bits) -> Tensor");
 }

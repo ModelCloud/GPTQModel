@@ -38,4 +38,19 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
           >
 __global__ void Marlin(MARLIN_KERNEL_PARAMS);
 
+// Large-M W4A16 specialization. Each CTA owns one output tile and traverses
+// the full K dimension, avoiding the cross-CTA reduction used by decode Marlin.
+template <typename scalar_t,
+          const vllm::ScalarTypeId w_type_id,
+          const vllm::ScalarTypeId s_type_id,
+          const int threads,
+          const int thread_m_blocks,
+          const int thread_n_blocks,
+          const int thread_k_blocks,
+          const bool m_block_size_8,
+          const int stages,
+          const int group_blocks,
+          const bool is_zp_float>
+__global__ void MarlinPrefill(MARLIN_KERNEL_PARAMS);
+
 }

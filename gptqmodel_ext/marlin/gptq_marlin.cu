@@ -99,7 +99,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
     vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
-    bool is_zp_float) {
+    bool is_zp_float, bool use_packed_prefill, int64_t packed_prefill_config) {
   TORCH_CHECK_NOT_IMPLEMENTED(false,
                               "marlin_gemm(..) requires CUDA_ARCH >= 7.5");
   return torch::empty({1, 1});
@@ -671,6 +671,48 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
   return kernel;
 }
 
+// Resolve only the deliberately narrow packed-prefill specializations. Other
+// quantization contracts stay on the general Marlin kernel.
+template <typename scalar_t>
+MarlinFuncPtr get_marlin_packed_prefill_kernel(int config) {
+  constexpr auto s_type = std::is_same<scalar_t, half>::value
+                              ? vllm::kFloat16
+                              : vllm::kBFloat16;
+  switch (config) {
+    case 1:
+      return MarlinPrefill<scalar_t, vllm::kU4B8.id(), s_type.id(), 128, 4, 8,
+                           4, false, pipe_stages, 8, false>;
+    case 2:
+      return MarlinPrefill<scalar_t, vllm::kU4B8.id(), s_type.id(), 128, 4, 16,
+                           4, false, pipe_stages, 8, false>;
+    case 3:
+      return MarlinPrefill<scalar_t, vllm::kU4B8.id(), s_type.id(), 256, 2, 32,
+                           4, false, pipe_stages, 8, false>;
+    case 4:
+      return MarlinPrefill<scalar_t, vllm::kU4B8.id(), s_type.id(), 64, 4, 8,
+                           4, false, pipe_stages, 8, false>;
+    default:
+      return MarlinDefault;
+  }
+}
+
+// Conservative auto-routing for projection shapes exercised by the
+// Llama-3.2-1B GPTQ test checkpoint. A zero result means that ordinary Marlin
+// remains faster for that M/K/N combination. Explicit configs are available
+// for tuning other sm_80 models without changing this table.
+int select_marlin_packed_prefill_config(int prob_m, int prob_n, int prob_k) {
+  if (prob_k != 2048) return 0;
+
+  if (prob_n == 2048) {
+    return prob_m == 2048 ? 1 : 0;
+  }
+  if (prob_n == 8192) {
+    if (prob_m == 1024) return 1;
+    if (prob_m == 2048) return 2;
+  }
+  return 0;
+}
+
 template <typename scalar_t>
 exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
                                     int prob_n, int prob_k, int thread_m_blocks,
@@ -750,7 +792,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
                int group_size, int dev, cudaStream_t stream, int thread_k_init,
                int thread_n_init, int sms, bool use_atomic_add,
-               bool use_fp32_reduce, bool is_zp_float) {
+               bool use_fp32_reduce, bool is_zp_float,
+               bool use_packed_prefill, int packed_prefill_config) {
   if (has_zp) {
     TORCH_CHECK(
         q_type == vllm::kU4 || q_type == vllm::kU8,
@@ -836,6 +879,72 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     stages = 2;
     if constexpr (!std::is_same<scalar_t, half>::value) {
       TORCH_CHECK(false, "Turing only supports float16 dense Marlin kernels.");
+    }
+  }
+
+  // Large-M prefill has enough independent output tiles to assign one complete
+  // K reduction to each CTA. This avoids decode Marlin's striped global
+  // reduction while consuming the same packed qweight and permuted scales.
+  if (use_packed_prefill && major_capability == 8 && minor_capability == 0 &&
+      q_type == vllm::kU4B8 && !has_act_order && !has_zp &&
+      is_k_full && group_size == 128 && !is_zp_float && prob_m >= 16) {
+    int config = packed_prefill_config;
+    if (config == 0) {
+      config = select_marlin_packed_prefill_config(prob_m, prob_n, prob_k);
+    }
+
+    int thread_m_blocks = -1;
+    thread_config_t prefill_thread_config{-1, -1, -1};
+    switch (config) {
+      case 1:
+        thread_m_blocks = 4;
+        prefill_thread_config = {64, 128, 128};
+        break;
+      case 2:
+        thread_m_blocks = 4;
+        prefill_thread_config = {64, 256, 128};
+        break;
+      case 3:
+        thread_m_blocks = 2;
+        prefill_thread_config = {64, 512, 256};
+        break;
+      case 4:
+        thread_m_blocks = 4;
+        prefill_thread_config = {64, 128, 64};
+        break;
+      default:
+        break;
+    }
+
+    int prefill_shared_mem =
+        thread_m_blocks > 0
+            ? get_kernel_cache_size(prefill_thread_config, thread_m_blocks,
+                                    prob_m, prob_n, prob_k, num_bits, group_size,
+                                    false, true, false, false, stages)
+            : max_shared_mem + 1;
+    bool prefill_config_valid =
+        thread_m_blocks > 0 &&
+        prob_k % prefill_thread_config.thread_k == 0 &&
+        prob_n % prefill_thread_config.thread_n == 0 &&
+        prefill_shared_mem <= max_shared_mem;
+    if (prefill_config_valid) {
+      auto kernel = get_marlin_packed_prefill_kernel<scalar_t>(config);
+      if (kernel != MarlinDefault) {
+        int shared_mem = prefill_shared_mem;
+        int m_tiles = div_ceil(prob_m, thread_m_blocks * 16);
+        int n_tiles = prob_n / prefill_thread_config.thread_n;
+        int blocks = m_tiles * n_tiles;
+
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             shared_mem);
+        // clang-format off
+        kernel<<<blocks, prefill_thread_config.num_threads, shared_mem, stream>>>(
+            A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, s_ptr, s2_ptr, zp_ptr,
+            g_idx_ptr, num_groups, prob_m, prob_n, prob_k, lda, locks, has_bias,
+            false, use_fp32_reduce, shared_mem);
+        // clang-format on
+        return;
+      }
     }
   }
 
@@ -979,7 +1088,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
     vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
-    bool is_zp_float) {
+    bool is_zp_float, bool use_packed_prefill, int64_t packed_prefill_config) {
   vllm::ScalarType const b_q_type = vllm::ScalarType::from_id(b_q_type_id);
   int pack_factor = 32 / b_q_type.size_bits();
 
@@ -1236,7 +1345,8 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
         a.stride(0), workspace.data_ptr(), b_q_type, has_bias, has_act_order,
         is_k_full, has_zp, num_groups, group_size, dev,
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
-        use_atomic_add, use_fp32_reduce, is_zp_float);
+        use_atomic_add, use_fp32_reduce, is_zp_float, use_packed_prefill,
+        static_cast<int>(packed_prefill_config));
     return c;
   }
   #endif
@@ -1279,7 +1389,8 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
         size_m, size_n, size_k, a.stride(0), workspace.data_ptr(), b_q_type,
         has_bias, has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
-        use_atomic_add, use_fp32_reduce, is_zp_float);
+        use_atomic_add, use_fp32_reduce, is_zp_float, use_packed_prefill,
+        static_cast<int>(packed_prefill_config));
     return c;
   }
   #endif

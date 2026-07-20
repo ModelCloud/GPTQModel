@@ -23,6 +23,14 @@
   #define MARLIN_NAMESPACE_NAME marlin
 #endif
 
+#ifndef MARLIN_KERNEL_FUNCTION
+  #define MARLIN_KERNEL_FUNCTION Marlin
+#endif
+
+#ifndef MARLIN_DIRECT_PREFILL
+  #define MARLIN_DIRECT_PREFILL 0
+#endif
+
 #include "marlin.cuh"
 #include "marlin_dtypes.cuh"
 #include "dequant.h"
@@ -56,7 +64,7 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                                      // with a separate quantization scale
           const bool is_zp_float     // is zero point of float16 type?
           >
-__global__ void Marlin(
+__global__ void MARLIN_KERNEL_FUNCTION(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
     int4* __restrict__ C,        // fp16 output buffer of shape mxn
@@ -231,7 +239,7 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                                    // with a separate quantization scale
           const bool is_zp_float   // is zero point of float16 type?
           >
-__global__ void Marlin(
+__global__ void MARLIN_KERNEL_FUNCTION(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
     int4* __restrict__ C,        // fp16 output buffer of shape mxn
@@ -323,17 +331,27 @@ __global__ void Marlin(
   constexpr int pack_factor = 32 / w_type.size_bits();
   static_assert(thread_m_blocks == 1 || !m_block_size_8);
 
-  // For larger GEMMs we run multiple batchsize 64 versions in parallel for a
-  // better partitioning with less reductions
+  // Decode Marlin stripes work across K to saturate the device. Large-M
+  // prefill instead maps one CTA to each output tile and lets that CTA own K.
+  // Keep the original M until blockIdx identifies the possibly partial tail.
+#if MARLIN_DIRECT_PREFILL
+  int direct_problem_m = prob_m;
+  int parallel = div_ceil(prob_m, m_block_size);
+#else
   int parallel = 1;
   if (prob_m > m_block_size) {
     parallel = prob_m / m_block_size;
     prob_m = m_block_size;
   }
+#endif
 
   int k_tiles = prob_k / 16 / thread_k_blocks;
   int n_tiles = prob_n / 16 / thread_n_blocks;
+#if MARLIN_DIRECT_PREFILL
+  int iters = k_tiles;
+#else
   int iters = div_ceil(k_tiles * n_tiles * parallel, gridDim.x);
+#endif
 
   if constexpr (!has_act_order && group_blocks != -1) {
     if (group_blocks >= thread_k_blocks) {
@@ -345,8 +363,13 @@ __global__ void Marlin(
     }
   }
 
+#if MARLIN_DIRECT_PREFILL
+  int slice_row = 0;
+  int slice_col_par = blockIdx.x;
+#else
   int slice_row = (iters * blockIdx.x) % k_tiles;
   int slice_col_par = (iters * blockIdx.x) / k_tiles;
+#endif
   int slice_col = slice_col_par;
   int slice_iters;  // number of threadblock tiles in the current slice
   int slice_count =
@@ -365,6 +388,9 @@ __global__ void Marlin(
     slice_col = slice_col_par % n_tiles;
     par_id = slice_col_par / n_tiles;
   }
+#if MARLIN_DIRECT_PREFILL
+  prob_m = min(m_block_size, direct_problem_m - par_id * m_block_size);
+#endif
   if (parallel * n_tiles >= gridDim.x) {
     // when parallel * n_tiles >= sms
     // then there are at most $sms$ conflict tile blocks
@@ -376,6 +402,18 @@ __global__ void Marlin(
   // Compute all information about the current slice which is required for
   // synchronization.
   auto init_slice = [&](bool first_init = false) {
+#if MARLIN_DIRECT_PREFILL
+    // The direct prefill grid assigns exactly one complete-K output tile to
+    // each CTA, so there is no inter-CTA reduction or follow-on slice.
+    if (!first_init) {
+      slice_iters = 0;
+      return;
+    }
+    slice_iters = k_tiles;
+    slice_count = 1;
+    slice_idx = 0;
+    return;
+#else
     slice_iters =
         iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
     if (slice_iters < 0 || slice_col_par >= n_tiles * parallel) slice_iters = 0;
@@ -431,6 +469,7 @@ __global__ void Marlin(
       slice_col = 0;
       par_id++;
     }
+#endif
   };
   init_slice(true);
 

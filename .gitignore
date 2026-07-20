@@ -177,11 +177,13 @@ example.py
 /gptqmodel_ext/marlin/kernel_bf16_ku4.cu
 /gptqmodel_ext/marlin/kernel_bf16_ku4b8.cu
 /gptqmodel_ext/marlin/kernel_bf16_ku8b128.cu
+/gptqmodel_ext/marlin/kernel_bf16_prefill_ku4b8.cu
 /gptqmodel_ext/marlin/kernel_fp16_kfe2m1f.cu
 /gptqmodel_ext/marlin/kernel_fp16_kfe4m3fn.cu
 /gptqmodel_ext/marlin/kernel_fp16_ku4.cu
 /gptqmodel_ext/marlin/kernel_fp16_ku4b8.cu
 /gptqmodel_ext/marlin/kernel_fp16_ku8b128.cu
+/gptqmodel_ext/marlin/kernel_fp16_prefill_ku4b8.cu
 /gptqmodel_offload/
 /benchmark_artifcats/
 /benchmark_artifacts/

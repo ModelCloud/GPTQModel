@@ -459,6 +459,8 @@ def apply_gptq_marlin_linear(
         bias: Optional[torch.Tensor] = None,
         use_fp32_reduce: bool = True,
         use_atomics: bool = False,
+        use_packed_prefill: bool = False,
+        packed_prefill_config: int = 0,
 
 ) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
@@ -487,7 +489,9 @@ def apply_gptq_marlin_linear(
                               is_k_full=is_k_full,
                               use_atomic_add=use_atomics,
                               use_fp32_reduce=use_fp32_reduce,
-                              is_zp_float=False)
+                              is_zp_float=False,
+                              use_packed_prefill=use_packed_prefill,
+                              packed_prefill_config=packed_prefill_config)
 
     return output.reshape(out_shape)
 
@@ -552,7 +556,9 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      is_k_full: bool = True,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
-                     is_zp_float: bool = False) -> torch.Tensor:
+                     is_zp_float: bool = False,
+                     use_packed_prefill: bool = False,
+                     packed_prefill_config: int = 0) -> torch.Tensor:
     if _marlin_runtime_dtype(a.dtype) == torch.bfloat16:
         op_name = "gptq_marlin_gemm_bf16"
     else:
@@ -581,6 +587,8 @@ def gptq_marlin_gemm(a: torch.Tensor,
         use_atomic_add,
         use_fp32_reduce,
         is_zp_float,
+        use_packed_prefill,
+        packed_prefill_config,
     )
 
 

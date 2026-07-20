@@ -223,6 +223,12 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 `BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
 
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
+The experimental large-M W4A16 packed-prefill kernel is selected automatically
+for its validated shapes, while decode and fallback shapes retain ordinary
+Marlin. It consumes Marlin-packed INT4 weights directly and creates no
+dense-weight cache. Set `GPTQMODEL_MARLIN_PACKED_PREFILL=0` before model loading
+only to disable automatic routing. See
+[Marlin prefill/decode split](docs/kernels/marlin_prefill_decode.md).
 
 ### Quantization Runtime Sharing
 
