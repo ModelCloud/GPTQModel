@@ -21,13 +21,13 @@
 
 ## Latest News
 
-* 07/14/2026 7.1.0-dev `main`: ✨ Added `nemotron_h_puzzle` model support
-* 07/07/2026 7.1.0-dev `main`: ✨ Added `deepseek_vl` model support
-* 07/06/2026 7.1.0-dev `main`: ✨ Added `deepseek_ocr2` model support
-* 04/07/2026 7.1.0-dev `main`: ✨ Added `deepseek_vl_v2` model support
-* 02/07/2026 7.1.0-dev `main`: ✨ Added `lfm2` and `lfm2_vl` model support
-* 06/30/2026 7.1.0-dev `main`: ✨ Added `minimax_m3_vl` / MiniMax M3 model support
-* 06/25/2026 7.1.0-dev `main`: ✨ Added `cohere2_moe` model support
+* 07/14/2026 7.3.0-dev `main`: ✨ Added `nemotron_h_puzzle` model support
+* 07/07/2026 7.3.0-dev `main`: ✨ Added `deepseek_vl` model support
+* 07/06/2026 7.3.0-dev `main`: ✨ Added `deepseek_ocr2` model support
+* 04/07/2026 7.3.0-dev `main`: ✨ Added `deepseek_vl_v2` model support
+* 02/07/2026 7.2.0-dev `main`: ✨ Added `lfm2` and `lfm2_vl` model support
+* 06/30/2026 7.2.0-dev `main`: ✨ Added `minimax_m3_vl` / MiniMax M3 model support
+* 06/25/2026 7.2.0-dev `main`: ✨ Added `cohere2_moe` model support
 * 05/25/2026 7.1.0-dev `main`: ✨ Added `hy_3` and `ministral3` model support
 * 05/25/2026 7.1.0-dev `main`: ✨ Added `hunyuan_v1_dense` and `hunyuan_v1_moe` model support
 * 05/21/2026 7.1.0-dev `main`: ✨ Added `nemotron_labs_diffusion` model support
