@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Backends"
+  short_description: "Add or tune quantized inference backends"
+  default_prompt: "Use $gptqmodel-backends to add or tune this quantized inference backend."

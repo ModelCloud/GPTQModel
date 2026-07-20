@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel CUDA Kernels"
+  short_description: "Build, debug, and benchmark CUDA/Triton kernels"
+  default_prompt: "Use $gptqmodel-cuda-kernels to build and validate this kernel change."

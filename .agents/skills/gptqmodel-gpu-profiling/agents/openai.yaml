@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel GPU Profiling"
+  short_description: "Profile quantized GPU bottlenecks safely"
+  default_prompt: "Use $gptqmodel-gpu-profiling to capture and analyze this GPU workload."

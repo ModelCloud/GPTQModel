@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Quantization"
+  short_description: "Implement and validate GPTQ/AWQ quantization"
+  default_prompt: "Use $gptqmodel-quantization to implement and validate this quantization change."

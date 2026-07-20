@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Ampere Kernels"
+  short_description: "Tune quantized kernels for Ampere sm_80 GPUs"
+  default_prompt: "Use $gptqmodel-ampere-kernels to tune this kernel for Ampere sm_80."

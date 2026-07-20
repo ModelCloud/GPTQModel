@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Hopper Kernels"
+  short_description: "Tune quantized kernels for Hopper sm_90 GPUs"
+  default_prompt: "Use $gptqmodel-hopper-kernels to tune this kernel for Hopper sm_90."

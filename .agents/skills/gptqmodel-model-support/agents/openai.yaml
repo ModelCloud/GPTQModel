@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Model Support"
+  short_description: "Add quantization support for new model families"
+  default_prompt: "Use $gptqmodel-model-support to add quantization support for this model family."
