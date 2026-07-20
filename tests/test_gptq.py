@@ -167,6 +167,7 @@ def test_gptq_act_group_aware_rejects_non_positive_group_size():
     [
         (ScaleSearchConfig.ACTIVATION, (4,)),
         (ScaleSearchConfig.HESSIAN, (4, 4)),
+        (ScaleSearchConfig.HYBRID, (4, 4)),
     ],
 )
 def test_grouped_scale_search_skips_overwritten_full_tensor_search(

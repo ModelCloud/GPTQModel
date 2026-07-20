@@ -4,7 +4,8 @@
 import pytest
 import torch
 
-from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
+from gptqmodel.looper import gptq_processor
+from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module, log_scale_search_config
 from gptqmodel.quantization import QuantizeConfig, Quantizer, ScaleSearchConfig
 
 
@@ -35,6 +36,14 @@ def _run_scale_search(
 def _quadratic_error(reference: torch.Tensor, candidate: torch.Tensor, hessian: torch.Tensor) -> float:
     error = candidate.float() - reference.float()
     return torch.einsum("bi,ij,bj->", error, hessian.float(), error).item()
+
+
+def _hybrid_error(reference: torch.Tensor, candidate: torch.Tensor, hessian: torch.Tensor) -> float:
+    """Independent oracle for the 50/50 diagonal/full-Hessian objective."""
+
+    error = candidate.float() - reference.float()
+    diagonal = (error.square() * hessian.float().diagonal()).sum()
+    return 0.5 * (diagonal.item() + _quadratic_error(reference, candidate, hessian))
 
 
 def _run_scalar_activation_reference(weights: torch.Tensor, hessian: torch.Tensor):
@@ -90,25 +99,149 @@ def _run_scalar_activation_reference(weights: torch.Tensor, hessian: torch.Tenso
     return quantizer.quantize(weights), quantizer.scale.clone(), quantizer.zero.clone()
 
 
+def _run_scalar_correlated_reference(
+    weights: torch.Tensor,
+    hessian: torch.Tensor,
+    method: ScaleSearchConfig,
+):
+    """Retain the eager one-candidate Hessian loop as a numerical oracle."""
+
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=weights.shape[1],
+        sym=True,
+        act_group_aware=False,
+        offload_to_disk=False,
+        scale_search=method,
+    )
+    quantizer = Quantizer(qcfg)
+    quantizer.configure(perchannel=True, grid=100, maxshrink=0.8)
+    quantizer.maxq = quantizer.maxq.to(weights.device)
+
+    x = weights.flatten(1)
+    zero_range = torch.zeros(x.shape[0], device=x.device)
+    xmin = torch.minimum(x.min(dim=1).values, zero_range)
+    xmax = torch.maximum(x.max(dim=1).values, zero_range)
+    xmax = torch.maximum(xmin.abs(), xmax)
+    xmin = torch.where(xmin < 0, -xmax, xmin)
+    empty = (xmin == 0) & (xmax == 0)
+    xmin = torch.where(empty, -torch.ones_like(xmin), xmin)
+    xmax = torch.where(empty, torch.ones_like(xmax), xmax)
+
+    scale = (xmax - xmin) / quantizer.maxq
+    zero = torch.full_like(scale, (quantizer.maxq + 1) / 2)
+    prepared_hessian = hessian.detach().to(device=x.device, dtype=torch.float32)
+    prepared_hessian = torch.nan_to_num(prepared_hessian, nan=0.0, posinf=0.0, neginf=0.0)
+    prepared_hessian = (prepared_hessian + prepared_hessian.t()) * 0.5
+    prepared_hessian = prepared_hessian / prepared_hessian.diagonal().clamp_min(0).mean()
+    best = torch.full([x.shape[0]], float("inf"), device=x.device)
+
+    for index in range(80):
+        shrink = 1 - index / 100
+        scale_candidate = (shrink * xmax - shrink * xmin) / quantizer.maxq
+        levels = torch.clamp(
+            torch.round(x / scale_candidate.unsqueeze(1)) + zero.unsqueeze(1),
+            0,
+            quantizer.maxq,
+        )
+        candidate = scale_candidate.unsqueeze(1) * (levels - zero.unsqueeze(1))
+        error = (candidate - x).float()
+        objective = (error.matmul(prepared_hessian) * error).sum(dim=1)
+        if method == ScaleSearchConfig.HYBRID:
+            diagonal = (error.square() * prepared_hessian.diagonal().clamp_min(0)).sum(dim=1)
+            objective = 0.5 * (objective + diagonal)
+        take = objective < best
+        if torch.any(take):
+            best[take] = objective[take]
+            scale[take] = scale_candidate[take]
+
+    quantizer.scale = scale.reshape(-1, 1)
+    quantizer.zero = zero.reshape(-1, 1)
+    return quantizer.quantize(weights), quantizer.scale.clone(), quantizer.zero.clone()
+
+
 def test_scale_search_values_are_stable():
     assert ScaleSearchConfig.MSE.value == "mse"
     assert ScaleSearchConfig.ACTIVATION.value == "activation"
     assert ScaleSearchConfig.HESSIAN.value == "hessian"
+    assert ScaleSearchConfig.HYBRID.value == "hybrid"
 
 
 def test_scale_search_config_normalization_and_round_trip():
-    disabled = QuantizeConfig(offload_to_disk=False)
+    default = QuantizeConfig(offload_to_disk=False)
+    assert default.scale_search is ScaleSearchConfig.ACTIVATION
+    assert default.mse == 2.0
+    assert default.to_dict()["meta"]["scale_search"] == "activation"
+
+    reloaded_default = QuantizeConfig.from_quant_config(default.to_dict())
+    assert reloaded_default.scale_search is ScaleSearchConfig.ACTIVATION
+    assert reloaded_default.mse == 2.0
+
+    disabled = QuantizeConfig(scale_search=None, offload_to_disk=False)
     assert disabled.scale_search is None
     assert disabled.mse == 0.0
 
-    activation = QuantizeConfig(scale_search="activation", offload_to_disk=False)
-    assert activation.scale_search is ScaleSearchConfig.ACTIVATION
-    assert activation.mse == 2.0
-    assert activation.to_dict()["meta"]["scale_search"] == "activation"
+    reloaded_disabled = QuantizeConfig.from_quant_config(disabled.to_dict())
+    assert reloaded_disabled.scale_search is None
+    assert reloaded_disabled.mse == 0.0
 
-    reloaded = QuantizeConfig.from_quant_config(activation.to_dict())
-    assert reloaded.scale_search is ScaleSearchConfig.ACTIVATION
-    assert reloaded.mse == 2.0
+    hybrid = QuantizeConfig(scale_search="hybrid", offload_to_disk=False)
+    assert hybrid.scale_search is ScaleSearchConfig.HYBRID
+    assert hybrid.mse == 2.0
+    assert hybrid.to_dict()["meta"]["scale_search"] == "hybrid"
+
+    reloaded_hybrid = QuantizeConfig.from_quant_config(hybrid.to_dict())
+    assert reloaded_hybrid.scale_search is ScaleSearchConfig.HYBRID
+    assert reloaded_hybrid.mse == 2.0
+
+
+def test_scale_search_cli_summary_reports_default_and_dynamic_overrides():
+    pattern = r"+:^model\.layers\.\d+\.self_attn\.(?:q_proj|k_proj|v_proj|o_proj)$"
+    default = QuantizeConfig(offload_to_disk=False)
+    mixed = QuantizeConfig(
+        scale_search=ScaleSearchConfig.HESSIAN,
+        dynamic={pattern: {"scale_search": ScaleSearchConfig.ACTIVATION}},
+        offload_to_disk=False,
+    )
+
+    assert default.scale_search_cli_summary() == "global=activation; dynamic_overrides=none"
+    assert mixed.scale_search_cli_summary() == (
+        f"global=hessian; dynamic_overrides=1 [{pattern} -> activation]"
+    )
+
+
+def test_scale_search_startup_log_is_clear_for_cli_users(monkeypatch):
+    messages = []
+    qcfg = QuantizeConfig(scale_search=None, offload_to_disk=False)
+    monkeypatch.setattr(gptq_processor.log, "info", messages.append)
+
+    message = log_scale_search_config(qcfg)
+
+    assert message == "ScaleSearch config: global=disabled; dynamic_overrides=none"
+    assert messages == [message]
+
+
+def test_gptq_processor_logs_scale_search_during_startup(monkeypatch):
+    summaries = []
+    qcfg = QuantizeConfig(offload_to_disk=False)
+    monkeypatch.setattr(
+        gptq_processor,
+        "log_scale_search_config",
+        lambda active_qcfg: summaries.append(active_qcfg.scale_search_cli_summary()),
+    )
+    monkeypatch.setattr(gptq_processor.LoopProcessor, "__init__", lambda self, **kwargs: None)
+
+    gptq_processor.GPTQProcessor(
+        tokenizer=None,
+        qcfg=qcfg,
+        calibration=None,
+        prepare_dataset_func=None,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        batch_size=1,
+    )
+
+    assert summaries == ["global=activation; dynamic_overrides=none"]
 
 
 def test_legacy_mse_selects_mse_strategy_without_changing_exponent():
@@ -146,6 +279,53 @@ def test_dynamic_scale_search_none_disables_search_per_module():
     assert cloned.mse == 0.0
 
 
+def test_dynamic_scale_search_projection_scopes_are_disjoint():
+    qcfg = QuantizeConfig(
+        scale_search=None,
+        dynamic={
+            r"+:^model\.layers\.\d+\.self_attn\.(?:q_proj|k_proj|v_proj)$": {
+                "scale_search": "activation",
+            },
+            r"+:^model\.layers\.\d+\.self_attn\.o_proj$": {
+                "scale_search": "hybrid",
+            },
+            r"+:^model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)$": {
+                "scale_search": "hessian",
+            },
+        },
+        offload_to_disk=False,
+    )
+
+    q_proj = clone_gptq_config_for_module(qcfg, "model.layers.3.self_attn.q_proj")
+    o_proj = clone_gptq_config_for_module(qcfg, "model.layers.3.self_attn.o_proj")
+    down_proj = clone_gptq_config_for_module(qcfg, "model.layers.3.mlp.down_proj")
+
+    assert q_proj is not None and q_proj.scale_search is ScaleSearchConfig.ACTIVATION
+    assert down_proj is not None and down_proj.scale_search is ScaleSearchConfig.HESSIAN
+    assert o_proj is not None and o_proj.scale_search is ScaleSearchConfig.HYBRID
+
+
+def test_qkvo_activation_else_hessian_policy_covers_every_qwen_projection():
+    """Keep the combined Qwen policy explicit and prevent unmatched quantized projections."""
+
+    qcfg = QuantizeConfig(
+        scale_search=ScaleSearchConfig.HESSIAN,
+        dynamic={
+            r"+:^model\.layers\.\d+\.self_attn\.(?:q_proj|k_proj|v_proj|o_proj)$": {
+                "scale_search": ScaleSearchConfig.ACTIVATION,
+            },
+        },
+        offload_to_disk=False,
+    )
+
+    for projection in ("q_proj", "k_proj", "v_proj", "o_proj"):
+        cloned = clone_gptq_config_for_module(qcfg, f"model.layers.3.self_attn.{projection}")
+        assert cloned is not None and cloned.scale_search is ScaleSearchConfig.ACTIVATION
+    for projection in ("gate_proj", "up_proj", "down_proj"):
+        cloned = clone_gptq_config_for_module(qcfg, f"model.layers.3.mlp.{projection}")
+        assert cloned is not None and cloned.scale_search is ScaleSearchConfig.HESSIAN
+
+
 def test_legacy_dynamic_mse_zero_disables_scale_search_per_module():
     qcfg = QuantizeConfig(
         scale_search="activation",
@@ -160,7 +340,7 @@ def test_legacy_dynamic_mse_zero_disables_scale_search_per_module():
     assert cloned.mse == 0.0
 
 
-@pytest.mark.parametrize("method", ["activation", "hessian"])
+@pytest.mark.parametrize("method", ["activation", "hessian", "hybrid"])
 def test_activation_aware_methods_require_squared_error(method):
     with pytest.raises(ValueError, match="require `mse=2.0`"):
         QuantizeConfig(scale_search=method, mse=2.4, offload_to_disk=False)
@@ -261,6 +441,57 @@ def test_vectorized_activation_search_matches_scalar_reference_ab(device, dtype)
     assert torch.equal(vectorized_q, reference_q)
 
 
+@pytest.mark.parametrize("method", [ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID])
+@pytest.mark.parametrize(
+    ("device", "dtype"),
+    [("cpu", torch.float32), ("cuda", torch.bfloat16)],
+)
+def test_vectorized_correlated_search_matches_scalar_reference_ab(method, device, dtype):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the BF16 correlated scale-search A/B")
+
+    generator = torch.Generator(device=device).manual_seed(2719)
+    weights = torch.randn((64, 128), generator=generator, device=device, dtype=dtype)
+    activations = torch.randn((128, 32), generator=generator, device=device, dtype=torch.float32)
+    hessian = activations.matmul(activations.t())
+
+    reference_q, reference_scale, reference_zero = _run_scalar_correlated_reference(weights, hessian, method)
+    vectorized_q, vectorized_scale, vectorized_zero = _run_scale_search(
+        weights,
+        method,
+        hessian=hessian,
+        bits=4,
+        grid=100,
+    )
+
+    assert torch.equal(vectorized_scale, reference_scale)
+    assert torch.equal(vectorized_zero, reference_zero)
+    assert torch.equal(vectorized_q, reference_q)
+
+
+def test_correlated_scale_search_uses_larger_bounded_candidate_chunks():
+    qcfg = QuantizeConfig(scale_search=ScaleSearchConfig.HESSIAN, offload_to_disk=False)
+    quantizer = Quantizer(qcfg)
+
+    expected_chunks = {
+        512: (16, 80),
+        2048: (16, 64),
+        8192: (8, 16),
+    }
+    for rows, (activation_chunk, hessian_chunk) in expected_chunks.items():
+        weights = torch.empty((rows, 128))
+        assert quantizer._scale_search_candidate_chunk_size(
+            weights,
+            80,
+            ScaleSearchConfig.ACTIVATION,
+        ) == activation_chunk
+        assert quantizer._scale_search_candidate_chunk_size(
+            weights,
+            80,
+            ScaleSearchConfig.HESSIAN,
+        ) == hessian_chunk
+
+
 @pytest.mark.parametrize("fill_value", [0.0, float("nan")])
 def test_activation_search_invalid_hessian_falls_back_to_mse(fill_value):
     weights = torch.tensor([[0.17, -0.91, 0.38, 0.04, -0.55, 0.73]], dtype=torch.float32)
@@ -307,12 +538,19 @@ def test_hessian_scale_search_uses_off_diagonal_correlations_ab():
         ScaleSearchConfig.HESSIAN,
         hessian=hessian,
     )
+    hybrid_q, _, _ = _run_scale_search(
+        weights,
+        ScaleSearchConfig.HYBRID,
+        hessian=hessian,
+    )
 
     assert not torch.equal(hessian_scale, activation_scale)
     assert _quadratic_error(weights, hessian_q, hessian) < _quadratic_error(weights, activation_q, hessian)
+    assert _hybrid_error(weights, hybrid_q, hessian) <= _hybrid_error(weights, activation_q, hessian)
+    assert _hybrid_error(weights, hybrid_q, hessian) <= _hybrid_error(weights, hessian_q, hessian)
 
 
-def test_activation_and_hessian_match_for_diagonal_hessian():
+def test_activation_hessian_and_hybrid_match_for_diagonal_hessian():
     weights = torch.tensor([[0.1, -0.8, 0.35, 1.2, -0.42, 0.07]], dtype=torch.float32)
     hessian = torch.diag(torch.tensor([1.0, 7.0, 0.5, 11.0, 2.0, 0.25]))
 
@@ -326,12 +564,22 @@ def test_activation_and_hessian_match_for_diagonal_hessian():
         ScaleSearchConfig.HESSIAN,
         hessian=hessian,
     )
+    hybrid_q, hybrid_scale, _ = _run_scale_search(
+        weights,
+        ScaleSearchConfig.HYBRID,
+        hessian=hessian,
+    )
 
     assert torch.equal(hessian_scale, activation_scale)
     assert torch.equal(hessian_q, activation_q)
+    assert torch.equal(hybrid_scale, activation_scale)
+    assert torch.equal(hybrid_q, activation_q)
 
 
-@pytest.mark.parametrize("method", [ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.HESSIAN])
+@pytest.mark.parametrize(
+    "method",
+    [ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID],
+)
 def test_activation_aware_search_without_hessian_falls_back_to_mse(method):
     weights = torch.tensor([[0.17, -0.91, 0.38, 0.04, -0.55, 0.73]], dtype=torch.float32)
 

@@ -39,6 +39,14 @@ log = setup_logger()
 lock = threading.Lock()
 
 
+def log_scale_search_config(qcfg: QuantizeConfig) -> str:
+    """Emit one durable startup line with the resolved ScaleSearch policy."""
+
+    message = f"ScaleSearch config: {qcfg.scale_search_cli_summary()}"
+    log.info(message)
+    return message
+
+
 def clone_gptq_config_for_module(
     qcfg: QuantizeConfig,
     module_full_name: str,
@@ -136,6 +144,7 @@ class GPTQProcessor(LoopProcessor):
     ):
         """Initializes GPTQ processing and optional weight-delta tracking."""
 
+        log_scale_search_config(qcfg)
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,

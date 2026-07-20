@@ -145,6 +145,13 @@ class ScaleSearchConfig(str, Enum):
     MSE = "mse"
     ACTIVATION = "activation"
     HESSIAN = "hessian"
+    HYBRID = "hybrid"
+
+
+# Keep the quality-oriented default explicit while distinguishing an omitted
+# selector from the public ``None`` opt-out and the legacy ``mse`` API.
+_DEFAULT_SCALE_SEARCH = ScaleSearchConfig.ACTIVATION
+_UNSET_SCALE_SEARCH = object()
 
 
 class VramStrategy(str, Enum):
@@ -3159,9 +3166,12 @@ class GPTQConfig(PreProcessorConfig):
     static_groups: bool = field(default=False)
     mse: float = field(default=0.0)
     scale_search: Optional[ScaleSearchConfig] = field(
-        default=None,
+        default=_UNSET_SCALE_SEARCH,  # type: ignore[arg-type]
         metadata={
-            "help": "Scale-search objective: mse, activation-diagonal weighted MSE, or group-local Hessian error."
+            "help": (
+                "Scale-search objective. Defaults to activation; pass None to disable. "
+                "Choices: mse, activation-diagonal, group-local Hessian, or hybrid shrinkage error."
+            )
         },
     )
     gptaq: Optional[GPTAQConfig] = field(default=None)
@@ -3218,12 +3228,18 @@ class GPTQConfig(PreProcessorConfig):
     def _normalize_scale_search(self) -> None:
         """Resolve the new strategy selector and the legacy MSE exponent together."""
 
+        selector_was_omitted = self.scale_search is _UNSET_SCALE_SEARCH
         try:
             self.mse = float(self.mse or 0.0)
         except (TypeError, ValueError) as exc:
             raise ValueError("QuantizeConfig: `mse` must be a non-negative number.") from exc
         if self.mse < 0:
             raise ValueError("QuantizeConfig: `mse` must be a non-negative number.")
+
+        if selector_was_omitted:
+            # Preserve the legacy ``mse=<positive>`` API while making an
+            # otherwise unconfigured GPTQ quantization use activation search.
+            self.scale_search = ScaleSearchConfig.MSE if self.mse > 0 else _DEFAULT_SCALE_SEARCH
 
         self.scale_search = normalize_scale_search(self.scale_search)
         if self.scale_search is None:
@@ -3236,10 +3252,37 @@ class GPTQConfig(PreProcessorConfig):
         if self.mse == 0:
             self.mse = 2.0
 
-        if self.scale_search in {ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.HESSIAN} and self.mse != 2.0:
+        if self.scale_search in {
+            ScaleSearchConfig.ACTIVATION,
+            ScaleSearchConfig.HESSIAN,
+            ScaleSearchConfig.HYBRID,
+        } and self.mse != 2.0:
             raise ValueError(
-                "QuantizeConfig: activation and hessian scale search require `mse=2.0`."
+                "QuantizeConfig: activation, hessian, and hybrid scale search require `mse=2.0`."
             )
+
+    def scale_search_cli_summary(self) -> str:
+        """Render the resolved global objective and scale-search-only dynamic overrides."""
+
+        global_method = self.scale_search.value if self.scale_search is not None else "disabled"
+        overrides = []
+        for pattern, layer_config in (self.dynamic or {}).items():
+            if not isinstance(layer_config, dict):
+                continue
+            if "scale_search" in layer_config:
+                method = normalize_scale_search(layer_config["scale_search"])
+                method_label = method.value if method is not None else "disabled"
+            elif "mse" in layer_config:
+                try:
+                    method_label = "mse" if float(layer_config["mse"] or 0.0) > 0 else "disabled"
+                except (TypeError, ValueError):
+                    method_label = f"mse({layer_config['mse']!r})"
+            else:
+                continue
+            overrides.append(f"{pattern} -> {method_label}")
+
+        override_summary = "none" if not overrides else f"{len(overrides)} [{'; '.join(overrides)}]"
+        return f"global={global_method}; dynamic_overrides={override_summary}"
 
     def _normalize_dynamic_layer_config(
         self,

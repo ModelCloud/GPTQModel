@@ -1639,7 +1639,7 @@ class GPTQ:
                 # clone() is required: retaining a diagonal view would keep the
                 # complete dense Hessian storage alive.
                 group_scale_search_diagonal = self.H.diagonal().clone()
-            elif scale_search == ScaleSearchConfig.HESSIAN:
+            elif scale_search in {ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID}:
                 group_size = self.qcfg.group_size
                 group_scale_search_hessians = tuple(
                     self.H[start:min(start + group_size, self.columns), start:min(start + group_size, self.columns)].clone()
