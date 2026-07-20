@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from ..utils.logger import setup_logger
-from .config import BaseQuantizeConfig, _normalize_quant_bits, resolve_quant_format
+from .config import BaseQuantizeConfig, ScaleSearch, _normalize_quant_bits, resolve_quant_format
 
 
 log = setup_logger()
@@ -68,7 +68,70 @@ class Quantizer(nn.Module):
         if trits:
             self.maxq = torch.tensor(-1)
 
-    def find_params(self, x, weight=False):
+    def _prepare_scale_search_hessian(
+        self,
+        hessian: torch.Tensor | None,
+        *,
+        columns: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        """Return a finite, symmetric, scale-normalized Hessian for range scoring."""
+
+        if hessian is None:
+            return None
+        if hessian.ndim != 2 or hessian.shape != (columns, columns):
+            raise ValueError(
+                "Quantizer.find_params(): `hessian` must have shape "
+                f"({columns}, {columns}), got {tuple(hessian.shape)}."
+            )
+
+        prepared = hessian.detach().to(device=device, dtype=torch.float32)
+        prepared = torch.nan_to_num(prepared, nan=0.0, posinf=0.0, neginf=0.0)
+        prepared = (prepared + prepared.t()) * 0.5
+        diagonal_mean = prepared.diagonal().clamp_min(0).mean()
+        if not torch.isfinite(diagonal_mean) or diagonal_mean <= 0:
+            return None
+        return prepared / diagonal_mean
+
+    def _scale_search_error(
+        self,
+        error: torch.Tensor,
+        *,
+        method: ScaleSearch,
+        mse: float,
+        hessian: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Score one clipping candidate for every output row."""
+
+        if method == ScaleSearch.MSE or hessian is None:
+            return error.abs().pow(mse).sum(dim=1)
+
+        error_fp32 = error.to(dtype=torch.float32)
+        if method == ScaleSearch.ACTIVATION:
+            importance = hessian.diagonal().clamp_min(0)
+            return error_fp32.square().mul(importance.unsqueeze(0)).sum(dim=1)
+
+        if method == ScaleSearch.HESSIAN:
+            # Exact within a quantization group. For an ungrouped tensor, use a
+            # bounded block-diagonal approximation so scale search does not turn
+            # into an O(columns^2) allocation for every candidate.
+            configured_group_size = int(getattr(self.qcfg, "group_size", -1) or -1)
+            block_size = (
+                min(error_fp32.shape[1], configured_group_size)
+                if configured_group_size > 0
+                else min(error_fp32.shape[1], 128)
+            )
+            objective = torch.zeros(error_fp32.shape[0], dtype=torch.float32, device=error_fp32.device)
+            for start in range(0, error_fp32.shape[1], block_size):
+                end = min(start + block_size, error_fp32.shape[1])
+                block_error = error_fp32[:, start:end]
+                block_hessian = hessian[start:end, start:end]
+                objective.add_((block_error.matmul(block_hessian) * block_error).sum(dim=1))
+            return objective.clamp_min_(0)
+
+        raise ValueError(f"Unsupported scale search method: `{method}`.")
+
+    def find_params(self, x, weight=False, *, hessian: torch.Tensor | None = None):
         dev = x.device
         self.maxq = self.maxq.to(dev)
 
@@ -115,7 +178,20 @@ class Quantizer(nn.Module):
                     self.zero = torch.round(-xmin / self.scale)
 
         mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
-        if mse > 0.0:
+        method = getattr(self.qcfg, "scale_search", None)
+        if method is None and mse > 0:
+            method = ScaleSearch.MSE
+        elif isinstance(method, str):
+            method = ScaleSearch(method)
+
+        if method is not None and mse > 0.0:
+            prepared_hessian = None
+            if method != ScaleSearch.MSE:
+                prepared_hessian = self._prepare_scale_search_hessian(
+                    hessian,
+                    columns=x.shape[1],
+                    device=dev,
+                )
             best = torch.full([x.shape[0]], float("inf"), device=dev)
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid
@@ -127,11 +203,19 @@ class Quantizer(nn.Module):
                     else (xmax1 - xmin1) / self.maxq
                 )
                 zero1 = torch.round(-xmin1 / scale1) if not self.qcfg.sym else self.zero
-                q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq, self.requires_groupwise_processing())
-                q -= x
-                q.abs_()
-                q.pow_(mse)
-                err = torch.sum(q, 1)
+                candidate = quantize(
+                    x,
+                    scale1.unsqueeze(1),
+                    zero1.unsqueeze(1),
+                    self.maxq,
+                    self.requires_groupwise_processing(),
+                )
+                err = self._scale_search_error(
+                    candidate - x,
+                    method=method,
+                    mse=mse,
+                    hessian=prepared_hessian,
+                )
                 tmp = err < best
                 if torch.any(tmp):
                     best[tmp] = err[tmp]

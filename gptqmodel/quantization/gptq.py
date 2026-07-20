@@ -983,7 +983,7 @@ class GPTQ:
             W = self.module_copy.to(device=self.H.device)
             del self.module_copy
 
-        self.quantizer.find_params(W, weight=True)
+        self.quantizer.find_params(W, weight=True, hessian=self.H)
 
         # H = self.H.to(device=self.H.device)
 
@@ -1003,7 +1003,12 @@ class GPTQ:
             groups = []
             for i in range(0, self.columns, self.qcfg.group_size):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i: (i + self.qcfg.group_size)], weight=True)
+                group_end = min(i + self.qcfg.group_size, self.columns)
+                quantizer.find_params(
+                    W[:, i:group_end],
+                    weight=True,
+                    hessian=self.H[i:group_end, i:group_end],
+                )
 
                 scale.append(quantizer.scale)
                 zero.append(quantizer.zero)
@@ -1024,7 +1029,7 @@ class GPTQ:
                 perm = perm.to(device=cpu_device)
                 W = W.to(device=cpu_device)[:, perm]
                 self.H = self.H.to(device=cpu_device)[perm][:, perm]
-                self.quantizer.find_params(W, weight=True)
+                self.quantizer.find_params(W, weight=True, hessian=self.H)
             invperm = torch.argsort(perm)
 
         elif self.qcfg.act_group_aware and use_hessian:
@@ -1053,7 +1058,7 @@ class GPTQ:
                 final_perm = final_perm.to(device=cpu_device)
                 W = W.to(device=cpu_device)[:, final_perm]
                 self.H = self.H.to(device=cpu_device)[final_perm][:, final_perm]
-                self.quantizer.find_params(W, weight=True)
+                self.quantizer.find_params(W, weight=True, hessian=self.H)
 
         if use_hessian:
             try:
@@ -1069,7 +1074,7 @@ class GPTQ:
                 cpu_device = torch.device("cpu")
                 self.H = self.H.to(device=cpu_device)
                 W = W.to(device=cpu_device)
-                self.quantizer.find_params(W, weight=True)
+                self.quantizer.find_params(W, weight=True, hessian=self.H)
                 Hinv, damp = self.hessian_inverse(self.H)
         else:
             Hinv, damp = None, 0.0
@@ -1094,7 +1099,11 @@ class GPTQ:
                         for group_start in group_start_cols:
                             group_end = min(group_start + self.qcfg.group_size, self.columns)
                             if group_start < group_end:
-                                self.quantizer.find_params(W[:, group_start:group_end], weight=True)
+                                self.quantizer.find_params(
+                                    W[:, group_start:group_end],
+                                    weight=True,
+                                    hessian=self.H[group_start:group_end, group_start:group_end],
+                                )
                                 scale.append(self.quantizer.scale)
                                 zero.append(self.quantizer.zero)
                                 now_idx += 1
@@ -1203,7 +1212,13 @@ class GPTQ:
                     if self.qcfg.group_size != -1:
                         if not self.qcfg.static_groups:
                             if (i1 + i) % self.qcfg.group_size == 0:
-                                self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)], weight=True)
+                                group_start = i1 + i
+                                group_end = min(group_start + self.qcfg.group_size, self.columns)
+                                self.quantizer.find_params(
+                                    W[:, group_start:group_end],
+                                    weight=True,
+                                    hessian=self.H[group_start:group_end, group_start:group_end],
+                                )
 
                             if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
                                 scale.append(self.quantizer.scale)

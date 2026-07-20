@@ -31,6 +31,7 @@ from ..quantization.config import (
     META_FIELD_GPTAQ_ENABLED,
     META_FIELD_MSE,
     META_FIELD_QUANTIZER,
+    META_FIELD_SCALE_SEARCH,
     META_FIELD_STATIC_GROUPS,
     META_FIELD_TRUE_SEQUENTIAL,
     META_FIELD_URI,
@@ -624,6 +625,12 @@ def ModelWriter(cls):
         self.quantize_config.meta_set(
             key=META_FIELD_MSE,
             value=getattr(self.quantize_config, "mse", None)
+        )
+
+        scale_search = getattr(self.quantize_config, "scale_search", None)
+        self.quantize_config.meta_set(
+            key=META_FIELD_SCALE_SEARCH,
+            value=scale_search.value if scale_search is not None else None,
         )
 
         self.quantize_config.meta_set(

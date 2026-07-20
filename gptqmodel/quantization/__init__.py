@@ -33,6 +33,7 @@ from .config import (
                      QuantBits,
                      QuantizeConfig,
                      RTNConfig,
+                     ScaleSearch,
                      SmootherConfig,
                      SmoothLog,
                      SmoothMAD,

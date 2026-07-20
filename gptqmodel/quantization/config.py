@@ -94,6 +94,7 @@ META_FIELD_STATIC_GROUPS = "static_groups"
 META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
 META_FIELD_MSE = "mse"
+META_FIELD_SCALE_SEARCH = "scale_search"
 META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
 META_FIELD_GPTAQ_ENABLED = "gptaq"
@@ -136,6 +137,14 @@ class METHOD(str, Enum):
     AWQ = "awq"
     EXL3 = "exl3"
     PARO = "paroquant"
+
+
+class ScaleSearch(str, Enum):
+    """Objectives available when searching GPTQ weight scales and clipping ranges."""
+
+    MSE = "mse"
+    ACTIVATION = "activation"
+    HESSIAN = "hessian"
 
 
 class VramStrategy(str, Enum):
@@ -1747,6 +1756,29 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
     return value
 
 
+def normalize_scale_search(
+    value: Optional[Union[str, ScaleSearch]],
+) -> Optional[ScaleSearch]:
+    """Normalize the public scale-search selector while preserving ``None`` as disabled."""
+
+    if value is None:
+        return None
+    if isinstance(value, ScaleSearch):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        try:
+            return ScaleSearch(normalized)
+        except ValueError as exc:
+            raise ValueError(
+                "QuantizeConfig: `scale_search` must be one of "
+                f"{[method.value for method in ScaleSearch]} or None, got `{value}`."
+            ) from exc
+    raise ValueError(
+        "QuantizeConfig: `scale_search` must be a ScaleSearch, string, or None."
+    )
+
+
 def _normalize_format(value: Union[str, FORMAT]) -> FORMAT:
     if isinstance(value, str):
         try:
@@ -2789,6 +2821,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "offload_to_disk_path": "offload_to_disk_path",
             "pack_impl": "pack_impl",
             "mse": "mse",
+            "scale_search": "scale_search",
             "mock_quantization": "mock_quantization",
             "act_group_aware": "act_group_aware",
             "true_sequential": "true_sequential",
@@ -3045,6 +3078,12 @@ class GPTQConfig(PreProcessorConfig):
     act_group_aware: Optional[bool] = field(default=None)
     static_groups: bool = field(default=False)
     mse: float = field(default=0.0)
+    scale_search: Optional[ScaleSearch] = field(
+        default=None,
+        metadata={
+            "help": "Scale-search objective: mse, activation-diagonal weighted MSE, or group-local Hessian error."
+        },
+    )
     gptaq: Optional[GPTAQConfig] = field(default=None)
     foem: Optional[FOEMConfig] = field(default=None)
     mock_quantization: bool = field(
@@ -3079,6 +3118,7 @@ class GPTQConfig(PreProcessorConfig):
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
         self.foem = _normalize_foem(self.foem)
+        self._normalize_scale_search()
 
         if act_group_aware_user_value is None:
             self.act_group_aware = self.method == METHOD.GPTQ
@@ -3088,6 +3128,49 @@ class GPTQConfig(PreProcessorConfig):
         self._resolve_activation_ordering(desc_act_user_value, act_group_aware_user_value)
         if self.act_group_aware and self.desc_act:
             raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
+
+    def _normalize_scale_search(self) -> None:
+        """Resolve the new strategy selector and the legacy MSE exponent together."""
+
+        try:
+            self.mse = float(self.mse or 0.0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("QuantizeConfig: `mse` must be a non-negative number.") from exc
+        if self.mse < 0:
+            raise ValueError("QuantizeConfig: `mse` must be a non-negative number.")
+
+        self.scale_search = normalize_scale_search(self.scale_search)
+        if self.scale_search is None:
+            # Backward compatibility: historically any positive `mse` enabled
+            # the uniform weight-error range search.
+            if self.mse > 0:
+                self.scale_search = ScaleSearch.MSE
+            return
+
+        if self.mse == 0:
+            self.mse = 2.0
+
+        if self.scale_search in {ScaleSearch.ACTIVATION, ScaleSearch.HESSIAN} and self.mse != 2.0:
+            raise ValueError(
+                "QuantizeConfig: activation and hessian scale search require `mse=2.0`."
+            )
+
+    def _normalize_dynamic_layer_config(
+        self,
+        layer_name: str,
+        layer_dict: Dict[str, Any],
+        *,
+        valid_bit_widths: List[int],
+        checkpoint_format: FORMAT,
+    ) -> None:
+        super()._normalize_dynamic_layer_config(
+            layer_name,
+            layer_dict,
+            valid_bit_widths=valid_bit_widths,
+            checkpoint_format=checkpoint_format,
+        )
+        if "scale_search" in layer_dict:
+            layer_dict["scale_search"] = normalize_scale_search(layer_dict["scale_search"])
 
     def _resolve_activation_ordering(
         self,
@@ -3129,6 +3212,7 @@ class GPTQConfig(PreProcessorConfig):
             }
 
         meta_payload["mse"] = self.mse
+        meta_payload["scale_search"] = self.scale_search.value if self.scale_search is not None else None
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
         meta_payload["hessian"] = {

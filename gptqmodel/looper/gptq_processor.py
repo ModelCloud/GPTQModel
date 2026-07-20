@@ -11,20 +11,38 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..quantization import GPTAQ, GPTQ, FOEM
-from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
-from ..utils.fallback import normalize_fallback
-from ..utils.logger import setup_logger, log_time_block
+from ..models.writer import (
+    PROCESS_LOG_FWD_TIME,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_TIME,
+    PROCESS_USED_MEMORY,
+    QUANT_LOG_DAMP,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_NSAMPLES,
+)
+from ..quantization import FOEM, GPTAQ, GPTQ
+from ..quantization.config import (
+    METHOD,
+    FOEMConfig,
+    GPTAQConfig,
+    HessianConfig,
+    QuantizeConfig,
+    normalize_scale_search,
+    resolve_quant_format,
+)
 from ..utils.device import get_device
+from ..utils.fallback import normalize_fallback
+from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, pack_module
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import HAS_NPU
+
 
 log = setup_logger()
 lock = threading.Lock()
@@ -46,9 +64,26 @@ def clone_gptq_config_for_module(
 
     # dynamic overrides
     if qcfg.dynamic is not None:
+        dynamic_overrides = qcfg.dynamic_get(module_full_name)
         qcfg_clone.bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
         qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
-        qcfg_clone.mse = qcfg.dynamic_get(module_full_name, "mse", qcfg_clone.mse)
+        dynamic_mse_present = isinstance(dynamic_overrides, dict) and "mse" in dynamic_overrides
+        dynamic_scale_search_present = isinstance(dynamic_overrides, dict) and "scale_search" in dynamic_overrides
+        if dynamic_mse_present:
+            qcfg_clone.mse = dynamic_overrides["mse"]
+        if dynamic_scale_search_present:
+            qcfg_clone.scale_search = normalize_scale_search(dynamic_overrides["scale_search"])
+            if qcfg_clone.scale_search is None:
+                qcfg_clone.mse = 0.0
+            elif not dynamic_mse_present:
+                # Activation- and Hessian-aware objectives are quadratic; do
+                # not inherit a custom legacy MSE exponent from the parent.
+                qcfg_clone.mse = 2.0
+        elif dynamic_mse_present:
+            # Preserve the legacy per-module contract where mse=0 disables
+            # search and mse>0 selects the uniform weight-error objective.
+            qcfg_clone.scale_search = "mse" if float(qcfg_clone.mse or 0.0) > 0 else None
+        qcfg_clone._normalize_scale_search()
 
         qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
         desc_act_override = qcfg.dynamic_get(module_full_name, "desc_act", None)

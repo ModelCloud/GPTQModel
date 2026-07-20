@@ -285,6 +285,7 @@ from .quantization import (
     GPTQConfig,
     QuantizeConfig,
     RTNConfig,
+    ScaleSearch,
     WeightOnlyConfig,
 )
 from .utils import BACKEND, PROFILE
