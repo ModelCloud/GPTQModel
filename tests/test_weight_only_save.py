@@ -12,6 +12,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from gptqmodel.models import writer as writer_module
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.writer import ModelWriter, _save_embedding_replacement_safetensors
 from gptqmodel.quantization.config import FORMAT, METHOD
 
@@ -47,6 +48,7 @@ class _DummyQuantizeConfig:
         clone = type(self)()
         memo[id(self)] = clone
         clone._meta = copy.deepcopy(self._meta, memo)
+        clone.dynamic = copy.deepcopy(self.dynamic, memo)
         return clone
 
     def meta_set_versionable(self, key, value):
@@ -212,6 +214,98 @@ def test_save_quantized_embeddings_uses_embedding_shard_replacement_helper(tmp_p
     assert index_payload["weight_map"]["embed_tokens.qweight"] == "model.safetensors"
     assert index_payload["weight_map"]["lm_head.qweight"] == "model.safetensors"
     assert index_payload["weight_map"]["layers.0.linear.weight"] == "model.safetensors"
+
+
+def test_save_quantized_embeddings_seeds_a_complete_checkpoint(tmp_path):
+    writer = _build_writer(tmp_path)
+    source_dir = tmp_path / "original"
+    save_file(
+        {"embed_tokens.weight": torch.ones(4, 3, dtype=torch.float16)},
+        str(source_dir / "model-00001-of-00002.safetensors"),
+    )
+    unchanged = torch.arange(6, dtype=torch.float16).reshape(2, 3)
+    save_file(
+        {"layers.0.linear.weight": unchanged},
+        str(source_dir / "model-00002-of-00002.safetensors"),
+    )
+    with open(source_dir / "model.safetensors.index.json", "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "metadata": {"total_size": 1},
+                "weight_map": {
+                    "embed_tokens.weight": "model-00001-of-00002.safetensors",
+                    "layers.0.linear.weight": "model-00002-of-00002.safetensors",
+                },
+            },
+            handle,
+        )
+    with open(source_dir / "config.json", "w", encoding="utf-8") as handle:
+        json.dump({"model_type": "dummy"}, handle)
+    with open(source_dir / "tokenizer_config.json", "w", encoding="utf-8") as handle:
+        json.dump({"tokenizer_class": "DummyTokenizer"}, handle)
+
+    writer.turtle_model._weight_map = {
+        "embed_tokens.weight": "model-00001-of-00002.safetensors",
+        "layers.0.linear.weight": "model-00002-of-00002.safetensors",
+    }
+    writer.model.embed_tokens = nn.Module()
+    writer.model.embed_tokens.register_buffer("qweight", torch.ones(2, 2, dtype=torch.int32))
+    writer.model.embed_tokens.register_buffer("scales", torch.ones(3, 1, dtype=torch.float16))
+    writer._embedding_replacement_prefixes = {"embed_tokens"}
+    writer.quantize_config.dynamic = {"embed_tokens": {"bits": 8, "group_size": 32}}
+
+    save_dir = tmp_path / "saved"
+    writer.save_quantized_embeddings(str(save_dir), meta_quantizer="test-quantizer:1.0")
+
+    assert (save_dir / "model-00002-of-00002.safetensors").is_file()
+    assert (save_dir / "tokenizer_config.json").is_file()
+    with safe_open(str(save_dir / "model-00001-of-00002.safetensors"), framework="pt", device="cpu") as handler:
+        assert set(handler.keys()) == {"embed_tokens.qweight", "embed_tokens.scales"}
+    with safe_open(str(save_dir / "model-00002-of-00002.safetensors"), framework="pt", device="cpu") as handler:
+        assert torch.equal(handler.get_tensor("layers.0.linear.weight"), unchanged)
+    with safe_open(str(source_dir / "model-00001-of-00002.safetensors"), framework="pt", device="cpu") as handler:
+        assert set(handler.keys()) == {"embed_tokens.weight"}
+    with open(save_dir / "model.safetensors.index.json", "r", encoding="utf-8") as handle:
+        index_payload = json.load(handle)
+    assert "embed_tokens.weight" not in index_payload["weight_map"]
+    assert index_payload["weight_map"]["embed_tokens.qweight"] == "model-00001-of-00002.safetensors"
+    assert index_payload["weight_map"]["layers.0.linear.weight"] == "model-00002-of-00002.safetensors"
+    assert index_payload["metadata"]["total_size"] > 1
+    with open(save_dir / "quantize_config.json", "r", encoding="utf-8") as handle:
+        quant_config_payload = json.load(handle)
+    with open(save_dir / "config.json", "r", encoding="utf-8") as handle:
+        config_payload = json.load(handle)
+    assert quant_config_payload["dynamic"] == writer.quantize_config.dynamic
+    assert "test-quantizer:1.0" in str(quant_config_payload)
+    assert config_payload["quantization_config"] == quant_config_payload
+
+
+def test_model_save_routes_embedding_only_lifecycle_with_metadata(tmp_path):
+    model = BaseQModel.__new__(BaseQModel)
+    nn.Module.__init__(model)
+    model.quantized = True
+    model._model_free_weight_only_embeddings_only = True
+    model.quant_override_files = {}
+    model.quant_region_timer = None
+    captured = {}
+
+    def save_quantized_embeddings(**kwargs):
+        captured.update(kwargs)
+
+    def fail_full_save(**_kwargs):
+        raise AssertionError("embedding-only lifecycle must not use the full save path")
+
+    model.save_quantized_embeddings = save_quantized_embeddings
+    model.save_quantized = fail_full_save
+
+    model.save(str(tmp_path / "saved"), meta_quantizer="test-quantizer:1.0")
+
+    assert captured == {
+        "save_dir": str(tmp_path / "saved"),
+        "safetensors_metadata": None,
+        "max_shard_size": "4GB",
+        "meta_quantizer": "test-quantizer:1.0",
+    }
 
 
 def test_embedding_replacement_safetensors_only_rewrites_affected_shard(tmp_path, monkeypatch):

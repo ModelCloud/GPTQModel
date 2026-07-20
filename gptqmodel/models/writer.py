@@ -560,6 +560,31 @@ def _save_embedding_replacement_safetensors(
     return rewritten_files, tensor_to_filename, total_size_bytes, removed_tensor_names
 
 
+def _copy_missing_checkpoint_files(source_dir: str, save_dir: str) -> List[str]:
+    """Seed a new embedding-only destination without overwriting existing files."""
+    source_root = os.path.realpath(source_dir)
+    save_root = os.path.realpath(save_dir)
+    if source_root == save_root:
+        return []
+    if os.path.commonpath([source_root, save_root]) == source_root:
+        raise ValueError("Embedding-only save destination must not be nested inside its checkpoint source.")
+
+    copied: List[str] = []
+    for root, dirnames, filenames in os.walk(source_root):
+        dirnames.sort()
+        relative_root = os.path.relpath(root, source_root)
+        target_root = save_root if relative_root == "." else os.path.join(save_root, relative_root)
+        for filename in sorted(filenames):
+            target_path = os.path.join(target_root, filename)
+            if os.path.exists(target_path):
+                continue
+            os.makedirs(target_root, exist_ok=True)
+            shutil.copy2(os.path.join(root, filename), target_path)
+            copied.append(os.path.relpath(target_path, save_root))
+
+    return copied
+
+
 def _parse_max_shard_size(value: Optional[Union[int, str]]) -> Optional[int]:
     if value is None:
         return None
@@ -629,6 +654,41 @@ def _update_embedding_dynamic_config_files(save_dir: str, quantize_config) -> No
         quantization_config = {}
     quantization_config["dynamic"] = dynamic
     config_payload["quantization_config"] = quantization_config
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(config_payload, indent=2, sort_keys=True) + "\n")
+
+
+def _prepare_embedding_save_metadata(quantize_config, meta_quantizer: Optional[str]) -> None:
+    quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
+    if meta_quantizer:
+        if len(meta_quantizer.split(":")) == 2:
+            quantizers.append(meta_quantizer.replace(" ", ""))
+        else:
+            log.warn(f"meta_quantizer: '{meta_quantizer}' format is invalid, expected: 'quantizer_name:version'")
+
+    quantize_config.meta_set_versionable(key=META_FIELD_QUANTIZER, value=quantizers)
+    quantize_config.meta_set(key=META_FIELD_URI, value=META_VALUE_URI)
+
+
+def _save_embedding_quantization_configs(model, quantize_config, save_dir: str) -> None:
+    """Write complete quantization configs without serializing model weights."""
+    serialized_quantize_config = copy.deepcopy(quantize_config)
+    serialized_quantize_config.save_pretrained(save_dir)
+    _update_embedding_dynamic_config_files(save_dir, serialized_quantize_config)
+
+    quant_config_path = os.path.join(save_dir, "quantize_config.json")
+    with open(quant_config_path, "r", encoding="utf-8") as f:
+        quant_config_payload = json.load(f)
+
+    config_path = os.path.join(save_dir, "config.json")
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_payload = json.load(f)
+    else:
+        model_config = getattr(model, "config", None)
+        config_payload = model_config.to_dict() if hasattr(model_config, "to_dict") else {}
+
+    config_payload["quantization_config"] = quant_config_payload
     with open(config_path, "w", encoding="utf-8") as f:
         f.write(json.dumps(config_payload, indent=2, sort_keys=True) + "\n")
 
@@ -928,6 +988,7 @@ def ModelWriter(cls):
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
+            meta_quantizer: Optional[str] = None,
     ):
         """Save an embeddings-only quantized checkpoint by replacing source checkpoint tensors."""
         os.makedirs(save_dir, exist_ok=True)
@@ -952,6 +1013,15 @@ def ModelWriter(cls):
         ):
             raise ValueError("Embedding-only save requires a LazyTurtle checkpoint source.")
 
+        copied_files = _copy_missing_checkpoint_files(
+            self.turtle_model.model_local_path,
+            save_dir,
+        )
+        if copied_files:
+            log.info("Embedding save: copied %s unchanged checkpoint file(s).", len(copied_files))
+
+        _prepare_embedding_save_metadata(self.quantize_config, meta_quantizer)
+
         del max_shard_size
         metadata_dict = _normalize_safetensors_metadata(safetensors_metadata)
         metadata_dict["format"] = "pt"
@@ -971,12 +1041,25 @@ def ModelWriter(cls):
             for tensor_name in removed_tensor_names:
                 weight_map.pop(tensor_name, None)
             weight_map.update(tensor_to_filename)
+            metadata = index.setdefault("metadata", {})
+            metadata["total_size"] = sum(
+                os.path.getsize(os.path.join(save_dir, filename))
+                for filename in set(weight_map.values())
+                if os.path.exists(os.path.join(save_dir, filename))
+            )
             with open(index_save_path, "w", encoding="utf-8") as f:
                 f.write(json.dumps(index, indent=2, sort_keys=True) + "\n")
         elif len(rewritten_files) > 1:
             log.warn("Embedding save: no safetensors index found in `%s`; updated shards only.", save_dir)
 
-        _update_embedding_dynamic_config_files(save_dir, self.quantize_config)
+        _save_embedding_quantization_configs(self.model, self.quantize_config, save_dir)
+
+        if self.trust_remote_code:
+            copy_py_files(save_dir, model_id_or_path=self.model_local_path)
+        if self.tokenizer:
+            self.tokenizer.save_pretrained(save_dir)
+        if hasattr(self, "processor") and isinstance(self.processor, ProcessorMixin):
+            self.processor.save_pretrained(save_dir)
 
         total_size_mb = total_size_bytes / (1024 * 1024)
         log.info(f"Embedding save: Rewritten shard size: {total_size_mb:.2f}MB")

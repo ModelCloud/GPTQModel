@@ -285,6 +285,7 @@ from .quantization import (
     GPTQConfig,
     QuantizeConfig,
     QuantizeEmbed,
+    QuantizeEmbedConfig,
     RTNConfig,
     ScaleSearchConfig,
     WeightOnlyConfig,

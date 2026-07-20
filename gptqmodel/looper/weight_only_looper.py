@@ -882,6 +882,7 @@ class WeightOnlyLooper:
                 "Weight-only input/output embeddings fast quantization currently supports RTNConfig only."
         )
         embed_only = bool(embedding_targets) and self.embed_only
+        self.gptq_model._model_free_weight_only_embeddings_only = False
         if embed_only:
             quant_config.offload_to_disk = False
             log.info("`embed_only` does not support `offload_to_disk=True`; setting `offload_to_disk` to `False`.")
@@ -993,6 +994,7 @@ class WeightOnlyLooper:
                 total_log = {self.processor.name(): self.processor.log}
                 self.gptq_model.quant_log = self.processor.log
                 self.processor.finalize(model=self.gptq_model)
+                self.gptq_model._model_free_weight_only_embeddings_only = True
                 return total_log
 
             for progress_index in range(len(embedding_targets), total_layers):

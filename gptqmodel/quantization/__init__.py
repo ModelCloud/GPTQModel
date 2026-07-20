@@ -34,6 +34,7 @@ from .config import (
                      QuantBits,
                      QuantizeConfig,
                      QuantizeEmbed,
+                     QuantizeEmbedConfig,
                      RTNConfig,
                      ScaleSearchConfig,
                      SmootherConfig,

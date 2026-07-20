@@ -12,11 +12,10 @@ import gptqmodel.looper.weight_only_looper as weight_only_looper_module
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.quantization.config import (
     QuantizeEmbed,
+    QuantizeEmbedConfig,
     RTNConfig,
     VramStrategy,
-    QuantizeEmbedConfig,
 )
-from gptqmodel.quantization.config import RTNConfig, VramStrategy
 
 
 class _FakeProgress:
@@ -447,6 +446,7 @@ def test_weight_only_looper_quantizes_embeddings_only(monkeypatch):
     assert processor.finalize_called is True
     assert model.quant_log == []
     assert model._embedding_replacement_prefixes == {"embed_tokens", "lm_head"}
+    assert model._model_free_weight_only_embeddings_only is True
     assert qcfg.dynamic["embed_tokens"]["bits"] == 8
     assert qcfg.dynamic["lm_head"]["bits"] == 8
     assert fake_logger.iterable == [0, 1]
@@ -483,6 +483,7 @@ def test_weight_only_looper_quantizes_embeddings_and_regular_modules(monkeypatch
     assert processor.memory_calls == [0]
     assert processor.finalize_called is True
     assert model._embedding_replacement_prefixes == {"embed_tokens"}
+    assert model._model_free_weight_only_embeddings_only is False
     assert qcfg.dynamic["embed_tokens"]["bits"] == 8
     assert "-:^linear$" not in qcfg.dynamic
     assert fake_logger.iterable == [0, 1]

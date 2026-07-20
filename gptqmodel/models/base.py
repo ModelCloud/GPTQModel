@@ -51,10 +51,10 @@ from ..quantization.config import (
     BaseQuantizeConfig,
     GcMode,
     QuantizeEmbed,
+    QuantizeEmbedConfig,
     VramStrategy,
     dynamic_get,
     resolve_quant_format,
-    QuantizeEmbedConfig,
 )
 from ..quantization.dtype import (
     available_float8_dtypes,
@@ -818,8 +818,14 @@ class BaseQModel(nn.Module):
         # minimum length of calibration data, default is 10
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
-        embed_quant_config: Optional[QuantizeEmbedConfig] = None,
+        embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]] = None,
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
+        embed_quant_config = self._normalize_embed_quant_config(
+            embed_quant_config=embed_quant_config,
+            embed_quant_mode=embed_quant_mode,
+        )
+
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
 
@@ -1039,10 +1045,36 @@ class BaseQModel(nn.Module):
 
         return result
 
+    @staticmethod
+    def _normalize_embed_quant_config(
+        embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]],
+        embed_quant_mode: Optional[QuantizeEmbed],
+    ) -> Optional[QuantizeEmbedConfig]:
+        """Normalize the current embedding config and the legacy mode argument."""
+        if embed_quant_config is not None and embed_quant_mode is not None:
+            raise ValueError("Pass only one of `embed_quant_config` or `embed_quant_mode`.")
+
+        if isinstance(embed_quant_config, QuantizeEmbed):
+            return QuantizeEmbedConfig(embed_quant_mode=embed_quant_config)
+
+        if embed_quant_config is not None:
+            if not isinstance(embed_quant_config, QuantizeEmbedConfig):
+                raise TypeError(
+                    "`embed_quant_config` must be a `QuantizeEmbedConfig` or `QuantizeEmbed` instance."
+                )
+            return embed_quant_config
+
+        if embed_quant_mode is not None:
+            if not isinstance(embed_quant_mode, QuantizeEmbed):
+                raise TypeError("`embed_quant_mode` must be a `QuantizeEmbed` instance.")
+            return QuantizeEmbedConfig(embed_quant_mode=embed_quant_mode)
+
+        return None
+
     def requantize(
         self,
         calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-        embed_quant_mode: QuantizeEmbed,
+        embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]] = None,
         calibration_concat_size: Optional[int] = None,
         calibration_sort: Optional[str] = "desc",
         batch_size: int = 1,
@@ -1052,9 +1084,17 @@ class BaseQModel(nn.Module):
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if not self.quantized:
             raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
+
+        embed_quant_config = self._normalize_embed_quant_config(
+            embed_quant_config=embed_quant_config,
+            embed_quant_mode=embed_quant_mode,
+        )
+        if embed_quant_config is None:
+            raise ValueError("`requantize()` requires `embed_quant_config` or `embed_quant_mode`.")
 
         return self.quantize(
             calibration=calibration,
@@ -1067,7 +1107,7 @@ class BaseQModel(nn.Module):
             adapter_calibration_dataset=adapter_calibration_dataset,
             calibration_data_min_length=calibration_data_min_length,
             calibration_concat_separator=calibration_concat_separator,
-            embed_quant_mode=embed_quant_mode,
+            embed_quant_config=embed_quant_config,
         )
 
     def _quantize_with_calibration(
