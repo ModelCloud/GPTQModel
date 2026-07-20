@@ -139,7 +139,7 @@ class METHOD(str, Enum):
     PARO = "paroquant"
 
 
-class ScaleSearch(str, Enum):
+class ScaleSearchConfig(str, Enum):
     """Objectives available when searching GPTQ weight scales and clipping ranges."""
 
     MSE = "mse"
@@ -1757,25 +1757,25 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
 
 
 def normalize_scale_search(
-    value: Optional[Union[str, ScaleSearch]],
-) -> Optional[ScaleSearch]:
+    value: Optional[Union[str, ScaleSearchConfig]],
+) -> Optional[ScaleSearchConfig]:
     """Normalize the public scale-search selector while preserving ``None`` as disabled."""
 
     if value is None:
         return None
-    if isinstance(value, ScaleSearch):
+    if isinstance(value, ScaleSearchConfig):
         return value
     if isinstance(value, str):
         normalized = value.strip().lower()
         try:
-            return ScaleSearch(normalized)
+            return ScaleSearchConfig(normalized)
         except ValueError as exc:
             raise ValueError(
                 "QuantizeConfig: `scale_search` must be one of "
-                f"{[method.value for method in ScaleSearch]} or None, got `{value}`."
+                f"{[method.value for method in ScaleSearchConfig]} or None, got `{value}`."
             ) from exc
     raise ValueError(
-        "QuantizeConfig: `scale_search` must be a ScaleSearch, string, or None."
+        "QuantizeConfig: `scale_search` must be a ScaleSearchConfig, string, or None."
     )
 
 
@@ -3078,7 +3078,7 @@ class GPTQConfig(PreProcessorConfig):
     act_group_aware: Optional[bool] = field(default=None)
     static_groups: bool = field(default=False)
     mse: float = field(default=0.0)
-    scale_search: Optional[ScaleSearch] = field(
+    scale_search: Optional[ScaleSearchConfig] = field(
         default=None,
         metadata={
             "help": "Scale-search objective: mse, activation-diagonal weighted MSE, or group-local Hessian error."
@@ -3144,13 +3144,13 @@ class GPTQConfig(PreProcessorConfig):
             # Backward compatibility: historically any positive `mse` enabled
             # the uniform weight-error range search.
             if self.mse > 0:
-                self.scale_search = ScaleSearch.MSE
+                self.scale_search = ScaleSearchConfig.MSE
             return
 
         if self.mse == 0:
             self.mse = 2.0
 
-        if self.scale_search in {ScaleSearch.ACTIVATION, ScaleSearch.HESSIAN} and self.mse != 2.0:
+        if self.scale_search in {ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.HESSIAN} and self.mse != 2.0:
             raise ValueError(
                 "QuantizeConfig: activation and hessian scale search require `mse=2.0`."
             )

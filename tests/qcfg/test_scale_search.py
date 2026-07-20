@@ -5,12 +5,12 @@ import pytest
 import torch
 
 from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
-from gptqmodel.quantization import QuantizeConfig, Quantizer, ScaleSearch
+from gptqmodel.quantization import QuantizeConfig, Quantizer, ScaleSearchConfig
 
 
 def _run_scale_search(
     weights: torch.Tensor,
-    method: ScaleSearch | str | None,
+    method: ScaleSearchConfig | str | None,
     *,
     hessian: torch.Tensor | None = None,
     mse: float = 0.0,
@@ -36,9 +36,9 @@ def _quadratic_error(reference: torch.Tensor, candidate: torch.Tensor, hessian: 
 
 
 def test_scale_search_values_are_stable():
-    assert ScaleSearch.MSE.value == "mse"
-    assert ScaleSearch.ACTIVATION.value == "activation"
-    assert ScaleSearch.HESSIAN.value == "hessian"
+    assert ScaleSearchConfig.MSE.value == "mse"
+    assert ScaleSearchConfig.ACTIVATION.value == "activation"
+    assert ScaleSearchConfig.HESSIAN.value == "hessian"
 
 
 def test_scale_search_config_normalization_and_round_trip():
@@ -47,19 +47,19 @@ def test_scale_search_config_normalization_and_round_trip():
     assert disabled.mse == 0.0
 
     activation = QuantizeConfig(scale_search="activation", offload_to_disk=False)
-    assert activation.scale_search is ScaleSearch.ACTIVATION
+    assert activation.scale_search is ScaleSearchConfig.ACTIVATION
     assert activation.mse == 2.0
     assert activation.to_dict()["meta"]["scale_search"] == "activation"
 
     reloaded = QuantizeConfig.from_quant_config(activation.to_dict())
-    assert reloaded.scale_search is ScaleSearch.ACTIVATION
+    assert reloaded.scale_search is ScaleSearchConfig.ACTIVATION
     assert reloaded.mse == 2.0
 
 
 def test_legacy_mse_selects_mse_strategy_without_changing_exponent():
     qcfg = QuantizeConfig(mse=2.4, offload_to_disk=False)
 
-    assert qcfg.scale_search is ScaleSearch.MSE
+    assert qcfg.scale_search is ScaleSearchConfig.MSE
     assert qcfg.mse == 2.4
 
 
@@ -73,7 +73,7 @@ def test_dynamic_scale_search_override_is_normalized_per_module():
     cloned = clone_gptq_config_for_module(qcfg, "model.layers.0.self_attn.q_proj")
 
     assert cloned is not None
-    assert cloned.scale_search is ScaleSearch.HESSIAN
+    assert cloned.scale_search is ScaleSearchConfig.HESSIAN
     assert cloned.mse == 2.0
 
 
@@ -121,7 +121,7 @@ def test_explicit_mse_strategy_matches_legacy_mse_ab():
     )
 
     legacy_q, legacy_scale, legacy_zero = _run_scale_search(weights, None, mse=2.0)
-    explicit_q, explicit_scale, explicit_zero = _run_scale_search(weights, ScaleSearch.MSE)
+    explicit_q, explicit_scale, explicit_zero = _run_scale_search(weights, ScaleSearchConfig.MSE)
 
     assert torch.equal(explicit_scale, legacy_scale)
     assert torch.equal(explicit_zero, legacy_zero)
@@ -140,10 +140,10 @@ def test_activation_scale_search_reduces_activation_weighted_error_ab():
         torch.tensor([1.0728676, 11.582974, 2.112485, 3.0850899, 0.3360269, 46.948254])
     )
 
-    mse_q, mse_scale, _ = _run_scale_search(weights, ScaleSearch.MSE, hessian=hessian)
+    mse_q, mse_scale, _ = _run_scale_search(weights, ScaleSearchConfig.MSE, hessian=hessian)
     activation_q, activation_scale, _ = _run_scale_search(
         weights,
-        ScaleSearch.ACTIVATION,
+        ScaleSearchConfig.ACTIVATION,
         hessian=hessian,
     )
 
@@ -173,12 +173,12 @@ def test_hessian_scale_search_uses_off_diagonal_correlations_ab():
 
     activation_q, activation_scale, _ = _run_scale_search(
         weights,
-        ScaleSearch.ACTIVATION,
+        ScaleSearchConfig.ACTIVATION,
         hessian=hessian,
     )
     hessian_q, hessian_scale, _ = _run_scale_search(
         weights,
-        ScaleSearch.HESSIAN,
+        ScaleSearchConfig.HESSIAN,
         hessian=hessian,
     )
 
@@ -192,12 +192,12 @@ def test_activation_and_hessian_match_for_diagonal_hessian():
 
     activation_q, activation_scale, _ = _run_scale_search(
         weights,
-        ScaleSearch.ACTIVATION,
+        ScaleSearchConfig.ACTIVATION,
         hessian=hessian,
     )
     hessian_q, hessian_scale, _ = _run_scale_search(
         weights,
-        ScaleSearch.HESSIAN,
+        ScaleSearchConfig.HESSIAN,
         hessian=hessian,
     )
 
@@ -205,11 +205,11 @@ def test_activation_and_hessian_match_for_diagonal_hessian():
     assert torch.equal(hessian_q, activation_q)
 
 
-@pytest.mark.parametrize("method", [ScaleSearch.ACTIVATION, ScaleSearch.HESSIAN])
+@pytest.mark.parametrize("method", [ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.HESSIAN])
 def test_activation_aware_search_without_hessian_falls_back_to_mse(method):
     weights = torch.tensor([[0.17, -0.91, 0.38, 0.04, -0.55, 0.73]], dtype=torch.float32)
 
-    mse_q, mse_scale, _ = _run_scale_search(weights, ScaleSearch.MSE)
+    mse_q, mse_scale, _ = _run_scale_search(weights, ScaleSearchConfig.MSE)
     fallback_q, fallback_scale, _ = _run_scale_search(weights, method)
 
     assert torch.equal(fallback_scale, mse_scale)
@@ -222,6 +222,6 @@ def test_scale_search_rejects_misaligned_hessian_shape():
     with pytest.raises(ValueError, match="must have shape"):
         _run_scale_search(
             weights,
-            ScaleSearch.ACTIVATION,
+            ScaleSearchConfig.ACTIVATION,
             hessian=torch.eye(3),
         )

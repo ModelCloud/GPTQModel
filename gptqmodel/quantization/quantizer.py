@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from ..utils.logger import setup_logger
-from .config import BaseQuantizeConfig, ScaleSearch, _normalize_quant_bits, resolve_quant_format
+from .config import BaseQuantizeConfig, ScaleSearchConfig, _normalize_quant_bits, resolve_quant_format
 
 
 log = setup_logger()
@@ -97,21 +97,21 @@ class Quantizer(nn.Module):
         self,
         error: torch.Tensor,
         *,
-        method: ScaleSearch,
+        method: ScaleSearchConfig,
         mse: float,
         hessian: torch.Tensor | None,
     ) -> torch.Tensor:
         """Score one clipping candidate for every output row."""
 
-        if method == ScaleSearch.MSE or hessian is None:
+        if method == ScaleSearchConfig.MSE or hessian is None:
             return error.abs().pow(mse).sum(dim=1)
 
         error_fp32 = error.to(dtype=torch.float32)
-        if method == ScaleSearch.ACTIVATION:
+        if method == ScaleSearchConfig.ACTIVATION:
             importance = hessian.diagonal().clamp_min(0)
             return error_fp32.square().mul(importance.unsqueeze(0)).sum(dim=1)
 
-        if method == ScaleSearch.HESSIAN:
+        if method == ScaleSearchConfig.HESSIAN:
             # Exact within a quantization group. For an ungrouped tensor, use a
             # bounded block-diagonal approximation so scale search does not turn
             # into an O(columns^2) allocation for every candidate.
@@ -180,13 +180,13 @@ class Quantizer(nn.Module):
         mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
         method = getattr(self.qcfg, "scale_search", None)
         if method is None and mse > 0:
-            method = ScaleSearch.MSE
+            method = ScaleSearchConfig.MSE
         elif isinstance(method, str):
-            method = ScaleSearch(method)
+            method = ScaleSearchConfig(method)
 
         if method is not None and mse > 0.0:
             prepared_hessian = None
-            if method != ScaleSearch.MSE:
+            if method != ScaleSearchConfig.MSE:
                 prepared_hessian = self._prepare_scale_search_hessian(
                     hessian,
                     columns=x.shape[1],
