@@ -18,7 +18,7 @@ HF_OPTIMUM = "hf_optimum"
 
 # Bound temporary candidate tensors while still amortizing eager CUDA launch
 # overhead for the 128-column groups used by GPTQ.
-SCALE_SEARCH_TARGET_ELEMENTS = 16 * 1024 * 1024
+SCALE_SEARCH_TARGET_ELEMENTS = 8 * 1024 * 1024
 SCALE_SEARCH_MAX_CANDIDATES_PER_CHUNK = 16
 
 
@@ -124,12 +124,12 @@ class Quantizer(nn.Module):
         """Score one clipping candidate for every output row."""
 
         if method == ScaleSearchConfig.MSE or hessian is None:
-            return error.abs().pow(mse).sum(dim=-1)
+            return error.abs_().pow_(mse).sum(dim=-1)
 
         error_fp32 = error.to(dtype=torch.float32)
         if method == ScaleSearchConfig.ACTIVATION:
             importance = hessian if hessian.ndim == 1 else hessian.diagonal().clamp_min(0)
-            return error_fp32.square().mul(importance).sum(dim=-1)
+            return error_fp32.square_().mul_(importance).sum(dim=-1)
 
         if method == ScaleSearchConfig.HESSIAN:
             if error_fp32.ndim != 2:
@@ -179,11 +179,11 @@ class Quantizer(nn.Module):
 
         if maxq_value < 0:
             return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
+        q = torch.div(x, scale)
+        q.round_()
         if self.requires_groupwise_processing():
-            q = torch.clamp(torch.round(x / scale), -self.maxq, self.maxq)
-            return scale * q
-        q = torch.clamp(torch.round(x / scale) + zero, 0, self.maxq)
-        return scale * (q - zero)
+            return q.clamp_(-self.maxq, self.maxq).mul_(scale)
+        return q.add_(zero).clamp_(0, self.maxq).sub_(zero).mul_(scale)
 
     def find_params(self, x, weight=False, *, hessian: torch.Tensor | None = None):
         dev = x.device
@@ -273,7 +273,7 @@ class Quantizer(nn.Module):
                         maxq_value=maxq_value,
                     )
                     err = self._scale_search_error(
-                        candidate - x,
+                        candidate.sub_(x),
                         method=method,
                         mse=mse,
                         hessian=prepared_hessian,
@@ -311,7 +311,7 @@ class Quantizer(nn.Module):
                         maxq_value=maxq_value,
                     )
                     errors = self._scale_search_error(
-                        candidate - x_batch,
+                        candidate.sub_(x_batch),
                         method=method,
                         mse=mse,
                         hessian=prepared_hessian,

@@ -983,7 +983,13 @@ class GPTQ:
             W = self.module_copy.to(device=self.H.device)
             del self.module_copy
 
-        self.quantizer.find_params(W, weight=True, hessian=self.H)
+        # Grouped quantization refreshes the quantizer from the corresponding
+        # weight/Hessian slice before quantizing the first column in every
+        # group. A full-tensor range search would therefore be overwritten
+        # before use while allocating candidates for the largest projection.
+        uses_group_params = int(getattr(self.qcfg, "group_size", -1) or -1) > 0
+        if not uses_group_params:
+            self.quantizer.find_params(W, weight=True, hessian=self.H)
 
         # H = self.H.to(device=self.H.device)
 
@@ -1029,7 +1035,8 @@ class GPTQ:
                 perm = perm.to(device=cpu_device)
                 W = W.to(device=cpu_device)[:, perm]
                 self.H = self.H.to(device=cpu_device)[perm][:, perm]
-                self.quantizer.find_params(W, weight=True, hessian=self.H)
+                if not uses_group_params:
+                    self.quantizer.find_params(W, weight=True, hessian=self.H)
             invperm = torch.argsort(perm)
 
         elif self.qcfg.act_group_aware and use_hessian:
@@ -1058,7 +1065,8 @@ class GPTQ:
                 final_perm = final_perm.to(device=cpu_device)
                 W = W.to(device=cpu_device)[:, final_perm]
                 self.H = self.H.to(device=cpu_device)[final_perm][:, final_perm]
-                self.quantizer.find_params(W, weight=True, hessian=self.H)
+                if not uses_group_params:
+                    self.quantizer.find_params(W, weight=True, hessian=self.H)
 
         if use_hessian:
             try:
@@ -1074,7 +1082,8 @@ class GPTQ:
                 cpu_device = torch.device("cpu")
                 self.H = self.H.to(device=cpu_device)
                 W = W.to(device=cpu_device)
-                self.quantizer.find_params(W, weight=True, hessian=self.H)
+                if not uses_group_params:
+                    self.quantizer.find_params(W, weight=True, hessian=self.H)
                 Hinv, damp = self.hessian_inverse(self.H)
         else:
             Hinv, damp = None, 0.0

@@ -16,7 +16,7 @@ import torch.nn as nn
 from models.model_test import ModelTest
 
 from gptqmodel.quantization import gptq as gptq_mod
-from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
+from gptqmodel.quantization.config import HessianConfig, QuantizeConfig, ScaleSearchConfig
 from gptqmodel.quantization.gptq import GPTQ
 
 
@@ -146,6 +146,62 @@ def test_gptq_act_group_aware_rejects_non_positive_group_size():
 
     with pytest.raises(ValueError, match="group_size > 0"):
         GPTQ(layer, qcfg=qcfg)
+
+
+@torch.inference_mode()
+def test_grouped_scale_search_skips_overwritten_full_tensor_search(monkeypatch):
+    torch.manual_seed(1907)
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        act_group_aware=False,
+        scale_search=ScaleSearchConfig.ACTIVATION,
+        offload_to_disk=False,
+    )
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.randn(4, 8, dtype=torch.float32), None)
+
+    searched_shapes = []
+    find_params = gptq.quantizer.find_params
+
+    def _record_find_params(weights, *args, **kwargs):
+        searched_shapes.append(tuple(weights.shape))
+        return find_params(weights, *args, **kwargs)
+
+    monkeypatch.setattr(gptq.quantizer, "find_params", _record_find_params)
+    gptq.quantize(blocksize=4)
+
+    assert searched_shapes == [(6, 4), (6, 4)]
+
+
+@torch.inference_mode()
+def test_ungrouped_scale_search_retains_full_tensor_search(monkeypatch):
+    torch.manual_seed(1907)
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=-1,
+        act_group_aware=False,
+        scale_search=ScaleSearchConfig.ACTIVATION,
+        offload_to_disk=False,
+    )
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.randn(4, 8, dtype=torch.float32), None)
+
+    searched_shapes = []
+    find_params = gptq.quantizer.find_params
+
+    def _record_find_params(weights, *args, **kwargs):
+        searched_shapes.append(tuple(weights.shape))
+        return find_params(weights, *args, **kwargs)
+
+    monkeypatch.setattr(gptq.quantizer, "find_params", _record_find_params)
+    gptq.quantize(blocksize=4)
+
+    assert searched_shapes == [(6, 8)]
 
 
 class TestGPTQAddBatchCPU(ModelTest):
