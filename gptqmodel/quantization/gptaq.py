@@ -140,7 +140,7 @@ class GPTAQ(GPTQ):
             W = self.module_copy
             self.module_copy = None
 
-        self.quantizer.find_params(W, weight=True)
+        self.quantizer.find_params(W, weight=True, hessian=self.H)
 
         H = self.H
         del self.H
@@ -160,7 +160,12 @@ class GPTAQ(GPTQ):
             groups = []
             for i in range(0, self.columns, self.qcfg.group_size):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i: (i + self.qcfg.group_size)], weight=True)
+                group_end = min(i + self.qcfg.group_size, self.columns)
+                quantizer.find_params(
+                    W[:, i:group_end],
+                    weight=True,
+                    hessian=H[i:group_end, i:group_end],
+                )
 
                 scale.append(quantizer.scale)
                 zero.append(quantizer.zero)
@@ -200,7 +205,13 @@ class GPTAQ(GPTQ):
                 if self.qcfg.group_size != -1:
                     if not self.qcfg.static_groups:
                         if (i1 + i) % self.qcfg.group_size == 0:
-                            self.quantizer.find_params(W[:, (i1 + i): (i1 + i + self.qcfg.group_size)], weight=True)
+                            group_start = i1 + i
+                            group_end = min(group_start + self.qcfg.group_size, self.columns)
+                            self.quantizer.find_params(
+                                W[:, group_start:group_end],
+                                weight=True,
+                                hessian=H[group_start:group_end, group_start:group_end],
+                            )
 
                         if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
                             scale.append(self.quantizer.scale)

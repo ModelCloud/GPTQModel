@@ -218,6 +218,7 @@ class ModelTest(unittest.TestCase):
     EORA = None
     DAMP_PERCENT = 0.05
     MSE = 0.0
+    SCALE_SEARCH = None
     DYNAMIC = None
     HESSIAN_CHUNK_SIZE = None
     # Process-level runtime-sharing toggles let model tests A/B quantization
@@ -1532,6 +1533,7 @@ class ModelTest(unittest.TestCase):
             moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
             damp_percent=self.DAMP_PERCENT,
             mse=self.MSE,
+            scale_search=self.SCALE_SEARCH,
             dynamic=self.DYNAMIC,
             hessian=HessianConfig(chunk_size=self.HESSIAN_CHUNK_SIZE),
             enable_shared_hessian_cache=self.ENABLE_SHARED_HESSIAN_CACHE,

@@ -286,6 +286,7 @@ from .quantization import (
     QuantizeConfig,
     QuantizeEmbed,
     RTNConfig,
+    ScaleSearchConfig,
     WeightOnlyConfig,
 )
 from .utils import BACKEND, PROFILE
