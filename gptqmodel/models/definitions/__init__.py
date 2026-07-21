@@ -51,6 +51,7 @@ from .hunyuan_v1_moe import HunYuanMoEV1QModel
 from .hy_v3 import HYV3QModel
 from .hymba import HymbaQModel
 from .instella import InstellaQModel
+from .inkling import InklingMMQModel
 from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
 from .interns1 import InternS1QModel

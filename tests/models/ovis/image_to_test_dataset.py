@@ -8,6 +8,7 @@ from gptqmodel.models.definitions.deepseek_ocr2 import DeepSeekOCR2QModel
 from gptqmodel.models.definitions.deepseek_vl import DeepSeekVLQModel
 from gptqmodel.models.definitions.deepseek_vl_v2 import DeepSeekVLV2QModel
 from gptqmodel.models.definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
+from gptqmodel.models.definitions.inkling import InklingMMQModel
 from gptqmodel.models.definitions.interns1 import InternS1QModel
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
 from gptqmodel.models.definitions.lfm2_vl import LFM2VLQModel
@@ -164,6 +165,7 @@ def get_calib_dataset(model):
         or isinstance(model, MiniCPMV4_6QModel)
         or isinstance(model, InternS1QModel)
         or isinstance(model, InternVLChatQModel)
+        or isinstance(model, InklingMMQModel)
         or isinstance(model, Ernie4_5_VLMoeQModel)
         or isinstance(model, LFM2VLQModel)
     ):
