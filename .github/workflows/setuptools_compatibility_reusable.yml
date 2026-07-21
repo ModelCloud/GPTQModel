@@ -37,7 +37,7 @@ jobs:
         run: |
           .github/scripts/ci_prepare_checkout.sh "${{ inputs.pr_number }}"
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 
@@ -67,7 +67,7 @@ jobs:
         run: |
           .github/scripts/ci_prepare_checkout.sh "${{ inputs.pr_number }}"
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
