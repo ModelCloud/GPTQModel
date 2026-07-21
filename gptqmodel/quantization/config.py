@@ -2941,6 +2941,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_channel_scale_clamp_max": "opt_channel_scale_clamp_max",
             "scale_search_chunked_activations": "scale_search_chunked_activations",
             "scale_search_gpu_weight_restore": "scale_search_gpu_weight_restore",
+            "scale_search_refine_steps": "scale_search_refine_steps",
             "enable_shared_hessian_cache": "enable_shared_hessian_cache",
             "enable_activation_x_mean_cache": "enable_activation_x_mean_cache",
         }
@@ -3380,6 +3381,12 @@ class AWQConfig(PreProcessorConfig):
             "help": "Keep AWQ scale-search restore weights on GPU when there is enough free device memory; otherwise fall back to CPU restore."
         },
     )
+    scale_search_refine_steps: int = field(
+        default=0,
+        metadata={
+            "help": "Subdivisions per interval for two-stage AWQ ratio refinement. The stable default 0 retains only the canonical coarse grid. Use dynamic module patterns for per-group overrides."
+        },
+    )
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.AWQ,)
@@ -3398,6 +3405,20 @@ class AWQConfig(PreProcessorConfig):
         if self.format not in self.supported_export_formats():
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
+        value = self.scale_search_refine_steps
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value == 1:
+            raise ValueError(
+                "AWQConfig: `scale_search_refine_steps` must be 0 or an integer greater than 1."
+            )
+        for pattern, overrides in (self.dynamic or {}).items():
+            if "scale_search_refine_steps" not in overrides:
+                continue
+            value = overrides["scale_search_refine_steps"]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value == 1:
+                raise ValueError(
+                    "AWQConfig: dynamic `scale_search_refine_steps` for pattern "
+                    f"`{pattern}` must be 0 or an integer greater than 1."
+                )
         super().__post_init__()
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
@@ -3410,6 +3431,7 @@ class AWQConfig(PreProcessorConfig):
         meta_payload["scale_search_chunked_activations"] = self.scale_search_chunked_activations
         meta_payload["enable_activation_x_mean_cache"] = self.enable_activation_x_mean_cache
         meta_payload["scale_search_gpu_weight_restore"] = self.scale_search_gpu_weight_restore
+        meta_payload["scale_search_refine_steps"] = self.scale_search_refine_steps
 
 
 @dataclass

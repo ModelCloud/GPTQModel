@@ -13,17 +13,17 @@ TESTS_MODELS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."
 if TESTS_MODELS_ROOT not in sys.path:
     sys.path.insert(0, TESTS_MODELS_ROOT)
 
-from model_test import ModelTest
+from model_test import ModelTest  # noqa: E402
 
-from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 
 
 # | Metric                         | AWQ GEMM |
 # |--------------------------------|----------|
-# | arc_challenge :: acc,none      |   0.3140 |
-# | arc_challenge :: acc_norm,none |   0.3541 |
-# | mmlu_stem :: acc,none          |   0.3841 |
-# | gsm8k_plat :: exact,flexible   |   0.3499 |
+# | arc_challenge :: acc,none      |   0.3012 |
+# | arc_challenge :: acc_norm,none |   0.3456 |
+# | mmlu_stem :: acc,none          |   0.3628 |
+# | gsm8k_plat :: exact,flexible   |   0.3797 |
 class TestLlama3_2_awq(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
@@ -33,25 +33,25 @@ class TestLlama3_2_awq(ModelTest):
         "gsm8k_platinum_cot": {
             "chat_template": True,
             "acc,num": {
-                "value": 0.34987593052109184,
+                "value": 0.37965260545905705,
                 "floor_pct": 0.04,
             },
         },
         "arc_challenge": {
             "chat_template": True,
             "acc": {
-                "value": 0.31399317406143346,
+                "value": 0.30119453924914674,
                 "floor_pct": 0.04,
             },
             "acc_norm": {
-                "value": 0.35409556313993173,
+                "value": 0.3455631399317406,
                 "floor_pct": 0.04,
             },
         },
         "mmlu_stem": {
             "chat_template": False,
             "acc": {
-                "value": 0.3840786552489692,
+                "value": 0.3628290516967967,
                 "floor_pct": 0.04,
             },
         },

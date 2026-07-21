@@ -150,14 +150,41 @@ class TestSerialization(unittest.TestCase):
         self.assertIsNone(meta["gptaq"])
 
     def test_awq_scale_search_chunked_activations_roundtrip(self):
-        cfg = AWQConfig(scale_search_chunked_activations=False)
+        qkv_pattern = r".*\.self_attn\.(q_proj|k_proj|v_proj)$"
+        cfg = AWQConfig(
+            scale_search_chunked_activations=False,
+            scale_search_refine_steps=7,
+            dynamic={qkv_pattern: {"scale_search_refine_steps": 4}},
+        )
 
         payload = cfg.to_dict()
         meta = payload.get("meta")
         self.assertIsInstance(meta, dict)
         self.assertIn("scale_search_chunked_activations", meta)
         self.assertFalse(meta["scale_search_chunked_activations"])
+        self.assertEqual(meta["scale_search_refine_steps"], 7)
+        self.assertEqual(payload["dynamic"][qkv_pattern]["scale_search_refine_steps"], 4)
 
         loaded = QuantizeConfig.from_quant_config(payload)
         self.assertIsInstance(loaded, AWQConfig)
         self.assertFalse(loaded.scale_search_chunked_activations)
+        self.assertEqual(loaded.scale_search_refine_steps, 7)
+        self.assertEqual(loaded.dynamic[qkv_pattern]["scale_search_refine_steps"], 4)
+
+    def test_awq_scale_search_refine_steps_validation(self):
+        for invalid in (-1, 1, 1.5, True):
+            with self.subTest(scope="global", invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "scale_search_refine_steps"):
+                    AWQConfig(scale_search_refine_steps=invalid)
+            with self.subTest(scope="dynamic", invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "dynamic `scale_search_refine_steps`"):
+                    AWQConfig(dynamic={r".*\.q_proj$": {"scale_search_refine_steps": invalid}})
+
+        self.assertEqual(AWQConfig().scale_search_refine_steps, 0)
+        self.assertEqual(AWQConfig(scale_search_refine_steps=0).scale_search_refine_steps, 0)
+        self.assertEqual(AWQConfig(scale_search_refine_steps=2).scale_search_refine_steps, 2)
+        self.assertEqual(
+            AWQConfig(dynamic={r".*\.q_proj$": {"scale_search_refine_steps": 2}})
+            .dynamic[r".*\.q_proj$"]["scale_search_refine_steps"],
+            2,
+        )

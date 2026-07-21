@@ -1,0 +1,169 @@
+{
+  "benchmark": "awq_scalesearch_refine_steps_qwen3_8b",
+  "date_utc": "2026-07-20",
+  "repository_revision": "cdea42af2f8b3f815c3ac29d0c510051d9619194",
+  "model": "/monster/data/model/Qwen3-8B",
+  "model_architecture": "Qwen3ForCausalLM",
+  "quantization": {
+    "method": "awq",
+    "format": "gemm",
+    "bits": 4,
+    "group_size": 128,
+    "sym": true,
+    "desc_act": false,
+    "dtype": "bfloat16"
+  },
+  "calibration": {
+    "dataset": "/monster/data/model/dataset/nm-calibration",
+    "config": "LLM",
+    "raw_rows": 512,
+    "concat_size": 2048,
+    "sort": "desc",
+    "sha256": "c767262e3b85f894849259188838d110b972c54e2aa2620dce973219a37f14ef",
+    "total_tokens": 182272,
+    "non_padding_tokens": 181796,
+    "packed_batches": 89
+  },
+  "evaluation": {
+    "framework": "Evalution",
+    "tasks": {
+      "arc_challenge": {
+        "examples": 1172,
+        "metrics": [
+          "accuracy,loglikelihood",
+          "accuracy,loglikelihood_norm"
+        ]
+      },
+      "gsm8k_platinum_cot": {
+        "examples": 1209,
+        "metric": "acc,num",
+        "max_new_tokens": 256
+      }
+    },
+    "backend": "MARLIN",
+    "batch_size": 64,
+    "attention": "eager",
+    "apply_chat_template": true,
+    "seed": 42,
+    "do_sample": false,
+    "device_family": "NVIDIA PG506-230/232",
+    "compute_capability": "8.0",
+    "total_memory_bytes": 102191202304
+  },
+  "notes": [
+    "The requested /model/data/model path was absent; /monster/data/model/Qwen3-8B was the matching local Qwen3-8B Instruct checkpoint.",
+    "The checkpoint's native bfloat16 dtype was required. Float16 trial runs produced non-finite ScaleSearch candidate losses at layer 3 and were excluded.",
+    "All five checkpoints were quantized concurrently, so quantization wall times include shared-host contention and are not isolated performance measurements.",
+    "ARC and GSM8K Platinum were scored in separate Evalution processes to use idle GPUs concurrently.",
+    "Step 0 ARC raw and normalized scores, step 6 ARC scores, and step 0 GSM8K score reproduced exactly on repeat runs."
+  ],
+  "results": [
+    {
+      "refine_steps": 0,
+      "arc_correct": 447,
+      "arc_score": 0.38139931740614336,
+      "arc_norm_correct": 479,
+      "arc_norm_score": 0.4087030716723549,
+      "gsm_correct": 239,
+      "gsm_score": 0.19768403639371382,
+      "reconstruction_loss": {
+        "count": 216,
+        "mean": 0.030792210497685185,
+        "median": 0.0021489934,
+        "minimum": 0.0000056804,
+        "maximum": 0.9273577586
+      },
+      "quantize_seconds": 1131.8362662931904,
+      "arc_seconds": 41.9771302677691,
+      "gsm_seconds": 736.180565840099,
+      "repeat": {
+        "arc_score": 0.38139931740614336,
+        "arc_norm_score": 0.4087030716723549,
+        "arc_seconds": 38.56225226819515,
+        "gsm_score": 0.19768403639371382,
+        "gsm_seconds": 727.8918547499925
+      }
+    },
+    {
+      "refine_steps": 2,
+      "arc_correct": 434,
+      "arc_score": 0.3703071672354949,
+      "arc_norm_correct": 464,
+      "arc_norm_score": 0.39590443686006827,
+      "gsm_correct": 213,
+      "gsm_score": 0.1761786600496278,
+      "reconstruction_loss": {
+        "count": 216,
+        "mean": 0.031167226327777776,
+        "median": 0.0021202604,
+        "minimum": 0.0000056481,
+        "maximum": 0.9824233504
+      },
+      "quantize_seconds": 1170.765512953978,
+      "arc_seconds": 36.57478111097589,
+      "gsm_seconds": 726.8301189099438
+    },
+    {
+      "refine_steps": 4,
+      "arc_correct": 439,
+      "arc_score": 0.37457337883959047,
+      "arc_norm_correct": 464,
+      "arc_norm_score": 0.39590443686006827,
+      "gsm_correct": 221,
+      "gsm_score": 0.1827956989247312,
+      "reconstruction_loss": {
+        "count": 216,
+        "mean": 0.03038909344212963,
+        "median": 0.00200054,
+        "minimum": 0.0000056481,
+        "maximum": 0.8964882576
+      },
+      "quantize_seconds": 1162.6894941646606,
+      "arc_seconds": 36.49782580835745,
+      "gsm_seconds": 724.2384700779803
+    },
+    {
+      "refine_steps": 6,
+      "arc_correct": 444,
+      "arc_score": 0.378839590443686,
+      "arc_norm_correct": 473,
+      "arc_norm_score": 0.4035836177474403,
+      "gsm_correct": 237,
+      "gsm_score": 0.19602977667493796,
+      "reconstruction_loss": {
+        "count": 216,
+        "mean": 0.030635343933333333,
+        "median": 0.0020521973,
+        "minimum": 0.0000056481,
+        "maximum": 0.9312289871
+      },
+      "quantize_seconds": 1233.5489242160693,
+      "arc_seconds": 37.47144776023924,
+      "gsm_seconds": 723.4780014120042,
+      "repeat": {
+        "arc_score": 0.378839590443686,
+        "arc_norm_score": 0.4035836177474403,
+        "arc_seconds": 36.785955025814474
+      }
+    },
+    {
+      "refine_steps": 8,
+      "arc_correct": 441,
+      "arc_score": 0.37627986348122866,
+      "arc_norm_correct": 467,
+      "arc_norm_score": 0.3984641638225256,
+      "gsm_correct": 218,
+      "gsm_score": 0.18031430934656742,
+      "reconstruction_loss": {
+        "count": 216,
+        "mean": 0.030090280038425926,
+        "median": 0.0020114651,
+        "minimum": 0.0000056481,
+        "maximum": 0.8753669875
+      },
+      "quantize_seconds": 1234.7746774028055,
+      "arc_seconds": 36.43762823892757,
+      "gsm_seconds": 725.2122532348149
+    }
+  ]
+}

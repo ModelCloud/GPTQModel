@@ -241,6 +241,8 @@ Both paths are enabled by default and can be disabled through process-level quan
 
 AWQ scale search also keeps pristine restore weights on GPU when free-memory headroom allows, avoiding repeated CPU-to-GPU restores during the ratio grid. Disable this speed path with `AWQConfig(scale_search_gpu_weight_restore=False)` for low-VRAM A/B runs.
 
+AWQ ScaleSearch uses the stable canonical coarse grid by default with `AWQConfig(scale_search_refine_steps=0)`. Refinement remains opt-in because lower calibration reconstruction loss did not consistently improve downstream task scores. Set a value greater than one to refine the three best coarse ratio cells twice. Target individual scaling groups through the standard configurable `dynamic` module map; for example, `AWQConfig(scale_search_refine_steps=0, dynamic={r".*\.self_attn\.(q_proj|k_proj|v_proj)$": {"scale_search_refine_steps": 4}})` enables step 4 only for a Llama-style QKV group. Every module in one AWQ scaling group must resolve to the same refinement value.
+
 See [Quantization Runtime Sharing](docs/quantization_runtime_sharing.md) for implementation notes and regression test coverage.
 
 ## Features

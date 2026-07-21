@@ -211,7 +211,7 @@ class AWQProcessor(LoopProcessor):
 
         self._module_forward_kwargs: Dict[str, torch.Tensor] = {}
         # Forward signatures are static during quantization. Cache accepted
-        # kwarg names so AWQ's 20-ratio scale search does not repeatedly call
+        # kwarg names so AWQ's multi-ratio scale search does not repeatedly call
         # inspect.signature for the same inspected module.
         self._module_forward_signature_cache: Dict[int, Set[str]] = {}
         self._rotary_lock = threading.Lock()
@@ -879,7 +879,7 @@ class AWQProcessor(LoopProcessor):
         except Exception:
             return aligned_kwargs
 
-        if keep_mask is None or keep_mask.ndim != 2 or keep_mask.shape[0] <= 1:
+        if keep_mask is None or keep_mask.ndim != 2:
             return aligned_kwargs
 
         total_kept = int(keep_mask.to(dtype=torch.int64).sum().item())
@@ -1454,6 +1454,7 @@ class AWQProcessor(LoopProcessor):
         for key, value in global_allowed_kwargs.items():
             module_kwargs.setdefault(key, value)
         module_kwargs = self._align_module_kwargs_to_input(inp, module_kwargs)
+        refine_steps = self._resolve_scale_search_refine_steps(module, layers)
 
         if use_chunked_scale_search:
             # Build the FP reference output one micro-batch at a time and move each
@@ -1474,7 +1475,14 @@ class AWQProcessor(LoopProcessor):
 
         # [STEP 4]: Compute loss
         best_scales, loss = self._compute_best_scale(
-            inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs
+            inp,
+            w_mean,
+            x_mean,
+            module2inspect,
+            layers,
+            fp16_output,
+            module_kwargs,
+            refine_steps=refine_steps,
         )
 
         return (
@@ -1483,6 +1491,39 @@ class AWQProcessor(LoopProcessor):
             best_scales,
             loss
         )
+
+    def _resolve_scale_search_refine_steps(
+        self,
+        module: torch.nn.Module,
+        layers: List[nn.Linear],
+    ) -> int:
+        """Resolve per-module dynamic overrides for one inseparable AWQ scale group."""
+
+        global_steps = int(getattr(self.qcfg, "scale_search_refine_steps", 0))
+        if not layers or not getattr(self.qcfg, "dynamic", None):
+            return global_steps
+
+        try:
+            module_prefix = str(get_op_name(self.model, module)) if self.model is not None else ""
+        except Exception:
+            module_prefix = ""
+
+        resolved_by_name: Dict[str, int] = {}
+        for layer in layers:
+            relative_name = str(get_op_name(module, layer))
+            full_name = f"{module_prefix}.{relative_name}" if module_prefix else relative_name
+            resolved_by_name[full_name] = int(
+                self.qcfg.dynamic_get(full_name, "scale_search_refine_steps", global_steps)
+            )
+
+        resolved_steps = set(resolved_by_name.values())
+        if len(resolved_steps) != 1:
+            raise ValueError(
+                "AWQ ScaleSearch applies one scale to every module in a scaling group, but dynamic "
+                f"`scale_search_refine_steps` values conflict: {resolved_by_name}. "
+                "Use patterns that assign the same value to the full group."
+            )
+        return resolved_steps.pop()
 
     @torch.inference_mode()
     def _search_best_clip(self, layer, named_linears, input_feat):
@@ -1760,6 +1801,8 @@ class AWQProcessor(LoopProcessor):
         linears2scale: List[nn.Linear],
         fp16_output: torch.Tensor,
         kwargs: Dict={},
+        *,
+        refine_steps: Optional[int] = None,
     ):
         """
         Compute loss and select best scales
@@ -1770,11 +1813,16 @@ class AWQProcessor(LoopProcessor):
         W: original weights in FP16     | layer
         s: per channel scaling factor   | s^-1 * X
         """
+        # Keep the canonical AWQ grid as the first stage. Group-wise rounding
+        # makes the reconstruction objective non-smooth, so the winning alpha
+        # is then refined with deterministic local grids instead of assuming a
+        # unimodal loss (as golden-section/ternary search would).
         n_grid = 20
         history = []
         best_ratio = -1
         best_scales = None
         best_error = float("inf")
+        evaluated_errors: Dict[float, float] = {}
 
         try:
             device = next(module2inspect.parameters()).device
@@ -1785,7 +1833,7 @@ class AWQProcessor(LoopProcessor):
 
         # Clone original weights once so candidate ratios can mutate in-flight
         # module weights without load_state_dict overhead. By default this uses
-        # a GPU master copy when headroom allows, avoiding 20 CPU->GPU restores
+        # a GPU master copy when headroom allows, avoiding repeated CPU->GPU restores
         # during AWQ ratio search. Low-memory runs keep the CPU restore path.
         restore_device = self._select_awq_weight_restore_device(device, linears2scale)
         try:
@@ -1821,69 +1869,125 @@ class AWQProcessor(LoopProcessor):
         # ref/int outputs chunk-by-chunk for lower memory, or reuse the legacy eager
         # tensor-vs-tensor loss computation.
         use_chunked_scale_search = getattr(self.qcfg, "scale_search_chunked_activations", True)
+        if refine_steps is None:
+            refine_steps = int(getattr(self.qcfg, "scale_search_refine_steps", 0))
 
-        for ratio in range(n_grid):
-            # create new scales
-            ratio = ratio / n_grid
+        def _ratio_key(ratio: float) -> float:
+            # Refinement ratios are produced through different arithmetic paths.
+            # A rounded key prevents duplicate forwards for numerically identical
+            # candidates while retaining far more precision than the search uses.
+            return round(min(max(float(ratio), 0.0), 1.0), 12)
 
-            # NOTE: s^-1 * x is fused here, according to paper
+        def _evaluate_ratio(ratio: float) -> float:
+            nonlocal best_error, best_ratio, best_scales
+
+            ratio = _ratio_key(ratio)
+            previous_error = evaluated_errors.get(ratio)
+            if previous_error is not None:
+                return previous_error
+
+            # NOTE: s^-1 * x is fused here, according to the AWQ paper.
             if self.duo_scaling:
                 scales = (x_mean.pow(ratio) / (w_mean.pow(1 - ratio) + 1e-4)).clamp(min=1e-4)
             else:
                 scales = x_mean.pow(ratio).clamp(min=1e-4).view(-1)
             scales = scales / (scales.max() * scales.min()).sqrt()
-            scales_view = scales.view(1, -1).to(device)
 
-            # avoid scaling values that overflow
+            # Avoid scale values that overflow before creating the broadcast view.
             scales[torch.isinf(scales)] = 1
             scales[torch.isnan(scales)] = 1
+            scales_view = scales.view(1, -1).to(device)
 
-            # Q(W * s)
-            # Temporarily apply the candidate scale, quantize the in-flight weights without allocating,
-            # and rely on the CPU master copy to restore the original FP values after evaluation.
-            for fc in linears2scale:
-                fc.weight.mul_(scales_view)
-                self._pseudo_quantize_tensor_into(fc.weight, fc.weight)
-                fc.weight.div_(scales_view)
+            try:
+                # Q(W * s). Temporarily apply the candidate scale and quantize
+                # the in-flight weights without allocating another weight tensor.
+                for fc in linears2scale:
+                    fc.weight.mul_(scales_view)
+                    self._pseudo_quantize_tensor_into(fc.weight, fc.weight)
+                    fc.weight.div_(scales_view)
 
-            # W * X
-            if use_chunked_scale_search:
-                # Compare chunked reference outputs against chunked quantized outputs
-                # so reconstruction loss is accumulated without assembling the full
-                # output activation on GPU.
-                total_loss = 0.0
-                total_elements = 0
-                for ref_chunk, int_w_output in zip(
-                    self._iter_reference_output_chunks(x, fp16_output),
-                    self._iter_module_forward_outputs(x, module2inspect, kwargs),
-                ):
-                    chunk_loss, chunk_elements = self._accumulate_awq_chunk_loss(ref_chunk, int_w_output)
-                    total_loss += chunk_loss
-                    total_elements += chunk_elements
+                if use_chunked_scale_search:
+                    # Compare reference and quantized outputs chunk-by-chunk so
+                    # refinement does not increase peak activation memory.
+                    total_loss = 0.0
+                    total_elements = 0
+                    for ref_chunk, int_w_output in zip(
+                        self._iter_reference_output_chunks(x, fp16_output),
+                        self._iter_module_forward_outputs(x, module2inspect, kwargs),
+                    ):
+                        chunk_loss, chunk_elements = self._accumulate_awq_chunk_loss(ref_chunk, int_w_output)
+                        total_loss += chunk_loss
+                        total_elements += chunk_elements
 
-                loss = total_loss / max(total_elements, 1)
-            else:
-                # Legacy eager scoring path: compute one dense quantized output tensor
-                # and evaluate loss against the dense FP reference tensor.
-                int_w_output = self._module_forward(x, module2inspect, kwargs)
-                int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
-                loss = self._compute_loss(fp16_output, int_w_output, device)
+                    loss = total_loss / max(total_elements, 1)
+                else:
+                    int_w_output = self._module_forward(x, module2inspect, kwargs)
+                    int_w_output = int_w_output.clip(
+                        torch.finfo(int_w_output.dtype).min,
+                        torch.finfo(int_w_output.dtype).max,
+                    )
+                    loss = self._compute_loss(fp16_output, int_w_output, device)
+            finally:
+                # Candidate evaluation is deliberately transactional: even a
+                # failed forward must not leave partially quantized weights.
+                for fc in linears2scale:
+                    self._restore_awq_weight_from_master(fc, orig_weights_master[fc])
 
             history.append(loss)
+            evaluated_errors[ratio] = loss
             if loss < best_error:
                 best_error = loss
                 best_ratio = ratio
                 # Each ratio creates a fresh scales tensor and never mutates it
-                # after scoring, so retaining the winning tensor avoids clone
-                # allocations during the grid search.
+                # after scoring, so retaining the winner avoids a clone.
                 best_scales = scales
+            return loss
+
+        try:
+            # Refined search includes alpha=1.0, making its coarse candidates a
+            # strict superset of the historical range(n_grid) search. Disabling
+            # refinement retains the exact legacy 20-candidate path for A/Bs.
+            coarse_count = n_grid + 1 if refine_steps > 1 else n_grid
+            coarse_ratios = [_ratio_key(index / n_grid) for index in range(coarse_count)]
+            for ratio in coarse_ratios:
+                _evaluate_ratio(ratio)
+
+            if refine_steps > 1:
+                def _rank_key(ratio: float) -> Tuple[float, float]:
+                    loss = evaluated_errors[_ratio_key(ratio)]
+                    return (loss if math.isfinite(loss) else float("inf"), ratio)
+
+                # Preserve multiple promising basins because group-wise integer
+                # rounding can create narrow minima that a single local search
+                # misses. Three coarse cells remain far cheaper than a dense grid.
+                centers = sorted(coarse_ratios, key=_rank_key)[:3]
+                radius = 0.5 / n_grid
+
+                # Two refinement stages give a default final spacing of 5e-4
+                # (20 coarse intervals, five subdivisions per half-cell) while
+                # evaluating at most 81 candidates instead of a 2001-point grid.
+                for _ in range(2):
+                    spacing = radius / refine_steps
+                    next_centers = []
+                    for center in centers:
+                        local_ratios = sorted({
+                            _ratio_key(center + offset * spacing)
+                            for offset in range(-refine_steps, refine_steps + 1)
+                        })
+                        for ratio in local_ratios:
+                            _evaluate_ratio(ratio)
+                        next_centers.append(min(local_ratios, key=_rank_key))
+
+                    # Adjacent coarse cells can converge to the same refined
+                    # minimum. Deduplicate them before the next stage.
+                    centers = list(dict.fromkeys(next_centers))
+                    radius = 0.5 * spacing
+        finally:
+            # Reset weights one final time so callers always see pristine FP
+            # weights, including when candidate generation or scoring raises.
             for fc in linears2scale:
                 self._restore_awq_weight_from_master(fc, orig_weights_master[fc])
-
-        # Reset weights one final time so callers always see the pristine FP copy.
-        for fc in linears2scale:
-            self._restore_awq_weight_from_master(fc, orig_weights_master[fc])
-        orig_weights_master.clear()
+            orig_weights_master.clear()
 
         if best_ratio == -1:
             log.debug(history)

@@ -1,0 +1,78 @@
+{
+  "benchmark": "awq_scalesearch_projection_policy",
+  "date_utc": "2026-07-20",
+  "repository_revision": "673289e2fa5879a984e313c8423006d9b0f9f362",
+  "model": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "quantization": {
+    "method": "awq",
+    "format": "gemm",
+    "bits": 4,
+    "group_size": 128,
+    "sym": true,
+    "desc_act": false,
+    "dtype": "float16"
+  },
+  "calibration": {
+    "dataset": "/monster/data/model/dataset/nm-calibration",
+    "config": "LLM",
+    "raw_rows": 512,
+    "concat_size": 2048,
+    "sort": "desc",
+    "sha256": "c767262e3b85f894849259188838d110b972c54e2aa2620dce973219a37f14ef"
+  },
+  "evaluation": {
+    "framework": "Evalution",
+    "task": "gsm8k_platinum_cot",
+    "metric": "acc,num",
+    "examples": 1209,
+    "backend": "MARLIN",
+    "batch_size": 64,
+    "attention": "eager",
+    "device": "NVIDIA PG506-230",
+    "compute_capability": "8.0",
+    "total_memory_bytes": 102191202304
+  },
+  "results": [
+    {
+      "policy": "coarse",
+      "refine_steps": 0,
+      "qkv_refine_steps": 0,
+      "non_qkv_refine_steps": 0,
+      "correct": 459,
+      "score": 0.37965260545905705,
+      "quantize_seconds": 237.3667779029347,
+      "reconstruction_loss_mean": 0.00015551817291666666
+    },
+    {
+      "policy": "qkv_only",
+      "refine_steps": 0,
+      "qkv_refine_steps": 4,
+      "non_qkv_refine_steps": 0,
+      "correct": 425,
+      "score": 0.35153019023986765,
+      "quantize_seconds": 267.7619112180546,
+      "reconstruction_loss_mean": 0.00015393398125
+    },
+    {
+      "policy": "non_qkv_only",
+      "refine_steps": 0,
+      "qkv_refine_steps": 0,
+      "non_qkv_refine_steps": 4,
+      "correct": 416,
+      "score": 0.34408602150537637,
+      "quantize_seconds": 250.5935468939133,
+      "reconstruction_loss_mean": 0.00015458345625000001
+    },
+    {
+      "policy": "uniform",
+      "refine_steps": 4,
+      "qkv_refine_steps": 4,
+      "non_qkv_refine_steps": 4,
+      "correct": 399,
+      "score": 0.33002481389578164,
+      "quantize_seconds": null,
+      "reconstruction_loss_mean": 0.00015313093541666667,
+      "note": "Uniform-step-4 quantization ran in the concurrent sweep, so its wall time is intentionally omitted."
+    }
+  ]
+}

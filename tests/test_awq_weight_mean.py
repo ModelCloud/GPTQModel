@@ -340,6 +340,30 @@ def test_awq_align_module_kwargs_packs_mask_for_packed_feature_tensor():
     assert packed_mask[0, 0, 3, 4] == torch.finfo(torch.float32).min
 
 
+def test_awq_align_module_kwargs_trims_single_padded_batch_for_replay():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    mask_min = torch.finfo(torch.float32).min
+    attention_mask = torch.tensor(
+        [[[[mask_min, mask_min, mask_min, mask_min],
+           [mask_min, 0.0, mask_min, mask_min],
+           [mask_min, 0.0, 0.0, mask_min],
+           [mask_min, 0.0, 0.0, 0.0]]]],
+        dtype=torch.float32,
+    )
+    position_ids = torch.tensor([[0, 0, 1, 2]])
+
+    aligned = processor._align_module_kwargs_to_input(
+        torch.randn(1, 3, 16),
+        {
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+        },
+    )
+
+    assert aligned["attention_mask"].shape == (1, 1, 3, 3)
+    assert aligned["position_ids"].tolist() == [[0, 1, 2]]
+
+
 def test_awq_search_best_scale_keeps_cpu_activations_off_device_until_forward_chunks():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available for this test run.")
@@ -374,6 +398,8 @@ def test_awq_search_best_scale_keeps_cpu_activations_off_device_until_forward_ch
         layers_arg,
         fp16_output,
         module_kwargs,
+        *,
+        refine_steps=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_devices"] = [chunk.device.type for chunk in fp16_output]
@@ -434,6 +460,8 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
         layers_arg,
         fp16_output,
         module_kwargs,
+        *,
+        refine_steps=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_type"] = type(fp16_output).__name__
@@ -492,6 +520,139 @@ def test_awq_compute_best_scale_restores_cpu_weights_without_aliasing():
     torch.testing.assert_close(module.weight, original_weight, atol=0, rtol=0)
     assert best_scales.device.type == "cpu"
     assert loss >= 0
+
+
+def test_awq_refined_scale_search_improves_groupwise_reconstruction():
+    torch.manual_seed(0)
+
+    base_module = nn.Linear(12, 8, bias=False, dtype=torch.float32).eval()
+    x = torch.randn(2, 5, 12) * torch.exp(torch.linspace(-2, 2, 12))
+
+    def run_search(refine_steps: int):
+        processor = _TestAWQProcessor(
+            AWQConfig(
+                format=FORMAT.GEMM,
+                group_size=4,
+                scale_search_refine_steps=refine_steps,
+            )
+        )
+        processor._quant_batch_size = 1
+        module = nn.Linear(12, 8, bias=False, dtype=torch.float32).eval()
+        module.load_state_dict(base_module.state_dict())
+        original_weight = module.weight.detach().clone()
+        w_mean = _compute_awq_weight_mean([module], processor.qcfg.group_size)
+        x_mean = processor._compute_activation_x_mean(x)
+        fp_output = [
+            output.detach()
+            for output in processor._iter_module_forward_outputs(x, module, {})
+        ]
+
+        with torch.inference_mode():
+            scales, loss = processor._compute_best_scale(
+                x,
+                w_mean,
+                x_mean,
+                module,
+                [module],
+                fp_output,
+                {},
+            )
+
+        torch.testing.assert_close(module.weight, original_weight, atol=0, rtol=0)
+        return scales, loss
+
+    coarse_scales, coarse_loss = run_search(refine_steps=0)
+    refined_scales, refined_loss = run_search(refine_steps=5)
+
+    assert torch.isfinite(coarse_scales).all()
+    assert torch.isfinite(refined_scales).all()
+    assert refined_loss < coarse_loss
+
+
+def test_awq_scale_search_refinement_resolves_dynamic_module_mapping():
+    class _Attention(nn.Module):
+        """Expose canonical projection names for ScaleSearch policy classification."""
+
+        def __init__(self):
+            super().__init__()
+            self.q_proj = nn.Linear(8, 8, bias=False)
+            self.k_proj = nn.Linear(8, 8, bias=False)
+            self.v_proj = nn.Linear(8, 8, bias=False)
+            self.o_proj = nn.Linear(8, 8, bias=False)
+
+    class _MLP(nn.Module):
+        """Expose non-QKV projection names for the complementary policy path."""
+
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = nn.Linear(8, 8, bias=False)
+            self.up_proj = nn.Linear(8, 8, bias=False)
+
+    class _DecoderLayer(nn.Module):
+        """Mirror the projection hierarchy used by Llama decoder layers."""
+
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _Attention()
+            self.mlp = _MLP()
+
+    layer = _DecoderLayer()
+    root = nn.Module()
+    root.model = nn.Module()
+    root.model.layers = nn.ModuleList([layer])
+    qkv = [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj]
+    output = [layer.self_attn.o_proj]
+    mlp = [layer.mlp.gate_proj, layer.mlp.up_proj]
+
+    qkv_pattern = r".*\.self_attn\.(q_proj|k_proj|v_proj)$"
+    non_qkv_pattern = r".*\.(self_attn\.o_proj|mlp\.(gate_proj|up_proj|down_proj))$"
+
+    def processor_for(qcfg: AWQConfig) -> _TestAWQProcessor:
+        processor = _TestAWQProcessor(qcfg)
+        processor.model = root
+        return processor
+
+    qkv_only = processor_for(
+        AWQConfig(
+            format=FORMAT.GEMM,
+            scale_search_refine_steps=0,
+            dynamic={qkv_pattern: {"scale_search_refine_steps": 4}},
+        )
+    )
+    assert qkv_only._resolve_scale_search_refine_steps(layer, qkv) == 4
+    assert qkv_only._resolve_scale_search_refine_steps(layer, output) == 0
+    assert qkv_only._resolve_scale_search_refine_steps(layer, mlp) == 0
+
+    non_qkv_only = processor_for(
+        AWQConfig(
+            format=FORMAT.GEMM,
+            scale_search_refine_steps=0,
+            dynamic={non_qkv_pattern: {"scale_search_refine_steps": 4}},
+        )
+    )
+    assert non_qkv_only._resolve_scale_search_refine_steps(layer, qkv) == 0
+    assert non_qkv_only._resolve_scale_search_refine_steps(layer, output) == 4
+    assert non_qkv_only._resolve_scale_search_refine_steps(layer, mlp) == 4
+
+    inherited = processor_for(
+        AWQConfig(
+            format=FORMAT.GEMM,
+            scale_search_refine_steps=4,
+            dynamic={qkv_pattern: {"scale_search_refine_steps": 0}},
+        )
+    )
+    assert inherited._resolve_scale_search_refine_steps(layer, qkv) == 0
+    assert inherited._resolve_scale_search_refine_steps(layer, mlp) == 4
+
+    conflicting = processor_for(
+        AWQConfig(
+            format=FORMAT.GEMM,
+            scale_search_refine_steps=0,
+            dynamic={r".*\.self_attn\.q_proj$": {"scale_search_refine_steps": 4}},
+        )
+    )
+    with pytest.raises(ValueError, match="assign the same value to the full group"):
+        conflicting._resolve_scale_search_refine_steps(layer, qkv)
 
 
 def test_awq_compute_best_scale_avoids_winning_scale_clone(monkeypatch):
@@ -803,6 +964,8 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
         layers_arg,
         fp16_output,
         module_kwargs,
+        *,
+        refine_steps=None,
     ):
         captured["fast"] = w_mean.detach().to(torch.float32).cpu()
         captured["baseline"] = (
