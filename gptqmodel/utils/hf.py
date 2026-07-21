@@ -138,9 +138,14 @@ def _sync_local_remote_code_cache(model_id_or_path: Optional[str]) -> None:
 
 
 def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
-    dtype = getattr(config, "dtype", None)
-    if dtype is None:
+    dtype = getattr(config, "dtype", _MISSING)
+    if dtype is _MISSING:
         dtype = getattr(config, "torch_dtype", None)
+    elif dtype is None:
+        # Transformers 5.14 exposes `torch_dtype` as a deprecated property that
+        # warns even when only read. Preserve genuinely stored legacy metadata
+        # without touching that alias on modern configs.
+        dtype = getattr(config, "__dict__", {}).get("torch_dtype")
 
     if dtype is None:
         return None
@@ -759,9 +764,28 @@ def _patch_transformers_remote_code_compat() -> None:
         cache_base_cls = getattr(cache_utils, "Cache", None) if cache_utils is not None else None
         if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length") and hasattr(cache_base_cls, "get_max_cache_shape"):
             # Older remote decoders expect `get_max_length()`, while newer
-            # transformers renamed that API to `get_max_cache_shape()`.
+            # transformers renamed that API to `get_max_cache_shape()`. In
+            # transformers 5.14, the deprecated cache-level method delegates
+            # back to `get_max_length()`, so prefer the layer API to avoid a
+            # compatibility-alias recursion.
             def get_max_length(self, layer_idx: int = 0) -> Optional[int]:
-                max_length = self.get_max_cache_shape(layer_idx)
+                missing = object()
+                max_length = missing
+                layers = getattr(self, "layers", None)
+                if layers is not None:
+                    if 0 <= layer_idx < len(layers):
+                        layer = layers[layer_idx]
+                        layer_get_max_length = getattr(layer, "get_max_length", None)
+                        layer_get_max_cache_shape = getattr(layer, "get_max_cache_shape", None)
+                        if callable(layer_get_max_length):
+                            max_length = layer_get_max_length()
+                        elif callable(layer_get_max_cache_shape):
+                            max_length = layer_get_max_cache_shape()
+                    else:
+                        max_length = -1
+
+                if max_length is missing:
+                    max_length = self.get_max_cache_shape(layer_idx)
                 return None if max_length is None or max_length < 0 else max_length
 
             cache_base_cls.get_max_length = get_max_length
