@@ -10,7 +10,9 @@ from transformers import AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 from ...utils.calibration import batched
-from ...utils.model import MODALITY
+from ...utils.model import MODALITY, move_to
+from ...utils.offload import offload_to_disk
+from .._const import CPU
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
@@ -64,6 +66,45 @@ class InklingMMQModel(BaseQModel):
             },
         },
     ]
+
+    def pre_quantize_generate_hook_start(self):
+        core_model = self.model.model
+        language_model = core_model.language_model
+        self.shell_module_materialize(language_model.embed_tokens, self.quantize_config.device)
+        self.shell_module_materialize(language_model.embed_norm, self.quantize_config.device)
+        self.shell_module_materialize(core_model.vision_tower, self.quantize_config.device)
+        self.shell_module_materialize(core_model.audio_tower, self.quantize_config.device)
+
+    def pre_quantize_generate_hook_end(self):
+        core_model = self.model.model
+        language_model = core_model.language_model
+        if self.quantize_config.offload_to_disk:
+            offload_to_disk(
+                model=language_model,
+                module=language_model.embed_tokens,
+                disk_path=self.quantize_config.offload_to_disk_path,
+            )
+            offload_to_disk(
+                model=language_model,
+                module=language_model.embed_norm,
+                disk_path=self.quantize_config.offload_to_disk_path,
+            )
+            offload_to_disk(
+                model=core_model,
+                module=core_model.vision_tower,
+                disk_path=self.quantize_config.offload_to_disk_path,
+            )
+            offload_to_disk(
+                model=core_model,
+                module=core_model.audio_tower,
+                disk_path=self.quantize_config.offload_to_disk_path,
+            )
+            return
+
+        language_model.embed_tokens = move_to(language_model.embed_tokens, device=CPU)
+        language_model.embed_norm = move_to(language_model.embed_norm, device=CPU)
+        core_model.vision_tower = move_to(core_model.vision_tower, device=CPU)
+        core_model.audio_tower = move_to(core_model.audio_tower, device=CPU)
 
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)

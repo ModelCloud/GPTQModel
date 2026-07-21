@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import json
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,7 +19,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.utils.structure import LazyTurtle
 
 
-MODEL_PATH = Path("/monster/data/model/Inkling")
+MODEL_PATH = Path("/monster/data/model/Inkling-0.6B-A0.6B-BF16")
 
 
 def _tiny_config() -> InklingConfig:
@@ -83,17 +81,6 @@ def _interleave(tensor: torch.Tensor, dim: int) -> torch.Tensor:
     return tensor.reshape(shape).transpose(dim, dim + 1).reshape(tensor.shape).contiguous()
 
 
-def _complete_local_checkpoint() -> bool:
-    index_path = MODEL_PATH / "model.safetensors.index.json"
-    if not index_path.is_file():
-        return False
-    try:
-        weight_map = json.loads(index_path.read_text(encoding="utf-8"))["weight_map"]
-    except (KeyError, OSError, json.JSONDecodeError):
-        return False
-    return bool(weight_map) and all((MODEL_PATH / filename).is_file() for filename in set(weight_map.values()))
-
-
 def test_inkling_model_type_selects_definition(monkeypatch):
     fake_config = SimpleNamespace(model_type="inkling_mm_model")
 
@@ -150,6 +137,32 @@ def test_inkling_calibration_uses_native_multimodal_chat_template():
         "return_dict": True,
         "return_tensors": "pt",
     }
+
+
+def test_inkling_multimodal_capture_materializes_preforward_modules_on_quant_device():
+    class RecordingInklingMMQModel(InklingMMQModel):
+        def shell_module_materialize(self, target_submodule, device, **kwargs):
+            del kwargs
+            self.materialize_calls.append((target_submodule, device))
+            return target_submodule
+
+    model = _tiny_model()
+    wrapper = RecordingInklingMMQModel.__new__(RecordingInklingMMQModel)
+    nn.Module.__init__(wrapper)
+    wrapper.model = model
+    wrapper.quantize_config = SimpleNamespace(device=torch.device("cuda:0"))
+    wrapper.materialize_calls = []
+
+    wrapper.pre_quantize_generate_hook_start()
+
+    core_model = model.model
+    assert [module for module, _device in wrapper.materialize_calls] == [
+        core_model.language_model.embed_tokens,
+        core_model.language_model.embed_norm,
+        core_model.vision_tower,
+        core_model.audio_tower,
+    ]
+    assert all(device == torch.device("cuda:0") for _module, device in wrapper.materialize_calls)
 
 
 def test_inkling_defuser_expands_packed_routed_experts_without_changing_forward():
@@ -334,55 +347,23 @@ def test_inkling_lazy_turtle_applies_interleave_before_dense_and_expert_splits(t
     assert torch.equal(shared_experts.gate_proj, expected_shared_gate)
 
 
-@unittest.skipUnless(_complete_local_checkpoint(), "Complete local Inkling checkpoint not found")
 class TestInklingMMModel(ModelTest):
     NATIVE_MODEL_ID = str(MODEL_PATH)
     TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 1
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
-    MODEL_COMPAT_FAST_LAYER_COUNT = 3
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
+            "chat_template": True,
+            "acc": {"value": 0.2098, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.2389, "floor_pct": 0.04},
+        },
+    }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     def test_inkling_mm_model(self):
-        with self.model_compat_test_context():
-            model, _tokenizer, processor = self.quantModel(
-                self.NATIVE_MODEL_ID,
-                trust_remote_code=self.TRUST_REMOTE_CODE,
-                dtype=self.TORCH_DTYPE,
-                batch_size=1,
-                call_perform_post_quant_validation=False,
-            )
-
-        image_url = (
-            "https://huggingface.co/datasets/merve/vl-test-suite/"
-            "resolve/main/pills.jpg"
-        )
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image_url},
-                    {"type": "text", "text": "Do any of the components in this supplement interact?"},
-                ],
-            },
-        ]
-        inputs = processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            reasoning_effort="medium",
-            return_dict=True,
-            return_tensors="pt",
-        ).to(model.device)
-        input_length = inputs["input_ids"].shape[-1]
-
-        outputs = model.generate(**inputs, max_new_tokens=512)
-        response = processor.decode(outputs[0][input_length:], skip_special_tokens=False)
-        parsed_response = processor.parse_response(response)
-
-        self.assertTrue(response)
-        self.assertIsInstance(parsed_response, dict)
-        self.assertTrue(parsed_response)
+        self.quantize_and_evaluate()
 
 
 __all__ = ["TestInklingMMModel"]
