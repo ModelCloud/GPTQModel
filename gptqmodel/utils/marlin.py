@@ -154,7 +154,7 @@ def _marlin_sources(dtype_tag: str) -> list[str]:
     sources = [
         str(root / f"marlin_torch_{dtype_tag}.cpp"),
         str(root / f"gptq_marlin_{dtype_tag}.cu"),
-        str(root.parent / "eora_marlin" / "eora_marlin_kernel.cu"),
+        str(root.parent / "marlin_lora" / "marlin_lora_kernel.cu"),
         str(root / "gptq_marlin_repack.cu"),
         str(root / "awq_marlin_repack.cu"),
     ]
@@ -196,8 +196,8 @@ _MARLIN_FP16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     namespace=_MARLIN_FP16_NAMESPACE,
     required_ops=(
         "gptq_marlin_gemm_fp16",
-        "gptq_marlin_gemm_eora_fp16",
-        "gptq_marlin_gemm_eora_prepared_fp16",
+        "gptq_marlin_gemm_lora_fp16",
+        "gptq_marlin_gemm_lora_prepared_fp16",
         "gptq_marlin_repack",
         "awq_marlin_repack",
     ),
@@ -219,8 +219,8 @@ _MARLIN_BF16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     namespace=_MARLIN_BF16_NAMESPACE,
     required_ops=(
         "gptq_marlin_gemm_bf16",
-        "gptq_marlin_gemm_eora_bf16",
-        "gptq_marlin_gemm_eora_prepared_bf16",
+        "gptq_marlin_gemm_lora_bf16",
+        "gptq_marlin_gemm_lora_prepared_bf16",
         "gptq_marlin_repack",
         "awq_marlin_repack",
     ),

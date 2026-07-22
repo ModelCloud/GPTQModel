@@ -23,7 +23,7 @@ hypotheses and must not be presented as measurements.
 Implemented and validated on both requested CC 8.0 devices. For both FP16 and BF16, production dispatch uses a direct
 continuous-3-bit native CUDA GEMV at flattened M=1 and native CUDA WMMA at M=2..16. FP16 uses exact-value expanded
 Marlin above M=16; BF16 retains fused Triton above M=16 because it is faster than the native large-M diagnostic.
-The exact M=1, K=N=4096, group-128, dense rank-128 EoRA case now uses a cooperative one-launch TriLin+LoRA mega-kernel
+The exact M=1, K=N=4096, group-128, dense rank-128 LoRA case now uses a cooperative one-launch TriLin+LoRA mega-kernel
 on sm80; unsupported adapter shapes, training/autograd, compressed adapters, CUDA Graph capture, and other devices
 retain the established base-kernel-plus-adapter fallback.
 Architecture, alignment, build-failure, training, and other unsupported cases retain guarded fallbacks. GPTQ/AWQ
@@ -50,7 +50,7 @@ from that initial design state.
 | M constraints | Any positive flattened row count; separate decode and prefill launch regimes |
 | Device | Runtime-probed CUDA device; optimized first for compute capability 8.0 |
 | Training | Inference specialization only; existing training/dequantized path remains the fallback |
-| Adapters/bias | Optional bias remains fused; exact sm80 M=1/K=N=4096/group-128 dense rank-128 EoRA is one cooperative launch, with the existing wrapper fallback for every other case |
+| Adapters/bias | Optional bias remains fused; exact sm80 M=1/K=N=4096/group-128 dense rank-128 LoRA is one cooperative launch, with the existing wrapper fallback for every other case |
 | Unsupported cases | Must fail validation for explicit selection or fall back through existing backend selection |
 
 The capability declarations alone cannot express conditional combinations such as “3-bit only when group size is
@@ -1940,7 +1940,7 @@ split selection, native current-stream execution, GPTQ/AWQ module dispatch at M=
 bias, save/reload, malformed zero points, and natural group-index validation.
 
 An initial aggregate extension-loader run was aborted because the fake registry did not include the newly registered
-`trilin` extension, causing the test to build real Trilin and then unrelated optional EoRA/Grasshopper extensions on
+`trilin` extension, causing the test to build real Trilin and then unrelated optional LoRA/Grasshopper extensions on
 this CUDA host. The deterministic fix added a fake Trilin extension and a `trilin-3bit` alias test. With CUDA hidden
 so unrelated host-conditional extensions remain out of scope, the extension/JIT utility suites passed `41` tests.
 The neighboring AWQ FP32-accumulation suite passed `2` tests on GPU0.

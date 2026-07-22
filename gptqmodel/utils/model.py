@@ -631,7 +631,7 @@ def create_quant_module(
         in_features=in_features,
         out_features=out_features,
         device=DEVICE(device) if isinstance(device, str) else device,
-        adapter=adapter, # TODO FIX ME..need to pass Eora if loaded
+        adapter=adapter, # TODO FIX ME..need to pass Lora if loaded
     )
     if err is not None:
         raise err

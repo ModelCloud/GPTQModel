@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 
 from gptqmodel.adapter.adapter import Lora
-from gptqmodel.utils.trilin import trilin_matmul, trilin_matmul_eora
+from gptqmodel.utils.trilin import trilin_matmul, trilin_matmul_lora
 
 
 K = 4096
@@ -21,7 +21,7 @@ SUPPORTED_RANKS = (32, 64, 128, 256)
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark the supported fused TriLin 3-bit plus EoRA decode path.")
+    parser = argparse.ArgumentParser(description="Benchmark the supported fused TriLin 3-bit plus LoRA decode path.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", choices=("fp16", "bf16"), default="fp16")
     parser.add_argument("--rank", type=int, choices=SUPPORTED_RANKS, default=128)
@@ -112,13 +112,13 @@ def main() -> None:
         raise ValueError("warmup/profile iterations must be non-negative and timing iterations must be positive")
     device = torch.device(args.device)
     if device.type != "cuda":
-        raise ValueError("TriLin+EoRA benchmarking requires CUDA")
+        raise ValueError("TriLin+LoRA benchmarking requires CUDA")
     dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
     torch.manual_seed(args.seed)
     torch.cuda.set_device(device)
     properties = torch.cuda.get_device_properties(device)
     if (properties.major, properties.minor) != (8, 0):
-        raise RuntimeError(f"TriLin+EoRA requires sm_80, got sm_{properties.major}{properties.minor}")
+        raise RuntimeError(f"TriLin+LoRA requires sm_80, got sm_{properties.major}{properties.minor}")
 
     qweight = torch.randint(
         0,
@@ -138,7 +138,7 @@ def main() -> None:
         return adapter.apply(x, trilin_matmul(x, qweight, scales))
 
     def fused():
-        return trilin_matmul_eora(x, qweight, scales, lora_a, lora_b, workspace)
+        return trilin_matmul_lora(x, qweight, scales, lora_a, lora_b, workspace)
 
     with torch.inference_mode():
         reference = unfused()
@@ -166,11 +166,11 @@ def main() -> None:
                 unfused()
                 fused()
             torch.cuda.synchronize()
-            torch.cuda.nvtx.range_push(f"trilin_eora_rank_{args.rank}_unfused")
+            torch.cuda.nvtx.range_push(f"trilin_lora_rank_{args.rank}_unfused")
             for _ in range(args.profile_iterations):
                 unfused()
             torch.cuda.nvtx.range_pop()
-            torch.cuda.nvtx.range_push(f"trilin_eora_rank_{args.rank}_fused")
+            torch.cuda.nvtx.range_push(f"trilin_lora_rank_{args.rank}_fused")
             for _ in range(args.profile_iterations):
                 fused()
             torch.cuda.nvtx.range_pop()

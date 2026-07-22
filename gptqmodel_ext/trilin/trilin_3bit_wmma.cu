@@ -532,7 +532,7 @@ __global__ void trilin_3bit_gemv_group_warp_reduce_kernel(
 }
 
 template <typename Scalar, int Rank>
-__global__ void trilin_3bit_eora_kernel(
+__global__ void trilin_3bit_lora_kernel(
     const Scalar* __restrict__ input,
     const uint32_t* __restrict__ qweight,
     const half* __restrict__ scales,
@@ -1299,18 +1299,18 @@ void dispatch_trilin_3bit_group_size(
 }
 
 template <typename Scalar, int Rank>
-int query_trilin_eora_grid_blocks(int device) {
+int query_trilin_lora_grid_blocks(int device) {
   int cooperative_launch = 0;
   cudaError_t status = cudaDeviceGetAttribute(&cooperative_launch, cudaDevAttrCooperativeLaunch, device);
   TORCH_CHECK(
       status == cudaSuccess,
-      "Trilin fused EoRA failed to query cooperative-launch support: ",
+      "Trilin fused LoRA failed to query cooperative-launch support: ",
       cudaGetErrorString(status));
-  TORCH_CHECK(cooperative_launch != 0, "Trilin fused EoRA requires cooperative CUDA launches");
+  TORCH_CHECK(cooperative_launch != 0, "Trilin fused LoRA requires cooperative CUDA launches");
 
   constexpr int threads = 512;
   int active_blocks_per_sm = 0;
-  auto kernel = trilin_3bit_eora_kernel<Scalar, Rank>;
+  auto kernel = trilin_3bit_lora_kernel<Scalar, Rank>;
   status = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
       &active_blocks_per_sm,
       kernel,
@@ -1318,21 +1318,21 @@ int query_trilin_eora_grid_blocks(int device) {
       0);
   TORCH_CHECK(
       status == cudaSuccess,
-      "Trilin fused EoRA failed to query kernel occupancy: ",
+      "Trilin fused LoRA failed to query kernel occupancy: ",
       cudaGetErrorString(status));
 
   int sm_count = 0;
   status = cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
   TORCH_CHECK(
       status == cudaSuccess,
-      "Trilin fused EoRA failed to query the multiprocessor count: ",
+      "Trilin fused LoRA failed to query the multiprocessor count: ",
       cudaGetErrorString(status));
   constexpr int kDesiredBlocks = 256 + Rank / 16;
   constexpr int kMinimumBlocks = 64;
   const int grid_blocks = std::min(kDesiredBlocks, active_blocks_per_sm * sm_count);
   TORCH_CHECK(
       grid_blocks >= kMinimumBlocks,
-      "Trilin fused EoRA requires cooperative capacity for at least ",
+      "Trilin fused LoRA requires cooperative capacity for at least ",
       kMinimumBlocks,
       " resident CTAs, got ",
       grid_blocks);
@@ -1340,7 +1340,7 @@ int query_trilin_eora_grid_blocks(int device) {
 }
 
 template <typename Scalar, int Rank>
-int get_trilin_eora_grid_blocks(int device) {
+int get_trilin_lora_grid_blocks(int device) {
   static std::mutex mutex;
   static std::vector<int> cache;
   std::lock_guard<std::mutex> lock(mutex);
@@ -1349,13 +1349,13 @@ int get_trilin_eora_grid_blocks(int device) {
   }
   int& grid_blocks = cache[device];
   if (grid_blocks == 0) {
-    grid_blocks = query_trilin_eora_grid_blocks<Scalar, Rank>(device);
+    grid_blocks = query_trilin_lora_grid_blocks<Scalar, Rank>(device);
   }
   return grid_blocks;
 }
 
 template <typename Scalar, int Rank>
-void launch_trilin_3bit_eora(
+void launch_trilin_3bit_lora(
     const Scalar* input,
     const uint32_t* qweight,
     const half* scales,
@@ -1368,8 +1368,8 @@ void launch_trilin_3bit_eora(
     int device,
     cudaStream_t stream) {
   constexpr int threads = 512;
-  const int grid_blocks = get_trilin_eora_grid_blocks<Scalar, Rank>(device);
-  auto kernel = trilin_3bit_eora_kernel<Scalar, Rank>;
+  const int grid_blocks = get_trilin_lora_grid_blocks<Scalar, Rank>(device);
+  auto kernel = trilin_3bit_lora_kernel<Scalar, Rank>;
   void* args[] = {
       &input,
       &qweight,
@@ -1390,12 +1390,12 @@ void launch_trilin_3bit_eora(
       stream);
   TORCH_CHECK(
       status == cudaSuccess,
-      "Trilin fused EoRA cooperative launch failed: ",
+      "Trilin fused LoRA cooperative launch failed: ",
       cudaGetErrorString(status));
 }
 
 template <typename Scalar>
-void dispatch_trilin_3bit_eora(
+void dispatch_trilin_3bit_lora(
     int64_t rank,
     const Scalar* input,
     const uint32_t* qweight,
@@ -1408,26 +1408,26 @@ void dispatch_trilin_3bit_eora(
     int bias_type,
     int device,
     cudaStream_t stream) {
-#define LAUNCH_TRILIN_EORA(RANK) \
-  launch_trilin_3bit_eora<Scalar, RANK>( \
+#define LAUNCH_TRILIN_LORA(RANK) \
+  launch_trilin_3bit_lora<Scalar, RANK>( \
       input, qweight, scales, bias, output, lora_a, lora_b, lora_down, bias_type, device, stream)
   switch (rank) {
     case 32:
-      LAUNCH_TRILIN_EORA(32);
+      LAUNCH_TRILIN_LORA(32);
       return;
     case 64:
-      LAUNCH_TRILIN_EORA(64);
+      LAUNCH_TRILIN_LORA(64);
       return;
     case 128:
-      LAUNCH_TRILIN_EORA(128);
+      LAUNCH_TRILIN_LORA(128);
       return;
     case 256:
-      LAUNCH_TRILIN_EORA(256);
+      LAUNCH_TRILIN_LORA(256);
       return;
     default:
-      TORCH_CHECK(false, "Trilin fused EoRA requires rank 32, 64, 128, or 256, got ", rank);
+      TORCH_CHECK(false, "Trilin fused LoRA requires rank 32, 64, 128, or 256, got ", rank);
   }
-#undef LAUNCH_TRILIN_EORA
+#undef LAUNCH_TRILIN_LORA
 }
 
 at::Tensor trilin_3bit_wmma(
@@ -1528,7 +1528,7 @@ at::Tensor trilin_3bit_wmma(
   return output;
 }
 
-at::Tensor trilin_3bit_eora(
+at::Tensor trilin_3bit_lora(
     at::Tensor input,
     at::Tensor qweight,
     at::Tensor scales,
@@ -1537,56 +1537,56 @@ at::Tensor trilin_3bit_eora(
     at::Tensor lora_b,
     at::Tensor workspace) {
   constexpr int64_t kSize = 4096;
-  TORCH_CHECK(input.is_cuda(), "Trilin fused EoRA input must be CUDA");
+  TORCH_CHECK(input.is_cuda(), "Trilin fused LoRA input must be CUDA");
   TORCH_CHECK(
       qweight.is_cuda() && scales.is_cuda() && lora_a.is_cuda() && lora_b.is_cuda() && workspace.is_cuda(),
-      "Trilin fused EoRA tensors must be CUDA");
+      "Trilin fused LoRA tensors must be CUDA");
   TORCH_CHECK(
       input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
-      "Trilin fused EoRA input must be FP16 or BF16");
-  TORCH_CHECK(qweight.scalar_type() == at::kInt, "Trilin fused EoRA qweight must be int32");
-  TORCH_CHECK(scales.scalar_type() == at::kHalf, "Trilin fused EoRA scales must be FP16");
+      "Trilin fused LoRA input must be FP16 or BF16");
+  TORCH_CHECK(qweight.scalar_type() == at::kInt, "Trilin fused LoRA qweight must be int32");
+  TORCH_CHECK(scales.scalar_type() == at::kHalf, "Trilin fused LoRA scales must be FP16");
   TORCH_CHECK(
       lora_a.scalar_type() == input.scalar_type() && lora_b.scalar_type() == input.scalar_type(),
-      "Trilin fused EoRA adapter tensors must match the input dtype");
-  TORCH_CHECK(workspace.scalar_type() == at::kFloat, "Trilin fused EoRA workspace must be FP32");
+      "Trilin fused LoRA adapter tensors must match the input dtype");
+  TORCH_CHECK(workspace.scalar_type() == at::kFloat, "Trilin fused LoRA workspace must be FP32");
   TORCH_CHECK(
       input.dim() == 2 && qweight.dim() == 2 && scales.dim() == 2 && lora_a.dim() == 2 && lora_b.dim() == 2,
-      "Trilin fused EoRA input, weights, scales, and adapter tensors must be 2D");
+      "Trilin fused LoRA input, weights, scales, and adapter tensors must be 2D");
   TORCH_CHECK(
       input.is_contiguous() && qweight.is_contiguous() && scales.is_contiguous() && lora_a.is_contiguous() &&
           lora_b.is_contiguous() && workspace.is_contiguous(),
-      "Trilin fused EoRA tensors must be contiguous");
+      "Trilin fused LoRA tensors must be contiguous");
   TORCH_CHECK(
       input.device() == qweight.device() && input.device() == scales.device() && input.device() == lora_a.device() &&
           input.device() == lora_b.device() && input.device() == workspace.device(),
-      "Trilin fused EoRA tensors differ in device");
-  TORCH_CHECK(input.size(0) == 1 && input.size(1) == kSize, "Trilin fused EoRA requires input shape (1, 4096)");
+      "Trilin fused LoRA tensors differ in device");
+  TORCH_CHECK(input.size(0) == 1 && input.size(1) == kSize, "Trilin fused LoRA requires input shape (1, 4096)");
   TORCH_CHECK(
       qweight.size(0) == kSize / 32 * 3 && qweight.size(1) == kSize,
-      "Trilin fused EoRA qweight shape mismatch");
-  TORCH_CHECK(scales.size(0) == kSize / 128 && scales.size(1) == kSize, "Trilin fused EoRA scale shape mismatch");
+      "Trilin fused LoRA qweight shape mismatch");
+  TORCH_CHECK(scales.size(0) == kSize / 128 && scales.size(1) == kSize, "Trilin fused LoRA scale shape mismatch");
   const int64_t rank = lora_a.size(1);
   TORCH_CHECK(
       rank == 32 || rank == 64 || rank == 128 || rank == 256,
-      "Trilin fused EoRA requires rank 32, 64, 128, or 256, got ",
+      "Trilin fused LoRA requires rank 32, 64, 128, or 256, got ",
       rank);
   TORCH_CHECK(
       lora_a.size(0) == kSize,
-      "Trilin fused EoRA LoRA-A first dimension must be 4096");
+      "Trilin fused LoRA-A first dimension must be 4096");
   TORCH_CHECK(
       lora_b.size(0) == rank && lora_b.size(1) == kSize,
-      "Trilin fused EoRA LoRA-B shape must be (rank, 4096)");
+      "Trilin fused LoRA-B shape must be (rank, 4096)");
   TORCH_CHECK(
       workspace.numel() >= rank,
-      "Trilin fused EoRA workspace must contain at least ",
+      "Trilin fused LoRA workspace must contain at least ",
       rank,
       " FP32 values");
 
   const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
   TORCH_CHECK(
       properties->major == 8 && properties->minor == 0,
-      "Trilin fused EoRA requires compute capability 8.0, got ",
+      "Trilin fused LoRA requires compute capability 8.0, got ",
       properties->major,
       ".",
       properties->minor);
@@ -1597,27 +1597,27 @@ at::Tensor trilin_3bit_eora(
   cudaError_t status = cudaStreamIsCapturing(stream, &capture_status);
   TORCH_CHECK(
       status == cudaSuccess,
-      "Trilin fused EoRA failed to query CUDA graph capture state: ",
+      "Trilin fused LoRA failed to query CUDA graph capture state: ",
       cudaGetErrorString(status));
   TORCH_CHECK(
       capture_status == cudaStreamCaptureStatusNone,
-      "Trilin fused EoRA cooperative launch does not support CUDA graph capture");
+      "Trilin fused LoRA cooperative launch does not support CUDA graph capture");
 
   const void* bias_ptr = nullptr;
   int bias_type = kBiasNone;
   if (bias.has_value()) {
-    TORCH_CHECK(bias->is_cuda() && bias->device() == input.device(), "Trilin fused EoRA bias device mismatch");
+    TORCH_CHECK(bias->is_cuda() && bias->device() == input.device(), "Trilin fused LoRA bias device mismatch");
     TORCH_CHECK(
         (bias->scalar_type() == at::kHalf || bias->scalar_type() == at::kBFloat16) && bias->is_contiguous(),
-        "Trilin fused EoRA bias must be contiguous FP16 or BF16");
-    TORCH_CHECK(bias->numel() == kSize, "Trilin fused EoRA bias shape mismatch");
+        "Trilin fused LoRA bias must be contiguous FP16 or BF16");
+    TORCH_CHECK(bias->numel() == kSize, "Trilin fused LoRA bias shape mismatch");
     bias_ptr = bias->const_data_ptr();
     bias_type = bias->scalar_type() == at::kHalf ? kBiasHalf : kBiasBFloat16;
   }
 
   auto output = at::empty({1, kSize}, input.options());
   if (input.scalar_type() == at::kHalf) {
-    dispatch_trilin_3bit_eora<half>(
+    dispatch_trilin_3bit_lora<half>(
         rank,
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>()),
@@ -1631,7 +1631,7 @@ at::Tensor trilin_3bit_eora(
         input.get_device(),
         stream);
   } else {
-    dispatch_trilin_3bit_eora<__nv_bfloat16>(
+    dispatch_trilin_3bit_lora<__nv_bfloat16>(
         rank,
         reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
         reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>()),
@@ -1847,7 +1847,7 @@ at::Tensor trilin_3bit_qkv(
 TORCH_LIBRARY(gptqmodel_trilin, m) {
   m.def("matmul(Tensor input, Tensor qweight, Tensor scales, Tensor? bias, int split_k, int group_size=128) -> Tensor");
   m.def(
-      "matmul_eora(Tensor input, Tensor qweight, Tensor scales, Tensor? bias, Tensor lora_a, Tensor lora_b, Tensor workspace) -> Tensor");
+      "matmul_lora(Tensor input, Tensor qweight, Tensor scales, Tensor? bias, Tensor lora_a, Tensor lora_b, Tensor workspace) -> Tensor");
   m.def(
       "silu_mul(Tensor input, Tensor gate_qweight, Tensor gate_scales, Tensor up_qweight, Tensor up_scales) -> Tensor");
   m.def(
@@ -1856,7 +1856,7 @@ TORCH_LIBRARY(gptqmodel_trilin, m) {
 
 TORCH_LIBRARY_IMPL(gptqmodel_trilin, CUDA, m) {
   m.impl("matmul", &trilin_3bit_wmma);
-  m.impl("matmul_eora", &trilin_3bit_eora);
+  m.impl("matmul_lora", &trilin_3bit_lora);
   m.impl("silu_mul", &trilin_3bit_swiglu);
   m.impl("qkv", &trilin_3bit_qkv);
 }

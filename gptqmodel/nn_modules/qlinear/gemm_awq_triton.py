@@ -230,7 +230,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             from ..triton_utils.three_bit import (
                 prepare_marlin_3bit,
                 prepare_trilin_3bit,
-                prepare_trilin_eora_3bit,
+                prepare_trilin_lora_3bit,
                 repack_awq_to_gptq_3bit,
                 unpack_3bit,
             )
@@ -250,8 +250,8 @@ class AwqGEMMTritonLinear(AWQuantLinear):
                 self.scales,
                 self.requested_group_size,
             )
-            eora_workspace = (
-                prepare_trilin_eora_3bit(
+            lora_workspace = (
+                prepare_trilin_lora_3bit(
                     self.adapter,
                     device=self.qweight.device,
                     in_features=self.in_features,
@@ -261,8 +261,8 @@ class AwqGEMMTritonLinear(AWQuantLinear):
                 if self.adapter is not None and self._trilin_native_3bit
                 else None
             )
-            if eora_workspace is not None:
-                self.register_buffer("_trilin_eora_workspace", eora_workspace, persistent=False)
+            if lora_workspace is not None:
+                self.register_buffer("_trilin_lora_workspace", lora_workspace, persistent=False)
             marlin_state = prepare_marlin_3bit(
                 self._triton_3bit_qweight,
                 self.scales,
@@ -285,7 +285,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
                 matmul_3bit,
                 matmul_marlin_3bit,
                 matmul_trilin_3bit,
-                matmul_trilin_eora_3bit,
+                matmul_trilin_lora_3bit,
             )
 
             input_dtype = x.dtype
@@ -310,12 +310,12 @@ class AwqGEMMTritonLinear(AWQuantLinear):
                     trilin_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
                     fused_out = None
                     if self.adapter is not None:
-                        fused_out = matmul_trilin_eora_3bit(
+                        fused_out = matmul_trilin_lora_3bit(
                             self.adapter,
                             trilin_input,
                             runtime_qweight,
                             self.scales,
-                            getattr(self, "_trilin_eora_workspace", None),
+                            getattr(self, "_trilin_lora_workspace", None),
                             bias=self.bias,
                             group_size=self.requested_group_size,
                         )

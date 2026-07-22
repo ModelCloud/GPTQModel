@@ -27,9 +27,9 @@ _UINT32_MASK = (1 << 32) - 1
 _MARLIN_N_ALIGNMENT = 64
 _MARLIN_GROUP_SIZES = frozenset({32, 64, 128})
 _TRILIN_NATIVE_GROUP_SIZES = frozenset({16, 32, 64, 96, 128, 192, 256, 384, 512, 1024})
-_TRILIN_EORA_ENV = "GPTQMODEL_TRILIN_EORA"
-_TRILIN_EORA_SIZE = 4096
-_TRILIN_EORA_RANKS = frozenset({32, 64, 128, 256})
+_TRILIN_LORA_ENV = "GPTQMODEL_TRILIN_LORA"
+_TRILIN_LORA_SIZE = 4096
+_TRILIN_LORA_RANKS = frozenset({32, 64, 128, 256})
 
 
 log = setup_logger()
@@ -393,7 +393,7 @@ def matmul_trilin_3bit(
     return trilin_matmul(input, qweight, scales, bias, group_size)
 
 
-def prepare_trilin_eora_3bit(
+def prepare_trilin_lora_3bit(
     adapter,
     *,
     device: torch.device,
@@ -402,14 +402,14 @@ def prepare_trilin_eora_3bit(
     group_size: int,
 ) -> torch.Tensor | None:
     """Allocate a disjoint payload for an exact supported Ampere decode specialization."""
-    if not env_flag(_TRILIN_EORA_ENV, default=True):
+    if not env_flag(_TRILIN_LORA_ENV, default=True):
         return None
     if device.type != "cuda" or torch.cuda.get_device_capability(device) != (8, 0):
         return None
     if (
         group_size != _TRILIN_GROUP_SIZE
-        or in_features != _TRILIN_EORA_SIZE
-        or out_features != _TRILIN_EORA_SIZE
+        or in_features != _TRILIN_LORA_SIZE
+        or out_features != _TRILIN_LORA_SIZE
     ):
         return None
     has_compressed_lora = getattr(adapter, "_has_compressed_lora", None)
@@ -424,26 +424,26 @@ def prepare_trilin_eora_3bit(
     if lora_a.dim() != 2 or lora_b.dim() != 2:
         return None
     rank = lora_a.shape[1]
-    if rank not in _TRILIN_EORA_RANKS:
+    if rank not in _TRILIN_LORA_RANKS:
         return None
-    if tuple(lora_a.shape) != (_TRILIN_EORA_SIZE, rank):
+    if tuple(lora_a.shape) != (_TRILIN_LORA_SIZE, rank):
         return None
-    if tuple(lora_b.shape) != (rank, _TRILIN_EORA_SIZE):
+    if tuple(lora_b.shape) != (rank, _TRILIN_LORA_SIZE):
         return None
     if not lora_a.is_contiguous():
         adapter.lora_A = lora_a.contiguous()
     if not lora_b.is_contiguous():
         adapter.lora_B = lora_b.contiguous()
-    log.info.once("Kernel: Ampere cooperative TriLin+EoRA ranks 32/64/128/256 decode inference is enabled.")
+    log.info.once("Kernel: Ampere cooperative TriLin+LoRA ranks 32/64/128/256 decode inference is enabled.")
     workspace = torch.empty((rank,), dtype=torch.float32, device=device)
     stream = torch.cuda.current_stream(device)
-    adapter._trilin_eora_stream_workspaces = {
+    adapter._trilin_lora_stream_workspaces = {
         (workspace.get_device(), stream.cuda_stream): workspace,
     }
     return workspace
 
 
-def _trilin_eora_workspace_for_current_stream(
+def _trilin_lora_workspace_for_current_stream(
     adapter,
     input: torch.Tensor,
     fallback: torch.Tensor,
@@ -452,10 +452,10 @@ def _trilin_eora_workspace_for_current_stream(
     """Return scratch exclusively owned by this adapter and CUDA stream."""
     stream = torch.cuda.current_stream(input.device)
     key = (input.get_device(), stream.cuda_stream)
-    workspaces = getattr(adapter, "_trilin_eora_stream_workspaces", None)
+    workspaces = getattr(adapter, "_trilin_lora_stream_workspaces", None)
     if not isinstance(workspaces, dict):
         workspaces = {}
-        adapter._trilin_eora_stream_workspaces = workspaces
+        adapter._trilin_lora_stream_workspaces = workspaces
 
     def valid(candidate) -> bool:
         return (
@@ -477,7 +477,7 @@ def _trilin_eora_workspace_for_current_stream(
     return workspace
 
 
-def matmul_trilin_eora_3bit(
+def matmul_trilin_lora_3bit(
     adapter,
     input: torch.Tensor,
     qweight: torch.Tensor,
@@ -487,12 +487,12 @@ def matmul_trilin_eora_3bit(
     bias: torch.Tensor | None = None,
     group_size: int = _TRILIN_GROUP_SIZE,
 ) -> torch.Tensor | None:
-    """Try the one-launch TriLin+EoRA specialization and return ``None`` for the established fallback."""
-    if not env_flag(_TRILIN_EORA_ENV, default=True) or workspace is None or group_size != _TRILIN_GROUP_SIZE:
+    """Try the one-launch TriLin+LoRA specialization and return ``None`` for the established fallback."""
+    if not env_flag(_TRILIN_LORA_ENV, default=True) or workspace is None or group_size != _TRILIN_GROUP_SIZE:
         return None
     if input.device.type != "cuda" or input.dtype not in (torch.float16, torch.bfloat16):
         return None
-    if tuple(input.shape) != (1, _TRILIN_EORA_SIZE) or not input.is_contiguous():
+    if tuple(input.shape) != (1, _TRILIN_LORA_SIZE) or not input.is_contiguous():
         return None
     if torch.cuda.get_device_capability(input.device) != (8, 0) or torch.cuda.is_current_stream_capturing():
         return None
@@ -509,11 +509,11 @@ def matmul_trilin_eora_3bit(
     if lora_a.dim() != 2 or lora_b.dim() != 2:
         return None
     rank = lora_a.shape[1]
-    if rank not in _TRILIN_EORA_RANKS:
+    if rank not in _TRILIN_LORA_RANKS:
         return None
-    if tuple(lora_a.shape) != (_TRILIN_EORA_SIZE, rank):
+    if tuple(lora_a.shape) != (_TRILIN_LORA_SIZE, rank):
         return None
-    if tuple(lora_b.shape) != (rank, _TRILIN_EORA_SIZE):
+    if tuple(lora_b.shape) != (rank, _TRILIN_LORA_SIZE):
         return None
     if torch.is_grad_enabled() and any(tensor.requires_grad for tensor in (input, lora_a, lora_b)):
         return None
@@ -528,14 +528,14 @@ def matmul_trilin_eora_3bit(
         or lora_b.device != input.device
     ):
         return None
-    workspace = _trilin_eora_workspace_for_current_stream(adapter, input, workspace, rank)
+    workspace = _trilin_lora_workspace_for_current_stream(adapter, input, workspace, rank)
 
     try:
-        from ...utils.trilin import trilin_matmul_eora
+        from ...utils.trilin import trilin_matmul_lora
 
-        return trilin_matmul_eora(input, qweight, scales, lora_a, lora_b, workspace, bias)
+        return trilin_matmul_lora(input, qweight, scales, lora_a, lora_b, workspace, bias)
     except Exception as exc:
-        log.warn.once(f"Integrated TriLin+EoRA inference failed; using the standard adapter path: {exc}")
+        log.warn.once(f"Integrated TriLin+LoRA inference failed; using the standard adapter path: {exc}")
         return None
 
 

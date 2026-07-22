@@ -205,39 +205,39 @@ def test_nvfp4_global_scale_contract_is_float_in_marlin_sources():
     assert "c1 *= global_scale_f32;" in template_h
 
 
-def test_integrated_eora_contract_is_present_in_marlin_extensions():
+def test_integrated_lora_contract_is_present_in_marlin_extensions():
     marlin_root = marlin_utils._marlin_root()
-    eora_kernel = marlin_root.parent / "eora_marlin" / "eora_marlin_kernel.cu"
+    lora_kernel = marlin_root.parent / "marlin_lora" / "marlin_lora_kernel.cu"
     gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
     template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
 
-    assert str(eora_kernel) in marlin_utils._marlin_sources("fp16")
-    assert str(eora_kernel) in marlin_utils._marlin_sources("bf16")
-    assert "gptq_marlin_gemm_eora_fp16" in marlin_utils._MARLIN_FP16_TORCH_OPS_EXTENSION.required_ops
-    assert "gptq_marlin_gemm_eora_bf16" in marlin_utils._MARLIN_BF16_TORCH_OPS_EXTENSION.required_ops
-    assert "gptq_marlin_gemm_eora_prepared_fp16" in marlin_utils._MARLIN_FP16_TORCH_OPS_EXTENSION.required_ops
-    assert "gptq_marlin_gemm_eora_prepared_bf16" in marlin_utils._MARLIN_BF16_TORCH_OPS_EXTENSION.required_ops
+    assert str(lora_kernel) in marlin_utils._marlin_sources("fp16")
+    assert str(lora_kernel) in marlin_utils._marlin_sources("bf16")
+    assert "gptq_marlin_gemm_lora_fp16" in marlin_utils._MARLIN_FP16_TORCH_OPS_EXTENSION.required_ops
+    assert "gptq_marlin_gemm_lora_bf16" in marlin_utils._MARLIN_BF16_TORCH_OPS_EXTENSION.required_ops
+    assert "gptq_marlin_gemm_lora_prepared_fp16" in marlin_utils._MARLIN_FP16_TORCH_OPS_EXTENSION.required_ops
+    assert "gptq_marlin_gemm_lora_prepared_bf16" in marlin_utils._MARLIN_BF16_TORCH_OPS_EXTENSION.required_ops
 
     for dtype_tag in ("fp16", "bf16"):
         source = (marlin_root / f"marlin_torch_{dtype_tag}.cpp").read_text(encoding="utf-8")
-        assert f"gptq_marlin_gemm_eora_{dtype_tag}" in source
-        assert f"gptq_marlin_gemm_eora_prepared_{dtype_tag}" in source
-        assert "eora_marlin_lora_fused_add_prepared_cuda" in source
+        assert f"gptq_marlin_gemm_lora_{dtype_tag}" in source
+        assert f"gptq_marlin_gemm_lora_prepared_{dtype_tag}" in source
+        assert "marlin_lora_fused_add_prepared_cuda" in source
         marlin_sources = marlin_utils._marlin_sources(dtype_tag)
         for rank in (32, 64, 96, 128, 192, 256):
             suffix = "" if rank == 128 else f"_r{rank}"
-            rank_kernel = marlin_root / f"kernel_{dtype_tag}_eora{suffix}_ku4b8.cu"
+            rank_kernel = marlin_root / f"kernel_{dtype_tag}_lora{suffix}_ku4b8.cu"
             assert str(rank_kernel) in marlin_sources
-            assert f"MarlinEoraRank{rank}" in rank_kernel.read_text(encoding="utf-8")
+            assert f"MarlinLoraRank{rank}" in rank_kernel.read_text(encoding="utf-8")
 
-    assert "launch_marlin_eora_attention" in gemm_cu
+    assert "launch_marlin_lora_attention" in gemm_cu
     assert "prob_n != 4096 || prob_k != 4096" in gemm_cu
-    assert "eora_rank != 32 && eora_rank != 64 && eora_rank != 96" in gemm_cu
-    assert "eora_rank != 128 && eora_rank != 192 && eora_rank != 256" in gemm_cu
+    assert "lora_rank != 32 && lora_rank != 64 && lora_rank != 96" in gemm_cu
+    assert "lora_rank != 128 && lora_rank != 192 && lora_rank != 256" in gemm_cu
     assert "device_info.sms != 124" in gemm_cu
-    assert "eora_down_ready_lock" in template_h
+    assert "lora_down_ready_lock" in template_h
     assert "ld.global.acquire.gpu.b32" in template_h
-    assert "atomicAdd(&locks[eora_up_arrivals_lock], 1)" in template_h
+    assert "atomicAdd(&locks[lora_up_arrivals_lock], 1)" in template_h
 
 
 def test_marlin_extra_cuda_cflags_enable_static_global_template_stub_when_nvcc_is_compatible(monkeypatch):
@@ -562,7 +562,7 @@ def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
         ((1, 1, 256), (1, 1, 64), 1, False),
     ],
 )
-def test_marlin_quant_linear_uses_one_integrated_eora_dispatch(
+def test_marlin_quant_linear_uses_one_integrated_lora_dispatch(
     monkeypatch,
     input_shape,
     output_shape,
@@ -616,7 +616,7 @@ def test_marlin_quant_linear_uses_one_integrated_eora_dispatch(
 
     monkeypatch.setattr(
         marlin_qlinear_module,
-        "prepare_eora_marlin_fused_lora",
+        "prepare_marlin_fused_lora",
         prepare_integrated_op,
     )
 
@@ -836,15 +836,15 @@ def test_marlin_live_row_fp32_scratch_matches_fp16_reduction(dtype):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("rank", [32, 64, 96, 128, 192, 256])
-def test_marlin_eora_attention_mega_kernel_matches_dense_update_and_releases_locks(
+def test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks(
     dtype, rank, monkeypatch
 ):
     device_index = 1 if dtype == torch.bfloat16 and torch.cuda.device_count() > 1 else 0
     device = torch.device(f"cuda:{device_index}")
     if torch.cuda.get_device_capability(device) != (8, 0):
-        pytest.skip("The cooperative Marlin+EoRA mega-kernel is enabled only for sm_80")
+        pytest.skip("The cooperative Marlin+LoRA mega-kernel is enabled only for sm_80")
 
-    monkeypatch.setenv("GPTQMODEL_EORA_MARLIN_COOPERATIVE", "1")
+    monkeypatch.setenv("GPTQMODEL_MARLIN_LORA_COOPERATIVE", "1")
     generator = torch.Generator(device=device)
     generator.manual_seed(27)
     features = 4096
@@ -883,8 +883,8 @@ def test_marlin_eora_attention_mega_kernel_matches_dense_update_and_releases_loc
         module.lora_B.copy_(lora_b)
     module.eval()
     module.post_init()
-    assert module.eora_cooperative_state is not None
-    assert module.eora_cooperative_state[-1] is True
+    assert module.lora_cooperative_state is not None
+    assert module.lora_cooperative_state[-1] is True
 
     module_adapter = module.adapter
     module.adapter = None

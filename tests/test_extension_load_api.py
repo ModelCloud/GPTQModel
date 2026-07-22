@@ -17,6 +17,7 @@ import gptqmodel.utils.exllamav2 as exllamav2_utils
 import gptqmodel.utils.cannoe as cannoe_utils
 import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
+import gptqmodel.utils.marlin_lora as marlin_lora_utils
 import gptqmodel.utils.paroquant as paroquant_utils
 import gptqmodel.utils.qqq as qqq_utils
 import gptqmodel.utils.trilin as trilin_utils
@@ -73,6 +74,7 @@ def _install_fake_extensions(monkeypatch):
         "machete": _FakeExtension("Machete"),
         "marlin_fp16": _FakeExtension("Marlin fp16"),
         "marlin_bf16": _FakeExtension("Marlin bf16"),
+        "marlin_lora": _FakeExtension("Marlin fused LoRA"),
         "trilin": _FakeExtension("Trilin native 3-bit WMMA"),
         "paroquant": _FakeExtension("ParoQuant rotation"),
         "cannoe": _FakeExtension("Cannoe V3"),
@@ -90,6 +92,8 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(machete_utils, "_validate_machete_device_support", lambda: True)
     monkeypatch.setattr(marlin_utils, "_MARLIN_FP16_TORCH_OPS_EXTENSION", fakes["marlin_fp16"])
     monkeypatch.setattr(marlin_utils, "_MARLIN_BF16_TORCH_OPS_EXTENSION", fakes["marlin_bf16"])
+    monkeypatch.setattr(marlin_lora_utils, "_MARLIN_LORA_TORCH_OPS_EXTENSION", fakes["marlin_lora"])
+    monkeypatch.setattr(marlin_lora_utils, "marlin_lora_supported", lambda: True)
     monkeypatch.setattr(trilin_utils, "_TRILIN_TORCH_OPS_EXTENSION", fakes["trilin"])
     monkeypatch.setattr(paroquant_utils, "_PAROQUANT_ROTATION_EXTENSION", fakes["paroquant"])
     monkeypatch.setattr(cannoe_utils, "_CANNOE_V3_TORCH_OPS_EXTENSION", fakes["cannoe"])
@@ -120,6 +124,7 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "machete": True,
         "marlin_fp16": True,
         "marlin_bf16": True,
+        "marlin_lora": True,
         "trilin": True,
         "paroquant": True,
         "cannoe": True,
@@ -158,6 +163,16 @@ def test_load_marlin_alias_builds_both_variants(monkeypatch):
     assert fakes["marlin_fp16"].load_calls == 1
     assert fakes["marlin_bf16"].load_calls == 1
     assert fakes["awq"].load_calls == 0
+
+
+def test_load_marlin_lora_alias_builds_fused_adapter_extension(monkeypatch):
+    fakes = _install_fake_extensions(monkeypatch)
+
+    result = extension_api.load(name="lora-marlin")
+
+    assert result == {"marlin_lora": True}
+    assert fakes["marlin_lora"].load_calls == 1
+    assert fakes["marlin_fp16"].load_calls == 0
 
 
 def test_load_trilin_alias_builds_native_3bit_extension(monkeypatch):

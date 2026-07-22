@@ -18,14 +18,14 @@ from tabulate import tabulate
 
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
-from gptqmodel.utils.eora_marlin import apply_eora_marlin_fused_lora
+from gptqmodel.utils.marlin_lora import apply_marlin_fused_lora
 
 
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 
-_FUSED_ENV = "GPTQMODEL_EORA_MARLIN_FUSED"
-_COOPERATIVE_ENV = "GPTQMODEL_EORA_MARLIN_COOPERATIVE"
-_CUDA_UP_ADD_ENV = "GPTQMODEL_EORA_MARLIN_CUDA_UP_ADD"
+_FUSED_ENV = "GPTQMODEL_MARLIN_LORA_FUSED"
+_COOPERATIVE_ENV = "GPTQMODEL_MARLIN_LORA_COOPERATIVE"
+_CUDA_UP_ADD_ENV = "GPTQMODEL_MARLIN_LORA_CUDA_UP_ADD"
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ VARIANTS = ("fallback", "addmm", "cooperative", "cuda_up_add")
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Benchmark and profile the fused EoRA/LoRA tail used by the Marlin backend."
+        description="Benchmark and profile the fused LoRA tail used by the Marlin backend."
     )
     parser.add_argument("--device", default="cuda:0", help="Logical torch device within CUDA_VISIBLE_DEVICES.")
     parser.add_argument("--dtype", choices=("fp16", "bf16"), default="fp16")
@@ -95,7 +95,7 @@ def _percentile(samples: list[float], q: float) -> float:
 def _select_cases(pattern: str | None) -> list[BenchCase]:
     cases = [case for case in DEFAULT_CASES if pattern is None or pattern in case.case_id]
     if not cases:
-        raise ValueError(f"No EoRA benchmark case matched {pattern!r}.")
+        raise ValueError(f"No LoRA benchmark case matched {pattern!r}.")
     return cases
 
 
@@ -231,21 +231,21 @@ def _make_call(
         )
     if scope == "marlin":
         assert module is not None
-        module.eora_cuda_up_add = variant == "cuda_up_add"
-        module.eora_cooperative_state = cooperative_state if variant == "cooperative" else None
+        module.lora_cuda_up_add = variant == "cuda_up_add"
+        module.lora_cooperative_state = cooperative_state if variant == "cooperative" else None
         return lambda: module(x)
     if variant == "fallback":
         return lambda: adapter.apply(x=x, out=base)
 
     def fused_call() -> torch.Tensor:
-        result = apply_eora_marlin_fused_lora(
+        result = apply_marlin_fused_lora(
             adapter,
             x=x,
             out=base,
             cooperative_buffer=cooperative_buffer,
         )
         if result is None:
-            raise RuntimeError(f"EoRA fused path unexpectedly fell back for variant {variant!r}.")
+            raise RuntimeError(f"LoRA fused path unexpectedly fell back for variant {variant!r}.")
         return result
 
     return fused_call
@@ -274,7 +274,7 @@ def _correctness_error(
             if os.environ[_FUSED_ENV] == "0":
                 actual = adapter.apply(x=x, out=actual_out)
             else:
-                actual = apply_eora_marlin_fused_lora(
+                actual = apply_marlin_fused_lora(
                     adapter,
                     x=x,
                     out=actual_out,
@@ -289,7 +289,7 @@ def _correctness_error(
                     ),
                 )
                 if actual is None:
-                    raise RuntimeError(f"EoRA fused path unexpectedly fell back for {variant!r}.")
+                    raise RuntimeError(f"LoRA fused path unexpectedly fell back for {variant!r}.")
         else:
             actual = call()
         expected_update = expected - reference_base.float()
@@ -337,7 +337,7 @@ def _measure_latency(
         torch.cuda.cudart().cudaProfilerStart()
     with torch.inference_mode():
         for index, (start, end) in enumerate(zip(starts, ends)):
-            torch.cuda.nvtx.range_push(f"eora::{case.case_id}::{variant}::{index}")
+            torch.cuda.nvtx.range_push(f"lora::{case.case_id}::{variant}::{index}")
             start.record(stream)
             call()
             end.record(stream)
@@ -424,7 +424,7 @@ def main() -> None:
                 dtype=dtype,
                 seed=args.seed + 1000 + case_index,
             )
-        cooperative_state = module.eora_cooperative_state if module is not None else None
+        cooperative_state = module.lora_cooperative_state if module is not None else None
         for variant in variants:
             base.copy_(base_seed)
             call = _make_call(

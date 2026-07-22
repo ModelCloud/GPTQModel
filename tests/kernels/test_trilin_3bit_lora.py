@@ -13,9 +13,9 @@ from gptqmodel.nn_modules.triton_utils.three_bit import (
     LAYOUT_AWQ,
     LAYOUT_GPTQ,
     pack_3bit,
-    prepare_trilin_eora_3bit,
+    prepare_trilin_lora_3bit,
 )
-from gptqmodel.utils.trilin import trilin_matmul, trilin_matmul_eora
+from gptqmodel.utils.trilin import trilin_matmul, trilin_matmul_lora
 
 
 K = 4096
@@ -26,9 +26,9 @@ GROUP_SIZE = 128
 
 def _require_sm80() -> None:
     if not torch.cuda.is_available():
-        pytest.skip("CUDA required for fused TriLin+EoRA tests")
+        pytest.skip("CUDA required for fused TriLin+LoRA tests")
     if torch.cuda.get_device_capability() != (8, 0):
-        pytest.skip("the fused TriLin+EoRA specialization is enabled only on sm_80")
+        pytest.skip("the fused TriLin+LoRA specialization is enabled only on sm_80")
 
 
 def _raw_case(dtype: torch.dtype, rank: int, *, seed: int = 73):
@@ -64,7 +64,7 @@ def _unfused_reference(
 
 @pytest.mark.parametrize("rank", RANKS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_trilin_eora_supported_rank_matches_unfused_reference_and_overwrites_workspace(
+def test_trilin_lora_supported_rank_matches_unfused_reference_and_overwrites_workspace(
     rank: int,
     dtype: torch.dtype,
 ):
@@ -73,7 +73,7 @@ def test_trilin_eora_supported_rank_matches_unfused_reference_and_overwrites_wor
 
     with torch.inference_mode():
         expected = _unfused_reference(x, qweight, scales, bias, lora_a, lora_b)
-        actual = trilin_matmul_eora(x, qweight, scales, lora_a, lora_b, workspace, bias)
+        actual = trilin_matmul_lora(x, qweight, scales, lora_a, lora_b, workspace, bias)
     torch.cuda.synchronize()
 
     assert actual.shape == expected.shape == (1, N)
@@ -86,7 +86,7 @@ def test_trilin_eora_supported_rank_matches_unfused_reference_and_overwrites_wor
     workspace.fill_(float("nan"))
     with torch.inference_mode():
         next_expected = _unfused_reference(next_x, qweight, scales, bias, lora_a, lora_b)
-        next_actual = trilin_matmul_eora(next_x, qweight, scales, lora_a, lora_b, workspace, bias)
+        next_actual = trilin_matmul_lora(next_x, qweight, scales, lora_a, lora_b, workspace, bias)
     torch.cuda.synchronize()
     assert bool(torch.isfinite(workspace).all())
     torch.testing.assert_close(
@@ -99,7 +99,7 @@ def test_trilin_eora_supported_rank_matches_unfused_reference_and_overwrites_wor
 
 @pytest.mark.parametrize("rank", RANKS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_trilin_eora_supported_rank_uses_current_stream(rank: int, dtype: torch.dtype):
+def test_trilin_lora_supported_rank_uses_current_stream(rank: int, dtype: torch.dtype):
     _require_sm80()
     x, qweight, scales, bias, lora_a, lora_b, workspace = _raw_case(dtype, rank, seed=79 + rank)
     with torch.inference_mode():
@@ -107,7 +107,7 @@ def test_trilin_eora_supported_rank_uses_current_stream(rank: int, dtype: torch.
 
     stream = torch.cuda.Stream(device=x.device)
     with torch.cuda.stream(stream), torch.inference_mode():
-        actual = trilin_matmul_eora(x, qweight, scales, lora_a, lora_b, workspace, bias)
+        actual = trilin_matmul_lora(x, qweight, scales, lora_a, lora_b, workspace, bias)
         completion = torch.cuda.Event()
         completion.record(stream)
     torch.cuda.current_stream(device=x.device).wait_event(completion)
@@ -116,21 +116,21 @@ def test_trilin_eora_supported_rank_uses_current_stream(rank: int, dtype: torch.
 
 
 @pytest.mark.parametrize("rank", RANKS)
-def test_trilin_eora_supported_rank_rejects_undersized_workspace(rank: int):
+def test_trilin_lora_supported_rank_rejects_undersized_workspace(rank: int):
     _require_sm80()
     x, qweight, scales, bias, lora_a, lora_b, _ = _raw_case(torch.float16, rank, seed=83 + rank)
     workspace = torch.empty((rank - 1,), dtype=torch.float32, device=x.device)
 
     with pytest.raises(RuntimeError, match=rf"at least {rank} FP32 values"):
-        trilin_matmul_eora(x, qweight, scales, lora_a, lora_b, workspace, bias)
+        trilin_matmul_lora(x, qweight, scales, lora_a, lora_b, workspace, bias)
 
 
-def test_trilin_eora_native_rejects_unsupported_rank():
+def test_trilin_lora_native_rejects_unsupported_rank():
     _require_sm80()
     x, qweight, scales, bias, lora_a, lora_b, workspace = _raw_case(torch.float16, 96, seed=181)
 
     with pytest.raises(RuntimeError, match="requires rank 32, 64, 128, or 256, got 96"):
-        trilin_matmul_eora(x, qweight, scales, lora_a, lora_b, workspace, bias)
+        trilin_matmul_lora(x, qweight, scales, lora_a, lora_b, workspace, bias)
 
 
 def _quant_linear(layout: str, dtype: torch.dtype, rank: int):
@@ -171,7 +171,7 @@ def _quant_linear(layout: str, dtype: torch.dtype, rank: int):
 @pytest.mark.parametrize("layout", [LAYOUT_GPTQ, LAYOUT_AWQ])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("rank", RANKS)
-def test_trilin_eora_quant_linear_routes_decode_and_preserves_m2_fallback(
+def test_trilin_lora_quant_linear_routes_decode_and_preserves_m2_fallback(
     layout: str,
     dtype: torch.dtype,
     rank: int,
@@ -183,9 +183,9 @@ def test_trilin_eora_quant_linear_routes_decode_and_preserves_m2_fallback(
     runtime_qweight = (
         module.qweight if layout == LAYOUT_GPTQ else module._triton_3bit_qweight
     )
-    assert module._trilin_eora_workspace.shape == (rank,)
-    assert module._trilin_eora_workspace.dtype == torch.float32
-    assert "_trilin_eora_workspace" not in module.state_dict()
+    assert module._trilin_lora_workspace.shape == (rank,)
+    assert module._trilin_lora_workspace.dtype == torch.float32
+    assert "_trilin_lora_workspace" not in module.state_dict()
 
     original_apply = module.adapter.apply
     apply_calls = 0
@@ -230,7 +230,7 @@ def test_trilin_eora_quant_linear_routes_decode_and_preserves_m2_fallback(
     torch.testing.assert_close(fallback_actual, fallback_expected, rtol=0, atol=0)
 
 
-def test_trilin_eora_quant_linear_uses_graph_safe_fallback(monkeypatch):
+def test_trilin_lora_quant_linear_uses_graph_safe_fallback(monkeypatch):
     _require_sm80()
     pytest.importorskip("triton")
     torch.manual_seed(97)
@@ -240,14 +240,14 @@ def test_trilin_eora_quant_linear_uses_graph_safe_fallback(monkeypatch):
     # Warm the established unfused route and its allocator state before
     # capture, then re-enable fusion. Capture itself must still select that
     # graph-safe fallback rather than attempting a cooperative launch.
-    monkeypatch.setenv("GPTQMODEL_TRILIN_EORA", "0")
+    monkeypatch.setenv("GPTQMODEL_TRILIN_LORA", "0")
     warmup_stream = torch.cuda.Stream(device=x.device)
     warmup_stream.wait_stream(torch.cuda.current_stream(device=x.device))
     with torch.cuda.stream(warmup_stream), torch.inference_mode():
         for _ in range(3):
             expected = module(x)
     torch.cuda.current_stream(device=x.device).wait_stream(warmup_stream)
-    monkeypatch.setenv("GPTQMODEL_TRILIN_EORA", "1")
+    monkeypatch.setenv("GPTQMODEL_TRILIN_LORA", "1")
 
     graph = torch.cuda.CUDAGraph()
     with torch.inference_mode(), torch.cuda.graph(graph):
@@ -258,7 +258,7 @@ def test_trilin_eora_quant_linear_uses_graph_safe_fallback(monkeypatch):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_trilin_eora_quant_linear_uses_disjoint_workspaces_across_streams():
+def test_trilin_lora_quant_linear_uses_disjoint_workspaces_across_streams():
     _require_sm80()
     pytest.importorskip("triton")
     torch.manual_seed(101)
@@ -289,18 +289,18 @@ def test_trilin_eora_quant_linear_uses_disjoint_workspaces_across_streams():
 
     torch.testing.assert_close(actual_0, expected_0, rtol=0.002, atol=0.0625)
     torch.testing.assert_close(actual_1, expected_1, rtol=0.002, atol=0.0625)
-    workspaces = module.adapter._trilin_eora_stream_workspaces
+    workspaces = module.adapter._trilin_lora_stream_workspaces
     assert workspaces[(x_0.get_device(), stream_0.cuda_stream)].data_ptr() != workspaces[
         (x_0.get_device(), stream_1.cuda_stream)
     ].data_ptr()
 
 
-def test_trilin_eora_unsupported_rank_preserves_standard_adapter_fallback():
+def test_trilin_lora_unsupported_rank_preserves_standard_adapter_fallback():
     _require_sm80()
     pytest.importorskip("triton")
     torch.manual_seed(103)
     module = _quant_linear(LAYOUT_GPTQ, torch.float16, 96)
-    assert not hasattr(module, "_trilin_eora_workspace")
+    assert not hasattr(module, "_trilin_lora_workspace")
 
     original_apply = module.adapter.apply
     apply_calls = 0
@@ -323,9 +323,9 @@ def test_trilin_eora_unsupported_rank_preserves_standard_adapter_fallback():
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_prepare_trilin_eora_rejects_cpu_without_allocating_workspace():
+def test_prepare_trilin_lora_rejects_cpu_without_allocating_workspace():
     adapter = Lora(rank=4, lora_A=torch.randn(8, 4), lora_B=torch.randn(4, 16))
-    assert prepare_trilin_eora_3bit(
+    assert prepare_trilin_lora_3bit(
         adapter,
         device=torch.device("cpu"),
         in_features=8,

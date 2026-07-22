@@ -216,7 +216,7 @@ class TritonV2Linear(TorchLinear):
             from ..triton_utils.three_bit import (
                 prepare_marlin_3bit,
                 prepare_trilin_3bit,
-                prepare_trilin_eora_3bit,
+                prepare_trilin_lora_3bit,
                 unpack_3bit,
             )
 
@@ -236,8 +236,8 @@ class TritonV2Linear(TorchLinear):
                     f"{type(self).__name__}: 3-bit symmetric GPTQ inference requires every zero point to equal 4."
                 )
             self._trilin_native_3bit = prepare_trilin_3bit(self.qweight, self.scales, self.requested_group_size)
-            eora_workspace = (
-                prepare_trilin_eora_3bit(
+            lora_workspace = (
+                prepare_trilin_lora_3bit(
                     self.adapter,
                     device=self.qweight.device,
                     in_features=self.in_features,
@@ -247,8 +247,8 @@ class TritonV2Linear(TorchLinear):
                 if self.adapter is not None and self._trilin_native_3bit
                 else None
             )
-            if eora_workspace is not None:
-                self.register_buffer("_trilin_eora_workspace", eora_workspace, persistent=False)
+            if lora_workspace is not None:
+                self.register_buffer("_trilin_lora_workspace", lora_workspace, persistent=False)
             marlin_state = prepare_marlin_3bit(self.qweight, self.scales, self.requested_group_size)
             if marlin_state is not None:
                 self.register_buffer("_trilin_marlin_qweight", marlin_state.qweight, persistent=False)
@@ -265,7 +265,7 @@ class TritonV2Linear(TorchLinear):
                 matmul_3bit,
                 matmul_marlin_3bit,
                 matmul_trilin_3bit,
-                matmul_trilin_eora_3bit,
+                matmul_trilin_lora_3bit,
             )
 
             capability = torch.cuda.get_device_capability(self.qweight.device)
@@ -284,12 +284,12 @@ class TritonV2Linear(TorchLinear):
                     trilin_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
                     fused_out = None
                     if self.adapter is not None:
-                        fused_out = matmul_trilin_eora_3bit(
+                        fused_out = matmul_trilin_lora_3bit(
                             self.adapter,
                             trilin_input,
                             self.qweight,
                             self.scales,
-                            getattr(self, "_trilin_eora_workspace", None),
+                            getattr(self, "_trilin_lora_workspace", None),
                             bias=self.bias,
                             group_size=self.requested_group_size,
                         )

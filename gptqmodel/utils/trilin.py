@@ -56,7 +56,7 @@ def _trilin_extra_cuda_cflags() -> list[str]:
 _TRILIN_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_TRILIN_OPS_NAME,
     namespace=_TRILIN_NAMESPACE,
-    required_ops=("matmul", "matmul_eora", "qkv", "silu_mul"),
+    required_ops=("matmul", "matmul_lora", "qkv", "silu_mul"),
     sources=_trilin_sources,
     build_root_env="GPTQMODEL_TRILIN_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("trilin"),
@@ -116,7 +116,7 @@ def trilin_matmul(
     return _extension_api().op("trilin", "matmul")(input, qweight, scales, bias, split_k, group_size)
 
 
-def trilin_matmul_eora(
+def trilin_matmul_lora(
     input: torch.Tensor,
     qweight: torch.Tensor,
     scales: torch.Tensor,
@@ -125,8 +125,8 @@ def trilin_matmul_eora(
     workspace: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Fuse exact-shape TriLin decode with a supported EoRA rank using caller-exclusive scratch."""
-    return _extension_api().op("trilin", "matmul_eora")(
+    """Fuse exact-shape TriLin decode with a supported LoRA rank using caller-exclusive scratch."""
+    return _extension_api().op("trilin", "matmul_lora")(
         input,
         qweight,
         scales,
@@ -181,7 +181,7 @@ __all__ = [
     "prewarm_trilin_extension",
     "select_trilin_split_k",
     "trilin_matmul",
-    "trilin_matmul_eora",
+    "trilin_matmul_lora",
     "trilin_qkv",
     "trilin_runtime_available",
     "trilin_runtime_error",

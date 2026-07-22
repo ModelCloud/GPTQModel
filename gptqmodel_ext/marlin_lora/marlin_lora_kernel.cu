@@ -372,7 +372,7 @@ void launch_lora_fused_add(const torch::Tensor& x,
 
 }  // namespace
 
-torch::Tensor eora_marlin_lora_up_add_cuda(torch::Tensor down,
+torch::Tensor marlin_lora_up_add_cuda(torch::Tensor down,
                                            torch::Tensor up,
                                            torch::Tensor out) {
   validate_lora_up_add_inputs(down, up, out);
@@ -415,7 +415,7 @@ torch::Tensor eora_marlin_lora_up_add_cuda(torch::Tensor down,
 
 // Module post-initialization validates and owns every tensor passed here. Keep
 // the fully validated entry point below for direct or externally assembled calls.
-torch::Tensor eora_marlin_lora_fused_add_prepared_cuda(
+torch::Tensor marlin_lora_fused_add_prepared_cuda(
     torch::Tensor x, torch::Tensor down_weight, torch::Tensor up_weight,
     torch::Tensor out, torch::Tensor workspace) {
   const c10::cuda::OptionalCUDAGuard device_guard(at::device_of(out));
@@ -471,7 +471,7 @@ torch::Tensor eora_marlin_lora_fused_add_prepared_cuda(
   return out;
 }
 
-torch::Tensor eora_marlin_lora_fused_add_cuda(
+torch::Tensor marlin_lora_fused_add_cuda(
     torch::Tensor x, torch::Tensor down_weight, torch::Tensor up_weight,
     torch::Tensor out, torch::Tensor workspace) {
   validate_lora_fused_add_inputs(x, down_weight, up_weight, out);
@@ -483,6 +483,6 @@ torch::Tensor eora_marlin_lora_fused_add_cuda(
   TORCH_CHECK(workspace.is_contiguous(), "workspace must be contiguous");
   TORCH_CHECK(workspace.numel() >= x.size(0) * down_weight.size(1),
               "workspace does not have enough elements for [rows, rank]");
-  return eora_marlin_lora_fused_add_prepared_cuda(
+  return marlin_lora_fused_add_prepared_cuda(
       x, down_weight, up_weight, out, workspace);
 }

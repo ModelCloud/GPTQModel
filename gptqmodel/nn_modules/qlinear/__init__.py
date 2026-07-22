@@ -159,16 +159,16 @@ class BaseQuantLinear(nn.Module):
                 # print(f"Adapter lazy init: {self.adapter.name()}: {self.adapter}, module: {self.name}")
 
             # TDOO: allow merged lora weights exist in gptq model safetensor file for direct loading
-            # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
+            # LoRA need to preallocate buffers for Lora_A and B weights so HF can load
             # self.register_buffer(
             #     "lora_A",
-            #     torch.zeros((in_features, 128), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
+            #     torch.zeros((in_features, 128), dtype=torch.float16), # <-- LoRA lora_A shape needs to be calculated using pass in_features/out_features or other lora_test math
             # )
             #
-            # # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
+            # # LoRA need to preallocate buffers for Lora_A and B weights so HF can load
             # self.register_buffer(
             #     "lora_B",
-            #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
+            #     torch.zeros((128, out_features), dtype=torch.float16), # <-- LoRA lora_A shape needs to be calculated using pass in_features/out_features or other lora_test math
             # )
 
     def list_buffers(self) -> List:

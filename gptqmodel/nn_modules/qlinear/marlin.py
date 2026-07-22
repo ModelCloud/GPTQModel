@@ -46,10 +46,10 @@ from ...utils.marlin import (
     marlin_sort_g_idx,
     replace_parameter,
 )
-from ...utils.eora_marlin import (
-    apply_eora_marlin_fused_lora,
-    eora_marlin_cuda_up_add_enabled,
-    prepare_eora_marlin_fused_lora,
+from ...utils.marlin_lora import (
+    apply_marlin_fused_lora,
+    marlin_lora_cuda_up_add_enabled,
+    prepare_marlin_fused_lora,
 )
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
@@ -62,8 +62,8 @@ log = setup_logger()
 # the native dispatcher still makes the final hardware/shape decision per call.
 _PACKED_PREFILL_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL"
 _PACKED_PREFILL_MIN_ROWS_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL_MIN_ROWS"
-_EORA_MEGA_KERNEL_WORKSPACE_BLOCKS = 192
-_EORA_MEGA_KERNEL_WORKSPACE_BLOCKS_BY_RANK = {192: 224, 256: 256}
+_LORA_MEGA_KERNEL_WORKSPACE_BLOCKS = 192
+_LORA_MEGA_KERNEL_WORKSPACE_BLOCKS_BY_RANK = {192: 224, 256: 256}
 _PACKED_PREFILL_CONFIG_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL_CONFIG"
 _PACKED_PREFILL_MIN_ROWS_DEFAULT = 1024
 
@@ -311,9 +311,9 @@ class MarlinLinear(GPTQQuantLinear):
         self.is_k_full = marlin_is_k_full(self.desc_act, is_row_parallel=False)
 
         # Allocate marlin workspace.
-        adapter_workspace_blocks = _EORA_MEGA_KERNEL_WORKSPACE_BLOCKS
+        adapter_workspace_blocks = _LORA_MEGA_KERNEL_WORKSPACE_BLOCKS
         if self.adapter is not None:
-            adapter_workspace_blocks = _EORA_MEGA_KERNEL_WORKSPACE_BLOCKS_BY_RANK.get(
+            adapter_workspace_blocks = _LORA_MEGA_KERNEL_WORKSPACE_BLOCKS_BY_RANK.get(
                 getattr(self.adapter, "rank", None), adapter_workspace_blocks
             )
         self.workspace = marlin_make_workspace_new(
@@ -357,8 +357,8 @@ class MarlinLinear(GPTQQuantLinear):
             self.bias.data = marlin_permute_bias(self.bias)
 
         super().post_init()
-        self.eora_cuda_up_add = eora_marlin_cuda_up_add_enabled()
-        self.eora_cooperative_state = None
+        self.lora_cuda_up_add = marlin_lora_cuda_up_add_enabled()
+        self.lora_cooperative_state = None
         if self.adapter is not None:
             use_prepared_marlin = (
                 self.weight_type == scalar_types.uint4b8
@@ -372,7 +372,7 @@ class MarlinLinear(GPTQQuantLinear):
                 and self.g_idx.numel() == 0
                 and self.g_idx_sort_indices.numel() == 0
             )
-            self.eora_cooperative_state = prepare_eora_marlin_fused_lora(
+            self.lora_cooperative_state = prepare_marlin_fused_lora(
                 self.adapter,
                 device=device,
                 dtype=self.compute_dtype,
@@ -380,9 +380,9 @@ class MarlinLinear(GPTQQuantLinear):
                 out_features=self.out_features,
                 use_prepared_marlin=use_prepared_marlin,
             )
-            if self.eora_cooperative_state is not None:
+            if self.lora_cooperative_state is not None:
                 log.info.once(
-                    "Kernel: Ampere cooperative Marlin+EoRA inference is enabled for eligible decode/small-M shapes."
+                    "Kernel: Ampere cooperative Marlin+LoRA inference is enabled for eligible decode/small-M shapes."
                 )
 
     def list_buffers(self) -> List:
@@ -393,16 +393,16 @@ class MarlinLinear(GPTQQuantLinear):
             buf.append(self.g_idx_sort_indices)
         if hasattr(self, "g_idx") and self.g_idx is not None:
             buf.append(self.g_idx)
-        if getattr(self, "eora_cooperative_state", None) is not None:
-            eora_workspace = self.eora_cooperative_state[3]
-            if eora_workspace is not None:
-                buf.append(eora_workspace)
+        if getattr(self, "lora_cooperative_state", None) is not None:
+            lora_workspace = self.lora_cooperative_state[3]
+            if lora_workspace is not None:
+                buf.append(lora_workspace)
         return buf
 
     def forward(self, x: torch.Tensor):
-        cooperative_state = getattr(self, "eora_cooperative_state", None) if self.adapter else None
+        cooperative_state = getattr(self, "lora_cooperative_state", None) if self.adapter else None
         if cooperative_state is not None:
-            op, lora_a, lora_b, eora_workspace, max_rows, prepared_marlin = cooperative_state
+            op, lora_a, lora_b, lora_workspace, max_rows, prepared_marlin = cooperative_state
             input_is_2d = x.dim() == 2
             rows = x.shape[0] if input_is_2d else x.numel() // x.shape[-1]
             marlin_input = x if input_is_2d or prepared_marlin else x.reshape(rows, x.shape[-1])
@@ -415,14 +415,14 @@ class MarlinLinear(GPTQQuantLinear):
                 and marlin_input.device == lora_a.device
                 and not torch.cuda.is_current_stream_capturing()
             ):
-                if not prepared_marlin and rows > eora_workspace.shape[0]:
-                    eora_workspace = torch.empty(
+                if not prepared_marlin and rows > lora_workspace.shape[0]:
+                    lora_workspace = torch.empty(
                         (rows, lora_a.shape[1]),
                         dtype=torch.float32,
                         device=marlin_input.device,
                     )
-                    cooperative_state = op, lora_a, lora_b, eora_workspace, max_rows, prepared_marlin
-                    self.eora_cooperative_state = cooperative_state
+                    cooperative_state = op, lora_a, lora_b, lora_workspace, max_rows, prepared_marlin
+                    self.lora_cooperative_state = cooperative_state
                 use_packed_prefill = (
                     self.packed_prefill
                     and rows >= self.packed_prefill_min_rows
@@ -454,7 +454,7 @@ class MarlinLinear(GPTQQuantLinear):
                             self.workspace,
                             lora_a,
                             lora_b,
-                            eora_workspace,
+                            lora_workspace,
                             self.weight_type.id,
                             rows,
                             self.out_features,
@@ -471,10 +471,10 @@ class MarlinLinear(GPTQQuantLinear):
                     return out.reshape(x.shape[:-1] + (self.out_features,))
                 except Exception as exc:
                     log.warn.once(
-                        "Integrated Marlin+EoRA inference failed at runtime; using the standard adapter path: "
+                        "Integrated Marlin+LoRA inference failed at runtime; using the standard adapter path: "
                         f"{exc}"
                     )
-                    self.eora_cooperative_state = None
+                    self.lora_cooperative_state = None
 
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
@@ -498,9 +498,9 @@ class MarlinLinear(GPTQQuantLinear):
         out_shape = x.shape[:-1] + (self.out_features,)
         out = None
         adapter_applied = False
-        cooperative_state = getattr(self, "eora_cooperative_state", None) if self.adapter else None
+        cooperative_state = getattr(self, "lora_cooperative_state", None) if self.adapter else None
         if cooperative_state is not None:
-            op, lora_a, lora_b, eora_workspace, max_rows, prepared_marlin = cooperative_state
+            op, lora_a, lora_b, lora_workspace, max_rows, prepared_marlin = cooperative_state
             can_use_cooperative = (
                 rows <= max_rows
                 and marlin_input.is_contiguous()
@@ -511,14 +511,14 @@ class MarlinLinear(GPTQQuantLinear):
                 and not torch.cuda.is_current_stream_capturing()
             )
             if can_use_cooperative:
-                if not prepared_marlin and rows > eora_workspace.shape[0]:
-                    eora_workspace = torch.empty(
+                if not prepared_marlin and rows > lora_workspace.shape[0]:
+                    lora_workspace = torch.empty(
                         (rows, lora_a.shape[1]),
                         dtype=torch.float32,
                         device=marlin_input.device,
                     )
-                    cooperative_state = op, lora_a, lora_b, eora_workspace, max_rows, prepared_marlin
-                    self.eora_cooperative_state = cooperative_state
+                    cooperative_state = op, lora_a, lora_b, lora_workspace, max_rows, prepared_marlin
+                    self.lora_cooperative_state = cooperative_state
                 try:
                     if prepared_marlin:
                         out = op(
@@ -545,7 +545,7 @@ class MarlinLinear(GPTQQuantLinear):
                             self.workspace,
                             lora_a,
                             lora_b,
-                            eora_workspace,
+                            lora_workspace,
                             self.weight_type.id,
                             rows,
                             self.out_features,
@@ -560,10 +560,10 @@ class MarlinLinear(GPTQQuantLinear):
                     adapter_applied = True
                 except Exception as exc:
                     log.warn.once(
-                        "Integrated Marlin+EoRA inference failed at runtime; using the standard adapter path: "
+                        "Integrated Marlin+LoRA inference failed at runtime; using the standard adapter path: "
                         f"{exc}"
                     )
-                    self.eora_cooperative_state = None
+                    self.lora_cooperative_state = None
 
         if out is None:
             out = apply_gptq_marlin_linear(
@@ -586,8 +586,8 @@ class MarlinLinear(GPTQQuantLinear):
             )
 
         if self.adapter and not adapter_applied:
-            if self.eora_cuda_up_add:
-                fused_out = apply_eora_marlin_fused_lora(
+            if self.lora_cuda_up_add:
+                fused_out = apply_marlin_fused_lora(
                     self.adapter,
                     x=x_2d,
                     out=out,

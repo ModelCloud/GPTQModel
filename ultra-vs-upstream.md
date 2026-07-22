@@ -104,7 +104,7 @@ Ultra extends EoRA with:
 The serialized low-bit adapter metadata is carried in GPTQModel-specific `LoraConfig` fields. These checkpoints are an
 Ultra extension and should not be assumed to load in unmodified upstream runtimes. See
 [gptqmodel/adapter/quant.py](gptqmodel/adapter/quant.py) and
-[gptqmodel/utils/eora_marlin.py](gptqmodel/utils/eora_marlin.py).
+[gptqmodel/utils/marlin_lora.py](gptqmodel/utils/marlin_lora.py).
 
 ### Hardware-specific kernels
 

@@ -101,12 +101,12 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.trilin", "_TRILIN_TORCH_OPS_EXTENSION"),
     ),
     _ExtensionSpec(
-        name="eora_marlin",
-        aliases=("eora_lora", "marlin_eora"),
-        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.eora_marlin", "_EORA_MARLIN_TORCH_OPS_EXTENSION"),
-        supported=lambda: _resolve_attr("gptqmodel.utils.eora_marlin", "eora_marlin_supported")(),
+        name="marlin_lora",
+        aliases=("lora_marlin",),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin_lora", "_MARLIN_LORA_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.marlin_lora", "marlin_lora_supported")(),
         unsupported_error=lambda: _resolve_attr(
-            "gptqmodel.utils.eora_marlin", "eora_marlin_runtime_error"
+            "gptqmodel.utils.marlin_lora", "marlin_lora_runtime_error"
         )(),
     ),
     _ExtensionSpec(

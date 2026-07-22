@@ -23,39 +23,39 @@ from .logger import setup_logger
 
 log = setup_logger()
 
-_EORA_MARLIN_OPS_NAME = "gptqmodel_eora_marlin_ops"
-_EORA_MARLIN_NAMESPACE = "gptqmodel_eora_marlin"
-_EORA_MARLIN_REQUIRED_CUDA_HEADERS = (
+_MARLIN_LORA_OPS_NAME = "gptqmodel_marlin_lora_ops"
+_MARLIN_LORA_NAMESPACE = "gptqmodel_marlin_lora"
+_MARLIN_LORA_REQUIRED_CUDA_HEADERS = (
     "cuda_runtime_api.h",
 )
-_FUSED_ENV = "GPTQMODEL_EORA_MARLIN_FUSED"
-_FUSED_COOPERATIVE_ENV = "GPTQMODEL_EORA_MARLIN_COOPERATIVE"
-_FUSED_CUDA_UP_ADD_ENV = "GPTQMODEL_EORA_MARLIN_CUDA_UP_ADD"
-_FUSED_MAX_M_ENV = "GPTQMODEL_EORA_MARLIN_FUSED_MAX_M"
-_FUSED_MAX_RANK_ENV = "GPTQMODEL_EORA_MARLIN_FUSED_MAX_RANK"
+_FUSED_ENV = "GPTQMODEL_MARLIN_LORA_FUSED"
+_FUSED_COOPERATIVE_ENV = "GPTQMODEL_MARLIN_LORA_COOPERATIVE"
+_FUSED_CUDA_UP_ADD_ENV = "GPTQMODEL_MARLIN_LORA_CUDA_UP_ADD"
+_FUSED_MAX_M_ENV = "GPTQMODEL_MARLIN_LORA_FUSED_MAX_M"
+_FUSED_MAX_RANK_ENV = "GPTQMODEL_MARLIN_LORA_FUSED_MAX_RANK"
 _FUSED_DISABLED_REASON: Optional[str] = None
 
 
-def _eora_marlin_root() -> Path:
-    return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "eora_marlin"
+def _marlin_lora_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "marlin_lora"
 
 
-def _eora_marlin_sources() -> list[str]:
-    root = _eora_marlin_root()
+def _marlin_lora_sources() -> list[str]:
+    root = _marlin_lora_root()
     return [
-        str(root / "eora_marlin.cpp"),
-        str(root / "eora_marlin_kernel.cu"),
+        str(root / "marlin_lora.cpp"),
+        str(root / "marlin_lora_kernel.cu"),
     ]
 
 
-def _eora_marlin_include_paths() -> list[str]:
+def _marlin_lora_include_paths() -> list[str]:
     return cuda_include_paths_with_fallback(
-        [str(_eora_marlin_root())],
-        required_header_names=_EORA_MARLIN_REQUIRED_CUDA_HEADERS,
+        [str(_marlin_lora_root())],
+        required_header_names=_MARLIN_LORA_REQUIRED_CUDA_HEADERS,
     )
 
 
-def _eora_marlin_extra_cuda_cflags() -> list[str]:
+def _marlin_lora_extra_cuda_cflags() -> list[str]:
     flags = default_jit_cuda_cflags(
         enable_bf16=True,
         include_lineinfo=True,
@@ -70,31 +70,31 @@ def _eora_marlin_extra_cuda_cflags() -> list[str]:
     return flags
 
 
-_EORA_MARLIN_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
-    name=_EORA_MARLIN_OPS_NAME,
-    namespace=_EORA_MARLIN_NAMESPACE,
+_MARLIN_LORA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+    name=_MARLIN_LORA_OPS_NAME,
+    namespace=_MARLIN_LORA_NAMESPACE,
     required_ops=("lora_fused_add", "lora_fused_add_prepared", "lora_up_add"),
-    sources=_eora_marlin_sources,
-    build_root_env="GPTQMODEL_EORA_MARLIN_BUILD_ROOT",
-    default_build_root=lambda: default_torch_ops_build_root("eora_marlin"),
-    display_name="EoRA Marlin fused LoRA",
+    sources=_marlin_lora_sources,
+    build_root_env="GPTQMODEL_MARLIN_LORA_BUILD_ROOT",
+    default_build_root=lambda: default_torch_ops_build_root("marlin_lora"),
+    display_name="Marlin fused LoRA",
     extra_cflags=lambda: default_jit_cflags(enable_bf16=True),
-    extra_cuda_cflags=_eora_marlin_extra_cuda_cflags,
-    extra_include_paths=_eora_marlin_include_paths,
-    force_rebuild_env="GPTQMODEL_EORA_MARLIN_FORCE_REBUILD",
+    extra_cuda_cflags=_marlin_lora_extra_cuda_cflags,
+    extra_include_paths=_marlin_lora_include_paths,
+    force_rebuild_env="GPTQMODEL_MARLIN_LORA_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
 )
 
 
-def eora_marlin_supported() -> bool:
+def marlin_lora_supported() -> bool:
     return torch.cuda.is_available()
 
 
-def eora_marlin_runtime_error() -> str:
+def marlin_lora_runtime_error() -> str:
     if not torch.cuda.is_available():
-        return "EoRA Marlin fused LoRA requires CUDA."
-    return _EORA_MARLIN_TORCH_OPS_EXTENSION.last_error_message()
+        return "Marlin fused LoRA requires CUDA."
+    return _MARLIN_LORA_TORCH_OPS_EXTENSION.last_error_message()
 
 
 def _extension_api():
@@ -103,10 +103,10 @@ def _extension_api():
     return extension_api
 
 
-def eora_marlin_runtime_available() -> bool:
-    if not eora_marlin_supported():
+def marlin_lora_runtime_available() -> bool:
+    if not marlin_lora_supported():
         return False
-    return _extension_api().is_available("eora_marlin")
+    return _extension_api().is_available("marlin_lora")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -167,11 +167,11 @@ def _ensure_lora_tensors(adapter, x: torch.Tensor) -> tuple[torch.Tensor, torch.
     return _ensure_lora_tensors_for(adapter, device=x.device, dtype=x.dtype)
 
 
-def eora_marlin_cuda_up_add_enabled() -> bool:
+def marlin_lora_cuda_up_add_enabled() -> bool:
     return env_flag(_FUSED_ENV, default=True) and env_flag(_FUSED_CUDA_UP_ADD_ENV, default=False)
 
 
-def prepare_eora_marlin_fused_lora(
+def prepare_marlin_fused_lora(
     adapter,
     *,
     device: torch.device,
@@ -180,7 +180,7 @@ def prepare_eora_marlin_fused_lora(
     out_features: int,
     use_prepared_marlin: bool = False,
 ):
-    """Prepare the Ampere cooperative EoRA state, or return None for the portable fallback."""
+    """Prepare the Ampere cooperative LoRA state, or return None for the portable fallback."""
 
     global _FUSED_DISABLED_REASON
 
@@ -213,13 +213,13 @@ def prepare_eora_marlin_fused_lora(
     marlin_extension = "marlin_bf16" if dtype == torch.bfloat16 else "marlin_fp16"
     dtype_tag = "bf16" if dtype == torch.bfloat16 else "fp16"
     prepared_suffix = "_prepared" if use_prepared_marlin else ""
-    op_name = f"gptq_marlin_gemm_eora{prepared_suffix}_{dtype_tag}"
+    op_name = f"gptq_marlin_gemm_lora{prepared_suffix}_{dtype_tag}"
     try:
         op = _extension_api().op(marlin_extension, op_name)
     except Exception as exc:
         reason = str(exc) or exc.__class__.__name__
         if _FUSED_DISABLED_REASON != reason:
-            log.warn(f"EoRA Marlin cooperative LoRA unavailable; using standard adapter path: {reason}")
+            log.warn(f"Marlin cooperative LoRA unavailable; using standard adapter path: {reason}")
             _FUSED_DISABLED_REASON = reason
         return None
 
@@ -227,14 +227,14 @@ def prepare_eora_marlin_fused_lora(
     return op, lora_a, lora_b, workspace, max_rows, use_prepared_marlin
 
 
-def apply_eora_marlin_fused_lora(
+def apply_marlin_fused_lora(
     adapter,
     *,
     x: torch.Tensor,
     out: torch.Tensor,
     cooperative_buffer: Optional[torch.Tensor] = None,
 ) -> Optional[torch.Tensor]:
-    """Try the optional Marlin+EoRA fused tail and return None on fallback."""
+    """Try the optional Marlin+LoRA fused tail and return None on fallback."""
 
     global _FUSED_DISABLED_REASON
 
@@ -251,13 +251,13 @@ def apply_eora_marlin_fused_lora(
         if torch.cuda.get_device_capability(x.device) != (8, 0):
             return None
         try:
-            op = _extension_api().op("eora_marlin", "lora_fused_add")
+            op = _extension_api().op("marlin_lora", "lora_fused_add")
             op(x_2d, lora_a, lora_b, out_2d, cooperative_buffer)
             return out
         except Exception as exc:
             reason = str(exc) or exc.__class__.__name__
             if _FUSED_DISABLED_REASON != reason:
-                log.warn(f"EoRA Marlin cooperative LoRA disabled; falling back to standard adapter path: {reason}")
+                log.warn(f"Marlin cooperative LoRA disabled; falling back to standard adapter path: {reason}")
                 _FUSED_DISABLED_REASON = reason
             return None
 
@@ -268,12 +268,12 @@ def apply_eora_marlin_fused_lora(
         return out
 
     try:
-        op = _extension_api().op("eora_marlin", "lora_up_add")
+        op = _extension_api().op("marlin_lora", "lora_up_add")
         op(down, lora_b, out_2d)
         return out
     except Exception as exc:
         reason = str(exc) or exc.__class__.__name__
         if _FUSED_DISABLED_REASON != reason:
-            log.warn(f"EoRA Marlin fused LoRA disabled; falling back to standard adapter path: {reason}")
+            log.warn(f"Marlin fused LoRA disabled; falling back to standard adapter path: {reason}")
             _FUSED_DISABLED_REASON = reason
         return None

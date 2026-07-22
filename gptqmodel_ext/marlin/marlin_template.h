@@ -31,15 +31,15 @@
   #define MARLIN_DIRECT_PREFILL 0
 #endif
 
-#ifndef MARLIN_EORA_FUSED
-  #define MARLIN_EORA_FUSED 0
+#ifndef MARLIN_LORA_FUSED
+  #define MARLIN_LORA_FUSED 0
 #endif
 
-#ifndef MARLIN_EORA_RANK
-  #define MARLIN_EORA_RANK 0
+#ifndef MARLIN_LORA_RANK
+  #define MARLIN_LORA_RANK 0
 #endif
 
-#if MARLIN_EORA_FUSED
+#if MARLIN_LORA_FUSED
   #include <cooperative_groups.h>
 #endif
 
@@ -274,12 +274,12 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     bool use_atomic_add,   // whether to use atomic add to reduce
     bool use_fp32_reduce,  // whether to use fp32 global reduce
     int max_shared_mem
-#if MARLIN_EORA_FUSED
-    , const scalar_t* __restrict__ eora_x,
-    const scalar_t* __restrict__ eora_down_weight,
-    const scalar_t* __restrict__ eora_up_weight,
-    scalar_t* __restrict__ eora_out,
-    float* __restrict__ eora_workspace
+#if MARLIN_LORA_FUSED
+    , const scalar_t* __restrict__ lora_x,
+    const scalar_t* __restrict__ lora_down_weight,
+    const scalar_t* __restrict__ lora_up_weight,
+    scalar_t* __restrict__ lora_out,
+    float* __restrict__ lora_workspace
 #endif
     ) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
@@ -386,60 +386,60 @@ __global__ void MARLIN_KERNEL_FUNCTION(
 #if MARLIN_DIRECT_PREFILL
   int slice_row = 0;
   int slice_col_par = blockIdx.x;
-#elif MARLIN_EORA_FUSED
+#elif MARLIN_LORA_FUSED
   // This fixed decode shape has 32 complete-K output slices. Keep each slice
   // on one lock chain instead of letting Marlin stripes cross boundaries.
   // The rank specialization reserves one complete-K CTA per 16 adapter ranks,
   // then assigns the remaining CTAs as three- or four-contributor Marlin
   // wavefronts. This fills one 124-SM cooperative wave at every supported rank.
-  #if MARLIN_EORA_RANK == 32
-  constexpr int eora_four_cta_slices = 26;
-  constexpr int eora_four_cta_blocks = eora_four_cta_slices * 4;
-  constexpr int eora_schedule_marlin_blocks = 122;
-  #elif MARLIN_EORA_RANK == 64
-  constexpr int eora_four_cta_slices = 24;
-  constexpr int eora_four_cta_blocks = eora_four_cta_slices * 4;
-  constexpr int eora_schedule_marlin_blocks = 120;
-  #elif MARLIN_EORA_RANK == 96
-  constexpr int eora_four_cta_slices = 22;
-  constexpr int eora_four_cta_blocks = eora_four_cta_slices * 4;
-  constexpr int eora_schedule_marlin_blocks = 118;
-  #elif MARLIN_EORA_RANK == 128
-  constexpr int eora_four_cta_slices = 20;
-  constexpr int eora_four_cta_blocks = eora_four_cta_slices * 4;
-  constexpr int eora_schedule_marlin_blocks = 116;
-  #elif MARLIN_EORA_RANK == 192
-  constexpr int eora_four_cta_slices = 16;
-  constexpr int eora_four_cta_blocks = eora_four_cta_slices * 4;
-  constexpr int eora_schedule_marlin_blocks = 112;
-  #elif MARLIN_EORA_RANK == 256
-  constexpr int eora_four_cta_slices = 12;
-  constexpr int eora_four_cta_blocks = eora_four_cta_slices * 4;
-  constexpr int eora_schedule_marlin_blocks = 108;
+  #if MARLIN_LORA_RANK == 32
+  constexpr int lora_four_cta_slices = 26;
+  constexpr int lora_four_cta_blocks = lora_four_cta_slices * 4;
+  constexpr int lora_schedule_marlin_blocks = 122;
+  #elif MARLIN_LORA_RANK == 64
+  constexpr int lora_four_cta_slices = 24;
+  constexpr int lora_four_cta_blocks = lora_four_cta_slices * 4;
+  constexpr int lora_schedule_marlin_blocks = 120;
+  #elif MARLIN_LORA_RANK == 96
+  constexpr int lora_four_cta_slices = 22;
+  constexpr int lora_four_cta_blocks = lora_four_cta_slices * 4;
+  constexpr int lora_schedule_marlin_blocks = 118;
+  #elif MARLIN_LORA_RANK == 128
+  constexpr int lora_four_cta_slices = 20;
+  constexpr int lora_four_cta_blocks = lora_four_cta_slices * 4;
+  constexpr int lora_schedule_marlin_blocks = 116;
+  #elif MARLIN_LORA_RANK == 192
+  constexpr int lora_four_cta_slices = 16;
+  constexpr int lora_four_cta_blocks = lora_four_cta_slices * 4;
+  constexpr int lora_schedule_marlin_blocks = 112;
+  #elif MARLIN_LORA_RANK == 256
+  constexpr int lora_four_cta_slices = 12;
+  constexpr int lora_four_cta_blocks = lora_four_cta_slices * 4;
+  constexpr int lora_schedule_marlin_blocks = 108;
   #else
-    #error "MARLIN_EORA_RANK must be 32, 64, 96, 128, 192, or 256"
+    #error "MARLIN_LORA_RANK must be 32, 64, 96, 128, 192, or 256"
   #endif
-  int eora_slice_lane = 0;
-  int eora_slice_count = 0;
-  int eora_slice_iters = 0;
+  int lora_slice_lane = 0;
+  int lora_slice_count = 0;
+  int lora_slice_iters = 0;
   int slice_row = 0;
   int slice_col_par = n_tiles;
-  if (blockIdx.x < eora_four_cta_blocks) {
+  if (blockIdx.x < lora_four_cta_blocks) {
     slice_col_par = blockIdx.x / 4;
-    eora_slice_lane = blockIdx.x % 4;
-    eora_slice_count = 4;
-    eora_slice_iters = 10 - (eora_slice_lane > 0) -
-                       2 * (eora_slice_lane > 1) -
-                       (eora_slice_lane > 2);
-    slice_row = eora_slice_lane * 10 - max(eora_slice_lane - 1, 0) -
-                2 * max(eora_slice_lane - 2, 0);
-  } else if (blockIdx.x < eora_schedule_marlin_blocks) {
-    const int eora_three_cta_block = blockIdx.x - eora_four_cta_blocks;
-    slice_col_par = eora_four_cta_slices + eora_three_cta_block / 3;
-    eora_slice_lane = eora_three_cta_block % 3;
-    eora_slice_count = 3;
-    eora_slice_iters = 12 - (eora_slice_lane > 0) - 2 * (eora_slice_lane > 1);
-    slice_row = eora_slice_lane * 12 - max(eora_slice_lane - 1, 0);
+    lora_slice_lane = blockIdx.x % 4;
+    lora_slice_count = 4;
+    lora_slice_iters = 10 - (lora_slice_lane > 0) -
+                       2 * (lora_slice_lane > 1) -
+                       (lora_slice_lane > 2);
+    slice_row = lora_slice_lane * 10 - max(lora_slice_lane - 1, 0) -
+                2 * max(lora_slice_lane - 2, 0);
+  } else if (blockIdx.x < lora_schedule_marlin_blocks) {
+    const int lora_three_cta_block = blockIdx.x - lora_four_cta_blocks;
+    slice_col_par = lora_four_cta_slices + lora_three_cta_block / 3;
+    lora_slice_lane = lora_three_cta_block % 3;
+    lora_slice_count = 3;
+    lora_slice_iters = 12 - (lora_slice_lane > 0) - 2 * (lora_slice_lane > 1);
+    slice_row = lora_slice_lane * 12 - max(lora_slice_lane - 1, 0);
   }
 #else
   int slice_row = (iters * blockIdx.x) % k_tiles;
@@ -466,7 +466,7 @@ __global__ void MARLIN_KERNEL_FUNCTION(
 #if MARLIN_DIRECT_PREFILL
   prob_m = min(m_block_size, direct_problem_m - par_id * m_block_size);
 #endif
-#if MARLIN_EORA_FUSED
+#if MARLIN_LORA_FUSED
   locks_off = slice_col_par;
 #else
   if (parallel * n_tiles >= gridDim.x) {
@@ -492,17 +492,17 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     slice_count = 1;
     slice_idx = 0;
     return;
-#elif MARLIN_EORA_FUSED
+#elif MARLIN_LORA_FUSED
     // Output-owned CTAs have no follow-on slice. Number contributors from
     // high K to low K to preserve Marlin's lock visitation order.
     if (!first_init) {
       slice_iters = 0;
       return;
     }
-    slice_iters = eora_slice_iters;
+    slice_iters = lora_slice_iters;
     if (slice_iters == 0) return;
-    slice_count = eora_slice_count;
-    slice_idx = slice_count - 1 - eora_slice_lane;
+    slice_count = lora_slice_count;
+    slice_idx = slice_count - 1 - lora_slice_lane;
 #else
     slice_iters =
         iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
@@ -1959,7 +1959,7 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       if (last || use_atomic_add)
         // only the last block in a slice actually writes the result
         write_result(last);
-#if MARLIN_EORA_FUSED
+#if MARLIN_LORA_FUSED
       if (last) {
         // Publish this complete 128-column Marlin output slice. Adapter CTAs
         // use the same lock only after its reduction chain has reset it, so a
@@ -2006,95 +2006,95 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     }
   }
 
-#if MARLIN_EORA_FUSED
+#if MARLIN_LORA_FUSED
   // Reserve one complete-K 16-rank LoRA-down CTA per adapter tile while the
   // output-owned Marlin CTAs finish. Lock slots 0..31 publish output readiness,
   // 96..97 hold reusable phase counters, and adapter values live at word 128
   // and beyond. Keeping payload outside Marlin's lock prefix lets a later
   // generic-M launch safely reuse the persistent workspace.
-  #if MARLIN_EORA_RANK == 32
-  constexpr int eora_rank = 32;
-  constexpr int eora_down_tile = 16;
-  constexpr int eora_marlin_blocks = 122;
-  constexpr int eora_down_blocks = 2;
-  constexpr int eora_lock_workspace_offset = 128;
-  constexpr int eora_lock_workspace_ints =
-      (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
-  constexpr int eora_down_ready_lock = 96;
-  constexpr int eora_up_arrivals_lock = eora_down_ready_lock + 1;
-  constexpr int eora_available_lock_ints = 144;
-  #elif MARLIN_EORA_RANK == 64
-  constexpr int eora_rank = 64;
-  constexpr int eora_down_tile = 16;
-  constexpr int eora_marlin_blocks = 120;
-  constexpr int eora_down_blocks = 4;
-  constexpr int eora_lock_workspace_offset = 128;
-  constexpr int eora_lock_workspace_ints =
-      (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
-  constexpr int eora_down_ready_lock = 96;
-  constexpr int eora_up_arrivals_lock = eora_down_ready_lock + 1;
-  constexpr int eora_available_lock_ints = 160;
-  #elif MARLIN_EORA_RANK == 96
-  constexpr int eora_rank = 96;
-  constexpr int eora_down_tile = 16;
-  constexpr int eora_marlin_blocks = 118;
-  constexpr int eora_down_blocks = 6;
-  constexpr int eora_lock_workspace_offset = 128;
-  constexpr int eora_lock_workspace_ints =
-      (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
-  constexpr int eora_down_ready_lock = 96;
-  constexpr int eora_up_arrivals_lock = eora_down_ready_lock + 1;
-  constexpr int eora_available_lock_ints = 176;
-  #elif MARLIN_EORA_RANK == 128
-  constexpr int eora_rank = 128;
-  constexpr int eora_down_tile = 16;
-  constexpr int eora_marlin_blocks = 116;
-  constexpr int eora_down_blocks = 8;
-  constexpr int eora_lock_workspace_offset = 128;
-  constexpr int eora_lock_workspace_ints =
-      (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
-  constexpr int eora_down_ready_lock = 96;
-  constexpr int eora_up_arrivals_lock = eora_down_ready_lock + 1;
-  constexpr int eora_available_lock_ints = 192;
-  #elif MARLIN_EORA_RANK == 192
-  constexpr int eora_rank = 192;
-  constexpr int eora_down_tile = 16;
-  constexpr int eora_marlin_blocks = 112;
-  constexpr int eora_down_blocks = 12;
-  constexpr int eora_lock_workspace_offset = 128;
-  constexpr int eora_lock_workspace_ints =
-      (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
-  constexpr int eora_down_ready_lock = 96;
-  constexpr int eora_up_arrivals_lock = eora_down_ready_lock + 1;
-  constexpr int eora_available_lock_ints = 224;
-  #elif MARLIN_EORA_RANK == 256
-  constexpr int eora_rank = 256;
-  constexpr int eora_down_tile = 16;
-  constexpr int eora_marlin_blocks = 108;
-  constexpr int eora_down_blocks = 16;
-  constexpr int eora_lock_workspace_offset = 128;
-  constexpr int eora_lock_workspace_ints =
-      (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
-  constexpr int eora_down_ready_lock = 96;
-  constexpr int eora_up_arrivals_lock = eora_down_ready_lock + 1;
-  constexpr int eora_available_lock_ints = 256;
+  #if MARLIN_LORA_RANK == 32
+  constexpr int lora_rank = 32;
+  constexpr int lora_down_tile = 16;
+  constexpr int lora_marlin_blocks = 122;
+  constexpr int lora_down_blocks = 2;
+  constexpr int lora_lock_workspace_offset = 128;
+  constexpr int lora_lock_workspace_ints =
+      (lora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
+  constexpr int lora_down_ready_lock = 96;
+  constexpr int lora_up_arrivals_lock = lora_down_ready_lock + 1;
+  constexpr int lora_available_lock_ints = 144;
+  #elif MARLIN_LORA_RANK == 64
+  constexpr int lora_rank = 64;
+  constexpr int lora_down_tile = 16;
+  constexpr int lora_marlin_blocks = 120;
+  constexpr int lora_down_blocks = 4;
+  constexpr int lora_lock_workspace_offset = 128;
+  constexpr int lora_lock_workspace_ints =
+      (lora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
+  constexpr int lora_down_ready_lock = 96;
+  constexpr int lora_up_arrivals_lock = lora_down_ready_lock + 1;
+  constexpr int lora_available_lock_ints = 160;
+  #elif MARLIN_LORA_RANK == 96
+  constexpr int lora_rank = 96;
+  constexpr int lora_down_tile = 16;
+  constexpr int lora_marlin_blocks = 118;
+  constexpr int lora_down_blocks = 6;
+  constexpr int lora_lock_workspace_offset = 128;
+  constexpr int lora_lock_workspace_ints =
+      (lora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
+  constexpr int lora_down_ready_lock = 96;
+  constexpr int lora_up_arrivals_lock = lora_down_ready_lock + 1;
+  constexpr int lora_available_lock_ints = 176;
+  #elif MARLIN_LORA_RANK == 128
+  constexpr int lora_rank = 128;
+  constexpr int lora_down_tile = 16;
+  constexpr int lora_marlin_blocks = 116;
+  constexpr int lora_down_blocks = 8;
+  constexpr int lora_lock_workspace_offset = 128;
+  constexpr int lora_lock_workspace_ints =
+      (lora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
+  constexpr int lora_down_ready_lock = 96;
+  constexpr int lora_up_arrivals_lock = lora_down_ready_lock + 1;
+  constexpr int lora_available_lock_ints = 192;
+  #elif MARLIN_LORA_RANK == 192
+  constexpr int lora_rank = 192;
+  constexpr int lora_down_tile = 16;
+  constexpr int lora_marlin_blocks = 112;
+  constexpr int lora_down_blocks = 12;
+  constexpr int lora_lock_workspace_offset = 128;
+  constexpr int lora_lock_workspace_ints =
+      (lora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
+  constexpr int lora_down_ready_lock = 96;
+  constexpr int lora_up_arrivals_lock = lora_down_ready_lock + 1;
+  constexpr int lora_available_lock_ints = 224;
+  #elif MARLIN_LORA_RANK == 256
+  constexpr int lora_rank = 256;
+  constexpr int lora_down_tile = 16;
+  constexpr int lora_marlin_blocks = 108;
+  constexpr int lora_down_blocks = 16;
+  constexpr int lora_lock_workspace_offset = 128;
+  constexpr int lora_lock_workspace_ints =
+      (lora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
+  constexpr int lora_down_ready_lock = 96;
+  constexpr int lora_up_arrivals_lock = lora_down_ready_lock + 1;
+  constexpr int lora_available_lock_ints = 256;
   #else
-    #error "MARLIN_EORA_RANK must be 32, 64, 96, 128, 192, or 256"
+    #error "MARLIN_LORA_RANK must be 32, 64, 96, 128, 192, or 256"
   #endif
-  constexpr int eora_phase_flag_slot = threads;
+  constexpr int lora_phase_flag_slot = threads;
   static_assert(sizeof(scalar_t) == 2);
-  static_assert(eora_up_arrivals_lock < eora_lock_workspace_offset);
-  static_assert(eora_lock_workspace_offset + eora_lock_workspace_ints <=
-                eora_available_lock_ints);
-  float* eora_partials = reinterpret_cast<float*>(sh);
-  scalar_t* eora_lock_workspace =
-      reinterpret_cast<scalar_t*>(locks + eora_lock_workspace_offset);
-  const int eora_down_block = blockIdx.x - eora_marlin_blocks;
-  if (eora_down_block >= 0 && eora_down_block < eora_down_blocks) {
+  static_assert(lora_up_arrivals_lock < lora_lock_workspace_offset);
+  static_assert(lora_lock_workspace_offset + lora_lock_workspace_ints <=
+                lora_available_lock_ints);
+  float* lora_partials = reinterpret_cast<float*>(sh);
+  scalar_t* lora_lock_workspace =
+      reinterpret_cast<scalar_t*>(locks + lora_lock_workspace_offset);
+  const int lora_down_block = blockIdx.x - lora_marlin_blocks;
+  if (lora_down_block >= 0 && lora_down_block < lora_down_blocks) {
     const int down_rank =
-        eora_down_block * eora_down_tile + (threadIdx.x & 15);
+        lora_down_block * lora_down_tile + (threadIdx.x & 15);
     const int down_k_lane = threadIdx.x >> 4;
-    constexpr int down_k_lanes = threads / eora_down_tile;
+    constexpr int down_k_lanes = threads / lora_down_tile;
     constexpr int64_t down_stride = down_k_lanes;
     int64_t k = down_k_lane;
     float down_partial_0 = 0.0f;
@@ -2107,88 +2107,88 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     float down_partial_7 = 0.0f;
     for (; k + down_stride * 7 < prob_k; k += down_stride * 8) {
       down_partial_0 +=
-          ScalarType<scalar_t>::num2float(eora_x[k]) *
+          ScalarType<scalar_t>::num2float(lora_x[k]) *
           ScalarType<scalar_t>::num2float(
-              eora_down_weight[k * eora_rank + down_rank]);
+              lora_down_weight[k * lora_rank + down_rank]);
       const int64_t k_1 = k + down_stride;
       down_partial_1 +=
-          ScalarType<scalar_t>::num2float(eora_x[k_1]) *
+          ScalarType<scalar_t>::num2float(lora_x[k_1]) *
           ScalarType<scalar_t>::num2float(
-              eora_down_weight[k_1 * eora_rank + down_rank]);
+              lora_down_weight[k_1 * lora_rank + down_rank]);
       const int64_t k_2 = k + down_stride * 2;
       down_partial_2 +=
-          ScalarType<scalar_t>::num2float(eora_x[k_2]) *
+          ScalarType<scalar_t>::num2float(lora_x[k_2]) *
           ScalarType<scalar_t>::num2float(
-              eora_down_weight[k_2 * eora_rank + down_rank]);
+              lora_down_weight[k_2 * lora_rank + down_rank]);
       const int64_t k_3 = k + down_stride * 3;
       down_partial_3 +=
-          ScalarType<scalar_t>::num2float(eora_x[k_3]) *
+          ScalarType<scalar_t>::num2float(lora_x[k_3]) *
           ScalarType<scalar_t>::num2float(
-              eora_down_weight[k_3 * eora_rank + down_rank]);
+              lora_down_weight[k_3 * lora_rank + down_rank]);
       const int64_t k_4 = k + down_stride * 4;
       down_partial_4 +=
-          ScalarType<scalar_t>::num2float(eora_x[k_4]) *
+          ScalarType<scalar_t>::num2float(lora_x[k_4]) *
           ScalarType<scalar_t>::num2float(
-              eora_down_weight[k_4 * eora_rank + down_rank]);
+              lora_down_weight[k_4 * lora_rank + down_rank]);
       const int64_t k_5 = k + down_stride * 5;
       down_partial_5 +=
-          ScalarType<scalar_t>::num2float(eora_x[k_5]) *
+          ScalarType<scalar_t>::num2float(lora_x[k_5]) *
           ScalarType<scalar_t>::num2float(
-              eora_down_weight[k_5 * eora_rank + down_rank]);
+              lora_down_weight[k_5 * lora_rank + down_rank]);
       const int64_t k_6 = k + down_stride * 6;
       down_partial_6 +=
-          ScalarType<scalar_t>::num2float(eora_x[k_6]) *
+          ScalarType<scalar_t>::num2float(lora_x[k_6]) *
           ScalarType<scalar_t>::num2float(
-              eora_down_weight[k_6 * eora_rank + down_rank]);
+              lora_down_weight[k_6 * lora_rank + down_rank]);
       const int64_t k_7 = k + down_stride * 7;
       down_partial_7 +=
-          ScalarType<scalar_t>::num2float(eora_x[k_7]) *
+          ScalarType<scalar_t>::num2float(lora_x[k_7]) *
           ScalarType<scalar_t>::num2float(
-              eora_down_weight[k_7 * eora_rank + down_rank]);
+              lora_down_weight[k_7 * lora_rank + down_rank]);
     }
     for (; k < prob_k; k += down_stride) {
       down_partial_0 +=
-          ScalarType<scalar_t>::num2float(eora_x[k]) *
+          ScalarType<scalar_t>::num2float(lora_x[k]) *
           ScalarType<scalar_t>::num2float(
-              eora_down_weight[k * eora_rank + down_rank]);
+              lora_down_weight[k * lora_rank + down_rank]);
     }
-    eora_partials[threadIdx.x] =
+    lora_partials[threadIdx.x] =
         ((down_partial_0 + down_partial_1) +
          (down_partial_2 + down_partial_3)) +
         ((down_partial_4 + down_partial_5) +
          (down_partial_6 + down_partial_7));
     __syncthreads();
-    if (threadIdx.x < eora_down_tile) {
+    if (threadIdx.x < lora_down_tile) {
       const float down_total =
-          (((eora_partials[threadIdx.x] +
-             eora_partials[threadIdx.x + 16]) +
-            (eora_partials[threadIdx.x + 32] +
-             eora_partials[threadIdx.x + 48])) +
-           ((eora_partials[threadIdx.x + 64] +
-             eora_partials[threadIdx.x + 80]) +
-            (eora_partials[threadIdx.x + 96] +
-             eora_partials[threadIdx.x + 112]))) +
-          (((eora_partials[threadIdx.x + 128] +
-             eora_partials[threadIdx.x + 144]) +
-            (eora_partials[threadIdx.x + 160] +
-             eora_partials[threadIdx.x + 176])) +
-           ((eora_partials[threadIdx.x + 192] +
-             eora_partials[threadIdx.x + 208]) +
-            (eora_partials[threadIdx.x + 224] +
-             eora_partials[threadIdx.x + 240])));
-      eora_lock_workspace[eora_down_block * eora_down_tile + threadIdx.x] =
+          (((lora_partials[threadIdx.x] +
+             lora_partials[threadIdx.x + 16]) +
+            (lora_partials[threadIdx.x + 32] +
+             lora_partials[threadIdx.x + 48])) +
+           ((lora_partials[threadIdx.x + 64] +
+             lora_partials[threadIdx.x + 80]) +
+            (lora_partials[threadIdx.x + 96] +
+             lora_partials[threadIdx.x + 112]))) +
+          (((lora_partials[threadIdx.x + 128] +
+             lora_partials[threadIdx.x + 144]) +
+            (lora_partials[threadIdx.x + 160] +
+             lora_partials[threadIdx.x + 176])) +
+           ((lora_partials[threadIdx.x + 192] +
+             lora_partials[threadIdx.x + 208]) +
+            (lora_partials[threadIdx.x + 224] +
+             lora_partials[threadIdx.x + 240])));
+      lora_lock_workspace[lora_down_block * lora_down_tile + threadIdx.x] =
           ScalarType<scalar_t>::float2num(down_total);
     }
     if (threadIdx.x < 32) {
       __syncwarp();
       if (threadIdx.x == 0) {
         __threadfence();
-        atomicAdd(&locks[eora_down_ready_lock], 1);
+        atomicAdd(&locks[lora_down_ready_lock], 1);
       }
     }
   }
 
-  #if MARLIN_EORA_RANK == 128
+  #if MARLIN_LORA_RANK == 128
   // A 32-column tile preserves coalesced LoRA-B reads. Four CTAs each own two
   // adjacent tiles from the same Marlin output slice; the remaining 120 CTAs
   // own one tile. This covers all 128 tiles while requiring only one output
@@ -2205,14 +2205,14 @@ __global__ void MARLIN_KERNEL_FUNCTION(
   // This delays the lock poll slightly, but shortens the post-acquire critical
   // path for every warp. BF16 showed no matched benefit and retains the
   // original post-acquire loads below.
-  constexpr bool eora_prefetch_up = std::is_same<scalar_t, half>::value;
-  constexpr int eora_up_prefetch = 32;
-  scalar_t eora_up_prefetched[eora_up_prefetch];
+  constexpr bool lora_prefetch_up = std::is_same<scalar_t, half>::value;
+  constexpr int lora_up_prefetch = 32;
+  scalar_t lora_up_prefetched[lora_up_prefetch];
   int tile;
   int col;
   int rank_begin;
   bool valid_up_tile;
-  if constexpr (eora_prefetch_up) {
+  if constexpr (lora_prefetch_up) {
     const bool use_secondary_tile = up_warp >= 4;
     tile = use_secondary_tile ? secondary_tile : primary_tile;
     col = tile * 32 + up_lane;
@@ -2220,9 +2220,9 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     valid_up_tile = tile < output_tiles && col < prob_n;
     if (valid_up_tile) {
     #pragma unroll
-      for (int rank_offset = 0; rank_offset < eora_up_prefetch; ++rank_offset) {
-        eora_up_prefetched[rank_offset] =
-            eora_up_weight[(rank_begin + rank_offset) * prob_n + col];
+      for (int rank_offset = 0; rank_offset < lora_up_prefetch; ++rank_offset) {
+        lora_up_prefetched[rank_offset] =
+            lora_up_weight[(rank_begin + rank_offset) * prob_n + col];
       }
     }
   }
@@ -2231,8 +2231,8 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     do {
       asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                    : "=r"(state)
-                   : "l"(&locks[eora_down_ready_lock]));
-    } while (state != eora_down_blocks);
+                   : "l"(&locks[lora_down_ready_lock]));
+    } while (state != lora_down_blocks);
     do {
       asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                    : "=r"(state)
@@ -2246,32 +2246,32 @@ __global__ void MARLIN_KERNEL_FUNCTION(
   // perform LoRA-up, then use the existing reduction barrier to publish the
   // last-arrival flag. This keeps the atomic off the acquire critical path.
   if (threadIdx.x == 128) {
-    const int arrival = atomicAdd(&locks[eora_up_arrivals_lock], 1);
-    eora_partials[eora_phase_flag_slot] =
+    const int arrival = atomicAdd(&locks[lora_up_arrivals_lock], 1);
+    lora_partials[lora_phase_flag_slot] =
         arrival == gridDim.x - 1 ? 1.0f : 0.0f;
   }
 
   // FP16 benefits from overlapping the base-output load with the LoRA-up MAC
   // and reduction. BF16 regressed under matched profiling and keeps its load
   // in the final writer block below.
-  constexpr bool eora_preload_base = std::is_same<scalar_t, half>::value;
-  bool eora_write_secondary;
-  int eora_write_lane;
-  int eora_write_tile;
-  int eora_write_col;
-  bool eora_valid_write;
-  scalar_t eora_base_value;
-  if constexpr (eora_preload_base) {
-    eora_write_secondary = threadIdx.x >= 32;
-    eora_write_lane = threadIdx.x & 31;
-    eora_write_tile = eora_write_secondary ? secondary_tile : primary_tile;
-    eora_write_col = eora_write_tile * 32 + eora_write_lane;
-    eora_valid_write = threadIdx.x < 64 && eora_write_tile < output_tiles &&
-                       eora_write_col < prob_n;
-    if (eora_valid_write) eora_base_value = eora_out[eora_write_col];
+  constexpr bool lora_preload_base = std::is_same<scalar_t, half>::value;
+  bool lora_write_secondary;
+  int lora_write_lane;
+  int lora_write_tile;
+  int lora_write_col;
+  bool lora_valid_write;
+  scalar_t lora_base_value;
+  if constexpr (lora_preload_base) {
+    lora_write_secondary = threadIdx.x >= 32;
+    lora_write_lane = threadIdx.x & 31;
+    lora_write_tile = lora_write_secondary ? secondary_tile : primary_tile;
+    lora_write_col = lora_write_tile * 32 + lora_write_lane;
+    lora_valid_write = threadIdx.x < 64 && lora_write_tile < output_tiles &&
+                       lora_write_col < prob_n;
+    if (lora_valid_write) lora_base_value = lora_out[lora_write_col];
   }
 
-  if constexpr (!eora_prefetch_up) {
+  if constexpr (!lora_prefetch_up) {
     const bool use_secondary_tile = up_warp >= 4;
     tile = use_secondary_tile ? secondary_tile : primary_tile;
     col = tile * 32 + up_lane;
@@ -2284,17 +2284,17 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
       const int rank = rank_begin + rank_offset;
       const float down_total = ScalarType<scalar_t>::num2float(
-          eora_lock_workspace[rank]);
+          lora_lock_workspace[rank]);
       scalar_t up_value;
-      if constexpr (eora_prefetch_up) {
-        up_value = eora_up_prefetched[rank_offset];
+      if constexpr (lora_prefetch_up) {
+        up_value = lora_up_prefetched[rank_offset];
       } else {
-        up_value = eora_up_weight[rank * prob_n + col];
+        up_value = lora_up_weight[rank * prob_n + col];
       }
       update += down_total *
                 ScalarType<scalar_t>::num2float(up_value);
     }
-    eora_partials[threadIdx.x] = update;
+    lora_partials[threadIdx.x] = update;
   }
   __syncthreads();
   // FP16 benefits from keeping phase recycling off the output-writer warps.
@@ -2302,29 +2302,29 @@ __global__ void MARLIN_KERNEL_FUNCTION(
   // that instruction stream.
   if constexpr (std::is_same<scalar_t, half>::value) {
     if (up_warp == 4 &&
-        eora_partials[eora_phase_flag_slot] != 0.0f) {
+        lora_partials[lora_phase_flag_slot] != 0.0f) {
       locks[up_lane] = 0;
-      if (up_lane == 0) locks[eora_down_ready_lock] = 0;
-      if (up_lane == 1) locks[eora_up_arrivals_lock] = 0;
+      if (up_lane == 0) locks[lora_down_ready_lock] = 0;
+      if (up_lane == 1) locks[lora_up_arrivals_lock] = 0;
     }
   } else {
     const bool reset_phase_state =
-        eora_partials[eora_phase_flag_slot] != 0.0f;
+        lora_partials[lora_phase_flag_slot] != 0.0f;
     if (reset_phase_state) {
       if (threadIdx.x < 32) locks[threadIdx.x] = 0;
-      if (threadIdx.x == 32) locks[eora_down_ready_lock] = 0;
-      if (threadIdx.x == 33) locks[eora_up_arrivals_lock] = 0;
+      if (threadIdx.x == 32) locks[lora_down_ready_lock] = 0;
+      if (threadIdx.x == 33) locks[lora_up_arrivals_lock] = 0;
     }
   }
-  if constexpr (eora_preload_base) {
-    if (eora_valid_write) {
-      const int partial_base = eora_write_secondary ? 128 : 0;
-      const float total = eora_partials[partial_base + eora_write_lane] +
-                          eora_partials[partial_base + eora_write_lane + 32] +
-                          eora_partials[partial_base + eora_write_lane + 64] +
-                          eora_partials[partial_base + eora_write_lane + 96];
-      eora_out[eora_write_col] = ScalarType<scalar_t>::float2num(
-          ScalarType<scalar_t>::num2float(eora_base_value) + total);
+  if constexpr (lora_preload_base) {
+    if (lora_valid_write) {
+      const int partial_base = lora_write_secondary ? 128 : 0;
+      const float total = lora_partials[partial_base + lora_write_lane] +
+                          lora_partials[partial_base + lora_write_lane + 32] +
+                          lora_partials[partial_base + lora_write_lane + 64] +
+                          lora_partials[partial_base + lora_write_lane + 96];
+      lora_out[lora_write_col] = ScalarType<scalar_t>::float2num(
+          ScalarType<scalar_t>::num2float(lora_base_value) + total);
     }
   } else if (threadIdx.x < 64) {
     const bool write_secondary = threadIdx.x >= 32;
@@ -2333,21 +2333,21 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     const int write_col = write_tile * 32 + write_lane;
     const int partial_base = write_secondary ? 128 : 0;
     if (write_tile < output_tiles && write_col < prob_n) {
-      const float total = eora_partials[partial_base + write_lane] +
-                          eora_partials[partial_base + write_lane + 32] +
-                          eora_partials[partial_base + write_lane + 64] +
-                          eora_partials[partial_base + write_lane + 96];
-      eora_out[write_col] = ScalarType<scalar_t>::float2num(
-          ScalarType<scalar_t>::num2float(eora_out[write_col]) + total);
+      const float total = lora_partials[partial_base + write_lane] +
+                          lora_partials[partial_base + write_lane + 32] +
+                          lora_partials[partial_base + write_lane + 64] +
+                          lora_partials[partial_base + write_lane + 96];
+      lora_out[write_col] = ScalarType<scalar_t>::float2num(
+          ScalarType<scalar_t>::num2float(lora_out[write_col]) + total);
     }
   }
-  #elif MARLIN_EORA_RANK == 192
+  #elif MARLIN_LORA_RANK == 192
     // Six warps cover the rank dimension for one coalesced 32-column tile.
     // The first four CTAs process an adjacent tile after their primary tile;
     // the remaining CTAs own one tile each. Warp six remains available for
     // phase recycling while the six adapter warps perform LoRA-up.
-    constexpr int eora_up_rank_warps = 6;
-    constexpr int eora_phase_warp = 6;
+    constexpr int lora_up_rank_warps = 6;
+    constexpr int lora_phase_warp = 6;
     const int up_lane = threadIdx.x & 31;
     const int up_warp = threadIdx.x >> 5;
     const int output_tiles = div_ceil(prob_n, 32);
@@ -2357,18 +2357,18 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     const int output_slice = primary_tile / 4;
     const int rank_begin = up_warp * 32;
     const int primary_col = primary_tile * 32 + up_lane;
-    const bool active_up_warp = up_warp < eora_up_rank_warps;
+    const bool active_up_warp = up_warp < lora_up_rank_warps;
     const bool valid_primary =
         active_up_warp && primary_tile < output_tiles && primary_col < prob_n;
 
-    constexpr bool eora_prefetch_up = std::is_same<scalar_t, half>::value;
-    scalar_t eora_up_prefetched[32];
-    if constexpr (eora_prefetch_up) {
+    constexpr bool lora_prefetch_up = std::is_same<scalar_t, half>::value;
+    scalar_t lora_up_prefetched[32];
+    if constexpr (lora_prefetch_up) {
       if (valid_primary) {
       #pragma unroll
         for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
-          eora_up_prefetched[rank_offset] =
-              eora_up_weight[(rank_begin + rank_offset) * prob_n +
+          lora_up_prefetched[rank_offset] =
+              lora_up_weight[(rank_begin + rank_offset) * prob_n +
                              primary_col];
         }
       }
@@ -2379,8 +2379,8 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       do {
         asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                      : "=r"(state)
-                     : "l"(&locks[eora_down_ready_lock]));
-      } while (state != eora_down_blocks);
+                     : "l"(&locks[lora_down_ready_lock]));
+      } while (state != lora_down_blocks);
       do {
         asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                      : "=r"(state)
@@ -2389,17 +2389,17 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     }
     __syncthreads();
 
-    if (threadIdx.x == eora_phase_warp * 32) {
-      const int arrival = atomicAdd(&locks[eora_up_arrivals_lock], 1);
-      eora_partials[eora_phase_flag_slot] =
+    if (threadIdx.x == lora_phase_warp * 32) {
+      const int arrival = atomicAdd(&locks[lora_up_arrivals_lock], 1);
+      lora_partials[lora_phase_flag_slot] =
           arrival == gridDim.x - 1 ? 1.0f : 0.0f;
     }
 
-    constexpr bool eora_preload_base = std::is_same<scalar_t, half>::value;
+    constexpr bool lora_preload_base = std::is_same<scalar_t, half>::value;
     scalar_t primary_base_value = ScalarType<scalar_t>::float2num(0.0f);
-    if constexpr (eora_preload_base) {
+    if constexpr (lora_preload_base) {
       if (up_warp == 0 && valid_primary) {
-        primary_base_value = eora_out[primary_col];
+        primary_base_value = lora_out[primary_col];
       }
     }
 
@@ -2409,44 +2409,44 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
         const int rank = rank_begin + rank_offset;
         const float down_total = ScalarType<scalar_t>::num2float(
-            eora_lock_workspace[rank]);
+            lora_lock_workspace[rank]);
         scalar_t up_value;
-        if constexpr (eora_prefetch_up) {
-          up_value = eora_up_prefetched[rank_offset];
+        if constexpr (lora_prefetch_up) {
+          up_value = lora_up_prefetched[rank_offset];
         } else {
-          up_value = eora_up_weight[rank * prob_n + primary_col];
+          up_value = lora_up_weight[rank * prob_n + primary_col];
         }
         update += down_total * ScalarType<scalar_t>::num2float(up_value);
       }
-      eora_partials[threadIdx.x] = update;
+      lora_partials[threadIdx.x] = update;
     }
     __syncthreads();
 
     if constexpr (std::is_same<scalar_t, half>::value) {
-      if (up_warp == eora_phase_warp &&
-          eora_partials[eora_phase_flag_slot] != 0.0f) {
+      if (up_warp == lora_phase_warp &&
+          lora_partials[lora_phase_flag_slot] != 0.0f) {
         locks[up_lane] = 0;
-        if (up_lane == 0) locks[eora_down_ready_lock] = 0;
-        if (up_lane == 1) locks[eora_up_arrivals_lock] = 0;
+        if (up_lane == 0) locks[lora_down_ready_lock] = 0;
+        if (up_lane == 1) locks[lora_up_arrivals_lock] = 0;
       }
     } else {
       const bool reset_phase_state =
-          eora_partials[eora_phase_flag_slot] != 0.0f;
+          lora_partials[lora_phase_flag_slot] != 0.0f;
       if (reset_phase_state) {
         if (threadIdx.x < 32) locks[threadIdx.x] = 0;
-        if (threadIdx.x == 32) locks[eora_down_ready_lock] = 0;
-        if (threadIdx.x == 33) locks[eora_up_arrivals_lock] = 0;
+        if (threadIdx.x == 32) locks[lora_down_ready_lock] = 0;
+        if (threadIdx.x == 33) locks[lora_up_arrivals_lock] = 0;
       }
     }
     if (up_warp == 0 && valid_primary) {
       const float total =
-          ((eora_partials[up_lane] + eora_partials[up_lane + 32]) +
-           (eora_partials[up_lane + 64] + eora_partials[up_lane + 96])) +
-          (eora_partials[up_lane + 128] + eora_partials[up_lane + 160]);
-      const scalar_t base_value = eora_preload_base
+          ((lora_partials[up_lane] + lora_partials[up_lane + 32]) +
+           (lora_partials[up_lane + 64] + lora_partials[up_lane + 96])) +
+          (lora_partials[up_lane + 128] + lora_partials[up_lane + 160]);
+      const scalar_t base_value = lora_preload_base
                                       ? primary_base_value
-                                      : eora_out[primary_col];
-      eora_out[primary_col] = ScalarType<scalar_t>::float2num(
+                                      : lora_out[primary_col];
+      lora_out[primary_col] = ScalarType<scalar_t>::float2num(
           ScalarType<scalar_t>::num2float(base_value) + total);
     }
 
@@ -2457,17 +2457,17 @@ __global__ void MARLIN_KERNEL_FUNCTION(
                                    secondary_tile < output_tiles &&
                                    secondary_col < prob_n;
       scalar_t secondary_base_value = ScalarType<scalar_t>::float2num(0.0f);
-      if constexpr (eora_preload_base) {
+      if constexpr (lora_preload_base) {
         if (up_warp == 0 && valid_secondary) {
-          secondary_base_value = eora_out[secondary_col];
+          secondary_base_value = lora_out[secondary_col];
         }
       }
-      if constexpr (eora_prefetch_up) {
+      if constexpr (lora_prefetch_up) {
         if (valid_secondary) {
         #pragma unroll
           for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
-            eora_up_prefetched[rank_offset] =
-                eora_up_weight[(rank_begin + rank_offset) * prob_n +
+            lora_up_prefetched[rank_offset] =
+                lora_up_weight[(rank_begin + rank_offset) * prob_n +
                                secondary_col];
           }
         }
@@ -2478,31 +2478,31 @@ __global__ void MARLIN_KERNEL_FUNCTION(
         for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
           const int rank = rank_begin + rank_offset;
           const float down_total = ScalarType<scalar_t>::num2float(
-              eora_lock_workspace[rank]);
+              lora_lock_workspace[rank]);
           scalar_t up_value;
-          if constexpr (eora_prefetch_up) {
-            up_value = eora_up_prefetched[rank_offset];
+          if constexpr (lora_prefetch_up) {
+            up_value = lora_up_prefetched[rank_offset];
           } else {
-            up_value = eora_up_weight[rank * prob_n + secondary_col];
+            up_value = lora_up_weight[rank * prob_n + secondary_col];
           }
           update += down_total * ScalarType<scalar_t>::num2float(up_value);
         }
-        eora_partials[threadIdx.x] = update;
+        lora_partials[threadIdx.x] = update;
       }
       __syncthreads();
       if (up_warp == 0 && valid_secondary) {
         const float total =
-            ((eora_partials[up_lane] + eora_partials[up_lane + 32]) +
-             (eora_partials[up_lane + 64] + eora_partials[up_lane + 96])) +
-            (eora_partials[up_lane + 128] + eora_partials[up_lane + 160]);
-        const scalar_t base_value = eora_preload_base
+            ((lora_partials[up_lane] + lora_partials[up_lane + 32]) +
+             (lora_partials[up_lane + 64] + lora_partials[up_lane + 96])) +
+            (lora_partials[up_lane + 128] + lora_partials[up_lane + 160]);
+        const scalar_t base_value = lora_preload_base
                                         ? secondary_base_value
-                                        : eora_out[secondary_col];
-        eora_out[secondary_col] = ScalarType<scalar_t>::float2num(
+                                        : lora_out[secondary_col];
+        lora_out[secondary_col] = ScalarType<scalar_t>::float2num(
             ScalarType<scalar_t>::num2float(base_value) + total);
       }
     }
-  #elif MARLIN_EORA_RANK == 256
+  #elif MARLIN_LORA_RANK == 256
     // Rank 256 maps one 32-rank adapter slice to each warp, so all eight warps
     // cooperate on one coalesced 32-column output tile. The first four CTAs
     // process one adjacent tile after their primary tile, covering all 128
@@ -2522,14 +2522,14 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     // Preserve the converged rank-128 FP16 overlap: stage the coalesced up
     // weights while Marlin is still finishing, then consume them after both
     // readiness conditions have acquired.
-    constexpr bool eora_prefetch_up = std::is_same<scalar_t, half>::value;
-    scalar_t eora_up_prefetched[32];
-    if constexpr (eora_prefetch_up) {
+    constexpr bool lora_prefetch_up = std::is_same<scalar_t, half>::value;
+    scalar_t lora_up_prefetched[32];
+    if constexpr (lora_prefetch_up) {
       if (valid_primary) {
       #pragma unroll
         for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
-          eora_up_prefetched[rank_offset] =
-              eora_up_weight[(rank_begin + rank_offset) * prob_n +
+          lora_up_prefetched[rank_offset] =
+              lora_up_weight[(rank_begin + rank_offset) * prob_n +
                              primary_col];
         }
       }
@@ -2540,8 +2540,8 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       do {
         asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                      : "=r"(state)
-                     : "l"(&locks[eora_down_ready_lock]));
-      } while (state != eora_down_blocks);
+                     : "l"(&locks[lora_down_ready_lock]));
+      } while (state != lora_down_blocks);
       do {
         asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                      : "=r"(state)
@@ -2554,16 +2554,16 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     // reusable lock state. The next same-stream launch cannot observe the
     // reset until this cooperative kernel has completed.
     if (threadIdx.x == 0) {
-      const int arrival = atomicAdd(&locks[eora_up_arrivals_lock], 1);
-      eora_partials[eora_phase_flag_slot] =
+      const int arrival = atomicAdd(&locks[lora_up_arrivals_lock], 1);
+      lora_partials[lora_phase_flag_slot] =
           arrival == gridDim.x - 1 ? 1.0f : 0.0f;
     }
 
-    constexpr bool eora_preload_base = std::is_same<scalar_t, half>::value;
+    constexpr bool lora_preload_base = std::is_same<scalar_t, half>::value;
     scalar_t primary_base_value = ScalarType<scalar_t>::float2num(0.0f);
-    if constexpr (eora_preload_base) {
+    if constexpr (lora_preload_base) {
       if (up_warp == 0 && valid_primary) {
-        primary_base_value = eora_out[primary_col];
+        primary_base_value = lora_out[primary_col];
       }
     }
 
@@ -2573,36 +2573,36 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
         const int rank = rank_begin + rank_offset;
         const float down_total = ScalarType<scalar_t>::num2float(
-            eora_lock_workspace[rank]);
+            lora_lock_workspace[rank]);
         scalar_t up_value;
-        if constexpr (eora_prefetch_up) {
-          up_value = eora_up_prefetched[rank_offset];
+        if constexpr (lora_prefetch_up) {
+          up_value = lora_up_prefetched[rank_offset];
         } else {
-          up_value = eora_up_weight[rank * prob_n + primary_col];
+          up_value = lora_up_weight[rank * prob_n + primary_col];
         }
         update += down_total * ScalarType<scalar_t>::num2float(up_value);
       }
-      eora_partials[threadIdx.x] = update;
+      lora_partials[threadIdx.x] = update;
     }
     __syncthreads();
 
     const bool reset_phase_state =
-        eora_partials[eora_phase_flag_slot] != 0.0f;
+        lora_partials[lora_phase_flag_slot] != 0.0f;
     if (reset_phase_state) {
       if (threadIdx.x < 32) locks[threadIdx.x] = 0;
-      if (threadIdx.x == 32) locks[eora_down_ready_lock] = 0;
-      if (threadIdx.x == 33) locks[eora_up_arrivals_lock] = 0;
+      if (threadIdx.x == 32) locks[lora_down_ready_lock] = 0;
+      if (threadIdx.x == 33) locks[lora_up_arrivals_lock] = 0;
     }
     if (up_warp == 0 && valid_primary) {
       const float total =
-          ((eora_partials[up_lane] + eora_partials[up_lane + 32]) +
-           (eora_partials[up_lane + 64] + eora_partials[up_lane + 96])) +
-          ((eora_partials[up_lane + 128] + eora_partials[up_lane + 160]) +
-           (eora_partials[up_lane + 192] + eora_partials[up_lane + 224]));
-      const scalar_t base_value = eora_preload_base
+          ((lora_partials[up_lane] + lora_partials[up_lane + 32]) +
+           (lora_partials[up_lane + 64] + lora_partials[up_lane + 96])) +
+          ((lora_partials[up_lane + 128] + lora_partials[up_lane + 160]) +
+           (lora_partials[up_lane + 192] + lora_partials[up_lane + 224]));
+      const scalar_t base_value = lora_preload_base
                                       ? primary_base_value
-                                      : eora_out[primary_col];
-      eora_out[primary_col] = ScalarType<scalar_t>::float2num(
+                                      : lora_out[primary_col];
+      lora_out[primary_col] = ScalarType<scalar_t>::float2num(
           ScalarType<scalar_t>::num2float(base_value) + total);
     }
 
@@ -2612,17 +2612,17 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       const bool valid_secondary =
           secondary_tile < output_tiles && secondary_col < prob_n;
       scalar_t secondary_base_value = ScalarType<scalar_t>::float2num(0.0f);
-      if constexpr (eora_preload_base) {
+      if constexpr (lora_preload_base) {
         if (up_warp == 0 && valid_secondary) {
-          secondary_base_value = eora_out[secondary_col];
+          secondary_base_value = lora_out[secondary_col];
         }
       }
-      if constexpr (eora_prefetch_up) {
+      if constexpr (lora_prefetch_up) {
         if (valid_secondary) {
         #pragma unroll
           for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
-            eora_up_prefetched[rank_offset] =
-                eora_up_weight[(rank_begin + rank_offset) * prob_n +
+            lora_up_prefetched[rank_offset] =
+                lora_up_weight[(rank_begin + rank_offset) * prob_n +
                                secondary_col];
           }
         }
@@ -2633,30 +2633,30 @@ __global__ void MARLIN_KERNEL_FUNCTION(
         for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
           const int rank = rank_begin + rank_offset;
           const float down_total = ScalarType<scalar_t>::num2float(
-              eora_lock_workspace[rank]);
+              lora_lock_workspace[rank]);
           scalar_t up_value;
-          if constexpr (eora_prefetch_up) {
-            up_value = eora_up_prefetched[rank_offset];
+          if constexpr (lora_prefetch_up) {
+            up_value = lora_up_prefetched[rank_offset];
           } else {
-            up_value = eora_up_weight[rank * prob_n + secondary_col];
+            up_value = lora_up_weight[rank * prob_n + secondary_col];
           }
           update += down_total * ScalarType<scalar_t>::num2float(up_value);
         }
-        eora_partials[threadIdx.x] = update;
+        lora_partials[threadIdx.x] = update;
       }
       __syncthreads();
       if (up_warp == 0 && valid_secondary) {
         const float total =
-            ((eora_partials[up_lane] + eora_partials[up_lane + 32]) +
-             (eora_partials[up_lane + 64] + eora_partials[up_lane + 96])) +
-            ((eora_partials[up_lane + 128] +
-              eora_partials[up_lane + 160]) +
-             (eora_partials[up_lane + 192] +
-              eora_partials[up_lane + 224]));
-        const scalar_t base_value = eora_preload_base
+            ((lora_partials[up_lane] + lora_partials[up_lane + 32]) +
+             (lora_partials[up_lane + 64] + lora_partials[up_lane + 96])) +
+            ((lora_partials[up_lane + 128] +
+              lora_partials[up_lane + 160]) +
+             (lora_partials[up_lane + 192] +
+              lora_partials[up_lane + 224]));
+        const scalar_t base_value = lora_preload_base
                                         ? secondary_base_value
-                                        : eora_out[secondary_col];
-        eora_out[secondary_col] = ScalarType<scalar_t>::float2num(
+                                        : lora_out[secondary_col];
+        lora_out[secondary_col] = ScalarType<scalar_t>::float2num(
             ScalarType<scalar_t>::num2float(base_value) + total);
       }
     }
@@ -2664,8 +2664,8 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     // Ranks 32, 64, and 96 need one, two, or three warps per 32-column output
     // tile. The first four CTAs use the next warp group for an adjacent tile,
     // so both tiles run concurrently while the other CTAs own one tile each.
-    constexpr int eora_up_rank_warps = MARLIN_EORA_RANK / 32;
-    constexpr int eora_phase_warp = eora_up_rank_warps == 3 ? 6 : 4;
+    constexpr int lora_up_rank_warps = MARLIN_LORA_RANK / 32;
+    constexpr int lora_phase_warp = lora_up_rank_warps == 3 ? 6 : 4;
     const int up_lane = threadIdx.x & 31;
     const int up_warp = threadIdx.x >> 5;
     const int output_tiles = div_ceil(prob_n, 32);
@@ -2673,24 +2673,24 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     const int primary_tile = dual_tile_block ? blockIdx.x * 2 : blockIdx.x + 4;
     const int secondary_tile = dual_tile_block ? primary_tile + 1 : output_tiles;
     const int output_slice = primary_tile / 4;
-    const bool use_secondary_tile = up_warp >= eora_up_rank_warps;
+    const bool use_secondary_tile = up_warp >= lora_up_rank_warps;
     const bool active_up_warp =
-        up_warp < eora_up_rank_warps ||
-        (dual_tile_block && up_warp < 2 * eora_up_rank_warps);
+        up_warp < lora_up_rank_warps ||
+        (dual_tile_block && up_warp < 2 * lora_up_rank_warps);
     const int tile = use_secondary_tile ? secondary_tile : primary_tile;
     const int col = tile * 32 + up_lane;
-    const int rank_begin = (up_warp % eora_up_rank_warps) * 32;
+    const int rank_begin = (up_warp % lora_up_rank_warps) * 32;
     const bool valid_up_tile =
         active_up_warp && tile < output_tiles && col < prob_n;
 
-    constexpr bool eora_prefetch_up = std::is_same<scalar_t, half>::value;
-    scalar_t eora_up_prefetched[32];
-    if constexpr (eora_prefetch_up) {
+    constexpr bool lora_prefetch_up = std::is_same<scalar_t, half>::value;
+    scalar_t lora_up_prefetched[32];
+    if constexpr (lora_prefetch_up) {
       if (valid_up_tile) {
       #pragma unroll
         for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
-          eora_up_prefetched[rank_offset] =
-              eora_up_weight[(rank_begin + rank_offset) * prob_n + col];
+          lora_up_prefetched[rank_offset] =
+              lora_up_weight[(rank_begin + rank_offset) * prob_n + col];
         }
       }
     }
@@ -2700,8 +2700,8 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       do {
         asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                      : "=r"(state)
-                     : "l"(&locks[eora_down_ready_lock]));
-      } while (state != eora_down_blocks);
+                     : "l"(&locks[lora_down_ready_lock]));
+      } while (state != lora_down_blocks);
       do {
         asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                      : "=r"(state)
@@ -2712,13 +2712,13 @@ __global__ void MARLIN_KERNEL_FUNCTION(
 
     // Use an idle warp for the phase-recycling ticket so the active up warps
     // can start their reductions as soon as both readiness states are visible.
-    if (threadIdx.x == eora_phase_warp * 32) {
-      const int arrival = atomicAdd(&locks[eora_up_arrivals_lock], 1);
-      eora_partials[eora_phase_flag_slot] =
+    if (threadIdx.x == lora_phase_warp * 32) {
+      const int arrival = atomicAdd(&locks[lora_up_arrivals_lock], 1);
+      lora_partials[lora_phase_flag_slot] =
           arrival == gridDim.x - 1 ? 1.0f : 0.0f;
     }
 
-    constexpr bool eora_preload_base = std::is_same<scalar_t, half>::value;
+    constexpr bool lora_preload_base = std::is_same<scalar_t, half>::value;
     const bool write_secondary = threadIdx.x >= 32;
     const int write_lane = threadIdx.x & 31;
     const int write_tile = write_secondary ? secondary_tile : primary_tile;
@@ -2726,8 +2726,8 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     const bool valid_write = threadIdx.x < 64 && write_tile < output_tiles &&
                              write_col < prob_n;
     scalar_t base_value = ScalarType<scalar_t>::float2num(0.0f);
-    if constexpr (eora_preload_base) {
-      if (valid_write) base_value = eora_out[write_col];
+    if constexpr (lora_preload_base) {
+      if (valid_write) base_value = lora_out[write_col];
     }
 
     if (valid_up_tile) {
@@ -2736,47 +2736,47 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
         const int rank = rank_begin + rank_offset;
         const float down_total = ScalarType<scalar_t>::num2float(
-            eora_lock_workspace[rank]);
+            lora_lock_workspace[rank]);
         scalar_t up_value;
-        if constexpr (eora_prefetch_up) {
-          up_value = eora_up_prefetched[rank_offset];
+        if constexpr (lora_prefetch_up) {
+          up_value = lora_up_prefetched[rank_offset];
         } else {
-          up_value = eora_up_weight[rank * prob_n + col];
+          up_value = lora_up_weight[rank * prob_n + col];
         }
         update += down_total * ScalarType<scalar_t>::num2float(up_value);
       }
-      eora_partials[threadIdx.x] = update;
+      lora_partials[threadIdx.x] = update;
     }
     __syncthreads();
 
     if constexpr (std::is_same<scalar_t, half>::value) {
-      if (up_warp == eora_phase_warp &&
-          eora_partials[eora_phase_flag_slot] != 0.0f) {
+      if (up_warp == lora_phase_warp &&
+          lora_partials[lora_phase_flag_slot] != 0.0f) {
         locks[up_lane] = 0;
-        if (up_lane == 0) locks[eora_down_ready_lock] = 0;
-        if (up_lane == 1) locks[eora_up_arrivals_lock] = 0;
+        if (up_lane == 0) locks[lora_down_ready_lock] = 0;
+        if (up_lane == 1) locks[lora_up_arrivals_lock] = 0;
       }
     } else {
       const bool reset_phase_state =
-          eora_partials[eora_phase_flag_slot] != 0.0f;
+          lora_partials[lora_phase_flag_slot] != 0.0f;
       if (reset_phase_state) {
         if (threadIdx.x < 32) locks[threadIdx.x] = 0;
-        if (threadIdx.x == 32) locks[eora_down_ready_lock] = 0;
-        if (threadIdx.x == 33) locks[eora_up_arrivals_lock] = 0;
+        if (threadIdx.x == 32) locks[lora_down_ready_lock] = 0;
+        if (threadIdx.x == 33) locks[lora_up_arrivals_lock] = 0;
       }
     }
 
     if (valid_write) {
-      const int partial_base = write_secondary ? eora_up_rank_warps * 32 : 0;
-      float total = eora_partials[partial_base + write_lane];
-      if constexpr (eora_up_rank_warps >= 2) {
-        total += eora_partials[partial_base + write_lane + 32];
+      const int partial_base = write_secondary ? lora_up_rank_warps * 32 : 0;
+      float total = lora_partials[partial_base + write_lane];
+      if constexpr (lora_up_rank_warps >= 2) {
+        total += lora_partials[partial_base + write_lane + 32];
       }
-      if constexpr (eora_up_rank_warps == 3) {
-        total += eora_partials[partial_base + write_lane + 64];
+      if constexpr (lora_up_rank_warps == 3) {
+        total += lora_partials[partial_base + write_lane + 64];
       }
-      if constexpr (!eora_preload_base) base_value = eora_out[write_col];
-      eora_out[write_col] = ScalarType<scalar_t>::float2num(
+      if constexpr (!lora_preload_base) base_value = lora_out[write_col];
+      lora_out[write_col] = ScalarType<scalar_t>::float2num(
           ScalarType<scalar_t>::num2float(base_value) + total);
     }
   #endif

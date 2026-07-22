@@ -53,7 +53,7 @@
 #include <mutex>
 #include <vector>
 
-torch::Tensor eora_marlin_lora_fused_add_prepared_cuda(
+torch::Tensor marlin_lora_fused_add_prepared_cuda(
     torch::Tensor x, torch::Tensor down_weight, torch::Tensor up_weight,
     torch::Tensor out, torch::Tensor workspace);
 
@@ -92,7 +92,7 @@ __global__ void MarlinDefault(MARLIN_KERNEL_PARAMS){};
 using MarlinFuncPtr = void (*)(MARLIN_KERNEL_PARAMS);
 
 template <typename scalar_t>
-using MarlinEoraFuncPtr = void (*)(MARLIN_EORA_KERNEL_PARAMS);
+using MarlinLoraFuncPtr = void (*)(MARLIN_LORA_KERNEL_PARAMS);
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
 
@@ -860,28 +860,28 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
 }
 
 template <typename scalar_t>
-bool launch_marlin_eora_attention(
+bool launch_marlin_lora_attention(
     const void* A, const void* B, void* C, void* C_tmp, void* scales,
-    void* locks, const void* eora_down_weight, const void* eora_up_weight,
-    int prob_m, int prob_n, int prob_k, int num_groups, int eora_rank,
+    void* locks, const void* lora_down_weight, const void* lora_up_weight,
+    int prob_m, int prob_n, int prob_k, int num_groups, int lora_rank,
     int64_t lock_workspace_ints, int dev, cudaStream_t stream,
     marlin_device_info_t const& device_info) {
-  const int eora_min_lock_workspace_ints =
-      128 + (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
+  const int lora_min_lock_workspace_ints =
+      128 + (lora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
   if (prob_m != 1 || prob_n != 4096 || prob_k != 4096 ||
-      (eora_rank != 32 && eora_rank != 64 && eora_rank != 96 &&
-       eora_rank != 128 && eora_rank != 192 && eora_rank != 256) ||
+      (lora_rank != 32 && lora_rank != 64 && lora_rank != 96 &&
+       lora_rank != 128 && lora_rank != 192 && lora_rank != 256) ||
       device_info.major_capability != 8 ||
       device_info.minor_capability != 0 || device_info.sms != 124 ||
       device_info.cooperative_launch == 0 ||
-      lock_workspace_ints < eora_min_lock_workspace_ints) {
+      lock_workspace_ints < lora_min_lock_workspace_ints) {
     return false;
   }
 
   constexpr int threads = 256;
   // Each rank reserves one LoRA-down CTA per 16 adapter ranks and assigns the
   // remaining CTAs to Marlin. Every supported schedule fills one wave.
-  constexpr int eora_grid_blocks = 124;
+  constexpr int lora_grid_blocks = 124;
   constexpr int thread_m_blocks = 1;
   constexpr int thread_n_blocks = 8;
   constexpr int thread_k_blocks = 8;
@@ -891,40 +891,40 @@ bool launch_marlin_eora_attention(
   constexpr vllm::ScalarTypeId scale_type_id =
       std::is_same<scalar_t, half>::value ? vllm::kFloat16.id()
                                           : vllm::kBFloat16.id();
-  MarlinEoraFuncPtr<scalar_t> kernel;
-  if (eora_rank == 32) {
+  MarlinLoraFuncPtr<scalar_t> kernel;
+  if (lora_rank == 32) {
     kernel =
-        MarlinEoraRank32<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+        MarlinLoraRank32<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
                          thread_m_blocks, thread_n_blocks, thread_k_blocks,
                          m_block_size_8, pipe_stages, group_blocks,
                          is_zp_float>;
-  } else if (eora_rank == 64) {
+  } else if (lora_rank == 64) {
     kernel =
-        MarlinEoraRank64<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+        MarlinLoraRank64<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
                          thread_m_blocks, thread_n_blocks, thread_k_blocks,
                          m_block_size_8, pipe_stages, group_blocks,
                          is_zp_float>;
-  } else if (eora_rank == 96) {
+  } else if (lora_rank == 96) {
     kernel =
-        MarlinEoraRank96<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+        MarlinLoraRank96<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
                          thread_m_blocks, thread_n_blocks, thread_k_blocks,
                          m_block_size_8, pipe_stages, group_blocks,
                          is_zp_float>;
-  } else if (eora_rank == 128) {
+  } else if (lora_rank == 128) {
     kernel =
-        MarlinEoraRank128<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+        MarlinLoraRank128<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
                           thread_m_blocks, thread_n_blocks, thread_k_blocks,
                           m_block_size_8, pipe_stages, group_blocks,
                           is_zp_float>;
-  } else if (eora_rank == 192) {
+  } else if (lora_rank == 192) {
     kernel =
-        MarlinEoraRank192<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+        MarlinLoraRank192<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
                           thread_m_blocks, thread_n_blocks, thread_k_blocks,
                           m_block_size_8, pipe_stages, group_blocks,
                           is_zp_float>;
   } else {
     kernel =
-        MarlinEoraRank256<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+        MarlinLoraRank256<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
                           thread_m_blocks, thread_n_blocks, thread_k_blocks,
                           m_block_size_8, pipe_stages, group_blocks,
                           is_zp_float>;
@@ -947,13 +947,13 @@ bool launch_marlin_eora_attention(
   bool has_bias = false;
   bool use_atomic_add = false;
   bool use_fp32_reduce = true;
-  const scalar_t* eora_x = reinterpret_cast<const scalar_t*>(A);
-  const scalar_t* eora_down =
-      reinterpret_cast<const scalar_t*>(eora_down_weight);
-  const scalar_t* eora_up =
-      reinterpret_cast<const scalar_t*>(eora_up_weight);
-  scalar_t* eora_out = reinterpret_cast<scalar_t*>(C);
-  float* eora_workspace = reinterpret_cast<float*>(C_tmp);
+  const scalar_t* lora_x = reinterpret_cast<const scalar_t*>(A);
+  const scalar_t* lora_down =
+      reinterpret_cast<const scalar_t*>(lora_down_weight);
+  const scalar_t* lora_up =
+      reinterpret_cast<const scalar_t*>(lora_up_weight);
+  scalar_t* lora_out = reinterpret_cast<scalar_t*>(C);
+  float* lora_workspace = reinterpret_cast<float*>(C_tmp);
   void* args[] = {
       &A_ptr,           &B_ptr,          &C_ptr,
       &C_tmp_ptr,       &bias_ptr,       &scales_ptr,
@@ -961,14 +961,14 @@ bool launch_marlin_eora_attention(
       &num_groups,      &prob_m,         &prob_n,
       &prob_k,          &lda,            &locks_ptr,
       &has_bias,        &use_atomic_add, &use_fp32_reduce,
-      &shared_mem,      &eora_x,         &eora_down,
-      &eora_up,         &eora_out,       &eora_workspace,
+      &shared_mem,      &lora_x,         &lora_down,
+      &lora_up,         &lora_out,       &lora_workspace,
   };
   cudaError_t status = cudaLaunchCooperativeKernel(
-      reinterpret_cast<const void*>(kernel), dim3(eora_grid_blocks),
+      reinterpret_cast<const void*>(kernel), dim3(lora_grid_blocks),
       dim3(threads), args, shared_mem, stream);
   TORCH_CHECK(status == cudaSuccess,
-              "fused Marlin+EoRA cooperative launch failed: ",
+              "fused Marlin+LoRA cooperative launch failed: ",
               cudaGetErrorString(status));
   return true;
 }
@@ -1659,7 +1659,7 @@ torch::Tensor MARLIN_GEMM_PREPARED_EXPORT_NAME(
   if (a.scalar_type() == at::ScalarType::Half) {
     const cudaStream_t stream =
         at::cuda::getCurrentCUDAStream(a.get_device());
-    bool fused = marlin::launch_marlin_eora_attention<half>(
+    bool fused = marlin::launch_marlin_lora_attention<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(),
         c.data_ptr<at::Half>(), c_tmp.data_ptr<float>(),
         b_scales.data_ptr<at::Half>(), workspace.data_ptr(),
@@ -1675,7 +1675,7 @@ torch::Tensor MARLIN_GEMM_PREPARED_EXPORT_NAME(
           b_q_type, false, false, true, false, num_groups, group_size,
           a.get_device(), stream, -1, -1, sms, false, true, false,
           use_packed_prefill, static_cast<int>(packed_prefill_config));
-      return eora_marlin_lora_fused_add_prepared_cuda(
+      return marlin_lora_fused_add_prepared_cuda(
           a, down_weight, up_weight, c, c_tmp);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -1687,7 +1687,7 @@ torch::Tensor MARLIN_GEMM_PREPARED_EXPORT_NAME(
   if (a.scalar_type() == at::ScalarType::BFloat16) {
     const cudaStream_t stream =
         at::cuda::getCurrentCUDAStream(a.get_device());
-    bool fused = marlin::launch_marlin_eora_attention<nv_bfloat16>(
+    bool fused = marlin::launch_marlin_lora_attention<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
         c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
         b_scales.data_ptr<at::BFloat16>(), workspace.data_ptr(),
@@ -1705,7 +1705,7 @@ torch::Tensor MARLIN_GEMM_PREPARED_EXPORT_NAME(
           num_groups, group_size, a.get_device(), stream, -1, -1, sms, false,
           true, false, use_packed_prefill,
           static_cast<int>(packed_prefill_config));
-      return eora_marlin_lora_fused_add_prepared_cuda(
+      return marlin_lora_fused_add_prepared_cuda(
           a, down_weight, up_weight, c, c_tmp);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
