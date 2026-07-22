@@ -403,6 +403,18 @@ def test_gguf_bits_string_parser_round_trip():
     assert int(bits) == 4
 
 
+def test_gguf_prism_q2_0_config_round_trip():
+    cfg = GGUFConfig(bits="q2_0")
+
+    assert cfg.bits == 2
+    assert cfg.format == "q_0"
+    assert cfg.runtime_bits.to_string() == "q2_0"
+
+    reloaded = QuantizeConfig.from_quant_config(cfg.to_dict())
+    assert isinstance(reloaded, GGUFConfig)
+    assert reloaded.runtime_bits.to_string() == "q2_0"
+
+
 def test_weight_only_payload_dispatches_to_rtn():
     cfg = QuantizeConfig(
         bits=4,

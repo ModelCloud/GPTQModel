@@ -16,6 +16,7 @@ import torch
 
 from ..nn_modules.qlinear.gguf import (
     _dequantize_gguf_tensor_numpy,
+    _dequantize_prism_q2_0_torch,
     _dequantize_sign_only_torch,
     _quantize_gguf_tensor_numpy,
 )
@@ -69,6 +70,8 @@ class GGMLQuantizationType(IntEnum):
     MXFP4 = 39
     Q1_0 = 40
     Q1_0_g128 = 41
+    Q2_0 = 42
+    PQ2_0 = 142
 
 
 class GGUFEndian(IntEnum):
@@ -127,10 +130,16 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.MXFP4: (32, 1 + 16),
     GGMLQuantizationType.Q1_0: (32, 2 + 4),
     GGMLQuantizationType.Q1_0_g128: (128, 2 + 16),
+    GGMLQuantizationType.Q2_0: (128, 2 + 32),
+    GGMLQuantizationType.PQ2_0: (128, 2 + 32),
 }
 _TORCH_SIGN_ONLY_QTYPES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.Q1_0: GGML_QUANT_SIZES[GGMLQuantizationType.Q1_0],
     GGMLQuantizationType.Q1_0_g128: GGML_QUANT_SIZES[GGMLQuantizationType.Q1_0_g128],
+}
+_TORCH_TERNARY_QTYPES = {
+    GGMLQuantizationType.Q2_0,
+    GGMLQuantizationType.PQ2_0,
 }
 
 MODEL_ARCH_QWEN3 = "qwen3"
@@ -175,6 +184,8 @@ _QWEN3_LINEAR_TENSOR_RE = pcre.compile(
 _GGUF_BITS_ALIAS_BY_QTYPE: dict[GGMLQuantizationType, str] = {
     GGMLQuantizationType.Q1_0: "q1_0",
     GGMLQuantizationType.Q1_0_g128: "q1_0_g128",
+    GGMLQuantizationType.Q2_0: "q2_0",
+    GGMLQuantizationType.PQ2_0: "q2_0",
     GGMLQuantizationType.Q4_0: "q4_0",
     GGMLQuantizationType.Q8_0: "q8_0",
     GGMLQuantizationType.Q4_K: "q4_k",
@@ -352,6 +363,13 @@ def dequantize_to_torch(
             np.asarray(data, dtype=np.uint8),
             block_size=block_size,
             type_size=type_size,
+            device=target_device,
+            dtype=dtype,
+        ).contiguous()
+
+    if resolved_qtype in _TORCH_TERNARY_QTYPES:
+        return _dequantize_prism_q2_0_torch(
+            np.asarray(data, dtype=np.uint8),
             device=target_device,
             dtype=dtype,
         ).contiguous()
@@ -628,6 +646,13 @@ class GGUFReader:
     def _read_tensors(self, data_start: int, fields: list[ReaderField]) -> None:
         tensors: list[ReaderTensor] = []
         seen_names: set[str] = set()
+        relative_offsets = sorted(int(field.parts[-1][0]) for field in fields)
+        data_size = len(self.data) - data_start
+        storage_span_by_offset = {
+            tensor_offset: (relative_offsets[index + 1] if index + 1 < len(relative_offsets) else data_size)
+            - tensor_offset
+            for index, tensor_offset in enumerate(relative_offsets)
+        }
 
         for field in fields:
             _name_length, name_data, _n_dims, dims, raw_dtype, tensor_offset = field.parts
@@ -641,7 +666,18 @@ class GGUFReader:
             logical_shape = tuple(reversed(dims.tolist()))
             block_size, type_size = GGML_QUANT_SIZES[tensor_type]
             n_bytes = n_elements * type_size // block_size
-            absolute_offset = int(data_start + tensor_offset[0])
+            relative_offset = int(tensor_offset[0])
+            absolute_offset = data_start + relative_offset
+
+            if tensor_type in _TORCH_TERNARY_QTYPES:
+                storage_span = storage_span_by_offset[relative_offset]
+                aligned_n_bytes = (n_bytes + self.alignment - 1) // self.alignment * self.alignment
+                if storage_span not in {n_bytes, aligned_n_bytes}:
+                    raise ValueError(
+                        f"Unsupported {tensor_type.name} storage for tensor `{tensor_name}`: the type tag implies "
+                        f"{block_size}-value/{type_size}-byte blocks ({n_bytes} data bytes), but its file span is "
+                        f"{storage_span} bytes. This checkpoint may use the incompatible Q2_0_g64 layout."
+                    )
 
             if tensor_type in {
                 GGMLQuantizationType.F16,

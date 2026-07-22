@@ -12,7 +12,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.python import has_gil_disabled
-from .gguf import GGUFTorchLinear, _unpack_q4_k_scale_min_torch
+from .gguf import PRISM_Q2_0_TYPE_SIZE, GGUFTorchLinear, _unpack_q4_k_scale_min_torch
 
 
 try:
@@ -503,6 +503,109 @@ if _TRITON_AVAILABLE:
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
+    @triton.jit
+    def _gguf_q2_0_u32_fused_matmul_kernel_impl(
+        x_ptr,
+        code_ptr,
+        scale_ptr,
+        out_ptr,
+        M,
+        N,
+        NUM_BLOCKS,
+        stride_xm,
+        stride_xk,
+        stride_cb,
+        stride_cg,
+        stride_cn,
+        stride_sb,
+        stride_sn,
+        stride_om,
+        stride_on,
+        BLOCK_SIZE_M: tl.constexpr,
+        BLOCK_SIZE_N: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+
+        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        m_mask = offs_m < M
+        n_mask = offs_n < N
+
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+        code_shifts = tl.arange(0, 16) * 2
+
+        for block_idx in range(0, NUM_BLOCKS):
+            scale = tl.load(
+                scale_ptr + block_idx * stride_sb + offs_n * stride_sn,
+                mask=n_mask,
+                other=0.0,
+            )
+
+            for code_group in range(0, 4):
+                offs_k = block_idx * 128 + code_group * 32 + tl.arange(0, 32)
+                activation = tl.load(
+                    x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk,
+                    mask=m_mask[:, None],
+                    other=0.0,
+                )
+                packed = tl.load(
+                    code_ptr
+                    + block_idx * stride_cb
+                    + (code_group * 2 + tl.arange(0, 2))[:, None] * stride_cg
+                    + offs_n[None, :] * stride_cn,
+                    mask=n_mask[None, :],
+                    other=0,
+                )
+                packed = tl.cast(packed, tl.uint32)
+                codes = (packed[:, None, :] >> code_shifts[None, :, None]) & 0x03
+                values = tl.reshape(codes, (32, BLOCK_SIZE_N))
+                weight = (tl.cast(values, tl.float16) - 1.0) * scale[None, :]
+                accumulator += tl.dot(activation, weight)
+
+        tl.store(
+            out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
+            tl.cast(accumulator, tl.float16),
+            mask=m_mask[:, None] & n_mask[None, :],
+        )
+
+    @triton.jit
+    def _gguf_q2_0_native_gemv_kernel_impl(
+        x_ptr,
+        qweight_ptr,
+        scale_ptr,
+        out_ptr,
+        N,
+        NUM_BLOCKS,
+        stride_qn,
+        stride_qb,
+        stride_sb,
+        stride_sn,
+    ):
+        """Decode one row directly from GGUF's output-major Q2_0 storage."""
+
+        pid_n = tl.program_id(0)
+        byte_offsets = tl.arange(0, 32)
+        code_shifts = tl.arange(0, 4) * 2
+        accumulator = tl.zeros((128,), dtype=tl.float32)
+
+        for block_idx in range(0, NUM_BLOCKS):
+            packed = tl.load(
+                qweight_ptr
+                + pid_n * stride_qn
+                + block_idx * stride_qb
+                + 2
+                + byte_offsets,
+            )
+            codes = (packed[:, None] >> code_shifts[None, :]) & 0x03
+            values = tl.reshape(codes, (128,))
+            activation = tl.load(x_ptr + block_idx * 128 + tl.arange(0, 128))
+            scale = tl.load(scale_ptr + block_idx * stride_sb + pid_n * stride_sn)
+            weight = (tl.cast(values, tl.float16) - 1.0) * scale
+            accumulator += tl.cast(activation * weight, tl.float32)
+
+        tl.store(out_ptr + pid_n, tl.sum(accumulator, axis=0), mask=pid_n < N)
+
     _gguf_q1_0_g128_fused_matmul_kernel_small = custom_autotune.autotune(
         configs=_GGUF_TRITON_SMALL_CONFIGS,
         key=["M", "N"],
@@ -533,6 +636,16 @@ if _TRITON_AVAILABLE:
         key=["M", "N"],
         nearest_power_of_two=True,
     )(_gguf_q1_0_g128_u32_k2048_fused_matmul_kernel_impl)
+    _gguf_q2_0_u32_fused_matmul_kernel_small = custom_autotune.autotune(
+        configs=_GGUF_TRITON_SMALL_CONFIGS,
+        key=["M", "N"],
+        nearest_power_of_two=True,
+    )(_gguf_q2_0_u32_fused_matmul_kernel_impl)
+    _gguf_q2_0_u32_fused_matmul_kernel_large = custom_autotune.autotune(
+        configs=_GGUF_TRITON_LARGE_CONFIGS,
+        key=["M", "N", "NUM_BLOCKS"],
+        nearest_power_of_two=True,
+    )(_gguf_q2_0_u32_fused_matmul_kernel_impl)
 
     @triton.jit
     def _gguf_q4_k_fused_matmul_kernel_impl(
@@ -938,6 +1051,40 @@ def _select_q1_0_g128_u32_fixed_launch_config(
     return None
 
 
+def _select_q2_0_fixed_launch_config(
+    *,
+    capability: tuple[int, int] | None,
+    rows: int,
+    in_features: int,
+    out_features: int,
+) -> dict[str, int] | None:
+    """Use measured Q1 tile families for Q2 multi-row prefill and generic fallback."""
+
+    return _select_q1_0_g128_fixed_launch_config(
+        capability=capability,
+        rows=rows,
+        in_features=in_features,
+        cols=out_features,
+    )
+
+
+def _use_q2_0_native_gemv(
+    *,
+    capability: tuple[int, int] | None,
+    rows: int,
+    in_features: int,
+    out_features: int,
+) -> bool:
+    """Use the profiled output-major decode path only for Prism's sm80 model shapes."""
+
+    return capability == (8, 0) and rows == 1 and (in_features, out_features) in {
+        (2048, 1024),
+        (2048, 2048),
+        (2048, 6144),
+        (6144, 2048),
+    }
+
+
 def _use_q1_0_g128_k2048_decode_specialization(
     *,
     rows: int,
@@ -1135,6 +1282,98 @@ def fused_q1_0_g128_u32_k2048_matmul(
         output.stride(0),
         output.stride(1),
     )
+
+
+def fused_q2_0_u32_matmul(
+    x: torch.Tensor,
+    code_words: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    if not _TRITON_AVAILABLE:
+        raise RuntimeError("Triton is not available for GGUF Q2_0 fused matmul.")
+
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    kernel = _select_triton_kernel(
+        _gguf_q2_0_u32_fused_matmul_kernel_small,
+        _gguf_q2_0_u32_fused_matmul_kernel_large,
+        num_blocks=code_words.shape[0],
+    )
+    return _launch(
+        kernel,
+        x,
+        output,
+        x,
+        code_words,
+        scale,
+        output,
+        x.shape[0],
+        output.shape[1],
+        code_words.shape[0],
+        x.stride(0),
+        x.stride(1),
+        code_words.stride(0),
+        code_words.stride(1),
+        code_words.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        output.stride(0),
+        output.stride(1),
+    )
+
+
+def _launch_q2_0_u32_fixed_matmul(
+    x: torch.Tensor,
+    code_words: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    fixed_config: dict[str, int],
+) -> torch.Tensor:
+    output = torch.empty((x.shape[0], scale.shape[1]), device=x.device, dtype=x.dtype)
+    return _launch_with_meta(
+        _gguf_q2_0_u32_fused_matmul_kernel_impl,
+        x,
+        output,
+        x,
+        code_words,
+        scale,
+        output,
+        x.shape[0],
+        output.shape[1],
+        code_words.shape[0],
+        x.stride(0),
+        x.stride(1),
+        code_words.stride(0),
+        code_words.stride(1),
+        code_words.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        output.stride(0),
+        output.stride(1),
+        **fixed_config,
+    )
+
+
+def _launch_q2_0_native_gemv(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    output = torch.empty((1, qweight.shape[0]), device=x.device, dtype=x.dtype)
+    _gguf_q2_0_native_gemv_kernel_impl[(qweight.shape[0],)](
+        x,
+        qweight,
+        scale,
+        output,
+        qweight.shape[0],
+        scale.shape[0],
+        qweight.stride(0),
+        PRISM_Q2_0_TYPE_SIZE,
+        scale.stride(0),
+        scale.stride(1),
+        num_warps=2,
+        num_stages=2,
+    )
+    return output
 
 
 def _launch_q1_0_g128_u32_fixed_matmul(
@@ -1358,7 +1597,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TRITON]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 45}
-    SUPPORTS_BITS = [1, 4, 5, 6]
+    SUPPORTS_BITS = [1, 2, 4, 5, 6]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True
@@ -1403,13 +1642,14 @@ class GGUFTritonKernel(GGUFTorchLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        if self.gguf_tensor_qtype not in {"Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"}:
+        if self.gguf_tensor_qtype not in {"Q1_0_g128", "Q2_0", "Q4_K", "Q5_K", "Q6_K"}:
             raise NotImplementedError(
                 f"{self.__class__.__name__} only supports fused GGUF Triton formats "
-                f"(Q1_0_g128, Q4_K, Q5_K, Q6_K). Actual GGUF qtype: {self.gguf_tensor_qtype}. "
+                f"(Q1_0_g128, Q2_0, Q4_K, Q5_K, Q6_K). Actual GGUF qtype: {self.gguf_tensor_qtype}. "
                 "Use BACKEND.GGUF_TORCH for unsupported GGUF formats."
             )
         self._gguf_triton_cache: dict[tuple[int, str], dict[str, Any]] = {}
+        self._gguf_q2_native_scale_cache: dict[tuple[int, str], dict[str, Any]] = {}
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -1427,7 +1667,22 @@ class GGUFTritonKernel(GGUFTorchLinear):
 
     def clear_weight_cache(self) -> None:
         self._gguf_triton_cache.clear()
+        self._gguf_q2_native_scale_cache.clear()
         return super().clear_weight_cache()
+
+    def release_q2_prefill_cache(self) -> None:
+        """Keep only Q2_0 scales needed by native decode; a later prefill rebuilds its code cache."""
+
+        if self.gguf_tensor_qtype != "Q2_0":
+            return
+        for key, cached in self._gguf_triton_cache.items():
+            if cached.get("qweight_ptr") != self.qweight.data_ptr():
+                continue
+            self._gguf_q2_native_scale_cache[key] = {
+                "qweight_ptr": cached["qweight_ptr"],
+                "scale": cached["scale"],
+            }
+        self._gguf_triton_cache.clear()
 
     def _triton_cache_key(self, device: torch.device) -> tuple[int, str]:
         return (device.index if device.index is not None else -1, self.gguf_tensor_qtype)
@@ -1472,6 +1727,27 @@ class GGUFTritonKernel(GGUFTorchLinear):
                 "sign_bytes": sign_bytes,
                 "scale": scale,
                 "use_u32": False,
+            }
+
+        if self.gguf_tensor_qtype == "Q2_0":
+            cache_key = self._triton_cache_key(device)
+            native_cache = self._gguf_q2_native_scale_cache.get(cache_key)
+            if native_cache is not None and native_cache.get("qweight_ptr") == self.qweight.data_ptr():
+                scale = native_cache["scale"]
+            else:
+                scale = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).permute(1, 0).contiguous()
+            code_bytes = blocks[..., 2:].permute(1, 2, 0).contiguous()
+            code_words_src = code_bytes.to(torch.int32)
+            code_words = (
+                code_words_src[:, 0::4, :]
+                | torch.bitwise_left_shift(code_words_src[:, 1::4, :], 8)
+                | torch.bitwise_left_shift(code_words_src[:, 2::4, :], 16)
+                | torch.bitwise_left_shift(code_words_src[:, 3::4, :], 24)
+            ).contiguous()
+            return {
+                "code_words": code_words,
+                "qweight_ptr": self.qweight.data_ptr(),
+                "scale": scale,
             }
 
         if self.gguf_tensor_qtype == "Q4_K":
@@ -1527,7 +1803,26 @@ class GGUFTritonKernel(GGUFTorchLinear):
 
         cached = self._build_triton_cache(device)
         self._gguf_triton_cache[key] = cached
+        self._gguf_q2_native_scale_cache.pop(key, None)
         return cached
+
+    def _get_q2_native_scale(self, device: torch.device) -> torch.Tensor:
+        key = self._triton_cache_key(device)
+        full_cache = self._gguf_triton_cache.get(key)
+        if full_cache is not None and full_cache.get("qweight_ptr") == self.qweight.data_ptr():
+            return full_cache["scale"]
+
+        cached = self._gguf_q2_native_scale_cache.get(key)
+        if cached is not None and cached.get("qweight_ptr") == self.qweight.data_ptr():
+            return cached["scale"]
+
+        blocks, _, _ = self._reshape_blocks(device=device)
+        scale = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).permute(1, 0).contiguous()
+        self._gguf_q2_native_scale_cache[key] = {
+            "qweight_ptr": self.qweight.data_ptr(),
+            "scale": scale,
+        }
+        return scale
 
     def _forward_triton(self, x_flat: torch.Tensor) -> torch.Tensor:
         if x_flat.device.type != "cuda":
@@ -1540,6 +1835,19 @@ class GGUFTritonKernel(GGUFTorchLinear):
             x_work = torch.nn.functional.pad(x_flat, (0, self.padded_in_features - x_flat.shape[-1])).contiguous()
         else:
             x_work = x_flat.contiguous()
+
+        capability = _cuda_device_capability(x_work.device)
+        if self.gguf_tensor_qtype == "Q2_0" and _use_q2_0_native_gemv(
+            capability=capability,
+            rows=x_work.shape[0],
+            in_features=self.padded_in_features,
+            out_features=self.out_features,
+        ):
+            return _launch_q2_0_native_gemv(
+                x_work,
+                self.qweight,
+                self._get_q2_native_scale(x_work.device),
+            )
 
         cache = self._get_triton_cache(x_work.device)
 
@@ -1593,6 +1901,21 @@ class GGUFTritonKernel(GGUFTorchLinear):
             ):
                 return fused_q1_0_g128_k2048_matmul(x_work, cache["sign_bytes"], cache["scale"])
             return fused_q1_0_g128_matmul(x_work, cache["sign_bytes"], cache["scale"])
+        if self.gguf_tensor_qtype == "Q2_0":
+            fixed_config = _select_q2_0_fixed_launch_config(
+                capability=capability,
+                rows=x_work.shape[0],
+                in_features=self.padded_in_features,
+                out_features=cache["scale"].shape[1],
+            )
+            if fixed_config is not None:
+                return _launch_q2_0_u32_fixed_matmul(
+                    x_work,
+                    cache["code_words"],
+                    cache["scale"],
+                    fixed_config=fixed_config,
+                )
+            return fused_q2_0_u32_matmul(x_work, cache["code_words"], cache["scale"])
         if self.gguf_tensor_qtype == "Q4_K":
             return fused_q4_k_matmul(x_work, cache["qs"], cache["scale"], cache["min"])
         if self.gguf_tensor_qtype == "Q5_K":
@@ -1634,11 +1957,13 @@ __all__ = [
     "_select_q1_0_g128_fixed_launch_config",
     "_select_q1_0_g128_u32_fixed_launch_config",
     "_select_q1_0_g128_u32_layout",
+    "_select_q2_0_fixed_launch_config",
     "_use_q1_0_g128_k2048_decode_specialization",
     "fused_q1_0_g128_matmul",
     "fused_q1_0_g128_k2048_matmul",
     "fused_q1_0_g128_u32_matmul",
     "fused_q1_0_g128_u32_k2048_matmul",
+    "fused_q2_0_u32_matmul",
     "fused_q4_k_matmul",
     "fused_q5_k_matmul",
     "fused_q6_k_matmul",

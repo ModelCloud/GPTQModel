@@ -249,7 +249,7 @@ See [Quantization Runtime Sharing](docs/quantization_runtime_sharing.md) for imp
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
-* ✨ Prism Bonsai `Q1_0_g128` GGUF checkpoints can be loaded for post-quantized inference through the normal `model_id_or_path` argument. GPT-QModel normalizes the GGUF artifact internally for HF Transformers via its native GGUF runtime, and does not support Prism Bonsai quantization or export.
+* ✨ Prism Bonsai `Q1_0_g128`, canonical `Q2_0`, and `PQ2_0` GGUF checkpoints can be loaded for post-quantized inference through the normal `model_id_or_path` argument. GPT-QModel normalizes the GGUF artifact internally for HF Transformers via its native GGUF runtime, and does not support Prism Bonsai quantization or export.
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
@@ -298,7 +298,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2   | ✅ | Zamba / Zamba2                  | ✅ | Intern S1              | ✅ |
 | HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ |    |  |                                 |  |                |   |
 
-Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
+Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. For ternary checkpoints, canonical 128-value-block `Q2_0` and its identical `PQ2_0` payload are supported; the incompatible `Q2_0_g64` layout is rejected. Prism model quantization is not included.
 
 ## Platform and HW Support 
 

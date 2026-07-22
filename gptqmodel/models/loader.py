@@ -28,7 +28,7 @@ else:
 
 import defuser
 from packaging.version import InvalidVersion, Version
-from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 
 from ..adapter.adapter import Adapter
@@ -1033,6 +1033,19 @@ def ModelLoader(cls):
                 "Native Q1_0_g128 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or BACKEND.GGUF_TRITON. "
                 f"Actual backend: `{backend}`."
             )
+        elif (
+            native_gguf_qspec is not None
+            and native_gguf_qspec.tensor_qtype
+            in {
+                internal_gguf.GGMLQuantizationType.Q2_0,
+                internal_gguf.GGMLQuantizationType.PQ2_0,
+            }
+            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON}
+        ):
+            raise ValueError(
+                "Native Prism Q2_0/PQ2_0 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or "
+                f"BACKEND.GGUF_TRITON. Actual backend: `{backend}`."
+            )
 
         if format_code == FORMAT.EXL3:
             if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH):
@@ -1683,6 +1696,41 @@ def ModelLoader(cls):
             model = gptqmodel_post_init(model, use_act_order=qcfg.desc_act, quantize_config=qcfg)
 
         model.eval()
+
+        if (
+            native_gguf_qspec is not None
+            and native_gguf_qspec.tensor_qtype
+            in {
+                internal_gguf.GGMLQuantizationType.Q2_0,
+                internal_gguf.GGMLQuantizationType.PQ2_0,
+            }
+            and getattr(qlinear_kernel, "__name__", None) == "GGUFTritonKernel"
+        ):
+            from ..nn_modules.triton_utils.q2_attention import install_prism_q2_gqa_attention
+            from ..nn_modules.triton_utils.q2_qkv import install_prism_q2_qkv
+            from ..nn_modules.triton_utils.q2_residual import install_prism_q2_residuals
+            from ..nn_modules.triton_utils.q2_rotary import install_prism_q2_rotary
+            from ..nn_modules.triton_utils.q2_swiglu import install_prism_q2_swiglu
+            from ..nn_modules.triton_utils.rms_norm import install_prism_q2_rms_norms
+
+            fused_rms_norms = install_prism_q2_rms_norms(model)
+            if fused_rms_norms:
+                log.info(f"Kernel: installed {fused_rms_norms} sm80 Prism Q2 RMSNorm kernels.")
+            fused_swiglu = install_prism_q2_swiglu(model)
+            if fused_swiglu:
+                log.info(f"Kernel: installed {fused_swiglu} sm80 Prism Q2 SwiGLU kernels.")
+            fused_qkv = install_prism_q2_qkv(model)
+            if fused_qkv:
+                log.info(f"Kernel: installed {fused_qkv} sm80 Prism Q2 QKV kernels.")
+            fused_rotary = install_prism_q2_rotary(model)
+            if fused_rotary:
+                log.info(f"Kernel: installed {fused_rotary} sm80 Prism Q2 rotary kernels.")
+            fused_attention = install_prism_q2_gqa_attention(model)
+            if fused_attention:
+                log.info(f"Kernel: installed {fused_attention} sm80 Prism Q2 GQA attention kernels.")
+            fused_residuals = install_prism_q2_residuals(model)
+            if fused_residuals:
+                log.info(f"Kernel: installed {fused_residuals} sm80 Prism Q2 residual-fused decoder layers.")
 
         if backend == BACKEND.MLX:
             import tempfile

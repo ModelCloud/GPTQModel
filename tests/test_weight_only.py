@@ -12,11 +12,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from gptqmodel.models._const import DEVICE, normalize_device
+from gptqmodel.models._const import normalize_device
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
-from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
+from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel, _use_q2_0_native_gemv
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
@@ -802,6 +802,130 @@ def test_gguf_triton_q1_0_g128_fused_forward_matches_dense_baseline():
     fused = triton_module(inputs)
 
     output_stats = _error_stats(baseline.to(torch.float32), fused.to(torch.float32))
+    assert output_stats["mae"] < 2e-4
+    assert output_stats["max"] < 3e-3
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton ternary tests")
+def test_gguf_triton_q2_0_fused_forward_matches_dense_baseline():
+    pytest.importorskip("triton")
+
+    torch.manual_seed(1234)
+    cpu_linear = nn.Linear(256, 192, bias=True, dtype=torch.float16).cpu().eval()
+    with torch.no_grad():
+        cpu_linear.weight.normal_(mean=0.0, std=0.01)
+        cpu_linear.bias.normal_(mean=0.0, std=0.001)
+
+    reference_module = GGUFTorchLinear(
+        bits="q2_0",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=256,
+        out_features=192,
+        bias=True,
+        register_buffers=False,
+    )
+    reference_module.pack(cpu_linear, scales=torch.empty(0), zeros=torch.empty(0), g_idx=None)
+    reference_module.post_init()
+    reference_module = reference_module.to("cuda").eval()
+
+    triton_module = GGUFTritonKernel(
+        bits="q2_0",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=256,
+        out_features=192,
+        bias=True,
+        register_buffers=True,
+    ).to("cuda").eval()
+    triton_module.load_state_dict(reference_module.state_dict(), strict=True)
+
+    inputs = torch.randn(16, 256, device="cuda", dtype=torch.float16) * 0.1
+    baseline = reference_module._forward_dequant_matmul(inputs)
+    baseline = baseline + reference_module.bias.to(device=baseline.device, dtype=baseline.dtype)
+    actual = triton_module(inputs)
+
+    output_stats = _error_stats(baseline.to(torch.float32), actual.to(torch.float32))
+    assert output_stats["mae"] < 2e-4
+    assert output_stats["max"] < 3e-3
+
+
+def test_gguf_triton_q2_0_native_decode_is_gated_to_profiled_sm80_shapes():
+    args = {
+        "rows": 1,
+        "in_features": 2048,
+        "out_features": 2048,
+    }
+
+    assert _use_q2_0_native_gemv(capability=(8, 0), **args)
+    assert not _use_q2_0_native_gemv(capability=(8, 9), **args)
+    assert not _use_q2_0_native_gemv(capability=(9, 0), **args)
+    assert not _use_q2_0_native_gemv(capability=(8, 0), **(args | {"rows": 2}))
+    assert not _use_q2_0_native_gemv(capability=(8, 0), **(args | {"out_features": 4096}))
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0),
+    reason="Prism Q2_0 native decode specialization requires sm80 CUDA",
+)
+def test_gguf_triton_q2_0_sm80_native_decode_matches_dense_and_releases_prefill_cache():
+    pytest.importorskip("triton")
+
+    torch.manual_seed(1234)
+    cpu_linear = nn.Linear(2048, 1024, bias=False, dtype=torch.float16).cpu().eval()
+    with torch.no_grad():
+        cpu_linear.weight.normal_(mean=0.0, std=0.01)
+
+    reference_module = GGUFTorchLinear(
+        bits="q2_0",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=2048,
+        out_features=1024,
+        bias=False,
+        register_buffers=False,
+    )
+    reference_module.pack(cpu_linear, scales=torch.empty(0), zeros=torch.empty(0), g_idx=None)
+    reference_module.post_init()
+    reference_module = reference_module.to("cuda").eval()
+
+    triton_module = GGUFTritonKernel(
+        bits="q2_0",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=2048,
+        out_features=1024,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda").eval()
+    triton_module.load_state_dict(reference_module.state_dict(), strict=True)
+
+    full_cache = triton_module._get_triton_cache(triton_module.qweight.device)
+    full_cache_bytes = sum(value.nbytes for value in full_cache.values() if torch.is_tensor(value))
+    triton_module.release_q2_prefill_cache()
+    native_cache = next(iter(triton_module._gguf_q2_native_scale_cache.values()))
+    native_cache_bytes = sum(value.nbytes for value in native_cache.values() if torch.is_tensor(value))
+
+    assert not triton_module._gguf_triton_cache
+    assert native_cache_bytes == full_cache["scale"].nbytes
+    assert native_cache_bytes * 17 == full_cache_bytes
+
+    native_scale_ptr = native_cache["scale"].data_ptr()
+    rebuilt_cache = triton_module._get_triton_cache(triton_module.qweight.device)
+    assert rebuilt_cache["scale"].data_ptr() == native_scale_ptr
+    triton_module.release_q2_prefill_cache()
+    rebuilt_native_cache = next(iter(triton_module._gguf_q2_native_scale_cache.values()))
+    assert rebuilt_native_cache["scale"].data_ptr() == native_scale_ptr
+
+    inputs = torch.randn(1, 2048, device="cuda", dtype=torch.float16) * 0.1
+    baseline = reference_module._forward_dequant_matmul(inputs)
+    actual = triton_module(inputs)
+
+    output_stats = _error_stats(baseline.to(torch.float32), actual.to(torch.float32))
     assert output_stats["mae"] < 2e-4
     assert output_stats["max"] < 3e-3
 

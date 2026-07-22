@@ -13,6 +13,7 @@ from gptqmodel.utils import hf as hf_utils
 from gptqmodel.utils import internal_gguf
 from gptqmodel.utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
+    get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
     normalize_hf_config_compat,
     normalize_model_id_or_path_for_hf_gguf,
@@ -20,6 +21,23 @@ from gptqmodel.utils.hf import (
     prepare_remote_model_init_compat,
     resolve_trust_remote_code,
 )
+
+
+def test_get_hf_config_dtype_avoids_modern_deprecated_alias():
+    class ModernConfig:
+        dtype = None
+
+        @property
+        def torch_dtype(self):
+            raise AssertionError("deprecated torch_dtype alias should not be read")
+
+    assert get_hf_config_dtype(ModernConfig()) is None
+
+
+def test_get_hf_config_dtype_preserves_stored_legacy_value():
+    config = SimpleNamespace(dtype=None, torch_dtype="float16")
+
+    assert get_hf_config_dtype(config) is torch.float16
 
 
 def test_normalize_hf_config_compat_backfills_llama_rope_parameters():
@@ -238,12 +256,19 @@ def test_normalize_hf_config_compat_restores_legacy_cache_length_helpers(monkeyp
         def get_seq_length(self):
             return self._seq_length
 
+        def get_max_length(self):
+            return self._max_cache_shape
+
         def get_max_cache_shape(self):
             return self._max_cache_shape
 
     class DummyCache(cache_utils.Cache):
         def __init__(self, seq_length, max_cache_shape):
             self.layers = [DummyLayer(seq_length, max_cache_shape)]
+
+    class EmptyCache(cache_utils.Cache):
+        def __init__(self):
+            self.layers = []
 
     normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
 
@@ -254,6 +279,7 @@ def test_normalize_hf_config_compat_restores_legacy_cache_length_helpers(monkeyp
     assert limited_cache.get_usable_length(4) == 6
     assert dynamic_cache.get_max_length() is None
     assert dynamic_cache.get_usable_length(4) == 8
+    assert EmptyCache().get_max_length() is None
 
 
 def test_normalize_hf_config_compat_restores_legacy_dynamic_cache_converters(monkeypatch):
