@@ -23,8 +23,20 @@ This file governs the whole repository. Keep changes narrowly scoped, preserve C
 - Ampere or A100 tuning: also use `$gptqmodel-ampere-kernels`.
 - Hopper or H100 tuning: also use `$gptqmodel-hopper-kernels`.
 - New model families, `module_tree`, MoE adapters, or `MODEL_MAP`: use `$gptqmodel-model-support`.
+- Tokenizer initialization, normalization, special-token compatibility, prompt rendering, chat templates, or
+  unexpectedly low inference/evaluation scores: use `$gptqmodel-tokenizer-normalization`.
 
 Read every selected `SKILL.md` completely before editing. Follow its linked references only when relevant to the task.
+
+## Tokenizer normalization ownership
+
+GPT-QModel depends on [ModelCloud/Tokenicer](https://github.com/ModelCloud/Tokenicer). Put reusable corrective
+tokenizer and chat-template normalization in Tokenicer, add relevant tests, increment its version, run its complete
+test suite, then commit, push, and open a Tokenicer pull request. Do not leave model-loader patches in GPT-QModel
+merely to avoid fixing the dependency.
+
+Establish a non-quantized baseline before treating bad generation or evaluation scores as a quantization regression.
+Compare exact rendered prompts and input IDs as well as aggregate scores.
 
 ## Working rules
 

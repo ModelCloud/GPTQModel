@@ -37,6 +37,9 @@ def test_laguna_module_tree_expands_dense_attention_and_sparse_moe_paths():
     assert "mlp.shared_experts.gate_proj" in flat_modules
     assert "mlp.shared_experts.up_proj" in flat_modules
     assert "mlp.shared_experts.down_proj" in flat_modules
+    assert "mlp.shared_expert.gate_proj" in flat_modules
+    assert "mlp.shared_expert.up_proj" in flat_modules
+    assert "mlp.shared_expert.down_proj" in flat_modules
     assert "mlp.experts.0.gate_proj" in flat_modules
     assert "mlp.experts.1.up_proj" in flat_modules
     assert "mlp.experts.2.down_proj" in flat_modules
@@ -55,9 +58,10 @@ def test_laguna_consumes_defuser_for_fused_expert_conversion():
         hidden_size=16,
         intermediate_size=32,
         num_attention_heads=2,
-        num_attention_heads_per_layer=[2, 2],
+        num_attention_heads_per_layer=[2, 4],
         num_key_value_heads=1,
         head_dim=8,
+        gating="per-head",
         vocab_size=32,
         num_experts=3,
         num_experts_per_tok=2,
@@ -67,6 +71,7 @@ def test_laguna_consumes_defuser_for_fused_expert_conversion():
         layer_types=["full_attention", "full_attention"],
     )
     model = modeling_laguna.LagunaForCausalLM(config)
+    assert model.model.layers[1].self_attn.g_proj.out_features == 4
     experts = model.model.layers[1].mlp.experts
     assert hasattr(experts, "gate_up_proj")
 

@@ -17,7 +17,7 @@ from transformers import PreTrainedTokenizerFast
 
 from gptqmodel.models.definitions import base_qwen2_5_omni, base_qwen2_vl
 from gptqmodel.utils import structure as structure_module
-from gptqmodel.utils.hf import load_tokenizer
+from gptqmodel.utils.hf import load_hf_tokenizer, load_tokenizer
 
 
 def test_qwen2_vl_image_only_process_vision_info_returns_image_list():
@@ -437,3 +437,35 @@ def test_load_tokenizer_deprecated_shim_forwards_to_tokenicer():
 
     assert any(item.category is DeprecationWarning for item in caught)
     assert wrapped.model_config is text_config
+
+
+def test_load_hf_tokenizer_delegates_normalization_to_tokenicer(monkeypatch):
+    native_tokenizer = object()
+    model_config = object()
+    calls = []
+
+    def fake_load(tokenizer_or_path, **kwargs):
+        calls.append((tokenizer_or_path, kwargs))
+        return types.SimpleNamespace(tokenizer=native_tokenizer)
+
+    monkeypatch.setattr(Tokenicer, "load", staticmethod(fake_load))
+
+    loaded = load_hf_tokenizer(
+        "/tmp/model",
+        model_config=model_config,
+        trust_remote_code=True,
+        revision="test-revision",
+    )
+
+    assert loaded is native_tokenizer
+    assert calls == [
+        (
+            "/tmp/model",
+            {
+                "model_config": model_config,
+                "trust_remote_code": True,
+                "revision": "test-revision",
+            },
+        )
+    ]
+    assert "fix_mistral_regex" not in calls[0][1]
