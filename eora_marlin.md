@@ -2639,3 +2639,849 @@ The final BF16 counter report is
 `ncu_candidate_wavefront_10_9_7_6_12_11_9_bf16_gpu3.ncu-rep`. Longer benchmark
 JSON files are
 `final_output_owned_wavefront_{fp16_gpu2,bf16_gpu3}_w500_i3000_t1000x5.json`.
+
+### 2026-07-22: per-output handoff removes the mega-kernel grid join
+
+This continuation used only PCI-ordered physical GPUs 2 and 3. Every GPU
+command set `CUDA_DEVICE_ORDER=PCI_BUS_ID` and either
+`CUDA_VISIBLE_DEVICES=2,3` or a single-device subset for Compute Sanitizer.
+Physical GPU 2 was logical `cuda:0` for FP16 and physical GPU 3 was logical
+`cuda:1` for BF16. Both devices are 124-SM NVIDIA PG506-230 `sm_80` GPUs with
+98,304 MiB. The interpreter was `/root/vm314t/bin/python` (Python 3.14.5),
+with PyTorch `2.13.0+cu130`, CUDA 13.0, driver 610.43.02, and
+`PYTHON_GIL=0`. JIT compilation used `TORCH_CUDA_ARCH_LIST=8.0`, producing
+`-gencode=arch=compute_80,code=sm_80` with `-O3`, `--threads 8`,
+`-Xptxas -O3,-dlcm=ca`, and `-lineinfo`.
+
+#### Retained producer-consumer protocol
+
+The preceding output-owned schedule ended Marlin and LoRA-down with a
+cooperative grid-wide join. Nsight source attribution assigned most barrier
+samples to that join even though many output slices were already complete.
+The retained kernel replaces it with two precise dependencies:
+
+- the final Marlin writer for each 128-column output slice completes
+  `write_result()`, executes a device fence, and publishes `-1` in that
+  slice's existing Marlin lock;
+- each of the eight complete-K LoRA-down CTAs publishes 16 reduced adapter
+  values in lock words 32-95, then increments the down-ready counter in lock
+  word 96 after a device fence;
+- one leader per LoRA-up CTA performs acquire loads until all eight down tiles
+  and its own output slice are ready, then releases its CTA through the
+  existing block barrier;
+- lock word 97 counts CTAs that have acquired both inputs. The final arrival
+  recycles output locks 0-31 and counters 96-97 so repeated eager calls reuse
+  the workspace safely.
+
+Four CTAs compute two adjacent 32-column LoRA-up tiles apiece. Pairing both
+tiles from the same 128-column output slice means each CTA waits on only one
+Marlin publication; the other 120 CTAs own one tile. The launch remains one
+`124 x 256` cooperative grid so all polling CTAs are guaranteed resident and
+the dependency protocol cannot deadlock behind an unscheduled producer.
+
+The 256 per-thread LoRA-up partials occupy shared slots 0-255. A validation
+review caught that reusing partial slot 0 as the final-arrival broadcast would
+allow lane 0 to overwrite the flag before slower sibling threads loaded it.
+The final code puts this short-lived flag in otherwise-unused shared slot 256.
+That removes the alias without increasing the already-configured 166.912 KiB
+dynamic shared-memory allocation. No persistent or transient VRAM allocation
+was added; allocator-visible peak remains 24 KiB.
+
+#### Raw Nsight Systems latency
+
+The command shape used for each final 1,000-launch capture was:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2,3 \
+TORCH_CUDA_ARCH_LIST=8.0 PYTHON_GIL=0 \
+PYTHONPATH=/root/GPT-QModel-Ultra-2 \
+nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
+  --capture-range-end=stop --sample=none --cpuctxsw=none \
+  /root/vm314t/bin/python scripts/benchmark_eora_marlin_fused.py \
+  --scope marlin --variants cooperative --case-pattern decode_attn_r128 \
+  --warmup 500 --iters 1000 --throughput-iters 1 \
+  --throughput-repeats 1 --profile
+```
+
+The table uses raw CUPTI GPU durations from matched 1,000-launch captures,
+not the profiler-inflated Python or CUDA-event values.
+
+| dtype | schedule | p50 | mean | p95 | min | max | registers |
+|:---|:---|---:|---:|---:|---:|---:|---:|
+| FP16 | prior grid join | 14.816 us | 15.252 us | 17.696 us | 14.240 us | 18.592 us | 78 |
+| FP16 | final per-output handoff | 14.592 us | 14.816 us | 16.032 us | 14.240 us | 17.664 us | 94 |
+| BF16 | prior grid join | 14.976 us | 15.406 us | 17.696 us | 14.591 us | 18.656 us | 80 |
+| BF16 | final per-output handoff | 14.656 us | 14.908 us | 16.416 us | 14.367 us | 18.752 us | 96 |
+
+Relative to the exact preceding source, final p50/mean/p95 improve by
+1.51%/2.86%/9.40% for FP16 and 2.14%/3.23%/7.23% for BF16. The much larger
+p95 reduction is consistent with removing a full-grid tail dependency. The
+register increase does not reduce theoretical residency: 166.912 KiB dynamic
+shared memory already limits the kernel to one CTA per SM. Both final kernels
+report zero local memory per thread.
+
+Longer non-profiler runs used 500 warmups, 3,000 individual event samples,
+and five 1,000-call throughput repeats. FP16 recorded 28.672 us p50,
+29.283 us mean, 34.816 us p95, and a sustained median of 18.987 us or
+52,668 calls/s. BF16 recorded 29.696 us p50, 35.466 us mean, 37.888 us p95,
+and a sustained median of 22.998 us or 43,482 calls/s. Shared-host noise was
+visible in both aggregate distributions, so raw Nsight Systems remains the
+optimization gate. Maximum absolute error against the dense FP32 update was
+unchanged at 0.004135 FP16 and 0.01007 BF16.
+
+#### Exact-source Nsight Compute attribution
+
+The final BF16 report was captured with:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2,3 \
+TORCH_CUDA_ARCH_LIST=8.0 PYTHON_GIL=0 \
+PYTHONPATH=/root/GPT-QModel-Ultra-2 \
+ncu --profile-from-start off --devices 1 \
+  --kernel-name regex:MarlinEoraRank128 --launch-count 1 \
+  --section SpeedOfLight --section LaunchStats --section Occupancy \
+  --section SchedulerStats --section WarpStateStats \
+  --section InstructionStats --section SourceCounters \
+  --section MemoryWorkloadAnalysis \
+  -o artifacts/eora_marlin_20260722_gpu23_cont/ncu_final_dedicated_phase_flag_bf16_gpu3 \
+  /root/vm314t/bin/python scripts/benchmark_eora_marlin_fused.py \
+  --device cuda:1 --dtype bf16 --scope marlin --variants cooperative \
+  --case-pattern decode_attn_r128 --warmup 500 --iters 1 \
+  --throughput-iters 1 --throughput-repeats 1 --profile
+```
+
+| metric | prior grid join | final per-output handoff |
+|:---|---:|---:|
+| Multi-pass replay duration | 23.328 us | 23.520 us |
+| Executed SASS instructions | 1,975,739 | 1,984,560 |
+| Registers/thread | 80 | 96 |
+| Dynamic shared memory | 166.912 KiB | 166.912 KiB |
+| Theoretical occupancy | 12.50% | 12.50% |
+| Final achieved occupancy | - | 12.47% |
+| Eligible warps/scheduler | 0.228 | 0.223 |
+| Warp cycles/issued instruction | 12.20 | 12.19 |
+| Barrier stall cycles/instruction | 5.925 | 6.334 |
+| Long-scoreboard stall cycles/instruction | 1.671 | 1.564 |
+| Wait stall cycles/instruction | 0.965 | 0.963 |
+| DRAM throughput | 18.98% | 18.79% |
+| Compute throughput | 14.53% | 14.26% |
+| Local spilling requests | 0 | 0 |
+
+The 16-pass NCU replay perturbs a synchronization-sensitive kernel, so its
+single replay duration is not used as the latency decision. The raw timeline
+shows the win. NCU confirms that neither compute nor DRAM bandwidth is close
+to saturation, shared memory still enforces one CTA per SM, and barrier
+latency remains the dominant incremental constraint. Registers are not the
+current occupancy limiter, so reducing them without changing synchronization
+would not expose another resident CTA.
+
+#### Rejected candidates and lessons
+
+| candidate | raw result | disposition |
+|:---|:---|:---|
+| Per-slice consumer-count reset | FP16 15.520/15.687/16.960 us p50/mean/p95 | Recovered 80 registers but extra consumer atomics lost more latency than they saved |
+| One polling leader per warp | FP16 18.816/18.603/19.264 us; BF16 17.856/17.840/18.592 us | Eightfold acquire polling per CTA overloaded the lock path |
+| Four sharded arrival counters | FP16 14.848/15.063/16.384 us | Second-level completion atomic and branching outweighed lower contention |
+| Warp-shuffle reset broadcast | FP16 14.720/14.948/16.160 us | Correct, but slightly slower than the dedicated shared flag |
+| 64 full-warp LoRA-up CTAs | FP16 14.751/14.920/16.192 us | Halved polling/barrier participation, but using only 64 SMs for up lost more than it saved |
+| 96 mixed LoRA-up CTAs | FP16 14.784/14.980/16.256 us | A 23% synchronization reduction still could not offset lower SM fan-out and added tile mapping |
+
+The main lesson is that a narrower synchronization scope is useful only when
+it does not multiply active pollers or atomics. One acquire leader per CTA and
+one arrival counter outperform both warp-local polling and hierarchical
+counter schemes. Scratch lifetime also matters at sub-barrier granularity: a
+shared slot is not reusable merely because all CTAs have logically entered a
+new phase; every consuming thread must have completed its last read first.
+
+#### Validation and artifacts
+
+- `pytest -q tests/test_marlin_jit.py -k marlin_eora_rank128_attention_mega_kernel`:
+  2 passed, 31 deselected for FP16 and BF16. The test now executes a second
+  consecutive call and verifies reusable phase-state reset.
+- `pytest -q tests/test_eora_marlin_fused.py`: 69 passed, 2 two-device tests
+  skipped in the single-visible-GPU run.
+- The two current-device/non-default-stream cases then passed with
+  `CUDA_VISIBLE_DEVICES=2,3`.
+- `gptqmodel_ext/marlin/generate_kernels.py --check`: passed.
+- Compute Sanitizer memcheck: `ERROR SUMMARY: 0 errors` for final-source FP16
+  on physical GPU 2 and BF16 on physical GPU 3.
+- Compute Sanitizer synccheck: `ERROR SUMMARY: 0 errors` for one filtered
+  `MarlinEoraRank128` FP16 launch on physical GPU 2. An initial unlimited
+  synccheck run spent minutes instrumenting intentional acquire spin loops;
+  `--kernel-name kns=MarlinEoraRank128 --launch-count 1` bounded the check.
+- CUDA graph capture continues to select the existing lower-work library
+  fallback; the eager-only cooperative specialization and all CPU/non-sm_80
+  fallbacks are unchanged.
+
+Profiler outputs remain untracked under
+`artifacts/eora_marlin_20260722_gpu23_cont/`. The final raw timelines are
+`nsys_candidate_dedicated_phase_flag_fp16_gpu2_1000.sqlite` and
+`nsys_final_dedicated_phase_flag_bf16_gpu3_1000.sqlite`; the exact final BF16
+counter report is `ncu_final_dedicated_phase_flag_bf16_gpu3.ncu-rep`. Longer
+benchmark JSON files are
+`final_dedicated_phase_flag_{fp16_gpu2,bf16_gpu3}_w500_i3000_t1000x5.json`.
+
+### 2026-07-22: FP16 LoRA-B prefetch hides acquire slack
+
+This continuation used only PCI-ordered physical GPUs 2 and 3. Commands set
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`, `CUDA_VISIBLE_DEVICES=2,3` (or the matching
+single-device subset for Compute Sanitizer), `TORCH_CUDA_ARCH_LIST=8.0`, and
+`PYTHON_GIL=0`. Physical GPU 2 was logical `cuda:0` for FP16 and physical GPU
+3 was logical `cuda:1` for BF16. Both are 124-SM NVIDIA PG506-230 `sm_80`
+devices with 98,304 MiB. The interpreter remained
+`/root/vm314t/bin/python`: Python 3.14.5, PyTorch `2.13.0+cu130`, CUDA 13.0,
+and driver 610.43.02.
+
+#### Source-level bottleneck attribution
+
+Source counters from the committed per-output handoff reported 743 not-issued
+barrier samples, 194 long-scoreboard samples, and 82 wait samples. The single
+largest PC accounted for 525 barrier samples at the shared load immediately
+after the handoff `__syncthreads()`. This is the 255 non-leader threads waiting
+while one CTA leader acquires the LoRA-down counter and its Marlin output
+slice. The barrier is required to propagate the leader's acquire and phase
+flag, but those waiting warps can issue input-independent work before it.
+
+The retained FP16 schedule therefore computes the LoRA-up tile mapping and
+loads all 32 coalesced LoRA-B values per thread before the dependency poll.
+After the acquire, each warp only loads the 32 reduced down values, performs
+the multiply-accumulate chain, and enters the existing shared reduction. A
+compile-time scalar-type branch keeps BF16 on the original post-acquire load
+order because it showed no matched benefit from the moved loads.
+
+#### Matched raw Nsight Systems latency
+
+All rows below are raw CUPTI GPU durations from 1,000-launch captures of
+`M=1, K=N=4096, rank=128`, not profiler-inflated Python or CUDA-event timing.
+The final row is the exact retained source after the dtype-specific structure
+was in place.
+
+| FP16 schedule | p50 | mean | p95 | registers | local/thread |
+|:---|---:|---:|---:|---:|---:|
+| Matched committed baseline | 14.592 us | 14.829 us | 16.192 us | 94 | 0 B |
+| Prefetch 16, warps 1-7 only | 14.752 us | 14.940 us | 16.192 us | 96 | 0 B |
+| Prefetch 16, all warps | 14.496 us | 14.733 us | 16.255 us | 94 | 0 B |
+| Prefetch 16, all warps repeat | 14.496 us | 14.720 us | 16.096 us | 94 | 0 B |
+| Prefetch 32, all warps | 14.464 us | 14.700 us | 16.224 us | 94 | 0 B |
+| Prefetch 32, all warps repeat | 14.464 us | 14.700 us | 16.192 us | 94 | 0 B |
+| Final FP16-only prefetch 32 | 14.464 us | 14.698 us | 16.160 us | 94 | 0 B |
+
+The retained source improves p50, mean, and p95 by 0.88%, 0.88%, and 0.20%
+against the same-session baseline. Dynamic shared memory remains 166.912 KiB,
+allocator-visible peak remains 24 KiB, and maximum absolute error remains
+0.004135 against the dense FP32 update. One final capture contained a single
+20.576 us maximum outlier, but the two preceding retained-mechanism captures
+reproduced the 14.464 us median exactly and had 18.560 us or lower maxima.
+
+BF16 was explicitly controlled for session drift. The final gated source was
+14.816/15.097/16.736 us p50/mean/p95; restoring the exact committed source in
+the same session measured 14.816/15.077/16.736 us. Median and p95 are
+identical, the 0.020 us mean difference is noise-sized, registers remain 96,
+and there is no local memory. An earlier 14.656 us BF16 capture came from a
+different device/session state and was not used as the dtype-gating control.
+
+#### Rejected publication and partial-prefetch candidates
+
+Replacing each output-ready `__threadfence()` plus `atomicExch()` with a
+single-producer device-scope release store was correct but slower in two raw
+FP16 captures: 15.055/15.184/16.320 us and 15.040/15.184/16.224 us
+p50/mean/p95. Restoring the exact source immediately returned
+14.592/14.829/16.192 us. Fewer memory-ordering instructions did not translate
+to lower end-to-end latency on this Ampere path.
+
+Prefetching only warps 1-7 was also rejected. It moved useful work into the
+acquire interval, but warp 0 still performed all 32 post-acquire LoRA-B loads
+and remained the critical warp at the final reduction barrier. Moving the
+same work for every warp is what exposed the reproducible gain.
+
+#### Final Nsight Compute attribution
+
+The final FP16 16-pass report is diagnostic only; synchronization-sensitive
+replay inflated its duration to 24.064 us. Raw Nsight Systems remains the
+performance gate.
+
+| metric | final FP16 prefetch 32 |
+|:---|---:|
+| Executed SASS instructions | 1,922,660 |
+| Registers/thread | 94 |
+| Dynamic shared memory | 166.912 KiB |
+| Theoretical occupancy | 12.50% |
+| Achieved occupancy | 12.02% |
+| Eligible warps/scheduler | 0.210 |
+| Warp cycles/issued instruction | 12.807 |
+| Barrier stall cycles/instruction | 6.598 |
+| Long-scoreboard stall cycles/instruction | 1.649 |
+| Wait stall cycles/instruction | 1.024 |
+| DRAM throughput | 18.38% |
+| SM throughput | 13.73% |
+| Local spill instructions | 0 |
+
+PC sampling still assigns 585 of 742 barrier samples to the shared phase-flag
+load after the acquire barrier; the retained change overlaps LoRA-B work with
+that dependency interval rather than removing its correctness boundary. The
+kernel remains neither DRAM- nor compute-saturated, and 166.912 KiB shared
+memory still fixes residency at one CTA per SM. Further work should focus on
+useful work that can safely cross the acquire boundary or on reducing the
+dependency tail without multiplying global pollers.
+
+#### Validation and artifacts
+
+- The exact repeated-call FP16/BF16 mega-kernel test passed: 2 passed and 31
+  deselected.
+- `tests/test_eora_marlin_fused.py` passed all 71 cases, including both
+  current-device/non-default-stream cases with physical GPUs 2 and 3 visible.
+- Compute Sanitizer memcheck reported zero errors for FP16 on physical GPU 2
+  and BF16 on physical GPU 3.
+- Compute Sanitizer synccheck reported zero errors for one filtered FP16
+  `MarlinEoraRank128` launch on physical GPU 2.
+- `gptqmodel_ext/marlin/generate_kernels.py --check` and `git diff --check`
+  passed.
+
+Profiler outputs remain untracked under
+`artifacts/eora_marlin_20260722_gpu23_cont/`. The matched FP16 files are
+`nsys_matched_baseline_after_release_store_fp16_gpu2_1000.sqlite` and
+`nsys_final_structural_fp16_up_prefetch32_fp16_gpu2_1000.sqlite`. The matched
+BF16 control is
+`nsys_matched_baseline_before_fp16_prefetch_bf16_gpu3_1000.sqlite`; the final
+counter report is
+`ncu_final_structural_fp16_up_prefetch32_fp16_gpu2.ncu-rep`.
+
+#### Immediate post-publish follow-up
+
+Two additional mechanisms were profiled after commit `b131723d` and rejected;
+the CUDA source was restored exactly afterward.
+
+| candidate | FP16 raw p50/mean/p95 | reason rejected |
+|:---|---:|:---|
+| Convert all 32 prefetched LoRA-B values to FP32 before acquire | 14.976/15.229/16.832 us | The added pre-acquire conversion chain exceeded the available dependency slack; the retained half-value prefetch is 14.464/14.698/16.160 us |
+| Move the 124-way arrival atomic after up-partial computation | 14.752/15.081/17.056 us | It removed the atomic from the first barrier but transferred its contention tail to the final reduction barrier, increasing p95 by 5.5% |
+
+Both candidates retained 94 registers/thread, 166.912 KiB dynamic shared
+memory, zero local memory per thread, 24 KiB allocator-visible peak, and
+0.004135 maximum absolute error. Their failures are scheduling effects rather
+than occupancy, spilling, VRAM, or correctness failures. Follow-up artifacts
+are `nsys_candidate_fp16_up_prefetch32_float_fp16_gpu2_1000.sqlite` and
+`nsys_candidate_late_arrival_fp16_gpu2_1000.sqlite`.
+
+#### Output-tile assignment follow-up
+
+Two additional FP16 scheduling hypotheses were tested with the same
+1,000-launch raw Nsight Systems method on PCI-ordered physical GPU 2. The
+interpreter remained `/root/vm314t/bin/python` with PyTorch `2.13.0+cu130`
+and CUDA 13.0. Both candidates covered LoRA-up tiles 0..127 exactly once and
+kept four 32-column tiles per 128-column Marlin output slice.
+
+| schedule | p50 | mean | p95 | result |
+|:---|---:|---:|---:|:---|
+| Matched retained source before changes | 14.464 us | 14.689 us | 16.160 us | baseline |
+| Each Marlin CTA consumes its own output slice | 14.495 us | 14.717 us | 16.288 us | rejected: p50/mean/p95 all regressed |
+| Swap late output tiles from down-only CTAs to early non-final Marlin CTAs | 15.584 us | 15.717 us | 17.024 us | rejected: exposed rather than hid the coupled phase tail |
+| Exact retained source restored | 14.464 us | 14.685 us | 16.192 us | restoration control |
+
+The first candidate aligned the 116 Marlin CTAs with their own output slices,
+used the eight down-only CTAs for the fourth tile of slices 20..27, and used
+upper warps in one CTA for the fourth tile of slices 28..31. Its small but
+consistent regression shows that the retained one-slice lead already overlaps
+useful LoRA-B work with Marlin's serial reduction chain.
+
+The narrower second candidate changed only eight tile owners. It moved tiles
+120..127 from down-only blocks 116..123 to non-final Marlin blocks
+82,85,...,103 and gave those down blocks the corresponding earlier tiles.
+This was intended to keep the two latest output slices from coinciding with
+the latest down workers. The 7.7% p50 regression instead shows that the
+retained coupling hides the down workers behind late Marlin completion; the
+swap made that work visible on the critical path.
+
+Both candidates and the restoration control used 94 registers/thread,
+166,912 bytes of dynamic shared memory, zero local memory, a `124 x 256`
+cooperative launch, 24 KiB allocator-visible peak, and 0.004135 maximum
+absolute error against the dense FP32 update. The CUDA source was restored
+exactly after rejection; the generated-source check and `git diff --check`
+passed. Artifacts are
+`nsys_candidate_cta_local_up_fp16_gpu2_1000.sqlite`,
+`nsys_candidate_decouple_down_output_tail_fp16_gpu2_1000.sqlite`, and
+`nsys_restored_baseline_after_up_mapping_rejects_fp16_gpu2_1000.sqlite` under
+`artifacts/eora_marlin_20260722_gpu23_cont/`.
+
+### 2026-07-22: overlap the FP16 base-output load with LoRA-up
+
+Profiling continued from commit `713e3d5d` with only PCI-ordered physical GPUs
+2 and 3. The interpreter remained `/root/vm314t/bin/python` with Python 3.14.5,
+PyTorch `2.13.0+cu130`, and CUDA 13.0. Both devices are 124-SM `sm_80`
+NVIDIA PG506-230 cards with 98,304 MiB. FP16 measurements used physical GPU 2;
+BF16 controls used physical GPU 3.
+
+#### Retained scheduling change
+
+The 64 final writer lanes previously loaded their Marlin base-output values
+only after the LoRA-up multiply-accumulate and shared reduction. For FP16, the
+retained schedule loads that value immediately after the dependency acquire
+barrier and holds it in a register while LoRA-up executes. This overlaps one
+global load with useful arithmetic without moving it ahead of the acquire that
+publishes the base output.
+
+The preload is compile-time gated to `half`. An ungated BF16 experiment
+regressed from 14.560/14.784/16.064 us to 14.656/14.842/16.160 us
+p50/mean/p95, so BF16 retains the original final-writer load. Disassembly of
+the final gated BF16 object has the same instruction-stream SHA-256 as the
+baseline (`3968c3e3247b4c5a4ee5f1ae1d3f2083d65b86bd17341a26aea01de457e28315`),
+confirming that the BF16 runtime path is unchanged.
+
+#### Matched raw Nsight Systems latency
+
+The performance gate was the raw CUPTI duration of 1,000
+`MarlinEoraRank128` launches at `M=1, K=N=4096, rank=128`. Alternating the
+candidate and exact restored source was necessary because the device shifted
+by several tenths of a microsecond during the session.
+
+| FP16 source | p50 | mean | p95 | role |
+|:---|---:|---:|---:|:---|
+| Candidate before matched restoration | 14.624 us | 14.961 us | 17.056 us | first A |
+| Exact retained source restored | 14.784 us | 15.144 us | 17.184 us | matched B |
+| Candidate reapplied | 14.272 us | 14.684 us | 17.024 us | second A |
+| Final FP16-gated source | 14.656 us | 14.985 us | 16.928 us | exact source |
+| Final FP16-gated repeat | 14.656 us | 14.884 us | 16.160 us | repeat |
+
+Using the first exact gated capture against the intervening restored control
+gives conservative reductions of 0.87% p50, 1.05% mean, and 1.49% p95. The
+repeat preserves the median and improves the mean and tail further. An early
+14.304/14.505/15.904 us exploratory capture was not used for the comparison
+because it preceded the matched restoration.
+
+The kernel remains at 94 registers/thread, 166,912 bytes of dynamic shared
+memory, zero local memory, and one CTA per SM. Allocator-visible peak remains
+24 KiB and maximum absolute error against the dense FP32 update remains
+0.004135.
+
+#### Nsight Compute attribution
+
+The exact final report used 16 replay passes and is diagnostic rather than the
+latency gate. It reports the following changes against the previous exact
+FP16 report:
+
+| metric | previous | early base load |
+|:---|---:|---:|
+| Replay duration | 24.064 us | 23.584 us |
+| Executed SASS instructions | 1,863,184 | 1,869,882 |
+| Registers/thread | 94 | 94 |
+| Dynamic shared memory | 166.912 KiB | 166.912 KiB |
+| Achieved occupancy | 12.022% | 12.307% |
+| Eligible warps/scheduler | 0.210 | 0.218 |
+| Warp cycles/issued instruction | 12.807 | 12.765 |
+| Long-scoreboard cycles/instruction | 1.649 | 1.600 |
+| Wait cycles/instruction | 1.024 | 1.022 |
+| Barrier cycles/instruction | 6.598 | 7.784 |
+| DRAM throughput | 18.38% | 18.76% |
+| SM throughput | 13.73% | 12.49% |
+
+The moved load itself received only two not-issued samples (one wait and no
+long-scoreboard samples), and the final store received 15 samples with no
+barrier, long-scoreboard, or wait attribution. Aggregate barrier samples fell
+from 742 to 725, while long-scoreboard samples moved from 185 to 212 and wait
+samples from 96 to 89. The acquire/phase-flag boundary remains dominant: 578
+of 582 samples at its shared phase-flag load are barrier stalls. The two
+acquire loops account for 47 additional long-scoreboard samples. The next
+incremental target is therefore the required phase-boundary tail, not the
+now-overlapped base-output load.
+
+#### Full-call throughput and validation
+
+The normal warmed benchmark includes Python/dispatcher overhead and is not
+used to accept sub-microsecond kernel changes, but it verifies the retained
+source in the ordinary call path:
+
+| dtype/device | p50 | mean | p95 | sustained stream | throughput |
+|:---|---:|---:|---:|---:|---:|
+| FP16 / physical GPU 2 | 30.72 us | 32.56 us | 36.86 us | 21.03 us/call | 47,551 calls/s |
+| BF16 / physical GPU 3 | 29.70 us | 31.28 us | 38.91 us | 19.96 us/call | 50,108 calls/s |
+
+- The focused repeated-call FP16 test passed on physical GPU 2 and BF16 test
+  passed on physical GPU 3.
+- Compute Sanitizer memcheck reported `ERROR SUMMARY: 0 errors` for both
+  dtypes, and FP16 synccheck reported `ERROR SUMMARY: 0 errors`.
+- The broader integrated-EoRA sweep passed all seven selected tests after its
+  stale `this_grid()` source-text assertion was updated to verify the current
+  acquire-load and arrival-atomic handoff contract.
+- `tests/test_eora_marlin_fused.py` passed all 71 cases with both physical
+  GPUs 2 and 3 visible, including both non-default-stream/current-device cases.
+- `gptqmodel_ext/marlin/generate_kernels.py --check` and `git diff --check`
+  passed.
+
+Profiler outputs remain untracked under
+`artifacts/eora_marlin_20260722_gpu23_cont/`. The matched timelines are
+`nsys_matched_baseline_after_early_base_output_load_repeat_fp16_gpu2_1000.sqlite`,
+`nsys_final_fp16_only_early_base_output_load_fp16_gpu2_1000.sqlite`, and
+`nsys_final_fp16_only_early_base_output_load_repeat_fp16_gpu2_1000.sqlite`.
+The exact counter report is
+`ncu_final_fp16_early_base_output_load_fp16_gpu2.ncu-rep`; warmed benchmark
+JSON files are
+`final_early_base_output_load_{fp16_gpu2,bf16_gpu3}_w500_i3000_t1000x5.json`.
+
+### 2026-07-22: overlap arrival bookkeeping with LoRA-up
+
+Profiling continued from commit `0863455a` with the interpreter fixed to
+`/root/vm314t/bin/python`: Python 3.14.5, PyTorch `2.13.0+cu130`, and CUDA
+13.0. Every GPU command used `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
+`TORCH_CUDA_ARCH_LIST=8.0`, and `PYTHON_GIL=0`. FP16 ran only on physical GPU
+2 (`0000:64:00.0`) and BF16 only on physical GPU 3 (`0000:69:00.0`). Both
+runtime-probed devices are NVIDIA PG506-230 `sm_80` cards with 124 SMs and
+98,304 MiB. GPUs 4-7 were not used.
+
+#### Retained scheduling change
+
+The prior kernel made thread 0 wait for both the LoRA-down completion count
+and its Marlin output slice, execute one member of the 124-way arrival atomic,
+publish the last-arrival flag in shared memory, and only then release the
+block through its first barrier. The arrival ticket is required to recycle
+the phase state for the next launch, but it is not an input to the current
+LoRA-up multiply-accumulate.
+
+The retained schedule therefore releases the block immediately after thread
+0 acquires both data dependencies. Thread 128, in an otherwise-idle upper
+warp for 120 of the 124 CTAs, issues the arrival atomic and shared phase-flag
+store while the active warps perform LoRA-up. The existing final reduction
+barrier publishes both the up partials and phase flag; lock recycling now
+occurs after that barrier. The launch remains one `124 x 256` cooperative
+kernel.
+
+This ordering is safe because every CTA has consumed both lock values before
+it takes an arrival ticket. The last ticket therefore proves that all CTAs
+have finished acquiring the old phase. Delaying the reset until the last
+CTA's final block barrier cannot affect the current launch, and the next
+same-stream launch cannot start before this kernel completes. The phase flag
+remains outside `partials[0..255]` at slot 256.
+
+#### Matched raw Nsight Systems latency
+
+The acceptance gate was the raw CUPTI duration of all 1,000
+`MarlinEoraRank128` launches at `M=1, K=N=4096, rank=128`, not the
+profiler-instrumented Python timing. The FP16 source was alternated candidate,
+exact restored baseline, and candidate again to control for session drift.
+
+| FP16 source on physical GPU 2 | p50 | mean | p95 | role |
+|:---|---:|---:|---:|:---|
+| Exact starting source | 14.304 us | 14.513 us | 15.938 us | initial B |
+| Overlapped arrival | 14.144 us | 14.360 us | 15.872 us | first A |
+| Overlapped arrival repeat | 14.144 us | 14.377 us | 15.936 us | A repeat |
+| Exact source restored | 14.304 us | 14.549 us | 16.096 us | matched B |
+| Overlapped arrival reapplied | 14.144 us | 14.386 us | 15.970 us | matched A |
+
+The final matched A/B comparison reduces FP16 p50 by 1.12%, mean by 1.12%,
+and p95 by 0.79%. Both earlier candidate captures reproduce the 14.144 us
+median.
+
+BF16 was independently controlled on physical GPU 3:
+
+| BF16 source | p50 | mean | p95 |
+|:---|---:|---:|---:|
+| Overlapped arrival | 14.496 us | 14.716 us | 16.256 us |
+| Exact source restored | 14.688 us | 14.913 us | 16.418 us |
+
+The BF16 reductions are 1.31% p50, 1.32% mean, and 0.98% p95. FP16 remains
+at 94 registers/thread and BF16 at 96 registers/thread; both retain 166,912
+bytes of dynamic shared memory, zero local memory, and one CTA per SM. The
+change therefore improves latency without increasing the kernel or allocator
+memory footprint.
+
+#### Nsight Compute attribution
+
+The exact candidate report used 16 replay passes and is diagnostic. Its replay
+duration is synchronization-sensitive and increased slightly, from 23.584 to
+23.840 us, so raw Nsight Systems remains the latency gate.
+
+| metric | previous exact FP16 | overlapped arrival |
+|:---|---:|---:|
+| SM throughput | 12.49% | 13.48% |
+| DRAM throughput | 18.76% | 18.55% |
+| Achieved occupancy | 12.31% | 12.33% |
+| Eligible warps/scheduler | 0.218 | 0.211 |
+| Warp cycles/issued instruction | 12.765 | 13.318 |
+| Barrier stall cycles/instruction | 7.784 | 6.883 |
+| Long-scoreboard cycles/instruction | 1.600 | 1.593 |
+| Wait cycles/instruction | 1.022 | 1.016 |
+| Executed SASS instructions | 1,869,882 | 1,878,852 |
+| Registers / dynamic shared / local | 94 / 166.912 KiB / 0 | 94 / 166.912 KiB / 0 |
+
+Normalized barrier stalls fall by 11.6%. Source correlation assigns no
+samples to the moved arrival atomic and no samples to the final reduction
+barrier, showing that the arrival operation is hidden by useful LoRA-up work.
+The subsequent phase-reset flag load receives 42 samples, 35 attributed to a
+barrier, but it is outside the output-critical dependency interval.
+
+The remaining dominant site is still the required acquire boundary. The
+first block barrier receives 607 samples, 593 not-issued, while the down-ready
+poll loop receives 88 samples, 86 not-issued, including 54 long-scoreboard and
+12 wait samples. Further work should target the down-ready dependency tail or
+move more independent work across that boundary; adding another global
+poller or blindly removing the block barrier would trade latency for
+contention or correctness.
+
+#### Full-call throughput, correctness, and safety
+
+The ordinary warmed benchmark includes Python/dispatcher overhead and is not
+the sub-microsecond selection gate, but verifies the retained source through
+native dispatch:
+
+| dtype/device | p50 | mean | p95 | sustained stream | throughput | peak | max abs error |
+|:---|---:|---:|---:|---:|---:|---:|---:|
+| FP16 / physical GPU 2 | 28.67 us | 30.70 us | 35.84 us | 19.84 us/call | 50,401 calls/s | 24 KiB | 0.004135 |
+| BF16 / physical GPU 3 | 28.67 us | 34.01 us | 36.86 us | 19.79 us/call | 50,534 calls/s | 24 KiB | 0.01007 |
+
+- The focused repeated-call mega-kernel checks passed independently for FP16
+  on physical GPU 2 and BF16 on physical GPU 3.
+- The seven-case integrated contract, dispatch, fallback, and FP16/BF16
+  mega-kernel sweep passed.
+- `tests/test_eora_marlin_fused.py` passed all 71 cases with only physical
+  GPUs 2 and 3 visible, including both current-device/non-default-stream cases.
+- Compute Sanitizer memcheck reported `ERROR SUMMARY: 0 errors` for FP16 and
+  BF16. FP16 synccheck also reported `ERROR SUMMARY: 0 errors`.
+- Racecheck displayed six hazards at the existing Marlin asynchronous-copy
+  pipeline sites (`marlin_template.h` lines 962, 1001, and 1358). A matched
+  run after restoring the exact pre-change source displayed the same six
+  hazard groups at the same sites, so this scheduling change introduces no
+  new racecheck site or class.
+- `gptqmodel_ext/marlin/generate_kernels.py --check` and `git diff --check`
+  passed.
+
+All profiler outputs remain untracked under
+`artifacts/eora_marlin_20260722_gpu23_cont/`. The FP16 A/B/A timelines are
+`nsys_cont2_candidate_overlap_arrival_fp16_gpu2_1000.sqlite`,
+`nsys_cont2_candidate_overlap_arrival_repeat_fp16_gpu2_1000.sqlite`,
+`nsys_cont2_matched_baseline_after_overlap_arrival_fp16_gpu2_1000.sqlite`,
+and `nsys_cont2_candidate_overlap_arrival_after_baseline_fp16_gpu2_1000.sqlite`.
+The BF16 control pair uses the corresponding
+`nsys_cont2_{candidate,matched_baseline_after}_overlap_arrival_bf16_gpu3_1000.sqlite`
+files. The exact counter report is
+`ncu_cont2_final_overlap_arrival_fp16_gpu2.ncu-rep`; warmed benchmark JSONs are
+`final_overlap_arrival_{fp16_gpu2,bf16_gpu3}_w500_i3000_t1000x5.json`.
+
+#### Immediate post-profile screens
+
+Two follow-up schedules were rejected and the retained arrival-overlap source
+was restored exactly afterward.
+
+| FP16 source on physical GPU 2 | p50 | mean | p95 | result |
+|:---|---:|---:|---:|:---|
+| Retained source before split-poller screen | 14.144 us | 14.386 us | 15.970 us | baseline |
+| Split down-ready/output pollers | 13.952 us | 14.697 us | 18.786 us | reject |
+| Split pollers repeat | 13.952 us | 14.647 us | 18.626 us | reject |
+| Retained source restored | 14.144 us | 14.391 us | 15.968 us | restoration control |
+
+Assigning the down-ready poll to thread 0 and the independent output-slice
+poll to thread 128 reduced median by 1.36%, but raised mean by 1.8-2.1% and
+p95 by 16.6-17.6% in two captures. It preserved one poller per lock, yet the
+second active polling warp increased scheduling/lock-traffic variability.
+This path is tail-sensitive; median alone would have selected the wrong
+schedule.
+
+Hoisting only FP16 final-writer coordinate arithmetic before the acquire was
+also tested. Its first two captures were 14.144/14.363/15.840 us and
+14.144/14.355/15.903 us p50/mean/p95. The strict restored-source control then
+measured 14.144/14.336/15.746 us, and reapplying the hoist measured
+14.144/14.372/15.840 us. Against that intervening control, the hoist leaves
+the median unchanged while regressing mean by 0.25% and p95 by 0.60%, so the
+apparent early gain was session drift.
+
+Every screen retained 94 registers/thread, 166,912 bytes of dynamic shared
+memory, zero local memory, the `124 x 256` launch, 24 KiB allocator-visible
+peak, and 0.004135 maximum absolute error. Artifacts are
+`nsys_cont3_candidate_split_acquire{,_repeat}_fp16_gpu2_1000.sqlite`,
+`nsys_cont3_restored_after_split_acquire_fp16_gpu2_1000.sqlite`, and the
+`nsys_cont3_{candidate_preacquire_writer_coords,matched_baseline_before_writer_coords,candidate_preacquire_writer_coords_after_baseline}_fp16_gpu2_1000.sqlite`
+captures under `artifacts/eora_marlin_20260722_gpu23_cont/`.
+
+### 2026-07-22: move FP16 phase recycling off the output-writer warps
+
+Profiling continued from commit `1dfa89da` with `/root/vm314t/bin/python`
+(Python 3.14.5), PyTorch `2.13.0+cu130`, and the CUDA 13.0 runtime. Every GPU
+command used `CUDA_DEVICE_ORDER=PCI_BUS_ID`, `TORCH_CUDA_ARCH_LIST=8.0`,
+`PYTHON_GIL=0`, and the repository `PYTHONPATH`. FP16 ran only on physical GPU
+2 (`0000:64:00.0`) and BF16 only on physical GPU 3 (`0000:69:00.0`). Both are
+driver 610.43.02 NVIDIA PG506-230 devices with compute capability 8.0, 124 SMs,
+and 98,304 MiB. GPUs 4-7 were not exposed to a test or profiler process.
+
+The JIT objects used `-gencode=arch=compute_80,code=sm_80`, C++17, `-O3`,
+`--optimize=3`, `-Xptxas -O3,-dlcm=ca`, and `-lineinfo`. The retained FP16
+kernel remains a cooperative `124 x 256` launch with 94 registers/thread,
+166,912 bytes of dynamic shared memory, a 32-byte stack, and zero local memory.
+BF16 remains at 96 registers/thread with the same shared-memory, stack, and
+local-memory footprint. Shared memory still fixes residency at one CTA per SM.
+
+#### Retained phase-reset schedule
+
+After the final LoRA-up reduction barrier, the old FP16 path made all eight
+warps load the uniform last-arrival flag. When set, output-writer warps 0 and 1
+also recycled output locks 0-31 and counters 96-97 before writing their final
+values. The retained schedule assigns that work to warp 4, which is idle in
+120 of the 124 CTAs. Its 32 lanes reset the output locks and lanes 0-1 reset
+the two counters while writer warps 0-1 perform the final shared reduction and
+global stores.
+
+The change is compile-time gated to `half`. BF16 showed slightly better median
+and mean but a worse and unstable tail, so it retains the converged whole-block
+reset. The final BF16 normalized SASS SHA-256 is
+`e904a672008a2794bc7609515f283583d0194b16a08f8fe4a801da400f834619`,
+identical to the earlier baseline object.
+
+Full-process Nsight Systems traces contain 1,503 named mega-kernel launches:
+one correctness call, one allocator-peak call, 500 warmups, 1,000 measured
+calls, and one aggregate-throughput call. The table sorts the raw CUPTI
+durations of launches `[-1001:-1]`; profiler-inflated Python event timing is
+not used as the acceptance gate.
+
+| FP16 source on physical GPU 2 | p50 | mean | p95 | role |
+|:---|---:|---:|---:|:---|
+| Exact pre-change source | 14.400 us | 14.582 us | 15.679 us | matched baseline |
+| Warp-4 reset | 14.272 us | 14.416 us | 15.552 us | first candidate |
+| Warp-4 reset repeat | 14.272 us | 14.396 us | 15.456 us | repeat |
+| Exact retained source later in session | 14.080 us | 14.297 us | 15.744 us | restoration/control |
+
+Against the exact pre-change source, the two candidate captures reduce p50 by
+0.89%, mean by 1.14-1.28%, and p95 by 0.81-1.42%. The later control confirms
+the retained source after all follow-up experiments but is not mixed into the
+percentage calculation because the device clock/load state had shifted.
+
+The all-dtype screen explains the FP16-only gate:
+
+| BF16 source on physical GPU 3 | p50 | mean | p95 |
+|:---|---:|---:|---:|
+| Exact pre-change source | 14.496 us | 14.674 us | 15.776 us |
+| Warp-4 reset | 14.432 us | 14.622 us | 15.808 us |
+| Warp-4 reset repeat | 14.400 us | 14.639 us | 16.000 us |
+
+BF16 p50 improves by 0.44-0.66% and mean by 0.24-0.35%, but p95 regresses by
+0.20-1.42%. Retaining its original instruction stream is preferable to
+accepting that tail trade.
+
+#### Exact Nsight Compute attribution
+
+The exact retained FP16 report used 16 replay passes. Replay perturbs this
+synchronization-sensitive kernel, so raw Nsight Systems remains the latency
+gate. Compared with the preceding exact arrival-overlap report:
+
+| metric | previous exact | warp-4 reset |
+|:---|---:|---:|
+| Replay duration | 23.840 us | 23.940 us |
+| DRAM throughput | 18.55% | 18.48% |
+| SM throughput | 13.48% | 14.03% |
+| Executed SASS instructions | 1,878,852 | 1,882,989 |
+| Achieved occupancy | 12.33% | 13.68% |
+| Eligible warps/scheduler | 0.211 | 0.220 |
+| Warp cycles/issued instruction | 13.318 | 13.030 |
+| Barrier cycles/instruction | 6.883 | 6.550 |
+| Long-scoreboard cycles/instruction | 1.593 | 1.670 |
+| Wait cycles/instruction | 1.016 | 1.010 |
+| Registers / dynamic shared / local | 94 / 166.912 KiB / 0 | 94 / 166.912 KiB / 0 |
+
+Source correlation shows the shared phase-flag load executing 124 times rather
+than 992, with no sampled stall at that load. The first acquire barrier remains
+dominant: it receives 640 samples, 633 not-issued. The down-ready acquire loop
+executes 17,123 global loads and receives 82 samples, including 62
+long-scoreboard samples. The retained reset change removes bookkeeping from
+the writer path, but the next material constraint is still the true LoRA-down
+dependency tail and the block barrier that publishes it.
+
+#### Rejected acquire, reduction, and publication candidates
+
+All timed candidates below used the same FP16 decode-attention shape
+`M=1, K=N=4096, rank=128` on physical GPU 2. Except where a matched full-trace
+control is shown, values are raw 1,000-launch capture-range durations.
+
+| candidate | p50 | mean | p95 | disposition |
+|:---|---:|---:|---:|:---|
+| Relaxed polling plus one final acquire | 14.400 us | 14.629 us | 16.096 us | rejected: all central values regressed |
+| Release reduction for the down producer | 14.144 us | 14.380 us | 15.936 us | rejected: neutral and introduced a subtler memory-order contract |
+| Pair-shuffle down reduction, 256 to 128 shared partials | 14.112 us | 14.373 us | 15.968 us | rejected: median-only win, mean neutral and tail worse |
+| Four ready counters, warp-local polls, and named barriers | 16.959 us | 17.140 us | 18.559 us | rejected: extra polling and synchronization dominated |
+| Relaxed poll followed by acquire fence | 14.400 us | 14.802 us | 16.896 us | rejected: fence did not recover the delayed dependency |
+| Cache all 128 down results in shared memory after acquire | 14.592 us | 14.916 us | 16.544 us | rejected: staging cost exceeded repeated global-load cost |
+
+The shared-cache candidate preserved 94 registers, zero local memory, 24 KiB
+allocator-visible peak, and 0.004135 maximum absolute error. The four-counter
+experiment reinforces the earlier finding that reducing the scope of one hot
+counter is not useful when it activates several polling warps and named
+barriers.
+
+Changing only the down-loop stride and index from 64-bit to 32-bit reduced
+static SASS from 2,480 to 2,352 instructions without changing 94 registers or
+local memory. It nevertheless regressed the raw full-trace distribution from
+14.400/14.582/15.679 us to 16.672/16.921/18.368 us p50/mean/p95. Static
+instruction count is therefore not a proxy for the scheduler and dependency
+behavior of this coupled kernel. Two bounded `cudaProfilerApi` attempts for
+that candidate exported no CUDA events; the investigation switched to
+full-process capture and the explicit 1,000-launch slice described above.
+
+#### Post-retention screens
+
+Several larger follow-ups were measured against the retained source and then
+removed:
+
+| candidate | candidate p50/mean/p95 | matched retained control | disposition |
+|:---|---:|---:|:---|
+| Reset locks before LoRA-up | 14.112/14.338/15.936 us repeat | 14.080/14.297/15.744 us | rejected: the first capture looked faster, but the A/B repeat regressed all three metrics |
+| Pair adjacent down ranks with `half2` and four active warps | 16.832/17.265/19.360 us | 14.080/14.297/15.744 us | rejected: halving down warps exposed per-thread dependency chains |
+| Use eight 16-rank up warps in single-tile CTAs | 14.240/14.667/17.184 us | 14.080/14.297/15.744 us | rejected: wider reduction and active warp-4 work amplified the tail |
+
+The early-reset candidate's first capture was
+14.048/14.241/15.520 us, but its repeat and the intervening exact control show
+that this was session drift. Recycling before LoRA-up is safe only after the
+last arrival proves all CTAs consumed the old locks, but it adds shuffle/reset
+work to the up schedule and is not a performance win.
+
+The paired-rank down path remained numerically correct at 0.004135 maximum
+absolute error and used 94 registers with zero local memory. Its failure is a
+parallelism lesson: four warps could not hide two FP32 rank chains per thread,
+even though packed loads reduced the apparent instruction and activation-load
+count. The eight-warp up path also looked favorable in the ordinary screen
+(19.42 us sustained) but failed the raw kernel gate. This is another example
+where host/event timing would have selected the wrong source.
+
+A combined per-output ready-bit protocol was rejected before profiling. The
+last down CTA attempted to OR a down-ready bit into the 32 Marlin output-lock
+words so each consumer could use one distributed poll. A repeated-call screen
+deadlocked because those words still contain live Marlin reduction-chain state
+when LoRA-down completes; the OR corrupts that protocol before some output
+slices publish. The hung screen was terminated, the source was restored, and
+no result from that design was retained. Future combined-state designs need
+separate storage or an explicit handoff after each Marlin reduction chain has
+finished; unused-looking lock bits are not free while another protocol owns
+the word.
+
+#### Final full-call throughput and validation
+
+The ordinary benchmark used 500 warmups, 3,000 synchronized samples, and five
+1,000-call aggregate repeats. It includes Python/native-dispatch overhead and
+is not the sub-microsecond source-selection gate.
+
+| dtype/device | p50 | mean | p95 | sustained stream | throughput | peak | max abs error |
+|:---|---:|---:|---:|---:|---:|---:|---:|
+| FP16 / physical GPU 2 | 27.65 us | 28.56 us | 35.84 us | 18.49 us/call | 54,091 calls/s | 24 KiB | 0.004135 |
+| BF16 / physical GPU 3 | 29.70 us | 30.42 us | 36.86 us | 20.23 us/call | 49,426 calls/s | 24 KiB | 0.01007 |
+
+- The focused repeated-call mega-kernel tests passed independently for FP16
+  on physical GPU 2 and BF16 on physical GPU 3.
+- The seven-case integrated contract, dispatch, fallback, and two-dtype
+  mega-kernel sweep passed.
+- `tests/test_eora_marlin_fused.py` passed all 71 cases with only physical
+  GPUs 2 and 3 visible, including both current-device/non-default-stream cases.
+- Bounded Compute Sanitizer memcheck reported `ERROR SUMMARY: 0 errors` for
+  FP16 and BF16. Bounded FP16 synccheck also reported zero errors.
+- `gptqmodel_ext/marlin/generate_kernels.py --check` and `git diff --check`
+  passed.
+
+Profiler outputs remain untracked under
+`artifacts/eora_marlin_20260722_gpu23_cont/`. The retained FP16 timelines are
+`nsys_cont5_candidate_warp4_phase_reset_fulltrace_fp16_gpu2.sqlite` and its
+`repeat` counterpart; the matched pre-change source is
+`nsys_cont5_matched_baseline_fulltrace_after_int32_fp16_gpu2.sqlite`. BF16
+controls are the corresponding `candidate_warp4_phase_reset`, `repeat`, and
+`matched_baseline_fulltrace_before_warp4_reset` files. The exact counter report
+is `ncu_cont5_final_fp16_warp4_phase_reset_gpu2.ncu-rep`.
+
+Follow-up artifacts are
+`nsys_cont6_candidate_preup_phase_reset{,_repeat}_fulltrace_fp16_gpu2.sqlite`,
+`nsys_cont6_matched_postbarrier_warp4_fulltrace_fp16_gpu2.sqlite`,
+`nsys_cont7_candidate_half2_down_pair_fulltrace_fp16_gpu2.sqlite`, and
+`nsys_cont8_candidate_eightwarp_single_up_fulltrace_fp16_gpu2.sqlite`. Final
+warmed JSON files are
+`final_warp4_phase_reset_{fp16_gpu2,bf16_gpu3}_w500_i3000_t1000x5.json`.

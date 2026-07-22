@@ -1931,6 +1931,18 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       if (last || use_atomic_add)
         // only the last block in a slice actually writes the result
         write_result(last);
+#if MARLIN_EORA_FUSED
+      if (last) {
+        // Publish this complete 128-column Marlin output slice. Adapter CTAs
+        // use the same lock only after its reduction chain has reset it, so a
+        // negative value is an unambiguous per-slice ready state. write_result
+        // has already crossed a block barrier after its global output stores.
+        if (threadIdx.x == 0) {
+          __threadfence();
+          atomicExch(&locks[locks_off], -1);
+        }
+      }
+#endif
       slice_row = 0;
       slice_col_par++;
       slice_col++;
@@ -1969,10 +1981,10 @@ __global__ void MARLIN_KERNEL_FUNCTION(
 #if MARLIN_EORA_FUSED
   // The output-owned Marlin schedule uses 116 CTAs. Eight additional CTAs
   // compute one complete-K 16-rank LoRA-down tile each while the base CTAs
-  // finish. This fixed shape uses only lock slots 0..31, so publish the
-  // reduced adapter values into the unused lock tail before the cooperative
-  // join and avoid a second grid barrier.
-  cooperative_groups::grid_group eora_grid = cooperative_groups::this_grid();
+  // finish. This fixed shape uses lock slots 0..31 for per-output readiness,
+  // 32..95 for adapter values, and two tail words for reusable phase counters.
+  // Per-slice acquire/release handoffs let early outputs enter LoRA-up without
+  // waiting at a grid-wide barrier for the slowest unrelated Marlin slice.
   constexpr int eora_rank = 128;
   constexpr int eora_down_tile = 16;
   constexpr int eora_marlin_blocks = 116;
@@ -1980,10 +1992,13 @@ __global__ void MARLIN_KERNEL_FUNCTION(
   constexpr int eora_lock_workspace_offset = 32;
   constexpr int eora_lock_workspace_ints =
       (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
+  constexpr int eora_down_ready_lock =
+      eora_lock_workspace_offset + eora_lock_workspace_ints;
+  constexpr int eora_up_arrivals_lock = eora_down_ready_lock + 1;
   constexpr int eora_available_lock_ints = 124;
+  constexpr int eora_phase_flag_slot = threads;
   static_assert(sizeof(scalar_t) == 2);
-  static_assert(eora_lock_workspace_offset + eora_lock_workspace_ints <=
-                eora_available_lock_ints);
+  static_assert(eora_up_arrivals_lock < eora_available_lock_ints);
   float* eora_partials = reinterpret_cast<float*>(sh);
   scalar_t* eora_lock_workspace =
       reinterpret_cast<scalar_t*>(locks + eora_lock_workspace_offset);
@@ -2077,36 +2092,156 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       eora_lock_workspace[eora_down_block * eora_down_tile + threadIdx.x] =
           ScalarType<scalar_t>::float2num(down_total);
     }
+    if (threadIdx.x < 32) {
+      __syncwarp();
+      if (threadIdx.x == 0) {
+        __threadfence();
+        atomicAdd(&locks[eora_down_ready_lock], 1);
+      }
+    }
   }
-  eora_grid.sync();
 
-  // A 32-column tile preserves coalesced LoRA-B reads. The 124-CTA grid leaves
-  // four attention tiles; the otherwise-idle upper four warps in blocks 0..3
-  // compute those tiles concurrently with the primary tiles.
+  // A 32-column tile preserves coalesced LoRA-B reads. Four CTAs each own two
+  // adjacent tiles from the same Marlin output slice; the remaining 120 CTAs
+  // own one tile. This covers all 128 tiles while requiring only one output
+  // readiness lock per CTA.
   const int up_lane = threadIdx.x & 31;
   const int up_warp = threadIdx.x >> 5;
   const int output_tiles = div_ceil(prob_n, 32);
-  const bool secondary_tile = up_warp >= 4;
-  const int tile = blockIdx.x + (secondary_tile ? gridDim.x : 0);
-  const int col = tile * 32 + up_lane;
-  if (tile < output_tiles && col < prob_n) {
+  const bool dual_tile_block = blockIdx.x < 4;
+  const int primary_tile = dual_tile_block ? blockIdx.x * 2 : blockIdx.x + 4;
+  const int secondary_tile = dual_tile_block ? primary_tile + 1 : output_tiles;
+  const int output_slice = primary_tile / 4;
+
+  // FP16 benefits from fetching LoRA-B before acquiring Marlin and LoRA-down.
+  // This delays the lock poll slightly, but shortens the post-acquire critical
+  // path for every warp. BF16 showed no matched benefit and retains the
+  // original post-acquire loads below.
+  constexpr bool eora_prefetch_up = std::is_same<scalar_t, half>::value;
+  constexpr int eora_up_prefetch = 32;
+  scalar_t eora_up_prefetched[eora_up_prefetch];
+  int tile;
+  int col;
+  int rank_begin;
+  bool valid_up_tile;
+  if constexpr (eora_prefetch_up) {
+    const bool use_secondary_tile = up_warp >= 4;
+    tile = use_secondary_tile ? secondary_tile : primary_tile;
+    col = tile * 32 + up_lane;
+    rank_begin = (up_warp & 3) * 32;
+    valid_up_tile = tile < output_tiles && col < prob_n;
+    if (valid_up_tile) {
+    #pragma unroll
+      for (int rank_offset = 0; rank_offset < eora_up_prefetch; ++rank_offset) {
+        eora_up_prefetched[rank_offset] =
+            eora_up_weight[(rank_begin + rank_offset) * prob_n + col];
+      }
+    }
+  }
+  if (threadIdx.x == 0) {
+    int state = 0;
+    do {
+      asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
+                   : "=r"(state)
+                   : "l"(&locks[eora_down_ready_lock]));
+    } while (state != eora_down_blocks);
+    do {
+      asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
+                   : "=r"(state)
+                   : "l"(&locks[output_slice]));
+    } while (state != -1);
+  }
+  __syncthreads();
+
+  // The arrival ticket is needed only to recycle phase state for the next
+  // launch. Issue it from an otherwise-idle upper warp while the active warps
+  // perform LoRA-up, then use the existing reduction barrier to publish the
+  // last-arrival flag. This keeps the atomic off the acquire critical path.
+  if (threadIdx.x == 128) {
+    const int arrival = atomicAdd(&locks[eora_up_arrivals_lock], 1);
+    eora_partials[eora_phase_flag_slot] =
+        arrival == gridDim.x - 1 ? 1.0f : 0.0f;
+  }
+
+  // FP16 benefits from overlapping the base-output load with the LoRA-up MAC
+  // and reduction. BF16 regressed under matched profiling and keeps its load
+  // in the final writer block below.
+  constexpr bool eora_preload_base = std::is_same<scalar_t, half>::value;
+  bool eora_write_secondary;
+  int eora_write_lane;
+  int eora_write_tile;
+  int eora_write_col;
+  bool eora_valid_write;
+  scalar_t eora_base_value;
+  if constexpr (eora_preload_base) {
+    eora_write_secondary = threadIdx.x >= 32;
+    eora_write_lane = threadIdx.x & 31;
+    eora_write_tile = eora_write_secondary ? secondary_tile : primary_tile;
+    eora_write_col = eora_write_tile * 32 + eora_write_lane;
+    eora_valid_write = threadIdx.x < 64 && eora_write_tile < output_tiles &&
+                       eora_write_col < prob_n;
+    if (eora_valid_write) eora_base_value = eora_out[eora_write_col];
+  }
+
+  if constexpr (!eora_prefetch_up) {
+    const bool use_secondary_tile = up_warp >= 4;
+    tile = use_secondary_tile ? secondary_tile : primary_tile;
+    col = tile * 32 + up_lane;
+    rank_begin = (up_warp & 3) * 32;
+    valid_up_tile = tile < output_tiles && col < prob_n;
+  }
+  if (valid_up_tile) {
     float update = 0.0f;
-    const int rank_begin = (up_warp & 3) * 32;
   #pragma unroll
-    for (int rank = rank_begin; rank < rank_begin + 32; ++rank) {
+    for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
+      const int rank = rank_begin + rank_offset;
       const float down_total = ScalarType<scalar_t>::num2float(
           eora_lock_workspace[rank]);
+      scalar_t up_value;
+      if constexpr (eora_prefetch_up) {
+        up_value = eora_up_prefetched[rank_offset];
+      } else {
+        up_value = eora_up_weight[rank * prob_n + col];
+      }
       update += down_total *
-                ScalarType<scalar_t>::num2float(
-                    eora_up_weight[rank * prob_n + col]);
+                ScalarType<scalar_t>::num2float(up_value);
     }
     eora_partials[threadIdx.x] = update;
   }
   __syncthreads();
-  if (threadIdx.x < 64) {
+  // FP16 benefits from keeping phase recycling off the output-writer warps.
+  // BF16 retains the converged whole-block reset, which profiles better for
+  // that instruction stream.
+  if constexpr (std::is_same<scalar_t, half>::value) {
+    if (up_warp == 4 &&
+        eora_partials[eora_phase_flag_slot] != 0.0f) {
+      locks[up_lane] = 0;
+      if (up_lane == 0) locks[eora_down_ready_lock] = 0;
+      if (up_lane == 1) locks[eora_up_arrivals_lock] = 0;
+    }
+  } else {
+    const bool reset_phase_state =
+        eora_partials[eora_phase_flag_slot] != 0.0f;
+    if (reset_phase_state) {
+      if (threadIdx.x < 32) locks[threadIdx.x] = 0;
+      if (threadIdx.x == 32) locks[eora_down_ready_lock] = 0;
+      if (threadIdx.x == 33) locks[eora_up_arrivals_lock] = 0;
+    }
+  }
+  if constexpr (eora_preload_base) {
+    if (eora_valid_write) {
+      const int partial_base = eora_write_secondary ? 128 : 0;
+      const float total = eora_partials[partial_base + eora_write_lane] +
+                          eora_partials[partial_base + eora_write_lane + 32] +
+                          eora_partials[partial_base + eora_write_lane + 64] +
+                          eora_partials[partial_base + eora_write_lane + 96];
+      eora_out[eora_write_col] = ScalarType<scalar_t>::float2num(
+          ScalarType<scalar_t>::num2float(eora_base_value) + total);
+    }
+  } else if (threadIdx.x < 64) {
     const bool write_secondary = threadIdx.x >= 32;
     const int write_lane = threadIdx.x & 31;
-    const int write_tile = blockIdx.x + (write_secondary ? gridDim.x : 0);
+    const int write_tile = write_secondary ? secondary_tile : primary_tile;
     const int write_col = write_tile * 32 + write_lane;
     const int partial_base = write_secondary ? 128 : 0;
     if (write_tile < output_tiles && write_col < prob_n) {

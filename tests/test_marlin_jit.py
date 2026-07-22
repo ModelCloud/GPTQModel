@@ -231,7 +231,9 @@ def test_integrated_eora_contract_is_present_in_marlin_extensions():
     assert "prob_n != 4096 || prob_k != 4096" in gemm_cu
     assert "eora_rank != 128" in gemm_cu
     assert "device_info.sms != 124" in gemm_cu
-    assert "cooperative_groups::this_grid()" in template_h
+    assert "eora_down_ready_lock" in template_h
+    assert "ld.global.acquire.gpu.b32" in template_h
+    assert "atomicAdd(&locks[eora_up_arrivals_lock], 1)" in template_h
 
 
 def test_marlin_extra_cuda_cflags_enable_static_global_template_stub_when_nvcc_is_compatible(monkeypatch):
@@ -885,10 +887,12 @@ def test_marlin_eora_rank128_attention_mega_kernel_matches_dense_update(dtype, m
 
     with torch.inference_mode():
         actual = module(x)
+        repeated = module(x)
 
     assert actual.shape == base.shape
     assert actual.dtype == dtype
     torch.testing.assert_close(actual.float(), expected, rtol=5e-2, atol=5e-2)
+    torch.testing.assert_close(repeated.float(), expected, rtol=5e-2, atol=5e-2)
 
 
 def test_marlin_include_paths_use_wheel_headers_when_local_cuda_is_incomplete(monkeypatch, tmp_path):
