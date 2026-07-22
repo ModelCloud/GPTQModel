@@ -218,7 +218,7 @@ def test_evalution_threads_seed_and_explicit_greedy_gen_kwargs(monkeypatch):
     assert results == {"arc_challenge": {"accuracy,loglikelihood": 1.0}}
     assert captured["model_args"]["device"] == "cuda:0"
     assert captured["model_args"]["seed"] == model_test_module.RAND_SEED
-    assert captured["model_args"]["random_seed"] == model_test_module.RAND_SEED
+    assert "random_seed" not in captured["model_args"]
     assert captured["gen_kwargs"] == "do_sample=false,temperature=0.0,top_p=1.0,top_k=50"
 
 

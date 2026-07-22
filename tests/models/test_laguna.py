@@ -134,6 +134,9 @@ class TestLagunaS21(_LagunaModelTest):
     # post-quant reload for Evalution.
     EVAL_SINGLE_GPU = False
     EVAL_TASKS_FAST = copy.deepcopy(_LagunaModelTest.EVAL_TASKS_FAST)
+    # Laguna's reasoning mode is selected by its chat template and defaults to enabled in
+    # generation_config.json, so this model must evaluate through the template-aware path.
+    EVAL_TASKS_FAST["gsm8k_platinum_cot"]["chat_template"] = True
     EVAL_TASKS_FAST["gsm8k_platinum_cot"]["evalution_suite_kwargs"]["max_rows"] = 8
     EVAL_TASKS_FAST["gsm8k_platinum_cot"]["acc,num"]["value"] = 0.125
     EVAL_TASKS_FAST["arc_challenge"]["evalution_suite_kwargs"]["max_rows"] = 8
