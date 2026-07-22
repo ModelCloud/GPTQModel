@@ -71,6 +71,30 @@ def test_quantize_config_dispatches_awq_from_format_without_explicit_method():
     assert cfg.sym is False
 
 
+@pytest.mark.parametrize("group_size", [256, 384, 512])
+@pytest.mark.parametrize(
+    ("method", "format_value", "config_type"),
+    [
+        (METHOD.GPTQ, FORMAT.GPTQ, GPTQConfig),
+        (METHOD.AWQ, FORMAT.GEMM, AWQConfig),
+    ],
+)
+def test_gptq_awq_extended_group_sizes_round_trip(group_size, method, format_value, config_type):
+    cfg = QuantizeConfig(
+        quant_method=method,
+        format=format_value,
+        group_size=group_size,
+        offload_to_disk=False,
+    )
+
+    restored = QuantizeConfig.from_quant_config(cfg.to_dict())
+
+    assert isinstance(restored, config_type)
+    assert restored.quant_method == method
+    assert restored.format == format_value
+    assert restored.group_size == group_size
+
+
 def test_quantize_config_dispatches_awq_ignoring_legacy_gptq_only_kwargs():
     cfg = QuantizeConfig(
         quant_method=METHOD.AWQ,

@@ -15,48 +15,80 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 
 
-def _mock_gptq_linear(bits: int, group_size: int, in_features: int, out_features: int) -> tuple[nn.Linear, torch.Tensor, torch.Tensor, torch.Tensor]:
+_GPTQ_OUTPUT_QUALITY_LIMITS = {
+    torch.float16: {"max_abs": 0.15, "mean_abs": 0.02, "relative_l2": 5e-4},
+    torch.bfloat16: {"max_abs": 1.25, "mean_abs": 0.16, "relative_l2": 4e-3},
+}
+
+
+def _assert_gptq_output_quality(
+    output: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    backend: str,
+    group_size: int,
+    dtype: torch.dtype,
+) -> None:
+    context = (
+        f"method=GPTQ format=GPTQ bits=4 group_size={group_size} sym=True "
+        f"desc_act=False dtype={dtype} backend={backend}"
+    )
+    assert output.shape == reference.shape, context
+    assert output.dtype == dtype, context
+    assert output.device == reference.device, context
+    assert torch.isfinite(output).all(), context
+
+    error = output.float() - reference
+    max_abs = error.abs().max().item()
+    mean_abs = error.abs().mean().item()
+    relative_l2 = (torch.linalg.vector_norm(error) / torch.linalg.vector_norm(reference)).item()
+    limits = _GPTQ_OUTPUT_QUALITY_LIMITS[dtype]
+
+    assert max_abs <= limits["max_abs"], f"{context} max_abs={max_abs:.8f} limit={limits['max_abs']:.8f}"
+    assert mean_abs <= limits["mean_abs"], f"{context} mean_abs={mean_abs:.8f} limit={limits['mean_abs']:.8f}"
+    assert relative_l2 <= limits["relative_l2"], (
+        f"{context} relative_l2={relative_l2:.8f} limit={limits['relative_l2']:.8f}"
+    )
+
+
+def _mock_gptq_linear(
+    bits: int,
+    group_size: int,
+    in_features: int,
+    out_features: int,
+) -> tuple[nn.Linear, torch.Tensor, torch.Tensor, torch.Tensor]:
     maxq = (1 << (bits - 1)) - 1
     weight = torch.randn((in_features, out_features), dtype=torch.float32)
+    effective_group_size = in_features if group_size == -1 else group_size
+    ref_groups = []
+    scale_groups = []
+    for group_start in range(0, in_features, effective_group_size):
+        group = weight[group_start:group_start + effective_group_size]
+        group_scales = torch.maximum(
+            group.abs().max(dim=0, keepdim=True).values,
+            torch.full((1, out_features), 1e-6, device=group.device),
+        ) / maxq
+        quantized = torch.round(group / group_scales).clamp_(-maxq, maxq)
+        ref_groups.append((quantized * group_scales).to(dtype=torch.float16))
+        scale_groups.append(group_scales)
 
-    if group_size != -1:
-        reshaped = weight.view(in_features // group_size, group_size, out_features)
-        w_g = reshaped.permute(1, 0, 2).reshape(group_size, -1)
-    else:
-        w_g = weight
-
-    scales = torch.maximum(
-        w_g.abs().max(dim=0, keepdim=True).values,
-        torch.full((1, w_g.shape[1]), 1e-6, device=w_g.device),
-    )
-    scales = scales / maxq
-
-    q = torch.round(w_g / scales).clamp_(-maxq, maxq)
-    ref = (q * scales).to(dtype=torch.float16)
-
-    if group_size != -1:
-        ref = ref.reshape(group_size, -1, out_features)
-        ref = ref.permute(1, 0, 2).reshape(in_features, out_features)
-
-        q = q.reshape(group_size, -1, out_features)
-        q = q.permute(1, 0, 2).reshape(in_features, out_features)
+    ref = torch.cat(ref_groups, dim=0)
+    scales = torch.cat(scale_groups, dim=0)
 
     linear = nn.Linear(in_features, out_features, bias=False)
     linear.weight.data = ref.t().contiguous()
 
-    scales = scales.reshape(-1, out_features).contiguous()
+    scales = scales.contiguous()
     zeros = torch.zeros_like(scales, dtype=torch.int32)
-    g_idx = torch.arange(in_features, dtype=torch.int32) // (
-        group_size if group_size != -1 else in_features
-    )
+    g_idx = torch.arange(in_features, dtype=torch.int32) // effective_group_size
 
     return linear, scales, zeros, g_idx
 
 
 @pytest.mark.cuda
-@pytest.mark.parametrize("group_size", [256, 512, 1024])
+@pytest.mark.parametrize("group_size", [256, 384, 512, 1024])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_torch_triton_large_group_sizes(group_size: int, dtype: torch.dtype) -> None:
+def test_gptq_torch_triton_large_group_size_output_quality(group_size: int, dtype: torch.dtype) -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA device required")
 
@@ -85,6 +117,7 @@ def test_torch_triton_large_group_sizes(group_size: int, dtype: torch.dtype) -> 
     )
     torch_module.pack_block(linear, scales.T, zeros.T, g_idx=g_idx)
     torch_module.post_init()
+    reference_weight = torch_module.dequantize_weight().to(torch.float32)
 
     try:
         triton_module = TritonV2Linear(
@@ -106,18 +139,32 @@ def test_torch_triton_large_group_sizes(group_size: int, dtype: torch.dtype) -> 
     device = torch.device("cuda:0")
     torch_module = torch_module.to(device=device, dtype=dtype).eval()
     triton_module = triton_module.to(device=device, dtype=dtype).eval()
+    reference_weight = reference_weight.to(device=device)
 
     batch = 8
     x = torch.randn((batch, in_features), device=device, dtype=dtype)
+    reference = torch.matmul(x.float(), reference_weight)
 
     with torch.inference_mode():
         torch_out = torch_module(x)
         triton_out = triton_module(x)
 
-    torch_out = torch_out.to(torch.float32)
-    triton_out = triton_out.to(torch.float32)
+    _assert_gptq_output_quality(
+        torch_out,
+        reference,
+        backend="TorchLinear",
+        group_size=group_size,
+        dtype=dtype,
+    )
+    _assert_gptq_output_quality(
+        triton_out,
+        reference,
+        backend="TritonV2Linear",
+        group_size=group_size,
+        dtype=dtype,
+    )
 
-    assert torch.allclose(triton_out, torch_out, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(triton_out, torch_out, rtol=1e-2, atol=1e-2)
     assert torch_out.abs().max() > 0
 
 ######### test_torch_weight_cache.py #########

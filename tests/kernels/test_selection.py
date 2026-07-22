@@ -13,11 +13,15 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
+from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
@@ -283,6 +287,41 @@ def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monke
     assert candidates[0] is GGUFTritonKernel
     assert GGUFCudaKernel not in candidates
     assert candidates[1] is GGUFTorchLinear
+
+
+@pytest.mark.parametrize("group_size", [256, 384, 512])
+@pytest.mark.parametrize(
+    ("method", "fmt", "expected_primary", "expected_fallback"),
+    [
+        (METHOD.GPTQ, FORMAT.GPTQ, TritonV2Linear, TorchLinear),
+        (METHOD.AWQ, FORMAT.GEMM, AwqGEMMTritonLinear, AwqTorchLinear),
+    ],
+)
+def test_cuda_auto_selects_extended_group_size_backends(
+    monkeypatch,
+    group_size,
+    method,
+    fmt,
+    expected_primary,
+    expected_fallback,
+):
+    _force_auto_candidates_valid(monkeypatch, method, fmt)
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=group_size,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=fmt,
+        quant_method=method,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert candidates[0] is expected_primary
+    assert expected_fallback in candidates
 
 
 def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):

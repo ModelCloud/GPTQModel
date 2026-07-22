@@ -22,7 +22,7 @@ class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 10}
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 384, 512]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True

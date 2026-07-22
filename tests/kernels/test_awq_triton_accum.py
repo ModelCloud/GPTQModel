@@ -5,8 +5,45 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.awq.modules.triton.gemm import awq_gemm_triton
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
+
+
+_AWQ_OUTPUT_QUALITY_LIMITS = {"max_abs": 0.02, "mean_abs": 0.002, "relative_l2": 5e-4}
+
+
+def _assert_awq_output_quality(
+    output: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    backend: str,
+    group_size: int,
+    sequence_length: int,
+) -> None:
+    context = (
+        f"method=AWQ format=GEMM bits=4 group_size={group_size} sym=True desc_act=False "
+        f"dtype=torch.float16 backend={backend} sequence_length={sequence_length}"
+    )
+    assert output.shape == reference.shape, context
+    assert output.dtype == torch.float16, context
+    assert output.device == reference.device, context
+    assert torch.isfinite(output).all(), context
+
+    error = output.float() - reference
+    max_abs = error.abs().max().item()
+    mean_abs = error.abs().mean().item()
+    relative_l2 = (torch.linalg.vector_norm(error) / torch.linalg.vector_norm(reference)).item()
+
+    assert max_abs <= _AWQ_OUTPUT_QUALITY_LIMITS["max_abs"], (
+        f"{context} max_abs={max_abs:.8f} limit={_AWQ_OUTPUT_QUALITY_LIMITS['max_abs']:.8f}"
+    )
+    assert mean_abs <= _AWQ_OUTPUT_QUALITY_LIMITS["mean_abs"], (
+        f"{context} mean_abs={mean_abs:.8f} limit={_AWQ_OUTPUT_QUALITY_LIMITS['mean_abs']:.8f}"
+    )
+    assert relative_l2 <= _AWQ_OUTPUT_QUALITY_LIMITS["relative_l2"], (
+        f"{context} relative_l2={relative_l2:.8f} limit={_AWQ_OUTPUT_QUALITY_LIMITS['relative_l2']:.8f}"
+    )
 
 
 def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
@@ -38,6 +75,73 @@ def _make_packed_buffers(bits: int, in_features: int, out_features: int, group_s
         scales,
         bias,
     )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for extended AWQ group-size parity test")
+@pytest.mark.parametrize("group_size", [256, 384, 512])
+@pytest.mark.parametrize("sequence_length", [1, 8, 129])
+def test_awq_torch_triton_extended_group_size_output_quality(group_size, sequence_length):
+    pytest.importorskip("triton")
+    torch.manual_seed(1000 + group_size + sequence_length)
+
+    bits = 4
+    in_features = 1536
+    out_features = 512
+    groups = in_features // group_size
+    int_weight = torch.randint(0, 2**bits, size=(in_features, out_features), dtype=torch.int32)
+    zero_points = torch.randint(0, 2**bits, size=(groups, out_features), dtype=torch.int32)
+    qweight = _pack_awq_tensor(int_weight, bits).cuda()
+    qzeros = _pack_awq_tensor(zero_points, bits).cuda()
+    scales = ((torch.rand(groups, out_features, dtype=torch.float16) * 0.02) + 0.01).cuda()
+
+    modules = []
+    for module_cls in (AwqTorchLinear, AwqGEMMTritonLinear):
+        module = module_cls(
+            bits=bits,
+            group_size=group_size,
+            sym=True,
+            desc_act=False,
+            in_features=in_features,
+            out_features=out_features,
+            bias=False,
+            dtype=torch.float16,
+            register_buffers=True,
+        ).cuda().eval()
+        module.qweight.copy_(qweight)
+        module.qzeros.copy_(qzeros)
+        module.scales.copy_(scales)
+        module.post_init()
+        modules.append(module)
+
+    x = torch.randn(1, sequence_length, in_features, device="cuda", dtype=torch.float16)
+    dense_weight = dequantize_gemm(
+        qweight=qweight,
+        qzeros=qzeros,
+        scales=scales,
+        bits=bits,
+        group_size=group_size,
+    ).to(device=x.device, dtype=x.dtype)
+    reference = torch.matmul(x.float(), dense_weight.float())
+
+    with torch.inference_mode():
+        torch_output, triton_output = (module(x) for module in modules)
+
+    _assert_awq_output_quality(
+        torch_output,
+        reference,
+        backend="AwqTorchLinear",
+        group_size=group_size,
+        sequence_length=sequence_length,
+    )
+    _assert_awq_output_quality(
+        triton_output,
+        reference,
+        backend="AwqGEMMTritonLinear",
+        group_size=group_size,
+        sequence_length=sequence_length,
+    )
+    torch.testing.assert_close(triton_output, torch_output, atol=0.01, rtol=0.01)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for AWQ Triton kernel parity test")
