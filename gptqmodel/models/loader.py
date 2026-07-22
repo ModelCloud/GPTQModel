@@ -1697,6 +1697,17 @@ def ModelLoader(cls):
 
         model.eval()
 
+        if qcfg.runtime_bits == 3 and qcfg.group_size == 128 and not qcfg.desc_act and qcfg.sym:
+            from ..nn_modules.triton_utils.trilin_qkv import install_trilin_3bit_qkv
+            from ..nn_modules.triton_utils.trilin_swiglu import install_trilin_3bit_swiglu
+
+            fused_trilin_qkv = install_trilin_3bit_qkv(model)
+            if fused_trilin_qkv:
+                log.info(f"Kernel: installed {fused_trilin_qkv} sm80 Trilin 3-bit QKV kernels.")
+            fused_trilin_swiglu = install_trilin_3bit_swiglu(model)
+            if fused_trilin_swiglu:
+                log.info(f"Kernel: installed {fused_trilin_swiglu} sm80 Trilin 3-bit SwiGLU kernels.")
+
         if (
             native_gguf_qspec is not None
             and native_gguf_qspec.tensor_qtype

@@ -89,8 +89,8 @@ class AwqGEMMTritonLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMM_TRITON]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 50}
-    SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 384, 512]
+    SUPPORTS_BITS = [3, 4]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 96, 128, 192, 256, 384, 512]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
@@ -105,7 +105,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = False
 
@@ -126,6 +126,55 @@ class AwqGEMMTritonLinear(AWQuantLinear):
 
         return True, None
 
+    @classmethod
+    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        valid, error = super().validate(**args)
+        if not valid:
+            return valid, error
+
+        if args.get("bits") != 3 and args.get("dtype") == torch.bfloat16:
+            return False, NotImplementedError(
+                f"{cls.__name__} BF16 support is currently limited to the 3-bit fused path."
+            )
+
+        if args.get("bits") == 3:
+            required = {
+                "desc_act": False,
+                "sym": True,
+                "pack_dtype": torch.int32,
+            }
+            for name, expected in required.items():
+                actual = args.get(name)
+                if actual != expected:
+                    return False, NotImplementedError(
+                        f"{cls.__name__} 3-bit fused inference requires `{name}={expected}`, got `{actual}`."
+                    )
+            if args.get("dynamic"):
+                return False, NotImplementedError(
+                    f"{cls.__name__} 3-bit fused inference does not support dynamic per-layer quantization."
+                )
+            in_features = args.get("in_features")
+            out_features = args.get("out_features")
+            group_size = args.get("group_size", 128)
+            effective_group_size = in_features if group_size == -1 else group_size
+            if in_features is not None and (
+                in_features % 32 != 0
+                or effective_group_size is None
+                or effective_group_size <= 0
+                or in_features % effective_group_size != 0
+            ):
+                return False, NotImplementedError(
+                    f"{cls.__name__} 3-bit fused inference requires in_features divisible by 32 and by "
+                    f"group_size (or group_size=-1), got in_features={in_features}, group_size={group_size}."
+                )
+            if out_features is not None and out_features % 32 != 0:
+                return False, NotImplementedError(
+                    f"{cls.__name__} 3-bit fused inference requires out_features divisible by 32, "
+                    f"got {out_features}."
+                )
+
+        return True, None
+
     def __init__(
         self,
         bits: int,
@@ -140,6 +189,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ):
+        register_3bit_buffers = register_buffers and bits == 3
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -151,16 +201,139 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.AWQ_GEMM_TRITON),
             adapter=adapter,
-            register_buffers=register_buffers,
+            register_buffers=register_buffers and bits != 3,
             **kwargs)
+
+        if register_3bit_buffers:
+            self.register_buffer(
+                "qweight",
+                torch.zeros((in_features, out_features // 32 * 3), dtype=pack_dtype),
+            )
+            self.register_buffer(
+                "qzeros",
+                torch.zeros((in_features // self.group_size, out_features // 32 * 3), dtype=pack_dtype),
+            )
+            self.register_buffer(
+                "scales",
+                torch.zeros((in_features // self.group_size, out_features), dtype=torch.float16),
+            )
+            if bias:
+                self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
+            else:
+                self.bias = None
 
     def post_init(self):
         if self.scales is not None:
             self.scales = self.scales.to(dtype=torch.float16)
         super().post_init()
+        if self.bits == 3:
+            from ..triton_utils.three_bit import (
+                prepare_marlin_3bit,
+                prepare_trilin_3bit,
+                repack_awq_to_gptq_3bit,
+                unpack_3bit,
+            )
+
+            zeros = unpack_3bit(self.qzeros, axis=1, count=self.out_features)
+            if not torch.all(zeros == 4):
+                raise ValueError(
+                    f"{type(self).__name__}: 3-bit symmetric AWQ inference requires every zero point to equal 4."
+                )
+            self.register_buffer(
+                "_triton_3bit_qweight",
+                repack_awq_to_gptq_3bit(self.qweight),
+                persistent=False,
+            )
+            self._trilin_native_3bit = prepare_trilin_3bit(
+                self._triton_3bit_qweight,
+                self.scales,
+                self.requested_group_size,
+            )
+            marlin_state = prepare_marlin_3bit(
+                self._triton_3bit_qweight,
+                self.scales,
+                self.requested_group_size,
+            )
+            if marlin_state is not None:
+                self.register_buffer("_trilin_marlin_qweight", marlin_state.qweight, persistent=False)
+                self.register_buffer("_trilin_marlin_scales", marlin_state.scales, persistent=False)
+                self.register_buffer("_trilin_marlin_workspace", marlin_state.workspace, persistent=False)
+                self.register_buffer("_trilin_marlin_empty", marlin_state.empty, persistent=False)
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
+
+        if self.bits == 3:
+            from ..triton_utils.three_bit import (
+                LAYOUT_AWQ,
+                LAYOUT_GPTQ,
+                dequantize_3bit,
+                matmul_3bit,
+                matmul_marlin_3bit,
+                matmul_trilin_3bit,
+            )
+
+            input_dtype = x.dtype
+            compute_dtype = input_dtype if input_dtype in (torch.float16, torch.bfloat16) else torch.float16
+            x_compute = x if x.dtype == compute_dtype else x.to(compute_dtype)
+            x_flat = x_compute.reshape(-1, x_compute.shape[-1])
+            if x_flat.stride(-1) != 1:
+                x_flat = x_flat.contiguous()
+
+            capability = torch.cuda.get_device_capability(self.qweight.device)
+            native_bias_applied = False
+            if not self.training and capability >= (8, 0):
+                runtime_qweight = getattr(self, "_triton_3bit_qweight", None)
+                native_qweight = getattr(self, "_trilin_marlin_qweight", None)
+                if (
+                    x_flat.dtype in (torch.float16, torch.bfloat16)
+                    and 0 < x_flat.shape[0] <= 16
+                    and runtime_qweight is not None
+                    and getattr(self, "_trilin_native_3bit", False)
+                ):
+                    out = matmul_trilin_3bit(
+                        x_flat if x_flat.is_contiguous() else x_flat.contiguous(),
+                        runtime_qweight,
+                        self.scales,
+                        bias=self.bias,
+                        group_size=self.requested_group_size,
+                    )
+                    native_bias_applied = self.bias is not None
+                elif x_flat.dtype == torch.float16 and native_qweight is not None:
+                    out = matmul_marlin_3bit(
+                        x_flat,
+                        native_qweight,
+                        self._trilin_marlin_scales,
+                        self._trilin_marlin_workspace,
+                        self._trilin_marlin_empty,
+                        k=self.in_features,
+                        n=self.out_features,
+                        bias=self.bias,
+                    )
+                    native_bias_applied = self.bias is not None
+                else:
+                    out = matmul_3bit(
+                        x_flat,
+                        runtime_qweight if runtime_qweight is not None else self.qweight,
+                        self.scales,
+                        layout=LAYOUT_GPTQ if runtime_qweight is not None else LAYOUT_AWQ,
+                        group_size=self.requested_group_size,
+                    )
+            else:
+                weight = dequantize_3bit(
+                    self.qweight,
+                    self.scales,
+                    layout=LAYOUT_AWQ,
+                    group_size=self.requested_group_size,
+                ).to(dtype=compute_dtype)
+                out = torch.matmul(x_flat, weight)
+
+            if self.bias is not None and not native_bias_applied:
+                out = out + self.bias
+            out = out.reshape(out_shape)
+            if self.adapter:
+                out = self.adapter.apply(x=x_compute, out=out)
+            return out.to(dtype=input_dtype)
 
         input_dtype = x.dtype
         if input_dtype != torch.float16:
@@ -187,6 +360,61 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             out = self.adapter.apply(x=x, out=out)
 
         return out.reshape(out_shape)
+
+    def pack(
+        self,
+        linear: torch.nn.Module,
+        scales: torch.Tensor,
+        zeros: torch.Tensor,
+        g_idx: torch.Tensor = None,
+    ):
+        if self.bits != 3:
+            from .gemm_awq import AwqGEMMLinear
+
+            return AwqGEMMLinear.pack(self, linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
+
+        from ..triton_utils.three_bit import pack_3bit
+
+        if g_idx is not None:
+            expected_g_idx = torch.arange(self.in_features, dtype=g_idx.dtype, device=g_idx.device) // self.group_size
+            if not torch.equal(g_idx, expected_g_idx):
+                raise ValueError("3-bit AWQ packing requires natural group indices for desc_act=False.")
+
+        scales_group_n = scales.t().contiguous()
+        zeros_group_n = zeros.t().contiguous()
+        expected_metadata_shape = (self.in_features // self.group_size, self.out_features)
+        if tuple(scales_group_n.shape) != expected_metadata_shape:
+            raise ValueError(
+                f"3-bit AWQ scales expected shape {expected_metadata_shape}, got {tuple(scales_group_n.shape)}"
+            )
+        if tuple(zeros_group_n.shape) != expected_metadata_shape:
+            raise ValueError(
+                f"3-bit AWQ zeros expected shape {expected_metadata_shape}, got {tuple(zeros_group_n.shape)}"
+            )
+        if not torch.all(zeros_group_n == 4):
+            raise ValueError("3-bit symmetric AWQ packing requires every zero point to equal 4.")
+
+        weight = linear.weight.detach()
+        if tuple(weight.shape) != (self.out_features, self.in_features):
+            raise ValueError(
+                "3-bit AWQ packing expects a Linear weight with shape "
+                f"({self.out_features}, {self.in_features}), got {tuple(weight.shape)}"
+            )
+        groups = torch.arange(self.in_features, device=weight.device) // self.group_size
+        scales_device = scales_group_n.to(device=weight.device)
+        zeros_device = zeros_group_n.to(device=weight.device)
+        integer_weight = torch.round(
+            (weight.t().contiguous() + zeros_device[groups] * scales_device[groups]) / scales_device[groups]
+        ).to(torch.int32)
+
+        self.register_buffer("qweight", pack_3bit(integer_weight, axis=1).to(device=weight.device))
+        self.register_buffer("qzeros", pack_3bit(zeros_device.to(torch.int32), axis=1))
+        scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        self.register_buffer("scales", scales_group_n.to(device=weight.device, dtype=scale_dtype))
+        if linear.bias is not None:
+            self.register_buffer("bias", linear.bias.detach().to(device=weight.device, dtype=scale_dtype))
+        else:
+            self.bias = None
 
 
 __all__ = [

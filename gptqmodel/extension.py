@@ -96,6 +96,11 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin", "_MARLIN_BF16_TORCH_OPS_EXTENSION"),
     ),
     _ExtensionSpec(
+        name="trilin",
+        aliases=("trilin_3bit",),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.trilin", "_TRILIN_TORCH_OPS_EXTENSION"),
+    ),
+    _ExtensionSpec(
         name="eora_marlin",
         aliases=("eora_lora", "marlin_eora"),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.eora_marlin", "_EORA_MARLIN_TORCH_OPS_EXTENSION"),

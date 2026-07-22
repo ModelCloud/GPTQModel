@@ -289,7 +289,39 @@ def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monke
     assert candidates[1] is GGUFTorchLinear
 
 
-@pytest.mark.parametrize("group_size", [256, 384, 512])
+@pytest.mark.parametrize(
+    "method,fmt,kernel_cls,group_size",
+    [
+        *((METHOD.GPTQ, FORMAT.GPTQ, TritonV2Linear, group_size)
+          for group_size in TritonV2Linear.SUPPORTS_GROUP_SIZE),
+        *((METHOD.AWQ, FORMAT.GEMM, AwqGEMMTritonLinear, group_size)
+          for group_size in AwqGEMMTritonLinear.SUPPORTS_GROUP_SIZE),
+    ],
+)
+def test_cuda_auto_selects_grouped_3bit_triton_backend(monkeypatch, method, fmt, kernel_cls, group_size):
+    monkeypatch.setattr(
+        kernel_cls,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+
+    selected = select_quant_linear(
+        bits=3,
+        group_size=group_size,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=fmt,
+        quant_method=method,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert selected is kernel_cls
+
+
+@pytest.mark.parametrize("group_size", [96, 192, 256, 384, 512])
 @pytest.mark.parametrize(
     ("method", "fmt", "expected_primary", "expected_fallback"),
     [

@@ -79,7 +79,7 @@ def _make_packed_buffers(bits: int, in_features: int, out_features: int, group_s
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for extended AWQ group-size parity test")
-@pytest.mark.parametrize("group_size", [256, 384, 512])
+@pytest.mark.parametrize("group_size", [96, 192, 256, 384, 512])
 @pytest.mark.parametrize("sequence_length", [1, 8, 129])
 def test_awq_torch_triton_extended_group_size_output_quality(group_size, sequence_length):
     pytest.importorskip("triton")

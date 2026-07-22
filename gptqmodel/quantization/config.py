@@ -2114,7 +2114,7 @@ def _normalize_moe_config(value: Optional[Union[MoEConfig, Dict[str, Any]]]) -> 
 
 
 def _resolve_dynamic_group_size_error() -> str:
-    return "QuantizeConfig: `group_size` must be one of `[-1, 16, 32, 64, 128, 256, 384, 512, 1024]`."
+    return "QuantizeConfig: `group_size` must be one of `[-1, 16, 32, 64, 96, 128, 192, 256, 384, 512, 1024]`."
 
 
 def _default_damp_percent(method: METHOD) -> float:

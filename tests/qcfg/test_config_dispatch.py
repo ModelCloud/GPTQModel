@@ -71,7 +71,7 @@ def test_quantize_config_dispatches_awq_from_format_without_explicit_method():
     assert cfg.sym is False
 
 
-@pytest.mark.parametrize("group_size", [256, 384, 512])
+@pytest.mark.parametrize("group_size", [96, 192, 256, 384, 512])
 @pytest.mark.parametrize(
     ("method", "format_value", "config_type"),
     [

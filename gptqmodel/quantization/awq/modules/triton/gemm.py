@@ -21,7 +21,7 @@ import triton.language as tl
 from gptqmodel.utils.env import env_flag
 
 
-AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128, 256, 384, 512]
+AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 96, 128, 192, 256, 384, 512]
 # Shared runtime default: fp32 accumulation trades a little speed for lower numerical drift.
 FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 

@@ -86,9 +86,16 @@ def _mock_gptq_linear(
 
 
 @pytest.mark.cuda
-@pytest.mark.parametrize("group_size", [256, 384, 512, 1024])
+@pytest.mark.parametrize(
+    "group_size,in_features",
+    [(96, 3072), (192, 3072), (256, 4096), (384, 4096), (512, 4096), (1024, 4096)],
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_gptq_torch_triton_large_group_size_output_quality(group_size: int, dtype: torch.dtype) -> None:
+def test_gptq_torch_triton_large_group_size_output_quality(
+    group_size: int,
+    in_features: int,
+    dtype: torch.dtype,
+) -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA device required")
 
@@ -98,7 +105,6 @@ def test_gptq_torch_triton_large_group_size_output_quality(group_size: int, dtyp
     torch.cuda.set_device(0)
 
     bits = 4
-    in_features = 4096
     out_features = 4096
 
     torch.manual_seed(0)
