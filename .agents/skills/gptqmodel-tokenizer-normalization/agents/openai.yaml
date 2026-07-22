@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Tokenizer Normalization"
+  short_description: "Route tokenizer and chat-template fixes upstream"
+  default_prompt: "Use $gptqmodel-tokenizer-normalization to diagnose and upstream this tokenizer or chat-template correction."
