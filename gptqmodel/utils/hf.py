@@ -21,11 +21,9 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
-    AutoTokenizer,
     GenerationConfig,
     PreTrainedModel,
 )
-from transformers.models.auto.tokenization_auto import get_tokenizer_config, tokenizer_class_from_name
 
 from ..nn_modules.qlinear.gguf import (
     PRISM_Q1_0_G128_BLOCK_SIZE,
@@ -1770,99 +1768,19 @@ def load_hf_tokenizer(
         trust_remote_code: bool = False,
         **kwargs,
 ):
-    auto_tokenizer_exc = None
-    try:
-        # Preferred path: let transformers perform its normal tokenizer
-        # resolution. This keeps behavior identical for native tokenizers and
-        # for remote-code tokenizers that are still compatible with the
-        # installed transformers release.
-        return AutoTokenizer.from_pretrained(
-            tokenizer_or_path,
-            trust_remote_code=trust_remote_code,
-            **kwargs,
-        )
-    except ValueError as exc:
-        # Transformers 5.x can incorrectly route some legacy/local repos to the
-        # generic tokenizers backend, which then fails before consulting the
-        # declared tokenizer class from tokenizer_config.json.
-        #
-        # In that failure mode the repo may still have a complete
-        # `vocab.json`/`merges.txt` pair, but `AutoTokenizer` never reaches the
-        # model-specific tokenizer class that knows how to map those files to
-        # `vocab_file` / `merges_file`. The issue is therefore dispatch, not
-        # missing tokenizer assets.
-        if "Couldn't instantiate the backend tokenizer" not in str(exc):
-            raise
-        auto_tokenizer_exc = exc
-    except AttributeError as exc:
-        # Narrow fallback for legacy trust_remote_code repositories. On
-        # transformers 5.x, some old repos no longer resolve to a tokenizer
-        # class inside AutoTokenizer and instead fail with
-        # `None.from_pretrained(...)`. Only intercept that specific compat
-        # break; all other exceptions should propagate unchanged.
-        if not trust_remote_code or "from_pretrained" not in str(exc):
-            raise
-        auto_tokenizer_exc = exc
+    from tokenicer import Tokenicer
 
-    tokenizer_config = get_tokenizer_config(
+    tokenicer = Tokenicer.load(
         tokenizer_or_path,
+        model_config=model_config,
         trust_remote_code=trust_remote_code,
         **kwargs,
     )
-    tokenizer_class_name = tokenizer_config.get("tokenizer_class")
-    if isinstance(tokenizer_class_name, str):
-        # `tokenizer_config.json` is the most direct source of truth once the
-        # generic auto-dispatch path has proven unreliable. Resolving the class
-        # name explicitly lets us instantiate the tokenizer implementation that
-        # ships with transformers (for example `Qwen2Tokenizer`) so it can load
-        # its expected files from the repo in the normal way.
-        tokenizer_cls = tokenizer_class_from_name(tokenizer_class_name)
-        if tokenizer_cls is not None:
-            return tokenizer_cls.from_pretrained(
-                tokenizer_or_path,
-                trust_remote_code=trust_remote_code,
-                **kwargs,
-            )
-
-    auto_map = getattr(model_config, "auto_map", None) or {}
-    # Old repositories often still expose an authoritative dynamic tokenizer
-    # reference in `config.auto_map`, even when the higher-level
-    # AutoTokenizer registry no longer reaches it.
-    class_ref = auto_map.get("AutoTokenizer")
-    if isinstance(class_ref, (list, tuple)):
-        # HF stores tokenizer refs as [slow, fast]. Prefer the fast tokenizer
-        # when present, otherwise use the slow one.
-        class_ref = class_ref[1] if len(class_ref) > 1 and class_ref[1] is not None else class_ref[0]
-
-    if not isinstance(class_ref, str):
-        raise auto_tokenizer_exc
-
-    from transformers.dynamic_module_utils import get_class_from_dynamic_module
-
-    tokenizer_cls = get_class_from_dynamic_module(class_ref, str(tokenizer_or_path), **kwargs)
-    original_init = getattr(tokenizer_cls, "__init__", None)
-    if callable(original_init) and not getattr(tokenizer_cls, "_gptqmodel_legacy_init_compat", False):
-        def patched_init(self, *init_args, **init_kwargs):
-            # Some legacy tokenizers assign `bos/eos/pad/..._token_id` before
-            # they call `PreTrainedTokenizer.__init__()`. In transformers 5.x
-            # those assignments now go through base-class attribute handling,
-            # which expects `_special_tokens_map` to already exist. Creating
-            # the storage eagerly preserves the old constructor order without
-            # modifying the upstream repository code.
-            if not hasattr(self, "_special_tokens_map"):
-                object.__setattr__(self, "_special_tokens_map", {})
-            return original_init(self, *init_args, **init_kwargs)
-
-        tokenizer_cls.__init__ = patched_init
-        # Avoid wrapping the same dynamically imported class multiple times in
-        # a long-running process.
-        tokenizer_cls._gptqmodel_legacy_init_compat = True
-    tokenizer_cls.register_for_auto_class()
-    return tokenizer_cls.from_pretrained(
-        tokenizer_or_path,
-        trust_remote_code=trust_remote_code,
-        **kwargs,
-    )
+    # BaseQModel applies GPTQModel's runtime Tokenicer wrapper once the model is
+    # constructed. Keep this loader's native-tokenizer return contract while
+    # delegating tokenizer construction and compatibility normalization to
+    # Tokenicer.
+    return tokenicer.tokenizer
 
 
 

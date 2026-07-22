@@ -34,7 +34,10 @@ class LagunaQModel(BaseQModel):
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
+                # Native Transformers uses the plural name, while Laguna S 2.1's
+                # custom model code keeps the checkpoint's singular name.
                 "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_expert": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "gate": ("gate:!",),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
