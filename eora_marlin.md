@@ -3485,3 +3485,54 @@ Follow-up artifacts are
 `nsys_cont8_candidate_eightwarp_single_up_fulltrace_fp16_gpu2.sqlite`. Final
 warmed JSON files are
 `final_warp4_phase_reset_{fp16_gpu2,bf16_gpu3}_w500_i3000_t1000x5.json`.
+
+### 2026-07-22: isolate mega-kernel payload from reusable Marlin locks
+
+The Evalution `M=12` hang was caused by the preceding `M=1` specialization,
+not by the `M=12` cooperative tail. The rank-128 attention mega-kernel packed
+its 128 BF16/FP16 LoRA-down values into persistent Marlin lock words 32-95 and
+left them populated. Repeated `M=1` calls passed because that specialization
+did not read those words as locks. The next ordinary `M=12` Marlin launch did,
+so its global reduction protocol spun on the stale nonzero state. On the real
+checkpoint, the 24-token smoke left 72 square attention modules with exactly
+64 populated words each before the first evaluation batch hung at 100% GPU
+utilization.
+
+The retained fix makes ownership explicit. Adapter-enabled Marlin modules
+allocate 192 `int32` workspace words: ordinary Marlin owns words 0-127, phase
+counters remain at 96-97, and the packed EoRA payload occupies an isolated tail
+at 128-191. The native mega-kernel launcher requires all 192 words. Existing
+prepared callers with the legacy 128-word allocation therefore use ordinary
+Marlin plus the established EoRA tail rather than risking an out-of-bounds or
+aliased launch. Non-adapter modules retain the 128-word minimum. The additional
+adapter state is 256 bytes per module, about 63 KiB across this 252-module
+checkpoint.
+
+A clear-on-exit repair was also correct, but it moved matched BF16 sustained
+`M=1` time from 19.52 to 21.50 us. Isolated ownership removes that cleanup from
+the critical path: final FP16/BF16 sustained times are 20.70/20.23 us, versus
+20.45/19.52 us on the broken source. The repaired cooperative route remains
+7.008x/7.748x faster than CUDA-up-add for FP16/BF16 `M=1`; the `M=12` ordinary
+Marlin plus cooperative-tail route is 2.197x/2.001x faster.
+
+Validation on PCI-ordered physical GPU 6 (`DE:00.0`, `sm_80`, 124 SMs) covered
+both FP16 and BF16 dense agreement, repeated `M=1`, `M=1 -> M=12`, a forced
+legacy-workspace fallback, and 100 non-default-stream transitions per dtype.
+The merged seven-case Marlin/EoRA selection passed. Memcheck and synccheck each
+reported zero errors. After the real 24-token smoke, all 252 modules had a
+clean 128-word Marlin prefix and a 192-word workspace; the following exact
+12-row GSM8K Platinum Evalution batch completed in 31.073 seconds, scored
+10/12, and produced zero invalid outputs. The subsequent full 1,209-row run
+completed without a hang in 1,437.50 seconds, including 1,430.709 seconds of
+generation. It scored 1,100/1,209 (90.9843%) with zero invalid outputs. The
+earlier safe fused-tail run took 2,525.75 seconds and scored 1,095/1,209, so the
+current end-to-end route was 1.757x faster with five net additional correct
+answers. Evalution changed from 0.0.8 to 0.0.9 between those runs, so the small
+score delta is not attributed solely to kernel arithmetic.
+
+The reusable lesson is broader than this shape: a persistent buffer's entry
+invariant belongs to every route that can consume it. Steady-state tests of one
+specialization cannot prove a later generic route is safe. Give independent
+protocols disjoint, explicitly sized regions when practical, gate optimized
+launches on the required capacity, and test specialized-to-generic row-count
+transitions while auditing the shared state between calls.

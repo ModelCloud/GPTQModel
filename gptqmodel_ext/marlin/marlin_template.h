@@ -1982,23 +1982,26 @@ __global__ void MARLIN_KERNEL_FUNCTION(
   // The output-owned Marlin schedule uses 116 CTAs. Eight additional CTAs
   // compute one complete-K 16-rank LoRA-down tile each while the base CTAs
   // finish. This fixed shape uses lock slots 0..31 for per-output readiness,
-  // 32..95 for adapter values, and two tail words for reusable phase counters.
+  // 96..97 for reusable phase counters, and an isolated workspace tail at
+  // 128..191 for adapter values. Keeping the payload outside Marlin's lock
+  // region lets a later generic-M launch reuse the same persistent workspace.
   // Per-slice acquire/release handoffs let early outputs enter LoRA-up without
   // waiting at a grid-wide barrier for the slowest unrelated Marlin slice.
   constexpr int eora_rank = 128;
   constexpr int eora_down_tile = 16;
   constexpr int eora_marlin_blocks = 116;
   constexpr int eora_down_blocks = 8;
-  constexpr int eora_lock_workspace_offset = 32;
+  constexpr int eora_lock_workspace_offset = 128;
   constexpr int eora_lock_workspace_ints =
       (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
-  constexpr int eora_down_ready_lock =
-      eora_lock_workspace_offset + eora_lock_workspace_ints;
+  constexpr int eora_down_ready_lock = 96;
   constexpr int eora_up_arrivals_lock = eora_down_ready_lock + 1;
-  constexpr int eora_available_lock_ints = 124;
+  constexpr int eora_available_lock_ints = 192;
   constexpr int eora_phase_flag_slot = threads;
   static_assert(sizeof(scalar_t) == 2);
-  static_assert(eora_up_arrivals_lock < eora_available_lock_ints);
+  static_assert(eora_up_arrivals_lock < eora_lock_workspace_offset);
+  static_assert(eora_lock_workspace_offset + eora_lock_workspace_ints <=
+                eora_available_lock_ints);
   float* eora_partials = reinterpret_cast<float*>(sh);
   scalar_t* eora_lock_workspace =
       reinterpret_cast<scalar_t*>(locks + eora_lock_workspace_offset);

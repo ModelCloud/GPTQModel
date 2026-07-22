@@ -127,3 +127,52 @@ def test_eora_cholesky_fast_path_falls_back_for_non_spd_covariance():
     assert A_chol.is_contiguous()
     assert B_chol.is_contiguous()
     torch.testing.assert_close(B_chol @ A_chol, B_eigh @ A_eigh, rtol=1e-5, atol=1e-5)
+
+
+def test_eora_eigh_truncates_unreliable_covariance_directions():
+    torch.manual_seed(3)
+    cols = 4
+    rows = 8
+    rank = 2
+    cov = torch.diag(torch.tensor([2.0, 1.0, 1e-20, -1e-4], dtype=torch.float64))
+    delta = torch.randn(rows, cols, dtype=torch.float32)
+
+    A, B = eora_compute_lora(
+        w_wq_delta=delta,
+        name="test_near_singular",
+        eigen_scaling_diag_matrix=cov,
+        rank=rank,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+        use_cholesky=False,
+    )
+
+    correction = B @ A
+    assert torch.isfinite(A).all()
+    assert torch.isfinite(B).all()
+    torch.testing.assert_close(correction[:, 2:], torch.zeros_like(correction[:, 2:]))
+    torch.testing.assert_close(correction[:, :2], delta[:, :2], rtol=1e-5, atol=1e-5)
+
+
+def test_eora_eigh_handles_covariance_without_positive_support():
+    torch.manual_seed(4)
+    cols = 4
+    rows = 8
+    rank = 2
+    cov = torch.diag(torch.tensor([0.0, -1e-12, -1e-6, -1.0], dtype=torch.float64))
+    delta = torch.randn(rows, cols, dtype=torch.float32)
+
+    A, B = eora_compute_lora(
+        w_wq_delta=delta,
+        name="test_no_positive_support",
+        eigen_scaling_diag_matrix=cov,
+        rank=rank,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+        use_cholesky=False,
+    )
+
+    assert torch.isfinite(A).all()
+    assert torch.isfinite(B).all()
+    torch.testing.assert_close(A, torch.zeros_like(A))
+    torch.testing.assert_close(B, torch.zeros_like(B))

@@ -28,6 +28,13 @@ log = setup_logger()
 
 _EORA_CHOLESKY_ENV = "GPTQMODEL_EORA_CHOLESKY"
 
+
+def _eora_covariance_rtol(size: int) -> float:
+    """Return the numerical-rank tolerance for float32 EoRA covariance data."""
+
+    return min(1.0, max(1, int(size)) * torch.finfo(torch.float32).eps)
+
+
 def eora_process_input(
         input: Tensor,
         name: str,
@@ -92,16 +99,36 @@ def _eora_compute_lora_eigh(
 ) -> Tuple[Tensor, Tensor]:
     L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
 
-    if (L < 0).any():
-        ## When expanding the calibration data size for EoRA, I suggest maintaining the balance by allocating 50% to general input (C4) and the remaining 50% to downstream task data.
-        log.warn(f"Found negative eigenvalues in `{name}`. Please increase your calibration data set for EoRA.")
-        minimum = torch.min(L[L > 0])
-        L[L < 0] = minimum
+    if not torch.isfinite(L).all():
+        raise FloatingPointError(f"EoRA covariance eigensolve produced non-finite eigenvalues for `{name}`.")
 
-    sqrtEigenvalues = torch.sqrt(L)
-    scaling_diag_matrix = Q @ torch.diag(sqrtEigenvalues)
+    # EoRA covariance contributions are accumulated in float32 before this
+    # eigensolve. Eigenvalues below the corresponding numerical-rank cutoff
+    # cannot be inverted reliably, even though the decomposition uses float64.
+    relative_tolerance = _eora_covariance_rtol(L.numel())
+    maximum = L[-1].clamp_min(0)
+    cutoff = maximum * relative_tolerance
+    retained = L > cutoff
+    discarded_count = int((~retained).sum().item())
 
-    scaling_matrix_inv = torch.diag(1/sqrtEigenvalues) @ Q.T
+    if discarded_count:
+        negative_count = int((L < 0).sum().item())
+        log.warning(
+            f"EoRA: covariance for `{name}` is numerically rank deficient; using a truncated pseudoinverse "
+            f"and discarding {discarded_count}/{L.numel()} eigenvalues at or below {cutoff.item():.3e} "
+            f"(negative={negative_count}, min={L[0].item():.3e}, max={L[-1].item():.3e}, "
+            f"rtol={relative_tolerance:.3e})."
+        )
+
+    sqrt_eigenvalues = torch.zeros_like(L)
+    inverse_sqrt_eigenvalues = torch.zeros_like(L)
+    sqrt_eigenvalues[retained] = torch.sqrt(L[retained])
+    inverse_sqrt_eigenvalues[retained] = torch.rsqrt(L[retained])
+
+    # Q @ diag(sqrt_eigenvalues) and diag(inverse_sqrt_eigenvalues) @ Q.T,
+    # expressed without materializing either dense diagonal matrix.
+    scaling_diag_matrix = Q * sqrt_eigenvalues.unsqueeze(0)
+    scaling_matrix_inv = inverse_sqrt_eigenvalues.unsqueeze(1) * Q.T
 
     scaling_diag_matrix = scaling_diag_matrix.to(dtype=torch.float32)
     scaling_matrix_inv = scaling_matrix_inv.to(dtype=torch.float32)
@@ -110,18 +137,14 @@ def _eora_compute_lora_eigh(
 
     U, S, V = torch.linalg.svd(delta_scale, full_matrices=False)
     lowrank_r = rank
-    truc_s = S[:lowrank_r]
-    truc_u = U[:, :lowrank_r]
+    sqrt_s = torch.sqrt(S[:lowrank_r])
+    B = (U[:, :lowrank_r] * sqrt_s.unsqueeze(0)).to(dtype=dtype)
     truc_v = torch.matmul(V[:lowrank_r, :], scaling_matrix_inv)
-    truc_sigma = torch.diag(truc_s)
-
-    sqrtS = torch.sqrt(truc_sigma)
-    B = torch.matmul(truc_u, sqrtS).to(dtype=dtype) # default to float16, check if we should save to float32
-    A = torch.matmul(sqrtS, truc_v).to(dtype=dtype) # default to float16, check if we should save to float32
+    A = (sqrt_s.unsqueeze(1) * truc_v).to(dtype=dtype)
 
     del L, Q, U, S, V,
-    del sqrtEigenvalues, scaling_diag_matrix, scaling_matrix_inv, delta_scale
-    del truc_s, truc_u, truc_v, truc_sigma, sqrtS
+    del sqrt_eigenvalues, inverse_sqrt_eigenvalues, scaling_diag_matrix, scaling_matrix_inv, delta_scale
+    del retained, maximum, cutoff, sqrt_s, truc_v
 
     return A.contiguous(), B.contiguous()
 

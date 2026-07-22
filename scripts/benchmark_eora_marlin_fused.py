@@ -43,6 +43,7 @@ DEFAULT_CASES = (
     BenchCase("decode_mlp_up_r128", 1, 4096, 11008, 128),
     BenchCase("decode_mlp_down_r128", 1, 11008, 4096, 128),
     BenchCase("batch8_attn_r128", 8, 4096, 4096, 128),
+    BenchCase("batch12_attn_r128", 12, 4096, 4096, 128),
     BenchCase("prefill16_attn_r128", 16, 4096, 4096, 128),
 )
 VARIANTS = ("fallback", "addmm", "cooperative", "cuda_up_add")

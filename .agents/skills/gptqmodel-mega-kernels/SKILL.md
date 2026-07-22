@@ -94,11 +94,76 @@ Separate raw-kernel attribution from full-operator impact. CUDA-event buckets,
 clock state, allocator reuse, instrumentation, and host dispatch can hide or
 exaggerate a one-microsecond kernel change.
 
+## Gotchas revealed by production failures
+
+### Persistent state can poison a different later dispatch
+
+The production Marlin+EoRA `M=1 -> M=12` hang required a state sequence that
+steady-state kernel tests did not cover:
+
+1. One quantized module retained the same `int32` workspace across forwards.
+2. The specialized `M=1, K=N=4096, rank=128` mega-kernel needed Marlin lock
+   words 0-31 only, so words 32-95 looked dead *for that launch*.
+3. The specialization packed its 128 FP16/BF16 EoRA-down values into words
+   32-95 and returned with those 64 words nonzero.
+4. Repeated `M=1` calls still passed because that route never interpreted the
+   payload words as locks.
+5. The next `M=12` call selected ordinary Marlin. That route owned more of the
+   lock prefix, interpreted the stale payload as reduction-lock state, and spun
+   forever waiting for an entry invariant that the preceding route had broken.
+
+The hang appeared to belong to `M=12`, although the corrupting launch was the
+earlier, numerically correct `M=1` smoke. A fresh-process `M=12` test, repeated
+`M=1` tests, and output-only assertions all passed. The useful failure signature
+was 100% GPU utilization at low power plus nonzero persistent lock words after
+the preceding specialization. The mistaken lifetime proof was local to one
+shape: storage that is dead for the current dispatch is not dead for the
+persistent workspace or for a different dispatch selected next.
+
+The retained fix expanded adapter-enabled workspaces from 128 to 192 `int32`
+words. Words 0-127 remain a Marlin-compatible lock/control prefix, including
+zero-on-exit phase counters at 96-97; the packed EoRA payload has a disjoint
+region at 128-191. The mega-kernel launcher verifies `workspace.numel() >= 192`.
+Legacy prepared callers with 128 words take ordinary Marlin plus the established
+EoRA tail. This costs 256 bytes per adapter module and avoids adding cleanup to
+the mega-kernel's critical path.
+
+### Plan persistent state before implementation
+
+Before reusing any persistent lock, scratch, semaphore, epoch, or counter
+storage, write an ownership/lifetime table across *all* routes that can reuse
+the object, not only the proposed specialization. For every region and route,
+record its first writer, final reader, entry value, exit value, synchronization
+boundary, and behavior after an interrupted or fallback dispatch. Treat the
+next kernel launch as a possible consumer even when the current kernel is
+correct in isolation.
+
+- Prefer disjoint, explicitly sized regions when route-wide liveness is hard to
+  prove. Gate the optimized launch on actual workspace capacity and retain a
+  tested fallback for legacy or externally allocated buffers.
+- If aliasing is unavoidable, restore every possible downstream route's entry
+  invariant before return. CTA arrival is not completion: cleanup may begin only
+  after a block-wide last-reader boundary, and the last completing CTA—not the
+  last arriving CTA—must publish the restored state. Benchmark that cleanup
+  against disjoint storage before retaining it.
+- Build a same-object route-transition matrix: cold specialized, repeated
+  specialized, specialized-to-generic at every row-count boundary,
+  generic-to-specialized, specialized-to-fallback, both dtypes, and a
+  non-default stream. Add hard timeouts, audit the persistent regions between
+  calls, and compare every result with the dense/unfused reference.
+- Do not accept a workspace-reuse design from same-route output correctness
+  alone. Review must include the ownership table, transition tests, capacity
+  gate, entry/exit assertions, and fallback behavior.
+
 ## Validate the retained source
 
 Cover:
 
 - dense/unfused reference agreement, shape, dtype, device, and finite output;
+- the persistent-region ownership/lifetime table, per-route entry/exit
+  invariants, workspace-capacity gate, and legacy-buffer fallback;
+- same-object specialized/generic/fallback transition sequences with hard
+  timeouts and persistent-state audits between calls;
 - every fused dtype and representative fallback shapes/ranks/row counts;
 - repeated calls, current/non-default streams, multiple visible devices, and
   graph capture;

@@ -437,7 +437,7 @@ def test_marlin_quant_linear_post_init_uses_compute_dtype_for_repack(monkeypatch
     monkeypatch.setattr(
         marlin_qlinear_module,
         "marlin_make_workspace_new",
-        lambda device: torch.zeros(1, dtype=torch.int32, device=device),
+        lambda device, **kwargs: torch.zeros(1, dtype=torch.int32, device=device),
     )
     monkeypatch.setattr(
         marlin_qlinear_module,
@@ -495,7 +495,7 @@ def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
     monkeypatch.setattr(
         marlin_qlinear_module,
         "marlin_make_workspace_new",
-        lambda device: torch.zeros(1, dtype=torch.int32, device=device),
+        lambda device, **kwargs: torch.zeros(1, dtype=torch.int32, device=device),
     )
     monkeypatch.setattr(
         marlin_qlinear_module,
@@ -590,7 +590,7 @@ def test_marlin_quant_linear_uses_one_integrated_eora_dispatch(
     monkeypatch.setattr(
         marlin_qlinear_module,
         "marlin_make_workspace_new",
-        lambda device: torch.zeros(1, dtype=torch.int32, device=device),
+        lambda device, **kwargs: torch.zeros(1, dtype=torch.int32, device=device),
     )
     monkeypatch.setattr(
         marlin_qlinear_module,
@@ -831,7 +831,9 @@ def test_marlin_live_row_fp32_scratch_matches_fp16_reduction(dtype):
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_marlin_eora_rank128_attention_mega_kernel_matches_dense_update(dtype, monkeypatch):
+def test_marlin_eora_rank128_attention_mega_kernel_matches_dense_update_and_releases_locks(
+    dtype, monkeypatch
+):
     device = torch.device("cuda:0")
     if torch.cuda.get_device_capability(device) != (8, 0):
         pytest.skip("The cooperative Marlin+EoRA mega-kernel is enabled only for sm_80")
@@ -893,6 +895,33 @@ def test_marlin_eora_rank128_attention_mega_kernel_matches_dense_update(dtype, m
     assert actual.dtype == dtype
     torch.testing.assert_close(actual.float(), expected, rtol=5e-2, atol=5e-2)
     torch.testing.assert_close(repeated.float(), expected, rtol=5e-2, atol=5e-2)
+    assert module.workspace.numel() >= 192
+    assert torch.count_nonzero(module.workspace[:128]).item() == 0
+
+    # The rank-128 M=1 mega-kernel shares this persistent buffer with ordinary
+    # Marlin. Its adapter payload must remain outside the first 128 lock words
+    # before a later M=12 launch reuses that prefix for global reduction.
+    x_m12 = torch.randn((12, features), dtype=dtype, device=device, generator=generator)
+    module.adapter = None
+    with torch.inference_mode():
+        base_m12 = module(x_m12)
+    module.adapter = module_adapter
+    expected_m12 = base_m12.float() + (x_m12.float() @ lora_a.float()) @ lora_b.float()
+
+    with torch.inference_mode():
+        actual_m12 = module(x_m12)
+
+    assert actual_m12.shape == base_m12.shape
+    assert actual_m12.dtype == dtype
+    torch.testing.assert_close(actual_m12.float(), expected_m12, rtol=5e-2, atol=5e-2)
+
+    # External prepared-op callers may still provide the legacy 128-word
+    # workspace. That is sufficient for ordinary Marlin, so it must select the
+    # established Marlin-plus-EoRA-tail fallback instead of the mega-kernel.
+    module.workspace = torch.zeros(128, dtype=torch.int32, device=device)
+    with torch.inference_mode():
+        legacy_workspace_actual = module(x)
+    torch.testing.assert_close(legacy_workspace_actual.float(), expected, rtol=5e-2, atol=5e-2)
 
 
 def test_marlin_include_paths_use_wheel_headers_when_local_cuda_is_incomplete(monkeypatch, tmp_path):

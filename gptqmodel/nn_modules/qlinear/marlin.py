@@ -62,6 +62,7 @@ log = setup_logger()
 # the native dispatcher still makes the final hardware/shape decision per call.
 _PACKED_PREFILL_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL"
 _PACKED_PREFILL_MIN_ROWS_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL_MIN_ROWS"
+_EORA_MEGA_KERNEL_WORKSPACE_BLOCKS = 192
 _PACKED_PREFILL_CONFIG_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL_CONFIG"
 _PACKED_PREFILL_MIN_ROWS_DEFAULT = 1024
 
@@ -309,7 +310,12 @@ class MarlinLinear(GPTQQuantLinear):
         self.is_k_full = marlin_is_k_full(self.desc_act, is_row_parallel=False)
 
         # Allocate marlin workspace.
-        self.workspace = marlin_make_workspace_new(device)
+        self.workspace = marlin_make_workspace_new(
+            device,
+            min_workspace_blocks=(
+                _EORA_MEGA_KERNEL_WORKSPACE_BLOCKS if self.adapter is not None else 128
+            ),
+        )
 
         def transform_w_q(x):
             x.data = gptq_marlin_repack(x.data.contiguous(),

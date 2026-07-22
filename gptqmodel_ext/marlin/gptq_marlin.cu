@@ -863,13 +863,16 @@ template <typename scalar_t>
 bool launch_marlin_eora_rank128_attention(
     const void* A, const void* B, void* C, void* C_tmp, void* scales,
     void* locks, const void* eora_down_weight, const void* eora_up_weight,
-    int prob_m, int prob_n, int prob_k, int num_groups, int eora_rank, int dev,
-    cudaStream_t stream, marlin_device_info_t const& device_info) {
+    int prob_m, int prob_n, int prob_k, int num_groups, int eora_rank,
+    int64_t lock_workspace_ints, int dev, cudaStream_t stream,
+    marlin_device_info_t const& device_info) {
+  constexpr int eora_min_lock_workspace_ints = 192;
   if (prob_m != 1 || prob_n != 4096 || prob_k != 4096 ||
       eora_rank != 128 ||
       device_info.major_capability != 8 ||
       device_info.minor_capability != 0 || device_info.sms != 124 ||
-      device_info.cooperative_launch == 0) {
+      device_info.cooperative_launch == 0 ||
+      lock_workspace_ints < eora_min_lock_workspace_ints) {
     return false;
   }
 
@@ -1627,7 +1630,7 @@ torch::Tensor MARLIN_GEMM_PREPARED_EXPORT_NAME(
         b_scales.data_ptr<at::Half>(), workspace.data_ptr(),
         down_weight.data_ptr<at::Half>(), up_weight.data_ptr<at::Half>(),
         size_m, size_n, size_k, num_groups, down_weight.size(1),
-        a.get_device(), stream, device_info);
+        workspace.numel(), a.get_device(), stream, device_info);
     if (!fused) {
       marlin::marlin_mm<half>(
           a.data_ptr<at::Half>(), b_q_weight.data_ptr(),
@@ -1655,7 +1658,8 @@ torch::Tensor MARLIN_GEMM_PREPARED_EXPORT_NAME(
         b_scales.data_ptr<at::BFloat16>(), workspace.data_ptr(),
         down_weight.data_ptr<at::BFloat16>(),
         up_weight.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
-        num_groups, down_weight.size(1), a.get_device(), stream, device_info);
+        num_groups, down_weight.size(1), workspace.numel(), a.get_device(),
+        stream, device_info);
     if (!fused) {
       marlin::marlin_mm<nv_bfloat16>(
           a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
