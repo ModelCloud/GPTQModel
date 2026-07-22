@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import copy
 import os
 
 from model_test import ModelTest
@@ -11,8 +12,8 @@ from gptqmodel.quantization.config import ExpertsRoutingOverride, Fallback, MoEC
 from gptqmodel.utils.backend import BACKEND
 
 
-class TestLagunaXS2(ModelTest):
-    NATIVE_MODEL_ID = os.environ.get("GPTQMODEL_LAGUNA_XS2_MODEL", "/monster/data/model/Laguna-XS.2")
+class _LagunaModelTest(ModelTest):
+    """Share Laguna quantization coverage across checkpoints with the same MoE topology."""
 
     FALLBACK = Fallback()
     LOAD_BACKEND = BACKEND.AUTO
@@ -24,6 +25,7 @@ class TestLagunaXS2(ModelTest):
     # three layers keeps the true-model path fast while covering two split MoE layers.
     MODEL_COMPAT_FAST_LAYER_COUNT = 3
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
+    MIN_FAST_MOE_LAYER_COUNT = 2
     DATASET_SIZE_FAST = 128
     DATASET_CONCAT_SIZE_FAST = 1024
     EVAL_BATCH_SIZE = "auto"
@@ -100,10 +102,43 @@ class TestLagunaXS2(ModelTest):
             if has_split_expert:
                 covered.append(layer_idx)
 
-        assert len(covered) >= 2, (
-            "Laguna fast quant test must cover at least two split MoE expert layers; "
+        assert len(covered) >= self.MIN_FAST_MOE_LAYER_COUNT, (
+            "Laguna fast quant test did not cover enough split MoE expert layers; "
             f"covered={covered}, selected={list(selected_indexes)}"
         )
 
+
+class TestLagunaXS2(_LagunaModelTest):
+    """Keep the original Laguna XS.2 regression covered."""
+
+    NATIVE_MODEL_ID = os.environ.get("GPTQMODEL_LAGUNA_XS2_MODEL", "/monster/data/model/Laguna-XS.2")
+
     def test_laguna_xs2(self):
+        self.quantize_and_evaluate()
+
+
+class TestLagunaS21(_LagunaModelTest):
+    """Exercise Laguna S 2.1's larger attention and singular shared-expert checkpoint layout."""
+
+    NATIVE_MODEL_ID = os.environ.get("GPTQMODEL_LAGUNA_S21_MODEL", "/monster/data/model/Laguna-S-2.1")
+    TRUST_REMOTE_CODE = True
+    # The first dense block and first sparse block span Laguna's two decoder
+    # topologies; avoid quantizing a redundant second sparse block on this 118B model.
+    MODEL_COMPAT_FAST_LAYER_COUNT = 2
+    MIN_FAST_MOE_LAYER_COUNT = 1
+    DATASET_SIZE_FAST = 16
+    # Keep routing aligned with the checkpoint instead of forcing all 256 experts
+    # active for every calibration token.
+    MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride(num_experts_per_tok=10))
+    # The hybrid checkpoint retains untouched BF16 layers and needs a multi-GPU
+    # post-quant reload for Evalution.
+    EVAL_SINGLE_GPU = False
+    EVAL_TASKS_FAST = copy.deepcopy(_LagunaModelTest.EVAL_TASKS_FAST)
+    EVAL_TASKS_FAST["gsm8k_platinum_cot"]["evalution_suite_kwargs"]["max_rows"] = 8
+    EVAL_TASKS_FAST["gsm8k_platinum_cot"]["acc,num"]["value"] = 0.125
+    EVAL_TASKS_FAST["arc_challenge"]["evalution_suite_kwargs"]["max_rows"] = 8
+    EVAL_TASKS_FAST["arc_challenge"]["acc"]["value"] = 0.375
+    EVAL_TASKS_FAST["arc_challenge"]["acc_norm"]["value"] = 0.625
+
+    def test_laguna_s21(self):
         self.quantize_and_evaluate()

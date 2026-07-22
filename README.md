@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 07/22/2026 7.3.1 `main`: ✨ Added Poolside `Laguna S 2.1` model support
 * 07/14/2026 7.3.0-dev `main`: ✨ Added `nemotron_h_puzzle` model support
 * 07/07/2026 7.3.0-dev `main`: ✨ Added `deepseek_vl` model support
 * 07/06/2026 7.3.0-dev `main`: ✨ Added `deepseek_ocr2` model support
