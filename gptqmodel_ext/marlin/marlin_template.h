@@ -31,6 +31,14 @@
   #define MARLIN_DIRECT_PREFILL 0
 #endif
 
+#ifndef MARLIN_EORA_FUSED
+  #define MARLIN_EORA_FUSED 0
+#endif
+
+#if MARLIN_EORA_FUSED
+  #include <cooperative_groups.h>
+#endif
+
 #include "marlin.cuh"
 #include "marlin_dtypes.cuh"
 #include "dequant.h"
@@ -261,7 +269,15 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     bool has_bias,
     bool use_atomic_add,   // whether to use atomic add to reduce
     bool use_fp32_reduce,  // whether to use fp32 global reduce
-    int max_shared_mem) {
+    int max_shared_mem
+#if MARLIN_EORA_FUSED
+    , const scalar_t* __restrict__ eora_x,
+    const scalar_t* __restrict__ eora_down_weight,
+    const scalar_t* __restrict__ eora_up_weight,
+    scalar_t* __restrict__ eora_out,
+    float* __restrict__ eora_workspace
+#endif
+    ) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
   // `thread_n_blocks`). Stripes are defined as shown in the 3x3 matrix 5 SM
@@ -366,6 +382,37 @@ __global__ void MARLIN_KERNEL_FUNCTION(
 #if MARLIN_DIRECT_PREFILL
   int slice_row = 0;
   int slice_col_par = blockIdx.x;
+#elif MARLIN_EORA_FUSED
+  // This fixed decode shape has 32 complete-K output slices. Keep each slice
+  // on one lock chain instead of letting Marlin stripes cross boundaries.
+  // From low K to high K, 20 slices use 10/9/7/6 tiles and 12 slices use
+  // 12/11/9. This wavefront overlaps each descending-K lock reduction with
+  // useful work and fills the 124-SM cooperative wave with eight adapter CTAs.
+  constexpr int eora_four_cta_slices = 20;
+  constexpr int eora_four_cta_blocks = eora_four_cta_slices * 4;
+  constexpr int eora_schedule_marlin_blocks = 116;
+  int eora_slice_lane = 0;
+  int eora_slice_count = 0;
+  int eora_slice_iters = 0;
+  int slice_row = 0;
+  int slice_col_par = n_tiles;
+  if (blockIdx.x < eora_four_cta_blocks) {
+    slice_col_par = blockIdx.x / 4;
+    eora_slice_lane = blockIdx.x % 4;
+    eora_slice_count = 4;
+    eora_slice_iters = 10 - (eora_slice_lane > 0) -
+                       2 * (eora_slice_lane > 1) -
+                       (eora_slice_lane > 2);
+    slice_row = eora_slice_lane * 10 - max(eora_slice_lane - 1, 0) -
+                2 * max(eora_slice_lane - 2, 0);
+  } else if (blockIdx.x < eora_schedule_marlin_blocks) {
+    const int eora_three_cta_block = blockIdx.x - eora_four_cta_blocks;
+    slice_col_par = eora_four_cta_slices + eora_three_cta_block / 3;
+    eora_slice_lane = eora_three_cta_block % 3;
+    eora_slice_count = 3;
+    eora_slice_iters = 12 - (eora_slice_lane > 0) - 2 * (eora_slice_lane > 1);
+    slice_row = eora_slice_lane * 12 - max(eora_slice_lane - 1, 0);
+  }
 #else
   int slice_row = (iters * blockIdx.x) % k_tiles;
   int slice_col_par = (iters * blockIdx.x) / k_tiles;
@@ -391,6 +438,9 @@ __global__ void MARLIN_KERNEL_FUNCTION(
 #if MARLIN_DIRECT_PREFILL
   prob_m = min(m_block_size, direct_problem_m - par_id * m_block_size);
 #endif
+#if MARLIN_EORA_FUSED
+  locks_off = slice_col_par;
+#else
   if (parallel * n_tiles >= gridDim.x) {
     // when parallel * n_tiles >= sms
     // then there are at most $sms$ conflict tile blocks
@@ -398,6 +448,7 @@ __global__ void MARLIN_KERNEL_FUNCTION(
   } else {
     locks_off = (iters * blockIdx.x) / k_tiles - 1;
   }
+#endif
 
   // Compute all information about the current slice which is required for
   // synchronization.
@@ -413,6 +464,17 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     slice_count = 1;
     slice_idx = 0;
     return;
+#elif MARLIN_EORA_FUSED
+    // Output-owned CTAs have no follow-on slice. Number contributors from
+    // high K to low K to preserve Marlin's lock visitation order.
+    if (!first_init) {
+      slice_iters = 0;
+      return;
+    }
+    slice_iters = eora_slice_iters;
+    if (slice_iters == 0) return;
+    slice_count = eora_slice_count;
+    slice_idx = slice_count - 1 - eora_slice_lane;
 #else
     slice_iters =
         iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
@@ -1414,9 +1476,14 @@ __global__ void MARLIN_KERNEL_FUNCTION(
     constexpr int tb_m = thread_m_blocks * 16;
     constexpr int tb_n = thread_n_blocks * 16;
 
-    constexpr int c_size = tb_m * tb_n * sizeof(float) / 16;
+    // The M<=8 fragment loop visits every other int4. Its partials are packed
+    // by live output row; larger tiles retain their native fragment layout.
+    const int c_rows = m_block_size_8 ? prob_m : tb_m;
+    const int c_size = c_rows * tb_n * sizeof(float) / 16;
 
     constexpr int active_threads = 32 * thread_n_blocks / 4;
+    constexpr int c_tmp_k_stride =
+        m_block_size_8 ? active_threads / 2 : active_threads;
     bool is_th_active = threadIdx.x < active_threads;
 
     constexpr int num_floats = thread_m_blocks * 4 * 2 * 4;
@@ -1428,12 +1495,91 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       return;
     }
 
+    if constexpr (m_block_size_8) {
+      if (prob_m == 1) {
+        if (threadIdx.x % 4 == 0) {
+          constexpr int threads_per_row_pair = active_threads / 4;
+          float* c_tmp_ptr = reinterpret_cast<float*>(C_tmp);
+          float* frag_c_ptr = reinterpret_cast<float*>(&frag_c);
+          const int compact_thread = threadIdx.x / 4;
+  #pragma unroll
+          for (int k = 0; k < th_size; k += 2) {
+            const int compact_col =
+                ((k / 2) * threads_per_row_pair + compact_thread) * 2;
+            if (!first) {
+              const float2 row = *reinterpret_cast<const float2*>(
+                  c_tmp_ptr + c_cur_offset * 4 + compact_col);
+              frag_c_ptr[k * 4] += row.x;
+              frag_c_ptr[k * 4 + 2] += row.y;
+            }
+            if (!last) {
+              *reinterpret_cast<float2*>(c_tmp_ptr + c_cur_offset * 4 +
+                                         compact_col) =
+                  make_float2(frag_c_ptr[k * 4], frag_c_ptr[k * 4 + 2]);
+            }
+          }
+        }
+        return;
+      }
+      if (prob_m < 8) {
+        constexpr int threads_per_row_pair = active_threads / 4;
+        float* c_tmp_ptr = reinterpret_cast<float*>(C_tmp);
+        float* frag_c_ptr = reinterpret_cast<float*>(&frag_c);
+        const int row_pair = threadIdx.x % 4;
+        const int compact_thread = threadIdx.x / 4;
+
+        if (2 * row_pair < prob_m) {
+  #pragma unroll
+          for (int k = 0; k < th_size; k += 2) {
+            const int compact_col =
+                ((k / 2) * threads_per_row_pair + compact_thread) * 2;
+            if (!first) {
+              const float2 even_row = *reinterpret_cast<const float2*>(
+                  c_tmp_ptr + c_cur_offset * 4 +
+                  (2 * row_pair) * tb_n + compact_col);
+              frag_c_ptr[k * 4] += even_row.x;
+              frag_c_ptr[k * 4 + 2] += even_row.y;
+            }
+            if (!last) {
+              *reinterpret_cast<float2*>(
+                  c_tmp_ptr + c_cur_offset * 4 +
+                  (2 * row_pair) * tb_n + compact_col) =
+                  make_float2(frag_c_ptr[k * 4], frag_c_ptr[k * 4 + 2]);
+            }
+          }
+        }
+
+        if (2 * row_pair + 1 < prob_m) {
+  #pragma unroll
+          for (int k = 0; k < th_size; k += 2) {
+            const int compact_col =
+                ((k / 2) * threads_per_row_pair + compact_thread) * 2;
+            if (!first) {
+              const float2 odd_row = *reinterpret_cast<const float2*>(
+                  c_tmp_ptr + c_cur_offset * 4 +
+                  (2 * row_pair + 1) * tb_n + compact_col);
+              frag_c_ptr[k * 4 + 1] += odd_row.x;
+              frag_c_ptr[k * 4 + 3] += odd_row.y;
+            }
+            if (!last) {
+              *reinterpret_cast<float2*>(
+                  c_tmp_ptr + c_cur_offset * 4 +
+                  (2 * row_pair + 1) * tb_n + compact_col) =
+                  make_float2(frag_c_ptr[k * 4 + 1],
+                              frag_c_ptr[k * 4 + 3]);
+            }
+          }
+        }
+        return;
+      }
+    }
+
     if (!first) {
       float* frag_c_ptr = reinterpret_cast<float*>(&frag_c);
   #pragma unroll
       for (int k = 0; k < th_size; k += (m_block_size_8 ? 2 : 1)) {
         sh_red[threadIdx.x] =
-            C_tmp[c_cur_offset + active_threads * k + threadIdx.x];
+            C_tmp[c_cur_offset + c_tmp_k_stride * k + threadIdx.x];
 
         float* sh_c_ptr = reinterpret_cast<float*>(&sh_red[threadIdx.x]);
   #pragma unroll
@@ -1447,7 +1593,7 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       int4* frag_c_ptr = reinterpret_cast<int4*>(&frag_c);
   #pragma unroll
       for (int k = 0; k < th_size; k += (m_block_size_8 ? 2 : 1)) {
-        C_tmp[c_cur_offset + active_threads * k + threadIdx.x] = frag_c_ptr[k];
+        C_tmp[c_cur_offset + c_tmp_k_stride * k + threadIdx.x] = frag_c_ptr[k];
       }
     }
   };
@@ -1819,6 +1965,160 @@ __global__ void MARLIN_KERNEL_FUNCTION(
       }
     }
   }
+
+#if MARLIN_EORA_FUSED
+  // The output-owned Marlin schedule uses 116 CTAs. Eight additional CTAs
+  // compute one complete-K 16-rank LoRA-down tile each while the base CTAs
+  // finish. This fixed shape uses only lock slots 0..31, so publish the
+  // reduced adapter values into the unused lock tail before the cooperative
+  // join and avoid a second grid barrier.
+  cooperative_groups::grid_group eora_grid = cooperative_groups::this_grid();
+  constexpr int eora_rank = 128;
+  constexpr int eora_down_tile = 16;
+  constexpr int eora_marlin_blocks = 116;
+  constexpr int eora_down_blocks = 8;
+  constexpr int eora_lock_workspace_offset = 32;
+  constexpr int eora_lock_workspace_ints =
+      (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
+  constexpr int eora_available_lock_ints = 124;
+  static_assert(sizeof(scalar_t) == 2);
+  static_assert(eora_lock_workspace_offset + eora_lock_workspace_ints <=
+                eora_available_lock_ints);
+  float* eora_partials = reinterpret_cast<float*>(sh);
+  scalar_t* eora_lock_workspace =
+      reinterpret_cast<scalar_t*>(locks + eora_lock_workspace_offset);
+  const int eora_down_block = blockIdx.x - eora_marlin_blocks;
+  if (eora_down_block >= 0 && eora_down_block < eora_down_blocks) {
+    const int down_rank =
+        eora_down_block * eora_down_tile + (threadIdx.x & 15);
+    const int down_k_lane = threadIdx.x >> 4;
+    constexpr int down_k_lanes = threads / eora_down_tile;
+    constexpr int64_t down_stride = down_k_lanes;
+    int64_t k = down_k_lane;
+    float down_partial_0 = 0.0f;
+    float down_partial_1 = 0.0f;
+    float down_partial_2 = 0.0f;
+    float down_partial_3 = 0.0f;
+    float down_partial_4 = 0.0f;
+    float down_partial_5 = 0.0f;
+    float down_partial_6 = 0.0f;
+    float down_partial_7 = 0.0f;
+    for (; k + down_stride * 7 < prob_k; k += down_stride * 8) {
+      down_partial_0 +=
+          ScalarType<scalar_t>::num2float(eora_x[k]) *
+          ScalarType<scalar_t>::num2float(
+              eora_down_weight[k * eora_rank + down_rank]);
+      const int64_t k_1 = k + down_stride;
+      down_partial_1 +=
+          ScalarType<scalar_t>::num2float(eora_x[k_1]) *
+          ScalarType<scalar_t>::num2float(
+              eora_down_weight[k_1 * eora_rank + down_rank]);
+      const int64_t k_2 = k + down_stride * 2;
+      down_partial_2 +=
+          ScalarType<scalar_t>::num2float(eora_x[k_2]) *
+          ScalarType<scalar_t>::num2float(
+              eora_down_weight[k_2 * eora_rank + down_rank]);
+      const int64_t k_3 = k + down_stride * 3;
+      down_partial_3 +=
+          ScalarType<scalar_t>::num2float(eora_x[k_3]) *
+          ScalarType<scalar_t>::num2float(
+              eora_down_weight[k_3 * eora_rank + down_rank]);
+      const int64_t k_4 = k + down_stride * 4;
+      down_partial_4 +=
+          ScalarType<scalar_t>::num2float(eora_x[k_4]) *
+          ScalarType<scalar_t>::num2float(
+              eora_down_weight[k_4 * eora_rank + down_rank]);
+      const int64_t k_5 = k + down_stride * 5;
+      down_partial_5 +=
+          ScalarType<scalar_t>::num2float(eora_x[k_5]) *
+          ScalarType<scalar_t>::num2float(
+              eora_down_weight[k_5 * eora_rank + down_rank]);
+      const int64_t k_6 = k + down_stride * 6;
+      down_partial_6 +=
+          ScalarType<scalar_t>::num2float(eora_x[k_6]) *
+          ScalarType<scalar_t>::num2float(
+              eora_down_weight[k_6 * eora_rank + down_rank]);
+      const int64_t k_7 = k + down_stride * 7;
+      down_partial_7 +=
+          ScalarType<scalar_t>::num2float(eora_x[k_7]) *
+          ScalarType<scalar_t>::num2float(
+              eora_down_weight[k_7 * eora_rank + down_rank]);
+    }
+    for (; k < prob_k; k += down_stride) {
+      down_partial_0 +=
+          ScalarType<scalar_t>::num2float(eora_x[k]) *
+          ScalarType<scalar_t>::num2float(
+              eora_down_weight[k * eora_rank + down_rank]);
+    }
+    eora_partials[threadIdx.x] =
+        ((down_partial_0 + down_partial_1) +
+         (down_partial_2 + down_partial_3)) +
+        ((down_partial_4 + down_partial_5) +
+         (down_partial_6 + down_partial_7));
+    __syncthreads();
+    if (threadIdx.x < eora_down_tile) {
+      const float down_total =
+          (((eora_partials[threadIdx.x] +
+             eora_partials[threadIdx.x + 16]) +
+            (eora_partials[threadIdx.x + 32] +
+             eora_partials[threadIdx.x + 48])) +
+           ((eora_partials[threadIdx.x + 64] +
+             eora_partials[threadIdx.x + 80]) +
+            (eora_partials[threadIdx.x + 96] +
+             eora_partials[threadIdx.x + 112]))) +
+          (((eora_partials[threadIdx.x + 128] +
+             eora_partials[threadIdx.x + 144]) +
+            (eora_partials[threadIdx.x + 160] +
+             eora_partials[threadIdx.x + 176])) +
+           ((eora_partials[threadIdx.x + 192] +
+             eora_partials[threadIdx.x + 208]) +
+            (eora_partials[threadIdx.x + 224] +
+             eora_partials[threadIdx.x + 240])));
+      eora_lock_workspace[eora_down_block * eora_down_tile + threadIdx.x] =
+          ScalarType<scalar_t>::float2num(down_total);
+    }
+  }
+  eora_grid.sync();
+
+  // A 32-column tile preserves coalesced LoRA-B reads. The 124-CTA grid leaves
+  // four attention tiles; the otherwise-idle upper four warps in blocks 0..3
+  // compute those tiles concurrently with the primary tiles.
+  const int up_lane = threadIdx.x & 31;
+  const int up_warp = threadIdx.x >> 5;
+  const int output_tiles = div_ceil(prob_n, 32);
+  const bool secondary_tile = up_warp >= 4;
+  const int tile = blockIdx.x + (secondary_tile ? gridDim.x : 0);
+  const int col = tile * 32 + up_lane;
+  if (tile < output_tiles && col < prob_n) {
+    float update = 0.0f;
+    const int rank_begin = (up_warp & 3) * 32;
+  #pragma unroll
+    for (int rank = rank_begin; rank < rank_begin + 32; ++rank) {
+      const float down_total = ScalarType<scalar_t>::num2float(
+          eora_lock_workspace[rank]);
+      update += down_total *
+                ScalarType<scalar_t>::num2float(
+                    eora_up_weight[rank * prob_n + col]);
+    }
+    eora_partials[threadIdx.x] = update;
+  }
+  __syncthreads();
+  if (threadIdx.x < 64) {
+    const bool write_secondary = threadIdx.x >= 32;
+    const int write_lane = threadIdx.x & 31;
+    const int write_tile = blockIdx.x + (write_secondary ? gridDim.x : 0);
+    const int write_col = write_tile * 32 + write_lane;
+    const int partial_base = write_secondary ? 128 : 0;
+    if (write_tile < output_tiles && write_col < prob_n) {
+      const float total = eora_partials[partial_base + write_lane] +
+                          eora_partials[partial_base + write_lane + 32] +
+                          eora_partials[partial_base + write_lane + 64] +
+                          eora_partials[partial_base + write_lane + 96];
+      eora_out[write_col] = ScalarType<scalar_t>::float2num(
+          ScalarType<scalar_t>::num2float(eora_out[write_col]) + total);
+    }
+  }
+#endif
 }
 
 }  // namespace MARLIN_NAMESPACE_NAME

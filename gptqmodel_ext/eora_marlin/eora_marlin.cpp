@@ -7,6 +7,14 @@
 torch::Tensor eora_marlin_lora_up_add_cuda(torch::Tensor down,
                                            torch::Tensor up,
                                            torch::Tensor out);
+torch::Tensor eora_marlin_lora_fused_add_cuda(torch::Tensor x,
+                                             torch::Tensor down_weight,
+                                             torch::Tensor up_weight,
+                                             torch::Tensor out,
+                                             torch::Tensor workspace);
+torch::Tensor eora_marlin_lora_fused_add_prepared_cuda(
+    torch::Tensor x, torch::Tensor down_weight, torch::Tensor up_weight,
+    torch::Tensor out, torch::Tensor workspace);
 
 namespace {
 
@@ -16,12 +24,35 @@ torch::Tensor eora_marlin_lora_up_add_dispatch(torch::Tensor down,
   return eora_marlin_lora_up_add_cuda(down, up, out);
 }
 
+torch::Tensor eora_marlin_lora_fused_add_dispatch(
+    torch::Tensor x, torch::Tensor down_weight, torch::Tensor up_weight,
+    torch::Tensor out, torch::Tensor workspace) {
+  return eora_marlin_lora_fused_add_cuda(x, down_weight, up_weight, out,
+                                         workspace);
+}
+
+torch::Tensor eora_marlin_lora_fused_add_prepared_dispatch(
+    torch::Tensor x, torch::Tensor down_weight, torch::Tensor up_weight,
+    torch::Tensor out, torch::Tensor workspace) {
+  return eora_marlin_lora_fused_add_prepared_cuda(
+      x, down_weight, up_weight, out, workspace);
+}
+
 }  // namespace
 
 TORCH_LIBRARY(gptqmodel_eora_marlin, m) {
   m.def("lora_up_add(Tensor down, Tensor up, Tensor(a!) out) -> Tensor(a!)");
+  m.def(
+      "lora_fused_add(Tensor x, Tensor down_weight, Tensor up_weight, "
+      "Tensor(a!) out, Tensor(b!) workspace) -> Tensor(a!)");
+  m.def(
+      "lora_fused_add_prepared(Tensor x, Tensor down_weight, Tensor up_weight, "
+      "Tensor(a!) out, Tensor(b!) workspace) -> Tensor(a!)");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_eora_marlin, CUDA, m) {
   m.impl("lora_up_add", &eora_marlin_lora_up_add_dispatch);
+  m.impl("lora_fused_add", &eora_marlin_lora_fused_add_dispatch);
+  m.impl("lora_fused_add_prepared",
+         &eora_marlin_lora_fused_add_prepared_dispatch);
 }

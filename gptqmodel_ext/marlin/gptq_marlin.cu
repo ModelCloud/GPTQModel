@@ -27,6 +27,10 @@
   #define MARLIN_GEMM_EXPORT_NAME gptq_marlin_gemm
 #endif
 
+#ifndef MARLIN_GEMM_PREPARED_EXPORT_NAME
+  #define MARLIN_GEMM_PREPARED_EXPORT_NAME gptq_marlin_gemm_prepared
+#endif
+
 #ifndef MARLIN_ENABLE_FP16
   #define MARLIN_ENABLE_FP16 1
 #endif
@@ -42,10 +46,16 @@
 #include <ATen/ATen.h>
 #include <ATen/DeviceGuard.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/types.h>
+#include <algorithm>
 #include <mutex>
 #include <vector>
+
+torch::Tensor eora_marlin_lora_fused_add_prepared_cuda(
+    torch::Tensor x, torch::Tensor down_weight, torch::Tensor up_weight,
+    torch::Tensor out, torch::Tensor workspace);
 
 #ifndef MARLIN_SHARED_MEM_GUARD_BYTES
 #  define MARLIN_SHARED_MEM_GUARD_BYTES 0 // 512
@@ -80,6 +90,9 @@ namespace marlin {
 __global__ void MarlinDefault(MARLIN_KERNEL_PARAMS){};
 
 using MarlinFuncPtr = void (*)(MARLIN_KERNEL_PARAMS);
+
+template <typename scalar_t>
+using MarlinEoraFuncPtr = void (*)(MARLIN_EORA_KERNEL_PARAMS);
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
 
@@ -223,11 +236,36 @@ int marlin_full_sm80_exact_thread_m_blocks(int prob_m) {
   }
 }
 
+int marlin_c_tmp_max_thread_n(int prob_m, int major_capability,
+                              int minor_capability, int sms) {
+  if (prob_m > 16) {
+    return MARLIN_NAMESPACE_NAME::max_thread_n;
+  }
+
+  bool full_sm80 =
+      marlin_prefers_full_sm80(major_capability, minor_capability, sms);
+  thread_config_t const* configs =
+      full_sm80 ? full_sm80_small_batch_thread_configs
+                : small_batch_thread_configs;
+  int config_count =
+      full_sm80
+          ? static_cast<int>(sizeof(full_sm80_small_batch_thread_configs) /
+                             sizeof(thread_config_t))
+          : static_cast<int>(sizeof(small_batch_thread_configs) /
+                             sizeof(thread_config_t));
+  int max_thread_n = 0;
+  for (int index = 0; index < config_count; ++index) {
+    max_thread_n = max(max_thread_n, configs[index].thread_n);
+  }
+  return max_thread_n;
+}
+
 struct marlin_device_info_t {
   int sms = 0;
   int max_shared_mem = 0;
   int major_capability = 0;
   int minor_capability = 0;
+  int cooperative_launch = 0;
 };
 
 marlin_device_info_t query_marlin_device_info(int device) {
@@ -239,6 +277,8 @@ marlin_device_info_t query_marlin_device_info(int device) {
                          cudaDevAttrComputeCapabilityMajor, device);
   cudaDeviceGetAttribute(&info.minor_capability,
                          cudaDevAttrComputeCapabilityMinor, device);
+  cudaDeviceGetAttribute(&info.cooperative_launch,
+                         cudaDevAttrCooperativeLaunch, device);
   return info;
 }
 
@@ -254,6 +294,41 @@ marlin_device_info_t get_marlin_device_info(int device) {
     info = query_marlin_device_info(device);
   }
   return info;
+}
+
+template <typename KernelPtr>
+void ensure_marlin_max_dynamic_shared_memory(KernelPtr kernel, int device,
+                                             int requested_bytes) {
+  struct cache_entry_t {
+    int device;
+    KernelPtr kernel;
+    int max_dynamic_shared_mem;
+  };
+  static std::mutex mutex;
+  static std::vector<cache_entry_t> cache;
+  std::lock_guard<std::mutex> lock(mutex);
+  for (auto& entry : cache) {
+    if (entry.device == device && entry.kernel == kernel) {
+      if (entry.max_dynamic_shared_mem >= requested_bytes) {
+        return;
+      }
+      cudaError_t status = cudaFuncSetAttribute(
+          kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+          requested_bytes);
+      TORCH_CHECK(status == cudaSuccess,
+                  "failed to set Marlin dynamic shared-memory limit: ",
+                  cudaGetErrorString(status));
+      entry.max_dynamic_shared_mem = requested_bytes;
+      return;
+    }
+  }
+
+  cudaError_t status = cudaFuncSetAttribute(
+      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, requested_bytes);
+  TORCH_CHECK(status == cudaSuccess,
+              "failed to set Marlin dynamic shared-memory limit: ",
+              cudaGetErrorString(status));
+  cache.push_back({device, kernel, requested_bytes});
 }
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
@@ -785,6 +860,82 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
 }
 
 template <typename scalar_t>
+bool launch_marlin_eora_rank128_attention(
+    const void* A, const void* B, void* C, void* C_tmp, void* scales,
+    void* locks, const void* eora_down_weight, const void* eora_up_weight,
+    int prob_m, int prob_n, int prob_k, int num_groups, int eora_rank, int dev,
+    cudaStream_t stream, marlin_device_info_t const& device_info) {
+  if (prob_m != 1 || prob_n != 4096 || prob_k != 4096 ||
+      eora_rank != 128 ||
+      device_info.major_capability != 8 ||
+      device_info.minor_capability != 0 || device_info.sms != 124 ||
+      device_info.cooperative_launch == 0) {
+    return false;
+  }
+
+  constexpr int threads = 256;
+  // 116 output-owned Marlin CTAs and eight role-specific LoRA-down CTAs fill
+  // one cooperative wave on the 124-SM target.
+  constexpr int eora_grid_blocks = 124;
+  constexpr int thread_m_blocks = 1;
+  constexpr int thread_n_blocks = 8;
+  constexpr int thread_k_blocks = 8;
+  constexpr bool m_block_size_8 = true;
+  constexpr int group_blocks = 8;
+  constexpr bool is_zp_float = false;
+  constexpr vllm::ScalarTypeId scale_type_id =
+      std::is_same<scalar_t, half>::value ? vllm::kFloat16.id()
+                                          : vllm::kBFloat16.id();
+  MarlinEoraFuncPtr<scalar_t> kernel =
+      MarlinEoraRank128<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+                        thread_m_blocks, thread_n_blocks, thread_k_blocks,
+                        m_block_size_8, pipe_stages, group_blocks,
+                        is_zp_float>;
+
+  int shared_mem = device_info.max_shared_mem;
+  ensure_marlin_max_dynamic_shared_memory(kernel, dev, shared_mem);
+
+  const int4* A_ptr = reinterpret_cast<const int4*>(A);
+  const int4* B_ptr = reinterpret_cast<const int4*>(B);
+  int4* C_ptr = reinterpret_cast<int4*>(C);
+  int4* C_tmp_ptr = reinterpret_cast<int4*>(C_tmp);
+  const int4* bias_ptr = nullptr;
+  const int4* scales_ptr = reinterpret_cast<const int4*>(scales);
+  const float* global_scale_ptr = nullptr;
+  const int4* zp_ptr = nullptr;
+  const int* g_idx_ptr = nullptr;
+  int lda = prob_k;
+  int* locks_ptr = reinterpret_cast<int*>(locks);
+  bool has_bias = false;
+  bool use_atomic_add = false;
+  bool use_fp32_reduce = true;
+  const scalar_t* eora_x = reinterpret_cast<const scalar_t*>(A);
+  const scalar_t* eora_down =
+      reinterpret_cast<const scalar_t*>(eora_down_weight);
+  const scalar_t* eora_up =
+      reinterpret_cast<const scalar_t*>(eora_up_weight);
+  scalar_t* eora_out = reinterpret_cast<scalar_t*>(C);
+  float* eora_workspace = reinterpret_cast<float*>(C_tmp);
+  void* args[] = {
+      &A_ptr,           &B_ptr,          &C_ptr,
+      &C_tmp_ptr,       &bias_ptr,       &scales_ptr,
+      &global_scale_ptr, &zp_ptr,         &g_idx_ptr,
+      &num_groups,      &prob_m,         &prob_n,
+      &prob_k,          &lda,            &locks_ptr,
+      &has_bias,        &use_atomic_add, &use_fp32_reduce,
+      &shared_mem,      &eora_x,         &eora_down,
+      &eora_up,         &eora_out,       &eora_workspace,
+  };
+  cudaError_t status = cudaLaunchCooperativeKernel(
+      reinterpret_cast<const void*>(kernel), dim3(eora_grid_blocks),
+      dim3(threads), args, shared_mem, stream);
+  TORCH_CHECK(status == cudaSuccess,
+              "fused Marlin+EoRA cooperative launch failed: ",
+              cudaGetErrorString(status));
+  return true;
+}
+
+template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                void* s, void* s2, void* zp, void* g_idx, void* perm,
                void* a_tmp, int prob_m, int prob_n, int prob_k, int lda,
@@ -935,8 +1086,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         int n_tiles = prob_n / prefill_thread_config.thread_n;
         int blocks = m_tiles * n_tiles;
 
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             shared_mem);
+        ensure_marlin_max_dynamic_shared_memory(kernel, dev, shared_mem);
         // clang-format off
         kernel<<<blocks, prefill_thread_config.num_threads, shared_mem, stream>>>(
             A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, s_ptr, s2_ptr, zp_ptr,
@@ -1055,8 +1205,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                   ", num_threads = ", num_threads, ", num_bits = ", num_bits);
     }
 
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         max_shared_mem_new);
+    ensure_marlin_max_dynamic_shared_memory(kernel, dev, max_shared_mem_new);
 
     bool part_use_atomic_add =
         use_atomic_add && div_ceil(prob_m_split, 64) * prob_n <= 2048;
@@ -1135,7 +1284,9 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   // auto -1)
   int thread_n = -1;
   // sms: number of SMs to use for the kernel
-  int sms = marlin::get_marlin_device_info(a.get_device()).sms;
+  marlin::marlin_device_info_t device_info =
+      marlin::get_marlin_device_info(a.get_device());
+  int sms = device_info.sms;
 
   // Alloc buffers
   const c10::cuda::OptionalCUDAGuard device_guard(at::device_of(a));
@@ -1159,10 +1310,26 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   auto options_fp32 =
       torch::TensorOptions().dtype(at::kFloat).device(a.device());
   if (use_fp32_reduce) {
-    int max_m_block_size = (size_m + 16 - 1) / 16 * 16;
+    // The M<=8 kernel packs only rows that can reach the output instead of
+    // reserving its full eight-row MMA tile.
+    int max_m_block_size =
+        size_m <= 8 ? size_m : (size_m + 16 - 1) / 16 * 16;
     max_m_block_size = min(max_m_block_size, 64);
-    int max_c_tmp_size =
-        sms * max_m_block_size * MARLIN_NAMESPACE_NAME::max_thread_n;
+    int max_thread_n = marlin::marlin_c_tmp_max_thread_n(
+        size_m, device_info.major_capability, device_info.minor_capability,
+        sms);
+    int64_t resident_columns =
+        static_cast<int64_t>(sms) * max_thread_n;
+    // Packed prefill can be forced down to M=16 through its environment
+    // threshold and uses a different configuration family. Reserve full N in
+    // that edge case; ordinary small-M launches use the tighter live-SM bound.
+    int64_t max_c_tmp_columns =
+        size_m <= 16
+            ? (use_packed_prefill && size_m == 16
+                   ? size_n
+                   : std::min(size_n, resident_columns))
+            : resident_columns;
+    int64_t max_c_tmp_size = max_m_block_size * max_c_tmp_columns;
     c_tmp = torch::empty({max_c_tmp_size}, options_fp32);
   } else {
     c_tmp = torch::empty({0}, options_fp32);
@@ -1194,12 +1361,9 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
                 "Unexpected g_idx.size(-1) = ", g_idx.size(-1),
                 " and perm.size(-1) = ", perm.size(-1),
                 ", where size_k = ", size_k);
-  } else {
-    g_idx = torch::empty({0}, options);
-    perm = torch::empty({0}, options);
-    a_tmp = torch::empty({0}, options);
   }
-  bool has_act_order = g_idx.size(-1) > 0 && perm.size(-1) > 0;
+  bool has_act_order = g_idx.defined() && perm.defined() &&
+                       g_idx.size(-1) > 0 && perm.size(-1) > 0;
 
   if (has_act_order) {
     a_tmp = torch::empty({size_m, size_k}, options);
@@ -1213,7 +1377,6 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     }
 
   } else {
-    a_tmp = torch::empty({0}, options);
     if (num_groups > 1) {
       TORCH_CHECK(
           size_k % num_groups == 0, "size_k = ", size_k,
@@ -1230,7 +1393,6 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     TORCH_CHECK(b_q_type == vllm::kFE2M1f && group_size == 16,
                 "global_scale can only be used for nvfp4 format.");
   } else {
-    global_scale = torch::empty({0}, options_fp32);
     TORCH_CHECK(!(b_q_type == vllm::kFE2M1f && group_size == 16),
                 "the global_scale parameter must be passed for nvfp4 format.");
   }
@@ -1243,8 +1405,6 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     TORCH_CHECK(b_bias.is_contiguous(), "b_bias is not contiguous");
     TORCH_CHECK(b_bias.size(0) == size_n, "b_bias.size(0) != size_n");
     TORCH_CHECK(b_bias.stride(0) == 1, "b_bias.stride(0) != 1");
-  } else {
-    b_bias = torch::empty({0}, options);
   }
 
   torch::Tensor b_zeros;
@@ -1252,10 +1412,8 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     b_zeros = b_zeros_or_none.value();
     TORCH_CHECK(b_zeros.device().is_cuda(), "b_zeros is not on GPU");
     TORCH_CHECK(b_zeros.is_contiguous(), "b_zeros is not contiguous");
-  } else {
-    b_zeros = torch::empty({0}, options);
   }
-  bool has_zp = b_zeros.size(-1) > 0;
+  bool has_zp = b_zeros.defined() && b_zeros.size(-1) > 0;
   if (has_zp) {
     TORCH_CHECK(
         b_q_type == vllm::kU4 || b_q_type == vllm::kU8,
@@ -1308,8 +1466,10 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
               " is below min_workspace_size = ", min_workspace_size);
 
   int dev = a.get_device();
-  TORCH_CHECK(global_scale.scalar_type() == at::ScalarType::Float,
-              "scalar type of global_scale must be float");
+  if (global_scale.defined()) {
+    TORCH_CHECK(global_scale.scalar_type() == at::ScalarType::Float,
+                "scalar type of global_scale must be float");
+  }
   #if MARLIN_ENABLE_FP16
   if (a.scalar_type() == at::ScalarType::Half) {
     void* scales_ptr;
@@ -1339,9 +1499,14 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
 
     marlin::marlin_mm<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        c_tmp.data_ptr<float>(), b_bias.data_ptr<at::Half>(), scales_ptr,
-        global_scale.data_ptr<float>(), b_zeros.data_ptr(), g_idx.data_ptr(),
-        perm.data_ptr(), a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
+        c_tmp.data_ptr<float>(),
+        has_bias ? b_bias.data_ptr<at::Half>() : nullptr, scales_ptr,
+        global_scale.defined() ? global_scale.data_ptr<float>() : nullptr,
+        has_zp ? b_zeros.data_ptr() : nullptr,
+        has_act_order ? g_idx.data_ptr() : nullptr,
+        has_act_order ? perm.data_ptr() : nullptr,
+        has_act_order ? a_tmp.data_ptr<at::Half>() : nullptr, size_m, size_n,
+        size_k,
         a.stride(0), workspace.data_ptr(), b_q_type, has_bias, has_act_order,
         is_k_full, has_zp, num_groups, group_size, dev,
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
@@ -1383,10 +1548,13 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     marlin::marlin_mm<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
         c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
-        b_bias.data_ptr<at::BFloat16>(), scales_ptr,
-        global_scale.data_ptr<float>(), b_zeros.data_ptr(),
-        g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
-        size_m, size_n, size_k, a.stride(0), workspace.data_ptr(), b_q_type,
+        has_bias ? b_bias.data_ptr<at::BFloat16>() : nullptr, scales_ptr,
+        global_scale.defined() ? global_scale.data_ptr<float>() : nullptr,
+        has_zp ? b_zeros.data_ptr() : nullptr,
+        has_act_order ? g_idx.data_ptr() : nullptr,
+        has_act_order ? perm.data_ptr() : nullptr,
+        has_act_order ? a_tmp.data_ptr<at::BFloat16>() : nullptr, size_m,
+        size_n, size_k, a.stride(0), workspace.data_ptr(), b_q_type,
         has_bias, has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float, use_packed_prefill,
@@ -1404,6 +1572,109 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   #endif
 
   return c;
+}
+
+// Module post-initialization fixes every invariant used by this common GPTQ
+// W4A16 path. Keep the validated operator above for direct callers and every
+// other Marlin format/configuration.
+torch::Tensor MARLIN_GEMM_PREPARED_EXPORT_NAME(
+    torch::Tensor& a, torch::Tensor& b_q_weight, torch::Tensor& b_scales,
+    torch::Tensor& workspace, torch::Tensor& down_weight,
+    torch::Tensor& up_weight, bool use_packed_prefill,
+    int64_t packed_prefill_config) {
+  constexpr int group_size = 128;
+  vllm::ScalarType const b_q_type = vllm::kU4B8;
+  const int64_t size_k = a.size(-1);
+  const int64_t size_m = a.numel() / size_k;
+  const int64_t size_n = b_scales.size(1);
+  const int num_groups = static_cast<int>(size_k / group_size);
+  marlin::marlin_device_info_t device_info =
+      marlin::get_marlin_device_info(a.get_device());
+  const int sms = device_info.sms;
+  const c10::cuda::OptionalCUDAGuard device_guard(at::device_of(a));
+  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
+  std::vector<int64_t> output_shape = a.sizes().vec();
+  output_shape.back() = size_n;
+  torch::Tensor c = torch::empty(output_shape, options);
+
+  auto options_fp32 =
+      torch::TensorOptions().dtype(at::kFloat).device(a.device());
+  int max_m_block_size =
+      size_m <= 8 ? size_m : (size_m + 15) / 16 * 16;
+  max_m_block_size = min(max_m_block_size, 64);
+  int max_thread_n = marlin::marlin_c_tmp_max_thread_n(
+      size_m, device_info.major_capability, device_info.minor_capability, sms);
+  int64_t resident_columns = static_cast<int64_t>(sms) * max_thread_n;
+  int64_t max_c_tmp_columns =
+      size_m <= 16
+          ? (use_packed_prefill && size_m == 16
+                 ? size_n
+                 : std::min(size_n, resident_columns))
+          : resident_columns;
+  const int64_t minimum_scratch_elements = size_m * down_weight.size(1);
+  const int64_t c_tmp_elements = std::max(
+      static_cast<int64_t>(max_m_block_size) * max_c_tmp_columns,
+      minimum_scratch_elements);
+  torch::Tensor c_tmp = torch::empty({c_tmp_elements}, options_fp32);
+
+  #if MARLIN_ENABLE_FP16
+  if (a.scalar_type() == at::ScalarType::Half) {
+    const cudaStream_t stream =
+        at::cuda::getCurrentCUDAStream(a.get_device());
+    bool fused = marlin::launch_marlin_eora_rank128_attention<half>(
+        a.data_ptr<at::Half>(), b_q_weight.data_ptr(),
+        c.data_ptr<at::Half>(), c_tmp.data_ptr<float>(),
+        b_scales.data_ptr<at::Half>(), workspace.data_ptr(),
+        down_weight.data_ptr<at::Half>(), up_weight.data_ptr<at::Half>(),
+        size_m, size_n, size_k, num_groups, down_weight.size(1),
+        a.get_device(), stream, device_info);
+    if (!fused) {
+      marlin::marlin_mm<half>(
+          a.data_ptr<at::Half>(), b_q_weight.data_ptr(),
+          c.data_ptr<at::Half>(), c_tmp.data_ptr<float>(), nullptr,
+          b_scales.data_ptr<at::Half>(), nullptr, nullptr, nullptr, nullptr,
+          nullptr, size_m, size_n, size_k, size_k, workspace.data_ptr(),
+          b_q_type, false, false, true, false, num_groups, group_size,
+          a.get_device(), stream, -1, -1, sms, false, true, false,
+          use_packed_prefill, static_cast<int>(packed_prefill_config));
+      return eora_marlin_lora_fused_add_prepared_cuda(
+          a, down_weight, up_weight, c, c_tmp);
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return c;
+  }
+  #endif
+
+  #if MARLIN_ENABLE_BF16
+  if (a.scalar_type() == at::ScalarType::BFloat16) {
+    const cudaStream_t stream =
+        at::cuda::getCurrentCUDAStream(a.get_device());
+    bool fused = marlin::launch_marlin_eora_rank128_attention<nv_bfloat16>(
+        a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
+        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
+        b_scales.data_ptr<at::BFloat16>(), workspace.data_ptr(),
+        down_weight.data_ptr<at::BFloat16>(),
+        up_weight.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
+        num_groups, down_weight.size(1), a.get_device(), stream, device_info);
+    if (!fused) {
+      marlin::marlin_mm<nv_bfloat16>(
+          a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
+          c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(), nullptr,
+          b_scales.data_ptr<at::BFloat16>(), nullptr, nullptr, nullptr,
+          nullptr, nullptr, size_m, size_n, size_k, size_k,
+          workspace.data_ptr(), b_q_type, false, false, true, false,
+          num_groups, group_size, a.get_device(), stream, -1, -1, sms, false,
+          true, false, use_packed_prefill,
+          static_cast<int>(packed_prefill_config));
+      return eora_marlin_lora_fused_add_prepared_cuda(
+          a, down_weight, up_weight, c, c_tmp);
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return c;
+  }
+  #endif
+
+  TORCH_CHECK(false, "prepared GPTQ Marlin W4A16 received an unsupported dtype");
 }
 
 #endif

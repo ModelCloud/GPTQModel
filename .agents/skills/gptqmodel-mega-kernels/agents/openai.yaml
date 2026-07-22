@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Mega-Kernels"
+  short_description: "Design and validate fused CUDA mega-kernels"
+  default_prompt: "Use $gptqmodel-mega-kernels to profile, design, and validate this multi-kernel fusion."

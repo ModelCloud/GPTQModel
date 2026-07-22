@@ -46,7 +46,11 @@ from ...utils.marlin import (
     marlin_sort_g_idx,
     replace_parameter,
 )
-from ...utils.eora_marlin import apply_eora_marlin_fused_lora
+from ...utils.eora_marlin import (
+    apply_eora_marlin_fused_lora,
+    eora_marlin_cuda_up_add_enabled,
+    prepare_eora_marlin_fused_lora,
+)
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
 
@@ -341,6 +345,33 @@ class MarlinLinear(GPTQQuantLinear):
             self.bias.data = marlin_permute_bias(self.bias)
 
         super().post_init()
+        self.eora_cuda_up_add = eora_marlin_cuda_up_add_enabled()
+        self.eora_cooperative_state = None
+        if self.adapter is not None:
+            use_prepared_marlin = (
+                self.weight_type == scalar_types.uint4b8
+                and self.group_size == 128
+                and self.in_features > self.group_size
+                and not self.desc_act
+                and self.is_k_full
+                and self.fp32
+                and self.bias is None
+                and self.qzeros.numel() == 0
+                and self.g_idx.numel() == 0
+                and self.g_idx_sort_indices.numel() == 0
+            )
+            self.eora_cooperative_state = prepare_eora_marlin_fused_lora(
+                self.adapter,
+                device=device,
+                dtype=self.compute_dtype,
+                in_features=self.in_features,
+                out_features=self.out_features,
+                use_prepared_marlin=use_prepared_marlin,
+            )
+            if self.eora_cooperative_state is not None:
+                log.info.once(
+                    "Kernel: Ampere cooperative Marlin+EoRA inference is enabled for eligible decode/small-M shapes."
+                )
 
     def list_buffers(self) -> List:
         buf = super().list_buffers()
@@ -350,9 +381,89 @@ class MarlinLinear(GPTQQuantLinear):
             buf.append(self.g_idx_sort_indices)
         if hasattr(self, "g_idx") and self.g_idx is not None:
             buf.append(self.g_idx)
+        if getattr(self, "eora_cooperative_state", None) is not None:
+            eora_workspace = self.eora_cooperative_state[3]
+            if eora_workspace is not None:
+                buf.append(eora_workspace)
         return buf
 
     def forward(self, x: torch.Tensor):
+        cooperative_state = getattr(self, "eora_cooperative_state", None) if self.adapter else None
+        if cooperative_state is not None:
+            op, lora_a, lora_b, eora_workspace, max_rows, prepared_marlin = cooperative_state
+            input_is_2d = x.dim() == 2
+            rows = x.shape[0] if input_is_2d else x.numel() // x.shape[-1]
+            marlin_input = x if input_is_2d or prepared_marlin else x.reshape(rows, x.shape[-1])
+            if (
+                0 < rows <= max_rows
+                and marlin_input.is_contiguous()
+                and marlin_input.dtype == self.scales.dtype
+                and (self.bias is None or self.bias.dtype == marlin_input.dtype)
+                and marlin_input.dtype == lora_a.dtype
+                and marlin_input.device == lora_a.device
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                if not prepared_marlin and rows > eora_workspace.shape[0]:
+                    eora_workspace = torch.empty(
+                        (rows, lora_a.shape[1]),
+                        dtype=torch.float32,
+                        device=marlin_input.device,
+                    )
+                    cooperative_state = op, lora_a, lora_b, eora_workspace, max_rows, prepared_marlin
+                    self.eora_cooperative_state = cooperative_state
+                use_packed_prefill = (
+                    self.packed_prefill
+                    and rows >= self.packed_prefill_min_rows
+                    and (input_is_2d or x.dim() < 3 or x.shape[-2] != 1)
+                )
+                try:
+                    if prepared_marlin:
+                        out = op(
+                            marlin_input,
+                            self.qweight,
+                            self.scales,
+                            self.workspace,
+                            lora_a,
+                            lora_b,
+                            use_packed_prefill,
+                            self.packed_prefill_config,
+                        )
+                    else:
+                        out = op(
+                            marlin_input,
+                            None,
+                            self.qweight,
+                            self.bias,
+                            self.scales,
+                            None,
+                            self.qzeros,
+                            self.g_idx,
+                            self.g_idx_sort_indices,
+                            self.workspace,
+                            lora_a,
+                            lora_b,
+                            eora_workspace,
+                            self.weight_type.id,
+                            rows,
+                            self.out_features,
+                            self.in_features,
+                            self.is_k_full,
+                            False,
+                            self.fp32,
+                            False,
+                            use_packed_prefill,
+                            self.packed_prefill_config,
+                        )
+                    if input_is_2d or prepared_marlin:
+                        return out
+                    return out.reshape(x.shape[:-1] + (self.out_features,))
+                except Exception as exc:
+                    log.warn.once(
+                        "Integrated Marlin+EoRA inference failed at runtime; using the standard adapter path: "
+                        f"{exc}"
+                    )
+                    self.eora_cooperative_state = None
+
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
         if x.shape[0] == 0:
@@ -368,30 +479,112 @@ class MarlinLinear(GPTQQuantLinear):
             x,
             self.packed_prefill_min_rows,
         )
-        out = apply_gptq_marlin_linear(
-            input=x.contiguous() if self.is_lm_head else x,
-            weight=self.qweight,
-            weight_scale=self.scales,
-            weight_zp=self.qzeros,
-            g_idx=self.g_idx,
-            g_idx_sort_indices=self.g_idx_sort_indices,
-            workspace=self.workspace,
-            wtype=self.weight_type,
-            output_size_per_partition=self.out_features,
-            input_size_per_partition=self.in_features,
-            is_k_full=self.is_k_full,
-            bias=self.bias,
-            use_fp32_reduce=self.fp32,
-            use_atomics=False, # reduces accuracy with slightly faster performance
-            use_packed_prefill=use_packed_prefill,
-            packed_prefill_config=self.packed_prefill_config,
-        )
+        input_is_2d = x.dim() == 2
+        rows = x.numel() // x.shape[-1]
+        x_2d = x if input_is_2d else x.reshape(rows, x.shape[-1])
+        marlin_input = x_2d.contiguous() if self.is_lm_head else x_2d
+        out_shape = x.shape[:-1] + (self.out_features,)
+        out = None
+        adapter_applied = False
+        cooperative_state = getattr(self, "eora_cooperative_state", None) if self.adapter else None
+        if cooperative_state is not None:
+            op, lora_a, lora_b, eora_workspace, max_rows, prepared_marlin = cooperative_state
+            can_use_cooperative = (
+                rows <= max_rows
+                and marlin_input.is_contiguous()
+                and marlin_input.dtype == lora_a.dtype
+                and marlin_input.device == lora_a.device
+                # The three library kernels have less raw GPU work once launch
+                # overhead is removed by graph replay.
+                and not torch.cuda.is_current_stream_capturing()
+            )
+            if can_use_cooperative:
+                if not prepared_marlin and rows > eora_workspace.shape[0]:
+                    eora_workspace = torch.empty(
+                        (rows, lora_a.shape[1]),
+                        dtype=torch.float32,
+                        device=marlin_input.device,
+                    )
+                    cooperative_state = op, lora_a, lora_b, eora_workspace, max_rows, prepared_marlin
+                    self.eora_cooperative_state = cooperative_state
+                try:
+                    if prepared_marlin:
+                        out = op(
+                            marlin_input,
+                            self.qweight,
+                            self.scales,
+                            self.workspace,
+                            lora_a,
+                            lora_b,
+                            use_packed_prefill,
+                            self.packed_prefill_config,
+                        )
+                    else:
+                        out = op(
+                            marlin_input,
+                            None,
+                            self.qweight,
+                            self.bias,
+                            self.scales,
+                            None,
+                            self.qzeros,
+                            self.g_idx,
+                            self.g_idx_sort_indices,
+                            self.workspace,
+                            lora_a,
+                            lora_b,
+                            eora_workspace,
+                            self.weight_type.id,
+                            rows,
+                            self.out_features,
+                            self.in_features,
+                            self.is_k_full,
+                            False,
+                            self.fp32,
+                            False,
+                            use_packed_prefill,
+                            self.packed_prefill_config,
+                        )
+                    adapter_applied = True
+                except Exception as exc:
+                    log.warn.once(
+                        "Integrated Marlin+EoRA inference failed at runtime; using the standard adapter path: "
+                        f"{exc}"
+                    )
+                    self.eora_cooperative_state = None
 
-        if self.adapter:
-            fused_out = apply_eora_marlin_fused_lora(self.adapter, x=x, out=out)
-            out = fused_out if fused_out is not None else self.adapter.apply(x=x, out=out)
+        if out is None:
+            out = apply_gptq_marlin_linear(
+                input=marlin_input,
+                weight=self.qweight,
+                weight_scale=self.scales,
+                weight_zp=self.qzeros,
+                g_idx=self.g_idx,
+                g_idx_sort_indices=self.g_idx_sort_indices,
+                workspace=self.workspace,
+                wtype=self.weight_type,
+                output_size_per_partition=self.out_features,
+                input_size_per_partition=self.in_features,
+                is_k_full=self.is_k_full,
+                bias=self.bias,
+                use_fp32_reduce=self.fp32,
+                use_atomics=False, # reduces accuracy with slightly faster performance
+                use_packed_prefill=use_packed_prefill,
+                packed_prefill_config=self.packed_prefill_config,
+            )
 
-        return out
+        if self.adapter and not adapter_applied:
+            if self.eora_cuda_up_add:
+                fused_out = apply_eora_marlin_fused_lora(
+                    self.adapter,
+                    x=x_2d,
+                    out=out,
+                )
+                out = fused_out if fused_out is not None else self.adapter.apply(x=x_2d, out=out)
+            else:
+                out = self.adapter.apply(x=x_2d, out=out)
+
+        return out if input_is_2d else out.reshape(out_shape)
 
 
 # Precompute permutations for Marlin weight and scale shuffling

@@ -29,6 +29,7 @@ _EORA_MARLIN_REQUIRED_CUDA_HEADERS = (
     "cuda_runtime_api.h",
 )
 _FUSED_ENV = "GPTQMODEL_EORA_MARLIN_FUSED"
+_FUSED_COOPERATIVE_ENV = "GPTQMODEL_EORA_MARLIN_COOPERATIVE"
 _FUSED_CUDA_UP_ADD_ENV = "GPTQMODEL_EORA_MARLIN_CUDA_UP_ADD"
 _FUSED_MAX_M_ENV = "GPTQMODEL_EORA_MARLIN_FUSED_MAX_M"
 _FUSED_MAX_RANK_ENV = "GPTQMODEL_EORA_MARLIN_FUSED_MAX_RANK"
@@ -72,7 +73,7 @@ def _eora_marlin_extra_cuda_cflags() -> list[str]:
 _EORA_MARLIN_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_EORA_MARLIN_OPS_NAME,
     namespace=_EORA_MARLIN_NAMESPACE,
-    required_ops=("lora_up_add",),
+    required_ops=("lora_fused_add", "lora_fused_add_prepared", "lora_up_add"),
     sources=_eora_marlin_sources,
     build_root_env="GPTQMODEL_EORA_MARLIN_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("eora_marlin"),
@@ -141,23 +142,98 @@ def _can_try_fused_lora(x: torch.Tensor, out: torch.Tensor, lora_a: torch.Tensor
     return rows <= max_m and lora_a.shape[1] <= max_rank
 
 
-def _ensure_lora_tensors(adapter, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _ensure_lora_tensors_for(
+    adapter,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
     lora_a = adapter.lora_A
     lora_b = adapter.lora_B
-    if lora_a.dtype != x.dtype or lora_a.device != x.device or lora_b.dtype != x.dtype or lora_b.device != x.device:
+    if lora_a.dtype != dtype or lora_a.device != device or lora_b.dtype != dtype or lora_b.device != device:
         log.info.once(
             f"Adapter: Lora A/B auto changed from `{lora_a.dtype}` on `{lora_a.device}` "
-            f"to `{x.dtype}` on `{x.device}` to match forward input."
+            f"to `{dtype}` on `{device}` to match forward input."
         )
-        adapter.lora_A = lora_a.to(device=x.device, dtype=x.dtype).contiguous()
-        adapter.lora_B = lora_b.to(device=x.device, dtype=x.dtype).contiguous()
+        adapter.lora_A = lora_a.to(device=device, dtype=dtype).contiguous()
+        adapter.lora_B = lora_b.to(device=device, dtype=dtype).contiguous()
     elif not lora_a.is_contiguous() or not lora_b.is_contiguous():
         adapter.lora_A = lora_a.contiguous()
         adapter.lora_B = lora_b.contiguous()
     return adapter.lora_A, adapter.lora_B
 
 
-def apply_eora_marlin_fused_lora(adapter, *, x: torch.Tensor, out: torch.Tensor) -> Optional[torch.Tensor]:
+def _ensure_lora_tensors(adapter, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return _ensure_lora_tensors_for(adapter, device=x.device, dtype=x.dtype)
+
+
+def eora_marlin_cuda_up_add_enabled() -> bool:
+    return env_flag(_FUSED_ENV, default=True) and env_flag(_FUSED_CUDA_UP_ADD_ENV, default=False)
+
+
+def prepare_eora_marlin_fused_lora(
+    adapter,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    in_features: int,
+    out_features: int,
+    use_prepared_marlin: bool = False,
+):
+    """Prepare the Ampere cooperative EoRA state, or return None for the portable fallback."""
+
+    global _FUSED_DISABLED_REASON
+
+    if not env_flag(_FUSED_ENV, default=True) or not env_flag(_FUSED_COOPERATIVE_ENV, default=True):
+        return None
+    if device.type != "cuda" or dtype not in (torch.float16, torch.bfloat16):
+        return None
+    if torch.cuda.get_device_capability(device) != (8, 0):
+        return None
+    has_compressed_lora = getattr(adapter, "_has_compressed_lora", None)
+    if callable(has_compressed_lora) and has_compressed_lora():
+        return None
+
+    lora_a = getattr(adapter, "lora_A", None)
+    lora_b = getattr(adapter, "lora_B", None)
+    if lora_a is None or lora_b is None or lora_a.dim() != 2 or lora_b.dim() != 2:
+        return None
+    rank = lora_a.shape[1]
+    max_rows = _env_int(_FUSED_MAX_M_ENV, 16)
+    max_rank = _env_int(_FUSED_MAX_RANK_ENV, 512)
+    if (
+        max_rows < 1
+        or rank < 1
+        or rank > max_rank
+        or lora_a.shape != (in_features, rank)
+        or lora_b.shape != (rank, out_features)
+    ):
+        return None
+    lora_a, lora_b = _ensure_lora_tensors_for(adapter, device=device, dtype=dtype)
+    marlin_extension = "marlin_bf16" if dtype == torch.bfloat16 else "marlin_fp16"
+    dtype_tag = "bf16" if dtype == torch.bfloat16 else "fp16"
+    prepared_suffix = "_prepared" if use_prepared_marlin else ""
+    op_name = f"gptq_marlin_gemm_eora{prepared_suffix}_{dtype_tag}"
+    try:
+        op = _extension_api().op(marlin_extension, op_name)
+    except Exception as exc:
+        reason = str(exc) or exc.__class__.__name__
+        if _FUSED_DISABLED_REASON != reason:
+            log.warn(f"EoRA Marlin cooperative LoRA unavailable; using standard adapter path: {reason}")
+            _FUSED_DISABLED_REASON = reason
+        return None
+
+    workspace = None if use_prepared_marlin else torch.empty((1, rank), dtype=torch.float32, device=device)
+    return op, lora_a, lora_b, workspace, max_rows, use_prepared_marlin
+
+
+def apply_eora_marlin_fused_lora(
+    adapter,
+    *,
+    x: torch.Tensor,
+    out: torch.Tensor,
+    cooperative_buffer: Optional[torch.Tensor] = None,
+) -> Optional[torch.Tensor]:
     """Try the optional Marlin+EoRA fused tail and return None on fallback."""
 
     global _FUSED_DISABLED_REASON
@@ -168,16 +244,33 @@ def apply_eora_marlin_fused_lora(adapter, *, x: torch.Tensor, out: torch.Tensor)
         return None
 
     lora_a, lora_b = _ensure_lora_tensors(adapter, x)
-    x_2d = x.reshape(-1, x.shape[-1])
-    out_2d = out.reshape(-1, out.shape[-1])
+    x_2d = x if x.dim() == 2 else x.reshape(-1, x.shape[-1])
+    out_2d = out if out.dim() == 2 else out.reshape(-1, out.shape[-1])
+
+    if env_flag(_FUSED_COOPERATIVE_ENV, default=True) and cooperative_buffer is not None:
+        if torch.cuda.get_device_capability(x.device) != (8, 0):
+            return None
+        try:
+            op = _extension_api().op("eora_marlin", "lora_fused_add")
+            op(x_2d, lora_a, lora_b, out_2d, cooperative_buffer)
+            return out
+        except Exception as exc:
+            reason = str(exc) or exc.__class__.__name__
+            if _FUSED_DISABLED_REASON != reason:
+                log.warn(f"EoRA Marlin cooperative LoRA disabled; falling back to standard adapter path: {reason}")
+                _FUSED_DISABLED_REASON = reason
+            return None
+
     down = torch.matmul(x_2d, lora_a).contiguous()
 
     if not env_flag(_FUSED_CUDA_UP_ADD_ENV, default=False):
-        return torch.addmm(out_2d, down, lora_b, beta=1.0, alpha=1.0, out=out_2d).reshape_as(out)
+        torch.addmm(out_2d, down, lora_b, beta=1.0, alpha=1.0, out=out_2d)
+        return out
 
     try:
         op = _extension_api().op("eora_marlin", "lora_up_add")
-        return op(down, lora_b, out_2d).reshape_as(out)
+        op(down, lora_b, out_2d)
+        return out
     except Exception as exc:
         reason = str(exc) or exc.__class__.__name__
         if _FUSED_DISABLED_REASON != reason:

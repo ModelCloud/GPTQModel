@@ -154,11 +154,12 @@ def _marlin_sources(dtype_tag: str) -> list[str]:
     sources = [
         str(root / f"marlin_torch_{dtype_tag}.cpp"),
         str(root / f"gptq_marlin_{dtype_tag}.cu"),
+        str(root.parent / "eora_marlin" / "eora_marlin_kernel.cu"),
         str(root / "gptq_marlin_repack.cu"),
         str(root / "awq_marlin_repack.cu"),
     ]
     sources.extend(str(path) for path in sorted(root.glob(f"kernel_{dtype_tag}_*.cu")))
-    if len(sources) <= 4:
+    if len(sources) <= 5:
         raise RuntimeError(f"Marlin {dtype_tag} sources are incomplete under `{root}`.")
     return sources
 
@@ -193,7 +194,13 @@ def _marlin_extra_cuda_cflags() -> list[str]:
 _MARLIN_FP16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_MARLIN_FP16_OPS_NAME,
     namespace=_MARLIN_FP16_NAMESPACE,
-    required_ops=("gptq_marlin_gemm_fp16", "gptq_marlin_repack", "awq_marlin_repack"),
+    required_ops=(
+        "gptq_marlin_gemm_fp16",
+        "gptq_marlin_gemm_eora_fp16",
+        "gptq_marlin_gemm_eora_prepared_fp16",
+        "gptq_marlin_repack",
+        "awq_marlin_repack",
+    ),
     sources=lambda: _marlin_sources("fp16"),
     build_root_env="GPTQMODEL_MARLIN_FP16_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("marlin_fp16"),
@@ -210,7 +217,13 @@ _MARLIN_FP16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
 _MARLIN_BF16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_MARLIN_BF16_OPS_NAME,
     namespace=_MARLIN_BF16_NAMESPACE,
-    required_ops=("gptq_marlin_gemm_bf16", "gptq_marlin_repack", "awq_marlin_repack"),
+    required_ops=(
+        "gptq_marlin_gemm_bf16",
+        "gptq_marlin_gemm_eora_bf16",
+        "gptq_marlin_gemm_eora_prepared_bf16",
+        "gptq_marlin_repack",
+        "awq_marlin_repack",
+    ),
     sources=lambda: _marlin_sources("bf16"),
     build_root_env="GPTQMODEL_MARLIN_BF16_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("marlin_bf16"),
@@ -463,7 +476,8 @@ def apply_gptq_marlin_linear(
         packed_prefill_config: int = 0,
 
 ) -> torch.Tensor:
-    reshaped_x = input.reshape(-1, input.shape[-1])
+    input_is_2d = input.dim() == 2
+    reshaped_x = input if input_is_2d else input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
     use_atomics = use_atomics and should_use_atomic_add_reduce(m=reshaped_x.size(0),
@@ -493,7 +507,7 @@ def apply_gptq_marlin_linear(
                               use_packed_prefill=use_packed_prefill,
                               packed_prefill_config=packed_prefill_config)
 
-    return output.reshape(out_shape)
+    return output if input_is_2d else output.reshape(out_shape)
 
 
 def apply_awq_marlin_linear(

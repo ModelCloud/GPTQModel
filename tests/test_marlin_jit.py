@@ -13,6 +13,7 @@ import gptqmodel.nn_modules.qlinear.marlin as marlin_qlinear_module
 import gptqmodel.nn_modules.qlinear.marlin_awq as marlin_awq_qlinear_module
 import gptqmodel.utils.marlin as marlin_utils
 from gptqmodel import extension as extension_api
+from gptqmodel.adapter.adapter import Lora
 from gptqmodel.utils import cpp as cpp_module
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 
@@ -196,12 +197,41 @@ def test_nvfp4_global_scale_contract_is_float_in_marlin_sources():
     assert "#include <torch/all.h>" not in marlin_cuh
     assert "#include <torch/extension.h>" not in marlin_cuh
     assert "const float *__restrict__ global_scale_ptr" in kernel_h
-    assert 'global_scale = torch::empty({0}, options_fp32);' in gemm_cu
+    assert "if (global_scale.defined())" in gemm_cu
     assert 'global_scale.scalar_type() == at::ScalarType::Float' in gemm_cu
-    assert "global_scale.data_ptr<float>()" in gemm_cu
+    assert "global_scale.defined() ? global_scale.data_ptr<float>() : nullptr" in gemm_cu
     assert "float global_scale_f32 = 1.0f;" in template_h
     assert "c0 *= global_scale_f32;" in template_h
     assert "c1 *= global_scale_f32;" in template_h
+
+
+def test_integrated_eora_contract_is_present_in_marlin_extensions():
+    marlin_root = marlin_utils._marlin_root()
+    eora_kernel = marlin_root.parent / "eora_marlin" / "eora_marlin_kernel.cu"
+    gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
+    template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
+
+    assert str(eora_kernel) in marlin_utils._marlin_sources("fp16")
+    assert str(eora_kernel) in marlin_utils._marlin_sources("bf16")
+    assert "gptq_marlin_gemm_eora_fp16" in marlin_utils._MARLIN_FP16_TORCH_OPS_EXTENSION.required_ops
+    assert "gptq_marlin_gemm_eora_bf16" in marlin_utils._MARLIN_BF16_TORCH_OPS_EXTENSION.required_ops
+    assert "gptq_marlin_gemm_eora_prepared_fp16" in marlin_utils._MARLIN_FP16_TORCH_OPS_EXTENSION.required_ops
+    assert "gptq_marlin_gemm_eora_prepared_bf16" in marlin_utils._MARLIN_BF16_TORCH_OPS_EXTENSION.required_ops
+
+    for dtype_tag in ("fp16", "bf16"):
+        source = (marlin_root / f"marlin_torch_{dtype_tag}.cpp").read_text(encoding="utf-8")
+        fused_kernel = marlin_root / f"kernel_{dtype_tag}_eora_ku4b8.cu"
+        assert f"gptq_marlin_gemm_eora_{dtype_tag}" in source
+        assert f"gptq_marlin_gemm_eora_prepared_{dtype_tag}" in source
+        assert "eora_marlin_lora_fused_add_prepared_cuda" in source
+        assert str(fused_kernel) in marlin_utils._marlin_sources(dtype_tag)
+        assert "MarlinEoraRank128" in fused_kernel.read_text(encoding="utf-8")
+
+    assert "launch_marlin_eora_rank128_attention" in gemm_cu
+    assert "prob_n != 4096 || prob_k != 4096" in gemm_cu
+    assert "eora_rank != 128" in gemm_cu
+    assert "device_info.sms != 124" in gemm_cu
+    assert "cooperative_groups::this_grid()" in template_h
 
 
 def test_marlin_extra_cuda_cflags_enable_static_global_template_stub_when_nvcc_is_compatible(monkeypatch):
@@ -517,6 +547,113 @@ def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
     assert out.dtype == torch.bfloat16
 
 
+@pytest.mark.parametrize(
+    ("input_shape", "output_shape", "expected_rows", "expected_packed_prefill"),
+    [
+        ((256,), (64,), 1, True),
+        ((2, 256), (2, 64), 2, True),
+        ((1, 2, 256), (1, 2, 64), 2, True),
+        ((1, 1, 256), (1, 1, 64), 1, False),
+    ],
+)
+def test_marlin_quant_linear_uses_one_integrated_eora_dispatch(
+    monkeypatch,
+    input_shape,
+    output_shape,
+    expected_rows,
+    expected_packed_prefill,
+):
+    captured = {}
+    ordinary_calls = 0
+
+    def integrated_op(*args):
+        captured["rows"] = args[0].numel() // args[0].shape[-1]
+        captured["out_features"] = args[5].shape[1]
+        captured["lora_a"] = args[4]
+        captured["lora_b"] = args[5]
+        captured["use_packed_prefill"] = args[-2]
+        return torch.full(args[0].shape[:-1] + (args[5].shape[1],), 7.0, dtype=args[0].dtype)
+
+    def ordinary_marlin(**kwargs):
+        nonlocal ordinary_calls
+        ordinary_calls += 1
+        return torch.zeros(
+            (kwargs["input"].shape[0], kwargs["output_size_per_partition"]),
+            dtype=kwargs["input"].dtype,
+        )
+
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_available", lambda dtype: True)
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_error", lambda dtype: "")
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_make_workspace_new",
+        lambda device: torch.zeros(1, dtype=torch.int32, device=device),
+    )
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "gptq_marlin_repack",
+        lambda b_q_weight, perm, size_k, size_n, num_bits, dtype=None: b_q_weight,
+    )
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_permute_scales",
+        lambda scales, size_k, size_n, group_size: scales,
+    )
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_permute_bias", lambda bias: bias)
+    monkeypatch.setattr(marlin_qlinear_module, "apply_gptq_marlin_linear", ordinary_marlin)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+
+    def prepare_integrated_op(adapter, **kwargs):
+        captured["use_prepared_marlin"] = kwargs["use_prepared_marlin"]
+        return integrated_op, adapter.lora_A, adapter.lora_B, None, 16, True
+
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "prepare_eora_marlin_fused_lora",
+        prepare_integrated_op,
+    )
+
+    adapter = Lora(
+        rank=8,
+        lora_A=torch.randn(256, 8, dtype=torch.float16),
+        lora_B=torch.randn(8, 64, dtype=torch.float16),
+    )
+    module = marlin_qlinear_module.MarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=256,
+        out_features=64,
+        bias=False,
+        dtype=torch.float16,
+        adapter=adapter,
+    )
+    with torch.no_grad():
+        module.lora_A.copy_(adapter.lora_A)
+        module.lora_B.copy_(adapter.lora_B)
+    module.post_init()
+    module.packed_prefill = True
+    module.packed_prefill_min_rows = 1
+    module.adapter.apply = lambda **kwargs: pytest.fail("adapter fallback should not run")
+
+    out = module(torch.randn(input_shape, dtype=torch.float16))
+
+    assert ordinary_calls == 0
+    assert captured == {
+        "rows": expected_rows,
+        "out_features": 64,
+        "lora_a": module.adapter.lora_A,
+        "lora_b": module.adapter.lora_B,
+        "use_packed_prefill": expected_packed_prefill,
+        "use_prepared_marlin": True,
+    }
+    assert out.shape == output_shape
+    assert torch.equal(out, torch.full_like(out, 7.0))
+    assert None not in module.list_buffers()
+
+
 def test_awq_marlin_quant_linear_registers_runtime_buffers_in_compute_dtype(monkeypatch):
     monkeypatch.setattr(marlin_awq_qlinear_module, "marlin_import_exception", None)
 
@@ -627,6 +764,131 @@ def test_marlin_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
 
         assert out.shape == (4, 64)
         assert out.dtype == dtype
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_marlin_live_row_fp32_scratch_matches_fp16_reduction(dtype):
+    device = torch.device("cuda:0")
+    capability = torch.cuda.get_device_capability(device)
+    if capability[0] < 8 and dtype == torch.bfloat16:
+        pytest.skip("Marlin BF16 requires compute capability >= 8.0")
+
+    generator = torch.Generator(device=device)
+    generator.manual_seed(31)
+    in_features = 4096
+    out_features = 256
+    marlin_linear = marlin_qlinear_module.MarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=torch.int32,
+        bias=False,
+        dtype=dtype,
+    ).to(device)
+    with torch.no_grad():
+        marlin_linear.qweight.copy_(
+            torch.randint(
+                -(2**31),
+                2**31 - 1,
+                marlin_linear.qweight.shape,
+                dtype=torch.int32,
+                device=device,
+                generator=generator,
+            )
+        )
+        marlin_linear.scales.copy_(
+            torch.rand(
+                marlin_linear.scales.shape,
+                dtype=dtype,
+                device=device,
+                generator=generator,
+            )
+            * 0.01
+            + 0.01
+        )
+        marlin_linear.g_idx.zero_()
+        marlin_linear.qzeros.zero_()
+    marlin_linear.post_init()
+
+    inputs = torch.randn((8, in_features), device=device, dtype=dtype, generator=generator)
+    with torch.inference_mode():
+        for rows in range(1, 9):
+            marlin_linear.fp32 = False
+            expected = marlin_linear(inputs[:rows]).float()
+            marlin_linear.fp32 = True
+            actual = marlin_linear(inputs[:rows]).float()
+            atol = 1.25e-1 if dtype == torch.bfloat16 else 5e-2
+            torch.testing.assert_close(actual, expected, rtol=5e-2, atol=atol)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_marlin_eora_rank128_attention_mega_kernel_matches_dense_update(dtype, monkeypatch):
+    device = torch.device("cuda:0")
+    if torch.cuda.get_device_capability(device) != (8, 0):
+        pytest.skip("The cooperative Marlin+EoRA mega-kernel is enabled only for sm_80")
+
+    monkeypatch.setenv("GPTQMODEL_EORA_MARLIN_COOPERATIVE", "1")
+    generator = torch.Generator(device=device)
+    generator.manual_seed(27)
+    features, rank = 4096, 128
+    x = torch.randn((1, features), dtype=dtype, device=device, generator=generator)
+    lora_a = torch.randn((features, rank), dtype=dtype, device=device, generator=generator) * 0.002
+    lora_b = torch.randn((rank, features), dtype=dtype, device=device, generator=generator) * 0.002
+    adapter = Lora(rank=rank, lora_A=lora_a, lora_B=lora_b)
+    module = marlin_qlinear_module.MarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=features,
+        out_features=features,
+        bias=False,
+        dtype=dtype,
+        adapter=adapter,
+    ).to(device)
+    with torch.no_grad():
+        module.qweight.copy_(
+            torch.randint(
+                -(2**31),
+                2**31 - 1,
+                module.qweight.shape,
+                dtype=torch.int32,
+                device=device,
+                generator=generator,
+            )
+        )
+        module.scales.copy_(
+            torch.rand(module.scales.shape, dtype=dtype, device=device, generator=generator) * 0.01 + 0.01
+        )
+        module.qzeros.zero_()
+        module.g_idx.zero_()
+        module.lora_A.copy_(lora_a)
+        module.lora_B.copy_(lora_b)
+    module.eval()
+    module.post_init()
+    assert module.eora_cooperative_state is not None
+    assert module.eora_cooperative_state[-1] is True
+
+    module_adapter = module.adapter
+    module.adapter = None
+    with torch.inference_mode():
+        base = module(x)
+    module.adapter = module_adapter
+    expected = base.float() + (x.float() @ lora_a.float()) @ lora_b.float()
+
+    with torch.inference_mode():
+        actual = module(x)
+
+    assert actual.shape == base.shape
+    assert actual.dtype == dtype
+    torch.testing.assert_close(actual.float(), expected, rtol=5e-2, atol=5e-2)
 
 
 def test_marlin_include_paths_use_wheel_headers_when_local_cuda_is_incomplete(monkeypatch, tmp_path):
