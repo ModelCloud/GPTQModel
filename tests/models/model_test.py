@@ -1800,7 +1800,6 @@ class ModelTest(unittest.TestCase):
                     # Keep evalution-backed generation reproducible even when a task opts
                     # into sampling or an engine backend introduces RNG-sensitive paths.
                     task_model_args.setdefault("seed", RAND_SEED)
-                    task_model_args.setdefault("random_seed", RAND_SEED)
                     task_suite_kwargs = dict(suite_kwargs_lookup.get(normalized_name, {}) or {})
                     task_batch_size = eval_batch_size_lookup.get(normalized_name)
                     if task_batch_size is None:
