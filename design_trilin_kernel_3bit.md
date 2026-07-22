@@ -23,6 +23,9 @@ hypotheses and must not be presented as measurements.
 Implemented and validated on both requested CC 8.0 devices. For both FP16 and BF16, production dispatch uses a direct
 continuous-3-bit native CUDA GEMV at flattened M=1 and native CUDA WMMA at M=2..16. FP16 uses exact-value expanded
 Marlin above M=16; BF16 retains fused Triton above M=16 because it is faster than the native large-M diagnostic.
+The exact M=1, K=N=4096, group-128, dense rank-128 EoRA case now uses a cooperative one-launch TriLin+LoRA mega-kernel
+on sm80; unsupported adapter shapes, training/autograd, compressed adapters, CUDA Graph capture, and other devices
+retain the established base-kernel-plus-adapter fallback.
 Architecture, alignment, build-failure, training, and other unsupported cases retain guarded fallbacks. GPTQ/AWQ
 packing, backend gates, save/reload, clock-controlled benchmarks, sanitizer checks, and Nsight Systems/Compute proof
 are complete. The repository revision at the start of the investigation was `644ac5cd` on branch
@@ -47,7 +50,7 @@ from that initial design state.
 | M constraints | Any positive flattened row count; separate decode and prefill launch regimes |
 | Device | Runtime-probed CUDA device; optimized first for compute capability 8.0 |
 | Training | Inference specialization only; existing training/dequantized path remains the fallback |
-| Adapters/bias | Applied through the existing QuantLinear wrapper after the kernel unless profiling proves fusion useful |
+| Adapters/bias | Optional bias remains fused; exact sm80 M=1/K=N=4096/group-128 dense rank-128 EoRA is one cooperative launch, with the existing wrapper fallback for every other case |
 | Unsupported cases | Must fail validation for explicit selection or fall back through existing backend selection |
 
 The capability declarations alone cannot express conditional combinations such as “3-bit only when group size is
@@ -4781,3 +4784,324 @@ Failed, corrected, or rejected tactics:
 
 Decision: retain native CUDA routing for every declared positive group size. Keep group 128 as the primary optimized
 contract and warn once per non-128 group; keep channelwise `-1` and incompatible shapes on the safe existing fallback.
+
+## 2026-07-22 — Fused TriLin plus EoRA rank-128 decode mega-kernel
+
+Status: implemented, routed through GPTQ and AWQ QuantLinear, benchmarked, profiled, and safety-checked on physical
+GPU0 and GPU1. The repository baseline was clean at `53a8a675` on branch `trilin-eora` before this iteration.
+
+### Contract and fallback boundary
+
+The production specialization is deliberately exact:
+
+- flattened M=1, K=N=4096, continuous GPTQ-layout 3-bit weights, group size 128, and dense LoRA rank 128;
+- GPTQ and AWQ wrappers (AWQ uses its existing exact repack to the runtime GPTQ layout);
+- FP16 or BF16 activation and LoRA tensors, FP16 scales, optional contiguous FP16/BF16 bias, and FP32 accumulation;
+- inference without required gradients, compute capability exactly 8.0, cooperative-launch support, and no active
+  CUDA Graph capture;
+- `GPTQMODEL_TRILIN_EORA=0` as a runtime kill switch.
+
+Training, autograd, M other than 1, other K/N/rank/group sizes, compressed LoRA, non-sm80 devices, graph capture,
+unavailable JIT builds, and native launch errors retain the established TriLin/Marlin/Triton base route followed by
+`Lora.apply`. The native wrapper validates every tensor shape, dtype, device, stride, workspace size, live compute
+capability, cooperative support, and stream capture state. Device properties and the current stream come from the
+input tensor; no fixed CUDA index or assumed SM count is used.
+
+### Retained kernel design
+
+The normal decode route produced four kernels per logical layer call: TriLin base GEMV, LoRA-down GEMV, the addmm
+matrix-vector phase, and its split reduction. The retained cooperative kernel collapses these into one launch:
+
+1. Up to 256 CTAs compute the existing exact 16-column TriLin base tiles while eight disjoint CTAs compute 16 LoRA
+   ranks each across the complete K dimension.
+2. A cooperative grid barrier establishes both the complete base output and the 128-value LoRA-down payload.
+3. Up to 128 CTAs compute 32 output columns of LoRA-up and add them to the dtype-rounded base output. If a smaller
+   sm80 device has cooperative capacity between the accepted minimum of 64 and 127 CTAs, warps 4-7 in early CTAs own
+   a second output tile.
+
+The desired grid is 264 CTAs, but launch capacity is computed from
+`cudaOccupancyMaxActiveBlocksPerMultiprocessor` and the runtime SM count. A launch is rejected below 64 resident CTAs.
+The 128-value FP32 payload is completely overwritten on every call, never aliases the existing TriLin lock/workspace,
+and preserves the ordinary LoRA path's FP16/BF16 rounding boundary after the down projection. QuantLinear owns a
+nonpersistent workspace and lazily caches a distinct payload per CUDA stream, so concurrent forwards cannot race.
+Calls serialized on one stream reuse scratch without an allocator operation.
+
+### Hardware and toolchain
+
+Runtime probes immediately before final validation reported:
+
+```text
++-----+------------------+----------------+------+-----+-----------+-----------+
+| GPU | name             | PCI bus        | CC   | SMs | memory    | driver    |
++-----+------------------+----------------+------+-----+-----------+-----------+
+| 0   | NVIDIA PG506-230 | 0000:25:00.0   | 8.0  | 124 | 98304 MiB | 610.43.02 |
+| 1   | NVIDIA PG506-232 | 0000:2b:00.0   | 8.0  | 124 | 98304 MiB | 610.43.02 |
++-----+------------------+----------------+------+-----+-----------+-----------+
+```
+
+PyTorch was 2.13.0+cu130, CUDA runtime 13.0, Triton 3.7.1, Python 3.14.5t, Nsight Systems 2024.6.2, and Nsight
+Compute/Compute Sanitizer 2025.3.1. The JIT compile used `TORCH_CUDA_ARCH_LIST=8.0`, C++17, NVCC `-O3`,
+`--use_fast_math`, `-lineinfo`, and the repository's detected-device compute_80/sm_80 flags. The resulting extension
+fingerprint was `c8c47c7f1b887a7c`.
+
+### Correctness, lifecycle, and safety proof
+
+`tests/kernels/test_trilin_3bit_eora.py` covers raw FP16/BF16 equivalence to the exact unfused route, output shape and
+dtype, repeated overwrite of poisoned scratch, non-default streams, undersized-workspace rejection, GPTQ/AWQ
+production routing, M=1-to-M=2 route transitions, nonpersistent state, CUDA Graph fallback, CPU rejection, and
+concurrent forwards with disjoint stream workspaces. Both raw and production checks include optional bias.
+The final module run reported 12 passed on GPU0 in 10.57 seconds and 12 passed on GPU1 in 11.00 seconds.
+
+The existing 229-case `tests/kernels/test_triton_3bit.py` suite passed independently on GPU0 in 159.21 seconds and
+GPU1 in 158.98 seconds. It covers both layouts, every supported group, FP16/BF16, dense-oracle quality, current-stream
+semantics, CUDA Graph replay, projection widths, save/reload, and malformed metadata. Compute Sanitizer 2025.3.1
+`memcheck` and `synccheck` were each run against two fused launches: FP16 on GPU0 and BF16 on GPU1. All four runs
+reported `ERROR SUMMARY: 0 errors`.
+The same-extension QKV suite passed 9/9 on GPU0, and the SwiGLU suite passed 9/9 on GPU1.
+
+Representative commands:
+
+```text
+CUDA_VISIBLE_DEVICES={0,1} TORCH_CUDA_ARCH_LIST=8.0 pytest -q tests/kernels/test_trilin_3bit_eora.py
+CUDA_VISIBLE_DEVICES={0,1} TORCH_CUDA_ARCH_LIST=8.0 pytest -q tests/kernels/test_triton_3bit.py
+CUDA_VISIBLE_DEVICES={0,1} compute-sanitizer --tool {memcheck,synccheck} \
+  --kernel-name regex=trilin_3bit_eora_rank128_kernel --launch-count 2 --error-exitcode 99 -- \
+  python scripts/benchmark_trilin_3bit_eora.py --device cuda:0 --dtype {fp16,bf16} \
+  --warmup 0 --profile-iterations 1
+```
+
+### Final warmed timing
+
+`scripts/benchmark_trilin_3bit_eora.py` first checks the fused result against the ordinary TriLin plus `Lora.apply`
+result, then uses 200 warmups and 500 individually recorded CUDA-event samples. GPU0 and GPU1 were assigned with
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` and `CUDA_VISIBLE_DEVICES`; the two physical cards were benchmarked in parallel only
+with each other, never with two processes on the same card.
+
+```text
++-----+-------+------------------+----------------+------------------+----------------+------------------+---------+
+| GPU | dtype | unfused p50 us   | fused p50 us   | unfused mean us  | fused mean us  | p95 old/new us   | p50 win |
++-----+-------+------------------+----------------+------------------+----------------+------------------+---------+
+| 0   | FP16  | 136.192          | 52.224         | 139.135          | 55.056         | 148.480 / 57.344 | 2.608x  |
+| 1   | FP16  | 132.096          | 50.176         | 154.096          | 56.183         | 147.456 / 56.320 | 2.633x  |
+| 0   | BF16  | 134.144          | 55.296         | 138.129          | 59.800         | 146.432 / 64.512 | 2.426x  |
+| 1   | BF16  | 133.120          | 54.272         | 147.771          | 65.139         | 155.648 / 65.536 | 2.453x  |
++-----+-------+------------------+----------------+------------------+----------------+------------------+---------+
+```
+
+The isolated maximum samples contained busy-host outliers, so p50 and p95 are the stable decision evidence; mean is
+included for completeness. Artifacts:
+
+```text
+benchmark_artifacts/trilin_eora/final_{fp16,bf16}_gpu{0,1}.json
+```
+
+### Nsight Systems launch proof
+
+Two 200-call, warmed NVTX-scoped captures prove the requested launch reduction. GPU0 FP16 recorded exactly 200 fused
+kernels versus 800 kernels for 200 unfused calls. GPU1 BF16 recorded the same 200-versus-800 ratio. No dequantization
+or dense-weight materialization appeared.
+
+```text
++-----+-------+-----------------------+----------------------+-----------------------+----------------------+
+| GPU | dtype | fused kernel median us| unfused kernel sum us| fused projected us/call| old projected us/call|
++-----+-------+-----------------------+----------------------+-----------------------+----------------------+
+| 0   | FP16  | 19.488                | 29.856               | 32.744                | 137.221              |
+| 1   | BF16  | 23.152                | 30.272               | 35.448                | 141.070              |
++-----+-------+-----------------------+----------------------+-----------------------+----------------------+
+```
+
+The unfused kernel sums are the medians of TriLin base, LoRA down, addmm matrix-vector, and split reduction; projected
+range time additionally includes launch gaps and is attribution evidence rather than the synchronized timing source.
+
+```text
+nsys profile --trace=cuda,nvtx,cublas --sample=none --cpuctxsw=none --force-overwrite=true \
+  -o benchmark_artifacts/trilin_eora/nsys_trilin_eora_{fp16_gpu0,bf16_gpu1} -- \
+  python scripts/benchmark_trilin_3bit_eora.py --device cuda:0 --dtype {fp16,bf16} \
+  --warmup 200 --profile-iterations 200
+nsys stats --report nvtx_kern_sum,nvtx_gpu_proj_sum --format table --timeunit usec <report>
+```
+
+Artifacts:
+
+```text
+benchmark_artifacts/trilin_eora/nsys_trilin_eora_fp16_gpu0.{nsys-rep,sqlite}
+benchmark_artifacts/trilin_eora/nsys_trilin_eora_bf16_gpu1.{nsys-rep,sqlite}
+```
+
+### Nsight Compute resource classification
+
+Targeted reports first collected `SpeedOfLight`, then `LaunchStats`, `Occupancy`, `SchedulerStats`, and
+`WarpStateStats`. Both variants launched 264 blocks of 512 threads with 2.05 KiB static shared memory and 50.12%
+achieved occupancy. FP16 used 32 registers/thread; BF16 used 31. Under replay, FP16 measured 20.46% compute,
+15.37% memory, and 10.22% DRAM throughput; BF16 measured 21.89%, 15.38%, and 10.06%. The kernels are therefore not
+bandwidth-saturated. CTA/grid phase imbalance and barriers are the primary remaining limiter: barrier stalls accounted
+for 45.54% of FP16 and 47.09% of BF16 warp cycles between issued instructions. This is consistent with the intentional
+base/down role split and one cross-phase grid barrier; despite that tail, the end-to-end launch fusion remains a
+2.43-2.63x median win.
+
+```text
+ncu --section SpeedOfLight --kernel-name 'regex:trilin_3bit_eora_rank128_kernel' \
+  --launch-skip 1 --launch-count 1 -o <report> -- python scripts/benchmark_trilin_3bit_eora.py ...
+ncu --section LaunchStats --section Occupancy --section SchedulerStats --section WarpStateStats \
+  --kernel-name 'regex:trilin_3bit_eora_rank128_kernel' --launch-skip 1 --launch-count 1 -o <report> -- ...
+```
+
+Artifacts:
+
+```text
+benchmark_artifacts/trilin_eora/ncu_sol_trilin_eora_{fp16_gpu0,bf16_gpu1}.ncu-rep
+benchmark_artifacts/trilin_eora/ncu_resources_trilin_eora_{fp16_gpu0,bf16_gpu1}.ncu-rep
+```
+
+Decision: retain the exact specialization behind its runtime kill switch. The measured launch-gap reduction and
+end-to-end latency win justify the cooperative barrier for rank-128 decode, while the narrow gate preserves every
+existing fallback. Future tuning should investigate a smaller-block base reduction or a more uniform phase-2 warp
+schedule only if a matched end-to-end benchmark improves; Nsight's theoretical stall estimates alone are not a reason
+to replace the validated route.
+
+## 2026-07-22 — Fused TriLin plus EoRA ranks 32, 64, 128, and 256
+
+Status: implemented and validated on physical GPU0 and GPU1. This iteration started from clean commit `a159035c`
+(`Add fused TriLin EoRA mega-kernel`) on branch `trilin-eora` and supersedes the rank-128-only contract above without
+changing its exact M/K/N/group/device gate or its fallbacks.
+
+### Baseline and retained boundary
+
+Before editing, the ordinary four-launch TriLin plus LoRA route was measured at M=1, K=N=4096, group size 128 with
+the exact future ranks. CUDA-event timing used 100 warmups and 300 samples:
+
+```text
++-----+-------+----------------+----------------+----------------+
+| GPU | dtype | rank 32 p50 us | rank 64 p50 us | rank 256 p50 us|
++-----+-------+----------------+----------------+----------------+
+| 0   | FP16  |        131.072 |        131.072 |         135.168|
+| 1   | FP16  |        133.120 |        132.096 |         135.168|
+| 0   | BF16  |        130.048 |        129.024 |         133.120|
+| 1   | BF16  |        129.024 |        128.000 |         132.096|
++-----+-------+----------------+----------------+----------------+
+```
+
+Warmed 200-call Nsight Systems baselines independently confirmed 800 GPU operations per rank range, or four per
+logical call. Projected range times per call were 141.677/140.724/147.610 us for ranks 32/64/256 on GPU0 FP16 and
+132.452/135.665/140.888 us on GPU1 BF16. These captures were made before any source change from `a159035c`.
+
+The production gate remains M=1, K=N=4096, continuous 3-bit group-128 weights, FP16/BF16 dense LoRA tensors,
+inference without required gradients, exact sm_80, cooperative launch support, and no CUDA Graph capture. Only dense
+ranks 32, 64, 128, and 256 enter the fused route. Any other rank, including the regression rank 96, preserves the
+standard base kernel followed by `Lora.apply`; direct native calls reject unsupported ranks. The existing runtime kill
+switch, architecture fallback, graph fallback, error fallback, and stream-exclusive scratch ownership are unchanged.
+
+### Rank-specialized kernel design
+
+The native entry point now dispatches compile-time `Rank` specializations rather than passing a dynamic inner-loop
+bound. Phase 1 reserves `Rank / 16` complete-K LoRA-down CTAs, giving 2/4/8/16 CTAs for ranks 32/64/128/256. The
+desired cooperative grids are consequently 258/260/264/272 CTAs, still capped by occupancy and the runtime SM count.
+Each rank specialization has its own per-device occupancy cache; no CUDA index or fixed SM inventory is assumed.
+
+After the grid barrier, each 32-column LoRA-up tile uses `Rank / 32` warps, or 1/2/4/8 warps for the four ranks. The
+writer sums exactly that many FP32 partial rows. The existing capacity fallback for 64-127 resident CTAs was
+generalized so adjacent warp groups own the secondary tile: rank 32 uses two total warps for two tiles, rank 64 uses
+four, rank 128 uses eight, and rank 256 uses all sixteen. The 512-float shared allocation is sufficient for every
+mapping. All threads still reach both CTA barriers, while the rank-sized FP32 payload is fully overwritten before the
+grid barrier and rounded through the activation dtype at the same boundary as the unfused reference.
+
+Python preparation derives the live dense rank from LoRA-A, verifies matching LoRA-B geometry, and allocates or reuses
+at least that many FP32 values per adapter/device/stream. A larger cached payload can safely serve a later smaller rank;
+growth allocates a new stream-owned payload. The benchmark gained `--rank {32,64,128,256}` and rank-labelled NVTX
+ranges.
+
+### Hardware, build, and numerical validation
+
+Runtime probes reported both requested cards as compute capability 8.0 with 124 SMs and 102191202304 bytes of memory:
+GPU0 was NVIDIA PG506-230 at `0000:25:00.0`; GPU1 was NVIDIA PG506-232 at `0000:2b:00.0`. Driver 610.43.02,
+PyTorch 2.13.0+cu130, CUDA runtime 13.0, NVCC 13.0.88, Triton 3.7.1, Nsight Systems 2024.6.2, and Nsight
+Compute/Compute Sanitizer 2025.3.1 were used. The sm_80 JIT build used `TORCH_CUDA_ARCH_LIST=8.0` and produced
+fingerprint `feac8164527020ea`.
+
+The focused suite now covers all four ranks in FP16 and BF16 against the ordinary TriLin plus `Lora.apply` reference,
+poisoned-scratch overwrite, non-default streams, undersized scratch, GPTQ and AWQ routing, M=2 fallback, graph
+fallback, disjoint concurrent-stream workspaces, native unsupported-rank rejection, and production rank-96 fallback.
+It passed 41/41 on GPU0 in 10.45 seconds and 41/41 on GPU1 in 10.76 seconds. The unchanged 229-case 3-bit regression
+suite passed on GPU0 in 159.65 seconds and GPU1 in 159.68 seconds. The same-extension QKV suite passed 9/9 on GPU0,
+and the SwiGLU suite passed 9/9 on GPU1. Ruff and `git diff --check` were clean.
+
+### Final warmed timing
+
+The final benchmark first asserted the fused result against the unfused result, then used 200 warmups and 500
+individually recorded CUDA-event samples. Each process was isolated to one requested physical GPU. Shape was always
+M=1, K=N=4096, group size 128; throughput is calls per second and follows directly from mean latency.
+
+```text
++-----+-------+------+-------------+-----------+--------------+------------+-------------------+---------+
+| GPU | dtype | rank | old p50 us  | new p50 us| old mean us  | new mean us| p95 old/new us    | p50 win |
++-----+-------+------+-------------+-----------+--------------+------------+-------------------+---------+
+| 0   | FP16  |   32 |     132.096 |    51.200 |      133.986 |     52.234 | 143.360 / 58.368  | 2.580x  |
+| 0   | FP16  |   64 |     134.144 |    52.224 |      136.673 |     53.047 | 147.456 / 57.344  | 2.569x  |
+| 0   | FP16  |  128 |     129.024 |    50.176 |      135.191 |     53.209 | 165.888 / 66.560  | 2.571x  |
+| 0   | FP16  |  256 |     137.216 |    51.200 |      139.532 |     53.017 | 149.504 / 58.368  | 2.680x  |
+| 0   | BF16  |   32 |     129.024 |    53.248 |      131.160 |     54.624 | 143.360 / 62.464  | 2.423x  |
+| 0   | BF16  |   64 |     135.168 |    54.272 |      137.710 |     55.374 | 149.504 / 62.464  | 2.491x  |
+| 0   | BF16  |  128 |     133.120 |    54.272 |      138.314 |     55.323 | 146.432 / 63.488  | 2.453x  |
+| 0   | BF16  |  256 |     135.168 |    53.248 |      139.270 |     54.014 | 148.480 / 62.464  | 2.538x  |
+| 1   | FP16  |   32 |     136.704 |    52.224 |      138.150 |     53.299 | 149.504 / 58.368  | 2.618x  |
+| 1   | FP16  |   64 |     132.096 |    51.200 |      134.941 |     52.601 | 146.432 / 57.344  | 2.580x  |
+| 1   | FP16  |  128 |     139.264 |    54.272 |      141.459 |     55.351 | 154.624 / 62.464  | 2.566x  |
+| 1   | FP16  |  256 |     140.288 |    53.248 |      144.454 |     54.817 | 154.624 / 60.416  | 2.635x  |
+| 1   | BF16  |   32 |     130.048 |    51.200 |      139.649 |     52.447 | 153.600 / 58.368  | 2.540x  |
+| 1   | BF16  |   64 |     134.144 |    54.272 |      142.139 |     56.107 | 149.504 / 63.488  | 2.472x  |
+| 1   | BF16  |  128 |     134.144 |    55.296 |      136.899 |     56.154 | 147.456 / 64.512  | 2.426x  |
+| 1   | BF16  |  256 |     141.312 |    55.296 |      142.655 |     57.227 | 153.600 / 65.536  | 2.556x  |
++-----+-------+------+-------------+-----------+--------------+------------+-------------------+---------+
+```
+
+Every device/dtype/rank case retained a 2.42-2.68x median win. JSON artifacts are under
+`benchmark_artifacts/trilin_eora_rank_extensions/final_rank{rank}_{dtype}_gpu{0,1}.json`.
+
+### Launch proof, resources, and sanitizer evidence
+
+Warmed 100-call Nsight Systems captures covered each new rank specialization. Every fused NVTX range contained 100
+GPU operations while every unfused range contained 400:
+
+```text
++------+-------+-----+----------------------+----------------------+------------------------+
+| rank | dtype | GPU | fused kernel med us  | fused projected/call| unfused projected/call |
++------+-------+-----+----------------------+----------------------+------------------------+
+|   32 | FP16  | 0   |               19.104 |               34.886 |                138.271 |
+|   64 | BF16  | 1   |               22.816 |               36.482 |                143.119 |
+|  256 | BF16  | 1   |               23.824 |               34.735 |                150.221 |
++------+-------+-----+----------------------+----------------------+------------------------+
+```
+
+Targeted Nsight Compute reports first collected SpeedOfLight, then launch/occupancy/scheduler/warp sections. Rank 32
+FP16 launched 258 blocks, used 32 registers/thread and 2.05 KiB static shared memory, achieved 49.04% occupancy, and
+reported 21.23% compute, 14.51% memory, and 8.81% DRAM throughput. Rank 256 BF16 launched 272 blocks, used 31
+registers/thread and the same shared memory, achieved 51.41% occupancy, and reported 22.07% compute, 16.49% memory,
+and 12.28% DRAM throughput. Barrier stalls were 45.99% and 44.65% respectively. These replay metrics classify the
+same intentional cross-phase imbalance seen at rank 128; they are not substituted for normal end-to-end timing.
+
+Compute Sanitizer memcheck reported zero errors for rank 32 FP16 on GPU0 and rank 256 BF16 on GPU1. Synccheck
+reported zero errors for rank 32 BF16 on GPU0, rank 64 FP16 on GPU1, and rank 256 FP16 on GPU0. Rank 256 BF16
+racecheck on GPU1 reported zero hazards, errors, or warnings. Reports and traces are stored under
+`benchmark_artifacts/trilin_eora_rank_extensions/`.
+
+### Investigation record
+
+Successful tactics:
+
+- Used compile-time rank dispatch, preserving constant inner-loop trip counts and separate occupancy caches.
+- Scaled only the down-CTA count and up-warp ownership while retaining the already validated base reduction, grid
+  barrier, dtype rounding boundary, scratch ownership, graph fallback, and kill switch.
+- Tested the supported matrix through both the raw op and real GPTQ/AWQ wrappers on both physical cards.
+- Required independent CUDA-event timing, launch-count proof, kernel-resource inspection, and sanitizer checks before
+  retaining the extension.
+
+Failed or corrected setup attempts:
+
+- The first `nvidia-smi` query requested unsupported field `multiprocessor_count`; the valid query was rerun and SM
+  counts were obtained from PyTorch runtime properties.
+- The first direct benchmark invocation omitted `PYTHONPATH=.` and stopped at import without compiling or measuring;
+  the corrected invocation compiled fingerprint `feac8164527020ea` and all reported measurements followed it.
+
+Decision: retain ranks 32, 64, 128, and 256 behind the existing exact specialization gate. Each new rank is
+numerically equivalent to the established unfused route within the existing FP16/BF16 tolerance, passes lifecycle and
+safety checks on both requested GPUs, reduces four launches to one, and delivers a material end-to-end latency win.

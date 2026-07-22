@@ -6,15 +6,19 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 #include <cuda_bf16.h>
+#include <cooperative_groups.h>
 #include <cuda_fp16.h>
 #include <mma.h>
 #include <torch/library.h>
 
 #include <algorithm>
+#include <mutex>
 #include <optional>
+#include <vector>
 
 namespace {
 
+namespace cg = cooperative_groups;
 namespace wmma = nvcuda::wmma;
 
 constexpr int kBlockN = 64;
@@ -525,6 +529,185 @@ __global__ void trilin_3bit_gemv_group_warp_reduce_kernel(
       bias_type,
       blockIdx.x,
       paired_partials);
+}
+
+template <typename Scalar, int Rank>
+__global__ void trilin_3bit_eora_kernel(
+    const Scalar* __restrict__ input,
+    const uint32_t* __restrict__ qweight,
+    const half* __restrict__ scales,
+    const void* __restrict__ bias,
+    Scalar* __restrict__ output,
+    const Scalar* __restrict__ lora_a,
+    const Scalar* __restrict__ lora_b,
+    float* __restrict__ lora_down,
+    int bias_type) {
+  constexpr int kSizeK = 4096;
+  constexpr int kSizeN = 4096;
+  constexpr int kRank = Rank;
+  constexpr int kBaseTiles = kSizeN / kGemvBlockN;
+  constexpr int kDownTile = 16;
+  constexpr int kDownBlocks = kRank / kDownTile;
+  constexpr int kSharedFloats = 512;
+  static_assert(kBaseTiles == 256);
+  static_assert(kRank == 32 || kRank == 64 || kRank == 128 || kRank == 256);
+  static_assert(kRank % kDownTile == 0);
+
+  __shared__ float scratch[kSharedFloats];
+  const int launch_blocks = static_cast<int>(gridDim.x);
+  const int base_blocks = launch_blocks - kDownBlocks;
+  const int block = static_cast<int>(blockIdx.x);
+
+  // Base-output CTAs retain Trilin's exact 16-column reduction. The remaining
+  // rank-specialized CTAs compute disjoint complete-K tiles at the same time.
+  if (block < base_blocks) {
+    for (int output_tile = block; output_tile < kBaseTiles; output_tile += base_blocks) {
+      trilin_3bit_gemv_group_warp_reduce_body<Scalar, kSizeN, 128>(
+          input,
+          qweight,
+          scales,
+          bias,
+          output,
+          bias_type,
+          output_tile,
+          scratch);
+      // The body needs no terminal barrier when it returns from an ordinary
+      // kernel. Here the same CTA may immediately reuse its shared reduction
+      // rows for another output tile.
+      __syncthreads();
+    }
+  } else {
+    const int down_block = block - base_blocks;
+    const int rank = down_block * kDownTile + (threadIdx.x & (kDownTile - 1));
+    const int k_lane = threadIdx.x / kDownTile;
+    constexpr int kLanesPerRank = 512 / kDownTile;
+    constexpr int kStride = kLanesPerRank;
+    int k = k_lane;
+    float partial_0 = 0.0f;
+    float partial_1 = 0.0f;
+    float partial_2 = 0.0f;
+    float partial_3 = 0.0f;
+    float partial_4 = 0.0f;
+    float partial_5 = 0.0f;
+    float partial_6 = 0.0f;
+    float partial_7 = 0.0f;
+    for (; k + kStride * 7 < kSizeK; k += kStride * 8) {
+      partial_0 = __fmaf_rn(
+          ScalarTraits<Scalar>::to_float(input[k]),
+          ScalarTraits<Scalar>::to_float(lora_a[static_cast<int64_t>(k) * kRank + rank]),
+          partial_0);
+      const int k_1 = k + kStride;
+      partial_1 = __fmaf_rn(
+          ScalarTraits<Scalar>::to_float(input[k_1]),
+          ScalarTraits<Scalar>::to_float(lora_a[static_cast<int64_t>(k_1) * kRank + rank]),
+          partial_1);
+      const int k_2 = k + kStride * 2;
+      partial_2 = __fmaf_rn(
+          ScalarTraits<Scalar>::to_float(input[k_2]),
+          ScalarTraits<Scalar>::to_float(lora_a[static_cast<int64_t>(k_2) * kRank + rank]),
+          partial_2);
+      const int k_3 = k + kStride * 3;
+      partial_3 = __fmaf_rn(
+          ScalarTraits<Scalar>::to_float(input[k_3]),
+          ScalarTraits<Scalar>::to_float(lora_a[static_cast<int64_t>(k_3) * kRank + rank]),
+          partial_3);
+      const int k_4 = k + kStride * 4;
+      partial_4 = __fmaf_rn(
+          ScalarTraits<Scalar>::to_float(input[k_4]),
+          ScalarTraits<Scalar>::to_float(lora_a[static_cast<int64_t>(k_4) * kRank + rank]),
+          partial_4);
+      const int k_5 = k + kStride * 5;
+      partial_5 = __fmaf_rn(
+          ScalarTraits<Scalar>::to_float(input[k_5]),
+          ScalarTraits<Scalar>::to_float(lora_a[static_cast<int64_t>(k_5) * kRank + rank]),
+          partial_5);
+      const int k_6 = k + kStride * 6;
+      partial_6 = __fmaf_rn(
+          ScalarTraits<Scalar>::to_float(input[k_6]),
+          ScalarTraits<Scalar>::to_float(lora_a[static_cast<int64_t>(k_6) * kRank + rank]),
+          partial_6);
+      const int k_7 = k + kStride * 7;
+      partial_7 = __fmaf_rn(
+          ScalarTraits<Scalar>::to_float(input[k_7]),
+          ScalarTraits<Scalar>::to_float(lora_a[static_cast<int64_t>(k_7) * kRank + rank]),
+          partial_7);
+    }
+    for (; k < kSizeK; k += kStride) {
+      partial_0 = __fmaf_rn(
+          ScalarTraits<Scalar>::to_float(input[k]),
+          ScalarTraits<Scalar>::to_float(lora_a[static_cast<int64_t>(k) * kRank + rank]),
+          partial_0);
+    }
+    scratch[threadIdx.x] =
+        ((partial_0 + partial_1) + (partial_2 + partial_3)) +
+        ((partial_4 + partial_5) + (partial_6 + partial_7));
+    __syncthreads();
+
+    if (threadIdx.x < kDownTile) {
+      float total = 0.0f;
+#pragma unroll
+      for (int lane = 0; lane < kLanesPerRank; ++lane) {
+        total += scratch[threadIdx.x + lane * kDownTile];
+      }
+      // torch.matmul produces a dtype-rounded LoRA-down tensor before the up
+      // projection. Preserve that boundary while storing it in an exclusively
+      // owned FP32 workspace that cannot alias another Trilin route's state.
+      lora_down[down_block * kDownTile + threadIdx.x] =
+          ScalarTraits<Scalar>::to_float(ScalarTraits<Scalar>::from_float(total));
+    }
+  }
+
+  cg::this_grid().sync();
+
+  // At most 128 CTAs own one 32-column LoRA-up tile. When the cooperative
+  // capacity is smaller, the first CTAs use otherwise-idle warps for a second
+  // tile, keeping the tail concurrent rather than serial.
+  constexpr int kUpTile = 32;
+  constexpr int kUpTiles = kSizeN / kUpTile;
+  constexpr int kUpWarpsPerTile = kRank / 32;
+  static_assert(kUpWarpsPerTile >= 1 && kUpWarpsPerTile <= 8);
+  const int extra_tiles = launch_blocks < kUpTiles ? kUpTiles - launch_blocks : 0;
+  const bool dual_tile_block = block < extra_tiles;
+  const int primary_tile = dual_tile_block ? block * 2 : block + extra_tiles;
+  const int secondary_tile = dual_tile_block ? primary_tile + 1 : kUpTiles;
+  const int warp = threadIdx.x >> 5;
+  const int lane = threadIdx.x & 31;
+  const int tile_slot = warp / kUpWarpsPerTile;
+  const int tile = tile_slot == 0 ? primary_tile : secondary_tile;
+  const int column = tile * kUpTile + lane;
+  const int rank_begin = (warp - tile_slot * kUpWarpsPerTile) * 32;
+  const int tiles_for_block = dual_tile_block ? 2 : 1;
+  const bool valid_up = tile_slot < tiles_for_block && tile < kUpTiles;
+  if (valid_up) {
+    float update = 0.0f;
+#pragma unroll
+    for (int rank_offset = 0; rank_offset < 32; ++rank_offset) {
+      const int rank = rank_begin + rank_offset;
+      update = __fmaf_rn(
+          lora_down[rank],
+          ScalarTraits<Scalar>::to_float(lora_b[static_cast<int64_t>(rank) * kSizeN + column]),
+          update);
+    }
+    scratch[threadIdx.x] = update;
+  }
+  __syncthreads();
+
+  if (threadIdx.x < 64) {
+    const bool write_secondary = threadIdx.x >= 32;
+    const int write_tile = write_secondary ? secondary_tile : primary_tile;
+    if (write_tile < kUpTiles) {
+      const int write_lane = threadIdx.x & 31;
+      const int write_column = write_tile * kUpTile + write_lane;
+      const int partial_base = write_secondary ? kUpWarpsPerTile * 32 : 0;
+      float update = 0.0f;
+#pragma unroll
+      for (int rank_slice = 0; rank_slice < kUpWarpsPerTile; ++rank_slice) {
+        update += scratch[partial_base + write_lane + rank_slice * 32];
+      }
+      output[write_column] = ScalarTraits<Scalar>::from_float(
+          ScalarTraits<Scalar>::to_float(output[write_column]) + update);
+    }
+  }
 }
 
 template <typename Scalar, int KvSize>
@@ -1115,6 +1298,138 @@ void dispatch_trilin_3bit_group_size(
   }
 }
 
+template <typename Scalar, int Rank>
+int query_trilin_eora_grid_blocks(int device) {
+  int cooperative_launch = 0;
+  cudaError_t status = cudaDeviceGetAttribute(&cooperative_launch, cudaDevAttrCooperativeLaunch, device);
+  TORCH_CHECK(
+      status == cudaSuccess,
+      "Trilin fused EoRA failed to query cooperative-launch support: ",
+      cudaGetErrorString(status));
+  TORCH_CHECK(cooperative_launch != 0, "Trilin fused EoRA requires cooperative CUDA launches");
+
+  constexpr int threads = 512;
+  int active_blocks_per_sm = 0;
+  auto kernel = trilin_3bit_eora_kernel<Scalar, Rank>;
+  status = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &active_blocks_per_sm,
+      kernel,
+      threads,
+      0);
+  TORCH_CHECK(
+      status == cudaSuccess,
+      "Trilin fused EoRA failed to query kernel occupancy: ",
+      cudaGetErrorString(status));
+
+  int sm_count = 0;
+  status = cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+  TORCH_CHECK(
+      status == cudaSuccess,
+      "Trilin fused EoRA failed to query the multiprocessor count: ",
+      cudaGetErrorString(status));
+  constexpr int kDesiredBlocks = 256 + Rank / 16;
+  constexpr int kMinimumBlocks = 64;
+  const int grid_blocks = std::min(kDesiredBlocks, active_blocks_per_sm * sm_count);
+  TORCH_CHECK(
+      grid_blocks >= kMinimumBlocks,
+      "Trilin fused EoRA requires cooperative capacity for at least ",
+      kMinimumBlocks,
+      " resident CTAs, got ",
+      grid_blocks);
+  return grid_blocks;
+}
+
+template <typename Scalar, int Rank>
+int get_trilin_eora_grid_blocks(int device) {
+  static std::mutex mutex;
+  static std::vector<int> cache;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (device >= static_cast<int>(cache.size())) {
+    cache.resize(device + 1, 0);
+  }
+  int& grid_blocks = cache[device];
+  if (grid_blocks == 0) {
+    grid_blocks = query_trilin_eora_grid_blocks<Scalar, Rank>(device);
+  }
+  return grid_blocks;
+}
+
+template <typename Scalar, int Rank>
+void launch_trilin_3bit_eora(
+    const Scalar* input,
+    const uint32_t* qweight,
+    const half* scales,
+    const void* bias,
+    Scalar* output,
+    const Scalar* lora_a,
+    const Scalar* lora_b,
+    float* lora_down,
+    int bias_type,
+    int device,
+    cudaStream_t stream) {
+  constexpr int threads = 512;
+  const int grid_blocks = get_trilin_eora_grid_blocks<Scalar, Rank>(device);
+  auto kernel = trilin_3bit_eora_kernel<Scalar, Rank>;
+  void* args[] = {
+      &input,
+      &qweight,
+      &scales,
+      &bias,
+      &output,
+      &lora_a,
+      &lora_b,
+      &lora_down,
+      &bias_type,
+  };
+  const cudaError_t status = cudaLaunchCooperativeKernel(
+      reinterpret_cast<const void*>(kernel),
+      dim3(static_cast<unsigned int>(grid_blocks)),
+      dim3(threads),
+      args,
+      0,
+      stream);
+  TORCH_CHECK(
+      status == cudaSuccess,
+      "Trilin fused EoRA cooperative launch failed: ",
+      cudaGetErrorString(status));
+}
+
+template <typename Scalar>
+void dispatch_trilin_3bit_eora(
+    int64_t rank,
+    const Scalar* input,
+    const uint32_t* qweight,
+    const half* scales,
+    const void* bias,
+    Scalar* output,
+    const Scalar* lora_a,
+    const Scalar* lora_b,
+    float* lora_down,
+    int bias_type,
+    int device,
+    cudaStream_t stream) {
+#define LAUNCH_TRILIN_EORA(RANK) \
+  launch_trilin_3bit_eora<Scalar, RANK>( \
+      input, qweight, scales, bias, output, lora_a, lora_b, lora_down, bias_type, device, stream)
+  switch (rank) {
+    case 32:
+      LAUNCH_TRILIN_EORA(32);
+      return;
+    case 64:
+      LAUNCH_TRILIN_EORA(64);
+      return;
+    case 128:
+      LAUNCH_TRILIN_EORA(128);
+      return;
+    case 256:
+      LAUNCH_TRILIN_EORA(256);
+      return;
+    default:
+      TORCH_CHECK(false, "Trilin fused EoRA requires rank 32, 64, 128, or 256, got ", rank);
+  }
+#undef LAUNCH_TRILIN_EORA
+}
+
 at::Tensor trilin_3bit_wmma(
     at::Tensor input,
     at::Tensor qweight,
@@ -1210,6 +1525,127 @@ at::Tensor trilin_3bit_wmma(
         bias_type,
         stream);
   }
+  return output;
+}
+
+at::Tensor trilin_3bit_eora(
+    at::Tensor input,
+    at::Tensor qweight,
+    at::Tensor scales,
+    std::optional<at::Tensor> bias,
+    at::Tensor lora_a,
+    at::Tensor lora_b,
+    at::Tensor workspace) {
+  constexpr int64_t kSize = 4096;
+  TORCH_CHECK(input.is_cuda(), "Trilin fused EoRA input must be CUDA");
+  TORCH_CHECK(
+      qweight.is_cuda() && scales.is_cuda() && lora_a.is_cuda() && lora_b.is_cuda() && workspace.is_cuda(),
+      "Trilin fused EoRA tensors must be CUDA");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Trilin fused EoRA input must be FP16 or BF16");
+  TORCH_CHECK(qweight.scalar_type() == at::kInt, "Trilin fused EoRA qweight must be int32");
+  TORCH_CHECK(scales.scalar_type() == at::kHalf, "Trilin fused EoRA scales must be FP16");
+  TORCH_CHECK(
+      lora_a.scalar_type() == input.scalar_type() && lora_b.scalar_type() == input.scalar_type(),
+      "Trilin fused EoRA adapter tensors must match the input dtype");
+  TORCH_CHECK(workspace.scalar_type() == at::kFloat, "Trilin fused EoRA workspace must be FP32");
+  TORCH_CHECK(
+      input.dim() == 2 && qweight.dim() == 2 && scales.dim() == 2 && lora_a.dim() == 2 && lora_b.dim() == 2,
+      "Trilin fused EoRA input, weights, scales, and adapter tensors must be 2D");
+  TORCH_CHECK(
+      input.is_contiguous() && qweight.is_contiguous() && scales.is_contiguous() && lora_a.is_contiguous() &&
+          lora_b.is_contiguous() && workspace.is_contiguous(),
+      "Trilin fused EoRA tensors must be contiguous");
+  TORCH_CHECK(
+      input.device() == qweight.device() && input.device() == scales.device() && input.device() == lora_a.device() &&
+          input.device() == lora_b.device() && input.device() == workspace.device(),
+      "Trilin fused EoRA tensors differ in device");
+  TORCH_CHECK(input.size(0) == 1 && input.size(1) == kSize, "Trilin fused EoRA requires input shape (1, 4096)");
+  TORCH_CHECK(
+      qweight.size(0) == kSize / 32 * 3 && qweight.size(1) == kSize,
+      "Trilin fused EoRA qweight shape mismatch");
+  TORCH_CHECK(scales.size(0) == kSize / 128 && scales.size(1) == kSize, "Trilin fused EoRA scale shape mismatch");
+  const int64_t rank = lora_a.size(1);
+  TORCH_CHECK(
+      rank == 32 || rank == 64 || rank == 128 || rank == 256,
+      "Trilin fused EoRA requires rank 32, 64, 128, or 256, got ",
+      rank);
+  TORCH_CHECK(
+      lora_a.size(0) == kSize,
+      "Trilin fused EoRA LoRA-A first dimension must be 4096");
+  TORCH_CHECK(
+      lora_b.size(0) == rank && lora_b.size(1) == kSize,
+      "Trilin fused EoRA LoRA-B shape must be (rank, 4096)");
+  TORCH_CHECK(
+      workspace.numel() >= rank,
+      "Trilin fused EoRA workspace must contain at least ",
+      rank,
+      " FP32 values");
+
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Trilin fused EoRA requires compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+  cudaError_t status = cudaStreamIsCapturing(stream, &capture_status);
+  TORCH_CHECK(
+      status == cudaSuccess,
+      "Trilin fused EoRA failed to query CUDA graph capture state: ",
+      cudaGetErrorString(status));
+  TORCH_CHECK(
+      capture_status == cudaStreamCaptureStatusNone,
+      "Trilin fused EoRA cooperative launch does not support CUDA graph capture");
+
+  const void* bias_ptr = nullptr;
+  int bias_type = kBiasNone;
+  if (bias.has_value()) {
+    TORCH_CHECK(bias->is_cuda() && bias->device() == input.device(), "Trilin fused EoRA bias device mismatch");
+    TORCH_CHECK(
+        (bias->scalar_type() == at::kHalf || bias->scalar_type() == at::kBFloat16) && bias->is_contiguous(),
+        "Trilin fused EoRA bias must be contiguous FP16 or BF16");
+    TORCH_CHECK(bias->numel() == kSize, "Trilin fused EoRA bias shape mismatch");
+    bias_ptr = bias->const_data_ptr();
+    bias_type = bias->scalar_type() == at::kHalf ? kBiasHalf : kBiasBFloat16;
+  }
+
+  auto output = at::empty({1, kSize}, input.options());
+  if (input.scalar_type() == at::kHalf) {
+    dispatch_trilin_3bit_eora<half>(
+        rank,
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(scales.data_ptr<at::Half>()),
+        bias_ptr,
+        reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+        reinterpret_cast<const half*>(lora_a.data_ptr<at::Half>()),
+        reinterpret_cast<const half*>(lora_b.data_ptr<at::Half>()),
+        workspace.data_ptr<float>(),
+        bias_type,
+        input.get_device(),
+        stream);
+  } else {
+    dispatch_trilin_3bit_eora<__nv_bfloat16>(
+        rank,
+        reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(scales.data_ptr<at::Half>()),
+        bias_ptr,
+        reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(lora_a.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(lora_b.data_ptr<at::BFloat16>()),
+        workspace.data_ptr<float>(),
+        bias_type,
+        input.get_device(),
+        stream);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }
 
@@ -1411,6 +1847,8 @@ at::Tensor trilin_3bit_qkv(
 TORCH_LIBRARY(gptqmodel_trilin, m) {
   m.def("matmul(Tensor input, Tensor qweight, Tensor scales, Tensor? bias, int split_k, int group_size=128) -> Tensor");
   m.def(
+      "matmul_eora(Tensor input, Tensor qweight, Tensor scales, Tensor? bias, Tensor lora_a, Tensor lora_b, Tensor workspace) -> Tensor");
+  m.def(
       "silu_mul(Tensor input, Tensor gate_qweight, Tensor gate_scales, Tensor up_qweight, Tensor up_scales) -> Tensor");
   m.def(
       "qkv(Tensor input, Tensor q_qweight, Tensor q_scales, Tensor k_qweight, Tensor k_scales, Tensor v_qweight, Tensor v_scales) -> Tensor");
@@ -1418,6 +1856,7 @@ TORCH_LIBRARY(gptqmodel_trilin, m) {
 
 TORCH_LIBRARY_IMPL(gptqmodel_trilin, CUDA, m) {
   m.impl("matmul", &trilin_3bit_wmma);
+  m.impl("matmul_eora", &trilin_3bit_eora);
   m.impl("silu_mul", &trilin_3bit_swiglu);
   m.impl("qkv", &trilin_3bit_qkv);
 }

@@ -230,6 +230,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             from ..triton_utils.three_bit import (
                 prepare_marlin_3bit,
                 prepare_trilin_3bit,
+                prepare_trilin_eora_3bit,
                 repack_awq_to_gptq_3bit,
                 unpack_3bit,
             )
@@ -249,6 +250,19 @@ class AwqGEMMTritonLinear(AWQuantLinear):
                 self.scales,
                 self.requested_group_size,
             )
+            eora_workspace = (
+                prepare_trilin_eora_3bit(
+                    self.adapter,
+                    device=self.qweight.device,
+                    in_features=self.in_features,
+                    out_features=self.out_features,
+                    group_size=self.requested_group_size,
+                )
+                if self.adapter is not None and self._trilin_native_3bit
+                else None
+            )
+            if eora_workspace is not None:
+                self.register_buffer("_trilin_eora_workspace", eora_workspace, persistent=False)
             marlin_state = prepare_marlin_3bit(
                 self._triton_3bit_qweight,
                 self.scales,
@@ -271,6 +285,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
                 matmul_3bit,
                 matmul_marlin_3bit,
                 matmul_trilin_3bit,
+                matmul_trilin_eora_3bit,
             )
 
             input_dtype = x.dtype
@@ -282,6 +297,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
 
             capability = torch.cuda.get_device_capability(self.qweight.device)
             native_bias_applied = False
+            adapter_applied = False
             if not self.training and capability >= (8, 0):
                 runtime_qweight = getattr(self, "_triton_3bit_qweight", None)
                 native_qweight = getattr(self, "_trilin_marlin_qweight", None)
@@ -291,14 +307,31 @@ class AwqGEMMTritonLinear(AWQuantLinear):
                     and runtime_qweight is not None
                     and getattr(self, "_trilin_native_3bit", False)
                 ):
-                    out = matmul_trilin_3bit(
-                        x_flat if x_flat.is_contiguous() else x_flat.contiguous(),
-                        runtime_qweight,
-                        self.scales,
-                        bias=self.bias,
-                        group_size=self.requested_group_size,
-                    )
-                    native_bias_applied = self.bias is not None
+                    trilin_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
+                    fused_out = None
+                    if self.adapter is not None:
+                        fused_out = matmul_trilin_eora_3bit(
+                            self.adapter,
+                            trilin_input,
+                            runtime_qweight,
+                            self.scales,
+                            getattr(self, "_trilin_eora_workspace", None),
+                            bias=self.bias,
+                            group_size=self.requested_group_size,
+                        )
+                    if fused_out is not None:
+                        out = fused_out
+                        native_bias_applied = self.bias is not None
+                        adapter_applied = True
+                    else:
+                        out = matmul_trilin_3bit(
+                            trilin_input,
+                            runtime_qweight,
+                            self.scales,
+                            bias=self.bias,
+                            group_size=self.requested_group_size,
+                        )
+                        native_bias_applied = self.bias is not None
                 elif x_flat.dtype == torch.float16 and native_qweight is not None:
                     out = matmul_marlin_3bit(
                         x_flat,
@@ -331,7 +364,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             if self.bias is not None and not native_bias_applied:
                 out = out + self.bias
             out = out.reshape(out_shape)
-            if self.adapter:
+            if self.adapter and not adapter_applied:
                 out = self.adapter.apply(x=x_compute, out=out)
             return out.to(dtype=input_dtype)
 

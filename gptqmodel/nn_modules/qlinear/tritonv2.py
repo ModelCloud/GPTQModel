@@ -213,7 +213,12 @@ class TritonV2Linear(TorchLinear):
             self.g_idx, self.scales, layer_name=type(self).__name__
         )
         if self.bits == 3:
-            from ..triton_utils.three_bit import prepare_marlin_3bit, prepare_trilin_3bit, unpack_3bit
+            from ..triton_utils.three_bit import (
+                prepare_marlin_3bit,
+                prepare_trilin_3bit,
+                prepare_trilin_eora_3bit,
+                unpack_3bit,
+            )
 
             expected_g_idx = torch.arange(
                 self.in_features,
@@ -231,6 +236,19 @@ class TritonV2Linear(TorchLinear):
                     f"{type(self).__name__}: 3-bit symmetric GPTQ inference requires every zero point to equal 4."
                 )
             self._trilin_native_3bit = prepare_trilin_3bit(self.qweight, self.scales, self.requested_group_size)
+            eora_workspace = (
+                prepare_trilin_eora_3bit(
+                    self.adapter,
+                    device=self.qweight.device,
+                    in_features=self.in_features,
+                    out_features=self.out_features,
+                    group_size=self.requested_group_size,
+                )
+                if self.adapter is not None and self._trilin_native_3bit
+                else None
+            )
+            if eora_workspace is not None:
+                self.register_buffer("_trilin_eora_workspace", eora_workspace, persistent=False)
             marlin_state = prepare_marlin_3bit(self.qweight, self.scales, self.requested_group_size)
             if marlin_state is not None:
                 self.register_buffer("_trilin_marlin_qweight", marlin_state.qweight, persistent=False)
@@ -247,6 +265,7 @@ class TritonV2Linear(TorchLinear):
                 matmul_3bit,
                 matmul_marlin_3bit,
                 matmul_trilin_3bit,
+                matmul_trilin_eora_3bit,
             )
 
             capability = torch.cuda.get_device_capability(self.qweight.device)
@@ -256,18 +275,35 @@ class TritonV2Linear(TorchLinear):
                 if x_flat.stride(-1) != 1:
                     x_flat = x_flat.contiguous()
                 native_qweight = getattr(self, "_trilin_marlin_qweight", None)
+                adapter_applied = False
                 if (
                     x_flat.dtype in (torch.float16, torch.bfloat16)
                     and 0 < x_flat.shape[0] <= 16
                     and getattr(self, "_trilin_native_3bit", False)
                 ):
-                    out = matmul_trilin_3bit(
-                        x_flat if x_flat.is_contiguous() else x_flat.contiguous(),
-                        self.qweight,
-                        self.scales,
-                        bias=self.bias,
-                        group_size=self.requested_group_size,
-                    ).reshape(out_shape)
+                    trilin_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
+                    fused_out = None
+                    if self.adapter is not None:
+                        fused_out = matmul_trilin_eora_3bit(
+                            self.adapter,
+                            trilin_input,
+                            self.qweight,
+                            self.scales,
+                            getattr(self, "_trilin_eora_workspace", None),
+                            bias=self.bias,
+                            group_size=self.requested_group_size,
+                        )
+                    if fused_out is not None:
+                        out = fused_out.reshape(out_shape)
+                        adapter_applied = True
+                    else:
+                        out = matmul_trilin_3bit(
+                            trilin_input,
+                            self.qweight,
+                            self.scales,
+                            bias=self.bias,
+                            group_size=self.requested_group_size,
+                        ).reshape(out_shape)
                 elif x_flat.dtype == torch.float16 and native_qweight is not None:
                     out = matmul_marlin_3bit(
                         x_flat,
@@ -291,7 +327,7 @@ class TritonV2Linear(TorchLinear):
                     if self.bias is not None:
                         out.add_(self.bias)
 
-                if self.adapter:
+                if self.adapter and not adapter_applied:
                     out = self.adapter.apply(x=x, out=out)
 
                 return out.to(dtype=x.dtype)
