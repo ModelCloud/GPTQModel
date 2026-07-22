@@ -574,6 +574,7 @@ class _SplitDimWithInterleave(int):
 
 
 def _split_dim_cache_key(split_dim: Optional[int]) -> tuple[Optional[int], Optional[int], Optional[bool]]:
+    """Keep Interleave metadata distinct when a split dimension is used as a cache key."""
     if split_dim is None:
         return None, None, None
     return (
@@ -1822,6 +1823,7 @@ class LazyTurtle:
             fused_candidate = (fused_name, expert_index, split_index, split_dim)
             if fused_candidate not in runtime_candidates:
                 runtime_candidates.append(fused_candidate)
+        # The expert index may be part of module_path, so inspect the full tensor name too.
         for fused_name, expert_index, split_index, split_dim in self._fused_checkpoint_requests(combined_name):
             fused_candidate = (fused_name, expert_index, split_index, split_dim)
             if fused_candidate not in runtime_candidates:
@@ -1864,6 +1866,7 @@ class LazyTurtle:
                     split_dim = None
                     resolved_expert_index = None
                     if len(converter.target_patterns) == 1:
+                        # One checkpoint tensor can hold every expert and both gate/up projections.
                         resolved_expert_index = fused_expert_index
                         split_index = fused_split_index
                         split_dim = fused_split_dim
@@ -1891,6 +1894,7 @@ class LazyTurtle:
                         None,
                     )
                     if interleave_operation is not None and split_dim is not None:
+                        # Inkling deinterleaves w13 before selecting the gate/up slice.
                         split_dim = _SplitDimWithInterleave(
                             split_dim,
                             interleave_dim=getattr(interleave_operation, "dim", 0),
@@ -2022,6 +2026,7 @@ class LazyTurtle:
         effective_split_dim = int(split_dim) if split_dim is not None else None
 
         def apply_interleave(candidate: torch.Tensor, dim: int) -> Optional[torch.Tensor]:
+            """Apply HF's two-way Interleave operation without changing tensor shape."""
             if dim < 0:
                 dim += candidate.ndim
             if dim < 0 or dim >= candidate.ndim or candidate.shape[dim] % 2:
@@ -2049,6 +2054,7 @@ class LazyTurtle:
             # Fused expert checkpoints store the expert axis first; peel it off before
             # reasoning about split dimensions or transpose decisions.
             tensor = tensor[expert_index].contiguous()
+            # Removing the expert axis shifts positive converter dimensions left.
             if interleave_dim is not None and interleave_dim > 0:
                 interleave_dim -= 1
             if effective_split_dim is not None and effective_split_dim > 0:
