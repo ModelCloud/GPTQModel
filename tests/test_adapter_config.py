@@ -18,7 +18,7 @@
 import os
 
 from gptqmodel import QuantizeConfig
-from gptqmodel.adapter.adapter import Lora, normalize_adapter
+from gptqmodel.adapter.adapter import EoRAConfig, Lora, normalize_adapter
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -71,10 +71,10 @@ class TestExtensionConfig(unittest.TestCase):
         print(f"{lora} config: {kv}")
 
         assert lora_config.rank == rank
-        assert len(kv) == 4
         assert rank_field in kv.keys()
         assert kv[rank_field] == rank
         assert kv["eora_cholesky"] is True
+        assert kv["eora_config"] == {"algo": "lowrank"}
 
     def test_extension_config_eora_cholesky_roundtrip(self):
         lora_config = Lora(rank=8, eora_cholesky=True)
@@ -98,6 +98,26 @@ class TestExtensionConfig(unittest.TestCase):
         assert disabled_lora.to_dict()["eora_cholesky"] is False
         assert isinstance(restored, Lora)
         assert restored.eora_cholesky is False
+
+    def test_eora_config_algo_default_validation_and_roundtrip(self):
+        assert EoRAConfig().algo == "lowrank"
+
+        legacy = normalize_adapter(adapter={"name": "lora", "rank": 8})
+        assert legacy.eora_config == EoRAConfig(algo="exact")
+
+        for algo in ("exact", "auto", "lowrank"):
+            lora = Lora(rank=8, eora_config=EoRAConfig(algo=algo))
+            payload = lora.to_dict()
+            restored = normalize_adapter(adapter=payload)
+
+            assert payload["eora_config"] == {"algo": algo}
+            assert restored.eora_config == EoRAConfig(algo=algo)
+
+        with self.assertRaisesRegex(ValueError, "EoRAConfig"):
+            EoRAConfig(algo="turbo")
+
+        with self.assertRaisesRegex(ValueError, "EoRAConfig"):
+            Lora(rank=8, eora_config={"algo": "turbo"})
 
     def test_extension_parse_does_not_mutate_serialized_payload(self):
         payload = Lora(path="/tmp/adapter", rank=128).to_dict()

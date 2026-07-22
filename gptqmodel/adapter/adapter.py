@@ -21,6 +21,44 @@ LORA_MERGED_WEIGHT_PATHS = [None, ""]
 HF_ADAPTER_FILE_NAME = "adapter_model.safetensors"
 HF_ADAPTER_CONFIG_FILE_NAME = "adapter_config.json"
 HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
+EORA_SVD_ALGOS = ("exact", "auto", "lowrank")
+
+
+@dataclass(frozen=True)
+class EoRAConfig:
+    """Selects calibration-time EoRA factor-generation behavior."""
+
+    algo: str = "lowrank"
+
+    def __post_init__(self):
+        """Normalizes and validates the public SVD algorithm name."""
+
+        if not isinstance(self.algo, str):
+            raise ValueError(f"EoRAConfig: `algo` must be one of {EORA_SVD_ALGOS}; actual = {self.algo!r}.")
+        algo = self.algo.strip().lower()
+        if algo not in EORA_SVD_ALGOS:
+            raise ValueError(f"EoRAConfig: `algo` must be one of {EORA_SVD_ALGOS}; actual = {self.algo!r}.")
+        object.__setattr__(self, "algo", algo)
+
+    def to_dict(self) -> Dict[str, str]:
+        """Serializes the stable public EoRA generation contract."""
+
+        return {"algo": self.algo}
+
+
+def normalize_eora_config(config: Optional[Union[Dict[str, str], EoRAConfig]]) -> EoRAConfig:
+    """Normalizes nested EoRA metadata without mutating caller-owned dictionaries."""
+
+    if config is None:
+        return EoRAConfig()
+    if isinstance(config, EoRAConfig):
+        return config
+    if not isinstance(config, Dict):
+        raise ValueError(f"EoRAConfig: expected a dictionary or EoRAConfig; actual = {config!r}.")
+    try:
+        return EoRAConfig(**dict(config))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"EoRAConfig: invalid config = {config!r}.") from exc
 
 
 class AdapterCache():
@@ -127,6 +165,7 @@ class Lora(Adapter):
         lora_A: torch.Tensor = None,
         lora_B: torch.Tensor = None,
         eora_cholesky: bool = True,
+        eora_config: Optional[Union[Dict[str, str], EoRAConfig]] = None,
         lora_weight_format: str = None,
         lora_weight_bits: int = None,
         lora_weight_group_size: int = 128,
@@ -140,6 +179,7 @@ class Lora(Adapter):
         self.lora_A = lora_A
         self.lora_B = lora_B
         self.eora_cholesky = bool(eora_cholesky)
+        self.eora_config = normalize_eora_config(eora_config)
         self.lora_weight_format = lora_weight_format
         self.lora_weight_bits = (
             normalize_lora_grouped_bits(lora_weight_bits, lora_weight_format)
@@ -463,6 +503,7 @@ class Lora(Adapter):
             "path": self.path,
             "rank": self.rank,
             "eora_cholesky": self.eora_cholesky,
+            "eora_config": self.eora_config.to_dict(),
             "lora_weight_format": self.lora_weight_format,
             "lora_weight_bits": self.lora_weight_bits,
             "lora_weight_group_size": self.lora_weight_group_size,
@@ -495,6 +536,12 @@ def normalize_adapter(adapter:  Union[Dict, Adapter]):
     adapterCls = ADAPTER_MAPPING.get(adapter_type)
     if adapterCls is None:
         raise ValueError(f"Adapter: Compatible adapters include `{ADAPTER_MAPPING.keys()}`: actual `{(adapter_type)}`.")
+
+    # A descriptor without this nested field predates configurable EoRA SVD and
+    # therefore generated factors with the exact solver. Keep replaying that
+    # historical contract even though newly constructed configs default to lowrank.
+    if adapterCls is Lora and "eora_config" not in adapter:
+        adapter["eora_config"] = {"algo": "exact"}
 
     try:
         adapterInstance = adapterCls(**adapter)

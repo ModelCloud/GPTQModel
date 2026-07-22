@@ -1,5 +1,6 @@
 import torch
 
+from gptqmodel.adapter.adapter import EoRAConfig
 from gptqmodel.eora import eora as eora_module
 from gptqmodel.eora.eora import eora_compute_lora
 
@@ -35,6 +36,7 @@ def test_eora_cholesky_fast_path_preserves_weighted_objective():
         dtype=torch.float32,
         device=torch.device("cpu"),
         use_cholesky=False,
+        eora_config=EoRAConfig(algo="exact"),
     )
     A_chol, B_chol = eora_compute_lora(
         w_wq_delta=delta,
@@ -44,6 +46,7 @@ def test_eora_cholesky_fast_path_preserves_weighted_objective():
         dtype=torch.float32,
         device=torch.device("cpu"),
         use_cholesky=True,
+        eora_config=EoRAConfig(algo="exact"),
     )
 
     assert A_eigh.is_contiguous()
@@ -72,8 +75,9 @@ def test_eora_compute_lora_defaults_to_cholesky(monkeypatch):
     cov = _make_spd(cols)
     delta = torch.randn(rows, cols, dtype=torch.float32)
 
-    def _fake_cholesky(w_wq_delta, name, raw_scaling_diag_matrix, rank, dtype):
+    def _fake_cholesky(w_wq_delta, name, raw_scaling_diag_matrix, rank, dtype, algo):
         del name, raw_scaling_diag_matrix
+        assert algo == "lowrank"
         calls.append("cholesky")
         return (
             torch.zeros((rank, w_wq_delta.shape[1]), dtype=dtype),

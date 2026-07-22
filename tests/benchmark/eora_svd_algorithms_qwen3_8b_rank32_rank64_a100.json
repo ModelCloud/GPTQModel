@@ -1,0 +1,254 @@
+{
+  "benchmark": "eora_svd_algorithms_qwen3_8b_rank32_rank64",
+  "date_utc": "2026-07-22",
+  "repository_revision": "930c5ce53385933ac23b4d145598dc2ada2e23fa",
+  "harness_note": "The configurable-rank harness was committed before these experiments; this result record is committed after all six pipelines completed.",
+  "related_result_records": [
+    "tests/benchmark/eora_svd_algorithms_qwen3_8b_a100.json",
+    "tests/benchmark/eora_svd_algorithms_qwen3_8b_rank256_a100.json"
+  ],
+  "base_model": "/monster/data/model/Qwen3-8B",
+  "quantized_snapshot": "/monster/data/model/Qwen3-8B-GPTQ-4bit-g128-activation-GAR-EoRA-r128-cal512",
+  "quantization": {
+    "method": "gptq",
+    "bits": 4,
+    "group_size": 128,
+    "sym": true,
+    "desc_act": false,
+    "scale_search": "activation",
+    "act_group_aware": true
+  },
+  "eora": {
+    "ranks": [
+      32,
+      64
+    ],
+    "cholesky": true,
+    "adapted_modules": 252,
+    "saved_factor_tensors_per_adapter": 504,
+    "factor_dtype": "bfloat16",
+    "rank_storage": {
+      "32": {
+        "total_factor_elements": 87293952,
+        "weights_bytes": 174656040
+      },
+      "64": {
+        "total_factor_elements": 174587904,
+        "weights_bytes": 349244256
+      }
+    }
+  },
+  "calibration": {
+    "dataset": "/monster/data/model/dataset/nm-calibration",
+    "config": "LLM",
+    "selection": "first 512 rows",
+    "sort": "desc",
+    "concat_size": null,
+    "batch_size": 1,
+    "selected_text_sha256": "a89c5ed40152f435d5102657166cb72399603042596c57dd2f1095724ad8f59d",
+    "non_padding_tokens": 181796
+  },
+  "evaluation": {
+    "framework": "Evalution",
+    "version": "0.0.9",
+    "batch_size": 16,
+    "apply_chat_template": false,
+    "seed": 898,
+    "do_sample": false,
+    "max_new_tokens": 256,
+    "tasks": {
+      "arc_challenge": {
+        "backend": "gptq_torch",
+        "examples": 1172,
+        "metrics": [
+          "accuracy,loglikelihood",
+          "accuracy,loglikelihood_norm"
+        ]
+      },
+      "gsm8k_platinum_cot": {
+        "backend": "marlin",
+        "examples": 1209,
+        "metric": "acc,num"
+      }
+    }
+  },
+  "hardware": {
+    "driver": "610.43.02",
+    "device_family": "NVIDIA PG506-230",
+    "compute_capability": "8.0",
+    "sm_count": 124,
+    "memory_bytes": 102191202304,
+    "assignments": [
+      {
+        "rank": 64,
+        "variant": "exact",
+        "physical_index_pci_order": 2,
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8"
+      },
+      {
+        "rank": 64,
+        "variant": "auto",
+        "physical_index_pci_order": 3,
+        "pci_bus_id": "00000000:69:00.0",
+        "uuid": "GPU-471ecdd7-a171-4d5c-d61f-a1802dc76e4c"
+      },
+      {
+        "rank": 64,
+        "variant": "lowrank",
+        "physical_index_pci_order": 4,
+        "pci_bus_id": "00000000:A0:00.0",
+        "uuid": "GPU-14ab23f1-a785-e9df-bbb5-215547154e3c"
+      },
+      {
+        "rank": 32,
+        "variant": "exact",
+        "physical_index_pci_order": 5,
+        "pci_bus_id": "00000000:A5:00.0",
+        "uuid": "GPU-3a4bf14f-fa28-df88-f6e8-00ef6b13d473"
+      },
+      {
+        "rank": 32,
+        "variant": "auto",
+        "physical_index_pci_order": 3,
+        "pci_bus_id": "00000000:69:00.0",
+        "uuid": "GPU-471ecdd7-a171-4d5c-d61f-a1802dc76e4c"
+      },
+      {
+        "rank": 32,
+        "variant": "lowrank",
+        "physical_index_pci_order": 4,
+        "pci_bus_id": "00000000:A0:00.0",
+        "uuid": "GPU-14ab23f1-a785-e9df-bbb5-215547154e3c"
+      }
+    ]
+  },
+  "software": {
+    "python": "3.14.5 free-threading",
+    "torch": "2.13.0+cu130",
+    "cuda_runtime": "13.0",
+    "transformers": "5.14.1",
+    "gptqmodel": "7.3.1+ultra"
+  },
+  "lower_rank_findings": {
+    "rank32_lowrank_vs_base_answer_delta": {
+      "arc_raw": 18,
+      "arc_normalized": 7,
+      "gsm8k_platinum": 23
+    },
+    "rank32_lowrank_vs_rank128_lowrank_answer_delta": {
+      "arc_raw": -7,
+      "arc_normalized": -7,
+      "gsm8k_platinum": -7
+    },
+    "rank64_lowrank_vs_rank128_lowrank_answer_delta": {
+      "arc_raw": -11,
+      "arc_normalized": -2,
+      "gsm8k_platinum": 1
+    },
+    "cross_rank_default_evidence": "Across ranks 32, 64, 128, and 256, lowrank led or tied eight of twelve within-rank task metrics and remained the fastest tested generation policy.",
+    "tradeoff": "Exact led both rank-64 ARC metrics; auto led rank-32 normalized ARC by one answer; lowrank led rank-32 raw ARC and both lower-rank GSM8K results."
+  },
+  "notes": [
+    "The first four complete pipelines ran concurrently on physical GPUs 2, 3, 4, and 5; rank-32 auto and lowrank started on GPUs 3 and 4 after their rank-64 lanes exited.",
+    "Every generated adapter contained 504 finite tensors at its requested rank, and runtime validation found 252 active adapters with finite logits.",
+    "All ARC and GSM8K evaluations used the full dataset; every GSM8K run reported zero invalid answers.",
+    "The adapter-free baseline is reused from the rank-256 result record because it is independent of EoRA rank."
+  ],
+  "results": [
+    {
+      "variant": "exact",
+      "rank": 32,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-4bit-g128-activation-GAR-EoRA-r128-cal512/eora-rank32-svd-exact",
+      "generation_seconds": 884.4193648099899,
+      "generation_speedup_vs_exact": 1.0,
+      "generation_seconds_saved_vs_exact": 0.0,
+      "all_finite": true,
+      "arc_correct": 642,
+      "arc_score": 0.5477815699658704,
+      "arc_norm_correct": 646,
+      "arc_norm_score": 0.5511945392491467,
+      "gsm_correct": 1088,
+      "gsm_score": 0.8999172870140613
+    },
+    {
+      "variant": "auto",
+      "rank": 32,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-4bit-g128-activation-GAR-EoRA-r128-cal512/eora-rank32-svd-auto",
+      "generation_seconds": 563.5990497297607,
+      "generation_speedup_vs_exact": 1.569235017756,
+      "generation_seconds_saved_vs_exact": 320.820315080229,
+      "all_finite": true,
+      "arc_correct": 635,
+      "arc_score": 0.5418088737201365,
+      "arc_norm_correct": 647,
+      "arc_norm_score": 0.5520477815699659,
+      "gsm_correct": 1091,
+      "gsm_score": 0.902398676592225
+    },
+    {
+      "variant": "lowrank",
+      "rank": 32,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-4bit-g128-activation-GAR-EoRA-r128-cal512/eora-rank32-svd-lowrank",
+      "generation_seconds": 532.9683385663666,
+      "generation_speedup_vs_exact": 1.65942195964,
+      "generation_seconds_saved_vs_exact": 351.451026243623,
+      "generation_speedup_vs_auto": 1.057471915209,
+      "generation_seconds_saved_vs_auto": 30.630711163394,
+      "all_finite": true,
+      "arc_correct": 643,
+      "arc_score": 0.5486348122866894,
+      "arc_norm_correct": 646,
+      "arc_norm_score": 0.5511945392491467,
+      "gsm_correct": 1092,
+      "gsm_score": 0.9032258064516129
+    },
+    {
+      "variant": "exact",
+      "rank": 64,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-4bit-g128-activation-GAR-EoRA-r128-cal512/eora-rank64-svd-exact",
+      "generation_seconds": 863.7489293152466,
+      "generation_speedup_vs_exact": 1.0,
+      "generation_seconds_saved_vs_exact": 0.0,
+      "all_finite": true,
+      "arc_correct": 642,
+      "arc_score": 0.5477815699658704,
+      "arc_norm_correct": 653,
+      "arc_norm_score": 0.5571672354948806,
+      "gsm_correct": 1093,
+      "gsm_score": 0.9040529363110008
+    },
+    {
+      "variant": "auto",
+      "rank": 64,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-4bit-g128-activation-GAR-EoRA-r128-cal512/eora-rank64-svd-auto",
+      "generation_seconds": 562.2871928028762,
+      "generation_speedup_vs_exact": 1.536134808637,
+      "generation_seconds_saved_vs_exact": 301.46173651237,
+      "all_finite": true,
+      "arc_correct": 637,
+      "arc_score": 0.5435153583617748,
+      "arc_norm_correct": 650,
+      "arc_norm_score": 0.5546075085324232,
+      "gsm_correct": 1089,
+      "gsm_score": 0.9007444168734491
+    },
+    {
+      "variant": "lowrank",
+      "rank": 64,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-4bit-g128-activation-GAR-EoRA-r128-cal512/eora-rank64-svd-lowrank",
+      "generation_seconds": 518.4166057747789,
+      "generation_speedup_vs_exact": 1.666128977532,
+      "generation_seconds_saved_vs_exact": 345.332323540468,
+      "generation_speedup_vs_auto": 1.084624193244,
+      "generation_seconds_saved_vs_auto": 43.870587028097,
+      "all_finite": true,
+      "arc_correct": 639,
+      "arc_score": 0.5452218430034129,
+      "arc_norm_correct": 651,
+      "arc_norm_score": 0.5554607508532423,
+      "gsm_correct": 1100,
+      "gsm_score": 0.9098428453267163
+    }
+  ]
+}

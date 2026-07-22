@@ -18,13 +18,16 @@ from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
                              PROCESS_LOG_NAME, PROCESS_LOG_TIME, PROCESS_USED_MEMORY)
 from ..quantization.config import QuantizeConfig
-from ..utils.logger import setup_logger
+from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.device import get_device
+from ..utils.env import env_flag
+from ..utils.logger import setup_logger
 from ..utils.model import move_to
-from ..utils.torch import CPU, DEVICE_0, DEVICE_1, torch_streamCtx, torch_sync
-from ..utils.torch import HAS_CUDA, tf32_disable_guard, torch_streamCtx, torch_sync
+from ..utils.torch import CPU, DEVICE_0, DEVICE_1
 
 log = setup_logger()
+
+_EORA_SHARED_COVARIANCE_ENV = "GPTQMODEL_EORA_SHARED_COVARIANCE"
 
 
 class EoraProcessor(LoopProcessor):
@@ -60,6 +63,20 @@ class EoraProcessor(LoopProcessor):
         # contributions without repeatedly moving data through the CPU.
         self._segment_accumulators: Dict[str, Dict[torch.device, Dict[str, Any]]] = {}
         self._module_target_devices: Dict[str, torch.device] = {}
+        self._enable_shared_covariance = env_flag(_EORA_SHARED_COVARIANCE_ENV, default=True)
+        self._shared_covariance_batch_cache: Dict[Tuple[object, ...], Dict[str, Any]] = {}
+        self._shared_covariance_module_groups: Dict[str, Tuple[object, ...]] = {}
+        self._shared_covariance_group_counts: Dict[Tuple[object, ...], int] = {}
+        self._shared_covariance_stats = {
+            "batch_requests": 0,
+            "batch_hits": 0,
+            "batch_misses": 0,
+        }
+
+        # The generic hook wrapper normally applies this mask independently for
+        # every module. EoRA applies it inside its hook so same-input siblings
+        # retain a common source identity and can reuse one covariance GEMM.
+        self.preserve_batch_keep_mask = True
 
         # Increase the dynamo cache size limit, default of 8 is too low
         if torch._dynamo.config.cache_size_limit < 64:
@@ -84,7 +101,7 @@ class EoraProcessor(LoopProcessor):
         """Clones adapter config, applies rank overrides, and initializes accumulators."""
 
         # entire module is skipped
-        if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
+        if self.qcfg.dynamic_get(layer_name=module.full_name) is False:
             module.adapter_cfg = None # hack
             return
 
@@ -115,6 +132,111 @@ class EoraProcessor(LoopProcessor):
         # dynamic override removed eora processing for this module
         return module.adapter_cfg in [None, {}]
 
+    @staticmethod
+    def _tensor_cache_fingerprint(tensor: torch.Tensor) -> Tuple[object, ...]:
+        """Build a stable identity for one activation view during subset replay."""
+
+        try:
+            storage_ptr = tensor.untyped_storage().data_ptr()
+        except Exception:
+            storage_ptr = tensor.data_ptr()
+        return (
+            str(tensor.device),
+            str(tensor.dtype),
+            tuple(tensor.shape),
+            tuple(tensor.stride()),
+            int(tensor.storage_offset()),
+            int(storage_ptr),
+        )
+
+    def prepare_subset(
+        self,
+        subset: Dict[str, NamedModule],
+        *,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ) -> None:
+        """Prepare exact same-input covariance reuse for one EoRA subset."""
+
+        with self.lock:
+            self._shared_covariance_batch_cache.clear()
+            self._shared_covariance_module_groups.clear()
+            self._shared_covariance_group_counts.clear()
+
+        if not self._enable_shared_covariance:
+            return
+
+        groups: Dict[Tuple[object, ...], List[str]] = {}
+        for name, named_module in subset.items():
+            if named_module.state.get("capture_only") or self.is_skipped(named_module):
+                continue
+            target_device = self._module_target_devices.get(name, get_device(named_module.module))
+            signature = (int(named_module.weight.data.shape[1]), str(target_device))
+            groups.setdefault(signature, []).append(name)
+
+        with self.lock:
+            for group_index, (signature, names) in enumerate(groups.items()):
+                if len(names) < 2:
+                    continue
+                group_key = (
+                    "eora-shared-covariance",
+                    subset_index,
+                    subset_total,
+                    group_index,
+                    tuple(names),
+                    signature,
+                )
+                self._shared_covariance_group_counts[group_key] = len(names)
+                for name in names:
+                    self._shared_covariance_module_groups[name] = group_key
+
+    def cleanup_subset(
+        self,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        *,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ) -> None:
+        """Release per-subset covariance reuse entries after all workers finish."""
+
+        del subset, subset_index, subset_total
+        with self.lock:
+            self._shared_covariance_batch_cache.clear()
+            self._shared_covariance_module_groups.clear()
+            self._shared_covariance_group_counts.clear()
+
+    def shared_covariance_stats(self, reset: bool = False) -> Dict[str, int]:
+        """Return same-input covariance reuse counters for tests and benchmarks."""
+
+        with self.lock:
+            stats = dict(self._shared_covariance_stats)
+            if reset:
+                for key in self._shared_covariance_stats:
+                    self._shared_covariance_stats[key] = 0
+        return stats
+
+    def _shared_covariance_cache_key(
+        self,
+        *,
+        name: str,
+        source: torch.Tensor,
+        keep_mask: Optional[torch.Tensor],
+        batch_index: Optional[int],
+    ) -> Optional[Tuple[object, ...]]:
+        """Return the cache key for a compatible same-input EoRA module."""
+
+        with self.lock:
+            group_key = self._shared_covariance_module_groups.get(name)
+        if group_key is None:
+            return None
+        mask_fingerprint = self._tensor_cache_fingerprint(keep_mask) if torch.is_tensor(keep_mask) else None
+        return (
+            group_key,
+            batch_index,
+            self._tensor_cache_fingerprint(source),
+            mask_fingerprint,
+        )
+
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that accumulates EoRA activation statistics."""
 
@@ -122,12 +244,62 @@ class EoraProcessor(LoopProcessor):
             """Processes one batch of inputs into an EoRA contribution segment."""
 
             batch_index = self.current_batch_index()
-            batch, contribution, scale = self.eora_process_input(
-                input=input,
+            source = input[0]
+            keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+            cache_key = self._shared_covariance_cache_key(
                 name=name,
-                sample_size=self.num_batches,
-                device=module.weight.data.device,
+                source=source,
+                keep_mask=keep_mask,
+                batch_index=batch_index,
             )
+
+            cached = None
+            if cache_key is not None:
+                with self.lock:
+                    self._shared_covariance_stats["batch_requests"] += 1
+                    cached = self._shared_covariance_batch_cache.get(cache_key)
+                    if cached is not None:
+                        self._shared_covariance_stats["batch_hits"] += 1
+                        cached["remaining"] -= 1
+                        if cached["remaining"] <= 0:
+                            self._shared_covariance_batch_cache.pop(cache_key, None)
+
+            if cached is not None:
+                batch = int(cached["batch"])
+                contribution = cached["contribution"].clone()
+                scale = float(cached["scale"])
+            else:
+                prepared_source = source
+                if (
+                    torch.is_tensor(keep_mask)
+                    and source.dim() >= 3
+                    and keep_mask.ndim == 2
+                    and keep_mask.shape[:2] == source.shape[:2]
+                ):
+                    prepared_source = apply_keep_mask_bt(source, keep_mask)
+
+                batch, contribution, scale = self.eora_process_input(
+                    input=(prepared_source,),
+                    name=name,
+                    sample_size=self.num_batches,
+                    device=module.weight.data.device,
+                )
+                if cache_key is not None:
+                    with self.lock:
+                        self._shared_covariance_stats["batch_misses"] += 1
+                        group_key = self._shared_covariance_module_groups.get(name)
+                        remaining = max(0, self._shared_covariance_group_counts.get(group_key, 1) - 1)
+                        if remaining:
+                            self._shared_covariance_batch_cache[cache_key] = {
+                                "batch": batch,
+                                "contribution": contribution,
+                                "scale": scale,
+                                "remaining": remaining,
+                                # Retain the source objects while this key is live so
+                                # allocator pointer reuse cannot create a false hit.
+                                "source": source,
+                                "keep_mask": keep_mask,
+                            }
 
             self._accumulate_eora_contribution(
                 name=name,
@@ -281,6 +453,7 @@ class EoraProcessor(LoopProcessor):
             dtype=module.module_dtype,
             device=module.weight.data.device,
             use_cholesky=module.adapter_cfg.eora_cholesky,
+            eora_config=module.adapter_cfg.eora_config,
         )
 
         del eigen_scaling_diag_matrix
@@ -320,12 +493,10 @@ class EoraProcessor(LoopProcessor):
             self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
         stats_0 = torch.cuda.memory_stats(DEVICE_0)
-        active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
         peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
 
         if torch.cuda.device_count() > 1:
             stats_1 = torch.cuda.memory_stats(DEVICE_1)
-            active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
             peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
 
             max_memory = f"{peak_active_0:.2f}MB, {peak_active_1:.2f}MB"
@@ -373,8 +544,19 @@ class EoraProcessor(LoopProcessor):
     def finalize(self, model: BaseQModel, **kwargs):
         """Releases accumulators and attaches the collected adapters to the model."""
 
+        covariance_stats = self.shared_covariance_stats()
+        if covariance_stats["batch_requests"]:
+            log.info(
+                "EoRA: same-input covariance reuse: "
+                f"{covariance_stats['batch_hits']} hits, {covariance_stats['batch_misses']} misses, "
+                f"{covariance_stats['batch_requests']} requests."
+            )
+
         del self._segment_accumulators
         del self._module_target_devices
+        del self._shared_covariance_batch_cache
+        del self._shared_covariance_module_groups
+        del self._shared_covariance_group_counts
 
         # hack: store loras into model until `save()` is called
         model.lora_results = self.results()

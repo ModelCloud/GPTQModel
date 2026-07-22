@@ -1,0 +1,176 @@
+{
+  "benchmark": "eora_svd_algorithms_qwen3_8b_rank256",
+  "date_utc": "2026-07-22",
+  "repository_revision": "fd01873576276a154a9b405dc14ca12a4bc8722a",
+  "harness_note": "The configurable-rank and base-quant harness changes are committed alongside this result record.",
+  "rank128_result_record": "tests/benchmark/eora_svd_algorithms_qwen3_8b_a100.json",
+  "base_model": "/monster/data/model/Qwen3-8B",
+  "quantized_snapshot": "/monster/data/model/Qwen3-8B-GPTQ-4bit-g128-activation-GAR-EoRA-r128-cal512",
+  "quantization": {
+    "method": "gptq",
+    "bits": 4,
+    "group_size": 128,
+    "sym": true,
+    "desc_act": false,
+    "scale_search": "activation",
+    "act_group_aware": true
+  },
+  "eora": {
+    "rank": 256,
+    "cholesky": true,
+    "adapted_modules": 252,
+    "saved_factor_tensors": 504,
+    "factor_dtype": "bfloat16",
+    "total_factor_elements": 698351616,
+    "weights_bytes": 1396772720
+  },
+  "calibration": {
+    "dataset": "/monster/data/model/dataset/nm-calibration",
+    "config": "LLM",
+    "selection": "first 512 rows",
+    "sort": "desc",
+    "concat_size": null,
+    "batch_size": 1,
+    "selected_text_sha256": "a89c5ed40152f435d5102657166cb72399603042596c57dd2f1095724ad8f59d",
+    "non_padding_tokens": 181796
+  },
+  "evaluation": {
+    "framework": "Evalution",
+    "version": "0.0.9",
+    "batch_size": 16,
+    "apply_chat_template": false,
+    "seed": 898,
+    "do_sample": false,
+    "max_new_tokens": 256,
+    "tasks": {
+      "arc_challenge": {
+        "backend": "gptq_torch",
+        "examples": 1172,
+        "metrics": [
+          "accuracy,loglikelihood",
+          "accuracy,loglikelihood_norm"
+        ]
+      },
+      "gsm8k_platinum_cot": {
+        "backend": "marlin",
+        "examples": 1209,
+        "metric": "acc,num"
+      }
+    }
+  },
+  "hardware": {
+    "driver": "610.43.02",
+    "device_family": "NVIDIA PG506-230",
+    "compute_capability": "8.0",
+    "sm_count": 124,
+    "memory_bytes": 102191202304,
+    "assignments": [
+      {
+        "variant": "exact",
+        "physical_index_pci_order": 2,
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8"
+      },
+      {
+        "variant": "auto",
+        "physical_index_pci_order": 3,
+        "pci_bus_id": "00000000:69:00.0",
+        "uuid": "GPU-471ecdd7-a171-4d5c-d61f-a1802dc76e4c"
+      },
+      {
+        "variant": "lowrank",
+        "physical_index_pci_order": 4,
+        "pci_bus_id": "00000000:A0:00.0",
+        "uuid": "GPU-14ab23f1-a785-e9df-bbb5-215547154e3c"
+      },
+      {
+        "variant": "base_quant",
+        "physical_index_pci_order": 5,
+        "pci_bus_id": "00000000:A5:00.0",
+        "uuid": "GPU-3a4bf14f-fa28-df88-f6e8-00ef6b13d473"
+      }
+    ]
+  },
+  "software": {
+    "python": "3.14.5 free-threading",
+    "torch": "2.13.0+cu130",
+    "cuda_runtime": "13.0",
+    "transformers": "5.14.1",
+    "gptqmodel": "7.3.1+ultra"
+  },
+  "default_decision": {
+    "selected": "lowrank",
+    "legacy_descriptor_default": "exact",
+    "evidence": "Across rank 128 and 256, lowrank led or tied five of six task metrics and was the fastest rank-256 generation route.",
+    "rank256_tradeoff": "Auto led rank-256 GSM8K by four answers; lowrank led both ARC metrics by one answer and generated 70.7 seconds faster."
+  },
+  "notes": [
+    "The four complete pipelines ran concurrently, one process per physical GPU.",
+    "The base-quant lane asserted 252 quantized linear modules, zero active adapters, no adapter ranks, and finite logits.",
+    "Every generated adapter contained 504 finite rank-256 factor tensors.",
+    "All ARC and GSM8K evaluations used the full dataset; GSM8K reported zero invalid answers.",
+    "The base-quant result is rank-independent and is the shared no-EoRA baseline for the rank-128 and rank-256 comparisons."
+  ],
+  "results": [
+    {
+      "variant": "base_quant",
+      "rank": null,
+      "adapter_path": null,
+      "generation_seconds": null,
+      "generation_speedup_vs_exact": null,
+      "arc_correct": 625,
+      "arc_score": 0.5332764505119454,
+      "arc_norm_correct": 639,
+      "arc_norm_score": 0.5452218430034129,
+      "gsm_correct": 1069,
+      "gsm_score": 0.8842018196856907
+    },
+    {
+      "variant": "exact",
+      "rank": 256,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-4bit-g128-activation-GAR-EoRA-r128-cal512/eora-rank256-svd-exact",
+      "generation_seconds": 871.9698723242618,
+      "generation_speedup_vs_exact": 1.0,
+      "generation_seconds_saved_vs_exact": 0.0,
+      "all_finite": true,
+      "arc_correct": 640,
+      "arc_score": 0.5460750853242321,
+      "arc_norm_correct": 645,
+      "arc_norm_score": 0.5503412969283277,
+      "gsm_correct": 1099,
+      "gsm_score": 0.9090157154673284
+    },
+    {
+      "variant": "auto",
+      "rank": 256,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-4bit-g128-activation-GAR-EoRA-r128-cal512/eora-rank256-svd-auto",
+      "generation_seconds": 602.7093620351516,
+      "generation_speedup_vs_exact": 1.446750170563,
+      "generation_seconds_saved_vs_exact": 269.26051028911,
+      "all_finite": true,
+      "arc_correct": 642,
+      "arc_score": 0.5477815699658704,
+      "arc_norm_correct": 652,
+      "arc_norm_score": 0.5563139931740614,
+      "gsm_correct": 1103,
+      "gsm_score": 0.91232423490488
+    },
+    {
+      "variant": "lowrank",
+      "rank": 256,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-4bit-g128-activation-GAR-EoRA-r128-cal512/eora-rank256-svd-lowrank",
+      "generation_seconds": 532.0509077850729,
+      "generation_speedup_vs_exact": 1.638884286382,
+      "generation_seconds_saved_vs_exact": 339.918964539189,
+      "generation_speedup_vs_auto": 1.132803935143,
+      "generation_seconds_saved_vs_auto": 70.658454250079,
+      "all_finite": true,
+      "arc_correct": 643,
+      "arc_score": 0.5486348122866894,
+      "arc_norm_correct": 653,
+      "arc_norm_score": 0.5571672354948806,
+      "gsm_correct": 1099,
+      "gsm_score": 0.9090157154673284
+    }
+  ]
+}

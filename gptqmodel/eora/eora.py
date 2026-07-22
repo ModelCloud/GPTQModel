@@ -19,6 +19,7 @@ from typing import Optional, Sequence, Tuple
 import torch
 from torch import Tensor
 
+from ..adapter.adapter import EORA_SVD_ALGOS, EoRAConfig
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.rocm import IS_ROCM
@@ -27,12 +28,78 @@ from ..utils.torch import TORCH_GTE_210
 log = setup_logger()
 
 _EORA_CHOLESKY_ENV = "GPTQMODEL_EORA_CHOLESKY"
+_EORA_LOWRANK_OVERSAMPLE = 2
+_EORA_LOWRANK_POWER_ITERS = 4
+_EORA_LOWRANK_SEED = 0xE0A
 
 
 def _eora_covariance_rtol(size: int) -> float:
     """Return the numerical-rank tolerance for float32 EoRA covariance data."""
 
     return min(1.0, max(1, int(size)) * torch.finfo(torch.float32).eps)
+
+
+def _eora_randomized_svd(matrix: Tensor, rank: int) -> Tuple[Tensor, Tensor, Tensor]:
+    """Compute a deterministic rank-focused SVD using randomized subspace iteration."""
+
+    rows, columns = matrix.shape[-2:]
+    target = min(rows, columns)
+    subspace_size = min(target, max(rank, rank * _EORA_LOWRANK_OVERSAMPLE))
+    if subspace_size >= target:
+        return torch.linalg.svd(matrix, full_matrices=False)
+
+    transposed = rows < columns
+    work = matrix.mH if transposed else matrix
+    generator = torch.Generator(device=matrix.device)
+    generator.manual_seed(_EORA_LOWRANK_SEED)
+    random_basis = torch.randn(
+        work.shape[-1],
+        subspace_size,
+        dtype=work.dtype,
+        device=work.device,
+        generator=generator,
+    )
+
+    basis = torch.linalg.qr(work @ random_basis, mode="reduced").Q
+    for _ in range(_EORA_LOWRANK_POWER_ITERS):
+        basis = torch.linalg.qr(work.mH @ basis, mode="reduced").Q
+        basis = torch.linalg.qr(work @ basis, mode="reduced").Q
+
+    projected = basis.mH @ work
+    projected_u, singular_values, projected_vh = torch.linalg.svd(projected, full_matrices=False)
+    work_u = basis @ projected_u
+
+    if transposed:
+        return projected_vh.mH, singular_values, work_u.mH
+    return work_u, singular_values, projected_vh
+
+
+def _eora_gesvda_supported(matrix: Tensor) -> bool:
+    """Return whether PyTorch can route this tensor to CUDA cuSOLVER gesvda."""
+
+    return matrix.is_cuda and not IS_ROCM
+
+
+def _eora_compute_svd(matrix: Tensor, rank: int, algo: str = "lowrank") -> Tuple[Tensor, Tensor, Tensor]:
+    """Select the accelerated EoRA SVD while retaining an exact portable fallback."""
+
+    if algo not in EORA_SVD_ALGOS:
+        raise ValueError(f"Invalid EoRA SVD algo={algo!r}; expected one of {EORA_SVD_ALGOS}.")
+
+    if algo == "lowrank":
+        try:
+            return _eora_randomized_svd(matrix, rank)
+        except RuntimeError as exc:
+            log.warn.once(f"EoRA: randomized SVD failed ({exc}); falling back to the exact solver.")
+
+    use_gesvda = algo == "auto" and _eora_gesvda_supported(matrix)
+    if use_gesvda:
+        try:
+            return torch.linalg.svd(matrix, full_matrices=False, driver="gesvda")
+        except RuntimeError as exc:
+            log.warn.once(f"EoRA: CUDA gesvda fast path failed ({exc}); falling back to the exact solver.")
+
+    return torch.linalg.svd(matrix, full_matrices=False)
 
 
 def eora_process_input(
@@ -94,8 +161,9 @@ def _eora_compute_lora_eigh(
         w_wq_delta: Tensor,
         name: str,
         raw_scaling_diag_matrix: torch.Tensor,
-        rank: int,
-        dtype: torch.dtype,
+    rank: int,
+    dtype: torch.dtype,
+    algo: str,
 ) -> Tuple[Tensor, Tensor]:
     L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
 
@@ -135,7 +203,7 @@ def _eora_compute_lora_eigh(
 
     delta_scale = torch.matmul(w_wq_delta, scaling_diag_matrix)
 
-    U, S, V = torch.linalg.svd(delta_scale, full_matrices=False)
+    U, S, V = _eora_compute_svd(delta_scale, rank, algo=algo)
     lowrank_r = rank
     sqrt_s = torch.sqrt(S[:lowrank_r])
     B = (U[:, :lowrank_r] * sqrt_s.unsqueeze(0)).to(dtype=dtype)
@@ -153,8 +221,9 @@ def _eora_compute_lora_cholesky(
         w_wq_delta: Tensor,
         name: str,
         raw_scaling_diag_matrix: torch.Tensor,
-        rank: int,
-        dtype: torch.dtype,
+    rank: int,
+    dtype: torch.dtype,
+    algo: str,
 ) -> Tuple[Tensor, Tensor] | None:
     if not hasattr(torch.linalg, "cholesky_ex"):
         log.warn.once("EoRA: Cholesky fast path requires torch.linalg.cholesky_ex; falling back to eigensolve.")
@@ -172,7 +241,7 @@ def _eora_compute_lora_cholesky(
     scaling_diag_matrix = scaling_diag_matrix.to(dtype=torch.float32)
     delta_scale = torch.matmul(w_wq_delta, scaling_diag_matrix)
 
-    U, S, V = torch.linalg.svd(delta_scale, full_matrices=False)
+    U, S, V = _eora_compute_svd(delta_scale, rank, algo=algo)
     lowrank_r = rank
     sqrt_s = torch.sqrt(S[:lowrank_r])
     B = (U[:, :lowrank_r] * sqrt_s.unsqueeze(0)).to(dtype=dtype)
@@ -199,11 +268,13 @@ def eora_compute_lora(
         eigen_scaling_diag_matrix: torch.Tensor,
         rank: int,
         dtype: torch.dtype,
-        device: torch.device,
-        use_cholesky: Optional[bool] = True,
+    device: torch.device,
+    use_cholesky: Optional[bool] = True,
+    eora_config: Optional[EoRAConfig] = None,
 ) -> Tuple[Tensor, Tensor]:
 
     assert w_wq_delta.dtype == torch.float32
+    eora_config = eora_config or EoRAConfig()
 
     # save this later for SVD
     raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(device=device, dtype=torch.float64)
@@ -225,6 +296,7 @@ def eora_compute_lora(
             raw_scaling_diag_matrix=raw_scaling_diag_matrix,
             rank=rank,
             dtype=dtype,
+            algo=eora_config.algo,
         )
     if result is None:
         result = _eora_compute_lora_eigh(
@@ -233,6 +305,7 @@ def eora_compute_lora(
             raw_scaling_diag_matrix=raw_scaling_diag_matrix,
             rank=rank,
             dtype=dtype,
+            algo=eora_config.algo,
         )
 
     A, B = result
