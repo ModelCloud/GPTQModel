@@ -94,7 +94,7 @@ THREAD_M_BLOCKS = [0.5, 1, 2, 3, 4]
 #   > 0 : group_size=16*group_blocks
 GROUP_BLOCKS = [0, 1, -1, 2, 4, 8]
 DTYPES = ["fp16", "bf16"]
-EORA_RANKS = [32, 64, 128, 256]
+EORA_RANKS = [32, 64, 96, 128, 192, 256]
 
 # (threads, M/16, N/16, K/16). These direct-grid variants cover the tile
 # shapes tuned for large-M symmetric GPTQ W4A16 prefill.

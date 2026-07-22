@@ -63,7 +63,7 @@ log = setup_logger()
 _PACKED_PREFILL_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL"
 _PACKED_PREFILL_MIN_ROWS_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL_MIN_ROWS"
 _EORA_MEGA_KERNEL_WORKSPACE_BLOCKS = 192
-_EORA_RANK256_MEGA_KERNEL_WORKSPACE_BLOCKS = 256
+_EORA_MEGA_KERNEL_WORKSPACE_BLOCKS_BY_RANK = {192: 224, 256: 256}
 _PACKED_PREFILL_CONFIG_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL_CONFIG"
 _PACKED_PREFILL_MIN_ROWS_DEFAULT = 1024
 
@@ -312,8 +312,10 @@ class MarlinLinear(GPTQQuantLinear):
 
         # Allocate marlin workspace.
         adapter_workspace_blocks = _EORA_MEGA_KERNEL_WORKSPACE_BLOCKS
-        if self.adapter is not None and getattr(self.adapter, "rank", None) == 256:
-            adapter_workspace_blocks = _EORA_RANK256_MEGA_KERNEL_WORKSPACE_BLOCKS
+        if self.adapter is not None:
+            adapter_workspace_blocks = _EORA_MEGA_KERNEL_WORKSPACE_BLOCKS_BY_RANK.get(
+                getattr(self.adapter, "rank", None), adapter_workspace_blocks
+            )
         self.workspace = marlin_make_workspace_new(
             device,
             min_workspace_blocks=(

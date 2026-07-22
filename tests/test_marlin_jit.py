@@ -224,7 +224,7 @@ def test_integrated_eora_contract_is_present_in_marlin_extensions():
         assert f"gptq_marlin_gemm_eora_prepared_{dtype_tag}" in source
         assert "eora_marlin_lora_fused_add_prepared_cuda" in source
         marlin_sources = marlin_utils._marlin_sources(dtype_tag)
-        for rank in (32, 64, 128, 256):
+        for rank in (32, 64, 96, 128, 192, 256):
             suffix = "" if rank == 128 else f"_r{rank}"
             rank_kernel = marlin_root / f"kernel_{dtype_tag}_eora{suffix}_ku4b8.cu"
             assert str(rank_kernel) in marlin_sources
@@ -232,8 +232,8 @@ def test_integrated_eora_contract_is_present_in_marlin_extensions():
 
     assert "launch_marlin_eora_attention" in gemm_cu
     assert "prob_n != 4096 || prob_k != 4096" in gemm_cu
-    assert "eora_rank != 32 && eora_rank != 64 && eora_rank != 128" in gemm_cu
-    assert "eora_rank != 256" in gemm_cu
+    assert "eora_rank != 32 && eora_rank != 64 && eora_rank != 96" in gemm_cu
+    assert "eora_rank != 128 && eora_rank != 192 && eora_rank != 256" in gemm_cu
     assert "device_info.sms != 124" in gemm_cu
     assert "eora_down_ready_lock" in template_h
     assert "ld.global.acquire.gpu.b32" in template_h
@@ -835,7 +835,7 @@ def test_marlin_live_row_fp32_scratch_matches_fp16_reduction(dtype):
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("rank", [32, 64, 128, 256])
+@pytest.mark.parametrize("rank", [32, 64, 96, 128, 192, 256])
 def test_marlin_eora_attention_mega_kernel_matches_dense_update_and_releases_locks(
     dtype, rank, monkeypatch
 ):

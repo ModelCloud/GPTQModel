@@ -869,8 +869,8 @@ bool launch_marlin_eora_attention(
   const int eora_min_lock_workspace_ints =
       128 + (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
   if (prob_m != 1 || prob_n != 4096 || prob_k != 4096 ||
-      (eora_rank != 32 && eora_rank != 64 && eora_rank != 128 &&
-       eora_rank != 256) ||
+      (eora_rank != 32 && eora_rank != 64 && eora_rank != 96 &&
+       eora_rank != 128 && eora_rank != 192 && eora_rank != 256) ||
       device_info.major_capability != 8 ||
       device_info.minor_capability != 0 || device_info.sms != 124 ||
       device_info.cooperative_launch == 0 ||
@@ -879,8 +879,8 @@ bool launch_marlin_eora_attention(
   }
 
   constexpr int threads = 256;
-  // Ranks 32/64/128/256 reserve 2/4/8/16 LoRA-down CTAs respectively and
-  // assign the remaining CTAs to Marlin. Every schedule fills one wave.
+  // Each rank reserves one LoRA-down CTA per 16 adapter ranks and assigns the
+  // remaining CTAs to Marlin. Every supported schedule fills one wave.
   constexpr int eora_grid_blocks = 124;
   constexpr int thread_m_blocks = 1;
   constexpr int thread_n_blocks = 8;
@@ -904,9 +904,21 @@ bool launch_marlin_eora_attention(
                          thread_m_blocks, thread_n_blocks, thread_k_blocks,
                          m_block_size_8, pipe_stages, group_blocks,
                          is_zp_float>;
+  } else if (eora_rank == 96) {
+    kernel =
+        MarlinEoraRank96<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+                         thread_m_blocks, thread_n_blocks, thread_k_blocks,
+                         m_block_size_8, pipe_stages, group_blocks,
+                         is_zp_float>;
   } else if (eora_rank == 128) {
     kernel =
         MarlinEoraRank128<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+                          thread_m_blocks, thread_n_blocks, thread_k_blocks,
+                          m_block_size_8, pipe_stages, group_blocks,
+                          is_zp_float>;
+  } else if (eora_rank == 192) {
+    kernel =
+        MarlinEoraRank192<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
                           thread_m_blocks, thread_n_blocks, thread_k_blocks,
                           m_block_size_8, pipe_stages, group_blocks,
                           is_zp_float>;
