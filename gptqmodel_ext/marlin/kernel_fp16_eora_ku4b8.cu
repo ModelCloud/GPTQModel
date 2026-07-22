@@ -3,6 +3,7 @@
 
 #define MARLIN_KERNEL_FUNCTION MarlinEoraRank128
 #define MARLIN_EORA_FUSED 1
+#define MARLIN_EORA_RANK 128
 #include "kernel.h"
 #include "marlin_template.h"
 

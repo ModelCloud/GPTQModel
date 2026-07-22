@@ -38,8 +38,10 @@ class BenchCase:
 
 
 DEFAULT_CASES = (
+    BenchCase("decode_attn_r32", 1, 4096, 4096, 32),
     BenchCase("decode_attn_r64", 1, 4096, 4096, 64),
     BenchCase("decode_attn_r128", 1, 4096, 4096, 128),
+    BenchCase("decode_attn_r256", 1, 4096, 4096, 256),
     BenchCase("decode_mlp_up_r128", 1, 4096, 11008, 128),
     BenchCase("decode_mlp_down_r128", 1, 11008, 4096, 128),
     BenchCase("batch8_attn_r128", 8, 4096, 4096, 128),

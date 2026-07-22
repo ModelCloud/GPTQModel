@@ -860,15 +860,17 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
 }
 
 template <typename scalar_t>
-bool launch_marlin_eora_rank128_attention(
+bool launch_marlin_eora_attention(
     const void* A, const void* B, void* C, void* C_tmp, void* scales,
     void* locks, const void* eora_down_weight, const void* eora_up_weight,
     int prob_m, int prob_n, int prob_k, int num_groups, int eora_rank,
     int64_t lock_workspace_ints, int dev, cudaStream_t stream,
     marlin_device_info_t const& device_info) {
-  constexpr int eora_min_lock_workspace_ints = 192;
+  const int eora_min_lock_workspace_ints =
+      128 + (eora_rank * sizeof(scalar_t) + sizeof(int) - 1) / sizeof(int);
   if (prob_m != 1 || prob_n != 4096 || prob_k != 4096 ||
-      eora_rank != 128 ||
+      (eora_rank != 32 && eora_rank != 64 && eora_rank != 128 &&
+       eora_rank != 256) ||
       device_info.major_capability != 8 ||
       device_info.minor_capability != 0 || device_info.sms != 124 ||
       device_info.cooperative_launch == 0 ||
@@ -877,8 +879,8 @@ bool launch_marlin_eora_rank128_attention(
   }
 
   constexpr int threads = 256;
-  // 116 output-owned Marlin CTAs and eight role-specific LoRA-down CTAs fill
-  // one cooperative wave on the 124-SM target.
+  // Ranks 32/64/128/256 reserve 2/4/8/16 LoRA-down CTAs respectively and
+  // assign the remaining CTAs to Marlin. Every schedule fills one wave.
   constexpr int eora_grid_blocks = 124;
   constexpr int thread_m_blocks = 1;
   constexpr int thread_n_blocks = 8;
@@ -889,11 +891,32 @@ bool launch_marlin_eora_rank128_attention(
   constexpr vllm::ScalarTypeId scale_type_id =
       std::is_same<scalar_t, half>::value ? vllm::kFloat16.id()
                                           : vllm::kBFloat16.id();
-  MarlinEoraFuncPtr<scalar_t> kernel =
-      MarlinEoraRank128<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
-                        thread_m_blocks, thread_n_blocks, thread_k_blocks,
-                        m_block_size_8, pipe_stages, group_blocks,
-                        is_zp_float>;
+  MarlinEoraFuncPtr<scalar_t> kernel;
+  if (eora_rank == 32) {
+    kernel =
+        MarlinEoraRank32<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+                         thread_m_blocks, thread_n_blocks, thread_k_blocks,
+                         m_block_size_8, pipe_stages, group_blocks,
+                         is_zp_float>;
+  } else if (eora_rank == 64) {
+    kernel =
+        MarlinEoraRank64<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+                         thread_m_blocks, thread_n_blocks, thread_k_blocks,
+                         m_block_size_8, pipe_stages, group_blocks,
+                         is_zp_float>;
+  } else if (eora_rank == 128) {
+    kernel =
+        MarlinEoraRank128<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+                          thread_m_blocks, thread_n_blocks, thread_k_blocks,
+                          m_block_size_8, pipe_stages, group_blocks,
+                          is_zp_float>;
+  } else {
+    kernel =
+        MarlinEoraRank256<scalar_t, vllm::kU4B8.id(), scale_type_id, threads,
+                          thread_m_blocks, thread_n_blocks, thread_k_blocks,
+                          m_block_size_8, pipe_stages, group_blocks,
+                          is_zp_float>;
+  }
 
   int shared_mem = device_info.max_shared_mem;
   ensure_marlin_max_dynamic_shared_memory(kernel, dev, shared_mem);
@@ -1624,7 +1647,7 @@ torch::Tensor MARLIN_GEMM_PREPARED_EXPORT_NAME(
   if (a.scalar_type() == at::ScalarType::Half) {
     const cudaStream_t stream =
         at::cuda::getCurrentCUDAStream(a.get_device());
-    bool fused = marlin::launch_marlin_eora_rank128_attention<half>(
+    bool fused = marlin::launch_marlin_eora_attention<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(),
         c.data_ptr<at::Half>(), c_tmp.data_ptr<float>(),
         b_scales.data_ptr<at::Half>(), workspace.data_ptr(),
@@ -1652,7 +1675,7 @@ torch::Tensor MARLIN_GEMM_PREPARED_EXPORT_NAME(
   if (a.scalar_type() == at::ScalarType::BFloat16) {
     const cudaStream_t stream =
         at::cuda::getCurrentCUDAStream(a.get_device());
-    bool fused = marlin::launch_marlin_eora_rank128_attention<nv_bfloat16>(
+    bool fused = marlin::launch_marlin_eora_attention<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
         c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
         b_scales.data_ptr<at::BFloat16>(), workspace.data_ptr(),

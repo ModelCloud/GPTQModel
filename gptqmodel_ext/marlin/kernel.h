@@ -46,6 +46,38 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
           >
 __global__ void Marlin(MARLIN_KERNEL_PARAMS);
 
+// Single-row rank-32 W4A16 attention specialization. The Marlin and LoRA
+// phases share one cooperative launch and reuse Marlin's dead reduction
+// scratch after the base output is complete.
+template <typename scalar_t,
+          const vllm::ScalarTypeId w_type_id,
+          const vllm::ScalarTypeId s_type_id,
+          const int threads,
+          const int thread_m_blocks,
+          const int thread_n_blocks,
+          const int thread_k_blocks,
+          const bool m_block_size_8,
+          const int stages,
+          const int group_blocks,
+          const bool is_zp_float>
+__global__ void MarlinEoraRank32(MARLIN_EORA_KERNEL_PARAMS);
+
+// Single-row rank-64 W4A16 attention specialization. The Marlin and LoRA
+// phases share one cooperative launch and reuse Marlin's dead reduction
+// scratch after the base output is complete.
+template <typename scalar_t,
+          const vllm::ScalarTypeId w_type_id,
+          const vllm::ScalarTypeId s_type_id,
+          const int threads,
+          const int thread_m_blocks,
+          const int thread_n_blocks,
+          const int thread_k_blocks,
+          const bool m_block_size_8,
+          const int stages,
+          const int group_blocks,
+          const bool is_zp_float>
+__global__ void MarlinEoraRank64(MARLIN_EORA_KERNEL_PARAMS);
+
 // Single-row rank-128 W4A16 attention specialization. The Marlin and LoRA
 // phases share one cooperative launch and reuse Marlin's dead reduction
 // scratch after the base output is complete.
@@ -61,6 +93,21 @@ template <typename scalar_t,
           const int group_blocks,
           const bool is_zp_float>
 __global__ void MarlinEoraRank128(MARLIN_EORA_KERNEL_PARAMS);
+
+// Single-row rank-256 W4A16 attention specialization. It preserves the same
+// one-wave cooperative Marlin schedule while doubling adapter rank work.
+template <typename scalar_t,
+          const vllm::ScalarTypeId w_type_id,
+          const vllm::ScalarTypeId s_type_id,
+          const int threads,
+          const int thread_m_blocks,
+          const int thread_n_blocks,
+          const int thread_k_blocks,
+          const bool m_block_size_8,
+          const int stages,
+          const int group_blocks,
+          const bool is_zp_float>
+__global__ void MarlinEoraRank256(MARLIN_EORA_KERNEL_PARAMS);
 
 // Large-M W4A16 specialization. Each CTA owns one output tile and traverses
 // the full K dimension, avoiding the cross-CTA reduction used by decode Marlin.

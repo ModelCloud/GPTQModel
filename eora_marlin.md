@@ -3536,3 +3536,186 @@ specialization cannot prove a later generic route is safe. Give independent
 protocols disjoint, explicitly sized regions when practical, gate optimized
 launches on the required capacity, and test specialized-to-generic row-count
 transitions while auditing the shared state between calls.
+
+### 2026-07-22: add a rank-256 one-launch attention specialization
+
+Before this change, the public fused EoRA admission policy accepted ranks 1
+through 512 by default, the standalone cooperative tail had compile-time
+specializations for ranks 64 and 128, and other admitted ranks used its
+runtime-rank kernel. The one-launch Marlin-plus-EoRA attention mega-kernel was
+narrower: only rank 128 was specialized. This change retains the general
+1-through-512 route and adds rank 256 to the one-launch path; it does not claim
+that every rank in the general range has a compile-time specialization.
+
+The rank-256 launch keeps the existing exact-shape and hardware gate:
+`M=1`, `K=N=4096`, symmetric U4B8 W4A16 with group size 128, FP16 or BF16,
+cooperative `sm_80`, and exactly 124 SMs. It fills one resident wave with 108
+output-owned Marlin CTAs and sixteen complete-K, 16-rank LoRA-down CTAs. The
+Marlin work is divided into twelve four-contributor output slices and twenty
+three-contributor slices. After acquiring the down and per-output readiness
+states, all eight warps in each CTA consume one 32-rank slice for a coalesced
+32-column LoRA-up tile. Four CTAs process one adjacent secondary tile so the
+124-CTA grid covers all 128 output tiles.
+
+Rank 128 remains a separate generated instantiation and keeps its established
+up phase. The rank-256 adapter payload occupies persistent workspace words
+128 through 255, outside ordinary Marlin's 128-word lock prefix, so its launcher
+requires 256 words. A smaller external workspace selects ordinary Marlin plus
+the established EoRA tail. Non-adapter modules still allocate 128 words and
+rank-128 adapters still allocate 192 words.
+
+The matched pre-change baseline was the production two-launch route (ordinary
+Marlin followed by the standalone cooperative EoRA tail). Both screens used
+500 warmups, 3,000 CUDA-event samples, and five 1,000-call aggregate repeats on
+physical GPUs 6 and 7.
+
+| dtype/device | route | p50 | mean | p95 | sustained stream | max abs error |
+|:---|:---|---:|---:|---:|---:|---:|
+| FP16 / GPU 6 | old two-launch | 52.22 us | 53.39 us | 55.30 us | 43.94 us/call | 0.003876 |
+| FP16 / GPU 6 | rank-256 mega | 29.70 us | 30.79 us | 36.86 us | 18.65 us/call | 0.003876 |
+| BF16 / GPU 7 | old two-launch | 55.30 us | 54.44 us | 57.34 us | 44.87 us/call | 0.01522 |
+| BF16 / GPU 7 | rank-256 mega | 29.70 us | 31.29 us | 37.89 us | 19.13 us/call | 0.01522 |
+
+That is a 1.76x/1.86x FP16/BF16 p50 speedup and a 2.36x/2.35x sustained-stream
+speedup over the previous rank-256 route. Nsight Systems confirms 200 calls
+produce exactly 200 `MarlinEoraRank256` cooperative launches. The raw BF16
+kernel distribution is 16.480/16.816/19.040 us p50/mean/p95, compared with a
+47.391 us median GPU span for the old Marlin-plus-tail pair. The retained
+rank-128 FP16 specialization remains one launch at 14.176/14.545/16.707 us on
+GPU 6.
+
+Nsight Compute reports 96 registers per thread, zero local-memory spills, a
+124-by-256 launch, 166.912 KiB dynamic shared memory per CTA, one wave per SM,
+11.99% achieved occupancy against the shared-memory-limited 12.5% ceiling,
+20.24% DRAM throughput, and 14.72% SM throughput. The low absolute throughput
+percentages are expected for this one-wave latency kernel; the useful result is
+that doubling adapter rank adds only about 2.3 us to the raw rank-128 kernel
+median while eliminating the second launch and its inter-launch gap.
+
+Validation exposed only physical GPUs 6 and 7. Dense-reference agreement,
+repeated calls, FP16 and BF16, non-default streams, undersized-workspace
+fallback, and the `M=1 -> M=12` persistent-lock transition all passed for ranks
+128 and 256. The broader EoRA/Marlin selection run passed 77 cases, including
+runtime ranks 37 and 320. Compute Sanitizer memcheck and synccheck each reported
+`ERROR SUMMARY: 0 errors` for rank 256 in both dtypes. Generated-source checks,
+Ruff, and `git diff --check` also passed.
+
+Profiler and benchmark artifacts are under
+`artifacts/eora_marlin_rank256_20260722/`. The retained benchmark JSON files are
+`final_rank256_fp16_gpu6.json` and `final_rank256_bf16_gpu7_repeat.json`; the
+primary profiles are `final_rank256_mega_bf16_gpu7_{nsys,ncu}`.
+
+### 2026-07-22: extend the one-launch schedule to ranks 32 and 64
+
+The current rank support has three distinct levels. They should not be
+collapsed into one claim:
+
+| route | ranks listed as supported |
+|:---|:---|
+| Public fused EoRA admission | 1 through 512 inclusive by default; `GPTQMODEL_EORA_MARLIN_FUSED_MAX_RANK` changes the upper bound |
+| Standalone cooperative EoRA tail | Static kernels for 64 and 128; a runtime-rank kernel handles every other admitted rank |
+| Exact attention one-launch Marlin+EoRA mega-kernel | 32, 64, 128, and 256 |
+
+Ranks in the general 1-through-512 range that are not in the last row remain
+supported through ordinary Marlin followed by the cooperative runtime-rank
+tail. The one-launch specializations retain the intentionally narrow gate:
+`M=1`, `K=N=4096`, symmetric U4B8 W4A16 with group size 128, FP16 or BF16,
+cooperative `sm_80`, and a runtime-probed 124-SM device. Other shapes,
+architectures, and SM counts keep the established fallback.
+
+The new schedules reserve one complete-K LoRA-down CTA per 16 adapter ranks
+and give every other CTA output-owned Marlin work. Each schedule is exactly
+one 124-CTA resident wave:
+
+| rank | Marlin CTAs | down CTAs | four-contributor output slices | three-contributor output slices | minimum workspace words |
+|---:|---:|---:|---:|---:|---:|
+| 32 | 122 | 2 | 26 | 6 | 144 |
+| 64 | 120 | 4 | 24 | 8 | 160 |
+| 128 | 116 | 8 | 20 | 12 | 192 |
+| 256 | 108 | 16 | 12 | 20 | 256 |
+
+For rank 32, one warp consumes the complete adapter rank for a coalesced
+32-column LoRA-up tile. Rank 64 uses two 32-rank warps. The first four CTAs use
+the next one or two warps for an adjacent output tile, so their secondary work
+runs concurrently rather than serially. All remaining CTAs own one output
+tile. Both paths retain the rank-128 tuning lessons: FP16 prefetches LoRA-B and
+the base output before the dependency handoff, the phase-recycling ticket runs
+on idle warp 4, and BF16 keeps its whole-block reset. Rank 128 and rank 256
+remain separate generated instantiations; comparing instruction-only SASS
+hashes before and after the small-rank additions showed exact matches for both
+existing kernels.
+
+Payload ownership remains isolated from ordinary Marlin locks. The launcher
+computes the required workspace as `128 + ceil(rank * sizeof(dtype) / 4)`
+`int32` words, giving the minima in the table. Adapter modules already allocate
+192 words for ranks 32, 64, and 128; rank 256 allocates 256. An externally
+prepared 128-word workspace is still valid for ordinary Marlin and therefore
+selects the safe two-launch fallback at every specialized rank.
+
+#### Matched full-call results
+
+The matched old route was ordinary Marlin plus the standalone cooperative
+EoRA tail. Every old/new pair used the same tensor seed, 500 warmups, 3,000
+CUDA-event samples, and five 1,000-call aggregate repeats. Physical GPU 6 ran
+FP16 and physical GPU 7 ran BF16.
+
+| rank/dtype/device | route | p50 | mean | p95 | sustained stream | max abs error |
+|:---|:---|---:|---:|---:|---:|---:|
+| 32 FP16 / GPU 6 | old two-launch | 36.86 us | 43.63 us | 47.10 us | 30.21 us/call | 0.003901 |
+| 32 FP16 / GPU 6 | one-launch mega | 29.70 us | 31.30 us | 36.86 us | 19.95 us/call | 0.003901 |
+| 32 BF16 / GPU 7 | old two-launch | 35.84 us | 37.66 us | 45.06 us | 25.88 us/call | 0.005719 |
+| 32 BF16 / GPU 7 | one-launch mega | 31.74 us | 33.56 us | 37.89 us | 20.13 us/call | 0.005719 |
+| 64 FP16 / GPU 6 | old two-launch | 36.86 us | 39.06 us | 45.06 us | 25.80 us/call | 0.003836 |
+| 64 FP16 / GPU 6 | one-launch mega | 30.72 us | 31.81 us | 37.89 us | 20.65 us/call | 0.003836 |
+| 64 BF16 / GPU 7 | old two-launch | 36.86 us | 38.17 us | 45.06 us | 27.76 us/call | 0.008408 |
+| 64 BF16 / GPU 7 | one-launch mega | 29.70 us | 31.37 us | 36.86 us | 19.53 us/call | 0.008408 |
+
+Rank 32 improves p50 by 1.24x/1.13x and sustained throughput by 1.51x/1.29x
+for FP16/BF16. Rank 64 improves p50 by 1.20x/1.24x and sustained throughput by
+1.25x/1.42x. Maximum absolute error is bit-for-bit unchanged within every
+matched old/new pair.
+
+#### Profiler attribution
+
+Bounded Nsight Systems captures contain exactly 200 mega-kernel launches for
+200 calls and no standalone EoRA tail launch. The rank-32 FP16 raw kernel is
+13.984/14.262/15.776 us p50/mean/p95 on GPU 6. The rank-64 BF16 raw kernel is
+14.400/14.609/15.872 us on GPU 7. These values are at the retained rank-128
+Marlin floor, which is the practical reason not to add more small-rank warp
+roles or another synchronization stage.
+
+Nsight Compute replay reports the following resource and bottleneck state:
+
+| rank/dtype | replay duration | registers | DRAM | SM | achieved occupancy | eligible warps/scheduler | spills |
+|:---|---:|---:|---:|---:|---:|---:|---:|
+| 32 FP16 | 21.76 us | 94 | 17.38% | 13.82% | 12.38% | 0.20 | 0 |
+| 64 BF16 | 23.23 us | 96 | 17.19% | 14.14% | 12.51% | 0.19 | 0 |
+
+Both launch 124 blocks of 256 threads with 166.912 KiB dynamic shared memory
+per CTA and one wave per SM. Shared memory intentionally limits theoretical
+occupancy to 12.5%; neither path spills local memory. Replay inflates this
+synchronization-sensitive kernel, so the raw Nsight Systems distributions are
+the latency gate.
+
+#### Validation and artifacts
+
+The host exposed only PCI-ordered physical GPUs 6 and 7 for CUDA validation.
+Both are runtime-probed `NVIDIA PG506-230` devices with compute capability 8.0,
+124 SMs, and 98,304 MiB memory. The environment used PyTorch 2.13.0+cu130,
+CUDA 13.0, driver 610.43.02, `TORCH_CUDA_ARCH_LIST=8.0`, and
+`PYTHON_GIL=0`.
+
+- The combined Marlin JIT and EoRA fused suites passed 110 tests. Coverage
+  includes ranks 32/64/128/256 in both dtypes, dense references, repeated and
+  non-default-stream calls, undersized-workspace fallback, `M=1 -> M=12`
+  workspace reuse, and generic runtime ranks 37 and 320.
+- Compute Sanitizer memcheck and synccheck each reported
+  `ERROR SUMMARY: 0 errors` for all four optimized ranks in FP16 and BF16.
+- Direct `sm_80` compilation reports 94 FP16 or 96 BF16 registers, a 32-byte
+  stack frame, and zero spill loads/stores for ranks 32 and 64.
+- Generated-source reproduction, Ruff, and `git diff --check` passed.
+
+Benchmarks, sanitizer logs, and final Nsys/NCU reports are under
+`artifacts/eora_marlin_ranks_32_64_20260722/`. The matched benchmark files are
+`baseline_rank{32,64}_{fp16_gpu6,bf16_gpu7}.json` and
+`final_rank{32,64}_{fp16_gpu6,bf16_gpu7}.json`.

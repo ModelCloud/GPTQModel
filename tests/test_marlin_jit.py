@@ -220,16 +220,20 @@ def test_integrated_eora_contract_is_present_in_marlin_extensions():
 
     for dtype_tag in ("fp16", "bf16"):
         source = (marlin_root / f"marlin_torch_{dtype_tag}.cpp").read_text(encoding="utf-8")
-        fused_kernel = marlin_root / f"kernel_{dtype_tag}_eora_ku4b8.cu"
         assert f"gptq_marlin_gemm_eora_{dtype_tag}" in source
         assert f"gptq_marlin_gemm_eora_prepared_{dtype_tag}" in source
         assert "eora_marlin_lora_fused_add_prepared_cuda" in source
-        assert str(fused_kernel) in marlin_utils._marlin_sources(dtype_tag)
-        assert "MarlinEoraRank128" in fused_kernel.read_text(encoding="utf-8")
+        marlin_sources = marlin_utils._marlin_sources(dtype_tag)
+        for rank in (32, 64, 128, 256):
+            suffix = "" if rank == 128 else f"_r{rank}"
+            rank_kernel = marlin_root / f"kernel_{dtype_tag}_eora{suffix}_ku4b8.cu"
+            assert str(rank_kernel) in marlin_sources
+            assert f"MarlinEoraRank{rank}" in rank_kernel.read_text(encoding="utf-8")
 
-    assert "launch_marlin_eora_rank128_attention" in gemm_cu
+    assert "launch_marlin_eora_attention" in gemm_cu
     assert "prob_n != 4096 || prob_k != 4096" in gemm_cu
-    assert "eora_rank != 128" in gemm_cu
+    assert "eora_rank != 32 && eora_rank != 64 && eora_rank != 128" in gemm_cu
+    assert "eora_rank != 256" in gemm_cu
     assert "device_info.sms != 124" in gemm_cu
     assert "eora_down_ready_lock" in template_h
     assert "ld.global.acquire.gpu.b32" in template_h
@@ -831,17 +835,19 @@ def test_marlin_live_row_fp32_scratch_matches_fp16_reduction(dtype):
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_marlin_eora_rank128_attention_mega_kernel_matches_dense_update_and_releases_locks(
-    dtype, monkeypatch
+@pytest.mark.parametrize("rank", [32, 64, 128, 256])
+def test_marlin_eora_attention_mega_kernel_matches_dense_update_and_releases_locks(
+    dtype, rank, monkeypatch
 ):
-    device = torch.device("cuda:0")
+    device_index = 1 if dtype == torch.bfloat16 and torch.cuda.device_count() > 1 else 0
+    device = torch.device(f"cuda:{device_index}")
     if torch.cuda.get_device_capability(device) != (8, 0):
         pytest.skip("The cooperative Marlin+EoRA mega-kernel is enabled only for sm_80")
 
     monkeypatch.setenv("GPTQMODEL_EORA_MARLIN_COOPERATIVE", "1")
     generator = torch.Generator(device=device)
     generator.manual_seed(27)
-    features, rank = 4096, 128
+    features = 4096
     x = torch.randn((1, features), dtype=dtype, device=device, generator=generator)
     lora_a = torch.randn((features, rank), dtype=dtype, device=device, generator=generator) * 0.002
     lora_b = torch.randn((rank, features), dtype=dtype, device=device, generator=generator) * 0.002
@@ -890,17 +896,23 @@ def test_marlin_eora_rank128_attention_mega_kernel_matches_dense_update_and_rele
     with torch.inference_mode():
         actual = module(x)
         repeated = module(x)
+        stream = torch.cuda.Stream(device=device)
+        with torch.cuda.stream(stream):
+            streamed = module(x)
+        stream.synchronize()
 
     assert actual.shape == base.shape
     assert actual.dtype == dtype
     torch.testing.assert_close(actual.float(), expected, rtol=5e-2, atol=5e-2)
     torch.testing.assert_close(repeated.float(), expected, rtol=5e-2, atol=5e-2)
-    assert module.workspace.numel() >= 192
+    torch.testing.assert_close(streamed.float(), expected, rtol=5e-2, atol=5e-2)
+    mega_workspace_words = 128 + rank // 2
+    assert module.workspace.numel() >= mega_workspace_words
     assert torch.count_nonzero(module.workspace[:128]).item() == 0
 
-    # The rank-128 M=1 mega-kernel shares this persistent buffer with ordinary
-    # Marlin. Its adapter payload must remain outside the first 128 lock words
-    # before a later M=12 launch reuses that prefix for global reduction.
+    # The M=1 mega-kernel shares this persistent buffer with ordinary Marlin.
+    # Its adapter payload must remain outside the first 128 lock words before a
+    # later M=12 launch reuses that prefix for global reduction.
     x_m12 = torch.randn((12, features), dtype=dtype, device=device, generator=generator)
     module.adapter = None
     with torch.inference_mode():
@@ -915,9 +927,8 @@ def test_marlin_eora_rank128_attention_mega_kernel_matches_dense_update_and_rele
     assert actual_m12.dtype == dtype
     torch.testing.assert_close(actual_m12.float(), expected_m12, rtol=5e-2, atol=5e-2)
 
-    # External prepared-op callers may still provide the legacy 128-word
-    # workspace. That is sufficient for ordinary Marlin, so it must select the
-    # established Marlin-plus-EoRA-tail fallback instead of the mega-kernel.
+    # A workspace below the rank-specific payload requirement remains enough
+    # for ordinary Marlin and must select the established two-launch fallback.
     module.workspace = torch.zeros(128, dtype=torch.int32, device=device)
     with torch.inference_mode():
         legacy_workspace_actual = module(x)
