@@ -127,8 +127,8 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
                         scale = 1e-6f;
                     }
                     float qf = std::nearbyint((w + offset) / scale);
+                    qf = std::max<float>(0.0f, std::min<float>(qf, static_cast<float>(max_q)));
                     int32_t q = static_cast<int32_t>(qf);
-                    q = std::max<int32_t>(0, std::min<int32_t>(q, max_q));
                     qvals[lane] = q;
                 }
 
