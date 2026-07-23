@@ -1091,8 +1091,12 @@ class PackableQuantLinear(GPTQQuantLinear):
             s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
 
             # int_block = round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
-            int_block = t.round((Wblk + sz_blk_T) / s_blk_T).to(t.int32)  # [out, blk]
-            int_block = int_block.T.contiguous()  # [blk, out]
+            int_block = t.round((Wblk + sz_blk_T) / s_blk_T)  # [out, blk]
+            # Values that drift outside the representable range must saturate.
+            # Bit-packing an unchecked value wraps it modulo 2**bits and turns
+            # a small reconstruction error into a full-range weight error.
+            int_block.clamp_(0, self.maxq)
+            int_block = int_block.to(t.int32).T.contiguous()  # [blk, out]
 
             groups32 = blk // word_bits
             base_group = (i0 // word_bits)
@@ -1288,8 +1292,9 @@ class PackableQuantLinear(GPTQQuantLinear):
             sz_blk_T = scale_zeros_dev.index_select(0, gsel).T
             s_blk_T = scales_dev.index_select(0, gsel).T
 
-            int_block = t.round((Wblk + sz_blk_T) / s_blk_T).to(t.int32)
-            int_block = int_block.T.contiguous()
+            int_block = t.round((Wblk + sz_blk_T) / s_blk_T)
+            int_block.clamp_(0, self.maxq)
+            int_block = int_block.to(t.int32).T.contiguous()
 
             groups32 = blk // word_bits
             base_group = (i0 // word_bits)
@@ -1362,8 +1367,9 @@ class PackableQuantLinear(GPTQQuantLinear):
                 # self.bias = linear.bias.clone().to(dtype=t.float16)
                 self.register_buffer("bias", linear.bias.to(dtype=t.float16))
 
-            int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
-            int_weight = int_weight.T.contiguous()
+            int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T)
+            int_weight.clamp_(0, self.maxq)
+            int_weight = int_weight.to(t.int32).T.contiguous()
             int_weight = int_weight.numpy().astype(self.pack_np_math_dtype)
 
             qweight = np.zeros((int_weight.shape[0] // self.pack_dtype_bits * self.bits, int_weight.shape[1]),
