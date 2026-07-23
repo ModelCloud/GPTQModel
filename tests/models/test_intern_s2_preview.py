@@ -8,7 +8,6 @@ import types
 
 from model_test import ModelTest
 import torch
-from torch import nn
 
 from gptqmodel.models.definitions import intern_s2_preview
 
