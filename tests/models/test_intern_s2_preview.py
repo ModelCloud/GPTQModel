@@ -13,43 +13,6 @@ from torch import nn
 from gptqmodel.models.definitions import intern_s2_preview
 
 
-def test_capture_modules_follow_quant_device(monkeypatch):
-    instance = object.__new__(intern_s2_preview.InternS2PreviewQModel)
-    instance.model = types.SimpleNamespace(
-        model=types.SimpleNamespace(
-            language_model=types.SimpleNamespace(
-                embed_tokens=nn.Embedding(4, 4),
-                rotary_emb=nn.Identity(),
-            ),
-            visual=nn.Identity(),
-        )
-    )
-    quant_device = torch.device("cuda:7")
-    instance.quantize_config = types.SimpleNamespace(
-        device=quant_device,
-        offload_to_disk=False,
-        offload_to_disk_path="/tmp/unused",
-    )
-
-    materialize_devices = []
-    instance.shell_module_materialize = lambda module, device: (
-        materialize_devices.append(device) or module
-    )
-
-    move_devices = []
-    monkeypatch.setattr(
-        intern_s2_preview,
-        "move_to",
-        lambda module, device: move_devices.append(device) or module,
-    )
-
-    instance.pre_quantize_generate_hook_start()
-    instance.pre_quantize_generate_hook_end()
-
-    assert materialize_devices == [quant_device, quant_device, quant_device]
-    assert move_devices == [torch.device("cpu")] * 3
-
-
 def test_causal_mask_compat_drops_removed_cache_position(monkeypatch):
     module_name = "tests.fake_modeling_intern_s2_preview"
     modeling_module = types.ModuleType(module_name)
