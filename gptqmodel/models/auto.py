@@ -128,6 +128,7 @@ from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.inkling import InklingMMQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
+from .definitions.intern_s2_preview import InternS2PreviewQModel  # noqa: E402
 from .definitions.interns1 import InternS1QModel  # noqa: E402
 from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
@@ -245,6 +246,7 @@ MODEL_MAP = {
     "baichuan": BaiChuanQModel,
     "internlm": InternLMQModel,
     "internlm2": InternLM2QModel,
+    "intern_s2_preview": InternS2PreviewQModel,
     "interns1": InternS1QModel,
     "internvl_chat": InternVLChatQModel,
     "hrm_text": HrmTextQModel,
