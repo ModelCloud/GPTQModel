@@ -1587,6 +1587,16 @@ class GPTQ:
             del local_values
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
             final_perm = extend_perm_with_tail(final_perm, self.columns)
+            if self.qcfg.static_groups:
+                # Static quantizers are created in original group order above,
+                # while GAR processes full groups in ``global_perm`` order.
+                # Reorder only the working quantizer list; the serialized
+                # scale/zero lists must remain in original group order after Q
+                # is restored to its original column layout.
+                reordered_group_count = int(global_perm.numel())
+                quantizer_group_order = global_perm.tolist()
+                groups = [groups[i] for i in quantizer_group_order] + groups[reordered_group_count:]
+                del quantizer_group_order
             try:
                 W = W[:, final_perm]
                 self.H = self.H[final_perm][:, final_perm]
@@ -1892,16 +1902,18 @@ class GPTQ:
         elif self.qcfg.act_group_aware and use_hessian:
             inv_final = invert_perm(final_perm).to(device=Q.device)
             Q = Q[:, inv_final]
-            inv_global_perm = invert_perm(global_perm)
-            inv_global_perm_list = inv_global_perm.tolist()
-            reordered_group_count = len(inv_global_perm_list)
-            temp_scale = [scale[i] for i in inv_global_perm_list]
-            temp_scale.extend(scale[reordered_group_count:])
-            scale = temp_scale
-            temp_zero = [zero[i] for i in inv_global_perm_list]
-            temp_zero.extend(zero[reordered_group_count:])
-            zero = temp_zero
-            del final_perm, inv_final, global_perm, inv_global_perm, inv_global_perm_list, local_perms
+            if not self.qcfg.static_groups:
+                inv_global_perm = invert_perm(global_perm)
+                inv_global_perm_list = inv_global_perm.tolist()
+                reordered_group_count = len(inv_global_perm_list)
+                temp_scale = [scale[i] for i in inv_global_perm_list]
+                temp_scale.extend(scale[reordered_group_count:])
+                scale = temp_scale
+                temp_zero = [zero[i] for i in inv_global_perm_list]
+                temp_zero.extend(zero[reordered_group_count:])
+                zero = temp_zero
+                del inv_global_perm, inv_global_perm_list
+            del final_perm, inv_final, global_perm, local_perms
 
         if self._tp_pad_cols:
             valid_cols = self._original_columns

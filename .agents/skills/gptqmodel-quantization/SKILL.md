@@ -18,6 +18,8 @@ Decide which boundaries move before editing:
 5. **Integration**: protocol compilation, serving engines, backend compatibility, or model loading.
 
 Read [references/method-map.md](references/method-map.md) for the current dispatch map and test layers.
+Read [references/quantization_packing.md](references/quantization_packing.md) completely whenever work touches integer
+code reconstruction, clipping, zero-points, packing, unpacking, serialization, or cross-packer parity.
 
 ## Trace the existing contract
 

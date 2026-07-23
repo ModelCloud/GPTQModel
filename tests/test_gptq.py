@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import math
 import os
 import subprocess
@@ -138,6 +139,50 @@ def test_gptq_act_group_aware_accepts_effective_columns_with_tail_group():
 
     gptq = GPTQ(layer, qcfg=qcfg)
     assert gptq.columns == 10
+
+
+@torch.inference_mode()
+def test_gptq_static_groups_keep_original_quantizer_mapping_with_gar(monkeypatch):
+    torch.manual_seed(42)
+    layer = nn.Linear(10, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(
+        bits=2,
+        group_size=4,
+        desc_act=False,
+        act_group_aware=True,
+        static_groups=True,
+    )
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.randn(10, 10, dtype=torch.float32), None)
+    gptq.finalize_hessian()
+
+    expected_scales = []
+    expected_zeros = []
+    original_weight = layer.weight.detach().clone()
+    for start in range(0, gptq.columns, qcfg.group_size):
+        end = start + qcfg.group_size
+        quantizer = copy.deepcopy(gptq.quantizer)
+        quantizer.find_params(
+            original_weight[:, start:end],
+            weight=True,
+            hessian=gptq.H[start:end, start:end],
+        )
+        expected_scales.append(quantizer.scale)
+        expected_zeros.append(quantizer.zero)
+
+    def _swap_full_groups(diag_h, group_size, **_kwargs):
+        assert diag_h.numel() == 10
+        assert group_size == 4
+        return torch.tensor([1, 0], dtype=torch.long, device=diag_h.device)
+
+    monkeypatch.setattr(gptq_mod, "compute_global_perm", _swap_full_groups)
+
+    _qweight, scales, zeros, g_idx, *_ = gptq.quantize(blocksize=4)
+
+    torch.testing.assert_close(scales, torch.cat(expected_scales, dim=1))
+    torch.testing.assert_close(zeros, torch.cat(expected_zeros, dim=1))
+    assert g_idx.tolist() == [0, 0, 0, 0, 1, 1, 1, 1, 2, 2]
 
 
 def test_gptq_base_quant_linear_like_shape_without_import():

@@ -1,0 +1,386 @@
+{
+  "benchmark": "eora_svd_algorithms_qwen3_8b_2bit_g32_post_wq_fix_rank_sweep",
+  "date_utc": "2026-07-23",
+  "repository_revision": "02c0be6f00daf9ca07263f72a579d732557543bd",
+  "base_model": "/monster/data/model/Qwen3-8B",
+  "quantized_snapshot": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped",
+  "provenance": {
+    "wq_lifecycle_fix": "independent detached CPU copy before the dense module can rematerialize",
+    "all_adapters_regenerated_after_fix": true,
+    "native_base_tensor_bytes": 4720190648,
+    "native_and_fixed_joint_packed_codes_match": true,
+    "sampled_prepack_code_mismatches": 0,
+    "sampled_packed_code_mismatches": 0,
+    "historical_corrupted_joint_results_excluded": true
+  },
+  "quantization": {
+    "method": "gptq",
+    "bits": 2,
+    "group_size": 32,
+    "sym": true,
+    "desc_act": false,
+    "scale_search": "activation",
+    "act_group_aware": true,
+    "mse": 2.0,
+    "packing": "GPU packer with floating-point round and clamp before integer conversion"
+  },
+  "calibration": {
+    "dataset": "/monster/data/model/dataset/nm-calibration",
+    "config": "LLM",
+    "selection": "first 512 rows",
+    "sort": "desc",
+    "concat_size": null,
+    "batch_size": 1,
+    "selected_text_sha256": "a89c5ed40152f435d5102657166cb72399603042596c57dd2f1095724ad8f59d",
+    "non_padding_tokens": 181796
+  },
+  "eora": {
+    "ranks": [
+      32,
+      64,
+      128,
+      256
+    ],
+    "algorithms": [
+      "exact",
+      "auto",
+      "lowrank"
+    ],
+    "configured_default": "lowrank",
+    "cholesky": true,
+    "adapted_modules": 252,
+    "saved_factor_tensors_per_adapter": 504,
+    "factor_dtype": "bfloat16",
+    "rank_storage": {
+      "32": {
+        "total_factor_elements": 87293952,
+        "weights_bytes": 174656040,
+        "combined_tensor_bytes": 4894846688,
+        "effective_bits_per_base_parameter": 4.780861764284862
+      },
+      "64": {
+        "total_factor_elements": 174587904,
+        "weights_bytes": 349244256,
+        "combined_tensor_bytes": 5069434904,
+        "effective_bits_per_base_parameter": 4.951384393403232
+      },
+      "128": {
+        "total_factor_elements": 349175808,
+        "weights_bytes": 698420736,
+        "combined_tensor_bytes": 5418611384,
+        "effective_bits_per_base_parameter": 5.292429698522209
+      },
+      "256": {
+        "total_factor_elements": 698351616,
+        "weights_bytes": 1396772720,
+        "combined_tensor_bytes": 6116963368,
+        "effective_bits_per_base_parameter": 5.974519355488003
+      }
+    }
+  },
+  "evaluation": {
+    "framework": "Evalution",
+    "version": "0.0.9",
+    "batch_size": 16,
+    "apply_chat_template": false,
+    "seed": 898,
+    "do_sample": false,
+    "max_new_tokens": 256,
+    "tasks": {
+      "arc_challenge": {
+        "backend": "gptq_torch",
+        "examples": 1172,
+        "metrics": [
+          "accuracy,loglikelihood",
+          "accuracy,loglikelihood_norm"
+        ]
+      },
+      "gsm8k_platinum_cot": {
+        "backend": "gptq_torch",
+        "examples": 1209,
+        "metric": "acc,num",
+        "invalid_answer_sentinel": "[invalid]"
+      }
+    }
+  },
+  "hardware": {
+    "driver": "610.43.02",
+    "device_family": "NVIDIA PG506-230/232",
+    "compute_capability": "8.0",
+    "sm_count": 124,
+    "memory_bytes": 102191202304,
+    "physical_gpu_assignments": {
+      "0": {
+        "pci_bus_id": "00000000:25:00.0",
+        "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+        "work": [
+          "base_quant",
+          "rank32_exact",
+          "rank128_exact"
+        ]
+      },
+      "1": {
+        "pci_bus_id": "00000000:2B:00.0",
+        "uuid": "GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855",
+        "work": [
+          "rank32_auto",
+          "rank128_auto"
+        ]
+      },
+      "2": {
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8",
+        "work": [
+          "rank32_lowrank",
+          "rank128_lowrank"
+        ]
+      },
+      "3": {
+        "pci_bus_id": "00000000:69:00.0",
+        "uuid": "GPU-471ecdd7-a171-4d5c-d61f-a1802dc76e4c",
+        "work": [
+          "rank64_exact",
+          "rank256_exact"
+        ]
+      },
+      "4": {
+        "pci_bus_id": "00000000:A0:00.0",
+        "uuid": "GPU-14ab23f1-a785-e9df-bbb5-215547154e3c",
+        "work": [
+          "rank64_auto",
+          "rank256_auto"
+        ]
+      },
+      "5": {
+        "pci_bus_id": "00000000:A5:00.0",
+        "uuid": "GPU-3a4bf14f-fa28-df88-f6e8-00ef6b13d473",
+        "work": [
+          "rank64_lowrank",
+          "rank256_lowrank"
+        ]
+      }
+    }
+  },
+  "software": {
+    "python": "3.14.5 free-threading",
+    "torch": "2.13.0+cu130",
+    "cuda_runtime": "13.0",
+    "transformers": "5.14.1",
+    "datasets": "4.8.3",
+    "evalution": "0.0.9",
+    "gptqmodel": "7.3.1+ultra"
+  },
+  "storage": {
+    "dense_base_parameter_count": 8190735360,
+    "quantized_model_tensor_bytes": 4720190648,
+    "base_effective_bits_per_parameter": 4.610272890564981,
+    "decimal_mb_divisor": 1000000
+  },
+  "base_quant": {
+    "rank_label": 128,
+    "arc_correct": 405,
+    "arc_score": 0.3455631399317406,
+    "arc_norm_correct": 414,
+    "arc_norm_score": 0.3532423208191126,
+    "gsm_correct": 495,
+    "gsm_score": 0.4094292803970223,
+    "gsm_sample_count": 1209,
+    "gsm_invalid_outputs": 9,
+    "arc_eval_seconds": 62.174192822072655,
+    "gsm_eval_seconds": 3873.336349388119
+  },
+  "results": [
+    {
+      "variant": "exact",
+      "rank": 32,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank32-svd-exact",
+      "generation_seconds": 837.0303473807871,
+      "weights_bytes": 174656040,
+      "arc_correct": 419,
+      "arc_score": 0.3575085324232082,
+      "arc_norm_correct": 445,
+      "arc_norm_score": 0.3796928327645051,
+      "gsm_correct": 589,
+      "gsm_score": 0.48717948717948717,
+      "gsm_invalid_outputs": 5,
+      "arc_eval_seconds": 67.28320555016398,
+      "gsm_eval_seconds": 3831.7171466802247
+    },
+    {
+      "variant": "auto",
+      "rank": 32,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank32-svd-auto",
+      "generation_seconds": 589.7063024989329,
+      "weights_bytes": 174656040,
+      "arc_correct": 424,
+      "arc_score": 0.36177474402730375,
+      "arc_norm_correct": 444,
+      "arc_norm_score": 0.378839590443686,
+      "gsm_correct": 585,
+      "gsm_score": 0.4838709677419355,
+      "gsm_invalid_outputs": 4,
+      "arc_eval_seconds": 64.40824294602498,
+      "gsm_eval_seconds": 3816.1589221819304
+    },
+    {
+      "variant": "lowrank",
+      "rank": 32,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank32-svd-lowrank",
+      "generation_seconds": 518.7066182768904,
+      "weights_bytes": 174656040,
+      "arc_correct": 425,
+      "arc_score": 0.3626279863481229,
+      "arc_norm_correct": 445,
+      "arc_norm_score": 0.3796928327645051,
+      "gsm_correct": 583,
+      "gsm_score": 0.48221670802315963,
+      "gsm_invalid_outputs": 5,
+      "arc_eval_seconds": 64.54707568790764,
+      "gsm_eval_seconds": 3791.0933901169337
+    },
+    {
+      "variant": "exact",
+      "rank": 64,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank64-svd-exact",
+      "generation_seconds": 851.0259373979643,
+      "weights_bytes": 349244256,
+      "arc_correct": 422,
+      "arc_score": 0.36006825938566556,
+      "arc_norm_correct": 452,
+      "arc_norm_score": 0.3856655290102389,
+      "gsm_correct": 638,
+      "gsm_score": 0.5277088502894954,
+      "gsm_invalid_outputs": 3,
+      "arc_eval_seconds": 63.83390802703798,
+      "gsm_eval_seconds": 3949.3198462929577
+    },
+    {
+      "variant": "auto",
+      "rank": 64,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank64-svd-auto",
+      "generation_seconds": 561.3941159336828,
+      "weights_bytes": 349244256,
+      "arc_correct": 427,
+      "arc_score": 0.3643344709897611,
+      "arc_norm_correct": 457,
+      "arc_norm_score": 0.38993174061433444,
+      "gsm_correct": 639,
+      "gsm_score": 0.5285359801488834,
+      "gsm_invalid_outputs": 2,
+      "arc_eval_seconds": 64.71494481991976,
+      "gsm_eval_seconds": 3756.7429942288436
+    },
+    {
+      "variant": "lowrank",
+      "rank": 64,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank64-svd-lowrank",
+      "generation_seconds": 521.4730759230442,
+      "weights_bytes": 349244256,
+      "arc_correct": 427,
+      "arc_score": 0.3643344709897611,
+      "arc_norm_correct": 449,
+      "arc_norm_score": 0.38310580204778155,
+      "gsm_correct": 641,
+      "gsm_score": 0.5301902398676592,
+      "gsm_invalid_outputs": 2,
+      "arc_eval_seconds": 63.03152848593891,
+      "gsm_eval_seconds": 3879.380405225791
+    },
+    {
+      "variant": "exact",
+      "rank": 128,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank128-svd-exact",
+      "generation_seconds": 856.2078119996004,
+      "weights_bytes": 698420736,
+      "arc_correct": 440,
+      "arc_score": 0.37542662116040953,
+      "arc_norm_correct": 471,
+      "arc_norm_score": 0.40187713310580203,
+      "gsm_correct": 710,
+      "gsm_score": 0.587262200165426,
+      "gsm_invalid_outputs": 1,
+      "arc_eval_seconds": 63.46585972234607,
+      "gsm_eval_seconds": 4021.3469925979152
+    },
+    {
+      "variant": "auto",
+      "rank": 128,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank128-svd-auto",
+      "generation_seconds": 564.7560999407433,
+      "weights_bytes": 698420736,
+      "arc_correct": 434,
+      "arc_score": 0.3703071672354949,
+      "arc_norm_correct": 470,
+      "arc_norm_score": 0.40102389078498296,
+      "gsm_correct": 707,
+      "gsm_score": 0.5847808105872622,
+      "gsm_invalid_outputs": 2,
+      "arc_eval_seconds": 63.33034264203161,
+      "gsm_eval_seconds": 3599.677889188286
+    },
+    {
+      "variant": "lowrank",
+      "rank": 128,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank128-svd-lowrank",
+      "generation_seconds": 524.0578436129726,
+      "weights_bytes": 698420736,
+      "arc_correct": 444,
+      "arc_score": 0.378839590443686,
+      "arc_norm_correct": 465,
+      "arc_norm_score": 0.3967576791808874,
+      "gsm_correct": 701,
+      "gsm_score": 0.5798180314309347,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 65.33597470121458,
+      "gsm_eval_seconds": 3666.9715178250335
+    },
+    {
+      "variant": "exact",
+      "rank": 256,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank256-svd-exact",
+      "generation_seconds": 863.8273830721155,
+      "weights_bytes": 1396772720,
+      "arc_correct": 455,
+      "arc_score": 0.38822525597269625,
+      "arc_norm_correct": 481,
+      "arc_norm_score": 0.4104095563139932,
+      "gsm_correct": 784,
+      "gsm_score": 0.6484698097601324,
+      "gsm_invalid_outputs": 2,
+      "arc_eval_seconds": 66.13240058813244,
+      "gsm_eval_seconds": 3772.406600929331
+    },
+    {
+      "variant": "auto",
+      "rank": 256,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank256-svd-auto",
+      "generation_seconds": 571.4098538290709,
+      "weights_bytes": 1396772720,
+      "arc_correct": 460,
+      "arc_score": 0.3924914675767918,
+      "arc_norm_correct": 483,
+      "arc_norm_score": 0.4121160409556314,
+      "gsm_correct": 787,
+      "gsm_score": 0.6509511993382961,
+      "gsm_invalid_outputs": 3,
+      "arc_eval_seconds": 61.39694306626916,
+      "gsm_eval_seconds": 3748.4555545467883
+    },
+    {
+      "variant": "lowrank",
+      "rank": 256,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped/eora-rank256-svd-lowrank",
+      "generation_seconds": 541.6898338058963,
+      "weights_bytes": 1396772720,
+      "arc_correct": 452,
+      "arc_score": 0.3856655290102389,
+      "arc_norm_correct": 478,
+      "arc_norm_score": 0.40784982935153585,
+      "gsm_correct": 806,
+      "gsm_score": 0.6666666666666666,
+      "gsm_invalid_outputs": 2,
+      "arc_eval_seconds": 62.774530675727874,
+      "gsm_eval_seconds": 3762.6254048510455
+    }
+  ]
+}

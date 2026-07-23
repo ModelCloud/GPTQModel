@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Quantize Qwen3-8B with GPTQ+EoRA and validate it with Evalution.
+"""Quantize Qwen3-8B with GPTQ, optionally generate EoRA, and validate it with Evalution.
 
-This is an operational run harness, not a unit test.  One process owns one
-CUDA-visible device and one output directory so the two requested arms can run
+This is an operational run harness, not a unit test. One process owns one
+CUDA-visible device and one output directory so independent arms can run
 concurrently without sharing mutable model or adapter state.
 """
 
@@ -55,7 +55,7 @@ from transformers import AutoModelForCausalLM
 from transformers.utils import is_flash_attn_2_available
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, ScaleSearchConfig
-from gptqmodel.adapter.adapter import Lora
+from gptqmodel.adapter.adapter import EoRAConfig, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import GcMode
@@ -119,15 +119,51 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--physical-gpu", required=True, type=int)
     parser.add_argument("--expected-pci-bus", required=True)
     parser.add_argument("--expected-uuid", required=True)
-    parser.add_argument("--bits", required=True, type=int, choices=(3, 4))
-    parser.add_argument("--group-size", required=True, type=int, choices=(64, 128))
+    parser.add_argument("--bits", required=True, type=int, choices=(2, 3, 4))
+    parser.add_argument("--group-size", required=True, type=int, choices=(32, 64, 128))
     parser.add_argument("--scale-search", required=True, choices=("activation", "disabled"))
     parser.add_argument("--gar", required=True, choices=("enabled", "disabled"))
+    parser.add_argument("--eora", choices=("enabled", "disabled"), default="enabled")
+    parser.add_argument(
+        "--eora-zero-correction",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Diagnostic control: retain the joint EoRA lifecycle but force every generated B @ A correction to zero.",
+    )
+    parser.add_argument(
+        "--static-groups",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Precompute group quantizers from the original weights before sequential GPTQ error feedback.",
+    )
+    parser.add_argument(
+        "--quantization-diagnostics",
+        choices=("off", "auto", "channel"),
+        default="auto",
+        help="Quantization-time anomaly diagnostics; channel additionally scans every scale tensor.",
+    )
+    parser.add_argument("--pack-impl", choices=("cpu", "gpu", "original"), default="cpu")
     parser.add_argument("--eval-backend", required=True, choices=("marlin", "torch"))
+    parser.add_argument("--eval-task", action="append", choices=TASKS)
+    parser.add_argument("--eval-max-rows", type=int)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--eval-batch-size", type=int, default=16)
     parser.add_argument("--stage", choices=("all", "quantize", "eval"), default="all")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.eval_max_rows is not None and args.eval_max_rows <= 0:
+        parser.error("--eval-max-rows must be positive")
+    if args.eora_zero_correction and args.eora != "enabled":
+        parser.error("--eora-zero-correction requires --eora enabled")
+    return args
+
+
+def requested_eval_tasks(args: argparse.Namespace) -> tuple[str, ...]:
+    return tuple(args.eval_task) if args.eval_task else TASKS
+
+
+def evaluation_result_path(output: Path, task: str, max_rows: int | None) -> Path:
+    suffix = "" if max_rows is None else f".maxrows{max_rows}"
+    return output / "evalution" / f"{task}{suffix}.json"
 
 
 def assert_device(args: argparse.Namespace) -> dict[str, Any]:
@@ -245,7 +281,15 @@ def build_quant_config(args: argparse.Namespace, adapter_dir: Path) -> QuantizeC
     scale_search = (
         ScaleSearchConfig.ACTIVATION if args.scale_search == "activation" else None
     )
-    adapter = Lora(rank=EORA_RANK, path=str(adapter_dir))
+    adapter = (
+        Lora(
+            rank=EORA_RANK,
+            path=str(adapter_dir),
+            eora_config=EoRAConfig(algo="lowrank"),
+        )
+        if args.eora == "enabled"
+        else None
+    )
     return QuantizeConfig(
         quant_method=METHOD.GPTQ,
         format=FORMAT.GPTQ,
@@ -256,8 +300,10 @@ def build_quant_config(args: argparse.Namespace, adapter_dir: Path) -> QuantizeC
         act_group_aware=args.gar == "enabled",
         scale_search=scale_search,
         mse=2.0 if scale_search is not None else 0.0,
+        static_groups=args.static_groups,
+        quantization_diagnostics=args.quantization_diagnostics,
         adapter=adapter,
-        pack_impl="cpu",
+        pack_impl=args.pack_impl,
         gc_mode=GcMode.ON_STAGE_END,
         # GPTQ and EoRA share processor/module state.  On this Python 3.14t
         # runtime, overlapping layer N finalizers with layer N+1 quantization
@@ -280,14 +326,14 @@ def package_versions() -> dict[str, Any]:
     }
 
 
-def artifact_complete(output: Path, adapter_dir: Path) -> bool:
+def artifact_complete(args: argparse.Namespace, output: Path, adapter_dir: Path) -> bool:
     model_files = sorted(output.glob("*.safetensors"))
-    return (
-        (output / "config.json").is_file()
-        and bool(model_files)
-        and (adapter_dir / "adapter_config.json").is_file()
-        and (adapter_dir / "adapter_model.safetensors").is_file()
-    )
+    model_complete = (output / "config.json").is_file() and bool(model_files)
+    if args.eora == "disabled":
+        return model_complete
+    return model_complete and (adapter_dir / "adapter_config.json").is_file() and (
+        adapter_dir / "adapter_model.safetensors"
+    ).is_file()
 
 
 def summarize_adapter(adapter_dir: Path) -> dict[str, Any]:
@@ -340,7 +386,7 @@ def summarize_model_artifact(output: Path) -> dict[str, Any]:
 
 
 def validate_saved_metadata(args: argparse.Namespace, output: Path, adapter_dir: Path) -> dict[str, Any]:
-    if not artifact_complete(output, adapter_dir):
+    if not artifact_complete(args, output, adapter_dir):
         raise RuntimeError(f"Saved artifact is incomplete: {output}")
 
     config = json.loads((output / "config.json").read_text())
@@ -354,6 +400,7 @@ def validate_saved_metadata(args: argparse.Namespace, output: Path, adapter_dir:
         "sym": True,
         "desc_act": False,
         "act_group_aware": args.gar == "enabled",
+        "static_groups": args.static_groups,
         "scale_search": "activation" if args.scale_search == "activation" else None,
         "wait_for_submodule_finalizers": True,
         "gc_mode": "on_stage_end",
@@ -369,11 +416,9 @@ def validate_saved_metadata(args: argparse.Namespace, output: Path, adapter_dir:
     if mismatches:
         raise RuntimeError(f"Saved quantization metadata mismatch: {mismatches}")
 
-    adapter_summary = summarize_adapter(adapter_dir)
-    if adapter_summary["observed_ranks"] != [EORA_RANK]:
-        raise RuntimeError(
-            f"Expected only EoRA rank {EORA_RANK}, observed {adapter_summary['observed_ranks']}"
-        )
+    adapter_summary = summarize_adapter(adapter_dir) if args.eora == "enabled" else None
+    if adapter_summary is not None and adapter_summary["observed_ranks"] != [EORA_RANK]:
+        raise RuntimeError(f"Expected only EoRA rank {EORA_RANK}, observed {adapter_summary['observed_ranks']}")
     return {
         "expected": expected,
         "adapter": adapter_summary,
@@ -381,12 +426,38 @@ def validate_saved_metadata(args: argparse.Namespace, output: Path, adapter_dir:
     }
 
 
+def install_zero_eora_correction_control() -> None:
+    """Replace EoRA factor generation with shape-correct zeros for one diagnostic process."""
+
+    from gptqmodel.looper import eora_processor as eora_processor_module
+
+    def zero_eora_compute_lora(
+        *,
+        w_wq_delta: torch.Tensor,
+        name: str,
+        eigen_scaling_diag_matrix: torch.Tensor,
+        rank: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        use_cholesky: bool,
+        eora_config: EoRAConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del name, eigen_scaling_diag_matrix, use_cholesky, eora_config
+        output_features, input_features = w_wq_delta.shape
+        return (
+            torch.zeros((rank, input_features), dtype=dtype, device=device),
+            torch.zeros((output_features, rank), dtype=dtype, device=device),
+        )
+
+    eora_processor_module.eora_compute_lora = zero_eora_compute_lora
+
+
 def quantize(args: argparse.Namespace, output: Path, adapter_dir: Path, manifest: dict[str, Any]) -> None:
     quant_marker = output / "quantization_complete.json"
     if quant_marker.is_file():
         print(f"[{args.label}] Quantization marker exists; reusing {output}", flush=True)
         return
-    if artifact_complete(output, adapter_dir):
+    if artifact_complete(args, output, adapter_dir):
         validation = validate_saved_metadata(args, output, adapter_dir)
         write_json(
             quant_marker,
@@ -400,7 +471,7 @@ def quantize(args: argparse.Namespace, output: Path, adapter_dir: Path, manifest
         return
 
     partial_model_files = list(output.glob("*.safetensors"))
-    partial_adapter_files = list(adapter_dir.glob("*")) if adapter_dir.exists() else []
+    partial_adapter_files = list(adapter_dir.glob("*")) if args.eora == "enabled" and adapter_dir.exists() else []
     if partial_model_files or partial_adapter_files:
         raise RuntimeError(
             f"Refusing to overwrite partial artifacts in {output}; model={partial_model_files}, "
@@ -410,6 +481,8 @@ def quantize(args: argparse.Namespace, output: Path, adapter_dir: Path, manifest
     calibration, calibration_metadata = load_calibration()
     manifest["calibration"] = calibration_metadata
     quant_config = build_quant_config(args, adapter_dir)
+    if args.eora_zero_correction:
+        install_zero_eora_correction_control()
     manifest["quantization_config"] = quant_config.to_dict()
     write_json(output / "run_manifest.json", manifest)
 
@@ -430,7 +503,9 @@ def quantize(args: argparse.Namespace, output: Path, adapter_dir: Path, manifest
 
     print(
         f"[{args.label}] Quantizing {args.bits}-bit/group-{args.group_size}; "
-        f"scale_search={args.scale_search}, GAR={args.gar}, EoRA rank={EORA_RANK}",
+        f"scale_search={args.scale_search}, GAR={args.gar}, EoRA={args.eora}, "
+        f"zero_correction={args.eora_zero_correction}, static_groups={args.static_groups}, "
+        f"diagnostics={args.quantization_diagnostics}",
         flush=True,
     )
     quant_started = time.perf_counter()
@@ -444,7 +519,7 @@ def quantize(args: argparse.Namespace, output: Path, adapter_dir: Path, manifest
     )
     quant_wall_s = time.perf_counter() - quant_started
 
-    print(f"[{args.label}] Saving quantized model and EoRA adapter to {output}", flush=True)
+    print(f"[{args.label}] Saving quantized model (EoRA={args.eora}) to {output}", flush=True)
     save_started = time.perf_counter()
     model.save(str(output))
     save_wall_s = time.perf_counter() - save_started
@@ -512,7 +587,11 @@ def validate_loaded_runtime(
             if getattr(module, "adapter", None) is not None
         }
     )
-    if bad_bits or bad_groups or missing_adapters or adapter_ranks != [EORA_RANK]:
+    adapter_contract_failed = (
+        (args.eora == "enabled" and (missing_adapters or adapter_ranks != [EORA_RANK]))
+        or (args.eora == "disabled" and len(missing_adapters) != len(modules))
+    )
+    if bad_bits or bad_groups or adapter_contract_failed:
         raise RuntimeError(
             "Reloaded module contract failed: "
             f"bad_bits={bad_bits[:3]}, bad_groups={bad_groups[:3]}, "
@@ -562,6 +641,7 @@ def validate_loaded_runtime(
 
 
 def dense_reference(
+    args: argparse.Namespace,
     output: Path,
     quant_logits: torch.Tensor,
     encoded: dict[str, torch.Tensor],
@@ -597,7 +677,7 @@ def dense_reference(
     top5_overlap = len(set(dense_top5[0].tolist()) & set(quant_top5[0].tolist()))
     result = {
         "reference": "dense BF16 base Qwen3-8B",
-        "candidate": "quantized GPTQ plus EoRA rank 128",
+        "candidate": "quantized GPTQ plus EoRA rank 128" if args.eora == "enabled" else "native GPTQ without EoRA",
         "scope": "last-token logits for the runtime smoke prompt",
         "load_and_forward_wall_s": wall_s,
         "dense_dtype": str(next(dense.parameters()).dtype),
@@ -627,8 +707,8 @@ def evaluate_tasks(
     summaries = {}
     backend = BACKEND.MARLIN if args.eval_backend == "marlin" else BACKEND.GPTQ_TORCH
 
-    for task in TASKS:
-        result_path = evaluation_dir / f"{task}.json"
+    for task in requested_eval_tasks(args):
+        result_path = evaluation_result_path(output, task, args.eval_max_rows)
         if result_path.is_file():
             existing = json.loads(result_path.read_text())
             summaries[task] = existing["metrics"]
@@ -636,7 +716,8 @@ def evaluate_tasks(
             continue
 
         print(
-            f"[{args.label}] Evalution starting full task={task}, batch_size={args.eval_batch_size}",
+            f"[{args.label}] Evalution starting task={task}, max_rows={args.eval_max_rows}, "
+            f"batch_size={args.eval_batch_size}",
             flush=True,
         )
         started = time.perf_counter()
@@ -648,6 +729,7 @@ def evaluate_tasks(
             model_args={"device": "cuda:0", "seed": SEED, "random_seed": SEED},
             apply_chat_template=False,
             gen_kwargs="do_sample=false,temperature=0.0,top_p=1.0,top_k=50,max_new_tokens=256",
+            suite_kwargs={"max_rows": args.eval_max_rows} if args.eval_max_rows is not None else {},
         )
         wall_s = time.perf_counter() - started
         task_metrics = get_eval_task_results(result).get(task, {})
@@ -661,8 +743,8 @@ def evaluate_tasks(
             result_path,
             {
                 "task": task,
-                "full_dataset": True,
-                "max_rows": None,
+                "full_dataset": args.eval_max_rows is None,
+                "max_rows": args.eval_max_rows,
                 "batch_size": args.eval_batch_size,
                 "apply_chat_template": False,
                 "wall_s": wall_s,
@@ -675,7 +757,11 @@ def evaluate_tasks(
         torch_empty_cache()
 
     write_json(
-        output / "evaluation_complete.json",
+        output / (
+            "evaluation_complete.json"
+            if args.eval_max_rows is None
+            else f"evaluation_complete.maxrows{args.eval_max_rows}.json"
+        ),
         {
             "completed_at": utc_now(),
             "backend": args.eval_backend,
@@ -688,10 +774,10 @@ def evaluate_tasks(
 def run_evaluation(args: argparse.Namespace, output: Path, adapter_dir: Path) -> None:
     validate_saved_metadata(args, output, adapter_dir)
     backend = BACKEND.MARLIN if args.eval_backend == "marlin" else BACKEND.GPTQ_TORCH
-    adapter = Lora(rank=EORA_RANK, path=str(adapter_dir))
+    adapter = Lora(rank=EORA_RANK, path=str(adapter_dir)) if args.eora == "enabled" else None
     attention = "flash_attention_2" if is_flash_attn_2_available() else "eager"
     print(
-        f"[{args.label}] Reloading saved model with backend={backend.value}, EoRA={adapter_dir}",
+        f"[{args.label}] Reloading saved model with backend={backend.value}, EoRA={args.eora}",
         flush=True,
     )
     load_started = time.perf_counter()
@@ -711,7 +797,7 @@ def run_evaluation(args: argparse.Namespace, output: Path, adapter_dir: Path) ->
     write_json(output / "runtime_smoke.json", runtime)
 
     if not (output / "dense_reference.json").is_file():
-        dense_reference(output, quant_logits, encoded)
+        dense_reference(args, output, quant_logits, encoded)
     else:
         print(f"[{args.label}] Reusing dense-reference comparison", flush=True)
     del quant_logits, encoded
@@ -745,7 +831,7 @@ def main() -> None:
         "base_model": str(BASE_MODEL),
         "base_model_config": json.loads((BASE_MODEL / "config.json").read_text()),
         "output": str(output),
-        "adapter_output": str(adapter_dir),
+        "adapter_output": str(adapter_dir) if args.eora == "enabled" else None,
         "gpu": gpu,
         "versions": package_versions(),
         "environment": {
@@ -776,9 +862,9 @@ def main() -> None:
         "arguments": vars(args),
         "evaluation": {
             "framework": "Evalution",
-            "tasks": list(TASKS),
-            "full_dataset": True,
-            "max_rows": None,
+            "tasks": list(requested_eval_tasks(args)),
+            "full_dataset": args.eval_max_rows is None,
+            "max_rows": args.eval_max_rows,
             "apply_chat_template": False,
             "batch_size": args.eval_batch_size,
             "seed": SEED,
@@ -787,14 +873,16 @@ def main() -> None:
     manifest_path = output / "run_manifest.json"
     if manifest_path.is_file():
         existing_manifest = json.loads(manifest_path.read_text())
+        existing_manifest.setdefault("quantization_gpu", existing_manifest.get("gpu"))
         existing_manifest["last_invocation_at"] = utc_now()
         existing_manifest["last_invocation_arguments"] = vars(args)
+        existing_manifest["last_invocation_gpu"] = manifest["gpu"]
         existing_manifest["environment"] = manifest["environment"]
         existing_manifest["cpu_threads"] = manifest["cpu_threads"]
         existing_manifest["device_pool_workers"] = manifest["device_pool_workers"]
-        existing_manifest["gpu"] = manifest["gpu"]
         existing_manifest["versions"] = manifest["versions"]
-        existing_manifest["nvidia_smi"] = manifest["nvidia_smi"]
+        existing_manifest["last_invocation_nvidia_smi"] = manifest["nvidia_smi"]
+        existing_manifest["evaluation"] = manifest["evaluation"]
         manifest = existing_manifest
     write_json(manifest_path, manifest)
 

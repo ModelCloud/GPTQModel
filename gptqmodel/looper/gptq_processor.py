@@ -28,6 +28,16 @@ from ..quantization.config import (
     normalize_scale_search,
     resolve_quant_format,
 )
+from ..quantization.diagnostics import (
+    QuantizationDiagnosticsMode,
+    analyze_quantization_losses,
+    analyze_scale_channels,
+    compare_quant_code_samples,
+    resolve_quantization_diagnostics_mode,
+    sample_packed_quant_codes,
+    sample_reconstructed_quant_codes,
+    summarize_quant_code_fingerprints,
+)
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.device import get_device
@@ -37,6 +47,19 @@ from ..utils.torch import HAS_NPU
 
 log = setup_logger()
 lock = threading.Lock()
+
+
+def snapshot_eora_reconstructed_weight(weight: torch.Tensor) -> torch.Tensor:
+    """Keep EoRA's reconstructed weight independent from module rematerialization.
+
+    Sequential processors can reload the dense checkpoint into the module's
+    parameter storage before EoRA runs. A plain tensor alias would then stop
+    containing GPTQ's reconstruction and make the base packer derive different
+    logical codes. The CPU copy also avoids retaining a second full weight on
+    the quantization device.
+    """
+
+    return weight.detach().to(device=CPU, copy=True)
 
 
 def log_scale_search_config(qcfg: QuantizeConfig) -> str:
@@ -56,7 +79,7 @@ def clone_gptq_config_for_module(
     """Clones and applies per-module GPTQ dynamic overrides, or skips the module."""
 
     # entire module is skipped
-    if qcfg.dynamic_get(layer_name=module_full_name) == False:
+    if qcfg.dynamic_get(layer_name=module_full_name) is False:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
@@ -163,6 +186,16 @@ class GPTQProcessor(LoopProcessor):
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
+        self.quantization_diagnostics_mode = resolve_quantization_diagnostics_mode(
+            qcfg.quantization_diagnostics
+        )
+        self._scale_channel_diagnostics = []
+        self._code_fingerprint_diagnostics = []
+        log.info(
+            "Quantization diagnostics: mode=%s; auto=module-loss summary, "
+            "channel=scale-channel scan plus sampled code-lifecycle fingerprints",
+            self.quantization_diagnostics_mode.value,
+        )
         # Preserve per-sample keep-mask semantics when batch quantization uses
         # padded calibration rows. GPTQ then consumes the original [B, S, H]
         # activations and applies the current batch mask itself.
@@ -537,7 +570,7 @@ class GPTQProcessor(LoopProcessor):
 
         # gptq has no dynamic method of full override (removal)
         t = self.tasks.get(module.name, False)
-        if t == False:
+        if t is False:
             return True
         else:
             return False
@@ -672,6 +705,28 @@ class GPTQProcessor(LoopProcessor):
 
         workspace_summary = getattr(g, "_borrow_workspace_last_summary", None)
         workspace_totals = getattr(g, "_borrow_workspace_totals", None)
+        scale_channel_summary = None
+        if self.quantization_diagnostics_mode == QuantizationDiagnosticsMode.CHANNEL:
+            scale_channel_summary = analyze_scale_channels(q_scales)
+            scale_channel_summary.update(
+                {
+                    PROCESS_LOG_LAYER: module.layer_index,
+                    PROCESS_LOG_MODULE: module.name,
+                }
+            )
+            with self.lock:
+                self._scale_channel_diagnostics.append(scale_channel_summary)
+            code_fingerprint = sample_reconstructed_quant_codes(
+                wq,
+                q_scales,
+                q_zeros,
+                q_g_idx,
+                bits=int(getattr(g.qcfg, "runtime_bits", g.qcfg.bits)),
+            )
+            if code_fingerprint is not None:
+                code_fingerprint["bits"] = int(getattr(g.qcfg, "runtime_bits", g.qcfg.bits))
+                with self.lock:
+                    module.state["_quant_code_fingerprint"] = code_fingerprint
 
         module.stream_state_payload_to_cpu(
             {
@@ -747,6 +802,13 @@ class GPTQProcessor(LoopProcessor):
                 )
                 stat["workspace_total_requests"] = str(total_requests)
                 stat["workspace_total_hit_rate"] = f"{cumulative_hit_rate:.1%}"
+        if scale_channel_summary is not None:
+            stat["scale_max"] = f"{scale_channel_summary['max_scale']:.6g}"
+            stat["scale_p99"] = f"{scale_channel_summary['p99_channel_max_scale']:.6g}"
+            stat["scale_max_channel"] = str(scale_channel_summary["max_scale_output_channel"])
+            ratio = scale_channel_summary["max_to_median_ratio"]
+            stat["scale_max/median"] = f"{ratio:.3f}" if ratio is not None else "n/a"
+            stat["scale_nonfinite"] = str(scale_channel_summary["nonfinite_scale_count"])
 
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
@@ -775,7 +837,10 @@ class GPTQProcessor(LoopProcessor):
             # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
             if self.calculate_w_wq_diff:
                 module.state.update({
-                    "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
+                    # The following EoRA pass rematerializes the dense module.
+                    # Preserve GPTQ's reconstructed weight in independent
+                    # storage before exposing ``wq`` through the parameter.
+                    "wq": snapshot_eora_reconstructed_weight(wq),
                 })
 
         # single largest deallocation of vram happens here
@@ -802,6 +867,7 @@ class GPTQProcessor(LoopProcessor):
             q_zeros = module.state.pop("q_zeros").clone()
             q_scales = module.state.pop("q_scales").clone()
             q_g_idx = module.state.pop("q_g_idx").clone()
+            code_fingerprint = module.state.pop("_quant_code_fingerprint", None)
 
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
@@ -810,6 +876,21 @@ class GPTQProcessor(LoopProcessor):
         layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
+        prepack_comparison = None
+        if code_fingerprint is not None:
+            prepack_sample = sample_reconstructed_quant_codes(
+                module.weight.data,
+                q_scales,
+                q_zeros,
+                q_g_idx,
+                bits=code_fingerprint["bits"],
+                input_indexes=code_fingerprint["input_indexes"],
+                output_indexes=code_fingerprint["output_indexes"],
+            )
+            prepack_comparison = compare_quant_code_samples(
+                code_fingerprint["codes"],
+                prepack_sample["codes"] if prepack_sample is not None else None,
+            )
 
         # replace module with quantized module
         timer = getattr(model, "quant_region_timer", None)
@@ -875,6 +956,37 @@ class GPTQProcessor(LoopProcessor):
                 source=f"{module_label} [{packer_label or 'module.pack_original'}]",
             )
 
+        if code_fingerprint is not None:
+            quantized_module = qModules.get(module.full_name)
+            packed_sample = (
+                sample_packed_quant_codes(
+                    quantized_module.qweight,
+                    bits=code_fingerprint["bits"],
+                    input_indexes=code_fingerprint["input_indexes"],
+                    output_indexes=code_fingerprint["output_indexes"],
+                )
+                if quantized_module is not None
+                else None
+            )
+            packed_comparison = compare_quant_code_samples(code_fingerprint["codes"], packed_sample)
+            record = {
+                PROCESS_LOG_LAYER: module.layer_index,
+                PROCESS_LOG_MODULE: module.name,
+                "post_gptq": {
+                    key: code_fingerprint[key]
+                    for key in (
+                        "sample_code_count",
+                        "nonfinite_count",
+                        "below_range_count",
+                        "above_range_count",
+                    )
+                },
+                "prepack": prepack_comparison,
+                "packed": packed_comparison,
+            }
+            with self.lock:
+                self._code_fingerprint_diagnostics.append(record)
+
         # TODO: store module quant results in module, not global processor result
         with self.lock:
             self.result_pop(module.full_name)
@@ -885,8 +997,94 @@ class GPTQProcessor(LoopProcessor):
     def finalize(self, model: BaseQModel, **kwargs):
         """Marks the model as GPTQ-quantized and runs shared finalization logic."""
 
-        # print("finalize")
-        # print_module_tree(model.model)
+        diagnostics = None
+        if self.quantization_diagnostics_mode != QuantizationDiagnosticsMode.OFF:
+            loss_summary = analyze_quantization_losses(self.log)
+            diagnostics = {
+                "mode": self.quantization_diagnostics_mode.value,
+                "loss": loss_summary,
+            }
+            top = loss_summary["top"]
+            if top:
+                worst = top[0]
+                log.info(
+                    "Quantization loss summary: modules=%d mean=%.10g median=%.10g max=%.10g "
+                    "layer=%s module=%s role_median_ratio=%.3fx total_share=%.2f%%",
+                    loss_summary["module_count"],
+                    loss_summary["mean_loss"],
+                    loss_summary["median_loss"],
+                    worst["loss"],
+                    worst["layer"],
+                    worst["module"],
+                    worst["role_median_ratio"] or 0.0,
+                    100.0 * worst["total_loss_share"],
+                )
+                if loss_summary["severe_concentration"]:
+                    log.warn(
+                        "Severe pre-pack quantization-loss concentration: layer=%s module=%s loss=%.10g "
+                        "is %.1fx the all-module mean and %.2f%% of total loss. Compare this module/channel against "
+                        "a higher-bit or dense reference before debugging packing or inference kernels.",
+                        worst["layer"],
+                        worst["module"],
+                        worst["loss"],
+                        loss_summary["max_to_mean_ratio"],
+                        100.0 * loss_summary["max_total_loss_share"],
+                    )
+
+            if self.quantization_diagnostics_mode == QuantizationDiagnosticsMode.CHANNEL:
+                channel_top = sorted(
+                    self._scale_channel_diagnostics,
+                    key=lambda item: item["max_scale"],
+                    reverse=True,
+                )[:5]
+                diagnostics["scale_channels"] = {
+                    "module_count": len(self._scale_channel_diagnostics),
+                    "top": channel_top,
+                }
+                for item in channel_top:
+                    ratio = item["max_to_median_ratio"]
+                    log.info(
+                        "Quantization scale-channel candidate: layer=%s module=%s output_channel=%d "
+                        "max_scale=%.6g p99=%.6g max/median=%s nonfinite=%d above_10=%d",
+                        item[PROCESS_LOG_LAYER],
+                        item[PROCESS_LOG_MODULE],
+                        item["max_scale_output_channel"],
+                        item["max_scale"],
+                        item["p99_channel_max_scale"],
+                        f"{ratio:.3f}x" if ratio is not None else "n/a",
+                        item["nonfinite_scale_count"],
+                        item["scale_count_above_10"],
+                    )
+                fingerprint_summary = summarize_quant_code_fingerprints(
+                    self._code_fingerprint_diagnostics
+                )
+                diagnostics["code_fingerprints"] = fingerprint_summary
+                log.info(
+                    "Quantization code fingerprints: modules=%d sampled_codes=%d "
+                    "post_gptq_to_prepack_mismatch=%d (%.4f%%) "
+                    "post_gptq_to_packed_mismatch=%d (%.4f%%)",
+                    fingerprint_summary["module_count"],
+                    fingerprint_summary["sample_code_count"],
+                    fingerprint_summary["prepack_mismatch_count"],
+                    100.0 * fingerprint_summary["prepack_mismatch_rate"],
+                    fingerprint_summary["packed_mismatch_count"],
+                    100.0 * fingerprint_summary["packed_mismatch_rate"],
+                )
+                if (
+                    fingerprint_summary["prepack_mismatch_count"]
+                    or fingerprint_summary["packed_mismatch_count"]
+                ):
+                    worst_fingerprint = fingerprint_summary["top"][0]
+                    log.warn(
+                        "Quantization code lifecycle mismatch: layer=%s module=%s "
+                        "prepack=%s packed=%s. The reconstructed weight changed after GPTQ or packing.",
+                        worst_fingerprint[PROCESS_LOG_LAYER],
+                        worst_fingerprint[PROCESS_LOG_MODULE],
+                        worst_fingerprint["prepack"]["mismatch_count"],
+                        worst_fingerprint["packed"]["mismatch_count"],
+                    )
+
+            model.quantization_diagnostics = diagnostics
 
         # set quantized state
         model.quantized = True

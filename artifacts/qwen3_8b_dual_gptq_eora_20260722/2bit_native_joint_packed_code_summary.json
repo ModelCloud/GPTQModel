@@ -1,0 +1,78 @@
+{
+  "reference": "Qwen3-8B-GPTQ-2bit-g32-activation-GAR-native-cal512-gpu-pack-clamped",
+  "candidate": "Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-cal512-gpu-pack-clamped",
+  "bits": 2,
+  "matched_packed_tensor_count": 252,
+  "exact_packed_tensor_count": 0,
+  "shape_or_dtype_mismatch_count": 0,
+  "packed_word_count": 434110464,
+  "packed_word_match_count": 92206985,
+  "packed_word_match_rate": 0.2124044284728414,
+  "code_count": 6945767424,
+  "code_mismatch_count": 850194241,
+  "code_mismatch_rate": 0.12240465150939094,
+  "mean_absolute_code_delta": 0.12293902385062065,
+  "maximum_absolute_code_delta": 3,
+  "scan_wall_s": 17.056792833842337,
+  "metadata": {
+    "scales": {
+      "matched_tensor_count": 252,
+      "exact_tensor_count": 252
+    },
+    "qzeros": {
+      "matched_tensor_count": 252,
+      "exact_tensor_count": 252
+    },
+    "g_idx": {
+      "matched_tensor_count": 252,
+      "exact_tensor_count": 252
+    }
+  },
+  "highest_code_mismatch_rates": [
+    {
+      "tensor": "model.layers.1.mlp.gate_proj.qweight",
+      "code_count": 50331648,
+      "code_mismatch_count": 10564040,
+      "code_mismatch_rate": 0.20988861719767252,
+      "mean_absolute_code_delta": 0.2216771443684896,
+      "maximum_absolute_code_delta": 3,
+      "packed_word_match_rate": 0.22716903686523438
+    },
+    {
+      "tensor": "model.layers.2.mlp.gate_proj.qweight",
+      "code_count": 50331648,
+      "code_mismatch_count": 10116554,
+      "code_mismatch_rate": 0.2009978691736857,
+      "mean_absolute_code_delta": 0.21336630980173746,
+      "maximum_absolute_code_delta": 3,
+      "packed_word_match_rate": 0.24940172831217447
+    },
+    {
+      "tensor": "model.layers.3.mlp.gate_proj.qweight",
+      "code_count": 50331648,
+      "code_mismatch_count": 9530552,
+      "code_mismatch_rate": 0.18935505549112955,
+      "mean_absolute_code_delta": 0.2006435990333557,
+      "maximum_absolute_code_delta": 3,
+      "packed_word_match_rate": 0.2432724634806315
+    },
+    {
+      "tensor": "model.layers.0.mlp.down_proj.qweight",
+      "code_count": 50331648,
+      "code_mismatch_count": 8627661,
+      "code_mismatch_rate": 0.17141622304916382,
+      "mean_absolute_code_delta": 0.1730052431424459,
+      "maximum_absolute_code_delta": 3,
+      "packed_word_match_rate": 0.11305777231852214
+    },
+    {
+      "tensor": "model.layers.0.mlp.gate_proj.qweight",
+      "code_count": 50331648,
+      "code_mismatch_count": 8199745,
+      "code_mismatch_rate": 0.1629142959912618,
+      "mean_absolute_code_delta": 0.163313627243042,
+      "maximum_absolute_code_delta": 3,
+      "packed_word_match_rate": 0.1317745844523112
+    }
+  ]
+}

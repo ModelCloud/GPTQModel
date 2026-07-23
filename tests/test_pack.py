@@ -3,8 +3,10 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+import os
 import time
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -170,3 +172,61 @@ class TestPackAccuracy(unittest.TestCase):
         self.assertTrue(torch.equal(pack_cpu["qzeros"], baseline["qzeros"]))
         self.assertTrue(torch.equal(pack_cpu["scales"], baseline["scales"]))
         self.assertTrue(torch.equal(pack_cpu["g_idx"].to(dtype=baseline["g_idx"].dtype), baseline["g_idx"]))
+
+    def test_pack_clamps_reconstructed_codes(self):
+        group_size = 32
+        in_features = 32
+        out_features = 32
+
+        for bits in (2, 3, 4, 8):
+            with self.subTest(bits=bits):
+                max_q = 2 ** bits - 1
+                zero = 2 ** (bits - 1)
+                raw_codes = torch.arange(-8, 24, dtype=torch.float32).view(in_features, 1)
+                raw_codes = raw_codes.expand(in_features, out_features).contiguous()
+                # Exercise saturation before integer conversion as well as the
+                # ordinary one-code boundary drift that triggered the regression.
+                raw_codes[0].fill_(-1e20)
+                raw_codes[-1].fill_(1e20)
+                linear = nn.Linear(in_features, out_features, bias=False)
+                linear.weight.data.copy_((raw_codes - zero).T)
+                scales = torch.ones(1, out_features, dtype=torch.float32)
+                zeros = torch.full((1, out_features), zero, dtype=torch.int32)
+                g_idx = torch.zeros(in_features, dtype=torch.int32)
+                expected = (raw_codes.clamp(0, max_q) - zero).to(torch.float16)
+
+                implementations = ["original", "pack_block", "pack_block_python"]
+                if torch.cuda.is_available():
+                    implementations.append("gpu")
+
+                packed = {}
+                for implementation in implementations:
+                    qlinear = TorchLinear(
+                        bits=bits,
+                        group_size=group_size,
+                        sym=True,
+                        desc_act=False,
+                        in_features=in_features,
+                        out_features=out_features,
+                        pack_dtype=torch.int32,
+                        backend=BACKEND.TORCH,
+                        bias=False,
+                    )
+                    scales_t = scales.T.contiguous()
+                    zeros_t = zeros.T.contiguous()
+                    if implementation == "original":
+                        qlinear.pack_original(linear, scales_t, zeros_t, g_idx=g_idx)
+                    elif implementation == "pack_block":
+                        qlinear.pack_block(linear, scales_t, zeros_t, g_idx=g_idx)
+                    elif implementation == "pack_block_python":
+                        with patch.dict(os.environ, {"GPTQMODEL_DISABLE_PACK_EXT": "1"}):
+                            qlinear.pack_block(linear, scales_t, zeros_t, g_idx=g_idx)
+                    else:
+                        qlinear.pack_gpu(linear, scales_t, zeros_t, g_idx=g_idx)
+                    qlinear.post_init()
+
+                    torch.testing.assert_close(qlinear.dequantize_weight(), expected, rtol=0, atol=0)
+                    packed[implementation] = qlinear.qweight
+
+                for implementation, qweight in packed.items():
+                    torch.testing.assert_close(qweight, packed["original"], rtol=0, atol=0, msg=implementation)

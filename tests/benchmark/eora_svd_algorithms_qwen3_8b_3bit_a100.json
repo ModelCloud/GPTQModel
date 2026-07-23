@@ -1,0 +1,576 @@
+{
+  "benchmark": "eora_svd_algorithms_qwen3_8b_3bit_rank_sweep",
+  "date_utc": "2026-07-23",
+  "repository_revision": "20391dac2ddcbbb8dc9445fc8724b75012bbf547",
+  "base_model": "/monster/data/model/Qwen3-8B",
+  "quantized_snapshot": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped",
+  "quantization": {
+    "method": "gptq",
+    "bits": 3,
+    "group_size": 128,
+    "sym": true,
+    "desc_act": false,
+    "scale_search": "activation",
+    "act_group_aware": true,
+    "mse": 2.0,
+    "packing_fix": "round, clamp to [0, 2**bits - 1] in floating point, then convert and pack"
+  },
+  "calibration": {
+    "dataset": "/monster/data/model/dataset/nm-calibration",
+    "config": "LLM",
+    "selection": "first 512 rows",
+    "sort": "desc",
+    "concat_size": null,
+    "batch_size": 1,
+    "selected_text_sha256": "a89c5ed40152f435d5102657166cb72399603042596c57dd2f1095724ad8f59d",
+    "non_padding_tokens": 181796
+  },
+  "eora": {
+    "ranks": [
+      32,
+      64,
+      128,
+      256
+    ],
+    "algorithms": [
+      "exact",
+      "auto",
+      "lowrank"
+    ],
+    "configured_default": "lowrank",
+    "cholesky": true,
+    "adapted_modules": 252,
+    "saved_factor_tensors_per_adapter": 504,
+    "factor_dtype": "bfloat16",
+    "rank_storage": {
+      "32": {
+        "total_factor_elements": 87293952,
+        "weights_bytes": 174656040
+      },
+      "64": {
+        "total_factor_elements": 174587904,
+        "weights_bytes": 349244256
+      },
+      "128": {
+        "total_factor_elements": 349175808,
+        "weights_bytes": 698420736
+      },
+      "256": {
+        "total_factor_elements": 698351616,
+        "weights_bytes": 1396772720
+      }
+    }
+  },
+  "evaluation": {
+    "framework": "Evalution",
+    "version": "0.0.9",
+    "batch_size": 16,
+    "apply_chat_template": false,
+    "seed": 898,
+    "do_sample": false,
+    "max_new_tokens": 256,
+    "tasks": {
+      "arc_challenge": {
+        "backend": "gptq_torch",
+        "examples": 1172,
+        "metrics": [
+          "accuracy,loglikelihood",
+          "accuracy,loglikelihood_norm"
+        ]
+      },
+      "gsm8k_platinum_cot": {
+        "backend": "gptq_triton",
+        "examples": 1209,
+        "metric": "acc,num",
+        "invalid_answer_sentinel": "[invalid]"
+      }
+    }
+  },
+  "hardware": {
+    "driver": "610.43.02",
+    "device_family": "NVIDIA PG506-230/232",
+    "compute_capability": "8.0",
+    "sm_count": 124,
+    "memory_bytes": 102191202304,
+    "assignments": [
+      {
+        "rank": 32,
+        "variant": "exact",
+        "physical_index_pci_order": 0,
+        "pci_bus_id": "00000000:25:00.0",
+        "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2"
+      },
+      {
+        "rank": 32,
+        "variant": "auto",
+        "physical_index_pci_order": 1,
+        "pci_bus_id": "00000000:2B:00.0",
+        "uuid": "GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855"
+      },
+      {
+        "rank": 32,
+        "variant": "lowrank",
+        "physical_index_pci_order": 2,
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8"
+      },
+      {
+        "rank": 64,
+        "variant": "exact",
+        "physical_index_pci_order": 3,
+        "pci_bus_id": "00000000:69:00.0",
+        "uuid": "GPU-471ecdd7-a171-4d5c-d61f-a1802dc76e4c"
+      },
+      {
+        "rank": 64,
+        "variant": "auto",
+        "physical_index_pci_order": 4,
+        "pci_bus_id": "00000000:A0:00.0",
+        "uuid": "GPU-14ab23f1-a785-e9df-bbb5-215547154e3c"
+      },
+      {
+        "rank": 64,
+        "variant": "lowrank",
+        "physical_index_pci_order": 5,
+        "pci_bus_id": "00000000:A5:00.0",
+        "uuid": "GPU-3a4bf14f-fa28-df88-f6e8-00ef6b13d473"
+      },
+      {
+        "rank": 128,
+        "variant": "exact",
+        "physical_index_pci_order": 0,
+        "pci_bus_id": "00000000:25:00.0",
+        "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2"
+      },
+      {
+        "rank": 128,
+        "variant": "auto",
+        "physical_index_pci_order": 1,
+        "pci_bus_id": "00000000:2B:00.0",
+        "uuid": "GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855"
+      },
+      {
+        "rank": 128,
+        "variant": "lowrank",
+        "physical_index_pci_order": 2,
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8"
+      },
+      {
+        "rank": 256,
+        "variant": "exact",
+        "physical_index_pci_order": 3,
+        "pci_bus_id": "00000000:69:00.0",
+        "uuid": "GPU-471ecdd7-a171-4d5c-d61f-a1802dc76e4c"
+      },
+      {
+        "rank": 256,
+        "variant": "auto",
+        "physical_index_pci_order": 4,
+        "pci_bus_id": "00000000:A0:00.0",
+        "uuid": "GPU-14ab23f1-a785-e9df-bbb5-215547154e3c"
+      },
+      {
+        "rank": 256,
+        "variant": "lowrank",
+        "physical_index_pci_order": 5,
+        "pci_bus_id": "00000000:A5:00.0",
+        "uuid": "GPU-3a4bf14f-fa28-df88-f6e8-00ef6b13d473"
+      },
+      {
+        "rank": 128,
+        "variant": "base_quant",
+        "physical_index_pci_order": 2,
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8"
+      }
+    ]
+  },
+  "software": {
+    "python": "3.14.5 free-threading",
+    "torch": "2.13.0+cu130",
+    "cuda_runtime": "13.0",
+    "triton": "3.7.1",
+    "transformers": "5.14.1",
+    "datasets": "4.8.3",
+    "evalution": "0.0.9",
+    "gptqmodel": "7.3.1+ultra"
+  },
+  "base_quant": {
+    "rank_label": 128,
+    "arc_correct": 586,
+    "arc_score": 0.5,
+    "arc_norm_correct": 596,
+    "arc_norm_score": 0.5085324232081911,
+    "gsm_correct": 1014,
+    "gsm_score": 0.8387096774193549,
+    "gsm_sample_count": 1209,
+    "gsm_invalid_outputs": 1,
+    "arc_eval_seconds": 42.002525851130486,
+    "gsm_eval_seconds": 2228.8332618027925,
+    "gsm_allocator_mapping_warnings": 44,
+    "invalid_sample": {
+      "index": 1009,
+      "target": "40",
+      "extracted": "[invalid]",
+      "description": "Coherent uncertainty response with no numeric answer; not repetitive or corrupted generation."
+    }
+  },
+  "results": [
+    {
+      "variant": "exact",
+      "rank": 32,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank32-svd-exact",
+      "generation_seconds": 879.5102256336249,
+      "generation_speedup_vs_exact": 1.0,
+      "generation_seconds_saved_vs_exact": 0.0,
+      "weights_bytes": 174656040,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 599,
+      "arc_score": 0.5110921501706485,
+      "arc_norm_correct": 611,
+      "arc_norm_score": 0.5213310580204779,
+      "gsm_correct": 1051,
+      "gsm_score": 0.869313482216708,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 47.75542611209676,
+      "gsm_eval_seconds": 2329.091194049921
+    },
+    {
+      "variant": "auto",
+      "rank": 32,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank32-svd-auto",
+      "generation_seconds": 592.9789814678952,
+      "generation_speedup_vs_exact": 1.483206408861969,
+      "generation_seconds_saved_vs_exact": 286.53124416572973,
+      "weights_bytes": 174656040,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 595,
+      "arc_score": 0.507679180887372,
+      "arc_norm_correct": 609,
+      "arc_norm_score": 0.5196245733788396,
+      "gsm_correct": 1042,
+      "gsm_score": 0.8618693134822167,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 48.151587937027216,
+      "gsm_eval_seconds": 2316.9858066048473
+    },
+    {
+      "variant": "lowrank",
+      "rank": 32,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank32-svd-lowrank",
+      "generation_seconds": 548.6729726754129,
+      "generation_speedup_vs_exact": 1.6029771274225506,
+      "generation_seconds_saved_vs_exact": 330.83725295821205,
+      "weights_bytes": 174656040,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 595,
+      "arc_score": 0.507679180887372,
+      "arc_norm_correct": 606,
+      "arc_norm_score": 0.5170648464163823,
+      "gsm_correct": 1043,
+      "gsm_score": 0.8626964433416047,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 52.3016544659622,
+      "gsm_eval_seconds": 2333.5786080840044
+    },
+    {
+      "variant": "exact",
+      "rank": 64,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank64-svd-exact",
+      "generation_seconds": 888.6158041940071,
+      "generation_speedup_vs_exact": 1.0,
+      "generation_seconds_saved_vs_exact": 0.0,
+      "weights_bytes": 349244256,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 598,
+      "arc_score": 0.5102389078498294,
+      "arc_norm_correct": 603,
+      "arc_norm_score": 0.514505119453925,
+      "gsm_correct": 1050,
+      "gsm_score": 0.8684863523573201,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 45.78345629014075,
+      "gsm_eval_seconds": 2262.378465235699
+    },
+    {
+      "variant": "auto",
+      "rank": 64,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank64-svd-auto",
+      "generation_seconds": 603.2459424203262,
+      "generation_speedup_vs_exact": 1.4730572420076762,
+      "generation_seconds_saved_vs_exact": 285.3698617736809,
+      "weights_bytes": 349244256,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 596,
+      "arc_score": 0.5085324232081911,
+      "arc_norm_correct": 606,
+      "arc_norm_score": 0.5170648464163823,
+      "gsm_correct": 1048,
+      "gsm_score": 0.8668320926385442,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 59.80490428535268,
+      "gsm_eval_seconds": 2327.198970092926
+    },
+    {
+      "variant": "lowrank",
+      "rank": 64,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank64-svd-lowrank",
+      "generation_seconds": 555.1226701028645,
+      "generation_speedup_vs_exact": 1.6007557465259816,
+      "generation_seconds_saved_vs_exact": 333.49313409114257,
+      "weights_bytes": 349244256,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 598,
+      "arc_score": 0.5102389078498294,
+      "arc_norm_correct": 604,
+      "arc_norm_score": 0.515358361774744,
+      "gsm_correct": 1050,
+      "gsm_score": 0.8684863523573201,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 50.1720224628225,
+      "gsm_eval_seconds": 2302.4210647353902
+    },
+    {
+      "variant": "exact",
+      "rank": 128,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank128-svd-exact",
+      "generation_seconds": 873.9934993898496,
+      "generation_speedup_vs_exact": 1.0,
+      "generation_seconds_saved_vs_exact": 0.0,
+      "weights_bytes": 698420736,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 606,
+      "arc_score": 0.5170648464163823,
+      "arc_norm_correct": 606,
+      "arc_norm_score": 0.5170648464163823,
+      "gsm_correct": 1066,
+      "gsm_score": 0.8817204301075269,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 54.36593264108524,
+      "gsm_eval_seconds": 2278.8327124929056
+    },
+    {
+      "variant": "auto",
+      "rank": 128,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank128-svd-auto",
+      "generation_seconds": 584.8133889427409,
+      "generation_speedup_vs_exact": 1.4944827117756403,
+      "generation_seconds_saved_vs_exact": 289.18011044710875,
+      "weights_bytes": 698420736,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 607,
+      "arc_score": 0.5179180887372014,
+      "arc_norm_correct": 606,
+      "arc_norm_score": 0.5170648464163823,
+      "gsm_correct": 1064,
+      "gsm_score": 0.880066170388751,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 56.156786585226655,
+      "gsm_eval_seconds": 2304.162494932767
+    },
+    {
+      "variant": "lowrank",
+      "rank": 128,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank128-svd-lowrank",
+      "generation_seconds": 545.179802052211,
+      "generation_speedup_vs_exact": 1.6031289055461901,
+      "generation_seconds_saved_vs_exact": 328.8136973376386,
+      "weights_bytes": 698420736,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 610,
+      "arc_score": 0.5204778156996587,
+      "arc_norm_correct": 612,
+      "arc_norm_score": 0.5221843003412969,
+      "gsm_correct": 1064,
+      "gsm_score": 0.880066170388751,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 68.75065767485648,
+      "gsm_eval_seconds": 2284.9856170569547
+    },
+    {
+      "variant": "exact",
+      "rank": 256,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank256-svd-exact",
+      "generation_seconds": 874.6159730292857,
+      "generation_speedup_vs_exact": 1.0,
+      "generation_seconds_saved_vs_exact": 0.0,
+      "weights_bytes": 1396772720,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 622,
+      "arc_score": 0.5307167235494881,
+      "arc_norm_correct": 614,
+      "arc_norm_score": 0.5238907849829352,
+      "gsm_correct": 1073,
+      "gsm_score": 0.8875103391232424,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 48.143100855872035,
+      "gsm_eval_seconds": 2413.7555340351537
+    },
+    {
+      "variant": "auto",
+      "rank": 256,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank256-svd-auto",
+      "generation_seconds": 586.0055348058231,
+      "generation_speedup_vs_exact": 1.4925046285084929,
+      "generation_seconds_saved_vs_exact": 288.61043822346255,
+      "weights_bytes": 1396772720,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 629,
+      "arc_score": 0.5366894197952219,
+      "arc_norm_correct": 614,
+      "arc_norm_score": 0.5238907849829352,
+      "gsm_correct": 1068,
+      "gsm_score": 0.8833746898263027,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 59.03294282546267,
+      "gsm_eval_seconds": 2339.3871241561137
+    },
+    {
+      "variant": "lowrank",
+      "rank": 256,
+      "adapter_path": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped/eora-rank256-svd-lowrank",
+      "generation_seconds": 554.8737810761668,
+      "generation_speedup_vs_exact": 1.5762431076360919,
+      "generation_seconds_saved_vs_exact": 319.7421919531189,
+      "weights_bytes": 1396772720,
+      "tensor_count": 504,
+      "all_finite": true,
+      "arc_correct": 623,
+      "arc_score": 0.5315699658703071,
+      "arc_norm_correct": 611,
+      "arc_norm_score": 0.5213310580204779,
+      "gsm_correct": 1071,
+      "gsm_score": 0.8858560794044665,
+      "gsm_invalid_outputs": 0,
+      "arc_eval_seconds": 50.82185190124437,
+      "gsm_eval_seconds": 2411.4815242569894
+    }
+  ],
+  "four_bit_reference_records": [
+    "tests/benchmark/eora_svd_algorithms_qwen3_8b_a100.json",
+    "tests/benchmark/eora_svd_algorithms_qwen3_8b_rank32_rank64_a100.json",
+    "tests/benchmark/eora_svd_algorithms_qwen3_8b_rank256_a100.json"
+  ],
+  "answer_count_deltas_three_bit_minus_four_bit": [
+    {
+      "rank": null,
+      "variant": "base_quant",
+      "arc": -39,
+      "arc_norm": -43,
+      "gsm": -55
+    },
+    {
+      "rank": 32,
+      "variant": "exact",
+      "arc": -43,
+      "arc_norm": -35,
+      "gsm": -37
+    },
+    {
+      "rank": 32,
+      "variant": "auto",
+      "arc": -40,
+      "arc_norm": -38,
+      "gsm": -49
+    },
+    {
+      "rank": 32,
+      "variant": "lowrank",
+      "arc": -48,
+      "arc_norm": -40,
+      "gsm": -49
+    },
+    {
+      "rank": 64,
+      "variant": "exact",
+      "arc": -44,
+      "arc_norm": -50,
+      "gsm": -43
+    },
+    {
+      "rank": 64,
+      "variant": "auto",
+      "arc": -41,
+      "arc_norm": -44,
+      "gsm": -41
+    },
+    {
+      "rank": 64,
+      "variant": "lowrank",
+      "arc": -41,
+      "arc_norm": -47,
+      "gsm": -50
+    },
+    {
+      "rank": 128,
+      "variant": "exact",
+      "arc": -43,
+      "arc_norm": -45,
+      "gsm": -25
+    },
+    {
+      "rank": 128,
+      "variant": "auto",
+      "arc": -40,
+      "arc_norm": -47,
+      "gsm": -28
+    },
+    {
+      "rank": 128,
+      "variant": "lowrank",
+      "arc": -40,
+      "arc_norm": -41,
+      "gsm": -35
+    },
+    {
+      "rank": 256,
+      "variant": "exact",
+      "arc": -18,
+      "arc_norm": -31,
+      "gsm": -26
+    },
+    {
+      "rank": 256,
+      "variant": "auto",
+      "arc": -13,
+      "arc_norm": -38,
+      "gsm": -35
+    },
+    {
+      "rank": 256,
+      "variant": "lowrank",
+      "arc": -20,
+      "arc_norm": -42,
+      "gsm": -28
+    }
+  ],
+  "default_decision": {
+    "configured_default": "lowrank",
+    "changed_by_three_bit_sweep": false,
+    "generation_speedup_range_vs_exact": [
+      1.5762431076360919,
+      1.6031289055461901
+    ],
+    "quality_summary": "Three-bit quality is mixed by metric and rank; lowrank is fastest at every rank, leads both rank-128 ARC metrics, ties rank-128 auto on GSM, and remains close to the within-rank leaders elsewhere."
+  },
+  "notes": [
+    "All generation and evaluation jobs used only physical PCI-ordered GPUs 0 through 5.",
+    "Every generated adapter contained 504 finite tensors at the requested rank, and runtime validation found 252 active adapters with finite logits.",
+    "All 12 adapter GSM8K runs produced zero invalid numeric extractions. The adapter-free baseline had one coherent uncertainty response with no numeric answer.",
+    "The base-quant GSM run emitted 44 recoverable expandable-segment mapping warnings during transient long-sequence memory peaks; it completed all 1,209 samples without a CUDA exception.",
+    "The invalid-output counter uses Evalution's official [invalid] sentinel and repaired the initially stale baseline task and manifest metadata through the resumable evaluation path.",
+    "ARC used GPTQ_TORCH for both bit widths. Three-bit GSM used GPTQ_TRITON because MARLIN does not support the controlled 3-bit model; the existing four-bit GSM reference used MARLIN."
+  ]
+}

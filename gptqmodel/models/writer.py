@@ -92,6 +92,7 @@ PROCESS_LOG_FWD_TIME = "fwd_time"
 PROCESS_USED_MEMORY = "(v)ram"
 
 EORA_DEFAULT_FILE = "eora.safetensors"
+QUANTIZATION_DIAGNOSTICS_FILE = "quantization_diagnostics.json"
 
 # disable gptqmodel split_by layer feature (until sglang pr is merged since our dir struct is not compatible)
 # SUPPORTED_SPLIT_BY = {None, "layer"}
@@ -1078,6 +1079,12 @@ def ModelWriter(cls):
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
+
+        quantization_diagnostics = getattr(self, "quantization_diagnostics", None)
+        if quantization_diagnostics:
+            with open(os.path.join(save_dir, QUANTIZATION_DIAGNOSTICS_FILE), mode="w", encoding="utf-8") as file:
+                json.dump(quantization_diagnostics, file, indent=2)
+                file.write("\n")
 
         if self.quant_log:
             with open(os.path.join(save_dir, "quant_log.csv"), mode='w', newline='') as file:

@@ -1,0 +1,143 @@
+{
+  "date_utc": "2026-07-23",
+  "scope": "Qwen3-8B 2-bit/group-32 joint GPTQ plus EoRA reconstructed-weight lifecycle regression",
+  "source_commit": "cf422f03410f527a55ada92db4a19996a3ff72f3",
+  "root_cause": {
+    "boundary": "between GPTQ reconstruction and EoRA replay, before packing",
+    "failure": "GPTQ saved wq as an alias of the module parameter storage. The following EoRA pass rematerialized the dense checkpoint into that storage, so finalization restored and packed a changed weight.",
+    "fix": "Snapshot GPTQ's reconstructed wq into independent CPU storage before exposing the accelerator tensor through the module parameter.",
+    "packer_status": "The GPU packer exactly serialized the floating-point reconstruction it received and was not the source of this 2-bit regression."
+  },
+  "configuration": {
+    "base_model": "/monster/data/model/Qwen3-8B",
+    "quant_method": "gptq",
+    "format": "gptq",
+    "bits": 2,
+    "group_size": 32,
+    "sym": true,
+    "desc_act": false,
+    "act_group_aware": true,
+    "scale_search": "activation",
+    "static_groups": false,
+    "pack_impl": "gpu",
+    "adapter_rank": 128,
+    "adapter_algo": "lowrank",
+    "calibration_rows": 512,
+    "calibration_tokens": 181796,
+    "calibration_text_sha256": "a89c5ed40152f435d5102657166cb72399603042596c57dd2f1095724ad8f59d",
+    "eval_backend": "gptq_torch"
+  },
+  "hardware": {
+    "physical_gpu": 0,
+    "name": "NVIDIA PG506-230",
+    "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+    "pci_bus_id": "00000000:25:00.0",
+    "compute_capability": "8.0",
+    "sm_count": 124,
+    "memory_bytes": 102191202304
+  },
+  "software": {
+    "python": "3.14.5 free-threading",
+    "gptqmodel": "7.3.1+ultra",
+    "torch": "2.13.0+cu130",
+    "cuda": "13.0",
+    "transformers": "5.14.1",
+    "datasets": "4.8.3",
+    "safetensors": "0.8.0",
+    "evalution": "0.0.9"
+  },
+  "bounded_layer_0_control": {
+    "sampled_codes": 28672,
+    "native_prepack_mismatches": 0,
+    "native_packed_mismatches": 0,
+    "aliased_zero_eora_prepack_mismatches": 4793,
+    "aliased_zero_eora_packed_mismatches": 4793,
+    "aliased_zero_eora_mismatch_rate": 0.16716657366071427,
+    "fixed_zero_eora_prepack_mismatches": 0,
+    "fixed_zero_eora_packed_mismatches": 0
+  },
+  "full_model_validation": {
+    "output": "/monster/data/model/Qwen3-8B-GPTQ-2bit-g32-activation-GAR-EoRA-independent-wq-cal512-gpu-pack-clamped",
+    "load_wall_s": 0.7500138399191201,
+    "quantize_wall_s": 1478.9771626992151,
+    "save_wall_s": 5.41960531193763,
+    "fingerprints": {
+      "modules": 252,
+      "sampled_codes": 1032192,
+      "prepack_mismatches": 0,
+      "prepack_mismatch_rate": 0.0,
+      "packed_mismatches": 0,
+      "packed_mismatch_rate": 0.0
+    },
+    "model_tensor_bytes": 4720190648,
+    "adapter_tensor_bytes": 698420736,
+    "model_plus_adapter_tensor_bytes": 5418611384,
+    "full_artifact_bytes": 5430163549,
+    "model_shards_match_native_byte_for_byte": true,
+    "model_shard_sha256": {
+      "model-00001-of-00002.safetensors": "700ddfe8d3b7e6fab5ef42ec0b5ae6fafb33a674b8d75fba9a2d208a3819520e",
+      "model-00002-of-00002.safetensors": "28fdea214c3df9742ac4b25ca653fd4286752fb081db63d9f26e95715f291f98"
+    },
+    "adapter_sha256": "9eb28f817023aa420b27d0496aea99ebe6a454b74684c5edf698b43b47268c58",
+    "adapter_tensor_count": 504,
+    "adapter_element_count": 349175808,
+    "adapter_dtype": "BF16"
+  },
+  "quantization_anomaly": {
+    "mean_loss": 0.0029472004484126985,
+    "worst_layer": 6,
+    "worst_module": "mlp.down_proj",
+    "worst_loss": 0.2265262944,
+    "worst_loss_to_mean_ratio": 76.86151599291537,
+    "worst_total_loss_share": 0.3050060158449023,
+    "max_scale": 34.880184173583984,
+    "max_scale_output_channel": 2276,
+    "max_scale_to_channel_median_ratio": 630.3822411298661
+  },
+  "runtime": {
+    "quant_linear_modules": 252,
+    "adapter_modules": 252,
+    "adapter_rank": 128,
+    "logits_finite": true,
+    "continuation": " Paris. The capital city of France is Paris. The capital city of France is Paris. The capital city of France is",
+    "dense_last_logit_cosine": 0.9718419313430786,
+    "dense_last_logit_rmse": 1.0649800300598145,
+    "dense_last_logit_mae": 0.8320494294166565,
+    "dense_top1_token_id": 12095,
+    "quant_top1_token_id": 12095,
+    "top1_agrees": true,
+    "gsm8k_platinum_max_rows": 64,
+    "gsm8k_correct": 32,
+    "gsm8k_score": 0.5,
+    "gsm8k_invalid": 0,
+    "gsm8k_wall_s": 149.71078192116693
+  },
+  "comparisons": {
+    "corrupted_joint_with_matching_adapter": {
+      "dense_last_logit_cosine": 0.366398,
+      "gsm8k_correct": 0,
+      "gsm8k_total": 64,
+      "gsm8k_invalid": 64
+    },
+    "coherent_native_without_adapter": {
+      "dense_last_logit_cosine": 0.96855497,
+      "gsm8k_correct": 22,
+      "gsm8k_total": 64,
+      "gsm8k_invalid": 1
+    },
+    "fixed_joint_with_matching_adapter": {
+      "dense_last_logit_cosine": 0.9718419313430786,
+      "gsm8k_correct": 32,
+      "gsm8k_total": 64,
+      "gsm8k_invalid": 0
+    }
+  },
+  "validation": {
+    "eora_config_math_and_lifecycle": "23 passed",
+    "regression_analyzer_and_quantization_diagnostics": "16 passed",
+    "skill_validator": "passed",
+    "ruff": "passed",
+    "git_diff_check": "passed"
+  },
+  "sweep_status": "The stopped 2-bit rank sweep was not resumed; this run was a single root-cause and production-fix validation."
+}

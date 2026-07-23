@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPTQModel Quantization Regression Diagnosis"
+  short_description: "Localize severe quantization quality regressions"
+  default_prompt: "Use $gptqmodel-quantization-regressions to localize this quantization quality regression."

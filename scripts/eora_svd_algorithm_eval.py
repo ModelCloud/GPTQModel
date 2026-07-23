@@ -40,6 +40,7 @@ import safetensors
 import torch
 import transformers
 from datasets import load_dataset
+from evalution.scorers.gsm8k import INVALID_ANSWER
 from safetensors import safe_open
 from transformers.utils import is_flash_attn_2_available
 
@@ -58,14 +59,23 @@ DEFAULT_QUANTIZED_MODEL = Path(
 )
 DEFAULT_CALIBRATION_DATASET = Path("/monster/data/model/dataset/nm-calibration")
 CALIBRATION_TEXT_SHA256 = "a89c5ed40152f435d5102657166cb72399603042596c57dd2f1095724ad8f59d"
-TASK_BACKENDS = {
+FOUR_BIT_TASK_BACKENDS = {
     "arc_challenge": BACKEND.GPTQ_TORCH,
     "gsm8k_platinum_cot": BACKEND.MARLIN,
+}
+THREE_BIT_TASK_BACKENDS = {
+    "arc_challenge": BACKEND.GPTQ_TORCH,
+    "gsm8k_platinum_cot": BACKEND.GPTQ_TRITON,
+}
+TWO_BIT_TASK_BACKENDS = {
+    "arc_challenge": BACKEND.GPTQ_TORCH,
+    "gsm8k_platinum_cot": BACKEND.GPTQ_TORCH,
 }
 SEED = 898
 DEFAULT_RANK = 128
 BATCH_SIZE = 16
 BASE_QUANT_VARIANT = "base_quant"
+DENSE_MODEL_PARAMETER_COUNT = 8_190_735_360
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,6 +95,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-pci-bus", required=True)
     parser.add_argument("--base-model", type=Path, default=DEFAULT_BASE_MODEL)
     parser.add_argument("--quantized-model", type=Path, default=DEFAULT_QUANTIZED_MODEL)
+    parser.add_argument("--bits", type=int, choices=(2, 3, 4), default=4)
+    parser.add_argument("--group-size", type=int, choices=(32, 64, 128), default=128)
     parser.add_argument("--calibration-dataset", type=Path, default=DEFAULT_CALIBRATION_DATASET)
     parser.add_argument("--stage", choices=("generate", "eval", "all"), default="all")
     args = parser.parse_args()
@@ -117,6 +129,28 @@ def jsonable(value: Any) -> Any:
     return repr(value)
 
 
+def numeric_output_counts(result: Any) -> dict[str, int]:
+    """Counts scored numeric samples and extraction failures in an Evalution result."""
+
+    if not isinstance(result, dict) or not isinstance(result.get("tests"), list):
+        raise RuntimeError("Evalution result does not expose a tests list for numeric-output validation")
+    sample_count = 0
+    invalid_count = 0
+    for test in result["tests"]:
+        if not isinstance(test, dict) or not isinstance(test.get("samples"), list):
+            continue
+        for sample in test["samples"]:
+            sample_count += 1
+            extracted = sample.get("extracted") if isinstance(sample, dict) else None
+            valid = isinstance(extracted, dict) and any(
+                value not in (None, "", INVALID_ANSWER) for value in extracted.values()
+            )
+            invalid_count += not valid
+    if sample_count == 0:
+        raise RuntimeError("Evalution result contains no numeric samples")
+    return {"sample_count": sample_count, "invalid_output_count": invalid_count}
+
+
 def write_json(path: Path, payload: Any) -> None:
     """Atomically writes a result so interrupted runs never look complete."""
 
@@ -142,6 +176,62 @@ def output_paths(args: argparse.Namespace) -> dict[str, Path | None]:
         "eval": args.quantized_model / f"evalution_{experiment_name}",
         "manifest": args.quantized_model / f"{experiment_name}_experiment.json",
     }
+
+
+def task_backends(bits: int) -> dict[str, BACKEND]:
+    """Returns the verified backend contract for each bit-width study."""
+
+    if bits == 4:
+        return FOUR_BIT_TASK_BACKENDS
+    if bits == 3:
+        return THREE_BIT_TASK_BACKENDS
+    return TWO_BIT_TASK_BACKENDS
+
+
+def load_quantization_contract(
+    path: Path,
+    expected_bits: int,
+    expected_group_size: int,
+) -> dict[str, Any]:
+    """Loads and validates the controlled GPTQ snapshot used by the quality study."""
+
+    config_path = path / "config.json"
+    if not config_path.is_file():
+        raise RuntimeError(f"Quantized snapshot is missing config.json: {path}")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    quantization = config.get("quantization_config")
+    if not isinstance(quantization, dict):
+        raise RuntimeError(f"Quantized snapshot has no quantization_config: {config_path}")
+    metadata = quantization.get("meta")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    contract = {
+        "bits": quantization.get("bits"),
+        "group_size": quantization.get("group_size"),
+        "sym": quantization.get("sym"),
+        "desc_act": quantization.get("desc_act"),
+        "scale_search": metadata.get("scale_search"),
+        "act_group_aware": metadata.get("act_group_aware"),
+        "mse": metadata.get("mse"),
+    }
+    expected = {
+        "bits": expected_bits,
+        "group_size": expected_group_size,
+        "sym": True,
+        "desc_act": False,
+        "scale_search": "activation",
+        "act_group_aware": True,
+        "mse": 2.0,
+    }
+    mismatches = {
+        key: {"expected": expected_value, "actual": contract[key]}
+        for key, expected_value in expected.items()
+        if contract[key] != expected_value
+    }
+    if mismatches:
+        raise RuntimeError(f"Quantized snapshot does not match the controlled study contract: {mismatches}")
+    return contract
 
 
 def assert_gpu(args: argparse.Namespace) -> dict[str, Any]:
@@ -293,6 +383,33 @@ def summarize_adapter(path: Path, generation_config: Lora, rank: int) -> dict[st
     }
 
 
+def summarize_storage(quantized_model: Path, adapter_path: Path | None) -> dict[str, Any]:
+    """Measures the saved model and EoRA tensor footprint against the dense parameter count."""
+
+    model_paths = sorted(quantized_model.glob("model-*.safetensors"))
+    if not model_paths and (quantized_model / "model.safetensors").is_file():
+        model_paths = [quantized_model / "model.safetensors"]
+    if not model_paths:
+        raise RuntimeError(f"Quantized snapshot has no model safetensors: {quantized_model}")
+    model_bytes = sum(path.stat().st_size for path in model_paths)
+
+    adapter_bytes = 0
+    if adapter_path is not None:
+        adapter_weights = adapter_path / "adapter_model.safetensors"
+        if not adapter_weights.is_file():
+            raise RuntimeError(f"EoRA snapshot has no adapter safetensors: {adapter_path}")
+        adapter_bytes = adapter_weights.stat().st_size
+
+    combined_bytes = model_bytes + adapter_bytes
+    return {
+        "dense_base_parameter_count": DENSE_MODEL_PARAMETER_COUNT,
+        "quantized_model_tensor_bytes": model_bytes,
+        "eora_tensor_bytes": adapter_bytes,
+        "combined_tensor_bytes": combined_bytes,
+        "effective_bits_per_base_parameter": 8 * combined_bytes / DENSE_MODEL_PARAMETER_COUNT,
+    }
+
+
 def generate_adapter(args: argparse.Namespace, paths: dict[str, Path | None], manifest: dict[str, Any]) -> None:
     """Generates one fresh configured-rank adapter from the shared calibration snapshot."""
 
@@ -326,23 +443,40 @@ def generate_adapter(args: argparse.Namespace, paths: dict[str, Path | None], ma
         "calibration": calibration_metadata,
         "adapter": summarize_adapter(adapter_path, adapter, rank=args.rank),
     }
+    manifest["storage"] = summarize_storage(args.quantized_model, adapter_path)
     write_json(manifest_path, manifest)
     del calibration
     gc.collect()
     torch_empty_cache()
 
 
-def validate_loaded_adapter(model: Any, adapter_path: Path | None, rank: int) -> dict[str, Any]:
+def validate_loaded_adapter(
+    model: Any,
+    adapter_path: Path | None,
+    rank: int,
+    bits: int,
+    group_size: int,
+) -> dict[str, Any]:
     """Checks adapter coverage and finite deterministic generation before scoring."""
 
     modules = [module for module in model.model.modules() if isinstance(module, BaseQuantLinear)]
     active = [module for module in modules if getattr(module, "adapter", None) is not None]
     ranks = sorted({int(module.adapter.rank) for module in active})
+    observed_bits = sorted({int(module.bits) for module in modules})
+    observed_group_sizes = sorted({int(module.group_size) for module in modules})
     expected_active = 0 if adapter_path is None else 252
     expected_ranks = [] if adapter_path is None else [rank]
-    if len(modules) != 252 or len(active) != expected_active or ranks != expected_ranks:
+    if (
+        len(modules) != 252
+        or len(active) != expected_active
+        or ranks != expected_ranks
+        or observed_bits != [bits]
+        or observed_group_sizes != [group_size]
+    ):
         raise RuntimeError(
-            f"Adapter coverage failed: modules={len(modules)}, active={len(active)}, ranks={ranks}"
+            "Quantized module validation failed: "
+            f"modules={len(modules)}, active={len(active)}, ranks={ranks}, "
+            f"bits={observed_bits}, group_sizes={observed_group_sizes}"
         )
 
     tokenizer = model.tokenizer
@@ -357,6 +491,8 @@ def validate_loaded_adapter(model: Any, adapter_path: Path | None, rank: int) ->
         "quant_linear_module_count": len(modules),
         "active_adapter_count": len(active),
         "adapter_ranks": ranks,
+        "bits": observed_bits,
+        "group_sizes": observed_group_sizes,
         "logits_all_finite": True,
         "continuation": tokenizer.decode(
             generated[0, encoded["input_ids"].shape[1] :],
@@ -372,19 +508,81 @@ def evaluate_tasks(args: argparse.Namespace, paths: dict[str, Path | None], mani
     manifest_path = paths["manifest"]
     if eval_path is None or manifest_path is None:
         raise RuntimeError("Experiment output paths are incomplete")
-    eval_path.mkdir(parents=True, exist_ok=False)
-    manifest["evaluation"] = {
-        "started_at": utc_now(),
+    eval_path.mkdir(parents=True, exist_ok=True)
+    evaluation = manifest.get("evaluation")
+    if evaluation is None:
+        evaluation = {
+            "started_at": utc_now(),
+            "batch_size": BATCH_SIZE,
+            "apply_chat_template": False,
+            "max_rows": None,
+            "seed": SEED,
+            "tasks": {},
+        }
+        manifest["evaluation"] = evaluation
+    if not isinstance(evaluation, dict):
+        raise RuntimeError(f"Experiment manifest has invalid evaluation metadata: {manifest_path}")
+    expected_evaluation = {
         "batch_size": BATCH_SIZE,
         "apply_chat_template": False,
         "max_rows": None,
         "seed": SEED,
-        "tasks": {},
     }
+    mismatches = {
+        key: {"expected": value, "actual": evaluation.get(key)}
+        for key, value in expected_evaluation.items()
+        if evaluation.get(key) != value
+    }
+    if mismatches:
+        raise RuntimeError(f"Existing evaluation contract does not match this experiment: {mismatches}")
+    if not isinstance(evaluation.get("tasks"), dict):
+        raise RuntimeError(f"Experiment manifest has invalid evaluation tasks: {manifest_path}")
     write_json(manifest_path, manifest)
 
     attention = "flash_attention_2" if is_flash_attn_2_available() else "eager"
-    for task, backend in TASK_BACKENDS.items():
+    for task, backend in task_backends(args.bits).items():
+        task_path = eval_path / f"{task}.json"
+        if task_path.is_file():
+            task_payload = json.loads(task_path.read_text(encoding="utf-8"))
+            expected = {
+                "task": task,
+                "variant": experiment_variant(args),
+                "algo": args.algo,
+                "rank": args.rank,
+                "backend": backend.value,
+                "full_dataset": True,
+                "max_rows": None,
+            }
+            mismatches = {
+                key: {"expected": value, "actual": task_payload.get(key)}
+                for key, value in expected.items()
+                if task_payload.get(key) != value
+            }
+            metrics = task_payload.get("metrics")
+            if mismatches or not isinstance(metrics, dict) or not metrics:
+                raise RuntimeError(
+                    f"Existing task result does not match this experiment: path={task_path}, "
+                    f"mismatches={mismatches}, metrics={metrics}"
+                )
+            output_counts = (
+                numeric_output_counts(task_payload.get("result"))
+                if task == "gsm8k_platinum_cot"
+                else {"sample_count": None, "invalid_output_count": None}
+            )
+            if any(task_payload.get(key) != value for key, value in output_counts.items()):
+                task_payload.update(output_counts)
+                write_json(task_path, task_payload)
+            evaluation["tasks"][task] = {
+                "backend": backend.value,
+                "load_wall_s": task_payload.get("load_wall_s"),
+                "eval_wall_s": task_payload.get("eval_wall_s"),
+                "metrics": metrics,
+                **output_counts,
+            }
+            write_json(manifest_path, manifest)
+            print(f"Reusing completed Evalution variant={experiment_variant(args)} task={task}: {metrics}", flush=True)
+            continue
+
         AdapterCache.reset()
         load_started = time.perf_counter()
         model = GPTQModel.load(
@@ -397,7 +595,13 @@ def evaluate_tasks(args: argparse.Namespace, paths: dict[str, Path | None], mani
         )
         model.eval()
         load_wall_s = time.perf_counter() - load_started
-        runtime = validate_loaded_adapter(model, paths["adapter"], rank=args.rank)
+        runtime = validate_loaded_adapter(
+            model,
+            paths["adapter"],
+            rank=args.rank,
+            bits=args.bits,
+            group_size=args.group_size,
+        )
 
         variant = experiment_variant(args)
         print(f"Starting full Evalution variant={variant} task={task} backend={backend.value}", flush=True)
@@ -417,6 +621,11 @@ def evaluate_tasks(args: argparse.Namespace, paths: dict[str, Path | None], mani
             raise RuntimeError(f"Evalution returned no metrics for {task}: {result}")
         if any(isinstance(value, (int, float)) and not math.isfinite(float(value)) for value in metrics.values()):
             raise RuntimeError(f"Evalution returned non-finite metrics for {task}: {metrics}")
+        output_counts = (
+            numeric_output_counts(result)
+            if task == "gsm8k_platinum_cot"
+            else {"sample_count": None, "invalid_output_count": None}
+        )
 
         task_payload = {
             "task": task,
@@ -433,14 +642,16 @@ def evaluate_tasks(args: argparse.Namespace, paths: dict[str, Path | None], mani
             "eval_wall_s": eval_wall_s,
             "runtime": runtime,
             "metrics": metrics,
+            **output_counts,
             "result": result,
         }
-        write_json(eval_path / f"{task}.json", task_payload)
-        manifest["evaluation"]["tasks"][task] = {
+        write_json(task_path, task_payload)
+        evaluation["tasks"][task] = {
             "backend": backend.value,
             "load_wall_s": load_wall_s,
             "eval_wall_s": eval_wall_s,
             "metrics": metrics,
+            **output_counts,
         }
         write_json(manifest_path, manifest)
         print(f"Completed Evalution variant={variant} task={task}: {metrics}", flush=True)
@@ -449,7 +660,7 @@ def evaluate_tasks(args: argparse.Namespace, paths: dict[str, Path | None], mani
         gc.collect()
         torch_empty_cache()
 
-    manifest["evaluation"]["completed_at"] = utc_now()
+    evaluation["completed_at"] = utc_now()
     write_json(manifest_path, manifest)
 
 
@@ -461,6 +672,11 @@ def main() -> None:
     gpu = assert_gpu(args)
     runtime = configure_runtime()
     variant = experiment_variant(args)
+    quantization_contract = load_quantization_contract(
+        args.quantized_model,
+        expected_bits=args.bits,
+        expected_group_size=args.group_size,
+    )
     manifest = {
         "started_at": utc_now(),
         "variant": variant,
@@ -473,14 +689,7 @@ def main() -> None:
         "eval_path": str(paths["eval"]),
         "gpu": gpu,
         "runtime": runtime,
-        "quantization_contract": {
-            "bits": 4,
-            "group_size": 128,
-            "sym": True,
-            "desc_act": False,
-            "scale_search": "activation",
-            "act_group_aware": True,
-        },
+        "quantization_contract": quantization_contract,
         "versions": {
             "python": sys.version,
             "platform": platform.platform(),
@@ -516,6 +725,8 @@ def main() -> None:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             else:
                 write_json(manifest_path, manifest)
+        manifest["storage"] = summarize_storage(args.quantized_model, paths["adapter"])
+        write_json(manifest_path, manifest)
         evaluate_tasks(args, paths, manifest)
 
     manifest["completed_at"] = utc_now()

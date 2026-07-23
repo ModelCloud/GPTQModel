@@ -21,6 +21,7 @@ from packaging import version
 
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
+from .diagnostics import QuantizationDiagnosticsMode, normalize_quantization_diagnostics_mode
 
 
 log = setup_logger()
@@ -2951,6 +2952,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "scale_search_refine_steps": "scale_search_refine_steps",
             "enable_shared_hessian_cache": "enable_shared_hessian_cache",
             "enable_activation_x_mean_cache": "enable_activation_x_mean_cache",
+            "quantization_diagnostics": "quantization_diagnostics",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -3195,6 +3197,16 @@ class GPTQConfig(PreProcessorConfig):
             "help": "Share same-input GPTQ Hessian accumulation and inverse/Cholesky cache within one processor subset."
         },
     )
+    quantization_diagnostics: QuantizationDiagnosticsMode = field(
+        default=QuantizationDiagnosticsMode.AUTO,
+        metadata={
+            "choices": [mode.value for mode in QuantizationDiagnosticsMode],
+            "help": (
+                "Quantization anomaly diagnostics: off disables them, auto adds a cheap module-loss summary, "
+                "and channel additionally scans scale tensors by output channel."
+            ),
+        },
+    )
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.GPTQ,)
@@ -3222,6 +3234,9 @@ class GPTQConfig(PreProcessorConfig):
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
         self.foem = _normalize_foem(self.foem)
+        self.quantization_diagnostics = normalize_quantization_diagnostics_mode(
+            self.quantization_diagnostics
+        )
         self._normalize_scale_search()
 
         if act_group_aware_user_value is None:
@@ -3355,6 +3370,7 @@ class GPTQConfig(PreProcessorConfig):
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
         meta_payload["enable_shared_hessian_cache"] = self.enable_shared_hessian_cache
+        meta_payload["quantization_diagnostics"] = self.quantization_diagnostics.value
         meta_payload["hessian"] = {
             "chunk_size": self.hessian.chunk_size,
             "chunk_bytes": self.hessian.chunk_bytes,

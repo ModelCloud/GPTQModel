@@ -1,0 +1,372 @@
+{
+  "arguments": {
+    "calibration_rows": 8,
+    "eora": "zero",
+    "label": "qwen3-8b-layer0-zero-eora-independent-wq",
+    "layer_count": 1,
+    "output": "artifacts/qwen3_8b_dual_gptq_eora_20260722/2bit_layer0_zero_eora_independent_wq.json",
+    "physical_gpu": 3
+  },
+  "base_model": "/monster/data/model/Qwen3-8B",
+  "calibration_rows": 8,
+  "completed_at": "2026-07-23T09:24:58.059191+00:00",
+  "diagnostics": {
+    "code_fingerprints": {
+      "module_count": 7,
+      "packed_mismatch_count": 0,
+      "packed_mismatch_rate": 0.0,
+      "prepack_mismatch_count": 0,
+      "prepack_mismatch_rate": 0.0,
+      "sample_code_count": 28672,
+      "top": [
+        {
+          "layer": 0,
+          "module": "self_attn.q_proj",
+          "packed": {
+            "maximum_absolute_delta": 0,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "sample_code_count": 4096
+          },
+          "post_gptq": {
+            "above_range_count": 0,
+            "below_range_count": 0,
+            "nonfinite_count": 0,
+            "sample_code_count": 4096
+          },
+          "prepack": {
+            "maximum_absolute_delta": 0,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "sample_code_count": 4096
+          }
+        },
+        {
+          "layer": 0,
+          "module": "self_attn.k_proj",
+          "packed": {
+            "maximum_absolute_delta": 0,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "sample_code_count": 4096
+          },
+          "post_gptq": {
+            "above_range_count": 0,
+            "below_range_count": 0,
+            "nonfinite_count": 0,
+            "sample_code_count": 4096
+          },
+          "prepack": {
+            "maximum_absolute_delta": 0,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "sample_code_count": 4096
+          }
+        },
+        {
+          "layer": 0,
+          "module": "self_attn.v_proj",
+          "packed": {
+            "maximum_absolute_delta": 0,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "sample_code_count": 4096
+          },
+          "post_gptq": {
+            "above_range_count": 0,
+            "below_range_count": 0,
+            "nonfinite_count": 0,
+            "sample_code_count": 4096
+          },
+          "prepack": {
+            "maximum_absolute_delta": 0,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "sample_code_count": 4096
+          }
+        },
+        {
+          "layer": 0,
+          "module": "self_attn.o_proj",
+          "packed": {
+            "maximum_absolute_delta": 0,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "sample_code_count": 4096
+          },
+          "post_gptq": {
+            "above_range_count": 0,
+            "below_range_count": 0,
+            "nonfinite_count": 0,
+            "sample_code_count": 4096
+          },
+          "prepack": {
+            "maximum_absolute_delta": 0,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "sample_code_count": 4096
+          }
+        },
+        {
+          "layer": 0,
+          "module": "mlp.gate_proj",
+          "packed": {
+            "maximum_absolute_delta": 0,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "sample_code_count": 4096
+          },
+          "post_gptq": {
+            "above_range_count": 0,
+            "below_range_count": 0,
+            "nonfinite_count": 0,
+            "sample_code_count": 4096
+          },
+          "prepack": {
+            "maximum_absolute_delta": 0,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "sample_code_count": 4096
+          }
+        }
+      ]
+    },
+    "loss": {
+      "max_to_mean_ratio": 3.5001767941061734,
+      "max_total_loss_share": 0.5000252563008819,
+      "mean_loss": 0.00024010981428571426,
+      "median_loss": 2.23314e-05,
+      "module_count": 7,
+      "severe_concentration": false,
+      "skipped_loss_count": 0,
+      "top": [
+        {
+          "layer": 0,
+          "loss": 0.0008404268,
+          "module": "mlp.gate_proj",
+          "role_median_loss": 0.0008404268,
+          "role_median_ratio": 1.0,
+          "total_loss_share": 0.5000252563008819
+        },
+        {
+          "layer": 0,
+          "loss": 0.0007304079,
+          "module": "mlp.up_proj",
+          "role_median_loss": 0.0007304079,
+          "role_median_ratio": 1.0,
+          "total_loss_share": 0.43456776652254414
+        },
+        {
+          "layer": 0,
+          "loss": 7.54647e-05,
+          "module": "mlp.down_proj",
+          "role_median_loss": 7.54647e-05,
+          "role_median_ratio": 1.0,
+          "total_loss_share": 0.04489892035709614
+        },
+        {
+          "layer": 0,
+          "loss": 2.23314e-05,
+          "module": "self_attn.o_proj",
+          "role_median_loss": 2.23314e-05,
+          "role_median_ratio": 1.0,
+          "total_loss_share": 0.013286420671684333
+        },
+        {
+          "layer": 0,
+          "loss": 7.8076e-06,
+          "module": "self_attn.q_proj",
+          "role_median_loss": 7.8076e-06,
+          "role_median_ratio": 1.0,
+          "total_loss_share": 0.004645255471499439
+        }
+      ],
+      "total_loss": 0.0016807686999999998
+    },
+    "mode": "channel",
+    "scale_channels": {
+      "module_count": 7,
+      "top": [
+        {
+          "layer": 0,
+          "max_scale": 0.9007585048675537,
+          "max_scale_output_channel": 1838,
+          "max_to_median_ratio": 14.576511343364345,
+          "median_channel_max_scale": 0.061795204877853394,
+          "module": "mlp.down_proj",
+          "nonfinite_scale_count": 0,
+          "output_channel_count": 4096,
+          "p99_channel_max_scale": 0.19932663440704346,
+          "scale_count_above_10": 0,
+          "scale_element_count": 1572864
+        },
+        {
+          "layer": 0,
+          "max_scale": 0.68637615442276,
+          "max_scale_output_channel": 1838,
+          "max_to_median_ratio": 12.758608879451902,
+          "median_channel_max_scale": 0.053797099739313126,
+          "module": "self_attn.o_proj",
+          "nonfinite_scale_count": 0,
+          "output_channel_count": 4096,
+          "p99_channel_max_scale": 0.1539745181798935,
+          "scale_count_above_10": 0,
+          "scale_element_count": 524288
+        },
+        {
+          "layer": 0,
+          "max_scale": 0.4566481113433838,
+          "max_scale_output_channel": 3793,
+          "max_to_median_ratio": 8.954813530606216,
+          "median_channel_max_scale": 0.05099470913410187,
+          "module": "self_attn.q_proj",
+          "nonfinite_scale_count": 0,
+          "output_channel_count": 4096,
+          "p99_channel_max_scale": 0.13900047540664673,
+          "scale_count_above_10": 0,
+          "scale_element_count": 524288
+        },
+        {
+          "layer": 0,
+          "max_scale": 0.4335390329360962,
+          "max_scale_output_channel": 499,
+          "max_to_median_ratio": 7.5487825500297046,
+          "median_channel_max_scale": 0.057431649416685104,
+          "module": "self_attn.k_proj",
+          "nonfinite_scale_count": 0,
+          "output_channel_count": 1024,
+          "p99_channel_max_scale": 0.218741774559021,
+          "scale_count_above_10": 0,
+          "scale_element_count": 131072
+        },
+        {
+          "layer": 0,
+          "max_scale": 0.3690536320209503,
+          "max_scale_output_channel": 7641,
+          "max_to_median_ratio": 6.654674420180883,
+          "median_channel_max_scale": 0.05545780435204506,
+          "module": "mlp.gate_proj",
+          "nonfinite_scale_count": 0,
+          "output_channel_count": 12288,
+          "p99_channel_max_scale": 0.1339341700077057,
+          "scale_count_above_10": 0,
+          "scale_element_count": 1572864
+        }
+      ]
+    }
+  },
+  "hardware": {
+    "compute_capability": "8.0",
+    "cuda_visible_devices": "3",
+    "memory_bytes": 102191202304,
+    "name": "NVIDIA PG506-230",
+    "pci_bus_id": 105,
+    "sm_count": 124,
+    "uuid": "471ecdd7-a171-4d5c-d61f-a1802dc76e4c",
+    "workers": {
+      "cpu": 1,
+      "cuda:per": 1,
+      "model_loader:cpu": 1,
+      "mps": 1,
+      "npu:per": 1,
+      "xpu:per": 1
+    }
+  },
+  "label": "qwen3-8b-layer0-zero-eora-independent-wq",
+  "load_wall_s": 0.6842117253690958,
+  "model_layer_count": 36,
+  "quantization_config": {
+    "bits": 2,
+    "checkpoint_format": "gptq",
+    "desc_act": false,
+    "dynamic": {
+      "-:^model\\.layers\\.10\\.": {},
+      "-:^model\\.layers\\.11\\.": {},
+      "-:^model\\.layers\\.12\\.": {},
+      "-:^model\\.layers\\.13\\.": {},
+      "-:^model\\.layers\\.14\\.": {},
+      "-:^model\\.layers\\.15\\.": {},
+      "-:^model\\.layers\\.16\\.": {},
+      "-:^model\\.layers\\.17\\.": {},
+      "-:^model\\.layers\\.18\\.": {},
+      "-:^model\\.layers\\.19\\.": {},
+      "-:^model\\.layers\\.1\\.": {},
+      "-:^model\\.layers\\.20\\.": {},
+      "-:^model\\.layers\\.21\\.": {},
+      "-:^model\\.layers\\.22\\.": {},
+      "-:^model\\.layers\\.23\\.": {},
+      "-:^model\\.layers\\.24\\.": {},
+      "-:^model\\.layers\\.25\\.": {},
+      "-:^model\\.layers\\.26\\.": {},
+      "-:^model\\.layers\\.27\\.": {},
+      "-:^model\\.layers\\.28\\.": {},
+      "-:^model\\.layers\\.29\\.": {},
+      "-:^model\\.layers\\.2\\.": {},
+      "-:^model\\.layers\\.30\\.": {},
+      "-:^model\\.layers\\.31\\.": {},
+      "-:^model\\.layers\\.32\\.": {},
+      "-:^model\\.layers\\.33\\.": {},
+      "-:^model\\.layers\\.34\\.": {},
+      "-:^model\\.layers\\.35\\.": {},
+      "-:^model\\.layers\\.3\\.": {},
+      "-:^model\\.layers\\.4\\.": {},
+      "-:^model\\.layers\\.5\\.": {},
+      "-:^model\\.layers\\.6\\.": {},
+      "-:^model\\.layers\\.7\\.": {},
+      "-:^model\\.layers\\.8\\.": {},
+      "-:^model\\.layers\\.9\\.": {}
+    },
+    "format": "gptq",
+    "group_size": 32,
+    "lm_head": false,
+    "meta": {
+      "act_group_aware": true,
+      "auto_forward_data_parallel": true,
+      "dense_vram_strategy": "exclusive",
+      "dense_vram_strategy_devices": null,
+      "enable_shared_hessian_cache": true,
+      "fallback": {
+        "smooth": null,
+        "strategy": "rtn",
+        "threshold": "0.5%"
+      },
+      "gc_mode": "on_stage_end",
+      "gptaq": null,
+      "hessian": {
+        "chunk_bytes": null,
+        "chunk_size": null,
+        "staging_dtype": "float32"
+      },
+      "mock_quantization": false,
+      "moe_vram_strategy": "exclusive",
+      "moe_vram_strategy_devices": null,
+      "mse": 2.0,
+      "offload_to_disk": true,
+      "offload_to_disk_path": "/tmp/gptqmodel_x9cc9olg",
+      "pack_impl": "gpu",
+      "quantization_diagnostics": "channel",
+      "scale_search": "activation",
+      "wait_for_submodule_finalizers": true,
+      "weight_only_quant_threads": null
+    },
+    "method": "gptq",
+    "pack_dtype": "int32",
+    "quant_method": "gptq",
+    "sym": true
+  },
+  "quantize_result_keys": [
+    "eora",
+    "gptq"
+  ],
+  "quantize_wall_s": 30.253796257078648,
+  "quantized_layer_count": 1,
+  "versions": {
+    "cuda": "13.0",
+    "datasets": "4.8.3",
+    "gptqmodel": "7.3.1+ultra",
+    "platform": "Linux-6.18.28-x86_64-with-glibc2.39",
+    "python": "3.14.5 free-threading build (main, May 11 2026, 11:48:49) [GCC 13.3.0]",
+    "torch": "2.13.0+cu130",
+    "transformers": "5.14.1"
+  }
+}

@@ -1,0 +1,234 @@
+{
+  "benchmark": "eora_gptq_3bit_packing_regression_qwen3_8b",
+  "date_utc": "2026-07-23",
+  "ultra_fix_commit": "009b27dc6288231cb03a5c2751fcfb3e0e75187e",
+  "upstream_cherry_pick_commit": "8fba537d91ee7807938376d4cc9f9d2dd2727481",
+  "upstream_pull_request": "https://github.com/ModelCloud/GPTQModel/pull/2963",
+  "scope": "Diagnose and repair corrupted 3-bit GPTQ base weights serialized during joint GPTQ plus EoRA generation.",
+  "base_model": "/monster/data/model/Qwen3-8B",
+  "quantization": {
+    "method": "gptq",
+    "format": "gptq",
+    "bits": 3,
+    "group_size": 128,
+    "sym": true,
+    "desc_act": false,
+    "scale_search": "activation",
+    "act_group_aware": true,
+    "pack_dtype": "int32"
+  },
+  "eora": {
+    "rank": 128,
+    "algo": "lowrank",
+    "algo_is_new_config_default": true,
+    "adapted_modules": 252,
+    "saved_factor_tensors": 504,
+    "weights_bytes": 698420736
+  },
+  "calibration": {
+    "dataset": "/monster/data/model/dataset/nm-calibration",
+    "config": "LLM",
+    "selection": "first 512 rows",
+    "sort": "desc",
+    "concat_size": null,
+    "batch_size": 1,
+    "selected_text_sha256": "a89c5ed40152f435d5102657166cb72399603042596c57dd2f1095724ad8f59d",
+    "non_padding_tokens": 181796
+  },
+  "software": {
+    "python": "3.14.5 free-threading",
+    "torch": "2.13.0+cu130",
+    "cuda_runtime": "13.0",
+    "transformers": "5.14.1",
+    "evalution": "0.0.9",
+    "datasets": "4.8.3",
+    "safetensors": "0.8.0",
+    "gptqmodel": "7.3.1+ultra"
+  },
+  "hardware": {
+    "driver": "610.43.02",
+    "device_family": "NVIDIA PG506-230/232",
+    "compute_capability": "8.0",
+    "sm_count": 124,
+    "memory_bytes": 102191202304,
+    "assignments": [
+      {
+        "purpose": "CPU/Python pack recreation",
+        "physical_index_pci_order": 0,
+        "pci_bus_id": "00000000:25:00.0",
+        "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2"
+      },
+      {
+        "purpose": "packer tests and dense-weight diagnostics",
+        "physical_index_pci_order": 1,
+        "pci_bus_id": "00000000:2B:00.0",
+        "uuid": "GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855"
+      },
+      {
+        "purpose": "GPU pack recreation and Evalution",
+        "physical_index_pci_order": 2,
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8"
+      }
+    ]
+  },
+  "root_cause": {
+    "boundary": "reconstructed floating-point quantization code immediately before bit packing",
+    "legal_unsigned_code_range": [
+      0,
+      7
+    ],
+    "failure": "Unchecked -1 and 8 values were narrowed or shifted and wrapped modulo the 3-bit code width.",
+    "trigger": "Joint EoRA replay changes the floating-point weight presented to the base packer after GPTQ scales and zero-points are fixed.",
+    "fix": "Round, clamp in floating point to the logical code domain, and only then convert to an integer and pack.",
+    "affected_entry_points": [
+      "PackableQuantLinear.pack_block Python fallback",
+      "PackableQuantLinear.pack_gpu",
+      "PackableQuantLinear.pack_original"
+    ],
+    "additional_hardening": "The native CPU extension now clamps before its int32 cast, protecting very large finite excursions.",
+    "normal_gptq_noop_evidence": "The two native no-EoRA model shards were byte-identical before and after the saturation change."
+  },
+  "packing_performance": {
+    "module_count": 252,
+    "cpu_python_pack": {
+      "stage_total_seconds": 257.603,
+      "quantization_wall_seconds": 1687.3680617008358,
+      "save_wall_seconds": 6.083436136133969
+    },
+    "gpu_pack": {
+      "stage_total_seconds": 46.693,
+      "quantization_wall_seconds": 1431.860340287909,
+      "save_wall_seconds": 5.605276775080711
+    },
+    "gpu_pack_stage_speedup": 5.5169511489944965,
+    "gpu_total_quantization_speedup": 1.1784445830530867,
+    "gpu_total_seconds_saved": 255.5077214129269
+  },
+  "model_results": [
+    {
+      "variant": "broken_joint_gptq_eora",
+      "artifact": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512",
+      "pack_impl": "cpu_python",
+      "quantization_wall_seconds": 1629.2105158641934,
+      "sampled_packed_weight_cosine_vs_dense": 0.6961333389793124,
+      "direct_saved_scale_cosine_vs_dense": 0.974280406321798,
+      "packed_vs_direct_code_agreement": 0.9456865574632373,
+      "last_logit_cosine_vs_dense": 0.3579723536968231,
+      "dense_top1_token_id": 12095,
+      "quant_top1_token_id": 83151,
+      "continuation": "SOLD repeated 24 times",
+      "gsm8k_platinum_max_rows": 64,
+      "gsm8k_correct": 0,
+      "gsm8k_score": 0.0,
+      "gsm8k_invalid": 64,
+      "evaluation_evidence": "initial stopped Evalution console run"
+    },
+    {
+      "variant": "native_gptq_without_eora",
+      "artifact": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-cal512-no-eora",
+      "pack_impl": "cpu_python",
+      "quantization_wall_seconds": 1157.7452012491412,
+      "sampled_packed_weight_cosine_vs_dense": 0.9653016052075795,
+      "direct_saved_scale_cosine_vs_dense": 0.974280406321798,
+      "packed_vs_direct_code_agreement": 0.8532532559973853,
+      "last_logit_cosine_vs_dense": 0.9847791194915771,
+      "dense_top1_token_id": 12095,
+      "quant_top1_token_id": 12095,
+      "continuation": "coherent Paris, Berlin, Rome, and Spain continuation",
+      "gsm8k_platinum_max_rows": 64,
+      "gsm8k_correct": 57,
+      "gsm8k_score": 0.890625,
+      "gsm8k_invalid": 0,
+      "evaluation_wall_seconds": 112.29476402234286
+    },
+    {
+      "variant": "fixed_joint_gptq_eora_gpu_pack_base_only_diagnostic",
+      "artifact": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped",
+      "pack_impl": "gpu",
+      "quantization_wall_seconds": 1431.860340287909,
+      "sampled_packed_weight_cosine_vs_dense": 0.9742787565503802,
+      "direct_saved_scale_cosine_vs_dense": 0.974280406321798,
+      "packed_vs_direct_code_agreement": 0.998239319239344,
+      "last_logit_cosine_vs_dense": 0.9699496030807495,
+      "dense_top1_token_id": 12095,
+      "quant_top1_token_id": 12095,
+      "continuation": "coherent Paris, Rome, Madrid, and Portugal continuation"
+    },
+    {
+      "variant": "fixed_joint_gptq_eora_gpu_pack_with_adapter",
+      "artifact": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-gpu-pack-clamped",
+      "adapter": "eora-rank128",
+      "pack_impl": "gpu",
+      "last_logit_cosine_vs_dense": 0.9553332924842834,
+      "dense_top1_token_id": 12095,
+      "quant_top1_token_id": 12095,
+      "continuation": "coherent Paris, Rome, Madrid, and Portugal continuation",
+      "gsm8k_platinum_max_rows": 64,
+      "gsm8k_correct": 58,
+      "gsm8k_score": 0.90625,
+      "gsm8k_invalid": 0,
+      "evaluation_wall_seconds": 121.13933972781524
+    },
+    {
+      "variant": "fixed_joint_gptq_eora_cpu_pack",
+      "artifact": "/monster/data/model/Qwen3-8B-GPTQ-3bit-g128-activation-GAR-EoRA-r128-cal512-cpu-pack-clamped",
+      "pack_impl": "cpu_python",
+      "quantization_wall_seconds": 1687.3680617008358,
+      "bitwise_identical_to_fixed_gpu_pack": true
+    },
+    {
+      "variant": "two_bit_control",
+      "artifact": "/monster/data/model/Qwen3-1.7B-w2g64-gptq_v2",
+      "bits": 2,
+      "group_size": 64,
+      "sampled_packed_weight_cosine_vs_dense": 0.9193230420351028,
+      "direct_saved_scale_cosine_vs_dense": 0.922525669847216,
+      "packed_vs_direct_code_agreement": 0.9540219690118518,
+      "last_logit_cosine_vs_dense": 0.619757890701294,
+      "dense_top1_token_id": 12095,
+      "quant_top1_token_id": 12095,
+      "continuation": "coherent Paris, New York City, and London continuation",
+      "catastrophic_endpoint_wrap_signature": false
+    }
+  ],
+  "hash_parity": {
+    "native_no_eora_before_and_after_fix": {
+      "model-00001-of-00002.safetensors": "c1ff77a92f87ee10b888c7566d9ee65159577880f059a20085154417763d1a2f",
+      "model-00002-of-00002.safetensors": "59948356dee2241391d7123197315cc1cf56f49d720d6a2f7dad02c494d8282a"
+    },
+    "fixed_cpu_and_gpu_pack": {
+      "model-00001-of-00002.safetensors": "c8692777ebe46222181e1b257ac6b454edc2320b8124ff0c53406e8a9785769d",
+      "model-00002-of-00002.safetensors": "0a0a58aaf406ef8a75638a0f6a8abb1d46920706a3aa2d2ac20ed6adae6fdb7e",
+      "eora-rank128/adapter_model.safetensors": "fcdb1ed99e2f2d3717fd009c7ca79b7f72cc6ada9d3535cf73d7ac7ac98e9f2e"
+    }
+  },
+  "inference_kernel_isolation": {
+    "dtype": "float16",
+    "native_trilin_modules": 252,
+    "base_native_calls": 6300,
+    "base_trilin_vs_torch_prefill_cosine": 0.9999977350234985,
+    "base_trilin_vs_torch_generated_ids_equal": true,
+    "adapter_unfused_native_calls": 6300,
+    "adapter_fused_base_calls": 4644,
+    "adapter_fused_eora_calls": 1656,
+    "adapter_unfused_vs_torch_prefill_cosine": 0.9999725818634033,
+    "adapter_fused_vs_unfused_generated_ids_equal": true,
+    "conclusion": "Native TriLin and fused TriLin plus EoRA agree with eager references; serialization was the failing boundary."
+  },
+  "validation": {
+    "full_pack_suite": "18 passed and 4 saturation subtests passed in 33.47 seconds on physical GPU 1",
+    "cpu_only_saturation": "1 passed and 4 saturation subtests passed in 8.70 seconds with CUDA hidden",
+    "eora_config_and_math": "22 passed in 12.72 seconds",
+    "ruff": "passed",
+    "skill_validator": "passed",
+    "json_validation": "passed",
+    "git_diff_check": "passed"
+  },
+  "notes": [
+    "The fixed GPU-pack artifact was evaluated with the saved rank-128 adapter; the sampled weight diagnostic intentionally loaded the same base without applying the adapter.",
+    "Evalution processed all 64 requested GSM8K Platinum rows and reported zero invalid outputs.",
+    "The batch-16 evaluation emitted recoverable CUDA expandable-segment mapping warnings near batch boundaries but completed successfully.",
+    "The quantization_packing skill and Ultra diagnosis artifacts are intentionally excluded from the upstream GPTQModel pull request."
+  ]
+}
