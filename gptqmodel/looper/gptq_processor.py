@@ -30,6 +30,19 @@ log = setup_logger()
 lock = threading.Lock()
 
 
+def snapshot_eora_reconstructed_weight(weight: torch.Tensor) -> torch.Tensor:
+    """Keep EoRA's reconstructed weight independent from module rematerialization.
+
+    Sequential processors can reload the dense checkpoint into the module's
+    parameter storage before EoRA runs. A plain tensor alias would then stop
+    containing GPTQ's reconstruction and make the base packer derive different
+    logical codes. The CPU copy also avoids retaining a second full weight on
+    the quantization device.
+    """
+
+    return weight.detach().to(device=CPU, copy=True)
+
+
 def clone_gptq_config_for_module(
     qcfg: QuantizeConfig,
     module_full_name: str,
@@ -391,7 +404,10 @@ class GPTQProcessor(LoopProcessor):
             # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
             if self.calculate_w_wq_diff:
                 module.state.update({
-                    "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
+                    # The following EoRA pass rematerializes the dense module.
+                    # Preserve GPTQ's reconstructed weight in independent
+                    # storage before exposing ``wq`` through the parameter.
+                    "wq": snapshot_eora_reconstructed_weight(wq),
                 })
 
         # single largest deallocation of vram happens here

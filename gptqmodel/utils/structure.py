@@ -558,6 +558,32 @@ def _ensure_target_storage_on_device_(param: torch.nn.Parameter, device: torch.d
     return param
 
 
+class _SplitDimWithInterleave(int):
+    """Integer split dimension carrying a preceding HF Interleave operation.
+
+    Keeping this as an ``int`` preserves the private resolver's four-item return
+    contract while allowing materialization to reproduce checkpoint conversion
+    pipelines such as Inkling's ``Interleave -> Chunk``.
+    """
+
+    def __new__(cls, split_dim: int, *, interleave_dim: int, interleave_inverse: bool):
+        value = super().__new__(cls, split_dim)
+        value.interleave_dim = interleave_dim
+        value.interleave_inverse = interleave_inverse
+        return value
+
+
+def _split_dim_cache_key(split_dim: Optional[int]) -> tuple[Optional[int], Optional[int], Optional[bool]]:
+    """Keep Interleave metadata distinct when a split dimension is used as a cache key."""
+    if split_dim is None:
+        return None, None, None
+    return (
+        int(split_dim),
+        getattr(split_dim, "interleave_dim", None),
+        getattr(split_dim, "interleave_inverse", None),
+    )
+
+
 @dataclass(frozen=True)
 class _MoEAliasSpec:
     """MoE alias groups derived entirely from the model definition's `module_tree`."""
@@ -1797,6 +1823,11 @@ class LazyTurtle:
             fused_candidate = (fused_name, expert_index, split_index, split_dim)
             if fused_candidate not in runtime_candidates:
                 runtime_candidates.append(fused_candidate)
+        # The expert index may be part of module_path, so inspect the full tensor name too.
+        for fused_name, expert_index, split_index, split_dim in self._fused_checkpoint_requests(combined_name):
+            fused_candidate = (fused_name, expert_index, split_index, split_dim)
+            if fused_candidate not in runtime_candidates:
+                runtime_candidates.append(fused_candidate)
 
         for converter in self._runtime_to_checkpoint_converters:
             if "ErnieFuseAndSplitTextVisionExperts" in converter.operation_names:
@@ -1833,15 +1864,49 @@ class LazyTurtle:
 
                     split_index = None
                     split_dim = None
-                    if converter.operation_names[:1] == ("Chunk",) and len(converter.source_patterns) > 1:
+                    resolved_expert_index = None
+                    if len(converter.target_patterns) == 1:
+                        # One checkpoint tensor can hold every expert and both gate/up projections.
+                        resolved_expert_index = fused_expert_index
+                        split_index = fused_split_index
+                        split_dim = fused_split_dim
+
+                    chunk_operation = next(
+                        (
+                            operation
+                            for operation in converter.operations
+                            if type(operation).__name__ == "Chunk"
+                        ),
+                        None,
+                    )
+                    if chunk_operation is not None and len(converter.source_patterns) > 1:
                         # Chunk converters share one checkpoint tensor across
                         # multiple runtime tensors; preserve the selected slice.
                         split_index = selected_source_index
-                        split_dim = getattr(converter.operations[0], "dim", 0)
+                        split_dim = getattr(chunk_operation, "dim", 0)
+
+                    interleave_operation = next(
+                        (
+                            operation
+                            for operation in converter.operations
+                            if type(operation).__name__ == "Interleave"
+                        ),
+                        None,
+                    )
+                    if interleave_operation is not None and split_dim is not None:
+                        # Inkling deinterleaves w13 before selecting the gate/up slice.
+                        split_dim = _SplitDimWithInterleave(
+                            split_dim,
+                            interleave_dim=getattr(interleave_operation, "dim", 0),
+                            interleave_inverse=bool(getattr(interleave_operation, "inverse", False)),
+                        )
 
                     renamed_variants = [renamed]
                     if "*" in renamed and fused_expert_index is not None:
                         renamed_variants.insert(0, renamed.replace("*", str(fused_expert_index), 1))
+                        # The expert index is encoded in the checkpoint key, not
+                        # stored as the leading axis of the checkpoint tensor.
+                        resolved_expert_index = None
 
                     for renamed_variant in renamed_variants:
                         for candidate in self._runtime_to_checkpoint_alias_candidates(renamed_variant):
@@ -1851,7 +1916,7 @@ class LazyTurtle:
                             )[0] is not None:
                                 continue
                             if candidate in self._weight_map:
-                                return candidate, None, split_index, split_dim
+                                return candidate, resolved_expert_index, split_index, split_dim
 
         return None, None, None, None
 
@@ -1956,18 +2021,55 @@ class LazyTurtle:
     ) -> Optional[torch.Tensor]:
         """Slice fused checkpoint tensors into the tensor layout expected by the shell module."""
 
+        interleave_dim = getattr(split_dim, "interleave_dim", None)
+        interleave_inverse = bool(getattr(split_dim, "interleave_inverse", False))
+        effective_split_dim = int(split_dim) if split_dim is not None else None
+
+        def apply_interleave(candidate: torch.Tensor, dim: int) -> Optional[torch.Tensor]:
+            """Apply HF's two-way Interleave operation without changing tensor shape."""
+            if dim < 0:
+                dim += candidate.ndim
+            if dim < 0 or dim >= candidate.ndim or candidate.shape[dim] % 2:
+                return None
+
+            shape = list(candidate.shape)
+            if interleave_inverse:
+                shape[dim : dim + 1] = [2, shape[dim] // 2]
+            else:
+                shape[dim : dim + 1] = [shape[dim] // 2, 2]
+            return candidate.reshape(shape).transpose(dim, dim + 1).reshape(candidate.shape).contiguous()
+
+        # If a converter acts on the leading expert axis, it must run before
+        # selecting an expert. Other dimensions can be adjusted after slicing,
+        # avoiding a copy of the complete packed expert tensor.
+        if expert_index is not None and interleave_dim == 0:
+            tensor = apply_interleave(tensor, interleave_dim)
+            if tensor is None:
+                return None
+            interleave_dim = None
+
         if expert_index is not None:
             if tensor.shape[0] <= expert_index:
                 return None
             # Fused expert checkpoints store the expert axis first; peel it off before
             # reasoning about split dimensions or transpose decisions.
             tensor = tensor[expert_index].contiguous()
+            # Removing the expert axis shifts positive converter dimensions left.
+            if interleave_dim is not None and interleave_dim > 0:
+                interleave_dim -= 1
+            if effective_split_dim is not None and effective_split_dim > 0:
+                effective_split_dim -= 1
+
+        if interleave_dim is not None:
+            tensor = apply_interleave(tensor, interleave_dim)
+            if tensor is None:
+                return None
 
         if expected_shape is None:
             if split_index is not None:
-                if split_dim is None or tensor.shape[split_dim] % 2 != 0:
+                if effective_split_dim is None or tensor.shape[effective_split_dim] % 2 != 0:
                     return None
-                tensor = tensor.chunk(2, dim=split_dim)[split_index].contiguous()
+                tensor = tensor.chunk(2, dim=effective_split_dim)[split_index].contiguous()
             return tensor
 
         expected_shape = tuple(expected_shape)
@@ -1979,16 +2081,16 @@ class LazyTurtle:
                 return None
 
             preferred_dims: list[int] = []
-            mapped_split_dim = split_dim
+            mapped_split_dim = effective_split_dim
             if (
                 used_transpose
                 and candidate.ndim == 2
-                and split_dim is not None
-                and 0 <= split_dim < 2
+                and effective_split_dim is not None
+                and 0 <= effective_split_dim < 2
             ):
                 # The resolver hint is expressed in the checkpoint's native layout.
                 # Once we transpose a 2D candidate, the split dimension flips too.
-                mapped_split_dim = 1 - split_dim
+                mapped_split_dim = 1 - effective_split_dim
             if mapped_split_dim is not None and 0 <= mapped_split_dim < candidate.ndim:
                 preferred_dims.append(mapped_split_dim)
             preferred_dims.extend(dim for dim in range(candidate.ndim) if dim not in preferred_dims)
