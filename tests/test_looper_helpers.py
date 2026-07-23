@@ -1,7 +1,6 @@
 import torch
 
 import gptqmodel.utils.looper_helpers as looper_helpers
-from gptqmodel.utils.looper_helpers import forward_batch_worker
 
 
 class _DummyProcessor:
@@ -55,7 +54,7 @@ def test_forward_batch_worker_waits_for_device_before_future_completion(monkeypa
         lambda device=None: events.append(("sync", device)),
     )
 
-    forward_batch_worker(
+    looper_helpers.forward_batch_worker(
         module=module,
         processor=processor,
         batch_index=0,
@@ -82,7 +81,7 @@ def test_forward_batch_worker_passes_none_attention_mask_when_module_requires_it
     module = _RequiresAttentionMask()
     hidden_states = torch.randn(1, 2, 4)
 
-    batch_index, module_output, kv_next = forward_batch_worker(
+    batch_index, module_output, kv_next = looper_helpers.forward_batch_worker(
         module=module,
         processor=processor,
         batch_index=3,
@@ -108,7 +107,7 @@ def test_forward_batch_worker_skips_attention_mask_for_modules_without_the_kwarg
     module = _IgnoresAttentionMask()
     hidden_states = torch.randn(1, 2, 4)
 
-    batch_index, module_output, kv_next = forward_batch_worker(
+    batch_index, module_output, kv_next = looper_helpers.forward_batch_worker(
         module=module,
         processor=processor,
         batch_index=1,
@@ -134,7 +133,7 @@ def test_forward_batch_worker_only_returns_primary_tensor_for_tuple_outputs():
     module = _ReturnsAuxState()
     hidden_states = torch.randn(1, 2, 4)
 
-    batch_index, module_output, kv_next = forward_batch_worker(
+    batch_index, module_output, kv_next = looper_helpers.forward_batch_worker(
         module=module,
         processor=processor,
         batch_index=2,
