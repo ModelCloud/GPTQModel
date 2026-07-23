@@ -374,7 +374,8 @@ def forward_batch_worker(
     # TODO: rehome was done during cloning, is it still needed there?
     rehome_module_to_device(module, module_device, move_parameters=True, move_buffers=True)
 
-    torch_sync() # try to avoid torch.AcceleratorError: CUDA error: unspecified launch failure
+    # Replica preparation may enqueue non-blocking parameter or buffer copies.
+    torch_sync(device=module_device)
     inputs = [move_to(inp, device=module_device) for inp in layer_input]
 
     attn_tensor = None
@@ -449,6 +450,11 @@ def forward_batch_worker(
         # Replay only consumes the hidden-state tensor that feeds the next
         # layer.
         result_output = module_output[0] if isinstance(module_output, tuple) else module_output
+
+    # A worker future must not resolve until its accelerator work is complete.
+    # Balanced calibration keeps outputs on-device, so there is no blocking
+    # device-to-host copy to provide this fence before GC or replica teardown.
+    torch_sync(device=module_device)
 
     # Promptly release VRAM to reduce peak memory usage.
     del inputs

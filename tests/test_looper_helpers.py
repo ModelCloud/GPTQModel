@@ -1,5 +1,6 @@
 import torch
 
+import gptqmodel.utils.looper_helpers as looper_helpers
 from gptqmodel.utils.looper_helpers import forward_batch_worker
 
 
@@ -31,6 +32,49 @@ class _ReturnsAuxState(torch.nn.Module):
     def forward(self, hidden_states, use_cache=False):
         aux_state = hidden_states + 2
         return hidden_states + 1, aux_state
+
+
+class _RecordsForward(torch.nn.Module):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def forward(self, hidden_states, use_cache=False):
+        self.events.append(("forward", hidden_states.device))
+        return hidden_states + 1
+
+
+def test_forward_batch_worker_waits_for_device_before_future_completion(monkeypatch):
+    events = []
+    processor = _DummyProcessor()
+    module = _RecordsForward(events)
+    hidden_states = torch.randn(1, 2, 4)
+    monkeypatch.setattr(
+        looper_helpers,
+        "torch_sync",
+        lambda device=None: events.append(("sync", device)),
+    )
+
+    forward_batch_worker(
+        module=module,
+        processor=processor,
+        batch_index=0,
+        layer_input=[hidden_states],
+        layer_input_kwargs={},
+        attention_mask=None,
+        position_ids=None,
+        support_batch_quantize=True,
+        is_lm_head_module=False,
+        need_output=True,
+        reuse_kv=False,
+        prev_kv=None,
+    )
+
+    assert events == [
+        ("sync", hidden_states.device),
+        ("forward", hidden_states.device),
+        ("sync", hidden_states.device),
+    ]
 
 
 def test_forward_batch_worker_passes_none_attention_mask_when_module_requires_it():
