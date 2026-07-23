@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import os
 import sys
 import types
 
@@ -12,17 +11,6 @@ import torch
 from torch import nn
 
 from gptqmodel.models.definitions import intern_s2_preview
-from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
-
-
-def _resolve_model_path() -> str:
-    requested_path = "/monster/data/model/internlm/Intern-S2-Preview"
-    local_fallback = "/monster/data/model/Intern-S2-Preview"
-    if os.path.isdir(requested_path):
-        return requested_path
-    if os.path.isdir(local_fallback):
-        return local_fallback
-    return requested_path
 
 
 def test_capture_modules_follow_quant_device(monkeypatch):
@@ -97,51 +85,69 @@ def test_causal_mask_compat_drops_removed_cache_position(monkeypatch):
     assert calls == [("config", "inputs", "attention", "cache")]
 
 
+def test_monkey_patch_uses_remote_stateful_cache(monkeypatch):
+    module_name = "tests.fake_modeling_intern_s2_preview_cache"
+    modeling_module = types.ModuleType(module_name)
+
+    class InternS2PreviewDynamicCache:
+        def get_seq_length(self, layer_idx=0):
+            return 5
+
+        def get_mask_sizes(self, cache_position, layer_idx):
+            return cache_position.shape[0] + self.get_seq_length(layer_idx), 0
+
+    modeling_module.InternS2PreviewDynamicCache = InternS2PreviewDynamicCache
+
+    def create_causal_mask(*, cache_position=None):
+        return cache_position
+
+    modeling_module.create_causal_mask = create_causal_mask
+    monkeypatch.setitem(sys.modules, module_name, modeling_module)
+
+    language_model_type = type(
+        "FakeInternS2PreviewTextModel",
+        (),
+        {"__module__": module_name},
+    )
+    model_type = type(
+        "FakeInternS2PreviewForConditionalGeneration",
+        (),
+        {
+            "_is_stateful": True,
+            "_supports_default_dynamic_cache": classmethod(lambda cls: True),
+        },
+    )
+    instance = object.__new__(intern_s2_preview.InternS2PreviewQModel)
+    instance.model = model_type()
+    instance.model.model = types.SimpleNamespace(
+        language_model=language_model_type(),
+    )
+
+    instance.monkey_patch()
+
+    assert instance.model._supports_default_dynamic_cache() is False
+    cache = InternS2PreviewDynamicCache()
+    assert cache.get_query_offset(layer_idx=3) == 5
+    assert cache.get_mask_sizes(2, layer_idx=3) == (7, 0)
+    assert cache.get_mask_sizes(torch.arange(2), layer_idx=3) == (7, 0)
+
+
 class TestInternS2Preview(ModelTest):
-    NATIVE_MODEL_ID = _resolve_model_path()
+    NATIVE_MODEL_ID = "/monster/data/model/Intern-S2-Preview"
     TRUST_REMOTE_CODE = True
     USE_FLASH_ATTN = False
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
-    MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride())
+    TORCH_DTYPE = torch.bfloat16
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
+            "chat_template": True,
+            "acc": {"value": 0.4283, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.4070, "floor_pct": 0.04},
+        },
+    }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
+    EVAL_BATCH_SIZE = 18
+    EVAL_SINGLE_GPU = False
 
     def test_intern_s2_preview(self):
-        with self.model_compat_test_context():
-            model, tokenizer, processor = self.quantModel(
-                self.NATIVE_MODEL_ID,
-                trust_remote_code=self.TRUST_REMOTE_CODE,
-                dtype=self.TORCH_DTYPE,
-                batch_size=self.QUANT_BATCH_SIZE,
-                call_perform_post_quant_validation=False,
-            )
-
-        image_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "ovis/10016.jpg",
-        )
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image_path},
-                    {"type": "text", "text": "What does this picture show?"},
-                ],
-            }
-        ]
-        inputs = processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            enable_thinking=False,
-            return_dict=True,
-            return_tensors="pt",
-        ).to(model.device, dtype=self.TORCH_DTYPE)
-
-        output_text = self.generate_stable_with_limit(
-            model,
-            tokenizer,
-            inputs=inputs,
-            max_new_tokens=128,
-        )
-        print("output_text:", output_text)
-
-        self.assertIn("snow", output_text.lower())
+        self.quantize_and_evaluate()

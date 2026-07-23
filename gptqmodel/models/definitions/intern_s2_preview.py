@@ -89,6 +89,44 @@ class InternS2PreviewQModel(BaseQModel):
         modeling_module = import_module(
             type(self.model.model.language_model).__module__
         )
+
+        # Intern-S2's remote code owns a legacy stateful cache with top-level
+        # conv_states/recurrent_states. Newer Transformers versions otherwise
+        # pre-create their generic DynamicCache, whose state lives per layer.
+        # Let the remote model create InternS2PreviewDynamicCache in forward.
+        model_cls = type(self.model)
+        legacy_cache_cls = getattr(
+            modeling_module,
+            "InternS2PreviewDynamicCache",
+            None,
+        )
+        if legacy_cache_cls is not None and getattr(model_cls, "_is_stateful", False):
+            model_cls._supports_default_dynamic_cache = classmethod(
+                lambda cls: False
+            )
+
+            if not hasattr(legacy_cache_cls, "get_query_offset"):
+                def get_query_offset(cache_self, layer_idx=0):
+                    return cache_self.get_seq_length(layer_idx)
+
+                legacy_cache_cls.get_query_offset = get_query_offset
+
+            get_mask_sizes = legacy_cache_cls.get_mask_sizes
+            if (
+                "cache_position" in signature(get_mask_sizes).parameters
+                and not getattr(get_mask_sizes, "_gptqmodel_accepts_query_length", False)
+            ):
+                @wraps(get_mask_sizes)
+                def get_mask_sizes_compat(cache_self, query_length, layer_idx):
+                    if hasattr(query_length, "shape"):
+                        return get_mask_sizes(cache_self, query_length, layer_idx)
+
+                    past_seen_tokens = cache_self.get_seq_length(layer_idx)
+                    return query_length + past_seen_tokens, 0
+
+                get_mask_sizes_compat._gptqmodel_accepts_query_length = True
+                legacy_cache_cls.get_mask_sizes = get_mask_sizes_compat
+
         create_causal_mask = modeling_module.create_causal_mask
 
         if "cache_position" in signature(create_causal_mask).parameters or getattr(
