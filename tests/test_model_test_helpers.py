@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import model_test as model_test_module
 import torch
 from model_test import ModelTest
+from paroquant_optimize_case import BaseLlama3_2ParoQuantOptimizeTest
 
 from gptqmodel import BACKEND
 
@@ -191,7 +192,30 @@ def test_mode_specific_baseline_value_supports_gpu_mapping(monkeypatch):
     assert helper._mode_specific_baseline_value("NATIVE_ARC_CHALLENGE_ACC") == 0.53
 
 
-def test_evalution_threads_seed_and_explicit_greedy_gen_kwargs(monkeypatch):
+def test_paroquant_optimize_batch_sweep_override_preserves_existing_default(monkeypatch):
+    class _LayerHarness(BaseLlama3_2ParoQuantOptimizeTest):
+        OPT_SCOPE = "layer"
+
+    helper = _LayerHarness(methodName="runTest")
+    env_names = (
+        "GPTQMODEL_PAROQUANT_OPT_BATCH_SIZE",
+        "GPTQMODEL_PAROQUANT_LAYER_OPT_BATCH_SIZE",
+    )
+    for name in env_names:
+        monkeypatch.delenv(name, raising=False)
+
+    default_cfg = helper._build_quantize_config()
+    assert default_cfg.desc_act is False
+    assert default_cfg.opt_batch_size == 64
+
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_LAYER_OPT_BATCH_SIZE", "32")
+
+    sweep_cfg = helper._build_quantize_config()
+    assert sweep_cfg.desc_act is False
+    assert sweep_cfg.opt_batch_size == 32
+
+
+def test_evalution_threads_engine_seed_without_loader_random_seed(monkeypatch):
     captured = {}
 
     class _Harness(ModelTest):
@@ -218,7 +242,7 @@ def test_evalution_threads_seed_and_explicit_greedy_gen_kwargs(monkeypatch):
     assert results == {"arc_challenge": {"accuracy,loglikelihood": 1.0}}
     assert captured["model_args"]["device"] == "cuda:0"
     assert captured["model_args"]["seed"] == model_test_module.RAND_SEED
-    assert captured["model_args"]["random_seed"] == model_test_module.RAND_SEED
+    assert "random_seed" not in captured["model_args"]
     assert captured["gen_kwargs"] == "do_sample=false,temperature=0.0,top_p=1.0,top_k=50"
 
 

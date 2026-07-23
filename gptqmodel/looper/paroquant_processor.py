@@ -25,7 +25,7 @@ import threading
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -115,7 +115,7 @@ class _ParoQuantReplayBatch:
     target: torch.Tensor
     position_ids: Optional[torch.Tensor]
     attention_mask: Optional[torch.Tensor]
-    row_count: int
+    sample_count: int
 
 
 def _value_has_inference_tensor(value: Any) -> bool:
@@ -194,7 +194,7 @@ class _LayerShardLoader:
             target=self._tensor_to_device(batch.target, self.target_device),
             position_ids=self._metadata_tensor_to_device(batch.position_ids),
             attention_mask=self._metadata_tensor_to_device(batch.attention_mask),
-            row_count=batch.row_count,
+            sample_count=batch.sample_count,
         )
 
     def iter_shards(self) -> Iterator[list[_ParoQuantReplayBatch]]:
@@ -220,6 +220,7 @@ class ParoQuantProcessor(LoopProcessor):
         require_fwd: bool = True,
         calculate_w_wq_diff: bool = False,
         calibration_concat_separator: Optional[str] = None,
+        validation_calibration=None,
     ):
         """Configure a looper that captures activations and quantizes after replay."""
         capture_group_layer_context = str(getattr(qcfg, "opt_scope", "module")).strip().lower() != "module"
@@ -241,6 +242,15 @@ class ParoQuantProcessor(LoopProcessor):
             ),
         )
 
+        self._configure_calibration_streams(
+            validation_calibration=validation_calibration,
+            prepare_dataset_func=prepare_dataset_func,
+            calibration_concat_size=calibration_concat_size,
+            calibration_sort=calibration_sort,
+            calibration_concat_separator=calibration_concat_separator,
+            batch_size=batch_size,
+        )
+
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses: list[float] = []
         self.gptq_model = gptq_model
@@ -255,6 +265,110 @@ class ParoQuantProcessor(LoopProcessor):
         self._clean_group_layer_inputs: Optional[List[List[torch.Tensor]]] = None
         self._runtime_prewarmed = False
         self.fallback = qcfg.fallback
+
+    @staticmethod
+    def _calibration_batch_sample_count(batch: Dict[str, Any]) -> int:
+        """Count full sequences in one prepared calibration batch."""
+        input_ids = batch.get("input_ids") if isinstance(batch, dict) else None
+        if isinstance(input_ids, torch.Tensor):
+            if input_ids.dim() == 0:
+                return 1
+            if input_ids.dim() == 1:
+                return 1
+            return int(input_ids.shape[0])
+        if isinstance(input_ids, (list, tuple)):
+            if not input_ids or isinstance(input_ids[0], int):
+                return 1 if input_ids else 0
+            return len(input_ids)
+        return 0
+
+    @classmethod
+    def _take_calibration_samples(
+        cls,
+        batches: List[Dict[str, Any]],
+        sample_limit: int,
+    ) -> tuple[List[Dict[str, Any]], int]:
+        """Take at most ``sample_limit`` full sequences, slicing only a final partial batch."""
+        remaining = max(0, int(sample_limit))
+        selected: List[Dict[str, Any]] = []
+        selected_samples = 0
+        for batch in batches:
+            if remaining == 0:
+                break
+            batch_samples = cls._calibration_batch_sample_count(batch)
+            if batch_samples <= 0:
+                continue
+            take = min(remaining, batch_samples)
+            if take == batch_samples:
+                selected_batch = batch
+            else:
+                selected_batch = {}
+                for key, value in batch.items():
+                    if isinstance(value, torch.Tensor) and value.dim() > 0 and value.shape[0] == batch_samples:
+                        selected_batch[key] = value[:take]
+                    elif isinstance(value, (list, tuple)) and len(value) == batch_samples:
+                        selected_batch[key] = value[:take]
+                    else:
+                        selected_batch[key] = value
+            selected.append(selected_batch)
+            selected_samples += take
+            remaining -= take
+        return selected, selected_samples
+
+    def _configure_calibration_streams(
+        self,
+        *,
+        validation_calibration,
+        prepare_dataset_func,
+        calibration_concat_size: Optional[int],
+        calibration_sort: Optional[str],
+        calibration_concat_separator: Optional[str],
+        batch_size: int,
+    ) -> None:
+        """Prepare bounded train/validation streams and retain their exact capture boundary."""
+        self._has_explicit_validation_calibration = validation_calibration is not None
+        train_limit = int(self.qcfg.opt_train_samples)
+        validation_limit = int(self.qcfg.opt_validation_samples)
+
+        if self._has_explicit_validation_calibration:
+            train_batches, train_samples = self._take_calibration_samples(
+                list(self.calibration_dataset),
+                train_limit,
+            )
+            if prepare_dataset_func is None:
+                raise ValueError("prepare_dataset_func must be provided with `validation_calibration`.")
+            validation_batches = prepare_dataset_func(
+                calibration_dataset=validation_calibration,
+                calibration_dataset_concat_size=calibration_concat_size,
+                calibration_dataset_sort=calibration_sort,
+                batch_size=batch_size,
+                calibration_concat_separator=calibration_concat_separator,
+            )
+            validation_batches, validation_samples = self._take_calibration_samples(
+                list(validation_batches),
+                validation_limit,
+            )
+            self.calibration_dataset = train_batches + validation_batches
+            self._train_calibration_batch_count = len(train_batches)
+            self._validation_calibration_batch_count = len(validation_batches)
+            self._train_calibration_sample_count = train_samples
+            self._validation_calibration_sample_count = validation_samples
+        else:
+            # Preserve the one-stream API while bounding capture by full sequences. The
+            # prefix/suffix split remains a compatibility fallback and may overlap when
+            # the caller supplies fewer than train_limit + validation_limit samples.
+            combined_batches, combined_samples = self._take_calibration_samples(
+                list(self.calibration_dataset),
+                train_limit + validation_limit,
+            )
+            self.calibration_dataset = combined_batches
+            self._train_calibration_batch_count = 0
+            self._validation_calibration_batch_count = 0
+            self._train_calibration_sample_count = min(train_limit, combined_samples)
+            self._validation_calibration_sample_count = min(validation_limit, combined_samples)
+
+        self.num_batches = len(self.calibration_dataset)
+        self.total_calibration_tokens = self._compute_total_tokens(self.calibration_dataset)
 
     def set_calibration_dataset(self, calibration_dataset):
         """Reject runtime dataset swaps because capture state is tied to the processor."""
@@ -321,9 +435,10 @@ class ParoQuantProcessor(LoopProcessor):
         with self.lock:
             entry = self.tasks.get(module_name)
             if entry is None:
-                entry = {"inputs": []}
+                entry = {"inputs": [], "batch_indices": []}
                 self.tasks[module_name] = entry
             entry.setdefault("inputs", []).append(feature)
+            entry.setdefault("batch_indices", []).append(self.current_batch_index())
 
     def _ensure_task_bucket(self, module_name: str, layer_index: int) -> None:
         """Reset repeated relative module names when quantization advances to a new layer."""
@@ -332,10 +447,110 @@ class ParoQuantProcessor(LoopProcessor):
             if entry is None or entry.get("layer_index") != layer_index:
                 self.tasks[module_name] = {
                     "inputs": [],
+                    "batch_indices": [],
                     "layer_index": layer_index,
                 }
                 return
             entry.setdefault("inputs", [])
+            entry.setdefault("batch_indices", [])
+
+    @staticmethod
+    def _feature_tensor_sample_count(tensor: torch.Tensor) -> int:
+        """Count full sequences represented by one captured module-input tensor."""
+        if tensor.numel() == 0:
+            return 0
+        # Rank-3 is the normal [batch, sequence, hidden] capture. Rank-2
+        # captures were promoted by `_record_input_feature` and represent one
+        # sequence/call rather than `shape[0]` independent token rows.
+        return int(tensor.shape[0]) if tensor.dim() >= 3 else 1
+
+    @classmethod
+    def _take_feature_samples(
+        cls,
+        tensors: List[torch.Tensor],
+        sample_limit: int,
+        *,
+        from_end: bool = False,
+    ) -> List[torch.Tensor]:
+        """Select a prefix or suffix by full-sequence count, slicing a boundary batch when needed."""
+        remaining = max(0, int(sample_limit))
+        if remaining == 0:
+            return []
+        source = list(reversed(tensors)) if from_end else tensors
+        selected: List[torch.Tensor] = []
+        for tensor in source:
+            if remaining == 0:
+                break
+            tensor_samples = cls._feature_tensor_sample_count(tensor)
+            if tensor_samples <= 0:
+                continue
+            take = min(remaining, tensor_samples)
+            if take == tensor_samples:
+                selected_tensor = tensor
+            elif from_end:
+                selected_tensor = tensor[-take:]
+            else:
+                selected_tensor = tensor[:take]
+            selected.append(selected_tensor)
+            remaining -= take
+        if from_end:
+            selected.reverse()
+        return selected
+
+    @staticmethod
+    def _concat_feature_tensors(tensors: List[torch.Tensor]) -> torch.Tensor:
+        """Concatenate captures, flattening variable sequence lengths only as a compatibility fallback."""
+        if not tensors:
+            return torch.empty(0)
+        try:
+            return torch.cat(tensors, dim=0)
+        except RuntimeError:
+            hidden = tensors[0].shape[-1]
+            return torch.cat([tensor.reshape(-1, hidden) for tensor in tensors], dim=0)
+
+    def _module_feature_streams(
+        self,
+        tensors: List[torch.Tensor],
+        batch_indices: List[Optional[int]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Separate captured module activations into non-leaking train and validation streams."""
+        explicit_validation = bool(getattr(self, "_has_explicit_validation_calibration", False))
+        if explicit_validation:
+            validation_start = int(getattr(self, "_train_calibration_batch_count", 0))
+            validation_end = validation_start + int(getattr(self, "_validation_calibration_batch_count", 0))
+            indexed = list(zip(tensors, batch_indices)) if len(batch_indices) == len(tensors) else []
+            if not indexed or any(batch_index is None for _tensor, batch_index in indexed):
+                raise RuntimeError(
+                    "ParoQuant explicit validation calibration requires a batch index for every captured feature."
+                )
+            train_tensors = [
+                tensor
+                for tensor, batch_index in indexed
+                if int(batch_index) < validation_start
+            ]
+            validation_tensors = [
+                tensor
+                for tensor, batch_index in indexed
+                if validation_start <= int(batch_index) < validation_end
+            ]
+            return (
+                self._concat_feature_tensors(train_tensors),
+                self._concat_feature_tensors(validation_tensors),
+            )
+
+        train_tensors = self._take_feature_samples(
+            tensors,
+            int(self.qcfg.opt_train_samples),
+        )
+        validation_tensors = self._take_feature_samples(
+            tensors,
+            int(self.qcfg.opt_validation_samples),
+            from_end=True,
+        )
+        return (
+            self._concat_feature_tensors(train_tensors),
+            self._concat_feature_tensors(validation_tensors),
+        )
 
     def _layer_input_features(self, state: _ParoQuantLayerState) -> Dict[str, torch.Tensor]:
         """Materialize concatenated calibration features for all modules in a layer."""
@@ -343,14 +558,18 @@ class ParoQuantProcessor(LoopProcessor):
         for name in list(state.modules):
             entry = self.tasks.get(name) or {}
             tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
+            batch_indices: List[Optional[int]] = entry.get("batch_indices", [])  # type: ignore[arg-type]
             if not tensors:
                 features[name] = torch.empty(0)
+                entry["train_inputs"] = torch.empty(0)
+                entry["validation_inputs"] = torch.empty(0)
                 continue
-            try:
-                features[name] = torch.cat(tensors, dim=0)
-                entry["inputs"] = [features[name]]
-            except RuntimeError:
-                features[name] = tensors[0]
+            train_inputs, validation_inputs = self._module_feature_streams(tensors, batch_indices)
+            features[name] = self._concat_feature_tensors(tensors)
+            entry["inputs"] = [features[name]]
+            entry["batch_indices"] = [None]
+            entry["train_inputs"] = train_inputs
+            entry["validation_inputs"] = validation_inputs
         return features
 
     def _module_quant_params(self, module_name: str) -> tuple[int, int, bool]:
@@ -432,22 +651,37 @@ class ParoQuantProcessor(LoopProcessor):
     def _quantize_one_module(
         self,
         module: NamedModule,
-        inputs: torch.Tensor,
+        train_inputs: torch.Tensor,
+        validation_inputs: Optional[torch.Tensor] = None,
     ) -> tuple[float, float]:
         """Optimize one module and stash its packed runtime tensors in `module.state`."""
         bits, group_size, sym = self._module_quant_params(module.full_name)
         weight = self._module_weight_matrix(module)
         bias = module.bias.data if getattr(module, "bias", None) is not None else None
         original_weight = weight.detach().clone()
-        if inputs.numel() == 0:
-            inputs = torch.empty((0, weight.shape[1]), dtype=weight.dtype, device=weight.device)
+        explicit_validation = bool(getattr(self, "_has_explicit_validation_calibration", False))
+        if train_inputs.numel() == 0:
+            if explicit_validation:
+                raise RuntimeError(
+                    "ParoQuant explicit training calibration produced no activations for "
+                    f"`{module.full_name}`."
+                )
+            train_inputs = torch.empty((0, weight.shape[1]), dtype=weight.dtype, device=weight.device)
+        if validation_inputs is not None and validation_inputs.numel() == 0:
+            if explicit_validation:
+                raise RuntimeError(
+                    "ParoQuant explicit validation calibration produced no activations for "
+                    f"`{module.full_name}`."
+                )
+            validation_inputs = None
         module_seed = self._module_seed(module.layer_index, module.full_name)
 
         with torch.inference_mode(False), torch.enable_grad():
             result = optimize_paroquant_linear(
                 weight=weight,
                 bias=bias,
-                inputs=inputs,
+                inputs=train_inputs,
+                validation_inputs=validation_inputs,
                 bits=bits,
                 group_size=group_size,
                 sym=sym,
@@ -1090,52 +1324,81 @@ class ParoQuantProcessor(LoopProcessor):
         return value
 
     @staticmethod
-    def _layer_batch_row_count(input_batch: List[torch.Tensor]) -> int:
-        """Count flattened token rows for one cached layer-input batch."""
+    def _layer_batch_sample_count(input_batch: List[torch.Tensor]) -> int:
+        """Count full calibration sequences in one cached layer-input batch."""
         if not input_batch:
             return 0
         primary = input_batch[0]
         if not isinstance(primary, torch.Tensor) or primary.numel() == 0:
             return 0
-        if primary.dim() == 0:
-            return 1
-        return int(primary.numel() // max(1, primary.shape[-1]))
+        if primary.dim() >= 3:
+            return int(primary.shape[0])
+        return 1
 
-    def _prefix_batch_count_for_rows(
+    def _prefix_batch_count_for_samples(
         self,
         input_batches: List[List[torch.Tensor]],
-        row_budget: int,
+        sample_budget: int,
     ) -> int:
-        """Choose the smallest non-empty prefix whose cached rows meet the requested budget."""
+        """Choose the smallest non-empty prefix whose full sequences meet the requested budget."""
         if not input_batches:
             return 0
-        if row_budget <= 0:
+        if sample_budget <= 0:
             return 1
-        total_rows = 0
+        total_samples = 0
         for index, batch in enumerate(input_batches, start=1):
-            total_rows += self._layer_batch_row_count(batch)
-            if total_rows >= row_budget:
+            total_samples += self._layer_batch_sample_count(batch)
+            if total_samples >= sample_budget:
                 return index
         return len(input_batches)
 
-    def _suffix_batch_count_for_rows(
+    def _suffix_batch_count_for_samples(
         self,
         input_batches: List[List[torch.Tensor]],
-        row_budget: int,
+        sample_budget: int,
     ) -> int:
-        """Choose the smallest non-empty suffix whose cached rows meet the requested budget."""
+        """Choose the smallest non-empty suffix whose full sequences meet the requested budget."""
         if not input_batches:
             return 0
-        if row_budget <= 0:
+        if sample_budget <= 0:
             return 1
-        total_rows = 0
+        total_samples = 0
         count = 0
         for batch in reversed(input_batches):
-            total_rows += self._layer_batch_row_count(batch)
+            total_samples += self._layer_batch_sample_count(batch)
             count += 1
-            if total_rows >= row_budget:
+            if total_samples >= sample_budget:
                 return count
         return len(input_batches)
+
+    def _calibration_batch_ranges(
+        self,
+        input_batches: List[List[torch.Tensor]],
+    ) -> tuple[int, int, int]:
+        """Return train end, validation start, and validation end batch indices."""
+        total_batches = len(input_batches)
+        if bool(getattr(self, "_has_explicit_validation_calibration", False)):
+            train_end = min(total_batches, int(getattr(self, "_train_calibration_batch_count", 0)))
+            validation_count = int(getattr(self, "_validation_calibration_batch_count", 0))
+            validation_start = train_end
+            validation_end = min(total_batches, validation_start + validation_count)
+            if train_end <= 0 or validation_start >= validation_end:
+                raise RuntimeError(
+                    "ParoQuant explicit calibration capture did not preserve non-empty training and validation "
+                    "batch ranges."
+                )
+            return train_end, validation_start, validation_end
+
+        train_end = self._prefix_batch_count_for_samples(
+            input_batches,
+            int(self.qcfg.opt_train_samples),
+        )
+        validation_count = self._suffix_batch_count_for_samples(
+            input_batches,
+            int(self.qcfg.opt_validation_samples),
+        )
+        validation_start = max(0, total_batches - validation_count)
+        return train_end, validation_start, total_batches
 
     @staticmethod
     def _target_primary(target_batch: Any) -> torch.Tensor:
@@ -1263,20 +1526,17 @@ class ParoQuantProcessor(LoopProcessor):
                     target=self._move_group_value_to_cpu(self._target_primary(output_batch)),
                     position_ids=None if pos_ids is None else self._move_group_value_to_cpu(pos_ids),
                     attention_mask=None if attn_mask is None else self._move_group_value_to_cpu(attn_mask),
-                    row_count=self._layer_batch_row_count(cpu_inputs),
+                    sample_count=self._layer_batch_sample_count(cpu_inputs),
                 )
             )
 
-        train_batch_count = self._prefix_batch_count_for_rows(
-            [batch.inputs for batch in replay_batches],
-            int(self.qcfg.opt_train_samples),
+        train_end, validation_start, validation_end = self._calibration_batch_ranges(
+            [batch.inputs for batch in replay_batches]
         )
-        val_batch_count = self._suffix_batch_count_for_rows(
-            [batch.inputs for batch in replay_batches],
-            int(self.qcfg.opt_validation_samples),
+        replay_split = (
+            replay_batches[:train_end],
+            replay_batches[validation_start:validation_end],
         )
-        val_start = max(0, len(replay_batches) - val_batch_count)
-        replay_split = (replay_batches[:train_batch_count], replay_batches[val_start:])
         state.replay_batches = replay_split
         return replay_split
 
@@ -1387,21 +1647,19 @@ class ParoQuantProcessor(LoopProcessor):
         if len(attention_masks) < len(input_batches):
             attention_masks.extend([None] * (len(input_batches) - len(attention_masks)))
 
-        train_batch_count = self._prefix_batch_count_for_rows(input_batches, int(self.qcfg.opt_train_samples))
-        val_batch_count = self._suffix_batch_count_for_rows(input_batches, int(self.qcfg.opt_validation_samples))
-        val_start = max(0, len(input_batches) - val_batch_count)
+        train_end, validation_start, validation_end = self._calibration_batch_ranges(input_batches)
 
         grouped_dataset = (
-            input_batches[:train_batch_count],
-            input_kwargs_batches[:train_batch_count],
-            output_batches[:train_batch_count],
-            position_ids[:train_batch_count],
-            attention_masks[:train_batch_count],
-            input_batches[val_start:],
-            input_kwargs_batches[val_start:],
-            output_batches[val_start:],
-            position_ids[val_start:],
-            attention_masks[val_start:],
+            input_batches[:train_end],
+            input_kwargs_batches[:train_end],
+            output_batches[:train_end],
+            position_ids[:train_end],
+            attention_masks[:train_end],
+            input_batches[validation_start:validation_end],
+            input_kwargs_batches[validation_start:validation_end],
+            output_batches[validation_start:validation_end],
+            position_ids[validation_start:validation_end],
+            attention_masks[validation_start:validation_end],
         )
         state.grouped_dataset = grouped_dataset
         return grouped_dataset
@@ -1652,7 +1910,7 @@ class ParoQuantProcessor(LoopProcessor):
                     target=replay_batch.target,
                     position_ids=replay_batch.position_ids,
                     attention_mask=replay_batch.attention_mask,
-                    row_count=replay_batch.row_count,
+                    sample_count=replay_batch.sample_count,
                 ),
                 cache_kwargs=cache_kwargs,
             )
@@ -1806,7 +2064,7 @@ class ParoQuantProcessor(LoopProcessor):
         epochs: int,
     ) -> tuple[float, float]:
         """Run one grouped optimization stage against preserved full-layer outputs."""
-        _normalize_opt_impl(self.qcfg.opt_stage_impl, field="stage_impl")
+        stage_impl = _normalize_opt_impl(self.qcfg.opt_stage_impl, field="stage_impl")
         optimizer_name = _normalize_opt_optimizer(getattr(self.qcfg, "opt_optimizer", "adamw"))
         normalized_groups = self._normalize_group_optimizer_param_groups(param_groups)
 
@@ -1843,13 +2101,28 @@ class ParoQuantProcessor(LoopProcessor):
             base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
             scaler = torch.amp.GradScaler(enabled=use_amp)
             active_prefixes = tuple(optim_modules.keys())
-            needs_angle_reset = any(optim_module.theta.requires_grad for optim_module in optim_modules.values())
             best_state_dtype = _resolve_best_state_snapshot_dtype(
                 best_state_dtype=getattr(self.qcfg, "opt_best_state_dtype", "fp32"),
                 device=opt_device,
             )
-            best_state: Optional[dict[str, torch.Tensor]] = None
-            best_val_loss = float("inf")
+            if stage_impl == "reference":
+                best_val_loss = self._evaluate_group_layer(
+                    layer,
+                    input_batches=input_batches_val,
+                    input_kwargs_batches=input_kwargs_val,
+                    target_batches=target_batches_val,
+                    position_ids=position_ids_val,
+                    attention_masks=attention_masks_val,
+                    use_amp=use_amp,
+                )
+                best_state: Optional[dict[str, torch.Tensor]] = self._snapshot_group_best_state(
+                    layer,
+                    active_prefixes=active_prefixes,
+                    target_dtype=best_state_dtype,
+                )
+            else:
+                best_state = None
+                best_val_loss = float("inf")
             last_train_loss = 0.0
             global_step = 0
 
@@ -1967,7 +2240,7 @@ class ParoQuantProcessor(LoopProcessor):
         metadata_cache: Optional[dict[tuple[int, str], torch.Tensor]] = None,
     ) -> tuple[float, float]:
         """Run one grouped layer stage while streaming train shards and validation batches from CPU."""
-        _normalize_opt_impl(self.qcfg.opt_stage_impl, field="stage_impl")
+        stage_impl = _normalize_opt_impl(self.qcfg.opt_stage_impl, field="stage_impl")
         optimizer_name = _normalize_opt_optimizer(getattr(self.qcfg, "opt_optimizer", "adamw"))
         normalized_groups = self._normalize_group_optimizer_param_groups(param_groups)
 
@@ -2005,8 +2278,23 @@ class ParoQuantProcessor(LoopProcessor):
                 best_state_dtype=getattr(self.qcfg, "opt_best_state_dtype", "fp32"),
                 device=CPU,
             )
-            best_state: Optional[dict[str, torch.Tensor]] = None
-            best_val_loss = float("inf")
+            if stage_impl == "reference":
+                best_val_loss = self._evaluate_group_layer_streamed(
+                    layer,
+                    replay_batches=replay_batches_val,
+                    use_amp=use_amp,
+                    target_device=opt_device,
+                    metadata_cache=metadata_cache,
+                )
+                best_state: Optional[dict[str, torch.Tensor]] = self._snapshot_group_best_state(
+                    layer,
+                    active_prefixes=active_prefixes,
+                    target_device=CPU,
+                    target_dtype=best_state_dtype,
+                )
+            else:
+                best_state = None
+                best_val_loss = float("inf")
             last_train_loss = 0.0
             global_step = 0
             shard_batches = self._layer_train_shard_batches(
@@ -2370,9 +2658,16 @@ class ParoQuantProcessor(LoopProcessor):
                 feat = input_feat.get(module_name)
                 if feat is None:
                     feat = torch.empty(0)
+                entry = self.tasks.get(module_name) or {}
+                train_inputs = entry.get("train_inputs", feat)
+                validation_inputs = entry.get("validation_inputs")
 
                 start = time.perf_counter()
-                _train_loss, val_loss = self._quantize_one_module(named_module, feat)
+                _train_loss, val_loss = self._quantize_one_module(
+                    named_module,
+                    train_inputs,
+                    validation_inputs,
+                )
                 duration = time.perf_counter() - start
                 self._log_quant_result(named_module, feat, val_loss, duration)
         else:
@@ -2622,8 +2917,13 @@ class ParoQuantProcessor(LoopProcessor):
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         """Require calibration data because ParoQuant always needs activation replay."""
         del processor_index
-        if self.calibration_dataset is None:
+        if not self.calibration_dataset:
             raise ValueError("ParoQuantProcessor's calibration_dataset must be provided.")
+        if bool(getattr(self, "_has_explicit_validation_calibration", False)):
+            if int(getattr(self, "_train_calibration_sample_count", 0)) <= 0:
+                raise ValueError("ParoQuant training calibration must contain at least one full sequence.")
+            if int(getattr(self, "_validation_calibration_sample_count", 0)) <= 0:
+                raise ValueError("ParoQuant validation calibration must contain at least one full sequence.")
         return True
 
     @classmethod

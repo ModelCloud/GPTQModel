@@ -1741,6 +1741,7 @@ def optimize_paroquant_linear(
     best_state_dtype: Optional[str | torch.dtype] = "fp32",
     scale_clamp_min: float = PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT,
     scale_clamp_max: float = PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT,
+    validation_inputs: Optional[torch.Tensor] = None,
 ) -> ParoQuantOptimizationResult:
     """Optimize one linear layer following the paper's two-stage PTQ schedule."""
     _require_paroquant_sym(sym)
@@ -1751,8 +1752,21 @@ def optimize_paroquant_linear(
     quantizer_sym = _quantizer_sym_for_impl(sym, quantizer_impl)
     normalized_optimizer_name = _normalize_opt_optimizer(optimizer_name)
     normalized_optimizer_betas = (float(optimizer_betas[0]), float(optimizer_betas[1]))
-    rows = _sample_activation_rows(inputs, max_rows=max(1, int(train_rows) + int(val_rows)))
-    if rows.numel() == 0:
+    if validation_inputs is None:
+        rows = _sample_activation_rows(inputs, max_rows=max(1, int(train_rows) + int(val_rows)))
+        train_count = min(rows.shape[0], max(1, int(train_rows))) if rows.dim() > 0 else 0
+        val_count = min(max(1, int(val_rows)), max(1, rows.shape[0] - train_count)) if rows.dim() > 0 else 0
+        inputs_train = rows[:train_count]
+        inputs_val = rows[-val_count:]
+    else:
+        # The processor has already separated full training and validation
+        # sequences by calibration-batch identity. Module scope remains a
+        # bounded row sampler, but it can no longer leak training rows into the
+        # validation objective.
+        inputs_train = _sample_activation_rows(inputs, max_rows=max(1, int(train_rows)))
+        inputs_val = _sample_activation_rows(validation_inputs, max_rows=max(1, int(val_rows)))
+
+    if inputs_train.numel() == 0:
         return _identity_result(
             weight=weight,
             bias=bias,
@@ -1761,20 +1775,18 @@ def optimize_paroquant_linear(
             quantizer_sym=quantizer_sym,
             krot=krot,
         )
+    if inputs_val.numel() == 0:
+        raise ValueError("ParoQuant optimization requires non-empty validation activations.")
 
     opt_device = weight.device
     opt_dtype = torch.float32
     weight_opt = weight.detach().to(device=opt_device, dtype=opt_dtype)
     bias_opt = None if bias is None else bias.detach().to(device=opt_device, dtype=opt_dtype)
-    rows = rows.to(device=opt_device, dtype=opt_dtype)
+    inputs_train = inputs_train.to(device=opt_device, dtype=opt_dtype)
+    inputs_val = inputs_val.to(device=opt_device, dtype=opt_dtype)
 
-    targets = F.linear(rows, weight_opt, bias_opt)
-    train_count = min(rows.shape[0], max(1, int(train_rows)))
-    val_count = min(max(1, int(val_rows)), max(1, rows.shape[0] - train_count))
-    inputs_train = rows[:train_count]
-    targets_train = targets[:train_count]
-    inputs_val = rows[-val_count:]
-    targets_val = targets[-val_count:]
+    targets_train = F.linear(inputs_train, weight_opt, bias_opt)
+    targets_val = F.linear(inputs_val, weight_opt, bias_opt)
 
     if inputs_train.numel() == 0 or targets_train.numel() == 0:
         raise ValueError("ParoQuant optimization requires non-empty training activations.")

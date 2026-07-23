@@ -222,7 +222,6 @@ def make_paroquant_config(
         bits=bits,
         group_size=group_size,
         sym=sym,
-        desc_act=False,
         krot=krot,
         dynamic=dynamic,
         offload_to_disk=offload_to_disk,

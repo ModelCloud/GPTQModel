@@ -9,6 +9,7 @@
 
 import copy
 import inspect
+import random
 import sys
 import threading
 import time
@@ -29,10 +30,12 @@ from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.looper.stage_layer import _capture_pristine_group_context
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.quantization.config import FORMAT, METHOD, ParoConfig, QuantizeConfig
 from gptqmodel.quantization.paroquant import optimization as paroquant_optimization
+from gptqmodel.quantization.paroquant.calibration import build_paroquant_calibration_datasets
 from gptqmodel.quantization.paroquant.optimization import (
     GroupLinearQuantizer,
     _apply_rotation,
@@ -87,7 +90,246 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.opt_train_on_noisy_inputs is False
     assert cfg.opt_channel_scale_clamp_min == 1e-2
     assert cfg.opt_channel_scale_clamp_max == 1e2
+    assert cfg.desc_act is False
+    assert "desc_act" not in cfg.to_dict()
     assert cfg.export_quant_method() == METHOD.PARO
+
+
+def test_paroquant_config_removes_desc_act_from_public_surface():
+    """GPTQ activation ordering is neither configurable nor serialized for ParoQuant."""
+    assert "desc_act" not in inspect.signature(ParoConfig).parameters
+
+    with pytest.raises(TypeError, match="desc_act"):
+        ParoConfig(bits=4, group_size=128, desc_act=True)
+
+
+def test_paroquant_config_strips_legacy_desc_act_payloads():
+    """Older generic payloads remain loadable without retaining ineffective activation-order fields."""
+    pattern = "+:model.layers.0.self_attn.q_proj"
+    cfg = QuantizeConfig.from_quant_config(
+        {
+            "quant_method": "paroquant",
+            "format": "paroquant",
+            "bits": 4,
+            "group_size": 128,
+            "sym": True,
+            "desc_act": True,
+            "dynamic": {
+                pattern: {
+                    "bits": 4,
+                    "desc_act": True,
+                },
+            },
+        }
+    )
+
+    assert isinstance(cfg, ParoConfig)
+    assert cfg.desc_act is False
+    assert cfg.dynamic[pattern] == {"bits": 4}
+    payload = cfg.to_dict()
+    assert "desc_act" not in payload
+    assert "desc_act" not in payload["dynamic"][pattern]
+
+
+def test_paroquant_public_quantize_api_accepts_independent_validation_calibration():
+    """The paper's held-out Pile stream must be expressible through the public API."""
+    parameters = inspect.signature(BaseQModel.quantize).parameters
+    assert "validation_calibration" in parameters
+    assert parameters["batch_size"].default == 1
+
+
+def test_paroquant_prepared_calibration_streams_are_bounded_and_kept_separate():
+    """Train/validation capture should retain an exact boundary after independent preparation."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=3, opt_validation_samples=2)
+    processor.calibration_dataset = [
+        {
+            "input_ids": torch.full((2, 4), 1, dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+        },
+        {
+            "input_ids": torch.full((2, 4), 2, dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+        },
+    ]
+
+    def prepare_validation(**kwargs):
+        assert kwargs["calibration_dataset"] == ["held-out"]
+        return [
+            {
+                "input_ids": torch.full((3, 4), 9, dtype=torch.long),
+                "attention_mask": torch.ones((3, 4), dtype=torch.long),
+            }
+        ]
+
+    processor._configure_calibration_streams(
+        validation_calibration=["held-out"],
+        prepare_dataset_func=prepare_validation,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        calibration_concat_separator=None,
+        batch_size=16,
+    )
+
+    assert processor._has_explicit_validation_calibration is True
+    assert processor._train_calibration_batch_count == 2
+    assert processor._validation_calibration_batch_count == 1
+    assert processor._train_calibration_sample_count == 3
+    assert processor._validation_calibration_sample_count == 2
+    assert [batch["input_ids"].shape[0] for batch in processor.calibration_dataset] == [2, 1, 2]
+    assert torch.all(processor.calibration_dataset[-1]["input_ids"] == 9)
+
+
+def test_paroquant_explicit_validation_uses_capture_boundary_not_stream_suffix():
+    """Grouped recovery must select the held-out batches, even if unrelated batches follow them."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=8, opt_validation_samples=8)
+    processor._has_explicit_validation_calibration = True
+    processor._train_calibration_batch_count = 2
+    processor._validation_calibration_batch_count = 1
+    processor.inputs_cache = SimpleNamespace(position_ids=[], attention_masks=[])
+
+    input_batches = [
+        [torch.full((2, 3, 4), marker, dtype=torch.float32)]
+        for marker in (1, 2, 9, 7)
+    ]
+    output_batches = [[batch[0].clone()] for batch in input_batches]
+    state = SimpleNamespace(
+        layer_inputs=input_batches,
+        layer_input_kwargs=[{} for _batch in input_batches],
+        layer_outputs=output_batches,
+        grouped_dataset=None,
+    )
+
+    grouped = processor._group_dataset_from_state(state)
+
+    assert [int(batch[0][0, 0, 0].item()) for batch in grouped[0]] == [1, 2]
+    assert [int(batch[0][0, 0, 0].item()) for batch in grouped[5]] == [9]
+
+
+def test_paroquant_grouped_fallback_counts_full_sequences_not_token_rows():
+    """A 2,048-token sequence contributes one sample, not 2,048 activation rows."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=4, opt_validation_samples=2)
+    processor._has_explicit_validation_calibration = False
+    batches = [[torch.randn(2, 2048, 4)] for _index in range(3)]
+
+    train_end, validation_start, validation_end = processor._calibration_batch_ranges(batches)
+
+    assert (train_end, validation_start, validation_end) == (2, 2, 3)
+
+
+def test_paroquant_module_capture_separates_train_and_validation_by_batch_index():
+    """Per-linear recovery may sample rows, but its validation rows must remain held out."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=4, opt_validation_samples=2)
+    processor._has_explicit_validation_calibration = True
+    processor._train_calibration_batch_count = 2
+    processor._validation_calibration_batch_count = 1
+
+    tensors = [torch.full((2, 3, 4), marker, dtype=torch.float32) for marker in (1, 2, 9)]
+    train_inputs, validation_inputs = processor._module_feature_streams(tensors, [0, 1, 2])
+
+    assert train_inputs.shape == (4, 3, 4)
+    assert validation_inputs.shape == (2, 3, 4)
+    assert set(train_inputs[:, 0, 0].tolist()) == {1.0, 2.0}
+    assert set(validation_inputs[:, 0, 0].tolist()) == {9.0}
+
+
+def test_paroquant_explicit_validation_rejects_missing_capture_batch_indices():
+    """An explicit held-out stream must never silently fall back to a potentially overlapping split."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=4, opt_validation_samples=2)
+    processor._has_explicit_validation_calibration = True
+    processor._train_calibration_batch_count = 1
+    processor._validation_calibration_batch_count = 1
+
+    with pytest.raises(RuntimeError, match="batch index for every captured feature"):
+        processor._module_feature_streams([torch.randn(1, 3, 4), torch.randn(1, 3, 4)], [None, None])
+
+
+def test_paroquant_paper_calibration_builder_matches_reference_mix_and_validation_source():
+    """Reproduce the legacy reference's even source mix, remainder rule, and held-out Pile stream."""
+
+    class _FakeDataset(list):
+        def shuffle(self, seed):
+            rows = list(self)
+            random.Random(seed).shuffle(rows)
+            return _FakeDataset(rows)
+
+        def select(self, indices):
+            return _FakeDataset([self[index] for index in indices])
+
+    markers = {
+        "wikitext": 1,
+        "allenai/c4": 2,
+        "liang2kl/RedPajama-Data-1T-Sample-Backup": 3,
+        "mit-han-lab/pile-val-backup": 9,
+    }
+    calls = []
+
+    def fake_loader(path, *args, **kwargs):
+        calls.append((path, args, kwargs))
+        marker = markers[path]
+        return _FakeDataset([{"text": f"{marker} {marker}"} for _index in range(32)])
+
+    tokenizer = SimpleNamespace(encode=lambda text: [int(token) for token in text.split()])
+    calibration = build_paroquant_calibration_datasets(
+        tokenizer,
+        train_samples=8,
+        validation_samples=3,
+        sequence_length=4,
+        seed=0,
+        dataset_loader=fake_loader,
+    )
+
+    train_markers = [int(example["input_ids"][0].item()) for example in calibration.train]
+    validation_markers = [int(example["input_ids"][0].item()) for example in calibration.validation]
+    assert {marker: train_markers.count(marker) for marker in (1, 2, 3)} == {1: 2, 2: 2, 3: 4}
+    assert validation_markers == [9, 9, 9]
+    assert all(example["input_ids"].numel() == 4 for example in calibration.train + calibration.validation)
+    assert [call[0] for call in calls] == [
+        "wikitext",
+        "allenai/c4",
+        "liang2kl/RedPajama-Data-1T-Sample-Backup",
+        "mit-han-lab/pile-val-backup",
+    ]
+
+
+def test_paroquant_linear_optimizer_accepts_independent_validation_activations():
+    """Exercise the optimizer boundary with already separated train/validation activation streams."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    weight = torch.randn((8, 8), dtype=torch.float32, device=device)
+    train_inputs = torch.randn((2, 3, 8), dtype=torch.float32, device=device)
+    validation_inputs = torch.randn((1, 3, 8), dtype=torch.float32, device=device)
+
+    result = optimize_paroquant_linear(
+        weight=weight,
+        bias=None,
+        inputs=train_inputs,
+        validation_inputs=validation_inputs,
+        bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        pair_ratio=0.5,
+        train_rows=6,
+        val_rows=3,
+        batch_size=3,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        fused_rotation=False,
+        stage_cudagraph=False,
+    )
+
+    assert result.used_identity is False
+    assert result.pseudo_weight.shape == weight.shape
+    assert torch.isfinite(torch.tensor(result.train_loss))
+    assert torch.isfinite(torch.tensor(result.val_loss))
 
 
 def test_paroquant_quantize_config_enables_gradient_checkpointing_by_default_for_layer_scope():
@@ -2022,6 +2264,7 @@ def test_paroquant_processor_group_capture_uses_pristine_module_and_clean_inputs
             attention_masks,
             cur_layer_device,
             is_lm_head_module,
+            is_embeddings_module,
             shared_kv_cache_dict,
             layer_index,
             need_outputs,
@@ -2041,6 +2284,7 @@ def test_paroquant_processor_group_capture_uses_pristine_module_and_clean_inputs
                 attention_masks,
                 cur_layer_device,
                 is_lm_head_module,
+                is_embeddings_module,
                 shared_kv_cache_dict,
                 layer_index,
                 need_outputs,
@@ -2199,7 +2443,9 @@ def test_paroquant_quantize_layer_clears_stored_forward_context():
     processor.lock = threading.Lock()
     processor.tasks = {"mlp.gate_proj": {"inputs": [torch.randn(1, 8)], "layer_index": 0}}
     processor._layer_input_features = lambda _state: {"mlp.gate_proj": torch.randn(4, 8)}
-    processor._quantize_one_module = lambda named_module, feat: (0.0, float(feat.numel() > 0))  # type: ignore[method-assign]
+    processor._quantize_one_module = (  # type: ignore[method-assign]
+        lambda named_module, feat, validation_feat=None: (0.0, float(feat.numel() > 0))
+    )
     processor._log_quant_result = lambda *args, **kwargs: None  # type: ignore[method-assign]
 
     state = SimpleNamespace(
@@ -2830,6 +3076,142 @@ def test_paroquant_processor_group_stage_defers_best_state_snapshot_until_first_
     assert layer.state_dict_calls == 1
 
 
+def test_paroquant_processor_reference_group_stage_restores_initial_state_when_epochs_regress():
+    """Reference grouped stages must retain the pre-stage checkpoint when validation gets worse."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(1, 1, bias=False)
+            with torch.no_grad():
+                self.linear.weight.fill_(1.0)
+
+        def forward(self, x, **_kwargs):
+            return self.linear(x)
+
+    class _OptimState:
+        def __init__(self):
+            self.theta = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+
+        def reset_masked_angles(self):
+            return None
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_stage_impl="reference",
+        opt_optimizer="sgd",
+        opt_best_state_dtype="fp32",
+        opt_gradient_checkpointing=False,
+    )
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    initial_weight = layer.linear.weight.detach().clone()
+    inputs = [[torch.ones(1, 1)]]
+    train_targets = [[torch.zeros(1, 1)]]
+    validation_targets = [[torch.ones(1, 1)]]
+
+    _train_loss, val_loss = processor._run_group_stage(
+        layer,
+        optim_modules={"linear": _OptimState()},
+        input_batches_train=inputs,
+        input_kwargs_train=[{}],
+        target_batches_train=train_targets,
+        position_ids_train=[None],
+        attention_masks_train=[None],
+        input_batches_val=inputs,
+        input_kwargs_val=[{}],
+        target_batches_val=validation_targets,
+        position_ids_val=[None],
+        attention_masks_val=[None],
+        param_groups=[
+            {
+                "params": [layer.linear.weight],
+                "lr": 0.5,
+                "weight_decay": 0.0,
+                "momentum": 0.0,
+                "dampening": 0.0,
+                "nesterov": False,
+            }
+        ],
+        epochs=1,
+    )
+
+    assert val_loss == pytest.approx(0.0)
+    torch.testing.assert_close(layer.linear.weight, initial_weight, atol=0, rtol=0)
+
+
+def test_paroquant_processor_reference_streamed_group_stage_restores_initial_state_when_epochs_regress():
+    """Reference streamed stages must also retain their CPU-owned pre-stage checkpoint."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(1, 1, bias=False)
+            with torch.no_grad():
+                self.linear.weight.fill_(1.0)
+
+        def forward(self, x, **_kwargs):
+            return self.linear(x)
+
+    class _OptimState:
+        def __init__(self):
+            self.theta = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+
+        def reset_masked_angles(self):
+            return None
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_stage_impl="reference",
+        opt_optimizer="sgd",
+        opt_best_state_dtype="fp32",
+        opt_gradient_checkpointing=False,
+    )
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    initial_weight = layer.linear.weight.detach().clone()
+    inputs = [torch.ones(1, 1)]
+    train_batch = paroquant_processor_module._ParoQuantReplayBatch(
+        inputs=inputs,
+        input_kwargs={},
+        target=torch.zeros(1, 1),
+        position_ids=None,
+        attention_mask=None,
+        sample_count=1,
+    )
+    validation_batch = paroquant_processor_module._ParoQuantReplayBatch(
+        inputs=inputs,
+        input_kwargs={},
+        target=torch.ones(1, 1),
+        position_ids=None,
+        attention_mask=None,
+        sample_count=1,
+    )
+
+    _train_loss, val_loss = processor._run_group_stage_streamed(
+        layer,
+        optim_modules={"linear": _OptimState()},
+        replay_batches_train=[train_batch],
+        replay_batches_val=[validation_batch],
+        param_groups=[
+            {
+                "params": [layer.linear.weight],
+                "lr": 0.5,
+                "weight_decay": 0.0,
+                "momentum": 0.0,
+                "dampening": 0.0,
+                "nesterov": False,
+            }
+        ],
+        epochs=1,
+    )
+
+    assert val_loss == pytest.approx(0.0)
+    torch.testing.assert_close(layer.linear.weight, initial_weight, atol=0, rtol=0)
+
+
 def test_paroquant_processor_group_dataset_for_device_caches_per_device():
     """Guard grouped dataset replay so repeated requests on the same device reuse one cached copy."""
 
@@ -2864,15 +3246,15 @@ def test_paroquant_processor_replay_batches_cache_cpu_splits():
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = SimpleNamespace(opt_train_samples=4, opt_validation_samples=2)
     processor.inputs_cache = InputCache(
-        layer_inputs=[[torch.randn(2, 4)] for _ in range(3)],
+        layer_inputs=[[torch.randn(2, 1, 4)] for _ in range(3)],
         layer_input_kwargs=[{} for _ in range(3)],
         position_ids=[None, None, None],
         attention_masks=[None, None, None],
     )
     state = SimpleNamespace(
-        layer_inputs=[[torch.randn(2, 4)] for _ in range(3)],
+        layer_inputs=[[torch.randn(2, 1, 4)] for _ in range(3)],
         layer_input_kwargs=[{} for _ in range(3)],
-        layer_outputs=[[torch.randn(2, 4)] for _ in range(3)],
+        layer_outputs=[[torch.randn(2, 1, 4)] for _ in range(3)],
         replay_batches=None,
     )
 
@@ -2948,7 +3330,7 @@ def test_paroquant_processor_layer_shard_loader_normalizes_inference_inputs():
             target=torch.randn(2, 4),
             position_ids=None,
             attention_mask=None,
-            row_count=2,
+            sample_count=2,
         )
 
     loader = paroquant_processor_module._LayerShardLoader(
@@ -3089,7 +3471,7 @@ def test_paroquant_processor_layer_shard_loader_reuses_metadata_tensors():
         target=torch.randn(1, 8).pin_memory(),
         position_ids=cpu_pos,
         attention_mask=cpu_mask,
-        row_count=1,
+        sample_count=1,
     )
     metadata_cache = {}
 

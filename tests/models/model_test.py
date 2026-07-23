@@ -1805,10 +1805,9 @@ class ModelTest(unittest.TestCase):
                     apply_chat_template = bool(chat_template_lookup.get(normalized_name, False))
                     task_model_args = dict(model_args)
                     task_model_args.update(task_model_args_lookup.get(normalized_name, {}) or {})
-                    # Keep evalution-backed generation reproducible even when a task opts
-                    # into sampling or an engine backend introduces RNG-sensitive paths.
+                    # Evalution routes `seed` to the engine. Do not also inject
+                    # `random_seed`, which falls through to Transformers model kwargs.
                     task_model_args.setdefault("seed", RAND_SEED)
-                    task_model_args.setdefault("random_seed", RAND_SEED)
                     task_suite_kwargs = dict(suite_kwargs_lookup.get(normalized_name, {}) or {})
                     task_batch_size = eval_batch_size_lookup.get(normalized_name)
                     if task_batch_size is None:

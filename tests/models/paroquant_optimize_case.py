@@ -118,6 +118,7 @@ class BaseLlama3_2ParoQuantOptimizeTest(ModelTest):
     PAROQUANT_ROTATION_EPOCHS = 2
     PAROQUANT_FINETUNE_EPOCHS = 2
     PAROQUANT_TRAIN_SAMPLES = 4096
+    PAROQUANT_OPT_BATCH_SIZE = 64
     PAROQUANT_SEED = 3141592653
 
     OPT_SCOPE: str = ""
@@ -186,11 +187,21 @@ class BaseLlama3_2ParoQuantOptimizeTest(ModelTest):
             default=cls.PAROQUANT_TRAIN_SAMPLES,
         )
 
+    @classmethod
+    def _opt_batch_size(cls) -> int:
+        prefix = cls._scope_prefix()
+        return _env_int(
+            f"GPTQMODEL_PAROQUANT_{prefix}_OPT_BATCH_SIZE",
+            "GPTQMODEL_PAROQUANT_OPT_BATCH_SIZE",
+            default=cls.PAROQUANT_OPT_BATCH_SIZE,
+        )
+
     def _build_quantize_config(self):
         return ParoConfig(
             bits=self.BITS,
             method=METHOD.PARO,
             format=FORMAT.PAROQUANT,
+            opt_batch_size=self._opt_batch_size(),
             opt_scope=self.OPT_SCOPE,
             opt_train_on_noisy_inputs=self._opt_train_on_noisy_inputs(),
             opt_gradient_checkpointing=self._opt_gradient_checkpointing(),

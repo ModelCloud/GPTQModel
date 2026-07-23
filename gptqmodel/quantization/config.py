@@ -2292,6 +2292,10 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
             normalized[FORMAT_FIELD_CODE] = FORMAT.EXL3
     elif target_cls is ParoConfig:
         expected_method = METHOD.PARO
+        # ParoQuant does not implement GPTQ activation ordering. Accept legacy
+        # payloads that serialized the inherited field, but do not expose it to
+        # ParoConfig's constructor.
+        normalized.pop("desc_act", None)
         format_value = normalized.get(FORMAT_FIELD_CODE)
         normalized_format = None
         if format_value is not None:
@@ -3441,6 +3445,9 @@ class AWQConfig(PreProcessorConfig):
 class ParoConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.PARO)
     format: FORMAT = field(default=FORMAT.PAROQUANT)
+    # Generic quantized-linear plumbing still reads this internal sentinel, but
+    # GPTQ activation ordering is not part of ParoQuant's algorithm or format.
+    desc_act: bool = field(default=False, init=False, repr=False, compare=False)
     krot: int = field(default=8)
     opt_rotation_epochs: int = field(default=10)
     opt_finetune_epochs: int = field(default=10)
@@ -3477,6 +3484,27 @@ class ParoConfig(PreProcessorConfig):
 
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
         return PAROQUANT_EXPORT_FORMATS
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def _normalize_dynamic_layer_config(
+        self,
+        layer_name: str,
+        layer_dict: Dict[str, Any],
+        *,
+        valid_bit_widths: List[int],
+        checkpoint_format: FORMAT,
+    ) -> None:
+        # Old generic configs may carry per-layer activation-order overrides.
+        # They have never affected ParoQuant weights, so discard them.
+        layer_dict.pop("desc_act", None)
+        super()._normalize_dynamic_layer_config(
+            layer_name,
+            layer_dict,
+            valid_bit_widths=valid_bit_widths,
+            checkpoint_format=checkpoint_format,
+        )
 
     @staticmethod
     def default_opt_gradient_checkpointing_for_scope(opt_scope: str) -> bool:
@@ -3617,6 +3645,7 @@ class ParoConfig(PreProcessorConfig):
         meta_payload["opt_channel_scale_clamp_max"] = self.opt_channel_scale_clamp_max
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out.pop("desc_act", None)
         out["zero_point"] = not self.sym
         out["krot"] = self.krot
         out[FORMAT_FIELD_CODE] = self.format

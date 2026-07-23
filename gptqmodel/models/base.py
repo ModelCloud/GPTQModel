@@ -820,6 +820,9 @@ class BaseQModel(nn.Module):
         calibration_concat_separator: Optional[str] = None,
         embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]] = None,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
+        validation_calibration: Optional[
+            Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
+        ] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         embed_quant_config = self._normalize_embed_quant_config(
             embed_quant_config=embed_quant_config,
@@ -853,6 +856,9 @@ class BaseQModel(nn.Module):
             )
 
         export_quant_method = self.quantize_config.export_quant_method()
+
+        if validation_calibration is not None and self.quantize_config.method != METHOD.PARO:
+            raise ValueError("`validation_calibration` is only supported for ParoQuant quantization.")
 
         if export_quant_method == METHOD.AWQ:
             if format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
@@ -1030,6 +1036,7 @@ class BaseQModel(nn.Module):
                 )
             result = self._quantize_with_calibration(
                 calibration=calibration,
+                validation_calibration=validation_calibration,
                 calibration_concat_size=calibration_concat_size,
                 calibration_sort=calibration_sort,
                 batch_size=batch_size,
@@ -1085,6 +1092,9 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
+        validation_calibration: Optional[
+            Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
+        ] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if not self.quantized:
             raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
@@ -1108,12 +1118,14 @@ class BaseQModel(nn.Module):
             calibration_data_min_length=calibration_data_min_length,
             calibration_concat_separator=calibration_concat_separator,
             embed_quant_config=embed_quant_config,
+            validation_calibration=validation_calibration,
         )
 
     def _quantize_with_calibration(
         self,
         *,
         calibration,
+        validation_calibration,
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
         batch_size: int,
@@ -1207,6 +1219,7 @@ class BaseQModel(nn.Module):
             paro_args["gptq_model"] = self
             paro_args["model"] = self.model
             paro_args["batch_size"] = batch_size
+            paro_args["validation_calibration"] = validation_calibration
 
             quantize_processor = preprocessors + [
                 ParoQuantProcessor(**paro_args),
