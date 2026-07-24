@@ -21,8 +21,9 @@ constexpr int kWarpsPerBlock = 8;
 constexpr int kThreadsPerBlock = kWarpSize * kWarpsPerBlock;
 constexpr int64_t kMaxWorkerWarps = int64_t{1} << 20;
 // Recompute from the bit pattern frequently so incremental FP64 drift cannot
-// accumulate across a long Gray-code range.
-constexpr uint64_t kRebaseInterval = 64;
+// accumulate across a long Gray-code range. 256 is large enough to amortize
+// the O(size^2) rebase cost while small enough to keep FP64 rounding stable.
+constexpr uint64_t kRebaseInterval = 256;
 
 __device__ __forceinline__ uint32_t gray_code(uint64_t index) {
   return static_cast<uint32_t>(index ^ (index >> 1));
@@ -92,11 +93,11 @@ __global__ void adjacent_exact_candidates_kernel(
       state = gray_code(index);
       if (lane < size) {
         field = smem_linear[lane];
-#pragma unroll 1
-        for (int other = 0; other < size; ++other) {
-          if ((state >> other) & 1u) {
-            field += smem_interaction[other * size + lane];
-          }
+        uint32_t bits = state;
+        while (bits) {
+          const int other = __ffs(bits) - 1;
+          field += smem_interaction[other * size + lane];
+          bits &= bits - 1;
         }
       } else {
         field = 0.0;
@@ -117,10 +118,12 @@ __global__ void adjacent_exact_candidates_kernel(
     }
 
     if (index + 1 < end) {
-      const uint32_t next_state = gray_code(index + 1);
-      const uint32_t changed = state ^ next_state;
-      const int flipped = __ffs(changed) - 1;
-      const double direction = ((next_state >> flipped) & 1u) ? 1.0 : -1.0;
+      // In a binary-reflected Gray code the bit that changes when moving from
+      // index to index+1 is the least-significant set bit of (index+1).
+      const uint32_t n = static_cast<uint32_t>(index + 1);
+      const int flipped = __ffs(n) - 1;
+      const uint32_t bit = 1u << flipped;
+      const double direction = ((state >> flipped) & 1u) ? -1.0 : 1.0;
       const double flipped_field = __shfl_sync(0xffffffffu, field, flipped);
       if (lane == 0) {
         energy += direction * flipped_field;
@@ -128,18 +131,18 @@ __global__ void adjacent_exact_candidates_kernel(
       if (lane < size) {
         field += direction * smem_interaction[flipped * size + lane];
       }
-      state = next_state;
+      state ^= bit;
     }
   }
 
   best_state = __shfl_sync(0xffffffffu, best_state, 0);
   if (lane < size) {
     field = smem_linear[lane];
-#pragma unroll 1
-    for (int other = 0; other < size; ++other) {
-      if ((best_state >> other) & 1u) {
-        field += smem_interaction[other * size + lane];
-      }
+    uint32_t bits = best_state;
+    while (bits) {
+      const int other = __ffs(bits) - 1;
+      field += smem_interaction[other * size + lane];
+      bits &= bits - 1;
     }
   } else {
     field = 0.0;

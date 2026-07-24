@@ -15,9 +15,11 @@
    - Wired the batched path into `GPTQ.quantize` for `act_group_aware=True` and grouped scale-search (group sizes 32/64/128).
    - Preserved the existing per-group `find_params` fallback for the ungrouped / full-tensor search path.
 
-2. **AdjacentExact CUDA kernel shared-memory optimization** (`gptqmodel_ext/adjacent_exact/adjacent_exact_cuda.cu`)
+2. **AdjacentExact CUDA kernel optimization** (`gptqmodel_ext/adjacent_exact/adjacent_exact_cuda.cu`)
    - Load the small QUBO `linear` vector and `interaction` matrix into `__shared__` once per block.
    - Store `interaction` in a transposed layout (`smem_interaction[col * size + row]`) so every warp lane reads the same column without 32-way bank conflicts.
+   - Recompute `field` from the bit pattern every 256 Gray-code steps instead of 64, and iterate only set bits during the rebase, to amortize the `O(size^2)` rebase work.
+   - Replace per-iteration `gray_code(index+1)` and `state ^ next_state` with the Gray-code property that the bit flipped at step `n` is `__ffs(n) - 1`; this removes one `__ffs` and several integer ops from the hot loop.
    - Pass the computed dynamic shared-memory size to the kernel launch.
 
 3. **Test coverage**
@@ -67,13 +69,13 @@ The `group_size=32 activation` `find_params` phase dropped from ~313 ms to ~108 
 
 Active-decision timing (all `size` decisions non-zero, `warps=0`) on a single A100:
 
-| active decisions | time (ms) |
-|------------------|-----------|
-| 28               | ~35       |
-| 30               | ~117      |
-| 32               | ~466      |
+| active decisions | before (ms) | after (ms) | speedup |
+|------------------|-------------|------------|---------|
+| 28               | ~35         | ~31        | 1.10x   |
+| 30               | ~117        | ~108       | 1.08x   |
+| 32               | ~466        | ~410       | 1.14x   |
 
-Nsight confirms that >99.9% of GPU time for the exact-solver microbenchmark is in `adjacent_exact_candidates_kernel`. The shared-memory change removes the per-iteration global loads for `linear` and `interaction` and transposes `interaction` to avoid bank conflicts; this improves both memory traffic and warp coherency.
+Nsight confirms that >99.9% of GPU time for the exact-solver microbenchmark is in `adjacent_exact_candidates_kernel`. `ncu --section SpeedOfLight` reports the kernel is **compute-bound** (SM throughput ~78%, memory throughput ~25%, DRAM 0%), with the ALU/integer pipeline dominating. The Gray-code shortcut reduces integer ops per iteration; the larger rebase interval and set-bit rebase reduce recompute work.
 
 ## Nsight reports
 
@@ -81,7 +83,8 @@ Generated `.nsys-rep` files:
 
 - `/tmp/scale_search_batched.nsys-rep` — `find_params_batched` kernel summary.
 - `/tmp/scale_search_per_group.nsys-rep` — per-group `find_params` kernel summary for comparison.
-- `/tmp/adjacent_exact_sizes.nsys-rep` — AdjacentExact exact-kernel profile.
+- `/tmp/adjacent_exact_sizes.nsys-rep` — AdjacentExact exact-kernel profile (shared-memory version).
+- `/tmp/adjacent_exact_sizes_v2.nsys-rep` — AdjacentExact exact-kernel profile after rebase/Gray-code optimizations.
 
 The batched profile shows far fewer small-launch overheads and a more regular CUDA kernel mix (`elementwise`, `reduce`, `sgemm`) compared with the per-group profile, which contains tens of thousands of tiny kernel instances dominated by Python-loop dispatch.
 
