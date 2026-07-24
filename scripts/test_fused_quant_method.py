@@ -9,16 +9,17 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import List
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-def preflight_gpu(target_index: int, samples: int = 3, interval: float = 0.5, max_wait: float = 60.0, memory_mib: int = 2000):
-    """Wait for target GPU to be idle (0%% util for `samples` consecutive reads) and below memory threshold."""
+def preflight_gpu(target_indices: List[int], samples: int = 3, interval: float = 0.5, max_wait: float = 60.0, memory_mib: int = 2000):
+    """Wait for target GPUs to be idle (0%% util for `samples` consecutive reads) and below memory threshold."""
     start = time.time()
-    idle_streak = 0
-    last_util = None
+    idle_streaks = dict.fromkeys(target_indices, 0)
+    last_utils = dict.fromkeys(target_indices)
     while time.time() - start < max_wait:
         out = subprocess.run(
             [
@@ -30,28 +31,32 @@ def preflight_gpu(target_index: int, samples: int = 3, interval: float = 0.5, ma
             text=True,
             check=True,
         ).stdout
-        row = None
+        rows = {}
         for line in out.strip().splitlines():
             parts = [p.strip() for p in line.split(",")]
-            if int(parts[0]) == target_index:
-                row = parts
-                break
-        if row is None:
-            raise RuntimeError(f"GPU index {target_index} not found by nvidia-smi")
-        mem_mib = int(row[1])
-        util = int(row[2])
-        if util == 0 and mem_mib <= memory_mib:
-            idle_streak += 1
-            if idle_streak >= samples:
-                print(f"Preflight passed for GPU {target_index}: util={util}%, memory={mem_mib} MiB")
-                return
-        else:
-            idle_streak = 0
-        if util != last_util or time.time() - start < 2.0:
-            print(f"Preflight GPU {target_index}: util={util}%, memory={mem_mib} MiB (streak {idle_streak}/{samples})")
-            last_util = util
+            idx = int(parts[0])
+            if idx in idle_streaks:
+                rows[idx] = parts
+        if len(rows) != len(target_indices):
+            missing = set(target_indices) - set(rows)
+            raise RuntimeError(f"GPU indices {missing} not found by nvidia-smi")
+        all_idle = True
+        for idx, parts in rows.items():
+            mem_mib = int(parts[1])
+            util = int(parts[2])
+            if util == 0 and mem_mib <= memory_mib:
+                idle_streaks[idx] += 1
+            else:
+                idle_streaks[idx] = 0
+                all_idle = False
+            if util != last_utils[idx] or time.time() - start < 2.0:
+                print(f"Preflight GPU {idx}: util={util}%, memory={mem_mib} MiB (streak {idle_streaks[idx]}/{samples})")
+                last_utils[idx] = util
+        if all_idle and all(s >= samples for s in idle_streaks.values()):
+            print(f"Preflight passed for GPUs {target_indices}: all idle")
+            return
         time.sleep(interval)
-    raise RuntimeError(f"GPU {target_index} did not reach idle state within {max_wait}s")
+    raise RuntimeError(f"GPUs {target_indices} did not reach idle state within {max_wait}s")
 
 
 def build_config(method: str, backend: str, moe_bypass: bool = False):
@@ -126,22 +131,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", required=True, choices=["gptq", "awq", "qqq", "paro", "exl3"])
     parser.add_argument("--backend", required=True)
-    parser.add_argument("--gpu-index", type=int, default=6)
+    parser.add_argument("--gpu-index", type=str, default="6", help="Comma-separated CUDA indices in PCI bus order")
     parser.add_argument("--no-preflight", action="store_true")
     parser.add_argument("--model", default="/monster/data/model/Llama-3.2-1B-Instruct")
     parser.add_argument("--moe-bypass", action="store_true")
     parser.add_argument("--true-sequential", action="store_true")
     args = parser.parse_args()
 
+    gpu_indices = [int(x.strip()) for x in args.gpu_index.split(",")]
+
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_indices)
 
     # Reduce Triton autotune overhead for Paro smoke tests.
     if args.method == "paro":
         os.environ["GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE"] = "0"
 
     if not args.no_preflight:
-        preflight_gpu(args.gpu_index, memory_mib=2000)
+        preflight_gpu(gpu_indices, memory_mib=2000)
 
     cal = [
         "The quick brown fox jumps over the lazy dog. " * 20,
