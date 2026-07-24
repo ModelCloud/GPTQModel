@@ -592,7 +592,11 @@ class Quantizer(nn.Module):
         return scale, zero
 
     def quantize(self, x):
-        return quantize(x, self.scale, self.zero, self.maxq, self.requires_groupwise_processing())
+        maxq_value = getattr(self, "_maxq_value", None)
+        if maxq_value is None:
+            maxq_value = int(self.maxq.item())
+            self._maxq_value = maxq_value
+        return quantize(x, self.scale, self.zero, maxq_value, self.requires_groupwise_processing())
 
     # def enabled(self):
     #     return self.maxq > 0

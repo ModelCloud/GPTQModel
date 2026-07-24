@@ -207,31 +207,30 @@ The raw Triton argmin-only numbers were 12.6 / 5.6 / 3.1 ms, so the top-20 exact
 
 After the activation scale-search fast path is enabled, `scripts/profile_gptq_scale_search.py` (4096 x 4096, A100 GPU 5) still reports ~1.27–1.38 s for all group sizes and methods. The `find_params_batched` phase is now ~25–35 ms, so the dominant cost is the per-column GPTQ weight update loop, not scale search. The next optimization round should target that loop.
 
-### Mini-panel weight update in `GPTQ.quantize`
+### Removing CPU syncs in the GPTQ per-column loop
 
-The per-column update `W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))` launches one small outer-product kernel per column (up to 128 launches per 128-column block on GPU 5). This was the largest remaining kernel-launch source after the scale-search work. The block loop now processes each 128-column block as four 32-column mini-panels:
-- columns inside a panel are still updated sequentially so the `w` value for each column stays numerically identical to the original loop;
-- after each panel, the remaining columns in the block are updated with a single `torch.addmm` using the panel's `Err1` slice and the corresponding `Hinv1` sub-block.
+Nsight Systems showed `cudaStreamSynchronize` consuming the majority of CPU API time inside `GPTQ.quantize`. Two sources of per-column GPU->CPU synchronization were fixed:
 
-This converts most of the per-column outer-product work into a few larger `addmm` calls without changing the quantization math.
+1. `Quantizer.quantize()` passed `self.maxq` (a 0-d GPU tensor) to the standalone `quantize()` helper. The helper's `if maxq < 0:` branch therefore called `Tensor.__bool__` / `.item()` on every column, forcing a device synchronize. `Quantizer.quantize()` now caches `_maxq_value` as a Python scalar and passes that scalar to `quantize()`.
+2. `loss_sum.add_(torch.sum(diff ** 2 / d**2) / 2)` was evaluated for every column. The 0-d `sum` + in-place scalar `add_` created a chain of tiny host-visible dependencies. `GPTQ.quantize()` now stores `err1 = (w - q) / d` in `Err1` per column and computes the block loss in one FP32 reduction at the end of each block: `loss_sum.add_((Err1.float() ** 2).sum() / 2)`. This is mathematically identical (`err1 = diff / d` => `err1**2 == diff**2 / d**2`) and removes ~4096 per-column scalar ops.
+
+A mini-panel `addmm` experiment for the trailing weight update was tried and reverted: it changed the float32/roundoff order enough to produce different `scale`/`zero` values for later groups, and after the two sync fixes it provided no additional speedup over the original sequential update.
 
 End-to-end `GPTQ.quantize` timing on A100 GPU 5 (`PYTHON_GIL=0`, 4096 x 4096, `blocksize=128`):
 
 | group_size | method     | before (ms) | after (ms) | speedup |
 |------------|------------|-------------|------------|---------|
-| 32         | activation | 1402.5      | 1381.2     | 1.02x   |
-| 32         | hessian    | 1412.9      | 1375.1     | 1.03x   |
-| 32         | hybrid     | 1439.0      | 1388.3     | 1.04x   |
-| 64         | activation | 1415.1      | 1354.2     | 1.04x   |
-| 64         | hessian    | 1428.3      | 1387.0     | 1.03x   |
-| 64         | hybrid     | 1434.8      | 1369.9     | 1.05x   |
-| 128        | activation | 1458.3      | 1370.4     | **1.06x** |
-| 128        | hessian    | 1525.7      | 1330.8     | **1.15x** |
-| 128        | hybrid     | 1521.9      | 1340.8     | **1.14x** |
+| 32         | activation | 1402.5      | 842.3      | **1.66x** |
+| 32         | hessian    | 1412.9      | 797.2      | **1.77x** |
+| 32         | hybrid     | 1439.0      | 794.7      | **1.81x** |
+| 64         | activation | 1415.1      | 830.9      | **1.70x** |
+| 64         | hessian    | 1428.3      | 790.4      | **1.81x** |
+| 64         | hybrid     | 1434.8      | 788.9      | **1.82x** |
+| 128        | activation | 1458.3      | 825.6      | **1.77x** |
+| 128        | hessian    | 1525.7      | 779.0      | **1.96x** |
+| 128        | hybrid     | 1521.9      | 781.8      | **1.95x** |
 
-The win is largest for `group_size=128` because there are fewer scale-search groups and the per-column weight update dominates. `MINIBLOCK=16` and `MINIBLOCK=64` experiments on `group_size=128 activation` both regressed to ~3.4 s, confirming `block_step=32` is the sweet spot for this shape.
-
-Nsight Systems after the change still shows `cudaStreamSynchronize` dominating CPU wait time and many small `elementwise_kernel` launches from the per-column quantize arithmetic, so the next round should target fusing the quantize+diff+err+update steps per column.
+Nsight Systems after the change still shows many small `elementwise_kernel` launches from the per-column quantize arithmetic, so the next round should target fusing those elementwise ops (Triton or custom CUDA) to reduce launch count further.
 
 ## Known limitations / future work
 
