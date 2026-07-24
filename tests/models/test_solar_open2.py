@@ -12,7 +12,6 @@ import torch
 from model_test import ModelTest
 from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
 
-from gptqmodel import WeightOnlyConfig
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.solar_open2 import SolarOpen2QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
