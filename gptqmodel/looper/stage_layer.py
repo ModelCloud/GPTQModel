@@ -21,11 +21,8 @@ import time
 from concurrent.futures import as_completed
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from defuser.modeling.replace_modules import materialize_model
-from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
-from ..nn_modules.converter import MODULE_CONVERTER_MAP
-from ..quantization.config import GcMode, QuantizeEmbed
 import torch
+from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.awq_processor import AWQProcessor
@@ -33,13 +30,21 @@ from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
 from ..looper.paroquant_processor import ParoQuantProcessor
 from ..looper.qqq_processor import QQQProcessor
+from ..nn_modules.converter import MODULE_CONVERTER_MAP
+from ..nn_modules.fused_group_forward import (
+    clear_fused_group_forward_caches,
+    install_fused_group_forward,
+)
+from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
+from ..quantization.config import GcMode, QuantizeEmbed
 from ..utils.device import get_device, get_device_new
-from ..utils.looper_helpers import normalize_device_like
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
+from ..utils.looper_helpers import normalize_device_like
 from ..utils.model import find_modules, get_layer_name, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
+
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from .module_looper import ModuleLooper
@@ -72,7 +77,7 @@ def _find_last_quantized_layer_index(
             module_full_name = f"{layer_name}.{module_name}"
             # If at least one module in this layer is not dynamically excluded,
             # the layer still needs forward/quantization work.
-            if looper.gptq_model.quantize_config.dynamic_get(layer_name=module_full_name) != False:
+            if looper.gptq_model.quantize_config.dynamic_get(layer_name=module_full_name) is not False:
                 last_quantized_layer_index = candidate_layer_index
                 break
 
@@ -532,6 +537,20 @@ def run_layer_stage(
                 skip_module_paths=hook_skip_modules,
             )
 
+            fused_forward_cfg = getattr(
+                looper.gptq_model.quantize_config, "fused_forward", None
+            )
+            if fused_forward_cfg is not None:
+                model_cls = type(looper.gptq_model)
+                layer_modules_blocks = model_cls.build_layer_modules(model_cls.module_tree)
+                install_fused_group_forward(
+                    layer_module=module,
+                    layer_modules_blocks=layer_modules_blocks,
+                    enabled=True,
+                    splice=getattr(fused_forward_cfg, "splice", "view"),
+                    logger=log,
+                )
+
             layers[layer_index] = module
 
             if layer_name:
@@ -773,6 +792,9 @@ def run_layer_stage(
                     # execution order and honor downstream dependencies.
                     for module in processed_subset.values():
                         actual_module = module.module if isinstance(module, NamedModule) else module
+
+                        if isinstance(actual_module, torch.nn.Module):
+                            clear_fused_group_forward_caches(actual_module)
 
                         get_device_new(
                             actual_module,

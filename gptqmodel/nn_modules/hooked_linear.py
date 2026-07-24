@@ -17,6 +17,28 @@ from ..utils.logger import setup_logger
 log = setup_logger()
 
 
+def _try_fused_forward(
+    module: nn.Module,
+    input: torch.Tensor,
+    target_device: torch.device,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    """Attempt a same-input fused forward; fall back to None on any issue."""
+
+    fused = getattr(module, "_fused_group_forward", None)
+    if fused is None:
+        return None
+    try:
+        return fused(module, input, target_device)
+    except Exception as exc:
+        log.warn(
+            "FusedGroupForward failed for %s, disabling for this module: %s",
+            getattr(module, "module_name", None) or getattr(module, "full_name", None) or type(module).__name__,
+            exc,
+        )
+        module._fused_group_forward = None
+        return None
+
+
 class StopForward(Exception):
     """Signal an intentional early stop of the forward pass."""
     pass
@@ -68,9 +90,13 @@ class HookedConv1D(transformers.Conv1D):
         original_device = input.device
         _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
-        if original_device != target_device:
-            input = input.to(device=target_device)
-        output = super().forward(input)
+        fused_result = _try_fused_forward(self, input, target_device)
+        if fused_result is None:
+            if original_device != target_device:
+                input = input.to(device=target_device)
+            output = super().forward(input)
+        else:
+            output, input = fused_result
 
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -131,9 +157,13 @@ class HookedConv1d(torch.nn.Conv1d):
         original_device = input.device
         _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
-        if original_device != target_device:
-            input = input.to(device=target_device)
-        output = super().forward(input)
+        fused_result = _try_fused_forward(self, input, target_device)
+        if fused_result is None:
+            if original_device != target_device:
+                input = input.to(device=target_device)
+            output = super().forward(input)
+        else:
+            output, input = fused_result
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
@@ -193,9 +223,13 @@ class HookedConv2d(torch.nn.Conv2d):
         original_device = input.device
         _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
-        if original_device != target_device:
-            input = input.to(device=target_device)
-        output = super().forward(input)
+        fused_result = _try_fused_forward(self, input, target_device)
+        if fused_result is None:
+            if original_device != target_device:
+                input = input.to(device=target_device)
+            output = super().forward(input)
+        else:
+            output, input = fused_result
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
@@ -223,9 +257,13 @@ class HookedTransformerConv1D(transformers.Conv1D):
         original_device = input.device
         _materialize_if_meta_weight(self, input_device=original_device)
         target_device = self.weight.data.device
-        if original_device != target_device:
-            input = input.to(device=target_device)
-        output = super().forward(input)
+        fused_result = _try_fused_forward(self, input, target_device)
+        if fused_result is None:
+            if original_device != target_device:
+                input = input.to(device=target_device)
+            output = super().forward(input)
+        else:
+            output, input = fused_result
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
@@ -262,9 +300,13 @@ class HookedLinear(torch.nn.Linear):
             weight_device=target_device,
             input_device=original_device,
         )
-        if original_device != target_device:
-            input = input.to(device=target_device)
-        output = super().forward(input)
+        fused_result = _try_fused_forward(self, input, target_device)
+        if fused_result is None:
+            if original_device != target_device:
+                input = input.to(device=target_device)
+            output = super().forward(input)
+        else:
+            output, input = fused_result
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:

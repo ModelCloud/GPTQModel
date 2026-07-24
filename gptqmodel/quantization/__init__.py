@@ -23,6 +23,7 @@ from .config import (
                      FallbackStrategy,
                      FOEMConfig,
                      FP8Config,
+                     FusedForwardConfig,
                      GGUFBits,
                      GGUFConfig,
                      GPTAQConfig,

@@ -280,6 +280,7 @@ from .quantization import (
     AWQConfig,
     BaseQuantizeConfig,
     FOEMConfig,
+    FusedForwardConfig,
     GGUFConfig,
     GPTAQConfig,
     GPTQConfig,

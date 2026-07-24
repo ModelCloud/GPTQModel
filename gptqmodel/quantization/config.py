@@ -22,6 +22,7 @@ from packaging import version
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
 from .diagnostics import QuantizationDiagnosticsMode, normalize_quantization_diagnostics_mode
+from .fused_forward_config import FusedForwardConfig
 
 
 log = setup_logger()
@@ -2028,6 +2029,22 @@ def _normalize_foem(foem: Optional[Union[FOEMConfig, Dict[str, Any]]]) -> Option
     return foem
 
 
+def _normalize_fused_forward_config(
+    fused_forward: Optional[Union[FusedForwardConfig, Dict[str, Any]]],
+) -> Optional[FusedForwardConfig]:
+    if fused_forward is None:
+        return None
+    if isinstance(fused_forward, dict):
+        return FusedForwardConfig(**fused_forward)
+    if isinstance(fused_forward, bool):
+        return FusedForwardConfig() if fused_forward else None
+    if not isinstance(fused_forward, FusedForwardConfig):
+        raise ValueError(
+            "QuantizeConfig: `fused_forward` must be a FusedForwardConfig, dict, bool, or None."
+        )
+    return fused_forward
+
+
 def _normalize_dense_vram_strategy(value: Union[str, VramStrategy]) -> VramStrategy:
     """Validate one user-supplied dense-pool placement strategy value."""
 
@@ -2456,6 +2473,17 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
     true_sequential: bool = field(default=True)
 
+    fused_forward: Optional[FusedForwardConfig] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional configuration for fusing same-input module forward passes "
+                "(e.g. q/k/v, gate/up) during calibration. None disables fusion; "
+                "FusedForwardConfig() enables it with splice='view'."
+            )
+        },
+    )
+
     lm_head: bool = field(default=False)
 
     method: METHOD = field(default=METHOD.GPTQ)
@@ -2700,6 +2728,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         else:
             self.meta = {}
 
+        self.fused_forward = _normalize_fused_forward_config(self.fused_forward)
         self.adapter = normalize_adapter(self.adapter)
         self._ensure_offload_temp_dir()
 
@@ -2984,6 +3013,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "enable_shared_hessian_cache": "enable_shared_hessian_cache",
             "enable_activation_x_mean_cache": "enable_activation_x_mean_cache",
             "quantization_diagnostics": "quantization_diagnostics",
+            "fused_forward": "fused_forward",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -3049,7 +3079,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             return cls.from_quant_config(args_from_json, format)
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
-        return None
+        if self.fused_forward is None:
+            meta_payload["fused_forward"] = None
+        else:
+            meta_payload["fused_forward"] = self.fused_forward.to_dict()
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         return None
@@ -4097,6 +4130,7 @@ class EXL3Config(BaseQuantizeConfig):
         else:
             self.meta = {}
 
+        self.fused_forward = _normalize_fused_forward_config(self.fused_forward)
         self.adapter = normalize_adapter(self.adapter)
         self._ensure_offload_temp_dir()
 
