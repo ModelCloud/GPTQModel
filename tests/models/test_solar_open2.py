@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 from model_test import ModelTest
-from torch import nn
 from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
 
 from gptqmodel import BACKEND, WeightOnlyConfig
