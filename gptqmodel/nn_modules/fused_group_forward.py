@@ -13,6 +13,7 @@ accumulates its own Hessian.
 import threading
 from typing import Dict, List, Optional, Tuple
 
+import pcre
 import torch
 import torch.nn as nn
 import transformers
@@ -272,6 +273,31 @@ def _all_same_device_dtype(members: List[nn.Module]) -> bool:
     return True
 
 
+def _is_moe_down_proj_group(names: List[str]) -> bool:
+    """Return True when members are per-expert down-projections (different inputs).
+
+    In MoE MLPs the gate/up projections all consume the same hidden state, so
+    fusing them across experts is valid. The down projection (or Mixtral w2)
+    consumes the expert-specific activated intermediate, so cross-expert fusion
+    would waste work without sharing inputs.
+    """
+
+    if len(names) < 2:
+        return False
+    suffixes = {"down_proj", "w2"}
+    last_parts = [n.rsplit(".", 1)[-1] for n in names]
+    if not all(p in suffixes for p in last_parts):
+        return False
+    expert_indices = set()
+    pattern = r"[./]experts[./](\d+)[./]"
+    for n in names:
+        m = pcre.search(pattern, n)
+        if not m:
+            return False
+        expert_indices.add(int(m.group(1)))
+    return len(expert_indices) > 1
+
+
 def install_fused_group_forward(
     layer_module: nn.Module,
     layer_modules_blocks: List[List[str]],
@@ -295,8 +321,10 @@ def install_fused_group_forward(
     if not enabled:
         return 0
 
-    def _try_install_group(members: List[nn.Module]) -> bool:
+    def _try_install_group(members: List[nn.Module], names: List[str]) -> bool:
         if len(members) < 2:
+            return False
+        if _is_moe_down_proj_group(names):
             return False
         first_in_dim = _get_linear_dims(members[0])[0]
         if first_in_dim == 0:
@@ -314,32 +342,38 @@ def install_fused_group_forward(
     installed = 0
     for block in layer_modules_blocks:
         members: List[nn.Module] = []
+        member_names: List[str] = []
         for raw_name in block:
             name = _clean_module_name(raw_name)
             try:
                 m = layer_module.get_submodule(name)
             except AttributeError:
-                if _try_install_group(members):
+                if _try_install_group(members, member_names):
                     installed += 1
                 members = []
+                member_names = []
                 continue
             if not _is_supported_fused_module(m):
-                if _try_install_group(members):
+                if _try_install_group(members, member_names):
                     installed += 1
                 members = []
+                member_names = []
                 continue
             in_dim, out_dim = _get_linear_dims(m)
             if in_dim == 0 or out_dim == 0:
-                if _try_install_group(members):
+                if _try_install_group(members, member_names):
                     installed += 1
                 members = []
+                member_names = []
                 continue
             if members and _get_linear_dims(members[0])[0] != in_dim:
-                if _try_install_group(members):
+                if _try_install_group(members, member_names):
                     installed += 1
                 members = []
+                member_names = []
             members.append(m)
-        if _try_install_group(members):
+            member_names.append(name)
+        if _try_install_group(members, member_names):
             installed += 1
 
     return installed
