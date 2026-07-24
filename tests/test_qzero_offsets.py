@@ -11,6 +11,7 @@ from safetensors.torch import save_file
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.model import (
+    convert_gptq_v1_to_v2_format,
     convert_gptq_v1_to_v2_format_module,
     convert_gptq_v2_to_v1_format_module,
 )
@@ -158,6 +159,30 @@ def test_qzero_offsets_roundtrip(bits: int, pack_dtype: torch.dtype) -> None:
     )
 
     assert torch.equal(module.qzeros.data, original)
+
+
+@torch.inference_mode()
+def test_qzero_offsets_use_module_contract_for_mixed_width_checkpoint() -> None:
+    module = _make_module(bits=4, pack_dtype=torch.int32)
+    model = nn.Sequential(module)
+    global_decoder_config = SimpleNamespace(
+        bits=3,
+        pack_dtype=torch.int32,
+        export_quant_method=lambda: METHOD.GPTQ,
+    )
+
+    convert_gptq_v1_to_v2_format(
+        model=model,
+        cfg=global_decoder_config,
+        qlinear_kernel=_TestQuantLinear,
+    )
+    convert_gptq_v2_to_v1_format_module(
+        module=module,
+        quantize_config=global_decoder_config,
+    )
+
+    assert torch.count_nonzero(module.qzeros.data) == 0
+    assert module.qzero_format() == 1
 
 
 @torch.inference_mode()

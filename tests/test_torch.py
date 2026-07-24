@@ -7,12 +7,17 @@ from __future__ import annotations
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import gptqmodel.utils.torch as torch_utils
+from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.lookahead import configure_default_lookahead
-from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear, TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
+from gptqmodel.quantization import FORMAT
+from gptqmodel.utils.backend import BACKEND
+from gptqmodel.utils.model import create_quant_module
 
 
 def _mock_gptq_linear(bits: int, group_size: int, in_features: int, out_features: int) -> tuple[nn.Linear, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -51,6 +56,58 @@ def _mock_gptq_linear(bits: int, group_size: int, in_features: int, out_features
     )
 
     return linear, scales, zeros, g_idx
+
+
+def test_torch_quant_embeddings_forward_matches_dequantized_lookup():
+    bits = 4
+    group_size = 32
+    vocab_size = 64
+    embedding_dim = 32
+    linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, vocab_size, embedding_dim)
+    module = TorchQuantEmbeddings(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=vocab_size,
+        out_features=embedding_dim,
+        pack_dtype=torch.int32,
+        bias=False,
+    )
+    module.pack_block(linear, scales.T, zeros.T, g_idx=g_idx)
+    module.optimize = lambda *args, **kwargs: None
+    module.post_init()
+
+    input_ids = torch.tensor([[0, 7, 63], [12, 31, 2]], dtype=torch.long)
+
+    torch.testing.assert_close(module(input_ids), F.embedding(input_ids, module.dequantize_weight()))
+
+
+def test_create_quant_module_uses_embedding_kernel_for_embedding_role():
+    model = nn.Module()
+    model.embed_tokens = nn.Embedding(64, 32, dtype=torch.float16)
+
+    create_quant_module(
+        name="embed_tokens",
+        linear_cls=TorchLinear,
+        bits=4,
+        desc_act=False,
+        dynamic=None,
+        group_size=32,
+        module=model,
+        submodule=model.embed_tokens,
+        sym=True,
+        device=DEVICE.CPU,
+        lm_head_name="lm_head",
+        pack_dtype=torch.int32,
+        format=FORMAT.GPTQ_V2,
+        backend=BACKEND.GPTQ_TORCH,
+        dtype=torch.float16,
+    )
+
+    assert isinstance(model.embed_tokens, TorchQuantEmbeddings)
+    assert model.embed_tokens.in_features == 64
+    assert model.embed_tokens.out_features == 32
 
 
 @pytest.mark.cuda

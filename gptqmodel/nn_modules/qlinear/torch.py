@@ -10,6 +10,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
@@ -748,4 +749,40 @@ def dequantize_model(model: PreTrainedModel):
     return model
 
 
-__all__ = ["TorchLinear", "dequantize_model"]
+class TorchQuantEmbeddings(TorchLinear):
+    """Quantized embedding layer backed by the Torch GPTQ dequant path."""
+
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20}
+    # Embeddings are selected by module role in create_quant_module(), and must
+    # not be discovered as a general backend: their forward contract accepts
+    # integer token IDs, not hidden states.
+    SUPPORTS_BACKEND_SELECTION = False
+    SUPPORTS_BITS = [2, 3, 4, 8]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = True
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+
+    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
+    SUPPORTS_ADAPTERS = []
+
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    REQUIRES_FORMAT_V2 = True
+
+    # for transformers/optimum tests compat
+    QUANT_TYPE = "torch"
+
+    def forward(self, input_ids: torch.Tensor):
+        return F.embedding(input_ids, self.dequantize_weight())
+
+
+__all__ = ["TorchLinear", "TorchQuantEmbeddings", "dequantize_model"]
