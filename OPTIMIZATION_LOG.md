@@ -85,6 +85,23 @@ A100 `find_params_batched` timing for `4096 x 4096`:
 
 `validate_find_params_batched_quick.py` and `validate_find_params_batched_strict.py` still pass with zero diff.
 
+### ScaleSearch candidate scale/zero precomputation
+
+The scale-search chunk loop recomputed `xmin1 = p * xmin`, `xmax1 = p * xmax`, `scale1`, and `zero1` inside every chunk, plus built the shrink list on the host. Precomputing the full `(candidates, rows, groups)` `scale_all`/`zero_all` tensors once and slicing them in the loop removes repeated elementwise launches and Python list construction. The symmetric `zero` case uses `expand` views so it does not allocate extra memory.
+
+A100 `find_params_batched` 4096x4096 after this change:
+
+| group_size | method     | before (ms) | after (ms) | speedup |
+|------------|------------|-------------|------------|---------|
+| 32         | activation | 70.6        | 69.5       | 1.02x   |
+| 32         | hessian    | 86.6        | 86.0       | 1.01x   |
+| 64         | activation | 64.2        | 63.3       | 1.01x   |
+| 64         | hessian    | 77.0        | 76.4       | 1.01x   |
+| 128        | activation | 60.8        | 60.0       | 1.01x   |
+| 128        | hessian    | 72.5        | 72.3       | 1.00x   |
+
+`find_params` (per-group) also precomputes candidate scales/zeros the same way. All `validate_find_params_batched_*` checks and `tests/test_gptq.py` pass with zero scale/zero diff.
+
 ### AdjacentExact CUDA exact kernel
 
 Active-decision timing (all `size` decisions non-zero, `warps=0`) on a single A100:

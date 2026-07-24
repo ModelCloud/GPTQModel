@@ -367,26 +367,30 @@ class Quantizer(nn.Module):
             candidate_count = int(self.maxshrink * self.grid)
 
             chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
-            # Materialize the original Python-float factors directly. A
-            # device-side FP32 subtraction can differ by one ULP after
+            # Vectorize the shrink factors on the device; materializing the
+            # original Python-float list one-by-one can differ by one ULP after
             # cancellation and alter the serialized scale values.
-            shrink = torch.tensor(
-                [1 - i / self.grid for i in range(candidate_count)],
-                device=dev,
-                dtype=torch.float32,
-            )
+            shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
+            shrink = 1.0 - shrink / self.grid
+            # Precompute scale/zero for every candidate once so the chunk loop
+            # only slices views instead of recomputing elementwise ranges.
+            p = shrink.view(-1, 1)
+            xmin_all = p * xmin.unsqueeze(0)
+            xmax_all = p * xmax.unsqueeze(0)
+            if self.requires_groupwise_processing():
+                scale_all = xmax_all / self.maxq
+            else:
+                scale_all = (xmax_all - xmin_all) / self.maxq
+            if self.qcfg.sym:
+                zero_all = self.zero.unsqueeze(0).expand_as(scale_all)
+            else:
+                zero_all = torch.round(-xmin_all / scale_all)
+
             x_batch = x.unsqueeze(0)
             for start in range(0, candidate_count, chunk_size):
                 end = min(start + chunk_size, candidate_count)
-                p = shrink[start:end].unsqueeze(1)
-                xmin1 = p * xmin.unsqueeze(0)
-                xmax1 = p * xmax.unsqueeze(0)
-                scale1 = (
-                    xmax1 / self.maxq
-                    if self.requires_groupwise_processing()
-                    else (xmax1 - xmin1) / self.maxq
-                )
-                zero1 = torch.round(-xmin1 / scale1) if not self.qcfg.sym else self.zero.expand_as(scale1)
+                scale1 = scale_all[start:end]
+                zero1 = zero_all[start:end]
                 candidate = self._quantize_scale_search_candidates(
                     x_batch,
                     scale1.unsqueeze(2),
@@ -508,26 +512,25 @@ class Quantizer(nn.Module):
             candidate_count = int(self.maxshrink * self.grid)
             chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
 
-            shrink = torch.tensor(
-                [1 - i / self.grid for i in range(candidate_count)],
-                device=dev,
-                dtype=torch.float32,
-            )
+            shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
+            shrink = 1.0 - shrink / self.grid
+            p = shrink.view(-1, 1, 1)
+            xmin_all = p * xmin.unsqueeze(0)
+            xmax_all = p * xmax.unsqueeze(0)
+            if self.requires_groupwise_processing():
+                scale_all = xmax_all / self.maxq
+            else:
+                scale_all = (xmax_all - xmin_all) / self.maxq
+            if self.qcfg.sym:
+                zero_all = zero.unsqueeze(0).expand(candidate_count, -1, -1)
+            else:
+                zero_all = torch.round(-xmin_all / scale_all)
+
             x_batch = x.unsqueeze(0)
             for start in range(0, candidate_count, chunk_size):
                 end = min(start + chunk_size, candidate_count)
-                p = shrink[start:end].view(-1, 1, 1)
-                xmin1 = p * xmin.unsqueeze(0)
-                xmax1 = p * xmax.unsqueeze(0)
-                if self.requires_groupwise_processing():
-                    scale1 = xmax1 / self.maxq
-                else:
-                    scale1 = (xmax1 - xmin1) / self.maxq
-                zero1 = (
-                    torch.round(-xmin1 / scale1)
-                    if not self.qcfg.sym
-                    else zero.unsqueeze(0).expand(end - start, -1, -1)
-                )
+                scale1 = scale_all[start:end]
+                zero1 = zero_all[start:end]
                 candidate = self._quantize_scale_search_candidates(
                     x_batch.expand(end - start, -1, -1, -1),
                     scale1.unsqueeze(-1),
