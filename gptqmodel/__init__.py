@@ -277,6 +277,8 @@ from . import extension
 from .models import GPTQModel, get_best_device
 from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import (
+    AnalysisConfig,
+    AnalysisSelection,
     AWQConfig,
     BaseQuantizeConfig,
     FOEMConfig,
@@ -287,9 +289,11 @@ from .quantization import (
     QuantizeConfig,
     QuantizeEmbed,
     QuantizeEmbedConfig,
+    QuantizationAnalyzer,
     RTNConfig,
     ScaleSearchConfig,
     WeightOnlyConfig,
+    apply_analysis_plan,
 )
 from .utils import BACKEND, PROFILE
 from .version import __version__

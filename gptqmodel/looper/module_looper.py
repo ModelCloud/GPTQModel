@@ -1703,6 +1703,7 @@ class ModuleLooper():
                 layers_prefix=layers_prefix,
                 quantize_config=self.gptq_model.quantize_config,
                 model=self.gptq_model.model,
+                gptq_model=self.gptq_model,
             )
 
     def hook_embeddings_module(self, module):

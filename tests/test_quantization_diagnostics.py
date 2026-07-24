@@ -8,9 +8,12 @@ from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.diagnostics import (
     QUANTIZATION_DIAGNOSTICS_ENV,
     QuantizationDiagnosticsMode,
+    analyze_group_index,
     analyze_quantization_losses,
+    analyze_reconstruction_error,
     analyze_scale_channels,
     compare_quant_code_samples,
+    render_quantization_diagnostics_markdown,
     resolve_quantization_diagnostics_mode,
     sample_packed_quant_codes,
     sample_reconstructed_quant_codes,
@@ -81,9 +84,12 @@ def test_scale_channel_summary_localizes_output_channel():
 
     assert summary["max_scale_output_channel"] == 2
     assert summary["output_channel_count"] == 4
+    assert summary["group_count"] == 3
     assert summary["max_scale"] == pytest.approx(35.0)
+    assert summary["max_scale_group"] == 0
     assert summary["scale_count_above_10"] == 3
     assert summary["nonfinite_scale_count"] == 0
+    assert summary["nonpositive_scale_count"] == 0
 
 
 def test_scale_channel_summary_does_not_report_group_index_as_channel():
@@ -94,6 +100,115 @@ def test_scale_channel_summary_does_not_report_group_index_as_channel():
 
     assert summary["max_scale_output_channel"] == 2276
     assert summary["output_channel_count"] == 4096
+
+
+def test_group_index_summary_preserves_zero_based_mapping_and_reports_decreases():
+    summary = analyze_group_index(torch.tensor([0, 0, 2, 1], dtype=torch.int32), group_count=3)
+
+    assert summary["minimum_group"] == 0
+    assert summary["maximum_group"] == 2
+    assert summary["unique_group_count"] == 3
+    assert summary["negative_group_count"] == 0
+    assert summary["out_of_range_group_count"] == 0
+    assert summary["monotonic_decrease_count"] == 1
+    assert summary["is_monotonic_non_decreasing"] is False
+
+
+def test_reconstruction_error_localizes_actual_tensor_axes_in_bounded_chunks():
+    source = torch.tensor([[1.0, -1.0], [2.0, -2.0]], dtype=torch.float32)
+    reconstructed = torch.tensor([[1.5, -1.0], [2.0, -2.0]], dtype=torch.float32)
+
+    summary = analyze_reconstruction_error(
+        source,
+        reconstructed,
+        max_chunk_values=2,
+        top_k_axes=2,
+    )
+
+    assert summary["available"] is True
+    assert summary["shape"] == [2, 2]
+    assert summary["axis_semantics"]["index_base"] == 0
+    assert summary["relative_rmse"] == pytest.approx(0.5 / (10.0 ** 0.5))
+    assert summary["rmse"] == pytest.approx(0.25)
+    assert summary["maximum_absolute_error"] == pytest.approx(0.5)
+    assert summary["maximum_error_output_row"] == 0
+    assert summary["maximum_error_input_feature"] == 0
+    assert summary["top_output_rows"][0]["output_row"] == 0
+    assert summary["top_input_features"][0]["input_feature"] == 0
+
+
+def test_during_quantization_markdown_is_human_readable_and_zero_based():
+    reconstruction = analyze_reconstruction_error(
+        torch.tensor([[1.0, -1.0], [2.0, -2.0]]),
+        torch.tensor([[1.5, -1.0], [2.0, -2.0]]),
+    )
+    reconstruction.update(
+        {
+            "layer": 0,
+            "module": "self_attn.q_proj",
+            "full_name": "model.layers.0.self_attn.q_proj",
+            "bits": 4,
+            "group_size": 128,
+        }
+    )
+    loss = analyze_quantization_losses(
+        [
+            {
+                "layer": 0,
+                "module": "self_attn.q_proj",
+                "full_name": "model.layers.0.self_attn.q_proj",
+                "loss": 0.25,
+                "bits": 4,
+                "group_size": 128,
+            }
+        ]
+    )
+    markdown = render_quantization_diagnostics_markdown(
+        {
+            "mode": "channel",
+            "module_grouping": {
+                "basis": "gptqmodel_model_definition_module_group",
+                "source": "gptqmodel.models.definitions.qwen3.Qwen3QModel.module_tree",
+                "groups": [
+                    ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+                    ["self_attn.o_proj"],
+                    ["mlp.gate_proj", "mlp.up_proj"],
+                    ["mlp.down_proj"],
+                ],
+            },
+            "quantization_config": {
+                "method": "gptq",
+                "format": "gptq",
+                "bits": 4,
+                "group_size": 128,
+                "sym": True,
+                "desc_act": True,
+                "pack_impl": "original",
+            },
+            "loss": loss,
+            "reconstruction": {"module_count": 1, "records": [reconstruction]},
+            "scale_channels": {"module_count": 0, "records": []},
+            "code_fingerprints": {
+                "module_count": 0,
+                "prepack_mismatch_count": 0,
+                "packed_mismatch_count": 0,
+                "records": [],
+            },
+        }
+    )
+
+    assert "# During-quantization error analysis" in markdown
+    assert "## Canonical GPTQ reconstruction error" in markdown
+    assert "## Localized reconstruction rows and input features" in markdown
+    assert "## Logical-code lifecycle" in markdown
+    assert "## GPTQModel definition-group recommendations" in markdown
+    assert "qkv_projection_group" in markdown
+    assert "Qwen3QModel.module_tree" in markdown
+    assert "`model.layers.0.self_attn.k_proj`" in markdown
+    assert "`model.layers.0.self_attn.v_proj`" in markdown
+    assert "not** evidence" in markdown
+    assert "`model.layers.0.self_attn.q_proj`" in markdown
+    assert "no `+1` conversion" in markdown
 
 
 @pytest.mark.parametrize("bits,in_features", [(2, 16), (3, 32), (4, 8), (8, 4)])

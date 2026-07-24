@@ -1221,26 +1221,58 @@ class TensorParallelPadderConfig(BasePreProcessorConfig):
 
 @dataclass
 class AnalysisConfig(BasePreProcessorConfig):
-    """Configure an early module quantizability report for the active quant config."""
+    """Configure granular pre-quantization error analysis for the active quant config."""
 
     code: ClassVar[str] = PreProcessorCode.ANALYSIS.value
     top_k: int = 32
+    top_k_regions: int = 128
+    regions_per_module: int = 8
     emit_markdown: bool = True
     emit_json: bool = True
+    include_endpoints: bool = True
     bad_block_rel_rmse_threshold: float = 0.10
+    recommendation_percentile: float = 95.0
+    min_recommendation_risk: float = 20.0
+    promotion_bits: int = 8
+    promotion_group_size: int = 32
+    fusion_profile: str = "model_definition"
+    max_chunk_values: int = 8 * 1024 * 1024
+    max_sample_values: int = 1024 * 1024
 
     def __post_init__(self):
         """Validate report shape and scoring thresholds."""
 
-        if not isinstance(self.top_k, int):
-            raise ValueError("AnalysisConfig: `top_k` must be an integer.")
-        if self.top_k <= 0:
-            raise ValueError("AnalysisConfig: `top_k` must be greater than 0.")
+        for name in (
+            "top_k",
+            "top_k_regions",
+            "regions_per_module",
+            "promotion_bits",
+            "promotion_group_size",
+            "max_chunk_values",
+            "max_sample_values",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int):
+                raise ValueError(f"AnalysisConfig: `{name}` must be an integer.")
+            if value <= 0:
+                raise ValueError(f"AnalysisConfig: `{name}` must be greater than 0.")
         self.emit_markdown = bool(self.emit_markdown)
         self.emit_json = bool(self.emit_json)
+        self.include_endpoints = bool(self.include_endpoints)
         self.bad_block_rel_rmse_threshold = float(self.bad_block_rel_rmse_threshold)
         if self.bad_block_rel_rmse_threshold <= 0:
             raise ValueError("AnalysisConfig: `bad_block_rel_rmse_threshold` must be greater than 0.")
+        self.recommendation_percentile = float(self.recommendation_percentile)
+        if not 0 < self.recommendation_percentile <= 100:
+            raise ValueError("AnalysisConfig: `recommendation_percentile` must be in (0, 100].")
+        self.min_recommendation_risk = float(self.min_recommendation_risk)
+        if not 0 <= self.min_recommendation_risk <= 100:
+            raise ValueError("AnalysisConfig: `min_recommendation_risk` must be in [0, 100].")
+        self.fusion_profile = str(self.fusion_profile).strip().lower()
+        if self.fusion_profile == "vllm_sglang":
+            self.fusion_profile = "model_definition"
+        if self.fusion_profile not in {"none", "model_definition"}:
+            raise ValueError("AnalysisConfig: `fusion_profile` must be one of `none` or `model_definition`.")
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the analysis preprocessor config."""
@@ -1254,6 +1286,22 @@ class AnalysisConfig(BasePreProcessorConfig):
                 "bad_block_rel_rmse_threshold": self.bad_block_rel_rmse_threshold,
             }
         )
+        optional_defaults = {
+            "top_k_regions": 128,
+            "regions_per_module": 8,
+            "include_endpoints": True,
+            "recommendation_percentile": 95.0,
+            "min_recommendation_risk": 20.0,
+            "promotion_bits": 8,
+            "promotion_group_size": 32,
+            "fusion_profile": "model_definition",
+            "max_chunk_values": 8 * 1024 * 1024,
+            "max_sample_values": 1024 * 1024,
+        }
+        for name, default in optional_defaults.items():
+            value = getattr(self, name)
+            if value != default:
+                payload[name] = value
         return payload
 
 
@@ -1738,9 +1786,19 @@ def _normalize_preprocessor_config(payload: Any) -> BasePreProcessorConfig:
         if code == PreProcessorCode.ANALYSIS.value:
             return AnalysisConfig(
                 top_k=payload.get("top_k", 32),
+                top_k_regions=payload.get("top_k_regions", 128),
+                regions_per_module=payload.get("regions_per_module", 8),
                 emit_markdown=payload.get("emit_markdown", True),
                 emit_json=payload.get("emit_json", True),
+                include_endpoints=payload.get("include_endpoints", True),
                 bad_block_rel_rmse_threshold=payload.get("bad_block_rel_rmse_threshold", 0.10),
+                recommendation_percentile=payload.get("recommendation_percentile", 95.0),
+                min_recommendation_risk=payload.get("min_recommendation_risk", 20.0),
+                promotion_bits=payload.get("promotion_bits", 8),
+                promotion_group_size=payload.get("promotion_group_size", 32),
+                fusion_profile=payload.get("fusion_profile", "model_definition"),
+                max_chunk_values=payload.get("max_chunk_values", 8 * 1024 * 1024),
+                max_sample_values=payload.get("max_sample_values", 1024 * 1024),
             )
         if code and code != PreProcessorCode.SMOOTHER.value:
             raise ValueError(f"QuantizeConfig: unsupported preprocessor code `{code}`.")
@@ -3280,7 +3338,8 @@ class GPTQConfig(PreProcessorConfig):
             "choices": [mode.value for mode in QuantizationDiagnosticsMode],
             "help": (
                 "Quantization anomaly diagnostics: off disables them, auto adds a cheap module-loss summary, "
-                "and channel additionally scans scale tensors by output channel."
+                "and channel additionally measures W-to-Wq reconstruction error, scale/group anomalies, and sampled "
+                "pre-pack/post-pack logical-code parity. Saved models include JSON and Markdown reports."
             ),
         },
     )

@@ -1,4 +1,4 @@
 interface:
-  display_name: "GPTQModel Quantization Regression Diagnosis"
-  short_description: "Localize severe quantization quality regressions"
-  default_prompt: "Use $gptqmodel-quantization-regressions to localize this quantization quality regression."
+  display_name: "GPTQModel Quantization Error Analysis"
+  short_description: "Find quantization error before, during, and after"
+  default_prompt: "Use $gptqmodel-quantization-regressions to localize pre-, during-, and post-quantization error and identify the smallest decisive control."

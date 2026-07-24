@@ -13,8 +13,9 @@ This file governs the whole repository. Keep changes narrowly scoped, preserve C
 ## Route work to the local skills
 
 - Quantization algorithms, formats, packing, protocols, calibration, GPTQ, AWQ, QQQ, FP8, GGUF, EXL3, ParoQuant, RTN, or bitsandbytes: use `$gptqmodel-quantization`.
-- Severe quantization quality regressions, layer/module/channel outliers, pre-pack loss spikes, scale amplification,
-  pack/dequant/kernel isolation, or higher-bit/RTN controls: also use `$gptqmodel-quantization-regressions`.
+- Pre/during/post quantization error analysis, risky module/weight/channel/embedding/LM-head discovery, severe quality
+  regressions, pre-pack loss or scale spikes, pack/dequant/kernel isolation, or higher-bit/RTN/mixed-precision controls:
+  also use `$gptqmodel-quantization-regressions`.
 - Quantized linear implementations, backend selection, capability declarations, fallback, or availability checks: use `$gptqmodel-backends`.
 - CUDA, C++, CUTLASS, Triton, JIT extensions, correctness debugging, or kernel benchmarks: use `$gptqmodel-cuda-kernels`.
 - Torch-profiler traces, Nsight analysis, bottleneck attribution, launch gaps, overlap, or fusion opportunities: use `$gptqmodel-gpu-profiling`.

@@ -30,9 +30,12 @@ from ..quantization.config import (
 )
 from ..quantization.diagnostics import (
     QuantizationDiagnosticsMode,
+    analyze_group_index,
     analyze_quantization_losses,
+    analyze_reconstruction_error,
     analyze_scale_channels,
     compare_quant_code_samples,
+    render_quantization_diagnostics_markdown,
     resolve_quantization_diagnostics_mode,
     sample_packed_quant_codes,
     sample_reconstructed_quant_codes,
@@ -190,6 +193,7 @@ class GPTQProcessor(LoopProcessor):
             qcfg.quantization_diagnostics
         )
         self._scale_channel_diagnostics = []
+        self._reconstruction_diagnostics = []
         self._code_fingerprint_diagnostics = []
         log.info(
             "Quantization diagnostics: mode=%s; auto=module-loss summary, "
@@ -706,13 +710,31 @@ class GPTQProcessor(LoopProcessor):
         workspace_summary = getattr(g, "_borrow_workspace_last_summary", None)
         workspace_totals = getattr(g, "_borrow_workspace_totals", None)
         scale_channel_summary = None
+        reconstruction_summary = None
         if self.quantization_diagnostics_mode == QuantizationDiagnosticsMode.CHANNEL:
+            runtime_bits = int(getattr(g.qcfg, "runtime_bits", g.qcfg.bits))
+            runtime_group_size = int(g.qcfg.group_size)
+            runtime_sym = bool(g.qcfg.sym)
+            runtime_desc_act = bool(g.qcfg.desc_act)
+            record_identity = {
+                PROCESS_LOG_LAYER: module.layer_index,
+                PROCESS_LOG_MODULE: module.name,
+                "full_name": module.full_name,
+                "bits": runtime_bits,
+                "group_size": runtime_group_size,
+                "sym": runtime_sym,
+                "desc_act": runtime_desc_act,
+            }
+            reconstruction_summary = analyze_reconstruction_error(module.weight.data, wq)
+            reconstruction_summary.update(record_identity)
+            with self.lock:
+                self._reconstruction_diagnostics.append(reconstruction_summary)
+
             scale_channel_summary = analyze_scale_channels(q_scales)
-            scale_channel_summary.update(
-                {
-                    PROCESS_LOG_LAYER: module.layer_index,
-                    PROCESS_LOG_MODULE: module.name,
-                }
+            scale_channel_summary.update(record_identity)
+            scale_channel_summary["group_index"] = analyze_group_index(
+                q_g_idx,
+                group_count=scale_channel_summary["group_count"],
             )
             with self.lock:
                 self._scale_channel_diagnostics.append(scale_channel_summary)
@@ -721,10 +743,10 @@ class GPTQProcessor(LoopProcessor):
                 q_scales,
                 q_zeros,
                 q_g_idx,
-                bits=int(getattr(g.qcfg, "runtime_bits", g.qcfg.bits)),
+                bits=runtime_bits,
             )
             if code_fingerprint is not None:
-                code_fingerprint["bits"] = int(getattr(g.qcfg, "runtime_bits", g.qcfg.bits))
+                code_fingerprint.update(record_identity)
                 with self.lock:
                     module.state["_quant_code_fingerprint"] = code_fingerprint
 
@@ -774,6 +796,7 @@ class GPTQProcessor(LoopProcessor):
             PROCESS_LOG_NAME:  self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
+            "full_name": module.full_name,
             MODULE_FEATURE_COLUMN: self.module_feature_summary(module),
             DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(module),
             QUANT_LOG_LOSS: loss_display,
@@ -782,6 +805,10 @@ class GPTQProcessor(LoopProcessor):
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
             PROCESS_USED_MEMORY: self.device_memory_report(),
+            "bits": int(getattr(g.qcfg, "runtime_bits", g.qcfg.bits)),
+            "group_size": int(g.qcfg.group_size),
+            "sym": bool(g.qcfg.sym),
+            "desc_act": bool(g.qcfg.desc_act),
         }
 
         if workspace_summary:
@@ -806,9 +833,15 @@ class GPTQProcessor(LoopProcessor):
             stat["scale_max"] = f"{scale_channel_summary['max_scale']:.6g}"
             stat["scale_p99"] = f"{scale_channel_summary['p99_channel_max_scale']:.6g}"
             stat["scale_max_channel"] = str(scale_channel_summary["max_scale_output_channel"])
+            stat["scale_max_group"] = str(scale_channel_summary["max_scale_group"])
             ratio = scale_channel_summary["max_to_median_ratio"]
             stat["scale_max/median"] = f"{ratio:.3f}" if ratio is not None else "n/a"
             stat["scale_nonfinite"] = str(scale_channel_summary["nonfinite_scale_count"])
+        if reconstruction_summary is not None and reconstruction_summary.get("available"):
+            stat["weight_rel_rmse"] = f"{reconstruction_summary['relative_rmse']:.8f}"
+            stat["weight_cosine"] = f"{reconstruction_summary['cosine_similarity']:.8f}"
+            sqnr_db = reconstruction_summary["sqnr_db"]
+            stat["weight_sqnr_db"] = f"{sqnr_db:.4f}" if sqnr_db is not None else "n/a"
 
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
@@ -972,6 +1005,12 @@ class GPTQProcessor(LoopProcessor):
             record = {
                 PROCESS_LOG_LAYER: module.layer_index,
                 PROCESS_LOG_MODULE: module.name,
+                "full_name": module.full_name,
+                "bits": code_fingerprint["bits"],
+                "group_size": code_fingerprint["group_size"],
+                "sym": code_fingerprint["sym"],
+                "desc_act": code_fingerprint["desc_act"],
+                "packer": packer_label,
                 "post_gptq": {
                     key: code_fingerprint[key]
                     for key in (
@@ -1000,8 +1039,39 @@ class GPTQProcessor(LoopProcessor):
         diagnostics = None
         if self.quantization_diagnostics_mode != QuantizationDiagnosticsMode.OFF:
             loss_summary = analyze_quantization_losses(self.log)
+            module_groups = model.simple_layer_modules(
+                model_config=model.model.config,
+                quantize_config=self.qcfg,
+                is_awq_quantize=False,
+                include_capture_only=False,
+            )
             diagnostics = {
+                "schema": "gptqmodel-quantization-diagnostics-v2",
+                "stage": "during_quantization",
+                "evidence_status": "observed",
                 "mode": self.quantization_diagnostics_mode.value,
+                "module_grouping": {
+                    "basis": "gptqmodel_model_definition_module_group",
+                    "source": f"{type(model).__module__}.{type(model).__name__}.module_tree",
+                    "groups": module_groups,
+                },
+                "index_semantics": {
+                    "layer_indices": "preserved from the model lifecycle; no +1 conversion",
+                    "tensor_indices": "zero-based",
+                    "weight_axis_0": "output_row",
+                    "weight_axis_1": "input_feature",
+                    "prepack_scale_layout": "[output_channel, group]",
+                },
+                "quantization_config": {
+                    "method": getattr(self.qcfg.method, "value", str(self.qcfg.method)),
+                    "format": getattr(self.qcfg.format, "value", str(self.qcfg.format)),
+                    "bits": int(self.qcfg.runtime_bits),
+                    "group_size": int(self.qcfg.group_size),
+                    "sym": bool(self.qcfg.sym),
+                    "desc_act": bool(self.qcfg.desc_act),
+                    "pack_impl": str(self.qcfg.pack_impl),
+                    "dynamic_rule_count": len(self.qcfg.dynamic or {}),
+                },
                 "loss": loss_summary,
             }
             top = loss_summary["top"]
@@ -1032,14 +1102,26 @@ class GPTQProcessor(LoopProcessor):
                     )
 
             if self.quantization_diagnostics_mode == QuantizationDiagnosticsMode.CHANNEL:
-                channel_top = sorted(
-                    self._scale_channel_diagnostics,
-                    key=lambda item: item["max_scale"],
+                reconstruction_records = sorted(
+                    self._reconstruction_diagnostics,
+                    key=lambda item: float(item.get("relative_rmse") or -1.0),
                     reverse=True,
-                )[:5]
+                )
+                diagnostics["reconstruction"] = {
+                    "module_count": len(reconstruction_records),
+                    "records": reconstruction_records,
+                    "top": reconstruction_records[:5],
+                }
+                channel_records = sorted(
+                    self._scale_channel_diagnostics,
+                    key=lambda item: float(item.get("max_scale") or -1.0),
+                    reverse=True,
+                )
+                channel_top = channel_records[:5]
                 diagnostics["scale_channels"] = {
-                    "module_count": len(self._scale_channel_diagnostics),
+                    "module_count": len(channel_records),
                     "top": channel_top,
+                    "records": channel_records,
                 }
                 for item in channel_top:
                     ratio = item["max_to_median_ratio"]
@@ -1085,6 +1167,7 @@ class GPTQProcessor(LoopProcessor):
                     )
 
             model.quantization_diagnostics = diagnostics
+            model.quantization_diagnostics_markdown = render_quantization_diagnostics_markdown(diagnostics)
 
         # set quantized state
         model.quantized = True
