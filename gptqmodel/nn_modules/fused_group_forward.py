@@ -295,43 +295,52 @@ def install_fused_group_forward(
     if not enabled:
         return 0
 
+    def _try_install_group(members: List[nn.Module]) -> bool:
+        if len(members) < 2:
+            return False
+        first_in_dim = _get_linear_dims(members[0])[0]
+        if first_in_dim == 0:
+            return False
+        if not all(_get_linear_dims(m)[0] == first_in_dim for m in members[1:]):
+            return False
+        if not _all_same_device_dtype(members):
+            return False
+        parent = _find_common_parent(layer_module, members)
+        fused = FusedGroupForward(parent, members, splice=splice)
+        for m in members:
+            m._fused_group_forward = fused
+        return True
+
     installed = 0
     for block in layer_modules_blocks:
-        if len(block) < 2:
-            continue
-
         members: List[nn.Module] = []
-        skip = False
         for raw_name in block:
             name = _clean_module_name(raw_name)
             try:
                 m = layer_module.get_submodule(name)
             except AttributeError:
-                skip = True
-                break
+                if _try_install_group(members):
+                    installed += 1
+                members = []
+                continue
             if not _is_supported_fused_module(m):
-                skip = True
-                break
+                if _try_install_group(members):
+                    installed += 1
+                members = []
+                continue
             in_dim, out_dim = _get_linear_dims(m)
             if in_dim == 0 or out_dim == 0:
-                skip = True
-                break
+                if _try_install_group(members):
+                    installed += 1
+                members = []
+                continue
+            if members and _get_linear_dims(members[0])[0] != in_dim:
+                if _try_install_group(members):
+                    installed += 1
+                members = []
             members.append(m)
-
-        if skip or len(members) < 2:
-            continue
-
-        in_dims = {_get_linear_dims(m)[0] for m in members}
-        if len(in_dims) != 1:
-            continue
-        if not _all_same_device_dtype(members):
-            continue
-
-        parent = _find_common_parent(layer_module, members)
-        fused = FusedGroupForward(parent, members, splice=splice)
-        for m in members:
-            m._fused_group_forward = fused
-        installed += 1
+        if _try_install_group(members):
+            installed += 1
 
     return installed
 
