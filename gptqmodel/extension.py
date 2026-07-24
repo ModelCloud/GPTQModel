@@ -44,6 +44,17 @@ def _resolve_extension_factory(module_name: str, attr_name: str) -> TorchOpsJitE
 
 _EXTENSION_SPECS = (
     _ExtensionSpec(
+        name="adjacent_exact",
+        aliases=("adjacent_exact_cuda",),
+        resolve=lambda: _resolve_extension_attr(
+            "gptqmodel.utils.adjacent_exact", "_ADJACENT_EXACT_TORCH_OPS_EXTENSION"
+        ),
+        supported=lambda: _resolve_attr(
+            "gptqmodel.utils.adjacent_exact", "adjacent_exact_cuda_supported"
+        )(),
+        unsupported_error=lambda: "AdjacentExact CUDA solvers require CUDA.",
+    ),
+    _ExtensionSpec(
         name="pack_block_cpu",
         aliases=("pack_block", "pack"),
         resolve=lambda: _resolve_extension_factory("gptqmodel.utils.cpp", "_pack_block_extension"),

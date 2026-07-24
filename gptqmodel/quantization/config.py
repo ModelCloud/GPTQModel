@@ -2355,6 +2355,11 @@ def _filter_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str
 
 def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, payload)
+    target_field_names = {field.name for field in fields(target_cls) if field.init}
+    if normalized.get("adjacent_model") is not None and "adjacent_model" not in target_field_names:
+        raise ValueError(
+            "QuantizeConfig: `adjacent_model` currently supports the Hessian-driven GPTQ lifecycle only."
+        )
     if target_cls is RTNConfig:
         normalized = _normalize_rtn_kwargs(normalized)
     elif target_cls is GGUFConfig:
@@ -2394,6 +2399,9 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
         return kwargs
 
     normalized = dict(kwargs)
+    for legacy_name in ("_adjacent_model_config", "adjacent_config"):
+        if legacy_name in normalized:
+            raise ValueError(f"QuantizeConfig: `{legacy_name}` was renamed to `adjacent_model`.")
     if FORMAT_FIELD_COMPAT_MARLIN in normalized:
         raise ValueError(
             "QuantizeConfig: `is_marlin_format` has been removed. Use `format=\"marlin\"` only for legacy checkpoint inspection, "
@@ -3191,6 +3199,15 @@ class GPTQConfig(PreProcessorConfig):
         metadata={"help": "Skip heavy computations for fast model loading validation"},
     )
     hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
+    # Experimental quantization-time AdjacentExact policy. It is intentionally
+    # omitted from checkpoint metadata because inference only consumes the
+    # already-selected packed weights.
+    adjacent_model: Optional[Any] = field(
+        default=None,
+        repr=False,
+        compare=False,
+        metadata={"help": "Optional AdjacentModelConfig used during GPTQ quantization only."},
+    )
     enable_shared_hessian_cache: bool = field(
         default=True,
         metadata={
@@ -3222,6 +3239,10 @@ class GPTQConfig(PreProcessorConfig):
         act_group_aware_user_value = self.act_group_aware
         super().__post_init__()
 
+        if self.adjacent_model is not None and self.method != METHOD.GPTQ:
+            raise ValueError(
+                "QuantizeConfig: `adjacent_model` currently supports `method=\"gptq\"` only."
+            )
         if self.damp_percent is None:
             self.damp_percent = _default_damp_percent(self.method)
         if self.damp_auto_increment is None:

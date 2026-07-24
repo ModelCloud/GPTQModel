@@ -1533,6 +1533,30 @@ class GPTQ:
             self.H[dead, dead] = 1
             W[:, dead] = 0
 
+        for legacy_name in ("_adjacent_model_config", "adjacent_config"):
+            if getattr(self.qcfg, legacy_name, None) is not None:
+                raise ValueError(f"{legacy_name} was renamed to adjacent_model.")
+        adjacent_model = getattr(self.qcfg, "adjacent_model", None)
+        adjacent_reference_weight = None
+        adjacent_reference_hessian = None
+        if adjacent_model is not None:
+            from .adjacent_model import AdjacentModelConfig
+
+            if not isinstance(adjacent_model, AdjacentModelConfig):
+                raise TypeError("adjacent_model must be an AdjacentModelConfig.")
+            if not use_hessian:
+                raise ValueError("Whole-model AdjacentExact requires Hessian-driven GPTQ.")
+            if self.qcfg.desc_act:
+                raise ValueError("Whole-model AdjacentExact does not support desc_act=True.")
+            if not 1 <= int(self.qcfg.group_size) <= 128:
+                raise ValueError("Whole-model AdjacentExact requires group_size in [1, 128].")
+            if W.device.type != "cuda" or self.H.device.type != "cuda":
+                raise ValueError("Whole-model AdjacentExact requires CUDA-resident weights and Hessians.")
+            # Keep the original column order and undamped objective. GPTQ may
+            # permute and then release its working Hessian before postprocessing.
+            adjacent_reference_weight = W.clone()
+            adjacent_reference_hessian = self.H.clone()
+
         # g_idx = []
         scale = []
         zero = []
@@ -1914,6 +1938,25 @@ class GPTQ:
                 zero = temp_zero
                 del inv_global_perm, inv_global_perm_list
             del final_perm, inv_final, global_perm, local_perms
+
+        if adjacent_model is not None:
+            if adjacent_reference_weight is None or adjacent_reference_hessian is None:
+                raise AssertionError("Adjacent whole-model references were not captured.")
+            from .adjacent_model import apply_adjacent_model_hybrid
+
+            Q, adjacent_stats = apply_adjacent_model_hybrid(
+                module_name=self.name,
+                weight=adjacent_reference_weight,
+                hessian=adjacent_reference_hessian,
+                classic_quantized=Q,
+                scale_parts=scale,
+                zero_parts=zero,
+                bits=self.qcfg.bits,
+                group_size=self.qcfg.group_size,
+                config=adjacent_model,
+            )
+            adjacent_model.record(adjacent_stats)
+            del adjacent_reference_weight, adjacent_reference_hessian
 
         if self._tp_pad_cols:
             valid_cols = self._original_columns

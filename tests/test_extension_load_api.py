@@ -11,10 +11,12 @@ import pytest
 import gptqmodel
 import gptqmodel.exllamav3.ext as exllamav3_ext
 import gptqmodel.extension as extension_api
+import gptqmodel.utils.adjacent_exact as adjacent_exact_utils
 import gptqmodel.utils.awq as awq_utils
 import gptqmodel.utils.cpp as cpp_utils
 import gptqmodel.utils.exllamav2 as exllamav2_utils
 import gptqmodel.utils.cannoe as cannoe_utils
+import gptqmodel.utils.grasshopper as grasshopper_utils
 import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
 import gptqmodel.utils.marlin_lora as marlin_lora_utils
@@ -64,6 +66,7 @@ class _FakeExtension:
 
 def _install_fake_extensions(monkeypatch):
     fakes = {
+        "adjacent_exact": _FakeExtension("AdjacentExact CUDA"),
         "pack_block_cpu": _FakeExtension("pack_block_cpu"),
         "floatx_cpu": _FakeExtension("floatx_cpu"),
         "awq": _FakeExtension("AWQ"),
@@ -76,11 +79,20 @@ def _install_fake_extensions(monkeypatch):
         "marlin_bf16": _FakeExtension("Marlin bf16"),
         "marlin_lora": _FakeExtension("Marlin fused LoRA"),
         "trilin": _FakeExtension("Trilin native 3-bit WMMA"),
+        "grasshopper": _FakeExtension("GrassHopper GPTQ grouped GEMV/GEMM"),
         "paroquant": _FakeExtension("ParoQuant rotation"),
         "cannoe": _FakeExtension("Cannoe V3"),
         "cannoe_ascendc": _FakeExtension("Cannoe Ascend C"),
     }
 
+    monkeypatch.setattr(
+        adjacent_exact_utils,
+        "_ADJACENT_EXACT_TORCH_OPS_EXTENSION",
+        fakes["adjacent_exact"],
+    )
+    monkeypatch.setattr(
+        adjacent_exact_utils, "adjacent_exact_cuda_supported", lambda: True
+    )
     monkeypatch.setattr(cpp_utils, "_pack_block_extension", lambda: fakes["pack_block_cpu"])
     monkeypatch.setattr(cpp_utils, "_floatx_cpu_extension", lambda: fakes["floatx_cpu"])
     monkeypatch.setattr(awq_utils, "_AWQ_TORCH_OPS_EXTENSION", fakes["awq"])
@@ -95,6 +107,12 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(marlin_lora_utils, "_MARLIN_LORA_TORCH_OPS_EXTENSION", fakes["marlin_lora"])
     monkeypatch.setattr(marlin_lora_utils, "marlin_lora_supported", lambda: True)
     monkeypatch.setattr(trilin_utils, "_TRILIN_TORCH_OPS_EXTENSION", fakes["trilin"])
+    monkeypatch.setattr(
+        grasshopper_utils,
+        "_GRASSHOPPER_TORCH_OPS_EXTENSION",
+        fakes["grasshopper"],
+    )
+    monkeypatch.setattr(grasshopper_utils, "grasshopper_supported", lambda: True)
     monkeypatch.setattr(paroquant_utils, "_PAROQUANT_ROTATION_EXTENSION", fakes["paroquant"])
     monkeypatch.setattr(cannoe_utils, "_CANNOE_V3_TORCH_OPS_EXTENSION", fakes["cannoe"])
     monkeypatch.setattr(cannoe_utils, "_CANNOE_ASCENDC_TORCH_OPS_EXTENSION", fakes["cannoe_ascendc"])
@@ -108,12 +126,22 @@ def test_package_root_exports_extension_module():
     assert gptqmodel.extension is extension_api
 
 
+def test_load_adjacent_exact_cuda_alias_builds_solver_extension(monkeypatch):
+    fakes = _install_fake_extensions(monkeypatch)
+
+    result = extension_api.load(name="adjacent_exact_cuda")
+
+    assert result == {"adjacent_exact": True}
+    assert fakes["adjacent_exact"].load_calls == 1
+
+
 def test_load_defaults_to_all_extensions(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
 
     result = extension_api.load()
 
     assert result == {
+        "adjacent_exact": True,
         "pack_block_cpu": True,
         "floatx_cpu": True,
         "awq": True,
@@ -126,6 +154,7 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "marlin_bf16": True,
         "marlin_lora": True,
         "trilin": True,
+        "grasshopper": True,
         "paroquant": True,
         "cannoe": True,
         "cannoe_ascendc": True,
