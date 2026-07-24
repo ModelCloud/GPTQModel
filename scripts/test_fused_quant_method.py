@@ -54,11 +54,12 @@ def preflight_gpu(target_index: int, samples: int = 3, interval: float = 0.5, ma
     raise RuntimeError(f"GPU {target_index} did not reach idle state within {max_wait}s")
 
 
-def build_config(method: str, backend: str):
+def build_config(method: str, backend: str, moe_bypass: bool = False):
     from gptqmodel import FusedForwardConfig, QuantizeConfig
-    from gptqmodel.quantization.config import FORMAT, METHOD
+    from gptqmodel.quantization.config import FORMAT, METHOD, ExpertsRoutingBypass, MoEConfig
 
     fused = FusedForwardConfig(splice="view")
+    moe = MoEConfig(routing=ExpertsRoutingBypass()) if moe_bypass else None
 
     if method == "gptq":
         cfg = QuantizeConfig(
@@ -69,6 +70,7 @@ def build_config(method: str, backend: str):
             scale_search="activation",
             damp_percent=0.05,
             fused_forward=fused,
+            moe=moe,
         )
     elif method == "awq":
         cfg = QuantizeConfig(
@@ -126,6 +128,9 @@ def main():
     parser.add_argument("--backend", required=True)
     parser.add_argument("--gpu-index", type=int, default=6)
     parser.add_argument("--no-preflight", action="store_true")
+    parser.add_argument("--model", default="/monster/data/model/Llama-3.2-1B-Instruct")
+    parser.add_argument("--moe-bypass", action="store_true")
+    parser.add_argument("--true-sequential", action="store_true")
     args = parser.parse_args()
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -149,10 +154,12 @@ def main():
     from gptqmodel import BACKEND, GPTQModel
 
     backend = getattr(BACKEND, args.backend)
-    cfg = build_config(args.method, args.backend)
+    cfg = build_config(args.method, args.backend, moe_bypass=args.moe_bypass)
+    if args.true_sequential:
+        cfg.true_sequential = True
 
     model = GPTQModel.load(
-        "/monster/data/model/Llama-3.2-1B-Instruct",
+        args.model,
         quantize_config=cfg,
         trust_remote_code=False,
         dtype="auto",
