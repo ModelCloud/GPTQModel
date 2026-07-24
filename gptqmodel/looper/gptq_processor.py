@@ -12,13 +12,23 @@ import torch
 import torch.nn as nn
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..quantization import GPTAQ, GPTQ, FOEM
+from ..models.writer import (
+    PROCESS_LOG_FWD_TIME,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_TIME,
+    PROCESS_USED_MEMORY,
+    QUANT_LOG_DAMP,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_NSAMPLES,
+)
+from ..nn_modules.fused_group_forward import FusedGroupForward
+from ..quantization import FOEM, GPTAQ, GPTQ
 from ..quantization.config import (
     METHOD,
     FOEMConfig,
@@ -41,15 +51,27 @@ from ..quantization.diagnostics import (
     sample_reconstructed_quant_codes,
     summarize_quant_code_fingerprints,
 )
-from ..utils.fallback import normalize_fallback
-from ..utils.logger import setup_logger, log_time_block
 from ..utils.device import get_device
+from ..utils.fallback import normalize_fallback
+from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, pack_module
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import HAS_NPU
 
+
 log = setup_logger()
 lock = threading.Lock()
+
+
+def _set_module_weight(module: NamedModule, weight: torch.Tensor) -> None:
+    """Assign a reconstructed weight, updating the shared fused buffer if active."""
+
+    target = module.module if isinstance(module, NamedModule) and hasattr(module, "module") else module
+    fg = getattr(target, "_fused_group_forward", None)
+    if isinstance(fg, FusedGroupForward):
+        if fg.update_member_weight(target, weight):
+            return
+    module.weight.data = weight
 
 
 def snapshot_eora_reconstructed_weight(weight: torch.Tensor) -> torch.Tensor:
@@ -877,7 +899,7 @@ class GPTQProcessor(LoopProcessor):
                 })
 
         # single largest deallocation of vram happens here
-        module.weight.data = wq
+        _set_module_weight(module, wq)
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
@@ -891,7 +913,7 @@ class GPTQProcessor(LoopProcessor):
         with (self.lock):
             # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
             if self.calculate_w_wq_diff:
-                module.weight.data = module.state.pop("wq").to(CPU)
+                _set_module_weight(module, module.state.pop("wq").to(CPU))
 
             module.state.pop("w", None) #
             module.state.pop("w_wq_diff", None)

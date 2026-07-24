@@ -113,7 +113,7 @@ def test_fused_linear_cache_reuses_moved_input():
     assert len(fg._cache) == 1
 
 
-def test_fused_linear_weight_change_invalidation():
+def test_fused_linear_weight_update():
     q = _make_hooked_linear(16, 16, torch.device("cpu"), torch.float32)
     k = _make_hooked_linear(16, 8, torch.device("cpu"), torch.float32)
     v = _make_hooked_linear(16, 8, torch.device("cpu"), torch.float32)
@@ -122,14 +122,13 @@ def test_fused_linear_weight_change_invalidation():
     x = torch.randn(2, 3, 16)
 
     out_q1 = q(x)
-    with torch.no_grad():
-        q.weight.data = torch.randn_like(q.weight)
+    new_weight = torch.randn_like(q.weight)
+    assert fg.update_member_weight(q, new_weight)
     out_q2 = q(x)
 
     expected = nn.functional.linear(x, q.weight, q.bias)
     torch.testing.assert_close(out_q2, expected)
     assert not torch.allclose(out_q1, out_q2)
-    assert len(fg._fused_weight_cache) == 1
 
 
 def test_fused_conv1d_matches_separate():
@@ -203,12 +202,10 @@ def test_clear_fused_group_forward_caches():
     x = torch.randn(2, 3, 16)
     q(x)
     assert len(fg._cache) == 1
-    assert len(fg._fused_weight_cache) == 1
-
+    assert fg.fused_weight_storage is not None
     assert clear_fused_group_forward_caches(q)
     assert not hasattr(q, "_fused_group_forward")
     assert len(fg._cache) == 0
-    assert len(fg._fused_weight_cache) == 0
 
 
 def test_fused_linear_splice_view_matches_contiguous():
