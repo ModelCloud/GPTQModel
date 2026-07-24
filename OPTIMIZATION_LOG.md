@@ -143,8 +143,9 @@ The batched profile shows far fewer small-launch overheads and a more regular CU
 
 ## Test results
 
-- `pytest -q tests/test_gptq.py tests/test_adjacent_exact_cuda.py` on GPUs 5,6: **41 passed, 2 skipped**
-- `pytest -q tests/test_adjacent_exact_cuda.py` on GPU 5: **39 passed** (including new FP32 accuracy cases)
+- `pytest -q tests/test_gptq.py tests/test_adjacent_exact_cuda.py` on GPUs 5,6: **60 passed, 2 skipped**
+- `python scripts/validate_find_params_batched_strict.py` (default Python path, no `GPTQMODEL_SCALE_SEARCH_TRITON`): **STRICT CHECK PASSED** across the full seed/rows/cols/gs/sym/bits/method sweep.
+- `python scripts/validate_find_params_batched_strict.py` with `GPTQMODEL_SCALE_SEARCH_TRITON=1`: failed on a small subset of seeds due to near-tie FP32 tie-breaking differences (documented above), so the Triton path remains opt-in.
 - New strict accuracy tests added to `tests/test_adjacent_exact_cuda.py`:
   - CPU FP64 exhaustive reference comparison for size 20, bits 4/8, sym False/True.
   - Cross-warp-granularity comparison for sizes 28/30/32, bits 4/8, sym False/True (`warps=0` vs `warps=2^20`).
@@ -153,9 +154,28 @@ The batched profile shows far fewer small-launch overheads and a more regular CU
 - `python scripts/validate_find_params_batched_strict.py`: exhaustive sweep across rows `[128, 512, 4096]`, columns `[128, 256, 512]`, group sizes `32/64/128`, `sym={True,False}`, bits `{2,4,8}`, methods `activation/hessian/hybrid`, seeds `42/123/999` — **STRICT CHECK PASSED** (all zero diff, scale diff `0.000`) after per-group Hessian normalization fix.
 - `ruff check` on modified Python files: **clean** (also fixed two pre-existing bare `except` clauses in `gptq.py`).
 
+### Triton fused activation scale-search kernel (experimental)
+
+A single-kernel Triton fast path for `ScaleSearchConfig.ACTIVATION` was added in `gptqmodel/quantization/_scale_search_triton.py`. The kernel assigns one program to each `(row_block, group)` tile, loops over all shrink candidates in device code, computes the weighted MSE, and returns the best `scale`/`zero`. This removes the per-candidate Python loop and the large temporary `candidate`/`error` tensors that dominate the PyTorch path, and it keeps the working set per SM small (`BLOCK_ROW=8`, `BLOCK_COL=128`).
+
+Performance with `PYTHON_GIL=0 GPTQMODEL_SCALE_SEARCH_TRITON=1` on A100 for `find_params_batched` (4096 x 4096):
+
+| group_size | method     | PyTorch (ms) | Triton (ms) | speedup |
+|------------|------------|--------------|-------------|---------|
+| 32         | activation | 69.4         | 12.6        | **5.5x** |
+| 64         | activation | 63.3         | 5.6         | **11.3x** |
+| 128        | activation | 59.9         | 3.1         | **19.3x** |
+| 32         | hessian    | 86.0         | 86.1        | 1.00x   |
+| 64         | hessian    | 76.4         | 76.5        | 1.00x   |
+| 128        | hessian    | 72.3         | 72.8        | 0.99x   |
+
+Hessian/hybrid are unchanged because the Triton path is specific to `activation`; the Python `torch.einsum` path is already the fastest available for those objectives.
+
+The kernel is **disabled by default** (`GPTQMODEL_SCALE_SEARCH_TRITON=1` required). Strict validation discovered that the fused FP32 arithmetic can resolve near-tie candidate losses differently from the PyTorch reference for some random seeds, producing scale differences above the `1e-4` threshold even though the chosen candidate is itself a valid minimizer. The gate therefore routes to the proven PyTorch path unless the env var is set, keeping the default quantization output unchanged.
+
 ## Known limitations / future work
 
 - **Group size 1** was skipped at user request; it is not a supported quantization option.
 - The `find_params_batched` path currently targets `act_group_aware=True` grouped search. The legacy ungrouped / full-tensor path is untouched and still uses the per-call `find_params`.
 - AdjacentExact CUDA exact solver is still exponential in the active-decision count. The shared-memory optimization lowers memory overhead but does not change asymptotic complexity; for components larger than ~32 decisions the existing branch-and-bound solver remains the practical fallback.
-- A custom Triton megakernel for `find_params_batched` was not implemented because the current vectorized PyTorch path already fuses the grid search into a small set of `elementwise`/`sgemm`/`reduce` kernels and was fast enough for the requested group sizes. A fused Triton kernel could be explored if the grid search becomes the dominant bottleneck.
+- The Triton activation scale-search kernel is fast but requires the next round to align its FP32 division/sum tie-breaking with the PyTorch reference before it can be enabled by default.

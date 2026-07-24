@@ -5,11 +5,14 @@
 
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
+import os
+
 import torch
 import torch.nn as nn
 
 from ..utils.logger import setup_logger
 from .config import BaseQuantizeConfig, ScaleSearchConfig, _normalize_quant_bits, resolve_quant_format
+from ._scale_search_triton import _triton_find_params_batched_activation
 
 
 log = setup_logger()
@@ -508,6 +511,33 @@ class Quantizer(nn.Module):
                     hessian,
                     method=method,
                 )
+
+            if (
+                os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON") == "1"
+                and _triton_find_params_batched_activation is not None
+                and method == ScaleSearchConfig.ACTIVATION
+                and prepared_hessian is not None
+                and not self.requires_groupwise_processing()
+                and group_size <= 128
+                and maxq_value >= 7
+                and x.is_cuda
+                and x.is_contiguous()
+                and x.dtype in (torch.float16, torch.float32, torch.bfloat16)
+            ):
+                try:
+                    return _triton_find_params_batched_activation(
+                        x,
+                        xmin,
+                        xmax,
+                        prepared_hessian,
+                        self.grid,
+                        self.maxshrink,
+                        float(self.maxq.item()),
+                        bool(self.qcfg.sym),
+                    )
+                except Exception as e:
+                    log.warn(f"Triton activation scale-search failed, falling back: {e}")
+
             best = torch.full((rows, num_groups), float("inf"), device=dev)
             candidate_count = int(self.maxshrink * self.grid)
             chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)

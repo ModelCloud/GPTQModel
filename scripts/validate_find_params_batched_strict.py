@@ -77,7 +77,6 @@ def check(rows: int, columns: int, group_size: int, method: ScaleSearchConfig, s
 
 def main():
     failed = False
-    device = "cuda:0"
     for seed in (42, 123, 999):
         for rows in (128, 512, 4096):
             for columns in (128, 256, 512):
