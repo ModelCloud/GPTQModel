@@ -21,9 +21,9 @@ constexpr int kWarpsPerBlock = 8;
 constexpr int kThreadsPerBlock = kWarpSize * kWarpsPerBlock;
 constexpr int64_t kMaxWorkerWarps = int64_t{1} << 20;
 // Recompute from the bit pattern frequently so incremental FP64 drift cannot
-// accumulate across a long Gray-code range. 256 is large enough to amortize
+// accumulate across a long Gray-code range. 2048 is large enough to amortize
 // the O(size^2) rebase cost while small enough to keep FP64 rounding stable.
-constexpr uint64_t kRebaseInterval = 256;
+constexpr uint64_t kRebaseInterval = 2048;
 
 __device__ __forceinline__ uint32_t gray_code(uint64_t index) {
   return static_cast<uint32_t>(index ^ (index >> 1));
