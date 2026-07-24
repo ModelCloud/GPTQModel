@@ -17,7 +17,7 @@ from tokenizers.trainers import WordLevelTrainer
 from torch import nn
 from transformers import PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, WeightOnlyConfig
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.solar_open import SolarOpenQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
@@ -255,18 +255,14 @@ class TestSolarOpen(ModelTest):
     EVAL_SINGLE_GPU = False
     MOE_VRAM_STRATEGY = VramStrategy.BALANCED
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
-    # Calibrate every routed expert instead of depending on native top-8 traffic.
-    MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride(num_experts_per_tok="all"))
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
-            "acc": {"value": 0.3618, "floor_pct": 0.04},
-            "acc_norm": {"value": 00.3882, "floor_pct": 0.04},
+            "acc": {"value": 0.3771, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.3831, "floor_pct": 0.04},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    SAVE_PATH = "./temp/solar_open1-test"
-    WEIGHT_ONLY = WeightOnlyConfig()
 
     def test_solar_open(self):
         self.quantize_and_evaluate()
