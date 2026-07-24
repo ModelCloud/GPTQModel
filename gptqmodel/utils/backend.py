@@ -25,6 +25,7 @@ class BACKEND(str, Enum):
     GPTQ_CANNOE = "gptq_cannoe"  # Ascend CANN kernel experiment
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
+    GPTQ_HUMMING = "gptq_humming"  # InclusionAI Humming JIT kernel for GPTQ
 
     # QQQ kernels
     QQQ = "qqq"  # marlin-based qqq kernel
@@ -45,6 +46,7 @@ class BACKEND(str, Enum):
     AWQ_KOMODO = "awq_komodo"  # Ascend NPU fused-style cached int4 kernel
     AWQ_CANNOE = "awq_cannoe"  # Ascend CANN kernel experiment
     AWQ_EXLLAMA_V2 = "awq_exllama_v2"
+    AWQ_HUMMING = "awq_humming"  # InclusionAI Humming JIT kernel for AWQ
 
     # ParoQuant kernels
     PAROQUANT_CUDA = "paroquant_cuda"
@@ -88,6 +90,7 @@ class BACKEND(str, Enum):
     TORCH_FUSED_AWQ = "torch_fused_awq"
     TORCH_AWQ = "torch_awq"
     BITBLAS_AWQ = "bitblas_awq"
+    HUMMING = "humming"
     PARO = "paroquant"
 
 
@@ -110,6 +113,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.KOMODO: BACKEND.GPTQ_KOMODO,
         BACKEND.CANNOE: BACKEND.GPTQ_CANNOE,
         BACKEND.BITBLAS: BACKEND.GPTQ_BITBLAS,
+        BACKEND.HUMMING: BACKEND.GPTQ_HUMMING,
     },
     "awq": {
         BACKEND.GEMM: BACKEND.AWQ_GEMM,
@@ -129,6 +133,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.KOMODO: BACKEND.AWQ_KOMODO,
         BACKEND.CANNOE: BACKEND.AWQ_CANNOE,
         BACKEND.EXLLAMA_V2: BACKEND.AWQ_EXLLAMA_V2,
+        BACKEND.HUMMING: BACKEND.AWQ_HUMMING,
     },
     "paroquant": {
         BACKEND.PARO: BACKEND.PAROQUANT_CUDA,

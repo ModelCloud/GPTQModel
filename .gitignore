@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Cloned external source mirrors used during vendoring
+repos/
+
 # C extensions
 *.so
 
