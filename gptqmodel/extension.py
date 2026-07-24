@@ -112,6 +112,13 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.trilin", "_TRILIN_TORCH_OPS_EXTENSION"),
     ),
     _ExtensionSpec(
+        name="amplin",
+        aliases=("gptq_amplin",),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.amplin", "_AMPLIN_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.amplin", "amplin_supported")(),
+        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.amplin", "amplin_runtime_error")(),
+    ),
+    _ExtensionSpec(
         name="marlin_lora",
         aliases=("lora_marlin",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin_lora", "_MARLIN_LORA_TORCH_OPS_EXTENSION"),

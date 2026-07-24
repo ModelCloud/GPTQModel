@@ -11,6 +11,7 @@ import pytest
 import gptqmodel
 import gptqmodel.exllamav3.ext as exllamav3_ext
 import gptqmodel.extension as extension_api
+import gptqmodel.utils.amplin as amplin_utils
 import gptqmodel.utils.adjacent_exact as adjacent_exact_utils
 import gptqmodel.utils.awq as awq_utils
 import gptqmodel.utils.cpp as cpp_utils
@@ -79,6 +80,7 @@ def _install_fake_extensions(monkeypatch):
         "marlin_bf16": _FakeExtension("Marlin bf16"),
         "marlin_lora": _FakeExtension("Marlin fused LoRA"),
         "trilin": _FakeExtension("Trilin native 3-bit WMMA"),
+        "amplin": _FakeExtension("Amplin Ampere GPTQ W4A16 GEMV"),
         "grasshopper": _FakeExtension("GrassHopper GPTQ grouped GEMV/GEMM"),
         "paroquant": _FakeExtension("ParoQuant rotation"),
         "cannoe": _FakeExtension("Cannoe V3"),
@@ -107,6 +109,8 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(marlin_lora_utils, "_MARLIN_LORA_TORCH_OPS_EXTENSION", fakes["marlin_lora"])
     monkeypatch.setattr(marlin_lora_utils, "marlin_lora_supported", lambda: True)
     monkeypatch.setattr(trilin_utils, "_TRILIN_TORCH_OPS_EXTENSION", fakes["trilin"])
+    monkeypatch.setattr(amplin_utils, "_AMPLIN_TORCH_OPS_EXTENSION", fakes["amplin"])
+    monkeypatch.setattr(amplin_utils, "amplin_supported", lambda: True)
     monkeypatch.setattr(
         grasshopper_utils,
         "_GRASSHOPPER_TORCH_OPS_EXTENSION",
@@ -154,6 +158,7 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "marlin_bf16": True,
         "marlin_lora": True,
         "trilin": True,
+        "amplin": True,
         "grasshopper": True,
         "paroquant": True,
         "cannoe": True,
@@ -211,6 +216,15 @@ def test_load_trilin_alias_builds_native_3bit_extension(monkeypatch):
 
     assert result == {"trilin": True}
     assert fakes["trilin"].load_calls == 1
+
+
+def test_load_amplin_alias_builds_ampere_w4_extension(monkeypatch):
+    fakes = _install_fake_extensions(monkeypatch)
+
+    result = extension_api.load(name="gptq-amplin")
+
+    assert result == {"amplin": True}
+    assert fakes["amplin"].load_calls == 1
 
 
 def test_load_specific_extension_honors_use_cache_false(monkeypatch):
