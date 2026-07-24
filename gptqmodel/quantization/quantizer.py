@@ -200,7 +200,8 @@ class Quantizer(nn.Module):
                 )
             importance = hessian.detach().to(dtype=torch.float32, device=hessian.device)
             importance = torch.nan_to_num(importance, nan=0.0, posinf=0.0, neginf=0.0).clamp_min_(0)
-            diagonal_mean = importance.mean()
+            # Normalize per-group to match the per-group find_params behavior.
+            diagonal_mean = importance.mean(dim=-1, keepdim=True)
             valid = torch.isfinite(diagonal_mean) & (diagonal_mean > 0)
             safe_mean = torch.where(valid, diagonal_mean, torch.ones_like(diagonal_mean))
             normalized = importance / safe_mean
@@ -215,10 +216,11 @@ class Quantizer(nn.Module):
         prepared = torch.nan_to_num(prepared, nan=0.0, posinf=0.0, neginf=0.0)
         prepared = (prepared + prepared.transpose(-2, -1)) * 0.5
         diagonal = prepared.diagonal(dim1=-2, dim2=-1).clamp_min(0)
-        diagonal_mean = diagonal.mean()
-        if not torch.isfinite(diagonal_mean) or diagonal_mean <= 0:
-            return None
-        prepared = prepared / diagonal_mean
+        # Normalize each group by its own diagonal mean to match per-group find_params.
+        diagonal_mean = diagonal.mean(dim=-1, keepdim=True).unsqueeze(-1)
+        valid = torch.isfinite(diagonal_mean) & (diagonal_mean > 0)
+        safe_mean = torch.where(valid, diagonal_mean, torch.ones_like(diagonal_mean))
+        prepared = prepared / safe_mean
         if method == ScaleSearchConfig.HYBRID:
             prepared.mul_(0.5)
             prepared.diagonal(dim1=-2, dim2=-1).mul_(2.0)

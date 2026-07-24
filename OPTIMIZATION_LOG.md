@@ -11,6 +11,7 @@
 1. **Batched grouped `find_params` for ScaleSearch** (`gptqmodel/quantization/quantizer.py`, `gptqmodel/quantization/gptq.py`)
    - Added `Quantizer.find_params_batched(...)` which processes all groups of a weight matrix in one tensor operation instead of one `find_params` Python call per group.
    - Rewrote the scale/zero grid search using vectorized `torch.einsum`/batched matmul over `[groups, grid, in_features]`.
+   - Hessian importance/diagonal normalization is performed per-group so batched and per-group objectives are identical.
    - Wired the batched path into `GPTQ.quantize` for `act_group_aware=True` and grouped scale-search (group sizes 32/64/128).
    - Preserved the existing per-group `find_params` fallback for the ungrouped / full-tensor search path.
 
@@ -21,7 +22,7 @@
 
 3. **Test coverage**
    - `tests/test_gptq.py` updated with `act_group_aware` + `find_params_batched` correctness checks.
-   - `scripts/test_find_params_batched.py` validates that batched outputs match per-group `find_params` for group sizes 32/64/128 and methods `activation/hessian/hybrid`.
+   - `scripts/validate_find_params_batched.py` validates that batched outputs match per-group `find_params` for group sizes 32/64/128 and methods `activation/hessian/hybrid`.
    - `tests/test_adjacent_exact_cuda.py` passes after the shared-memory change (rebuilt with `GPTQMODEL_ADJACENT_EXACT_FORCE_REBUILD=1`).
 
 ## Benchmarks
@@ -86,9 +87,9 @@ The batched profile shows far fewer small-launch overheads and a more regular CU
 
 ## Test results
 
-- `pytest -q tests/test_gptq.py` on GPUs 5,6: **21 passed, 2 skipped**
-- `pytest -q tests/test_adjacent_exact_cuda.py` on GPU 5: **20 passed**
-- `python scripts/test_find_params_batched.py`: all group_size 32/64/128 and activation/hessian/hybrid scale/zero outputs match per-group `find_params` within `atol=1e-5, rtol=1e-5`.
+- `pytest -q tests/test_gptq.py tests/test_adjacent_exact_cuda.py` on GPUs 5,6: **41 passed, 2 skipped**
+- `python scripts/validate_find_params_batched.py`: all group_size 32/64/128 and activation/hessian/hybrid scale/zero outputs match per-group `find_params` within `atol=1e-5, rtol=1e-5`.
+- `python scripts/validate_find_params_batched_strict.py`: exhaustive sweep across rows `[128, 512, 4096]`, columns `[128, 256, 512]`, group sizes `32/64/128`, `sym={True,False}`, bits `{2,4,8}`, methods `activation/hessian/hybrid`, seeds `42/123/999` — **STRICT CHECK PASSED** (all zero diff, scale diff `0.000`) after per-group Hessian normalization fix.
 - `ruff check` on modified Python files: **clean** (also fixed two pre-existing bare `except` clauses in `gptq.py`).
 
 ## Known limitations / future work
