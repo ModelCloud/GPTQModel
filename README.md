@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 07/23/2026 7.3.1 `main`: ✨ Added `solar_open2` model support
 * 07/23/2026 7.3.1 `main`: ✨ Added `inkling_mm_model` model support
 * 07/22/2026 7.3.1 `main`: ✨ Added Poolside `Laguna S 2.1` model support
 * 07/14/2026 7.3.0-dev `main`: ✨ Added `nemotron_h_puzzle` model support
@@ -276,7 +277,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | XVERSE                        | ✅ | Brumby                          | ✅ | Hymba                      | ✅ | Mistral                         | ✅ | Qwen 1/2/3/3.5         | ✅ |
 | MiniMax M2/M3                 | ✅ | AfMoE                           | ✅ | Bailing-MoE                | ✅ | LFM2 / LFM2-VL / LFM2-MoE       | ✅ | Marin                  | ✅ |
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2             | ✅ | Zamba / Zamba2                  | ✅ | Intern S1              | ✅ |
-| HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ | Inkling           | ✅ |                                 |  |                |   |
+| HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ | Inkling           | ✅ | Solar Open 2                    | ✅ |                        |   |
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 

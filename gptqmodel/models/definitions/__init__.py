@@ -90,6 +90,7 @@ from .qwen3 import Qwen3QModel
 from .qwen3_moe import Qwen3MoeQModel
 from .qwen3_vl import Qwen3_VLQModel
 from .rw import RwgQModel
+from .solar_open2 import SolarOpen2QModel
 from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel
 from .xverse import XverseQModel
