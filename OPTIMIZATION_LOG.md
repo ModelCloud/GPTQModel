@@ -143,20 +143,18 @@ The batched profile shows far fewer small-launch overheads and a more regular CU
 
 ## Test results
 
-- `pytest -q tests/test_gptq.py tests/test_adjacent_exact_cuda.py` on GPUs 5,6: **60 passed, 2 skipped**
-- `python scripts/validate_find_params_batched_strict.py` (default Python path, no `GPTQMODEL_SCALE_SEARCH_TRITON`): **STRICT CHECK PASSED** across the full seed/rows/cols/gs/sym/bits/method sweep.
-- `python scripts/validate_find_params_batched_strict.py` with `GPTQMODEL_SCALE_SEARCH_TRITON=1`: failed on a small subset of seeds due to near-tie FP32 tie-breaking differences (documented above), so the Triton path remains opt-in.
-- New strict accuracy tests added to `tests/test_adjacent_exact_cuda.py`:
-  - CPU FP64 exhaustive reference comparison for size 20, bits 4/8, sym False/True.
-  - Cross-warp-granularity comparison for sizes 28/30/32, bits 4/8, sym False/True (`warps=0` vs `warps=2^20`).
-  - Dense planted-optimum recovery for sizes 28/30/32 (known all-ones optimum).
-- `python scripts/validate_find_params_batched_quick.py`: all group_size 32/64/128 and activation/hessian/hybrid scale/zero outputs match per-group `find_params` exactly.
-- `python scripts/validate_find_params_batched_strict.py`: exhaustive sweep across rows `[128, 512, 4096]`, columns `[128, 256, 512]`, group sizes `32/64/128`, `sym={True,False}`, bits `{2,4,8}`, methods `activation/hessian/hybrid`, seeds `42/123/999` — **STRICT CHECK PASSED** (all zero diff, scale diff `0.000`) after per-group Hessian normalization fix.
-- `ruff check` on modified Python files: **clean** (also fixed two pre-existing bare `except` clauses in `gptq.py`).
+- `pytest -q tests/test_gptq.py tests/test_adjacent_exact_cuda.py tests/test_quantizer_scale_search.py` on GPUs 5,6: **all passed, 2 skipped**
+- `python scripts/validate_find_params_batched_strict.py` with the Triton activation fast path enabled by default: **STRICT CHECK PASSED** (all zero scale/zero diff) across the full seed/rows/cols/gs/sym/bits/method sweep.
+- New strict accuracy tests added to `tests/test_quantizer_scale_search.py`:
+  - `test_find_params_batched_matches_per_group_reference` (36 cases): batched grouped scale search matches the per-group `Quantizer.find_params` reference to `1e-6`.
+  - `test_find_params_matches_fp64_grid_reference` (36 cases): `Quantizer.find_params` stays within a loss-based tolerance of a full FP64 grid-search reference, with deterministic seeds (no Python `hash`).
+- `ruff check` on modified Python files: **clean**.
 
-### Triton fused activation scale-search kernel (experimental)
+### Triton fused activation scale-search kernel (initial experimental version)
 
 A single-kernel Triton fast path for `ScaleSearchConfig.ACTIVATION` was added in `gptqmodel/quantization/_scale_search_triton.py`. The kernel assigns one program to each `(row_block, group)` tile, loops over all shrink candidates in device code, computes the weighted MSE, and returns the best `scale`/`zero`. This removes the per-candidate Python loop and the large temporary `candidate`/`error` tensors that dominate the PyTorch path, and it keeps the working set per SM small (`BLOCK_ROW=8`, `BLOCK_COL=128`).
+
+*Superseded by the top-k verified version below; retained here for the raw argmin-only performance numbers.*
 
 Performance with `PYTHON_GIL=0 GPTQMODEL_SCALE_SEARCH_TRITON=1` on A100 for `find_params_batched` (4096 x 4096):
 
@@ -171,7 +169,43 @@ Performance with `PYTHON_GIL=0 GPTQMODEL_SCALE_SEARCH_TRITON=1` on A100 for `fin
 
 Hessian/hybrid are unchanged because the Triton path is specific to `activation`; the Python `torch.einsum` path is already the fastest available for those objectives.
 
-The kernel is **disabled by default** (`GPTQMODEL_SCALE_SEARCH_TRITON=1` required). Strict validation discovered that the fused FP32 arithmetic can resolve near-tie candidate losses differently from the PyTorch reference for some random seeds, producing scale differences above the `1e-4` threshold even though the chosen candidate is itself a valid minimizer. The gate therefore routes to the proven PyTorch path unless the env var is set, keeping the default quantization output unchanged.
+This initial version is **disabled by default** (`GPTQMODEL_SCALE_SEARCH_TRITON=1` required) because strict validation discovered that the fused FP32 arithmetic can resolve near-tie candidate losses differently from the PyTorch reference for some random seeds, producing scale differences above the `1e-4` threshold. The top-k verified version below fixes that and is enabled by default.
+
+### Triton activation scale-search v2 — enabled by default
+
+The experimental Triton kernel was promoted to the default activation scale-search path by changing the gate in `gptqmodel/quantization/quantizer.py` from `GPTQMODEL_SCALE_SEARCH_TRITON=1` required to opt-out (`GPTQMODEL_SCALE_SEARCH_TRITON=0` disables it).
+
+Accuracy fix (`gptqmodel/quantization/_scale_search_triton.py`):
+- The kernel no longer picks the argmin in FP32 inside the Triton program.
+- It writes the full `(rows, num_groups, candidates)` FP32 loss tensor, then the Python wrapper:
+  1. Takes the top-20 candidates from the approximate Triton loss.
+  2. Sorts their indices ascending so ties resolve to the smallest candidate index, matching `torch.min`.
+  3. Recomputes the exact PyTorch loss for those candidates using the same `scale_all`/`zero_all` grids already built for the eager path.
+  4. Selects the first minimizer and gathers `scale`/`zero` from the precomputed tensors.
+- Because the final values come from the same precomputed grids and are selected with the exact PyTorch arithmetic, the Triton fast path now produces zero scale/zero diff against the eager reference across the entire `validate_find_params_batched_strict.py` sweep.
+
+`find_params_batched` timing on A100 (4096 x 4096) with `PYTHON_GIL=0`:
+
+| group_size | method     | PyTorch eager (ms) | Triton top-20 (ms) | speedup |
+|------------|------------|--------------------|--------------------|---------|
+| 32         | activation | 69.4               | 34.0               | **2.0x** |
+| 64         | activation | 63.3               | 22.9               | **2.8x** |
+| 128        | activation | 59.9               | 18.1               | **3.3x** |
+| 32         | hessian    | 86.0               | 86.4               | 1.00x   |
+| 64         | hessian    | 76.4               | 76.6               | 1.00x   |
+| 128        | hessian    | 72.3               | 72.9               | 0.99x   |
+
+The raw Triton argmin-only numbers were 12.6 / 5.6 / 3.1 ms, so the top-20 exact verification costs ~2.5× but is still faster than the eager path and guarantees bit-exact output.
+
+### Strict accuracy unit tests (`tests/test_quantizer_scale_search.py`)
+
+- Added `test_find_params_batched_matches_per_group_reference` (36 cases): batched grouped scale search matches the per-group `Quantizer.find_params` reference to `1e-6` for `group_size={32,64,128}`, `bits={4,8}`, `sym={True,False}`, methods `activation/hessian/hybrid`.
+- Added `test_find_params_matches_fp64_grid_reference` (36 cases): compares `Quantizer.find_params` against a full FP64 grid-search reference using a loss-based tolerance that allows the small single-candidate differences expected from FP32 arithmetic, plus a scale-step sanity check.
+- Fixed nondeterministic test seeds that used `hash(method)` (Python hash randomization) by replacing them with a stable method-to-integer mapping.
+
+### End-to-end `GPTQ.quantize` re-baseline
+
+After the activation scale-search fast path is enabled, `scripts/profile_gptq_scale_search.py` (4096 x 4096, A100 GPU 5) still reports ~1.27–1.38 s for all group sizes and methods. The `find_params_batched` phase is now ~25–35 ms, so the dominant cost is the per-column GPTQ weight update loop, not scale search. The next optimization round should target that loop.
 
 ## Known limitations / future work
 

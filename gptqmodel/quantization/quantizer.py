@@ -512,8 +512,27 @@ class Quantizer(nn.Module):
                     method=method,
                 )
 
+            candidate_count = int(self.maxshrink * self.grid)
+            if candidate_count > 0:
+                shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
+                shrink = 1.0 - shrink / self.grid
+                p = shrink.view(-1, 1, 1)
+                xmin_all = p * xmin.unsqueeze(0)
+                xmax_all = p * xmax.unsqueeze(0)
+                if self.requires_groupwise_processing():
+                    scale_all = xmax_all / self.maxq
+                else:
+                    scale_all = (xmax_all - xmin_all) / self.maxq
+                if self.qcfg.sym:
+                    zero_all = zero.unsqueeze(0).expand(candidate_count, -1, -1)
+                else:
+                    zero_all = torch.round(-xmin_all / scale_all)
+            else:
+                scale_all = scale.unsqueeze(0)
+                zero_all = zero.unsqueeze(0)
+
             if (
-                os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON") == "1"
+                os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON", "1") != "0"
                 and _triton_find_params_batched_activation is not None
                 and method == ScaleSearchConfig.ACTIVATION
                 and prepared_hessian is not None
@@ -530,31 +549,19 @@ class Quantizer(nn.Module):
                         xmin,
                         xmax,
                         prepared_hessian,
+                        scale_all,
+                        zero_all,
                         self.grid,
                         self.maxshrink,
                         float(self.maxq.item()),
                         bool(self.qcfg.sym),
+                        candidate_count,
                     )
                 except Exception as e:
                     log.warn(f"Triton activation scale-search failed, falling back: {e}")
 
             best = torch.full((rows, num_groups), float("inf"), device=dev)
-            candidate_count = int(self.maxshrink * self.grid)
             chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
-
-            shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
-            shrink = 1.0 - shrink / self.grid
-            p = shrink.view(-1, 1, 1)
-            xmin_all = p * xmin.unsqueeze(0)
-            xmax_all = p * xmax.unsqueeze(0)
-            if self.requires_groupwise_processing():
-                scale_all = xmax_all / self.maxq
-            else:
-                scale_all = (xmax_all - xmin_all) / self.maxq
-            if self.qcfg.sym:
-                zero_all = zero.unsqueeze(0).expand(candidate_count, -1, -1)
-            else:
-                zero_all = torch.round(-xmin_all / scale_all)
 
             x_batch = x.unsqueeze(0)
             for start in range(0, candidate_count, chunk_size):
