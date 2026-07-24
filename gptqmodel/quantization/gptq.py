@@ -36,6 +36,13 @@ from .gar import (
 from .npu_linalg import npu_inverse_cholesky_factor
 from .quantizer import HF_OPTIMUM, Quantizer
 
+try:
+    from ._gptq_block_triton import gptq_block_triton
+except Exception:
+    gptq_block_triton = None
+
+_USE_GPTQ_TRITON_BLOCK = os.environ.get("GPTQMODEL_TRITON_BLOCK", "1") != "0"
+
 
 log = setup_logger()
 
@@ -1867,44 +1874,88 @@ class GPTQ:
                             x_3d, weight=True, hessian=batched_hessian
                         )
 
-                for i in range(count):
-                    w = W1[:, i]
-                    if Hinv is not None:
-                        d = Hinv1[i, i]
+                # Fast fused Triton path: one kernel launch per block for the
+                # common grouped-GPTQ case. Falls back to the serial loop below
+                # for unsupported configurations.
+                triton_block_done = False
+                if (
+                    _USE_GPTQ_TRITON_BLOCK
+                    and gptq_block_triton is not None
+                    and Hinv is not None
+                    and count <= 128
+                    and group_size > 0
+                    and not self.qcfg.static_groups
+                    and count % group_size == 0
+                    and batched_group_count == count // group_size
+                ):
+                    try:
+                        maxq_value = (
+                            2 ** (self.qcfg.bits - 1) - 1
+                            if self.quantizer.requires_groupwise_processing()
+                            else 2 ** self.qcfg.bits - 1
+                        )
+                        gptq_block_triton(
+                            W1,
+                            Q1,
+                            Err1,
+                            Hinv1,
+                            batched_scale,
+                            batched_zero,
+                            maxq_value,
+                            group_size,
+                            groupwise=self.quantizer.requires_groupwise_processing(),
+                        )
+                        # Append per-group scale/zero for downstream packing/return.
+                        if batched_group_count > 0:
+                            scale.extend(batched_scale.chunk(batched_group_count, dim=1))
+                            zero.extend(batched_zero.chunk(batched_group_count, dim=1))
+                            now_idx = batched_first_global_idx + batched_group_count + 1
+                        triton_block_done = True
+                    except Exception as exc:
+                        log.warn(
+                            f"Quantization: Module `{self.name}` -> Triton block kernel failed, "
+                            f"falling back to serial loop: {exc}"
+                        )
 
-                    if self.qcfg.group_size != -1:
-                        if not self.qcfg.static_groups:
-                            if (i1 + i) % self.qcfg.group_size == 0:
-                                group_start = i1 + i
-                                group_end = min(group_start + self.qcfg.group_size, self.columns)
-                                local_group = (group_start - i1) // group_size
-                                if local_group < batched_group_count:
-                                    self.quantizer.scale = batched_scale[:, local_group : local_group + 1]
-                                    self.quantizer.zero = batched_zero[:, local_group : local_group + 1]
-                                else:
-                                    self.quantizer.find_params(
-                                        W[:, group_start:group_end],
-                                        weight=True,
-                                        hessian=group_scale_search_hessian(group_start, group_end),
-                                    )
+                if not triton_block_done:
+                    for i in range(count):
+                        w = W1[:, i]
+                        if Hinv is not None:
+                            d = Hinv1[i, i]
 
-                            if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
-                                scale.append(self.quantizer.scale)
-                                zero.append(self.quantizer.zero)
-                                now_idx += 1
-                        else:
-                            idx = i1 + i
-                            if self.qcfg.desc_act:
-                                idx = perm[idx]
+                        if self.qcfg.group_size != -1:
+                            if not self.qcfg.static_groups:
+                                if (i1 + i) % self.qcfg.group_size == 0:
+                                    group_start = i1 + i
+                                    group_end = min(group_start + self.qcfg.group_size, self.columns)
+                                    local_group = (group_start - i1) // group_size
+                                    if local_group < batched_group_count:
+                                        self.quantizer.scale = batched_scale[:, local_group : local_group + 1]
+                                        self.quantizer.zero = batched_zero[:, local_group : local_group + 1]
+                                    else:
+                                        self.quantizer.find_params(
+                                            W[:, group_start:group_end],
+                                            weight=True,
+                                            hessian=group_scale_search_hessian(group_start, group_end),
+                                        )
 
-                            self.quantizer = groups[idx // self.qcfg.group_size]
+                                if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
+                                    scale.append(self.quantizer.scale)
+                                    zero.append(self.quantizer.zero)
+                                    now_idx += 1
+                            else:
+                                idx = i1 + i
+                                if self.qcfg.desc_act:
+                                    idx = perm[idx]
 
-                    q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
-                    Q1[:, i] = q
-                    if Hinv is not None:
-                        err1 = (w - q) / d
-                        W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                        Err1[:, i] = err1
+                                self.quantizer = groups[idx // self.qcfg.group_size]
+
+                        q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                        Q1[:, i] = q
+                        if Hinv is not None:
+                            err1 = (w - q) / d
+                            W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                            Err1[:, i] = err1
 
                 Q[:, i1:i2] = Q1
                 if Hinv is not None:

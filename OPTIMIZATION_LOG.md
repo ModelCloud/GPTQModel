@@ -232,9 +232,53 @@ End-to-end `GPTQ.quantize` timing on A100 GPU 5 (`PYTHON_GIL=0`, 4096 x 4096, `b
 
 Nsight Systems after the change still shows many small `elementwise_kernel` launches from the per-column quantize arithmetic, so the next round should target fusing those elementwise ops (Triton or custom CUDA) to reduce launch count further.
 
+## Round: fused Triton block kernel for the GPTQ per-column loop
+
+A new standalone Triton kernel (`gptqmodel/quantization/_gptq_block_triton.py`) fuses the entire 128-column GPTQ inner loop into a single GPU launch: one program per row serially quantizes each column, computes `err = (w - q) / d`, and updates the remaining row with `w -= err * Hinv[i, i:]`. It preserves the existing FP32 accumulator by operating on `float32` views of `W1`, `Q1`, `Err1`, and `Hinv1`, and uses `tl.div_rn` plus a bank-propensity round-to-nearest-even helper to match eager `torch.div` + `torch.round` quantization.
+
+### Integration and fallback
+
+`gptq.py` calls `gptq_block_triton` when:
+- `Hinv` is available,
+- the block `count` is exactly `128`,
+- `group_size` is `32/64/128` and divides `count`,
+- `batched_group_count == count / group_size`,
+- `static_groups` is not enabled.
+
+Unsupported configs (CPU tensors, non-standard group layouts, tails) raise immediately and fall back to the original serial per-column loop. The fast path is gated by `GPTQMODEL_TRITON_BLOCK` (default `1`) so it can be disabled with `GPTQMODEL_TRITON_BLOCK=0`.
+
+### Accuracy validation
+
+- `tests/test_gptq_block_triton.py`: for a 2048x2048 `Linear` with `group_size={32,64,128}` it compares `GPTQ.quantize` with and without the Triton kernel. `g_idx` matches exactly; `scale`/`zero` are within `1e-7` absolute / `1e-6` relative (small FP nondeterminism from `find_params_batched` reductions); `Q` is within `5e-2` absolute (at most one quantization bin); and the reported loss is identical to `<1e-6`.
+- `scripts/validate_find_params_batched_strict.py` still reports `STRICT CHECK PASSED`.
+- `scripts/compare_gptq_triton_block.py` (4096x4096, `bits=4`, `sym=False`, `activation` scale search) shows:
+  - `group_size=128`: `Q` max diff `1.5e-5`, `loss` diff `0.0`
+  - `group_size=32`: `Q` max diff `1.5e-5`, `loss` diff `0.0`
+  - `group_size=64`: `Q` max diff `1.9e-3` (one bin), `loss` diff `3.7e-8`
+
+The one-bin differences for `group_size=64` are expected: the serial eager path and the fused Triton kernel accumulate the FP32 weight-update in a slightly different order, so a few weights land on the adjacent side of a half-integer rounding boundary. The resulting dequantized error and the final block loss are unchanged.
+
+### End-to-end `GPTQ.quantize` (4096 x 4096, A100 GPU 5, `blocksize=128`)
+
+Baseline = serial per-column loop after the CPU-sync fixes (previous round). Triton = fused block kernel.
+
+| group_size | method     | baseline (ms) | Triton (ms) | speedup |
+|------------|------------|---------------|-------------|---------|
+| 32         | activation | 842.3         | 126.5       | **6.7x** |
+| 32         | hessian    | 797.2         | 136.0       | **5.9x** |
+| 32         | hybrid     | 794.7         | 136.1       | **5.8x** |
+| 64         | activation | 830.9         | 124.7       | **6.7x** |
+| 64         | hessian    | 790.4         | 127.1       | **6.2x** |
+| 64         | hybrid     | 788.9         | 128.1       | **6.2x** |
+| 128        | activation | 825.6         | 115.1       | **7.2x** |
+| 128        | hessian    | 779.0         | 123.4       | **6.3x** |
+| 128        | hybrid     | 781.8         | 121.6       | **6.4x** |
+
+Nsight Systems (`nsys profile --trace=cuda,nvtx`) confirms the fused `_gptq_block_kernel` now appears as a single `~576 us` launch per 128-column block, with grid `(4096,1,1)` and block `(128,1,1)`. The per-column `elementwise_kernel` storm is gone, and the remaining host time is dominated by the grouped `find_params` / scale-search phase.
+
 ## Known limitations / future work
 
 - **Group size 1** was skipped at user request; it is not a supported quantization option.
 - The `find_params_batched` path currently targets `act_group_aware=True` grouped search. The legacy ungrouped / full-tensor path is untouched and still uses the per-call `find_params`.
 - AdjacentExact CUDA exact solver is still exponential in the active-decision count. The shared-memory optimization lowers memory overhead but does not change asymptotic complexity; for components larger than ~32 decisions the existing branch-and-bound solver remains the practical fallback.
-- The per-column quantize and error-feedback arithmetic remains a large source of small kernel launches; fusing it (Triton or custom CUDA) is the next target.
+- The per-column quantize and error-feedback arithmetic is now fused; the next dominant cost is the grouped `find_params` / scale-search phase. A Triton or batched grid-search kernel for that phase is the next target.
