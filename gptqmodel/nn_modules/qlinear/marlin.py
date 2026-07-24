@@ -91,9 +91,13 @@ class MarlinLinear(GPTQQuantLinear):
     SUPPORTS_SYM = [True]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
-    SUPPORTS_AUTO_PADDING = False
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
+    # GPTQ's int32 checkpoint layout stores K/N in 32-value blocks. Marlin
+    # consumes 64-column N tiles and complete K groups, so post_init() pads the
+    # runtime tensors to those larger shapes and forward() restores the logical
+    # output shape.
+    SUPPORTS_AUTO_PADDING = True
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
@@ -112,6 +116,61 @@ class MarlinLinear(GPTQQuantLinear):
         (4, True): scalar_types.uint4b8,
         (8, True): scalar_types.uint8b128,
     }
+
+    @staticmethod
+    def _ceil_multiple(value: int, divisor: int) -> int:
+        return ((value + divisor - 1) // divisor) * divisor
+
+    @classmethod
+    def _validate(
+        cls,
+        bits: int = 4,
+        group_size: int = 128,
+        desc_act: bool = False,
+        sym: bool = False,
+        pack_dtype: torch.dtype = None,
+        dtype: Optional[torch.dtype] = None,
+        dynamic: Optional[dict] = None,
+        in_features: int = None,
+        out_features: int = None,
+        device: Optional[DEVICE] = None,
+        trainable: Optional[bool] = None,
+        adapter: Optional[Adapter] = None,
+    ) -> Tuple[bool, Optional[Exception]]:
+        ok, err = super()._validate(
+            bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            in_features=in_features,
+            out_features=out_features,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
+        if not ok:
+            return ok, err
+
+        needs_k_padding = (
+            in_features is not None
+            and group_size not in (-1, in_features)
+            and in_features % group_size != 0
+        )
+        needs_n_padding = out_features is not None and out_features % 64 != 0
+        if needs_k_padding and desc_act:
+            return False, NotImplementedError(
+                f"{cls}: automatic K padding is not supported with desc_act=True; "
+                f"in_features={in_features}, group_size={group_size}."
+            )
+        if adapter is not None and (needs_k_padding or needs_n_padding):
+            return False, NotImplementedError(
+                f"{cls}: automatic K/N padding is not supported with adapters; "
+                f"in_features={in_features}, out_features={out_features}, group_size={group_size}."
+            )
+        return True, None
 
     def __init__(
             self, bits: int,
@@ -177,6 +236,13 @@ class MarlinLinear(GPTQQuantLinear):
             register_buffers=False, # do not register buffers in super()
             **kwargs)
 
+        self.padded_in_features = (
+            self.in_features
+            if self.requested_group_size == -1
+            else self._ceil_multiple(self.in_features, self.group_size)
+        )
+        self.padded_out_features = self._ceil_multiple(self.out_features, 64)
+
         if not self.fp32:
             log.warn.once(
                 "Kernel: GPTQMODEL_MARLIN_USE_FP32 is disabled. Marlin will use reduced-precision reduction.")
@@ -193,11 +259,11 @@ class MarlinLinear(GPTQQuantLinear):
                                              is_row_parallel=False):
             # By setting scale_dim == None, weight_loader will
             # repeat the scales on each GPU in TP>1 case.
-            scales_and_zp_size = self.in_features // self.group_size
+            scales_and_zp_size = self.padded_in_features // self.group_size
         else:
             # By setting scale_dim == 0, weight_loader will
             # shard the scales in TP>1 case.
-            scales_and_zp_size = self.in_features // self.group_size
+            scales_and_zp_size = self.padded_in_features // self.group_size
 
         # Quantized weights
         self.register_parameter(
@@ -310,6 +376,28 @@ class MarlinLinear(GPTQQuantLinear):
 
         self.is_k_full = marlin_is_k_full(self.desc_act, is_row_parallel=False)
 
+        pad_k = self.padded_in_features - self.in_features
+        pad_n = self.padded_out_features - self.out_features
+        if pad_k or pad_n:
+            qweight_pad_rows = pad_k // self.pack_factor
+            padded_qweight = torch.nn.functional.pad(
+                self.qweight.data,
+                (0, pad_n, 0, qweight_pad_rows),
+                value=0,
+            )
+            replace_parameter(self, "qweight", padded_qweight)
+            replace_parameter(
+                self,
+                "scales",
+                torch.nn.functional.pad(self.scales.data, (0, pad_n), value=1.0),
+            )
+            if self.bias is not None:
+                self.bias.data = torch.nn.functional.pad(
+                    self.bias.data,
+                    (0, pad_n),
+                    value=0.0,
+                )
+
         # Allocate marlin workspace.
         adapter_workspace_blocks = _LORA_MEGA_KERNEL_WORKSPACE_BLOCKS
         if self.adapter is not None:
@@ -326,16 +414,16 @@ class MarlinLinear(GPTQQuantLinear):
         def transform_w_q(x):
             x.data = gptq_marlin_repack(x.data.contiguous(),
                                         perm=self.g_idx_sort_indices,
-                                        size_k=self.in_features,
-                                        size_n=self.out_features,
+                                        size_k=self.padded_in_features,
+                                        size_n=self.padded_out_features,
                                         num_bits=self.bits,
                                         dtype=self.compute_dtype)
             return x
 
         def transform_w_s(x):
             x.data = marlin_permute_scales(x.data.contiguous(),
-                                           size_k=self.in_features,
-                                           size_n=self.out_features,
+                                           size_k=self.padded_in_features,
+                                           size_n=self.padded_out_features,
                                            group_size=self.group_size)
             return x
 
@@ -400,6 +488,17 @@ class MarlinLinear(GPTQQuantLinear):
         return buf
 
     def forward(self, x: torch.Tensor):
+        if x.shape[-1] != self.in_features:
+            raise ValueError(
+                f"{self.__class__.__name__} expected input width {self.in_features}, got {x.shape[-1]}."
+            )
+        if self.padded_in_features != self.in_features:
+            x = torch.nn.functional.pad(
+                x,
+                (0, self.padded_in_features - self.in_features),
+                value=0.0,
+            )
+
         cooperative_state = getattr(self, "lora_cooperative_state", None) if self.adapter else None
         if cooperative_state is not None:
             op, lora_a, lora_b, lora_workspace, max_rows, prepared_marlin = cooperative_state
@@ -575,8 +674,8 @@ class MarlinLinear(GPTQQuantLinear):
                 g_idx_sort_indices=self.g_idx_sort_indices,
                 workspace=self.workspace,
                 wtype=self.weight_type,
-                output_size_per_partition=self.out_features,
-                input_size_per_partition=self.in_features,
+                output_size_per_partition=self.padded_out_features,
+                input_size_per_partition=self.padded_in_features,
                 is_k_full=self.is_k_full,
                 bias=self.bias,
                 use_fp32_reduce=self.fp32,
@@ -584,6 +683,9 @@ class MarlinLinear(GPTQQuantLinear):
                 use_packed_prefill=use_packed_prefill,
                 packed_prefill_config=self.packed_prefill_config,
             )
+
+        if self.padded_out_features != self.out_features:
+            out = out[:, :self.out_features]
 
         if self.adapter and not adapter_applied:
             if self.lora_cuda_up_add:
