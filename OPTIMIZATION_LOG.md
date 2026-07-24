@@ -424,4 +424,71 @@ The activation path avoids the full `scale_all`/`zero_all` precompute, giving me
 - Hessian/Hybrid Triton scale search is disabled until an exact (or provably tight top-k) loss computation is implemented.
 - The lazy activation recompute still materializes `scale_k`/`zero_k` and `losses_k` for the top-20 candidates; fusing the exact recompute into the Triton kernel would remove the remaining Python->CUDA launch overhead.
 - Group size 1 remains skipped as requested.
+
+---
+
+## Round: reduce activation exact recompute to top-2 candidates
+
+### Objective
+
+Cut the remaining Python-side exact recompute cost in the activation Triton scale-search path by narrowing the shortlist from 20 candidates to 2, while preserving strict bit-for-bit agreement with the eager per-group reference.
+
+### Nsight baseline
+
+End-to-end `GPTQ.quantize` (`4096 x 4096`, `blocksize=128`, all scale-search methods, A100 GPU 5). Dominant GPU kernels by cumulative time:
+
+| rank | kernel family | calls | total GPU time | share | notes |
+|------|----------------|-------|----------------|-------|-------|
+| 1 | `at::native::elementwise_kernel` | ~37k | ~1730 ms | ~27% | `x/scale`, `(q-zero)*scale`, `-`, `*importance` in the top-20 recompute, plus other elementwise ops |
+| 2 | `_gptq_block_kernel` | 1728 | ~852 ms | ~13% | fused per-column GPTQ block step |
+| 3 | `at::native::elementwise_kernel` (other inst.) | ~11k | ~636 ms | ~10% | scale/zero expansion and top-k value manipulation |
+| 4 | `ampere_sgemm_128x128_nn` | 768 | ~453 ms | ~7% | cuBLAS GEMM (Hessian/Cholesky related) |
+| 5 | `at::native::reduce_kernel` | ~5760 | ~433 ms | ~7% | `.sum(dim=-1)` over `group_size` in the recompute and `topk` reductions |
+| 6 | `at::native::vectorized_elementwise_kernel` (clamp) | 5760 | ~278 ms | ~4% | `torch.clamp` in the recompute |
+| 7 | `at::native::vectorized_elementwise_kernel` (round) | 7488 | ~265 ms | ~4% | `torch.round` in the recompute |
+| 8 | `ampere_sgemm_32x128_tn` | 3672 | ~250 ms | ~4% | cuBLAS |
+| 9 | `ampere_sgemm_64x64_nn` | 384 | ~201 ms | ~3% | cuBLAS |
+| 10 | `kernel_trsm_l_mul32` / `trsm_left_kernel` / `potrf_*` | ~12k | ~320 ms | ~5% | Cholesky inverse factorization |
+
+The top-20 exact recompute accounts for the largest share of elementwise/reduce launches. Reducing `k` from 20 to 2 directly shrinks the expanded `x_exp`, `scale_k_exp`, `zero_k_exp` tensors and the `clamp`/`round`/`-`/`*`/`sum` kernels.
+
+### Changes
+
+1. **`gptqmodel/quantization/_scale_search_triton.py`**
+   - Changed the activation wrapper's exact-recompute shortlist from `k=min(candidate_count, 20)` to `k=min(candidate_count, 2)`.
+   - Updated the surrounding comment to document the top-2 rationale.
+   - Left the Hessian/Hybrid wrapper at `k=20`; it is currently disabled in `quantizer.py` and would need a larger shortlist if re-enabled.
+
+### Accuracy validation
+
+- `pytest -q tests/test_gptq.py tests/test_quantizer.py tests/test_quantizer_scale_search.py tests/test_adjacent_exact_cuda.py tests/test_gptq_block_triton.py`: **210 passed, 2 skipped** on A100 GPU 5.
+- `python scripts/validate_find_params_batched_strict.py`: **STRICT CHECK PASSED** on both GPU 5 and GPU 6.
+- New dense Hessian unit test `test_find_params_batched_dense_matches_per_group_reference`: **36/36 passed**.
+
+### Benchmarks
+
+`find_params_batched` microbenchmark (`4096 x 4096`, `bits=4`, `sym=False`, `grid=100`, A100 GPU 5). `before` = top-20 exact recompute; `after` = top-2 exact recompute.
+
+| group_size | method | before (ms) | after (ms) | speedup |
+|------------|--------|-------------|------------|---------|
+| 32         | activation | 25.00 | 11.97 | **2.09x** |
+| 64         | activation | 20.06 | 7.27  | **2.76x** |
+| 128        | activation | 18.26 | 6.04  | **3.02x** |
+| 32         | hessian    | 86.32 | 85.91 | 1.00x |
+| 64         | hessian    | 76.61 | 76.87 | 0.99x |
+| 128        | hessian    | 72.45 | 72.49 | 0.99x |
+| 32         | hybrid     | 86.17 | 86.14 | 1.00x |
+| 64         | hybrid     | 76.73 | 76.33 | 1.00x |
+| 128        | hybrid     | 72.46 | 72.65 | 0.99x |
+
+End-to-end `GPTQ.quantize` on the same shape is within noise for activation because `find_params_batched` is only one component; the dominant remaining time is the fused GPTQ block kernel and the Hessian Cholesky inversion. The microbenchmark speedup is representative of the `find_params_batched` hot path itself.
+
+### Rejected experiments
+
+- Recompute for only the single `argmin` candidate (`k=1`): failed strict validation on several seeds (`seed=42 rows=512 cols=512 gs=32 sym=True bits=8 activation` scale_diff 1.9e-4, others up to 0.0066). The Triton `tl.sum` reduction order can shift the approximate argmin away from the true torch.sum argmin, so a second candidate is required for safety.
+- `k=10` and `k=5` both passed strict validation and the focused test suite, but `k=2` also passed and gives the largest speedup, so it was chosen.
+
+### Next target
+
+The Hessian/Hybrid scale search still falls back to the exact vectorized chunk loop and is 6-12x slower than activation per `find_params_batched` call. Next round: investigate whether an exact or larger-top-k Triton loss kernel can safely accelerate Hessian/Hybrid, or whether the chunk size / `einsum` path in `_scale_search_error_batched` can be reordered to use `torch.bmm` over `group_size` blocks with less global memory traffic.
 - AdjacentExact CUDA exact solver remains exponential in active-decision count; no further work in this round.
