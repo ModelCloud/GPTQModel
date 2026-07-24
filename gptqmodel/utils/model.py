@@ -45,6 +45,7 @@ from ..models._const import (
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
+from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import (
     FORMAT_FIELD_CODE,
@@ -511,6 +512,9 @@ def create_quant_module(
         # print(f"offloading named module: {module.full_name}")
         submodule = submodule.module
 
+    if isinstance(submodule, nn.Embedding):
+        linear_cls = TorchQuantEmbeddings
+
     # submodule may be BaseQuantLinear, and the next QuantLinear is selected because of in_features/out_features
     # mismatch and other reasons.
     # In this case, need to call list_buffer() to get the device.
@@ -531,6 +535,9 @@ def create_quant_module(
     elif isinstance(submodule, nn.Linear):
         in_features = submodule.in_features
         out_features = submodule.out_features
+    elif isinstance(submodule, nn.Embedding):
+        in_features = submodule.num_embeddings
+        out_features = submodule.embedding_dim
     elif isinstance(submodule, _ConvNd):
         in_features = submodule.in_channels
         out_features = submodule.out_channels
@@ -544,7 +551,7 @@ def create_quant_module(
     else:
         raise NotImplementedError(f"Unsupported module {submodule}")
 
-    bias = submodule.bias is not None
+    bias = submodule.bias is not None if hasattr(submodule, "bias") else False
 
     # need copies as dynamic config may override these in for loop
     tmp_bits = _normalize_quant_bits(bits, format_value=format)
@@ -676,9 +683,11 @@ def create_quant_layer(
         if name not in quant_result:
             continue
 
+        qlinear_cls = TorchQuantEmbeddings if isinstance(submodule, nn.Embedding) else linear_cls
+
         create_quant_module(
             name=name,
-            linear_cls=linear_cls,
+            linear_cls=qlinear_cls,
             bits=bits,
             desc_act=desc_act,
             dynamic=dynamic,
@@ -827,7 +836,11 @@ def convert_gptq_v1_to_v2_format(
         # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
         # overflow ~<=13% based on testing
         if isinstance(submodule, qlinear_kernel):
-            convert_gptq_v1_to_v2_format_module(module=submodule, bits=cfg.bits, pack_dtype=cfg.pack_dtype)
+            convert_gptq_v1_to_v2_format_module(
+                module=submodule,
+                bits=getattr(submodule, "bits", cfg.bits),
+                pack_dtype=getattr(submodule, "pack_dtype", cfg.pack_dtype),
+            )
 
         #log.info(f"Format: Conversion complete: {time.time() - t}s")
 
@@ -857,13 +870,15 @@ def convert_gptq_v2_to_v1_format_module(
 
     log.info.once("Format: Converting GPTQ v2 to v1")
 
-    if quantize_config.bits == 2:
+    bits = getattr(module, "bits", quantize_config.bits)
+    pack_dtype = getattr(module, "pack_dtype", quantize_config.pack_dtype)
+    if bits == 2:
         module.qzeros.data -= 0b01010101010101010101010101010101
-    elif quantize_config.bits == 3:
-        if quantize_config.pack_dtype == torch.int32:
+    elif bits == 3:
+        if pack_dtype == torch.int32:
             # Keep INT3 export symmetric with the load-side logical correction.
             module.qzeros.data.copy_(
-                _revert_gptq_v1_qzeros_correction(module.qzeros.data, quantize_config.bits)
+                _revert_gptq_v1_qzeros_correction(module.qzeros.data, bits)
             )
         else:
             module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] -= (
@@ -875,9 +890,9 @@ def convert_gptq_v2_to_v1_format_module(
             module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] -= (
                 0b01001001001001001001001001001001
             )
-    elif quantize_config.bits == 4:
+    elif bits == 4:
         module.qzeros.data -= 0b00010001000100010001000100010001
-    elif quantize_config.bits == 8:
+    elif bits == 8:
         module.qzeros.data -= 0b00000001000000010000000100000001
     else:
         raise NotImplementedError("Only 2,3,4,8 bits are supported.")
@@ -1965,6 +1980,60 @@ def find_config_seq_len(config_dict, target_keys):
             if found is not None:
                 return found
     return None
+
+
+def get_module_name(module: nn.Module, child_module: nn.Module) -> str:
+    for name, candidate in module.named_modules():
+        if candidate is child_module:
+            return name
+    raise ValueError(f"Cannot find child_module {child_module} in module {module}")
+
+
+def check_module_quantized_in_keys(keys, module_name: str) -> bool:
+    return any(
+        key.startswith(module_name + ".")
+        and (".qweight" in key or ".qzeros" in key or ".scales" in key)
+        for key in keys
+    )
+
+
+def is_embeddings_module_quantized(
+    model_dir: str,
+    input_embed_name: Optional[str],
+    output_embed_name: Optional[str],
+) -> Tuple[bool, bool]:
+    input_quantized = False
+    output_quantized = False
+
+    def inspect_keys(keys) -> Tuple[bool, bool]:
+        return (
+            bool(input_embed_name and check_module_quantized_in_keys(keys, input_embed_name)),
+            bool(output_embed_name and check_module_quantized_in_keys(keys, output_embed_name)),
+        )
+
+    index_path = os.path.join(model_dir, "model.safetensors.index.json")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as handle:
+            index = json.load(handle)
+        return inspect_keys(index.get("weight_map", {}).keys())
+
+    safetensor_files = [
+        os.path.join(model_dir, filename)
+        for filename in os.listdir(model_dir)
+        if filename.endswith(".safetensors")
+    ]
+    for safefile in safetensor_files:
+        try:
+            with safe_open(safefile, framework="pt") as handle:
+                found_input, found_output = inspect_keys(handle.keys())
+                input_quantized = input_quantized or found_input
+                output_quantized = output_quantized or found_output
+                if input_quantized and output_quantized:
+                    break
+        except Exception as exc:
+            log.warn(f"Failed to inspect {safefile}: {exc}")
+
+    return input_quantized, output_quantized
 
 
 def has_any_attr(obj, names):
