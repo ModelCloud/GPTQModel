@@ -77,6 +77,17 @@ Active-decision timing (all `size` decisions non-zero, `warps=0`) on a single A1
 
 Nsight confirms that >99.9% of GPU time for the exact-solver microbenchmark is in `adjacent_exact_candidates_kernel`. `ncu --section SpeedOfLight` reports the kernel is **compute-bound** (SM throughput ~78%, memory throughput ~25%, DRAM 0%), with the ALU/integer pipeline dominating. The Gray-code shortcut removes one `__ffs` and several integer ops per iteration; the set-bit rebase removes empty toggles; raising `kRebaseInterval` from 64 to 1024 amortizes the `O(size^2)` rebase work. The biggest win is switching the incremental Gray-code `field`/`energy` accumulation to **FP32** (`acc_t = float`) while recomputing the final `candidate_costs` from the original FP64 QUBO using the selected best state. FP32 is ~16x faster than FP64 on A100 and, with the 1024-state rebase safeguard, keeps the strict exact-solver tests passing with zero state/cost diffs.
 
+### AdjacentExact CUDA branch-and-bound split depth
+
+The automatic split depth for native branch-and-bound was capped at 12, which limited the number of parallel DFS workers and left each worker with a large remaining subtree. For components with more than 32 active decisions we now use the maximum C++-allowed split depth (20), launching up to 2^20 worker warps. This tightens the per-worker lower bound earlier and shrinks the DFS per worker.
+
+A100 branch-and-bound timing (`warps=0` default, random dense problem, bits=4):
+
+| active decisions | before (split_depth=12, ms) | after (split_depth=20, ms) | speedup |
+|------------------|------------------------------|----------------------------|---------|
+| 40               | ~600                         | ~127                       | 4.7x    |
+| 48               | ~8128                        | ~1743                      | 4.7x    |
+
 ### Attempted but reverted
 
 - **Branch-and-bound shared memory**: Loading `interaction` and `linear` into `__shared__` for `adjacent_branch_bound_kernel` caused a ~10x slowdown for `size=40`. The DFS has heavy warp divergence and random-access patterns, so shared-memory bank conflicts outweighed the global-memory savings; the original global-memory path with L2 caching is faster. `ncu` showed the kernel is latency-bound, not DRAM-bound, so reducing global traffic did not help.
@@ -96,7 +107,11 @@ The batched profile shows far fewer small-launch overheads and a more regular CU
 ## Test results
 
 - `pytest -q tests/test_gptq.py tests/test_adjacent_exact_cuda.py` on GPUs 5,6: **41 passed, 2 skipped**
-- `pytest -q tests/test_adjacent_exact_cuda.py` with FP32 incremental accumulator on GPU 5: **20 passed**
+- `pytest -q tests/test_adjacent_exact_cuda.py` on GPU 5: **39 passed** (including new FP32 accuracy cases)
+- New strict accuracy tests added to `tests/test_adjacent_exact_cuda.py`:
+  - CPU FP64 exhaustive reference comparison for size 20, bits 4/8, sym False/True.
+  - Cross-warp-granularity comparison for sizes 28/30/32, bits 4/8, sym False/True (`warps=0` vs `warps=2^20`).
+  - Dense planted-optimum recovery for sizes 28/30/32 (known all-ones optimum).
 - `python scripts/validate_find_params_batched_quick.py`: all group_size 32/64/128 and activation/hessian/hybrid scale/zero outputs match per-group `find_params` exactly.
 - `python scripts/validate_find_params_batched_strict.py`: exhaustive sweep across rows `[128, 512, 4096]`, columns `[128, 256, 512]`, group sizes `32/64/128`, `sym={True,False}`, bits `{2,4,8}`, methods `activation/hessian/hybrid`, seeds `42/123/999` — **STRICT CHECK PASSED** (all zero diff, scale diff `0.000`) after per-group Hessian normalization fix.
 - `ruff check` on modified Python files: **clean** (also fixed two pre-existing bare `except` clauses in `gptq.py`).

@@ -316,9 +316,15 @@ def _exact_interaction_components(interaction: Tensor) -> list[Tensor]:
 
 
 def _automatic_branch_split_depth(device: torch.device, decisions: int) -> int:
-    properties = torch.cuda.get_device_properties(device)
-    target_workers = max(1, int(properties.multi_processor_count) * 32)
-    return min(decisions, 12, (target_workers - 1).bit_length())
+    # The exact kernel handles components with 32 or fewer active decisions, so
+    # branch-and-bound is only used for larger components.  Use the maximum
+    # C++-allowed split depth (20) for those to launch the most parallel DFS
+    # workers and tighten the per-worker lower bound as early as possible.
+    if decisions <= 32:
+        properties = torch.cuda.get_device_properties(device)
+        target_workers = max(1, int(properties.multi_processor_count) * 32)
+        return min(decisions, 12, (target_workers - 1).bit_length())
+    return min(decisions, 20)
 
 
 def _unpack_branch_bound_state(words: Tensor, size: int) -> Tensor:
