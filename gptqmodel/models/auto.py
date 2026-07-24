@@ -184,6 +184,7 @@ from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .definitions.qwen3_vl import Qwen3_VLQModel
 from .definitions.rw import RwgQModel  # noqa: E402
+from .definitions.solar_open import SolarOpenQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.voxtral import VoxtralGPTQ  # noqa: E402
@@ -339,6 +340,7 @@ MODEL_MAP = {
     "ernie4_5_moe_vl": Ernie4_5_VLMoeQModel, # Backward Compatibility alias
     "ernie4_5_vl_moe": Ernie4_5_VLMoeQModel,
     "seed_oss": LlamaQModel, # 100% llama clone
+    "solar_open": SolarOpenQModel,
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
     "llava_qwen2": LlavaQwen2QModel,
