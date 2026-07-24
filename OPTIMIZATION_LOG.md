@@ -282,3 +282,58 @@ Nsight Systems (`nsys profile --trace=cuda,nvtx`) confirms the fused `_gptq_bloc
 - The `find_params_batched` path currently targets `act_group_aware=True` grouped search. The legacy ungrouped / full-tensor path is untouched and still uses the per-call `find_params`.
 - AdjacentExact CUDA exact solver is still exponential in the active-decision count. The shared-memory optimization lowers memory overhead but does not change asymptotic complexity; for components larger than ~32 decisions the existing branch-and-bound solver remains the practical fallback.
 - The per-column quantize and error-feedback arithmetic is now fused; the next dominant cost is the grouped `find_params` / scale-search phase. A Triton or batched grid-search kernel for that phase is the next target.
+
+---
+
+## Round: Triton fused Hessian/Hybrid scale-search kernel
+
+### Objective
+
+Replace the Python chunk loop + `torch.einsum` Hessian/Hybrid `find_params_batched` path with a single Triton kernel per (row-block, group) that evaluates all shrink candidates, removing the large per-candidate `candidate`/`error` tensors and the slow generic `einsum` contraction for `num_groups=1` per-block calls.
+
+### Changes
+
+1. **`gptqmodel/quantization/_scale_search_triton.py`**
+   - Added `_scale_search_hessian_kernel` and `_triton_find_params_batched_hessian_hybrid`.
+   - The kernel reuses the existing round-half-to-even quantization helper and computes `error^T @ H @ error` with `tl.dot(error, h, allow_tf32=False, out_dtype=tl.float32)`, followed by `tl.maximum(loss, 0.0)` to match the eager `clamp_min_(0)`.
+   - `BLOCK_COL` is launched as `group_size` (32/64/128) so small groups are not padded to 128 columns, avoiding a ~4-16x waste in the matrix multiply.
+   - The Python wrapper selects the top-20 candidates from the approximate Triton loss and recomputes the exact PyTorch objective for those candidates, preserving the original first-minimizer tie-breaking.
+
+2. **`gptqmodel/quantization/quantizer.py`**
+   - Wired `_triton_find_params_batched_hessian_hybrid` into `find_params_batched` for `method in {HESSIAN, HYBRID}` when the group Hessian is 3D, the group size is 32/64/128, the tensor is contiguous CUDA float16/float32/bfloat16, and `GPTQMODEL_SCALE_SEARCH_TRITON != "0"`.
+   - Removed a per-call `.item()` sync in the activation Triton launch by passing `float(maxq_value)` instead of `float(self.maxq.item())`.
+   - Changed `_quantize_scale_search_candidates` to clamp with a Python `float(maxq_value)` instead of a CUDA 0-d tensor `self.maxq`, eliminating the implicit `cudaStreamSynchronize` caused by `clamp_` with a tensor argument.
+
+3. **`tests/test_quantizer_scale_search.py`**
+   - Added `test_find_params_batched_triton_matches_eager` to compare the Triton and eager `find_params_batched` outputs for `HESSIAN` and `HYBRID` across `group_size={32,64,128}`, `bits={4,8}`, and `sym={False,True}`.
+
+### Accuracy validation
+
+- `pytest -q tests/test_quantizer_scale_search.py tests/test_gptq_block_triton.py tests/test_adjacent_exact_cuda.py tests/test_gptq.py tests/test_quantizer.py`: **162 passed, 2 skipped**.
+- `test_find_params_batched_triton_matches_eager`: Triton and eager `scale`/`zero` match to `<1e-6` for all 24 param combinations.
+- End-to-end `GPTQ.quantize` comparison (`4096x4096`, `bits=4`, `sym=False`, `mse=2.0`, 8-sample Hessian) with `GPTQMODEL_SCALE_SEARCH_TRITON=0` vs `=1`:
+  - `group_size=128 hessian`: 1138.9 ms → 132.5 ms, `Q`/scale/zero/loss diff all `0.0`.
+  - `group_size=128 hybrid`: 119.9 ms → 119.6 ms, diffs `0.0`.
+  - `group_size=64 hessian`: 128.2 ms → 125.2 ms, diffs `0.0`.
+  - `group_size=32 hessian`: 139.6 ms → 134.9 ms, diffs `0.0`.
+
+### Benchmarks
+
+`find_params_batched` (4096 x 4096, all groups, A100 GPU 5):
+
+| group_size | method     | before (ms) | after (ms) | speedup |
+|------------|------------|-------------|------------|---------|
+| 32         | hessian    | 86.7        | 38.6       | **2.2x** |
+| 32         | hybrid     | 86.8        | 38.6       | **2.2x** |
+| 64         | hessian    | 77.4        | 36.9       | **2.1x** |
+| 64         | hybrid     | 77.3        | 36.7       | **2.1x** |
+| 128        | hessian    | 72.3        | 41.6       | **1.7x** |
+| 128        | hybrid     | 72.3        | 41.6       | **1.7x** |
+
+The largest end-to-end impact is for `group_size=128 hessian` on dense per-block Hessians, where the eager `einsum` path was ~8.6x slower than the Triton kernel.
+
+### Known limitations / future work
+
+- `find_params_batched` Triton Hessian/Hybrid is restricted to `group_size in (32, 64, 128)` so `tl.dot` operates on power-of-two tile sizes.
+- The `find_params_batched` activation path still uses `BLOCK_COL=128` for all group sizes; tightening that tile could further speed up `group_size=32/64 activation`.
+- AdjacentExact CUDA exact solver remains exponential in active-decision count; no further work in this round.

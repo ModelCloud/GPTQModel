@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Triton fused activation scale-search kernel for Quantizer.find_params_batched.
+"""Triton fused scale-search kernels for Quantizer.find_params_batched.
 
-This kernel is a fast path for the activation-method scale search. It loops over
-shrink candidates inside a single Triton kernel, computing the weighted MSE for
-each (row, group, candidate) and returns the full loss tensor. The Python wrapper
-then selects the top-k candidates from the Triton loss, recomputes their losses
+This module provides fast paths for the activation and Hessian/Hybrid scale-search
+objectives. Each kernel loops over shrink candidates in a single Triton launch,
+computes the per-(row, group, candidate) loss, and returns the full loss tensor.
+The Python wrapper then selects the top-k candidates, recomputes their losses
 with the exact PyTorch arithmetic used by the eager reference, and picks the
 first minimizer. This keeps the speed benefit of device-side candidate iteration
 while guaranteeing bit-exact agreement with the existing Python scale search.
@@ -225,5 +225,182 @@ if _triton_available():
         zero_out = zero_perm.gather(2, best_idx.unsqueeze(-1)).squeeze(-1)
         return scale_out, zero_out
 
+    @triton.jit
+    def _scale_search_hessian_kernel(
+        x_ptr,
+        xmin_ptr,
+        xmax_ptr,
+        hessian_ptr,
+        loss_out_ptr,
+        rows,
+        num_groups,
+        group_size,
+        maxq: tl.float32,
+        grid: tl.int32,
+        candidate_count: tl.int32,
+        sym: tl.int32,
+        x_stride_r: tl.int32,
+        x_stride_g: tl.int32,
+        min_stride_r: tl.int32,
+        h_stride_g: tl.int32,
+        h_stride_r: tl.int32,
+        h_stride_c: tl.int32,
+        loss_stride_r: tl.int32,
+        loss_stride_g: tl.int32,
+        loss_stride_c: tl.int32,
+        BLOCK_ROW: tl.constexpr,
+        BLOCK_COL: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        row_blocks = tl.cdiv(rows, BLOCK_ROW)
+        g = pid // row_blocks
+        rb = pid % row_blocks
+        row_start = rb * BLOCK_ROW
+
+        row_idx = row_start + tl.arange(0, BLOCK_ROW)
+        col_idx = tl.arange(0, BLOCK_COL)
+        row_mask = row_idx < rows
+        col_mask = col_idx < group_size
+        mask_2d = row_mask[:, None] & col_mask[None, :]
+
+        x = tl.load(
+            x_ptr + row_idx[:, None] * x_stride_r + g * x_stride_g + col_idx[None, :],
+            mask=mask_2d,
+            other=0.0,
+        )
+        x = tl.cast(x, tl.float32)
+
+        h_offs = col_idx[:, None] * h_stride_r + col_idx[None, :] * h_stride_c
+        h_mask = col_mask[:, None] & col_mask[None, :]
+        h = tl.load(hessian_ptr + g * h_stride_g + h_offs, mask=h_mask, other=0.0)
+
+        min_offsets = row_idx * min_stride_r + g
+        xmin = tl.load(xmin_ptr + min_offsets, mask=row_mask, other=-1.0)
+        xmax = tl.load(xmax_ptr + min_offsets, mask=row_mask, other=1.0)
+
+        grid_f = tl.cast(grid, tl.float32)
+        maxq_f = maxq
+        sym_b = sym != 0
+        const_zero_sym = (maxq_f + 1.0) / 2.0
+
+        loss_base = loss_out_ptr + g * loss_stride_g + row_idx * loss_stride_r
+        for c in tl.range(0, candidate_count):
+            p = 1.0 - tl.cast(c, tl.float32) / grid_f
+            xmin_p = p * xmin
+            xmax_p = p * xmax
+            scale_c = (xmax_p - xmin_p) / maxq_f
+
+            zero_c = tl.where(
+                sym_b,
+                const_zero_sym,
+                _round_half_to_even(-xmin_p / scale_c),
+            )
+
+            q_raw = _round_half_to_even(x / scale_c[:, None])
+            q_int = q_raw + zero_c[:, None]
+            q_int = tl.clamp(q_int, 0.0, maxq_f)
+            dequant = (q_int - zero_c[:, None]) * scale_c[:, None]
+            error = dequant - x
+
+            # projected[r, j] = sum_i error[r, i] * h[i, j]
+            projected = tl.dot(error, h, allow_tf32=False, out_dtype=tl.float32)
+            weighted = error * projected
+            weighted = tl.where(mask_2d, weighted, 0.0)
+            loss = tl.sum(weighted, axis=1)
+            loss = tl.maximum(loss, 0.0)
+
+            tl.store(loss_base + c * loss_stride_c, loss, mask=row_mask)
+
+    def _triton_find_params_batched_hessian_hybrid(
+        x: torch.Tensor,
+        xmin: torch.Tensor,
+        xmax: torch.Tensor,
+        prepared_hessian: torch.Tensor,
+        scale_all: torch.Tensor,
+        zero_all: torch.Tensor,
+        grid: int,
+        maxshrink: float,
+        maxq: float,
+        sym: bool,
+        candidate_count: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        rows, num_groups, group_size = x.shape
+        device = x.device
+
+        if candidate_count <= 0:
+            scale = (xmax - xmin) / maxq
+            zero = torch.round(-xmin / scale) if not sym else torch.full_like(scale, (maxq + 1.0) / 2.0)
+            return scale, zero
+
+        BLOCK_ROW = 8
+        row_blocks = (rows + BLOCK_ROW - 1) // BLOCK_ROW
+        total_programs = num_groups * row_blocks
+        if total_programs == 0:
+            return (
+                torch.empty((rows, num_groups), dtype=torch.float32, device=device),
+                torch.empty((rows, num_groups), dtype=torch.float32, device=device),
+            )
+
+        loss_out = torch.empty((rows, num_groups, candidate_count), dtype=torch.float32, device=device)
+
+        # Use a tight tile that matches the group size so the batched matrix
+        # multiply in the Hessian/Hybrid objective does not pad tiny groups to
+        # the full 128-column block size.
+        block_col = group_size
+        _scale_search_hessian_kernel[(total_programs,)](
+            x,
+            xmin,
+            xmax,
+            prepared_hessian,
+            loss_out,
+            rows,
+            num_groups,
+            group_size,
+            float(maxq),
+            int(grid),
+            int(candidate_count),
+            int(sym),
+            x.stride(0),
+            x.stride(1),
+            xmin.stride(0),
+            prepared_hessian.stride(0),
+            prepared_hessian.stride(1),
+            prepared_hessian.stride(2),
+            loss_out.stride(0),
+            loss_out.stride(1),
+            loss_out.stride(2),
+            BLOCK_ROW=BLOCK_ROW,
+            BLOCK_COL=block_col,
+        )
+
+        k = min(candidate_count, 20)
+        topk_values, topk_indices = loss_out.topk(k, dim=-1, largest=False, sorted=False)
+        topk_indices, sort_order = topk_indices.sort(dim=-1)
+        topk_values = topk_values.gather(2, sort_order)
+
+        scale_perm = scale_all.permute(1, 2, 0)  # [rows, num_groups, candidate_count]
+        zero_perm = zero_all.permute(1, 2, 0)
+        scale_k = scale_perm.gather(2, topk_indices)
+        zero_k = zero_perm.gather(2, topk_indices)
+
+        x_exp = x.unsqueeze(2).expand(-1, -1, k, -1)  # [rows, num_groups, k, group_size]
+        scale_k_exp = scale_k.unsqueeze(-1)
+        zero_k_exp = zero_k.unsqueeze(-1)
+        q = torch.clamp(torch.round(x_exp / scale_k_exp) + zero_k_exp, 0.0, maxq)
+        dequant = (q - zero_k_exp) * scale_k_exp
+        error = dequant - x_exp
+
+        # Recompute exact Hessian/Hybrid loss: error^T @ prepared_hessian @ error.
+        projected = torch.einsum("rgki,gij->rgkj", error, prepared_hessian)
+        losses_k = (error * projected).sum(dim=-1).clamp_min(0.0)
+
+        best_local = losses_k.argmin(dim=-1)
+        best_idx = topk_indices.gather(2, best_local.unsqueeze(-1)).squeeze(-1)
+
+        scale_out = scale_perm.gather(2, best_idx.unsqueeze(-1)).squeeze(-1)
+        zero_out = zero_perm.gather(2, best_idx.unsqueeze(-1)).squeeze(-1)
+        return scale_out, zero_out
+
 else:
     _triton_find_params_batched_activation = None
+    _triton_find_params_batched_hessian_hybrid = None

@@ -12,7 +12,10 @@ import torch.nn as nn
 
 from ..utils.logger import setup_logger
 from .config import BaseQuantizeConfig, ScaleSearchConfig, _normalize_quant_bits, resolve_quant_format
-from ._scale_search_triton import _triton_find_params_batched_activation
+from ._scale_search_triton import (
+    _triton_find_params_batched_activation,
+    _triton_find_params_batched_hessian_hybrid,
+)
 
 
 log = setup_logger()
@@ -297,9 +300,10 @@ class Quantizer(nn.Module):
             return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
         q = torch.div(x, scale)
         q.round_()
+        maxq_f = float(maxq_value)
         if self.requires_groupwise_processing():
-            return q.clamp_(-self.maxq, self.maxq).mul_(scale)
-        return q.add_(zero).clamp_(0, self.maxq).sub_(zero).mul_(scale)
+            return q.clamp_(-maxq_f, maxq_f).mul_(scale)
+        return q.add_(zero).clamp_(0, maxq_f).sub_(zero).mul_(scale)
 
     def find_params(self, x, weight=False, *, hessian: torch.Tensor | None = None):
         dev = x.device
@@ -553,12 +557,42 @@ class Quantizer(nn.Module):
                         zero_all,
                         self.grid,
                         self.maxshrink,
-                        float(self.maxq.item()),
-                        bool(self.qcfg.sym),
+                        float(maxq_value),
+                        int(self.qcfg.sym),
                         candidate_count,
                     )
                 except Exception as e:
                     log.warn(f"Triton activation scale-search failed, falling back: {e}")
+
+            if (
+                os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON", "1") != "0"
+                and _triton_find_params_batched_hessian_hybrid is not None
+                and method in {ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID}
+                and prepared_hessian is not None
+                and prepared_hessian.ndim == 3
+                and not self.requires_groupwise_processing()
+                and group_size in (32, 64, 128)
+                and maxq_value >= 7
+                and x.is_cuda
+                and x.is_contiguous()
+                and x.dtype in (torch.float16, torch.float32, torch.bfloat16)
+            ):
+                try:
+                    return _triton_find_params_batched_hessian_hybrid(
+                        x,
+                        xmin,
+                        xmax,
+                        prepared_hessian,
+                        scale_all,
+                        zero_all,
+                        self.grid,
+                        self.maxshrink,
+                        float(maxq_value),
+                        int(self.qcfg.sym),
+                        candidate_count,
+                    )
+                except Exception as e:
+                    log.warn(f"Triton hessian/hybrid scale-search failed, falling back: {e}")
 
             best = torch.full((rows, num_groups), float("inf"), device=dev)
             chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)

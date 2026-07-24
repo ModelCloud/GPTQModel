@@ -251,3 +251,55 @@ def test_find_params_matches_fp64_grid_reference(group_size, bits, sym, method):
     assert scale_diff <= 2.0 * scale_step + 1e-6, (
         f"scale mismatch {scale_diff} for {group_size=}, {bits=}, {sym=}, {method=}"
     )
+
+
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("sym", [False, True])
+@pytest.mark.parametrize("method", [ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID])
+def test_find_params_batched_triton_matches_eager(group_size, bits, sym, method):
+    """Triton fast path for grouped find_params_batched must match the eager path."""
+    rows = 64
+    cols = group_size
+    device = "cuda"
+    generator = torch.Generator(device=device).manual_seed(4040 + group_size + bits + int(sym) + _method_seed(method))
+    W = torch.randn(rows, cols, generator=generator, device=device, dtype=torch.float32)
+    hessian = _make_group_block_hessian(cols, group_size, device=device)
+
+    qcfg = QuantizeConfig(
+        bits=bits,
+        group_size=group_size,
+        sym=sym,
+        mse=2.0,
+        scale_search=method,
+    )
+
+    def run(triton_flag: str):
+        prev = os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON")
+        os.environ["GPTQMODEL_SCALE_SEARCH_TRITON"] = triton_flag
+        try:
+            q = Quantizer(qcfg)
+            q.configure(perchannel=True, grid=100, maxshrink=0.8)
+            q.maxq = q.maxq.to(device)
+            W3d = W.reshape(rows, cols // group_size, group_size)
+            blocks = hessian.reshape(1, group_size, group_size)
+            if method == ScaleSearchConfig.ACTIVATION:
+                hessian_batched = hessian.diagonal().reshape(1, group_size)
+            else:
+                hessian_batched = blocks
+            scale, zero = q.find_params_batched(W3d, weight=True, hessian=hessian_batched)
+            torch.cuda.synchronize()
+            return scale, zero
+        finally:
+            if prev is None:
+                os.environ.pop("GPTQMODEL_SCALE_SEARCH_TRITON", None)
+            else:
+                os.environ["GPTQMODEL_SCALE_SEARCH_TRITON"] = prev
+
+    scale_ref, zero_ref = run("0")
+    scale_tri, zero_tri = run("1")
+
+    scale_diff = (scale_tri - scale_ref).abs().max().item()
+    zero_diff = (zero_tri - zero_ref).abs().max().item()
+    assert scale_diff < 1e-6, f"scale mismatch {scale_diff} for {group_size=}, {bits=}, {sym=}, {method=}"
+    assert zero_diff < 1e-6, f"zero mismatch {zero_diff} for {group_size=}, {bits=}, {sym=}, {method=}"
