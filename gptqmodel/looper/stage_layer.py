@@ -541,11 +541,9 @@ def run_layer_stage(
                 looper.gptq_model.quantize_config, "fused_forward", None
             )
             if fused_forward_cfg is not None:
-                model_cls = type(looper.gptq_model)
-                layer_modules_blocks = model_cls.build_layer_modules(model_cls.module_tree)
                 install_fused_group_forward(
                     layer_module=module,
-                    layer_modules_blocks=layer_modules_blocks,
+                    layer_modules_blocks=planning_layer_modules,
                     enabled=True,
                     splice=getattr(fused_forward_cfg, "splice", "view"),
                     logger=log,

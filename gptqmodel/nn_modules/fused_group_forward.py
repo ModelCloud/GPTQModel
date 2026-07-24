@@ -8,11 +8,19 @@ projections (q/k/v, gate/up).  Running one larger GEMM and splitting the output
 is usually faster than launching multiple smaller GEMMs, and the per-module
 outputs are still fed into the existing GPTQ forward hooks so each module
 accumulates its own Hessian.
+
+To avoid doubling weight memory, FusedGroupForward lazily builds one contiguous
+shared storage buffer and makes each member's `weight` Parameter a view into
+that buffer.  The quantizer writes each reconstructed `wq` back into the
+shared buffer, so the fused forward always uses the current weights without
+keeping a second concatenated copy.
 """
 
 import threading
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
+import pcre
 import torch
 import torch.nn as nn
 import transformers
@@ -94,12 +102,19 @@ def _find_common_parent(root: nn.Module, members: List[nn.Module]) -> nn.Module:
 
 
 class FusedGroupForward:
-    """Coordinate a single fused GEMM for a group of same-input linear modules."""
+    """Coordinate a single fused GEMM for a group of same-input linear modules.
+
+    Weight data is stored once in a shared contiguous buffer.  Each member's
+    ``nn.Parameter`` is a view into that buffer, so the fused forward never
+    holds an extra concatenated copy of the weights.
+    """
 
     def __init__(self, parent_module: nn.Module, members: List[nn.Module], splice: str = "view"):
         self.parent = parent_module
         self.members = members
         self.splice = splice if splice in {"view", "contiguous_copy"} else "view"
+        self.concat_dim = _weight_concat_dim(members[0])
+        self.in_dim, _ = _get_linear_dims(members[0])
         self.member_to_slice: Dict[int, Tuple[int, int]] = {}
         start = 0
         for m in members:
@@ -112,71 +127,117 @@ class FusedGroupForward:
             Tuple[object, ...],
             Tuple[torch.Tensor, Dict[int, torch.Tensor]],
         ] = {}
-        self._fused_weight_cache: Dict[
-            Tuple[Tuple[int, ...], str, str],
-            Tuple[torch.Tensor, Optional[torch.Tensor]],
-        ] = {}
 
-    def _weight_cache_key(self, target_device: torch.device, dtype: torch.dtype) -> Optional[Tuple[Tuple[int, ...], str, str]]:
-        """Fingerprint member weights for cache invalidation."""
+        # Shared storage; allocated lazily on the target device at first use.
+        self.fused_weight_storage: Optional[torch.Tensor] = None
+        self.fused_bias_storage: Optional[torch.Tensor] = None
+        self._version = 0
 
-        ptrs: List[int] = []
-        for m in self.members:
-            w = getattr(m, "weight", None)
-            if not isinstance(w, torch.Tensor):
-                return None
-            ptrs.append(w.untyped_storage().data_ptr())
-        return (tuple(ptrs), str(target_device), str(dtype))
+    def _weight_view(self, s: int, e: int) -> torch.Tensor:
+        """Return a view into the shared weight storage for a member's slice."""
 
-    def _build_fused_weight(
+        if self.concat_dim == 0:
+            return self.fused_weight_storage[s:e, :]
+        return self.fused_weight_storage[:, s:e]
+
+    def _initialize_storage(self, target_device: torch.device, dtype: torch.dtype) -> None:
+        """Allocate or rebuild shared storage on target_device and reparameterize members as views.
+
+        This is called lazily at the first forward so the storage lands on the
+        device the model forward is actually executing on.
+        """
+
+        if (
+            self.fused_weight_storage is not None
+            and self.fused_weight_storage.device == target_device
+            and self.fused_weight_storage.dtype == dtype
+        ):
+            return
+
+        with self.lock:
+            # Double-check after acquiring the lock.
+            if (
+                self.fused_weight_storage is not None
+                and self.fused_weight_storage.device == target_device
+                and self.fused_weight_storage.dtype == dtype
+            ):
+                return
+
+            # _initialize_storage may be called while the parent forward is under
+            # inference mode, but the shared buffer must be a normal tensor so
+            # later quantizer updates (copy_ of reconstructed wq) are allowed.
+            with torch.inference_mode(False):
+                if self.concat_dim == 0:
+                    weight_shape = (self.total_out_dim, self.in_dim)
+                else:
+                    weight_shape = (self.in_dim, self.total_out_dim)
+
+                fused_weight = torch.empty(
+                    weight_shape,
+                    dtype=dtype,
+                    device=target_device,
+                )
+
+                has_bias = False
+                for m in self.members:
+                    b = getattr(m, "bias", None)
+                    if isinstance(b, torch.nn.Parameter) or isinstance(b, torch.Tensor):
+                        has_bias = True
+                        break
+
+                fused_bias = None
+                if has_bias:
+                    fused_bias = torch.zeros(self.total_out_dim, dtype=dtype, device=target_device)
+
+                for m in self.members:
+                    s, e = self.member_to_slice[id(m)]
+                    w = getattr(m, "weight", None)
+                    if not isinstance(w, torch.Tensor):
+                        continue
+                    # Copy member weight into the shared buffer; the original
+                    # Parameter will be replaced by a view and can be freed.
+                    fused_weight.narrow(self.concat_dim, s, e - s).copy_(w.detach().to(device=target_device, dtype=dtype))
+
+                    b = getattr(m, "bias", None)
+                    if fused_bias is not None and isinstance(b, torch.Tensor):
+                        fused_bias[s:e].copy_(b.detach().to(device=target_device, dtype=dtype))
+
+                    # Replace the member's Parameter with a view into shared storage.
+                    requires_grad = getattr(w, "requires_grad", True)
+                    if self.concat_dim == 0:
+                        weight_view = fused_weight[s:e, :]
+                    else:
+                        weight_view = fused_weight[:, s:e]
+                    m.weight = nn.Parameter(weight_view, requires_grad=requires_grad)
+                    if fused_bias is not None:
+                        # If this member had a bias, replace it with a view too; otherwise leave None.
+                        if isinstance(b, torch.nn.Parameter) or (isinstance(b, torch.Tensor) and b is not None):
+                            bias_requires_grad = getattr(b, "requires_grad", requires_grad)
+                            m.bias = nn.Parameter(fused_bias[s:e], requires_grad=bias_requires_grad)
+
+                self.fused_weight_storage = fused_weight
+                self.fused_bias_storage = fused_bias
+                self._version = 0
+
+    def has_storage(self) -> bool:
+        return self.fused_weight_storage is not None
+
+    def _cache_key(
         self,
+        input: torch.Tensor,
         target_device: torch.device,
         dtype: torch.dtype,
-        weight_key: Tuple[Tuple[int, ...], str, str],
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """Concatenate member weights/biases along the output dimension (cached)."""
-
-        cached = self._fused_weight_cache.get(weight_key)
-        if cached is not None:
-            return cached
-
-        weights: List[torch.Tensor] = []
-        biases: List[Optional[torch.Tensor]] = []
-        for m in self.members:
-            w = getattr(m, "weight", None)
-            if not isinstance(w, torch.Tensor):
-                return None, None
-            if w.device != target_device or w.dtype != dtype:
-                w = w.to(device=target_device, dtype=dtype)
-            weights.append(w)
-            b = getattr(m, "bias", None)
-            if isinstance(b, torch.Tensor):
-                if b.device != target_device or b.dtype != dtype:
-                    b = b.to(device=target_device, dtype=dtype)
-                biases.append(b)
-            else:
-                biases.append(None)
-
-        if not weights:
-            return None, None
-
-        fused_weight = torch.cat(weights, dim=_weight_concat_dim(self.members[0]))
-
-        fused_bias = None
-        if any(b is not None for b in biases):
-            bias_parts = []
-            for b, m in zip(biases, self.members):
-                s, e = self.member_to_slice[id(m)]
-                if b is None:
-                    bias_parts.append(
-                        torch.zeros(e - s, device=target_device, dtype=dtype)
-                    )
-                else:
-                    bias_parts.append(b)
-            fused_bias = torch.cat(bias_parts, dim=0)
-
-        self._fused_weight_cache = {weight_key: (fused_weight, fused_bias)}
-        return fused_weight, fused_bias
+    ) -> Optional[Tuple[object, ...]]:
+        if self.fused_weight_storage is None:
+            return None
+        input_key = _make_input_fingerprint(input)
+        weight_key = (
+            self._version,
+            self.fused_weight_storage.untyped_storage().data_ptr(),
+            str(dtype),
+            str(target_device),
+        )
+        return (input_key, weight_key)
 
     def __call__(
         self,
@@ -194,12 +255,15 @@ class FusedGroupForward:
         if not isinstance(requester_weight, torch.Tensor):
             return None
         dtype = requester_weight.dtype
-        weight_key = self._weight_cache_key(target_device, dtype)
-        if weight_key is None:
+
+        # Ensure shared storage exists on the device the forward is running on.
+        self._initialize_storage(target_device, dtype)
+        if self.fused_weight_storage is None:
             return None
 
-        input_key = _make_input_fingerprint(input)
-        cache_key = (input_key, weight_key)
+        cache_key = self._cache_key(input, target_device, dtype)
+        if cache_key is None:
+            return None
 
         with self.lock:
             entry = self._cache.get(cache_key)
@@ -215,11 +279,8 @@ class FusedGroupForward:
             else:
                 moved_input = input
 
-            fused_weight, fused_bias = self._build_fused_weight(
-                target_device, dtype, weight_key
-            )
-            if fused_weight is None:
-                return None
+            fused_weight = self.fused_weight_storage
+            fused_bias = self.fused_bias_storage
 
             if _is_conv1d(self.members[0]):
                 orig_shape = moved_input.shape
@@ -229,9 +290,7 @@ class FusedGroupForward:
                     fused_out = fused_out + fused_bias
                 fused_out = fused_out.reshape(*orig_shape[:-1], fused_weight.shape[1])
             else:
-                fused_out = torch.nn.functional.linear(
-                    moved_input, fused_weight, fused_bias
-                )
+                fused_out = torch.nn.functional.linear(moved_input, fused_weight, fused_bias)
 
             outputs: Dict[int, torch.Tensor] = {}
             for m in self.members:
@@ -248,12 +307,39 @@ class FusedGroupForward:
 
             return outputs[id(requester)], moved_input
 
+    def update_member_weight(self, module: nn.Module, wq: torch.Tensor) -> bool:
+        """Write a reconstructed weight back into the shared storage and refresh the view.
+
+        The quantizer calls this instead of ``module.weight.data = wq`` so the
+        fused forward buffer stays consistent with the per-member weight.
+        """
+
+        slice_info = self.member_to_slice.get(id(module))
+        if slice_info is None or self.fused_weight_storage is None:
+            return False
+        s, e = slice_info
+
+        target_device = self.fused_weight_storage.device
+        dtype = self.fused_weight_storage.dtype
+        wq_moved = wq.to(device=target_device, dtype=dtype)
+
+        self.fused_weight_storage.narrow(self.concat_dim, s, e - s).copy_(wq_moved)
+        self._version += 1
+
+        # Make sure the module's Parameter is a view into the updated storage.
+        requires_grad = getattr(module.weight, "requires_grad", True)
+        module.weight = nn.Parameter(self._weight_view(s, e), requires_grad=requires_grad)
+        return True
+
     def clear(self) -> None:
-        """Drop cached tensors so the module can be moved/offloaded without GPU leakage."""
+        """Drop cached tensors so the module can be moved/offloaded without GPU leakage.
+
+        The shared weight storage is retained because the member Parameter views
+        still point to it; it will be freed naturally when those views are gone.
+        """
 
         with self.lock:
             self._cache.clear()
-            self._fused_weight_cache.clear()
 
 
 def _all_same_device_dtype(members: List[nn.Module]) -> bool:
@@ -270,6 +356,115 @@ def _all_same_device_dtype(members: List[nn.Module]) -> bool:
         if w.device != first_w.device or w.dtype != first_w.dtype:
             return False
     return True
+
+
+def _expert_index_from_name(name: str) -> Optional[int]:
+    """Extract the expert index from a module name, or None for non-expert paths."""
+
+    pattern = r"[./]experts[./](\d+)[./]"
+    m = pcre.search(pattern, name)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def _is_moe_down_proj_group(names: List[str]) -> bool:
+    """Return True when members are per-expert down-projections (different inputs).
+
+    In MoE MLPs the gate/up projections all consume the same hidden state, so
+    fusing them across experts is valid. The down projection (or Mixtral w2)
+    consumes the expert-specific activated intermediate, so cross-expert fusion
+    would waste work without sharing inputs.
+    """
+
+    if len(names) < 2:
+        return False
+    suffixes = {"down_proj", "w2"}
+    last_parts = [n.rsplit(".", 1)[-1] for n in names]
+    if not all(p in suffixes for p in last_parts):
+        return False
+    expert_indices = set()
+    pattern = r"[./]experts[./](\d+)[./]"
+    for n in names:
+        m = pcre.search(pattern, n)
+        if not m:
+            return False
+        expert_indices.add(int(m.group(1)))
+    return len(expert_indices) > 1
+
+
+def _partition_into_subgroups(
+    members: List[nn.Module],
+    names: List[str],
+) -> List[Tuple[List[nn.Module], List[str]]]:
+    """Partition a candidate group into safe fusion subgroups.
+
+    Modules belonging to different MoE experts should not be fused into one giant
+    group.  This keeps per-expert gate/up pairs together and avoids cross-device
+    copies during multi-GPU quantization.
+    """
+
+    if not members or len(members) < 2:
+        return []
+
+    # If none of the names contain an expert index, the whole list is one group.
+    has_experts = any(_expert_index_from_name(n) is not None for n in names)
+    if not has_experts:
+        return [(members, names)]
+
+    # Group by expert index; shared/non-expert modules go into their own bucket.
+    groups: Dict[Optional[int], List[Tuple[nn.Module, str]]] = defaultdict(list)
+    for m, n in zip(members, names):
+        idx = _expert_index_from_name(n)
+        groups[idx].append((m, n))
+
+    result: List[Tuple[List[nn.Module], List[str]]] = []
+    for idx in sorted(groups, key=lambda k: (k is not None, k or -1)):
+        sub_members = [m for m, _ in groups[idx]]
+        sub_names = [n for _, n in groups[idx]]
+        if len(sub_members) >= 2:
+            result.append((sub_members, sub_names))
+    return result
+
+
+def _try_install_group(
+    layer_module: nn.Module,
+    members: List[nn.Module],
+    names: List[str],
+    splice: str,
+    logger=None,
+) -> bool:
+    if len(members) < 2:
+        return False
+    if _is_moe_down_proj_group(names):
+        return False
+    first_in_dim = _get_linear_dims(members[0])[0]
+    if first_in_dim == 0:
+        return False
+    if not all(_get_linear_dims(m)[0] == first_in_dim for m in members[1:]):
+        return False
+    if not _all_same_device_dtype(members):
+        return False
+
+    # Partition into per-expert/shared subgroups and install a FusedGroupForward
+    # for each one.  This bounds the fused weight size and respects multi-GPU
+    # device placement for MoE models.
+    subgroups = _partition_into_subgroups(members, names)
+    if not subgroups:
+        return False
+
+    installed_any = False
+    for sub_members, _ in subgroups:
+        if len(sub_members) < 2:
+            continue
+        if not _all_same_device_dtype(sub_members):
+            continue
+        parent = _find_common_parent(layer_module, sub_members)
+        fused = FusedGroupForward(parent, sub_members, splice=splice)
+        for m in sub_members:
+            m._fused_group_forward = fused
+        installed_any = True
+    return installed_any
 
 
 def install_fused_group_forward(
@@ -297,41 +492,40 @@ def install_fused_group_forward(
 
     installed = 0
     for block in layer_modules_blocks:
-        if len(block) < 2:
-            continue
-
         members: List[nn.Module] = []
-        skip = False
+        member_names: List[str] = []
         for raw_name in block:
             name = _clean_module_name(raw_name)
             try:
                 m = layer_module.get_submodule(name)
             except AttributeError:
-                skip = True
-                break
+                if _try_install_group(layer_module, members, member_names, splice=splice, logger=logger):
+                    installed += 1
+                members = []
+                member_names = []
+                continue
             if not _is_supported_fused_module(m):
-                skip = True
-                break
+                if _try_install_group(layer_module, members, member_names, splice=splice, logger=logger):
+                    installed += 1
+                members = []
+                member_names = []
+                continue
             in_dim, out_dim = _get_linear_dims(m)
             if in_dim == 0 or out_dim == 0:
-                skip = True
-                break
+                if _try_install_group(layer_module, members, member_names, splice=splice, logger=logger):
+                    installed += 1
+                members = []
+                member_names = []
+                continue
+            if members and _get_linear_dims(members[0])[0] != in_dim:
+                if _try_install_group(layer_module, members, member_names, splice=splice, logger=logger):
+                    installed += 1
+                members = []
+                member_names = []
             members.append(m)
-
-        if skip or len(members) < 2:
-            continue
-
-        in_dims = {_get_linear_dims(m)[0] for m in members}
-        if len(in_dims) != 1:
-            continue
-        if not _all_same_device_dtype(members):
-            continue
-
-        parent = _find_common_parent(layer_module, members)
-        fused = FusedGroupForward(parent, members, splice=splice)
-        for m in members:
-            m._fused_group_forward = fused
-        installed += 1
+            member_names.append(name)
+        if _try_install_group(layer_module, members, member_names, splice=splice, logger=logger):
+            installed += 1
 
     return installed
 
