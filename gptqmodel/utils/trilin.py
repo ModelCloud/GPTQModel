@@ -125,7 +125,7 @@ def trilin_matmul_lora(
     workspace: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Fuse exact-shape TriLin decode with a supported LoRA rank using caller-exclusive scratch."""
+    """Fuse exact-shape Trilin decode with a supported LoRA rank using caller-exclusive scratch."""
     return _extension_api().op("trilin", "matmul_lora")(
         input,
         qweight,

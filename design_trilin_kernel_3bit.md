@@ -23,7 +23,7 @@ hypotheses and must not be presented as measurements.
 Implemented and validated on both requested CC 8.0 devices. For both FP16 and BF16, production dispatch uses a direct
 continuous-3-bit native CUDA GEMV at flattened M=1 and native CUDA WMMA at M=2..16. FP16 uses exact-value expanded
 Marlin above M=16; BF16 retains fused Triton above M=16 because it is faster than the native large-M diagnostic.
-The exact M=1, K=N=4096, group-128, dense rank-128 LoRA case now uses a cooperative one-launch TriLin+LoRA mega-kernel
+The exact M=1, K=N=4096, group-128, dense rank-128 LoRA case now uses a cooperative one-launch Trilin+LoRA mega-kernel
 on sm80; unsupported adapter shapes, training/autograd, compressed adapters, CUDA Graph capture, and other devices
 retain the established base-kernel-plus-adapter fallback.
 Architecture, alignment, build-failure, training, and other unsupported cases retain guarded fallbacks. GPTQ/AWQ
@@ -4785,7 +4785,7 @@ Failed, corrected, or rejected tactics:
 Decision: retain native CUDA routing for every declared positive group size. Keep group 128 as the primary optimized
 contract and warn once per non-128 group; keep channelwise `-1` and incompatible shapes on the safe existing fallback.
 
-## 2026-07-22 — Fused TriLin plus EoRA rank-128 decode mega-kernel
+## 2026-07-22 — Fused Trilin plus EoRA rank-128 decode mega-kernel
 
 Status: implemented, routed through GPTQ and AWQ QuantLinear, benchmarked, profiled, and safety-checked on physical
 GPU0 and GPU1. The repository baseline was clean at `53a8a675` on branch `trilin-eora` before this iteration.
@@ -4802,17 +4802,17 @@ The production specialization is deliberately exact:
 - `GPTQMODEL_TRILIN_EORA=0` as a runtime kill switch.
 
 Training, autograd, M other than 1, other K/N/rank/group sizes, compressed LoRA, non-sm80 devices, graph capture,
-unavailable JIT builds, and native launch errors retain the established TriLin/Marlin/Triton base route followed by
+unavailable JIT builds, and native launch errors retain the established Trilin/Marlin/Triton base route followed by
 `Lora.apply`. The native wrapper validates every tensor shape, dtype, device, stride, workspace size, live compute
 capability, cooperative support, and stream capture state. Device properties and the current stream come from the
 input tensor; no fixed CUDA index or assumed SM count is used.
 
 ### Retained kernel design
 
-The normal decode route produced four kernels per logical layer call: TriLin base GEMV, LoRA-down GEMV, the addmm
+The normal decode route produced four kernels per logical layer call: Trilin base GEMV, LoRA-down GEMV, the addmm
 matrix-vector phase, and its split reduction. The retained cooperative kernel collapses these into one launch:
 
-1. Up to 256 CTAs compute the existing exact 16-column TriLin base tiles while eight disjoint CTAs compute 16 LoRA
+1. Up to 256 CTAs compute the existing exact 16-column Trilin base tiles while eight disjoint CTAs compute 16 LoRA
    ranks each across the complete K dimension.
 2. A cooperative grid barrier establishes both the complete base output and the 128-value LoRA-down payload.
 3. Up to 128 CTAs compute 32 output columns of LoRA-up and add them to the dtype-rounded base output. If a smaller
@@ -4821,7 +4821,7 @@ matrix-vector phase, and its split reduction. The retained cooperative kernel co
 
 The desired grid is 264 CTAs, but launch capacity is computed from
 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` and the runtime SM count. A launch is rejected below 64 resident CTAs.
-The 128-value FP32 payload is completely overwritten on every call, never aliases the existing TriLin lock/workspace,
+The 128-value FP32 payload is completely overwritten on every call, never aliases the existing Trilin lock/workspace,
 and preserves the ordinary LoRA path's FP16/BF16 rounding boundary after the down projection. QuantLinear owns a
 nonpersistent workspace and lazily caches a distinct payload per CUDA stream, so concurrent forwards cannot race.
 Calls serialized on one stream reuse scratch without an allocator operation.
@@ -4872,7 +4872,7 @@ CUDA_VISIBLE_DEVICES={0,1} compute-sanitizer --tool {memcheck,synccheck} \
 
 ### Final warmed timing
 
-`scripts/benchmark_trilin_3bit_eora.py` first checks the fused result against the ordinary TriLin plus `Lora.apply`
+`scripts/benchmark_trilin_3bit_eora.py` first checks the fused result against the ordinary Trilin plus `Lora.apply`
 result, then uses 200 warmups and 500 individually recorded CUDA-event samples. GPU0 and GPU1 were assigned with
 `CUDA_DEVICE_ORDER=PCI_BUS_ID` and `CUDA_VISIBLE_DEVICES`; the two physical cards were benchmarked in parallel only
 with each other, never with two processes on the same card.
@@ -4910,7 +4910,7 @@ or dense-weight materialization appeared.
 +-----+-------+-----------------------+----------------------+-----------------------+----------------------+
 ```
 
-The unfused kernel sums are the medians of TriLin base, LoRA down, addmm matrix-vector, and split reduction; projected
+The unfused kernel sums are the medians of Trilin base, LoRA down, addmm matrix-vector, and split reduction; projected
 range time additionally includes launch gaps and is attribution evidence rather than the synchronized timing source.
 
 ```text
@@ -4959,15 +4959,15 @@ existing fallback. Future tuning should investigate a smaller-block base reducti
 schedule only if a matched end-to-end benchmark improves; Nsight's theoretical stall estimates alone are not a reason
 to replace the validated route.
 
-## 2026-07-22 — Fused TriLin plus EoRA ranks 32, 64, 128, and 256
+## 2026-07-22 — Fused Trilin plus EoRA ranks 32, 64, 128, and 256
 
 Status: implemented and validated on physical GPU0 and GPU1. This iteration started from clean commit `a159035c`
-(`Add fused TriLin EoRA mega-kernel`) on branch `trilin-eora` and supersedes the rank-128-only contract above without
+(`Add fused Trilin EoRA mega-kernel`) on branch `trilin-eora` and supersedes the rank-128-only contract above without
 changing its exact M/K/N/group/device gate or its fallbacks.
 
 ### Baseline and retained boundary
 
-Before editing, the ordinary four-launch TriLin plus LoRA route was measured at M=1, K=N=4096, group size 128 with
+Before editing, the ordinary four-launch Trilin plus LoRA route was measured at M=1, K=N=4096, group size 128 with
 the exact future ranks. CUDA-event timing used 100 warmups and 300 samples:
 
 ```text
@@ -5018,7 +5018,7 @@ PyTorch 2.13.0+cu130, CUDA runtime 13.0, NVCC 13.0.88, Triton 3.7.1, Nsight Syst
 Compute/Compute Sanitizer 2025.3.1 were used. The sm_80 JIT build used `TORCH_CUDA_ARCH_LIST=8.0` and produced
 fingerprint `feac8164527020ea`.
 
-The focused suite now covers all four ranks in FP16 and BF16 against the ordinary TriLin plus `Lora.apply` reference,
+The focused suite now covers all four ranks in FP16 and BF16 against the ordinary Trilin plus `Lora.apply` reference,
 poisoned-scratch overwrite, non-default streams, undersized scratch, GPTQ and AWQ routing, M=2 fallback, graph
 fallback, disjoint concurrent-stream workspaces, native unsupported-rank rejection, and production rank-96 fallback.
 It passed 41/41 on GPU0 in 10.45 seconds and 41/41 on GPU1 in 10.76 seconds. The unchanged 229-case 3-bit regression

@@ -17,15 +17,22 @@ from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
-from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear, TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.trilin import AwqTrilinLinear, TrilinLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.importer import AUTO_BACKEND_KERNEL_MAPPING, auto_select_device, select_quant_linear
+from gptqmodel.utils.importer import (
+    AUTO_BACKEND_KERNEL_MAPPING,
+    auto_select_device,
+    iter_quant_linear_kernels,
+    select_quant_linear,
+)
+from gptqmodel.utils.model import create_quant_layer
 from gptqmodel.utils.rocm import IS_ROCM
 from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU
 
@@ -146,6 +153,15 @@ def test_auto_select_normalizes_torch_device_before_device_prefilter(monkeypatch
     )
 
     assert qlinear_cls is CudaKernel
+
+
+@pytest.mark.parametrize("fmt", [FORMAT.GPTQ, FORMAT.GPTQ_V2])
+def test_auto_select_excludes_embedding_only_kernel(fmt):
+    candidates = AUTO_BACKEND_KERNEL_MAPPING[METHOD.GPTQ][fmt].values()
+
+    assert TorchQuantEmbeddings not in candidates
+    assert TorchLinear in candidates
+    assert TorchQuantEmbeddings not in iter_quant_linear_kernels()
 
 
 CASES = []
@@ -292,13 +308,13 @@ def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monke
 @pytest.mark.parametrize(
     "method,fmt,kernel_cls,group_size",
     [
-        *((METHOD.GPTQ, FORMAT.GPTQ, TritonV2Linear, group_size)
-          for group_size in TritonV2Linear.SUPPORTS_GROUP_SIZE),
-        *((METHOD.AWQ, FORMAT.GEMM, AwqGEMMTritonLinear, group_size)
-          for group_size in AwqGEMMTritonLinear.SUPPORTS_GROUP_SIZE),
+        *((METHOD.GPTQ, FORMAT.GPTQ, TrilinLinear, group_size)
+          for group_size in TrilinLinear.SUPPORTS_GROUP_SIZE),
+        *((METHOD.AWQ, FORMAT.GEMM, AwqTrilinLinear, group_size)
+          for group_size in AwqTrilinLinear.SUPPORTS_GROUP_SIZE),
     ],
 )
-def test_cuda_auto_selects_grouped_3bit_triton_backend(monkeypatch, method, fmt, kernel_cls, group_size):
+def test_cuda_auto_selects_grouped_3bit_trilin_backend(monkeypatch, method, fmt, kernel_cls, group_size):
     monkeypatch.setattr(
         kernel_cls,
         "cached_validate_once",
@@ -319,6 +335,179 @@ def test_cuda_auto_selects_grouped_3bit_triton_backend(monkeypatch, method, fmt,
     )
 
     assert selected is kernel_cls
+
+
+@pytest.mark.parametrize(
+    ("method", "fmt", "expected"),
+    [
+        (METHOD.GPTQ, FORMAT.GPTQ, TritonV2Linear),
+        (METHOD.AWQ, FORMAT.GEMM, AwqGEMMTritonLinear),
+    ],
+)
+def test_cuda_auto_uses_triton_for_unsupported_trilin_group_size(monkeypatch, method, fmt, expected):
+    _force_auto_candidates_valid(monkeypatch, method, fmt)
+
+    selected = select_quant_linear(
+        bits=3,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=fmt,
+        quant_method=method,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert selected is expected
+
+
+@pytest.mark.parametrize(
+    ("method", "fmt", "expected"),
+    [
+        (METHOD.GPTQ, FORMAT.GPTQ, TrilinLinear),
+        (METHOD.AWQ, FORMAT.GEMM, AwqTrilinLinear),
+    ],
+)
+def test_explicit_trilin_backend_selects_layout_specific_kernel(monkeypatch, method, fmt, expected):
+    monkeypatch.setattr(
+        expected,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+
+    selected = select_quant_linear(
+        bits=3,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.TRILIN,
+        format=fmt,
+        quant_method=method,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert selected is expected
+
+
+@pytest.mark.parametrize(
+    ("method", "fmt", "kernel_cls"),
+    [
+        (METHOD.GPTQ, FORMAT.GPTQ, TritonV2Linear),
+        (METHOD.AWQ, FORMAT.GEMM, AwqGEMMTritonLinear),
+    ],
+)
+def test_cuda_auto_selects_3bit_triton_with_compatible_4bit_overrides(
+    monkeypatch,
+    method,
+    fmt,
+    kernel_cls,
+):
+    monkeypatch.setattr(
+        kernel_cls,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    dynamic = {
+        "+:^model\\.embed_tokens$": {
+            "bits": 4,
+            "group_size": 32,
+            "desc_act": False,
+            "sym": True,
+        },
+        "+:^lm_head$": {
+            "bits": 4,
+            "group_size": 32,
+            "desc_act": False,
+            "sym": True,
+        },
+    }
+
+    selected = select_quant_linear(
+        bits=3,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=fmt,
+        quant_method=method,
+        dynamic=dynamic,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert selected is kernel_cls
+
+
+@pytest.mark.parametrize("kernel_cls", [TritonV2Linear, AwqGEMMTritonLinear])
+def test_3bit_triton_rejects_incompatible_dynamic_3bit_contract(kernel_cls):
+    valid, error = kernel_cls.validate(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        dynamic={
+            "+:^model\\.layers\\.0\\.self_attn\\.q_proj$": {
+                "bits": 3,
+                "group_size": 128,
+                "desc_act": True,
+                "sym": True,
+            },
+        },
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert not valid
+    assert "3-bit fused inference requires `desc_act=False`" in str(error)
+
+
+def test_create_quant_layer_selects_trilin_decoder_and_triton_4bit_override(monkeypatch):
+    for kernel_cls in (TrilinLinear, TritonV2Linear, TorchLinear):
+        monkeypatch.setattr(
+            kernel_cls,
+            "cached_validate_once",
+            classmethod(lambda qlinear_cls: (True, None)),
+        )
+
+    model = torch.nn.Module()
+    model.proj = torch.nn.Linear(128, 32, bias=False)
+    model.lm_head = torch.nn.Linear(128, 32, bias=False)
+    dynamic = {
+        "+:^lm_head$": {
+            "bits": 4,
+            "group_size": 32,
+            "desc_act": False,
+            "sym": True,
+        },
+    }
+
+    primary = create_quant_layer(
+        linear_candidates=[TrilinLinear, TritonV2Linear, TorchLinear],
+        bits=3,
+        desc_act=False,
+        dynamic=dynamic,
+        group_size=128,
+        quant_result={"proj": {}, "lm_head": {}},
+        module=model,
+        sym=True,
+        device=DEVICE.CUDA,
+        lm_head_name="lm_head",
+        pack_dtype=torch.int32,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ,
+        dtype=torch.float16,
+    )
+
+    assert primary is TrilinLinear
+    assert isinstance(model.proj, TrilinLinear)
+    assert isinstance(model.lm_head, TritonV2Linear)
+    assert not isinstance(model.lm_head, TrilinLinear)
 
 
 @pytest.mark.parametrize("group_size", [96, 192, 256, 384, 512])

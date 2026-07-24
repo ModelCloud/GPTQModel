@@ -18,6 +18,8 @@ This file governs the whole repository. Keep changes narrowly scoped, preserve C
 - Quantized linear implementations, backend selection, capability declarations, fallback, or availability checks: use `$gptqmodel-backends`.
 - CUDA, C++, CUTLASS, Triton, JIT extensions, correctness debugging, or kernel benchmarks: use `$gptqmodel-cuda-kernels`.
 - Torch-profiler traces, Nsight analysis, bottleneck attribution, launch gaps, overlap, or fusion opportunities: use `$gptqmodel-gpu-profiling`.
+- GPU correctness tests, performance benchmarks, user-specified GPU IDs, idle-device preflights, or long-running
+  live result tables: use `$gptqmodel-gpu-testing`.
 - Multi-kernel fusion, cooperative or persistent mega-kernels, cross-phase scratch reuse, grid barriers, fused phase scheduling, or launch-count reduction: also use `$gptqmodel-mega-kernels`.
 - Nsight Systems capture, `.nsys-rep` reports, CUDA launch gaps, memory copies, or NCCL timeline analysis: also use `$perf-nsight-systems`.
 - Nsight Compute kernel metrics, `.ncu-rep` reports, SOL/roofline, occupancy, memory hierarchy, or warp stalls: also use `$perf-nsight-compute-analysis`.

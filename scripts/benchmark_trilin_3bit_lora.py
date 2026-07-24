@@ -21,7 +21,7 @@ SUPPORTED_RANKS = (32, 64, 128, 256)
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark the supported fused TriLin 3-bit plus LoRA decode path.")
+    parser = argparse.ArgumentParser(description="Benchmark the supported fused Trilin 3-bit plus LoRA decode path.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", choices=("fp16", "bf16"), default="fp16")
     parser.add_argument("--rank", type=int, choices=SUPPORTED_RANKS, default=128)
@@ -112,13 +112,13 @@ def main() -> None:
         raise ValueError("warmup/profile iterations must be non-negative and timing iterations must be positive")
     device = torch.device(args.device)
     if device.type != "cuda":
-        raise ValueError("TriLin+LoRA benchmarking requires CUDA")
+        raise ValueError("Trilin+LoRA benchmarking requires CUDA")
     dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
     torch.manual_seed(args.seed)
     torch.cuda.set_device(device)
     properties = torch.cuda.get_device_properties(device)
     if (properties.major, properties.minor) != (8, 0):
-        raise RuntimeError(f"TriLin+LoRA requires sm_80, got sm_{properties.major}{properties.minor}")
+        raise RuntimeError(f"Trilin+LoRA requires sm_80, got sm_{properties.major}{properties.minor}")
 
     qweight = torch.randint(
         0,

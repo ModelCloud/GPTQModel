@@ -50,6 +50,21 @@ def test_named_module_register_and_state_locking():
     assert torch.equal(named.new_attr, torch.zeros(1))
 
 
+def test_named_module_uses_floating_buffer_dtype_for_parameterless_packed_module():
+    module = torch.nn.Module()
+    module.register_buffer("qweight", torch.zeros((2, 2), dtype=torch.int32))
+    module.register_buffer("scales", torch.ones((2, 2), dtype=torch.bfloat16))
+
+    named = NamedModule(
+        module,
+        name="q_proj",
+        full_name="model.layers.0.self_attn.q_proj",
+        layer_index=0,
+    )
+
+    assert named.module_dtype is torch.bfloat16
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for streaming")
 def test_named_module_streaming_apis():
     device = torch.device("cuda", 0)

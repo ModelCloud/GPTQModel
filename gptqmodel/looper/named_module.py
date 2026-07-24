@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import contextlib
 from typing import Any, Dict, Optional
 
 import torch
@@ -13,7 +12,7 @@ from torch.nn import Parameter
 from torch.nn.modules.conv import _ConvNd
 
 from ..utils.logger import setup_logger
-from ..utils.module_locks import get_parent_lock, parent_module_lock
+from ..utils.module_locks import get_parent_lock
 from ..utils.stream import stream_sync as stream_sync_events
 from ..utils.stream import stream_tensor_dict_to_cpu
 
@@ -28,7 +27,22 @@ class NamedModule(torch.nn.Module):
         super().__init__()
 
         self.module = module  # wrapped module
-        self.module_dtype = next(module.parameters()).dtype
+        representative = next(module.parameters(), None)
+        if representative is None:
+            first_buffer = None
+            for buffer in module.buffers():
+                if first_buffer is None:
+                    first_buffer = buffer
+                if buffer.is_floating_point() or buffer.is_complex():
+                    representative = buffer
+                    break
+            if representative is None:
+                representative = first_buffer
+        if representative is None:
+            raise ValueError(
+                f"NamedModule requires `{full_name}` to expose at least one parameter or buffer."
+            )
+        self.module_dtype = representative.dtype
         self.name = name  # module name
         self.full_name = full_name  # full dotted path inside model
         self.layer_index = layer_index  # layer index for repeated blocks

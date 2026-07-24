@@ -34,6 +34,26 @@ def _has_vision_inputs(example: Dict[str, Any]) -> bool:
     return any(key in example for key in _VISION_INPUT_KEYS)
 
 
+def _resolve_input_capture_device(
+    *,
+    example: Dict[str, Any],
+    embed_quant_mode: Optional[QuantizeEmbed],
+    input_embeddings: Optional[torch.nn.Module],
+    fallback_device: torch.device,
+) -> torch.device:
+    """Resolve where the model input must execute during calibration capture."""
+
+    if (
+        embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+        and "input_ids" in example
+        and input_embeddings is not None
+    ):
+        embedding_device = get_device(input_embeddings)
+        if embedding_device != META:
+            return embedding_device
+    return fallback_device
+
+
 class StageInputsCapture:
     """Capture layer inputs so processors can reuse cached activations."""
 
@@ -196,6 +216,7 @@ class StageInputsCapture:
         # Parameters attached to the shell root must be ready before embedding forward.
         self._materialize_modules_with_direct_meta_tensors(cur_layer_device)
 
+        input_embeddings = self.gptq_model.get_input_embeddings()
         input_embeddings_name = self.gptq_model.get_input_embeddings_name()
 
         ori_outside_layer_module_devices: Dict[str, torch.device] = {}
@@ -205,7 +226,10 @@ class StageInputsCapture:
             if module is None:
                 continue
 
-            if embed_quant_mode is not None and module_name == input_embeddings_name:
+            if (
+                embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+                and module_name == input_embeddings_name
+            ):
                 # Do not move embeddings to the CPU when quantizing them.
                 continue
 
@@ -230,6 +254,12 @@ class StageInputsCapture:
                         if _has_vision_inputs(example)
                         else cur_layer_device
                     )
+                data_device = _resolve_input_capture_device(
+                    example=example,
+                    embed_quant_mode=embed_quant_mode,
+                    input_embeddings=input_embeddings,
+                    fallback_device=data_device,
+                )
                 example = self.gptq_model.move_input_capture_example(example, data_device)
                 if (
                         embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)

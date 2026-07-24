@@ -16,6 +16,7 @@ from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.torch import HAS_XPU
+from .utils import validate_mixed_precision_3bit_contract
 
 
 # Shared runtime default: prefer accuracy first unless the user explicitly opts out.
@@ -132,27 +133,23 @@ class AwqGEMMTritonLinear(AWQuantLinear):
         if not valid:
             return valid, error
 
+        valid, error = validate_mixed_precision_3bit_contract(
+            kernel_name=cls.__name__,
+            bits=args.get("bits"),
+            desc_act=args.get("desc_act"),
+            sym=args.get("sym"),
+            pack_dtype=args.get("pack_dtype"),
+            dynamic=args.get("dynamic"),
+        )
+        if not valid:
+            return valid, error
+
         if args.get("bits") != 3 and args.get("dtype") == torch.bfloat16:
             return False, NotImplementedError(
                 f"{cls.__name__} BF16 support is currently limited to the 3-bit fused path."
             )
 
         if args.get("bits") == 3:
-            required = {
-                "desc_act": False,
-                "sym": True,
-                "pack_dtype": torch.int32,
-            }
-            for name, expected in required.items():
-                actual = args.get(name)
-                if actual != expected:
-                    return False, NotImplementedError(
-                        f"{cls.__name__} 3-bit fused inference requires `{name}={expected}`, got `{actual}`."
-                    )
-            if args.get("dynamic"):
-                return False, NotImplementedError(
-                    f"{cls.__name__} 3-bit fused inference does not support dynamic per-layer quantization."
-                )
             in_features = args.get("in_features")
             out_features = args.get("out_features")
             group_size = args.get("group_size", 128)
@@ -228,9 +225,6 @@ class AwqGEMMTritonLinear(AWQuantLinear):
         super().post_init()
         if self.bits == 3:
             from ..triton_utils.three_bit import (
-                prepare_marlin_3bit,
-                prepare_trilin_3bit,
-                prepare_trilin_lora_3bit,
                 repack_awq_to_gptq_3bit,
                 unpack_3bit,
             )
@@ -245,47 +239,14 @@ class AwqGEMMTritonLinear(AWQuantLinear):
                 repack_awq_to_gptq_3bit(self.qweight),
                 persistent=False,
             )
-            self._trilin_native_3bit = prepare_trilin_3bit(
-                self._triton_3bit_qweight,
-                self.scales,
-                self.requested_group_size,
-            )
-            lora_workspace = (
-                prepare_trilin_lora_3bit(
-                    self.adapter,
-                    device=self.qweight.device,
-                    in_features=self.in_features,
-                    out_features=self.out_features,
-                    group_size=self.requested_group_size,
-                )
-                if self.adapter is not None and self._trilin_native_3bit
-                else None
-            )
-            if lora_workspace is not None:
-                self.register_buffer("_trilin_lora_workspace", lora_workspace, persistent=False)
-            marlin_state = prepare_marlin_3bit(
-                self._triton_3bit_qweight,
-                self.scales,
-                self.requested_group_size,
-            )
-            if marlin_state is not None:
-                self.register_buffer("_trilin_marlin_qweight", marlin_state.qweight, persistent=False)
-                self.register_buffer("_trilin_marlin_scales", marlin_state.scales, persistent=False)
-                self.register_buffer("_trilin_marlin_workspace", marlin_state.workspace, persistent=False)
-                self.register_buffer("_trilin_marlin_empty", marlin_state.empty, persistent=False)
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
 
         if self.bits == 3:
             from ..triton_utils.three_bit import (
-                LAYOUT_AWQ,
                 LAYOUT_GPTQ,
-                dequantize_3bit,
                 matmul_3bit,
-                matmul_marlin_3bit,
-                matmul_trilin_3bit,
-                matmul_trilin_lora_3bit,
             )
 
             input_dtype = x.dtype
@@ -295,76 +256,18 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             if x_flat.stride(-1) != 1:
                 x_flat = x_flat.contiguous()
 
-            capability = torch.cuda.get_device_capability(self.qweight.device)
-            native_bias_applied = False
-            adapter_applied = False
-            if not self.training and capability >= (8, 0):
-                runtime_qweight = getattr(self, "_triton_3bit_qweight", None)
-                native_qweight = getattr(self, "_trilin_marlin_qweight", None)
-                if (
-                    x_flat.dtype in (torch.float16, torch.bfloat16)
-                    and 0 < x_flat.shape[0] <= 16
-                    and runtime_qweight is not None
-                    and getattr(self, "_trilin_native_3bit", False)
-                ):
-                    trilin_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
-                    fused_out = None
-                    if self.adapter is not None:
-                        fused_out = matmul_trilin_lora_3bit(
-                            self.adapter,
-                            trilin_input,
-                            runtime_qweight,
-                            self.scales,
-                            getattr(self, "_trilin_lora_workspace", None),
-                            bias=self.bias,
-                            group_size=self.requested_group_size,
-                        )
-                    if fused_out is not None:
-                        out = fused_out
-                        native_bias_applied = self.bias is not None
-                        adapter_applied = True
-                    else:
-                        out = matmul_trilin_3bit(
-                            trilin_input,
-                            runtime_qweight,
-                            self.scales,
-                            bias=self.bias,
-                            group_size=self.requested_group_size,
-                        )
-                        native_bias_applied = self.bias is not None
-                elif x_flat.dtype == torch.float16 and native_qweight is not None:
-                    out = matmul_marlin_3bit(
-                        x_flat,
-                        native_qweight,
-                        self._trilin_marlin_scales,
-                        self._trilin_marlin_workspace,
-                        self._trilin_marlin_empty,
-                        k=self.in_features,
-                        n=self.out_features,
-                        bias=self.bias,
-                    )
-                    native_bias_applied = self.bias is not None
-                else:
-                    out = matmul_3bit(
-                        x_flat,
-                        runtime_qweight if runtime_qweight is not None else self.qweight,
-                        self.scales,
-                        layout=LAYOUT_GPTQ if runtime_qweight is not None else LAYOUT_AWQ,
-                        group_size=self.requested_group_size,
-                    )
-            else:
-                weight = dequantize_3bit(
-                    self.qweight,
-                    self.scales,
-                    layout=LAYOUT_AWQ,
-                    group_size=self.requested_group_size,
-                ).to(dtype=compute_dtype)
-                out = torch.matmul(x_flat, weight)
+            out = matmul_3bit(
+                x_flat,
+                self._triton_3bit_qweight,
+                self.scales,
+                layout=LAYOUT_GPTQ,
+                group_size=self.requested_group_size,
+            )
 
-            if self.bias is not None and not native_bias_applied:
+            if self.bias is not None:
                 out = out + self.bias
             out = out.reshape(out_shape)
-            if self.adapter and not adapter_applied:
+            if self.adapter:
                 out = self.adapter.apply(x=x_compute, out=out)
             return out.to(dtype=input_dtype)
 

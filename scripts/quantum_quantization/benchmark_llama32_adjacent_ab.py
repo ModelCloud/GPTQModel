@@ -20,9 +20,108 @@ import threading
 import time
 from typing import Any
 
-import numpy as np
-import psutil
-import torch
+
+def _bootstrap_gpu_idle_preflight() -> None:
+    """Fail before CUDA imports when a formal run requires an exclusive physical GPU."""
+
+    if os.environ.get("GPTQMODEL_REQUIRE_IDLE_GPU") != "1":
+        return
+    if os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID":
+        raise RuntimeError("CUDA_DEVICE_ORDER=PCI_BUS_ID is required for GPU test execution.")
+
+    gpu_uuid = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if not gpu_uuid.startswith("GPU-") or "," in gpu_uuid:
+        raise RuntimeError("CUDA_VISIBLE_DEVICES must contain exactly one physical GPU UUID.")
+
+    sample_count = int(os.environ.get("GPTQMODEL_IDLE_SAMPLES", "3"))
+    sample_interval = float(os.environ.get("GPTQMODEL_IDLE_INTERVAL_SECONDS", "1"))
+    max_memory_mib = int(os.environ.get("GPTQMODEL_IDLE_MAX_MEMORY_MIB", "16"))
+    if sample_count < 1 or sample_interval < 0 or max_memory_mib < 0:
+        raise ValueError("GPU idle-preflight samples, interval, and memory allowance must be non-negative.")
+
+    accepted_samples = []
+    for sample_index in range(sample_count):
+        gpu_result = subprocess.run(
+            [
+                "nvidia-smi",
+                "-i",
+                gpu_uuid,
+                "--query-gpu=index,pci.bus_id,uuid,name,memory.used,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if gpu_result.returncode != 0:
+            raise RuntimeError(f"GPU idle preflight could not resolve {gpu_uuid}: {gpu_result.stderr.strip()}")
+        fields = [field.strip() for field in gpu_result.stdout.strip().split(",")]
+        if len(fields) != 6 or fields[2] != gpu_uuid:
+            raise RuntimeError(f"GPU idle preflight received an invalid inventory row: {gpu_result.stdout.strip()}")
+
+        process_result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if process_result.returncode != 0:
+            raise RuntimeError(f"GPU idle preflight could not query compute processes: {process_result.stderr.strip()}")
+        foreign_processes = [
+            row.strip()
+            for row in process_result.stdout.splitlines()
+            if row.strip() and row.split(",", 1)[0].strip() == gpu_uuid
+        ]
+        memory_used_mib = int(fields[4])
+        utilization_pct = int(fields[5])
+        if foreign_processes or utilization_pct != 0 or memory_used_mib > max_memory_mib:
+            raise RuntimeError(
+                "GPU idle preflight rejected "
+                f"physical_id={fields[0]} pci_bus_id={fields[1]} uuid={gpu_uuid} "
+                f"utilization={utilization_pct}% memory={memory_used_mib}MiB "
+                f"max_memory={max_memory_mib}MiB foreign_processes={foreign_processes}"
+            )
+
+        accepted_samples.append(
+            {
+                "physical_id": int(fields[0]),
+                "pci_bus_id": fields[1],
+                "uuid": fields[2],
+                "name": fields[3],
+                "memory_used_mib": memory_used_mib,
+                "utilization_pct": utilization_pct,
+            }
+        )
+        if sample_index + 1 < sample_count:
+            time.sleep(sample_interval)
+
+    payload = {
+        "accepted": True,
+        "sample_count": sample_count,
+        "sample_interval_seconds": sample_interval,
+        "max_memory_mib": max_memory_mib,
+        "samples": accepted_samples,
+    }
+    os.environ["GPTQMODEL_IDLE_PREFLIGHT_JSON"] = json.dumps(payload, sort_keys=True)
+    final = accepted_samples[-1]
+    print(
+        "GPU idle preflight accepted: "
+        f"physical_id={final['physical_id']} pci_bus_id={final['pci_bus_id']} uuid={final['uuid']} "
+        f"utilization={final['utilization_pct']}% memory={final['memory_used_mib']}MiB "
+        f"samples={sample_count} max_memory={max_memory_mib}MiB",
+        flush=True,
+    )
+
+
+_bootstrap_gpu_idle_preflight()
+
+import numpy as np  # noqa: E402
+import psutil  # noqa: E402
+import torch  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -192,6 +291,7 @@ def require_single_gpu() -> tuple[torch.device, str]:
 
 def hardware_metadata(device: torch.device, gpu_uuid: str) -> dict[str, Any]:
     properties = torch.cuda.get_device_properties(device)
+    idle_preflight = json.loads(os.environ.get("GPTQMODEL_IDLE_PREFLIGHT_JSON", "null"))
     driver = _run_text(
         [
             "nvidia-smi",
@@ -203,7 +303,9 @@ def hardware_metadata(device: torch.device, gpu_uuid: str) -> dict[str, Any]:
     )
     return {
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "cuda_device_order": os.environ.get("CUDA_DEVICE_ORDER"),
         "gpu_uuid": gpu_uuid,
+        "idle_preflight": idle_preflight,
         "device_name": properties.name,
         "compute_capability": f"{properties.major}.{properties.minor}",
         "sm_count": properties.multi_processor_count,
@@ -418,9 +520,14 @@ def evaluate_case(args: argparse.Namespace) -> None:
     sampler.start()
     eval_start = time.perf_counter()
     try:
+        suite_kwargs = {}
+        if args.max_rows is not None:
+            suite_kwargs["max_rows"] = args.max_rows
+        if args.mmlu_subsets:
+            suite_kwargs["subsets"] = list(args.mmlu_subsets)
         result = evaluate(
             model_or_id_or_path=str(args.model),
-            tasks=list(TASKS),
+            tasks=list(args.tasks),
             batch_size=args.eval_batch_size,
             trust_remote_code=False,
             output_path=str(raw_output),
@@ -433,6 +540,7 @@ def evaluate_case(args: argparse.Namespace) -> None:
             },
             apply_chat_template=args.apply_chat_template,
             gen_kwargs="do_sample=false,temperature=0.0,top_p=1.0,top_k=50",
+            suite_kwargs=suite_kwargs or None,
         )
         torch.cuda.synchronize(device)
         eval_wall_seconds = time.perf_counter() - eval_start
@@ -445,8 +553,10 @@ def evaluate_case(args: argparse.Namespace) -> None:
         "model": str(args.model),
         "backend": backend.value,
         "seed": args.seed,
-        "tasks": list(TASKS),
+        "tasks": list(args.tasks),
         "batch_size": args.eval_batch_size,
+        "max_rows": args.max_rows,
+        "mmlu_subsets": list(args.mmlu_subsets or ()),
         "apply_chat_template": args.apply_chat_template,
         "eval_wall_seconds": eval_wall_seconds,
         "metrics": get_eval_task_results(result),
@@ -592,6 +702,9 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--result-json", type=Path, required=True)
     evaluate_parser.add_argument("--seed", type=int, default=SEED)
     evaluate_parser.add_argument("--eval-batch-size", type=int, default=EVAL_BATCH_SIZE)
+    evaluate_parser.add_argument("--max-rows", type=int)
+    evaluate_parser.add_argument("--mmlu-subsets", nargs="+")
+    evaluate_parser.add_argument("--tasks", nargs="+", default=list(TASKS))
     evaluate_parser.add_argument(
         "--apply-chat-template",
         action=argparse.BooleanOptionalAction,

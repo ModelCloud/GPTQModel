@@ -10,6 +10,7 @@ from typing import Any, Optional, Union
 class BACKEND(str, Enum):
     AUTO = "auto"  # choose the optimal local kernel based on quant_config compatibility
     AUTO_TRAINABLE = "auto_trainable"  # choose the optimal trainable local kernel for post-quant training
+    TRILIN = "trilin"  # native CUDA continuous 3-bit kernel for GPTQ and AWQ layouts
 
     # GPTQ kernels
     GPTQ_TORCH_FUSED = "gptq_torch_fused"  # optimized for Intel XPU

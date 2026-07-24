@@ -58,7 +58,7 @@ from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, ScaleSearchConfig
 from gptqmodel.adapter.adapter import EoRAConfig, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
-from gptqmodel.quantization.config import GcMode
+from gptqmodel.quantization.config import GcMode, VramStrategy
 from gptqmodel.utils.linalg_warmup import run_torch_linalg_warmup
 from gptqmodel.utils.threadx import DeviceThreadPool, WarmUpCtx, WarmupTask
 from gptqmodel.utils.torch import torch_empty_cache
@@ -116,9 +116,10 @@ def run_text(command: list[str]) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--label", required=True)
-    parser.add_argument("--physical-gpu", required=True, type=int)
-    parser.add_argument("--expected-pci-bus", required=True)
-    parser.add_argument("--expected-uuid", required=True)
+    parser.add_argument("--base-model", type=Path, default=BASE_MODEL)
+    parser.add_argument("--physical-gpu", required=True, type=int, action="append")
+    parser.add_argument("--expected-pci-bus", required=True, action="append")
+    parser.add_argument("--expected-uuid", required=True, action="append")
     parser.add_argument("--bits", required=True, type=int, choices=(2, 3, 4))
     parser.add_argument("--group-size", required=True, type=int, choices=(32, 64, 128))
     parser.add_argument("--scale-search", required=True, choices=("activation", "disabled"))
@@ -169,35 +170,62 @@ def evaluation_result_path(output: Path, task: str, max_rows: int | None) -> Pat
 def assert_device(args: argparse.Namespace) -> dict[str, Any]:
     if os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID":
         raise RuntimeError("CUDA_DEVICE_ORDER must be PCI_BUS_ID")
-    if torch.cuda.device_count() != 1:
+    expected_count = len(args.expected_uuid)
+    if not (
+        expected_count
+        == len(args.expected_pci_bus)
+        == len(args.physical_gpu)
+    ):
+        raise RuntimeError("Repeat physical GPU, PCI bus, and UUID arguments the same number of times.")
+    if torch.cuda.device_count() != expected_count:
         raise RuntimeError(
-            "Each run must see exactly one CUDA device; actual "
-            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}, count={torch.cuda.device_count()}"
+            f"Expected {expected_count} CUDA devices; actual "
+            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}, count={torch.cuda.device_count()}."
         )
 
-    props = torch.cuda.get_device_properties(0)
-    actual_uuid = str(props.uuid).removeprefix("GPU-").lower()
-    expected_uuid = args.expected_uuid.removeprefix("GPU-").lower()
-    if actual_uuid != expected_uuid:
-        raise RuntimeError(f"Visible GPU UUID mismatch: expected {expected_uuid}, got {actual_uuid}")
-
-    expected_bus_number = int(args.expected_pci_bus.split(":")[-2], 16)
-    actual_bus_number = int(props.pci_bus_id)
-    if actual_bus_number != expected_bus_number:
+    gil_enabled = bool(getattr(sys, "_is_gil_enabled", lambda: True)())
+    if expected_count > 1 and (os.environ.get("PYTHON_GIL") != "0" or gil_enabled):
         raise RuntimeError(
-            f"Visible GPU PCI bus mismatch: expected {expected_bus_number:#x}, got {actual_bus_number:#x}"
+            "Multi-GPU quantization requires starting Python with `PYTHON_GIL=0`; "
+            f"env={os.environ.get('PYTHON_GIL')!r}, gil_enabled={gil_enabled}."
+        )
+
+    devices = []
+    for index, (physical_index, expected_bus, expected_uuid_value) in enumerate(
+        zip(args.physical_gpu, args.expected_pci_bus, args.expected_uuid, strict=True)
+    ):
+        props = torch.cuda.get_device_properties(index)
+        actual_uuid = str(props.uuid).removeprefix("GPU-").lower()
+        expected_uuid = expected_uuid_value.removeprefix("GPU-").lower()
+        if actual_uuid != expected_uuid:
+            raise RuntimeError(
+                f"Visible GPU {index} UUID mismatch: expected {expected_uuid}, got {actual_uuid}."
+            )
+        expected_bus_number = int(expected_bus.split(":")[-2], 16)
+        actual_bus_number = int(props.pci_bus_id)
+        if actual_bus_number != expected_bus_number:
+            raise RuntimeError(
+                f"Visible GPU {index} PCI bus mismatch: "
+                f"expected {expected_bus_number:#x}, got {actual_bus_number:#x}."
+            )
+        devices.append(
+            {
+                "visible_index": index,
+                "requested_physical_index_pci_order": physical_index,
+                "pci_bus_id": expected_bus,
+                "uuid": f"GPU-{actual_uuid}",
+                "name": props.name,
+                "compute_capability": f"{props.major}.{props.minor}",
+                "sm_count": props.multi_processor_count,
+                "memory_bytes": props.total_memory,
+            }
         )
 
     return {
-        "requested_physical_index_pci_order": args.physical_gpu,
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-        "process_cuda_index": 0,
-        "pci_bus_id": args.expected_pci_bus,
-        "uuid": f"GPU-{actual_uuid}",
-        "name": props.name,
-        "compute_capability": f"{props.major}.{props.minor}",
-        "sm_count": props.multi_processor_count,
-        "memory_bytes": props.total_memory,
+        "python_gil_env": os.environ.get("PYTHON_GIL"),
+        "python_gil_enabled": gil_enabled,
+        "devices": devices,
     }
 
 
@@ -290,6 +318,8 @@ def build_quant_config(args: argparse.Namespace, adapter_dir: Path) -> QuantizeC
         if args.eora == "enabled"
         else None
     )
+    visible_devices = [f"cuda:{index}" for index in range(torch.cuda.device_count())]
+    multi_gpu = len(visible_devices) > 1
     return QuantizeConfig(
         quant_method=METHOD.GPTQ,
         format=FORMAT.GPTQ,
@@ -309,6 +339,10 @@ def build_quant_config(args: argparse.Namespace, adapter_dir: Path) -> QuantizeC
         # runtime, overlapping layer N finalizers with layer N+1 quantization
         # reproducibly deadlocks at the next projection group.
         wait_for_submodule_finalizers=True,
+        auto_forward_data_parallel=True,
+        calibration_data_device="balanced" if multi_gpu else None,
+        dense_vram_strategy=VramStrategy.BALANCED if multi_gpu else VramStrategy.EXCLUSIVE,
+        dense_vram_strategy_devices=visible_devices if multi_gpu else None,
     )
 
 
@@ -488,15 +522,15 @@ def quantize(args: argparse.Namespace, output: Path, adapter_dir: Path, manifest
 
     attention = "flash_attention_2" if is_flash_attn_2_available() else "eager"
     print(
-        f"[{args.label}] Loading dense model {BASE_MODEL} on cuda:0 with attention={attention}",
+        f"[{args.label}] Loading dense model {args.base_model} on cuda:0 with attention={attention}",
         flush=True,
     )
     started = time.perf_counter()
     model = GPTQModel.load(
-        str(BASE_MODEL),
+        str(args.base_model),
         quantize_config=quant_config,
         dtype="auto",
-        device_map={"": "cuda:0"},
+        device_map="auto" if torch.cuda.device_count() > 1 else {"": "cuda:0"},
         attn_implementation=attention,
     )
     load_wall_s = time.perf_counter() - started
@@ -650,7 +684,7 @@ def dense_reference(
     print(f"Loading dense BF16 reference for a bounded logit comparison ({attention})", flush=True)
     started = time.perf_counter()
     dense = AutoModelForCausalLM.from_pretrained(
-        str(BASE_MODEL),
+        str(args.base_model),
         dtype=torch.bfloat16,
         device_map={"": "cuda:0"},
         attn_implementation=attention,
@@ -828,8 +862,8 @@ def main() -> None:
             "head": run_text(["git", "rev-parse", "HEAD"]),
             "status_short": run_text(["git", "status", "--short"]),
         },
-        "base_model": str(BASE_MODEL),
-        "base_model_config": json.loads((BASE_MODEL / "config.json").read_text()),
+        "base_model": str(args.base_model),
+        "base_model_config": json.loads((args.base_model / "config.json").read_text()),
         "output": str(output),
         "adapter_output": str(adapter_dir) if args.eora == "enabled" else None,
         "gpu": gpu,

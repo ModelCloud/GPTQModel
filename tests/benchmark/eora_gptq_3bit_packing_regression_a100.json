@@ -214,7 +214,7 @@
     "adapter_fused_eora_calls": 1656,
     "adapter_unfused_vs_torch_prefill_cosine": 0.9999725818634033,
     "adapter_fused_vs_unfused_generated_ids_equal": true,
-    "conclusion": "Native TriLin and fused TriLin plus EoRA agree with eager references; serialization was the failing boundary."
+    "conclusion": "Native Trilin and fused Trilin plus EoRA agree with eager references; serialization was the failing boundary."
   },
   "validation": {
     "full_pack_suite": "18 passed and 4 saturation subtests passed in 33.47 seconds on physical GPU 1",

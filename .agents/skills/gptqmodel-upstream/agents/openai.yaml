@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPTQModel Upstream"
+  short_description: "Publish upstream changes without downstream disclosure"
+  default_prompt: "Use $gptqmodel-upstream to prepare and audit a clean GPTQModel upstream change."

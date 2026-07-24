@@ -9,8 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
+from gptqmodel.nn_modules.qlinear.trilin import AwqTrilinLinear, TrilinLinear
 from gptqmodel.nn_modules.triton_utils.three_bit import pack_3bit
 from gptqmodel.nn_modules.triton_utils.trilin_swiglu import install_trilin_3bit_swiglu
 from gptqmodel.utils.trilin import trilin_matmul, trilin_silu_mul
@@ -145,7 +144,7 @@ def _fake_projection(
     projection._trilin_native_3bit = True
     projection.register_buffer("qweight", qweight)
     projection.register_buffer("scales", scales)
-    if projection_type is AwqGEMMTritonLinear:
+    if projection_type is AwqTrilinLinear:
         projection.register_buffer("_triton_3bit_qweight", qweight)
     projection.forward = MethodType(_fake_projection_forward, projection)
     return projection
@@ -174,7 +173,7 @@ class _LlamaModel(torch.nn.Module):
 
 
 @_SM80_REQUIRED
-@pytest.mark.parametrize("projection_type", [TritonV2Linear, AwqGEMMTritonLinear])
+@pytest.mark.parametrize("projection_type", [TrilinLinear, AwqTrilinLinear])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_trilin_3bit_swiglu_installer_routes_gptq_and_awq_decode_and_falls_back_for_prefill(
     projection_type: type[torch.nn.Module],
@@ -220,8 +219,8 @@ def test_trilin_3bit_swiglu_installer_accepts_exact_mistral_mlp():
     gate_scales = torch.ones((K // GROUP_SIZE, n), device=device, dtype=torch.float16)
     up_scales = torch.ones((K // GROUP_SIZE, n), device=device, dtype=torch.float16)
     mlp = MistralMLP(
-        _fake_projection(TritonV2Linear, gate_qweight, gate_scales),
-        _fake_projection(TritonV2Linear, up_qweight, up_scales),
+        _fake_projection(TrilinLinear, gate_qweight, gate_scales),
+        _fake_projection(TrilinLinear, up_qweight, up_scales),
     )
     model = _LlamaModel(mlp, model_type="mistral").eval()
 

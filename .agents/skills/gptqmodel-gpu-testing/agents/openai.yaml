@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel GPU Testing"
+  short_description: "Run safe, reproducible GPU tests and benchmarks"
+  default_prompt: "Use $gptqmodel-gpu-testing to run this GPU test with PCI bus ordering, an idle preflight, and 60-second live results."

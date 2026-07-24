@@ -7,8 +7,7 @@ import pytest
 import torch
 
 from gptqmodel.adapter.adapter import Lora
-from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
+from gptqmodel.nn_modules.qlinear.trilin import AwqTrilinLinear, TrilinLinear
 from gptqmodel.nn_modules.triton_utils.three_bit import (
     LAYOUT_AWQ,
     LAYOUT_GPTQ,
@@ -26,9 +25,9 @@ GROUP_SIZE = 128
 
 def _require_sm80() -> None:
     if not torch.cuda.is_available():
-        pytest.skip("CUDA required for fused TriLin+LoRA tests")
+        pytest.skip("CUDA required for fused Trilin+LoRA tests")
     if torch.cuda.get_device_capability() != (8, 0):
-        pytest.skip("the fused TriLin+LoRA specialization is enabled only on sm_80")
+        pytest.skip("the fused Trilin+LoRA specialization is enabled only on sm_80")
 
 
 def _raw_case(dtype: torch.dtype, rank: int, *, seed: int = 73):
@@ -135,7 +134,7 @@ def test_trilin_lora_native_rejects_unsupported_rank():
 
 def _quant_linear(layout: str, dtype: torch.dtype, rank: int):
     device = torch.device("cuda")
-    linear_cls = TritonV2Linear if layout == LAYOUT_GPTQ else AwqGEMMTritonLinear
+    linear_cls = TrilinLinear if layout == LAYOUT_GPTQ else AwqTrilinLinear
     module = linear_cls(
         bits=3,
         group_size=GROUP_SIZE,

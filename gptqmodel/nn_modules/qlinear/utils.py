@@ -6,6 +6,46 @@
 import torch
 
 
+def validate_mixed_precision_3bit_contract(
+    *,
+    kernel_name: str,
+    bits: int,
+    desc_act: bool,
+    sym: bool,
+    pack_dtype: torch.dtype,
+    dynamic: dict | None,
+):
+    """Validate only the default or dynamic contracts that actually use 3-bit weights."""
+    contracts = [("default", {})]
+    contracts.extend((pattern, override) for pattern, override in (dynamic or {}).items() if isinstance(override, dict))
+
+    defaults = {
+        "bits": bits,
+        "desc_act": desc_act,
+        "sym": sym,
+        "pack_dtype": pack_dtype,
+    }
+    required = {
+        "desc_act": False,
+        "sym": True,
+        "pack_dtype": torch.int32,
+    }
+    for pattern, override in contracts:
+        effective = {name: override.get(name, value) for name, value in defaults.items()}
+        if effective["bits"] != 3:
+            continue
+        for name, expected in required.items():
+            actual = effective[name]
+            if actual != expected:
+                location = "" if pattern == "default" else f" for layer pattern `{pattern}`"
+                return False, NotImplementedError(
+                    f"{kernel_name} 3-bit fused inference requires `{name}={expected}`, "
+                    f"got `{actual}`{location}."
+                )
+
+    return True, None
+
+
 # Copied from https://github.com/IST-DASLab/marlin/pull/1
 def unpack_4bit_to_32bit_signed(qweight, qzeros):
     # Unpack 4-bit values and interpret them as signed integers

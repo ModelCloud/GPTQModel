@@ -119,6 +119,35 @@ def test_stage_inputs_capture_detects_deepseek_images_key():
     assert not _has_vision_inputs({"input_ids": torch.zeros(1)})
 
 
+def test_stage_inputs_capture_resolves_quantized_embedding_device():
+    from gptqmodel.looper.stage_inputs_capture import _resolve_input_capture_device
+    from gptqmodel.quantization.config import QuantizeEmbed
+
+    input_embeddings = nn.Embedding(8, 4)
+    resolved = _resolve_input_capture_device(
+        example={"input_ids": torch.ones((1, 4), dtype=torch.long)},
+        embed_quant_mode=QuantizeEmbed.INPUT,
+        input_embeddings=input_embeddings,
+        fallback_device=torch.device("meta"),
+    )
+
+    assert resolved == torch.device("cpu")
+
+
+def test_stage_inputs_capture_keeps_fallback_for_output_only_quantization():
+    from gptqmodel.looper.stage_inputs_capture import _resolve_input_capture_device
+    from gptqmodel.quantization.config import QuantizeEmbed
+
+    resolved = _resolve_input_capture_device(
+        example={"input_ids": torch.ones((1, 4), dtype=torch.long)},
+        embed_quant_mode=QuantizeEmbed.OUTPUT,
+        input_embeddings=nn.Embedding(8, 4),
+        fallback_device=torch.device("meta"),
+    )
+
+    assert resolved == torch.device("meta")
+
+
 class _DummyLooperForCapture:
     """Minimal fake ModuleLooper for testing StageInputsCapture."""
 

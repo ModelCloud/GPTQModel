@@ -434,7 +434,7 @@ def prepare_trilin_lora_3bit(
         adapter.lora_A = lora_a.contiguous()
     if not lora_b.is_contiguous():
         adapter.lora_B = lora_b.contiguous()
-    log.info.once("Kernel: Ampere cooperative TriLin+LoRA ranks 32/64/128/256 decode inference is enabled.")
+    log.info.once("Kernel: Ampere cooperative Trilin+LoRA ranks 32/64/128/256 decode inference is enabled.")
     workspace = torch.empty((rank,), dtype=torch.float32, device=device)
     stream = torch.cuda.current_stream(device)
     adapter._trilin_lora_stream_workspaces = {
@@ -487,7 +487,7 @@ def matmul_trilin_lora_3bit(
     bias: torch.Tensor | None = None,
     group_size: int = _TRILIN_GROUP_SIZE,
 ) -> torch.Tensor | None:
-    """Try the one-launch TriLin+LoRA specialization and return ``None`` for the established fallback."""
+    """Try the one-launch Trilin+LoRA specialization and return ``None`` for the established fallback."""
     if not env_flag(_TRILIN_LORA_ENV, default=True) or workspace is None or group_size != _TRILIN_GROUP_SIZE:
         return None
     if input.device.type != "cuda" or input.dtype not in (torch.float16, torch.bfloat16):
@@ -535,7 +535,7 @@ def matmul_trilin_lora_3bit(
 
         return trilin_matmul_lora(input, qweight, scales, lora_a, lora_b, workspace, bias)
     except Exception as exc:
-        log.warn.once(f"Integrated TriLin+LoRA inference failed; using the standard adapter path: {exc}")
+        log.warn.once(f"Integrated Trilin+LoRA inference failed; using the standard adapter path: {exc}")
         return None
 
 

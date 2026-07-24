@@ -82,10 +82,9 @@ def install_trilin_3bit_swiglu(model: torch.nn.Module) -> int:
     if mlp_class_name is None or getattr(config, "hidden_act", None) != "silu":
         return 0
 
-    from ..qlinear.gemm_awq_triton import AwqGEMMTritonLinear
-    from ..qlinear.tritonv2 import TritonV2Linear
+    from ..qlinear.trilin import AwqTrilinLinear, TrilinLinear
 
-    projection_types = (TritonV2Linear, AwqGEMMTritonLinear)
+    projection_types = (TrilinLinear, AwqTrilinLinear)
     installed = 0
     for module in model.modules():
         if module.__class__.__name__ != mlp_class_name or getattr(module, "_gptqmodel_trilin_swiglu", False):

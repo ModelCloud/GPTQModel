@@ -14,6 +14,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
 from .torch import TorchLinear
+from .utils import validate_mixed_precision_3bit_contract
 
 
 log = setup_logger()
@@ -153,22 +154,18 @@ class TritonV2Linear(TorchLinear):
         if not valid:
             return valid, error
 
+        valid, error = validate_mixed_precision_3bit_contract(
+            kernel_name=cls.__name__,
+            bits=args.get("bits"),
+            desc_act=args.get("desc_act"),
+            sym=args.get("sym"),
+            pack_dtype=args.get("pack_dtype"),
+            dynamic=args.get("dynamic"),
+        )
+        if not valid:
+            return valid, error
+
         if args.get("bits") == 3:
-            required = {
-                "desc_act": False,
-                "sym": True,
-                "pack_dtype": torch.int32,
-            }
-            for name, expected in required.items():
-                actual = args.get(name)
-                if actual != expected:
-                    return False, NotImplementedError(
-                        f"{cls.__name__} 3-bit fused inference requires `{name}={expected}`, got `{actual}`."
-                    )
-            if args.get("dynamic"):
-                return False, NotImplementedError(
-                    f"{cls.__name__} 3-bit fused inference does not support dynamic per-layer quantization."
-                )
             in_features = args.get("in_features")
             out_features = args.get("out_features")
             group_size = args.get("group_size", 128)
@@ -213,12 +210,7 @@ class TritonV2Linear(TorchLinear):
             self.g_idx, self.scales, layer_name=type(self).__name__
         )
         if self.bits == 3:
-            from ..triton_utils.three_bit import (
-                prepare_marlin_3bit,
-                prepare_trilin_3bit,
-                prepare_trilin_lora_3bit,
-                unpack_3bit,
-            )
+            from ..triton_utils.three_bit import unpack_3bit
 
             expected_g_idx = torch.arange(
                 self.in_features,
@@ -235,38 +227,12 @@ class TritonV2Linear(TorchLinear):
                 raise ValueError(
                     f"{type(self).__name__}: 3-bit symmetric GPTQ inference requires every zero point to equal 4."
                 )
-            self._trilin_native_3bit = prepare_trilin_3bit(self.qweight, self.scales, self.requested_group_size)
-            lora_workspace = (
-                prepare_trilin_lora_3bit(
-                    self.adapter,
-                    device=self.qweight.device,
-                    in_features=self.in_features,
-                    out_features=self.out_features,
-                    group_size=self.requested_group_size,
-                )
-                if self.adapter is not None and self._trilin_native_3bit
-                else None
-            )
-            if lora_workspace is not None:
-                self.register_buffer("_trilin_lora_workspace", lora_workspace, persistent=False)
-            marlin_state = prepare_marlin_3bit(self.qweight, self.scales, self.requested_group_size)
-            if marlin_state is not None:
-                self.register_buffer("_trilin_marlin_qweight", marlin_state.qweight, persistent=False)
-                self.register_buffer("_trilin_marlin_scales", marlin_state.scales, persistent=False)
-                self.register_buffer("_trilin_marlin_workspace", marlin_state.workspace, persistent=False)
-                self.register_buffer("_trilin_marlin_empty", marlin_state.empty, persistent=False)
 
     def forward(self, x):
         from ..triton_utils.dequant import QuantLinearFunction
 
         if self.bits == 3 and not self.training:
-            from ..triton_utils.three_bit import (
-                LAYOUT_GPTQ,
-                matmul_3bit,
-                matmul_marlin_3bit,
-                matmul_trilin_3bit,
-                matmul_trilin_lora_3bit,
-            )
+            from ..triton_utils.three_bit import LAYOUT_GPTQ, matmul_3bit
 
             capability = torch.cuda.get_device_capability(self.qweight.device)
             if capability >= (8, 0):
@@ -274,60 +240,17 @@ class TritonV2Linear(TorchLinear):
                 x_flat = x.reshape(-1, x.shape[-1])
                 if x_flat.stride(-1) != 1:
                     x_flat = x_flat.contiguous()
-                native_qweight = getattr(self, "_trilin_marlin_qweight", None)
-                adapter_applied = False
-                if (
-                    x_flat.dtype in (torch.float16, torch.bfloat16)
-                    and 0 < x_flat.shape[0] <= 16
-                    and getattr(self, "_trilin_native_3bit", False)
-                ):
-                    trilin_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
-                    fused_out = None
-                    if self.adapter is not None:
-                        fused_out = matmul_trilin_lora_3bit(
-                            self.adapter,
-                            trilin_input,
-                            self.qweight,
-                            self.scales,
-                            getattr(self, "_trilin_lora_workspace", None),
-                            bias=self.bias,
-                            group_size=self.requested_group_size,
-                        )
-                    if fused_out is not None:
-                        out = fused_out.reshape(out_shape)
-                        adapter_applied = True
-                    else:
-                        out = matmul_trilin_3bit(
-                            trilin_input,
-                            self.qweight,
-                            self.scales,
-                            bias=self.bias,
-                            group_size=self.requested_group_size,
-                        ).reshape(out_shape)
-                elif x_flat.dtype == torch.float16 and native_qweight is not None:
-                    out = matmul_marlin_3bit(
-                        x_flat,
-                        native_qweight,
-                        self._trilin_marlin_scales,
-                        self._trilin_marlin_workspace,
-                        self._trilin_marlin_empty,
-                        k=self.in_features,
-                        n=self.out_features,
-                        bias=self.bias,
-                    ).reshape(out_shape)
-                else:
-                    out = matmul_3bit(
-                        x_flat,
-                        self.qweight,
-                        self.scales,
-                        layout=LAYOUT_GPTQ,
-                        group_size=self.requested_group_size,
-                    ).reshape(out_shape)
+                out = matmul_3bit(
+                    x_flat,
+                    self.qweight,
+                    self.scales,
+                    layout=LAYOUT_GPTQ,
+                    group_size=self.requested_group_size,
+                ).reshape(out_shape)
 
-                    if self.bias is not None:
-                        out.add_(self.bias)
-
-                if self.adapter and not adapter_applied:
+                if self.bias is not None:
+                    out.add_(self.bias)
+                if self.adapter:
                     out = self.adapter.apply(x=x, out=out)
 
                 return out.to(dtype=x.dtype)

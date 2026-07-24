@@ -763,6 +763,10 @@ class TorchQuantEmbeddings(TorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.TORCH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20}
+    # Embeddings are selected by module role in create_quant_module(), and must
+    # not be discovered as a general backend: their forward contract accepts
+    # integer token IDs, not hidden states.
+    SUPPORTS_BACKEND_SELECTION = False
     SUPPORTS_BITS = [2, 3, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 96, 128, 192, 256, 384, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]

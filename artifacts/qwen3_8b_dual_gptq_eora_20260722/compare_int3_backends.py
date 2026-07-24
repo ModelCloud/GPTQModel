@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare eager Torch, TriLin, fused TriLin+EoRA, and dense Qwen3 behavior."""
+"""Compare eager Torch, Trilin, fused Trilin+EoRA, and dense Qwen3 behavior."""
 
 # ruff: noqa: E402
 
@@ -237,7 +237,7 @@ def main() -> None:
     del torch_model
     torch_empty_cache()
 
-    print("Loading GPTQ_TRITON/TriLin candidate", flush=True)
+    print("Loading GPTQ_TRITON/Trilin candidate", flush=True)
     trilin_model = GPTQModel.load(
         str(args.model),
         backend=BACKEND.GPTQ_TRITON,

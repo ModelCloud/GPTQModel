@@ -11,6 +11,7 @@ import torch
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.trilin import AwqTrilinLinear, TrilinLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.nn_modules.triton_utils.three_bit import (
     LAYOUT_AWQ,
@@ -166,7 +167,10 @@ def test_trilin_split_k_selector_uses_measured_small_m_split():
     assert select_trilin_split_k(16, 256) == 2
 
 
-@pytest.mark.parametrize("linear_cls", [TritonV2Linear, AwqGEMMTritonLinear])
+@pytest.mark.parametrize(
+    "linear_cls",
+    [TritonV2Linear, AwqGEMMTritonLinear, TrilinLinear, AwqTrilinLinear],
+)
 def test_3bit_backend_capability_accepts_supported_group_sizes(linear_cls):
     common = {
         "bits": BITS,
@@ -372,7 +376,7 @@ def test_3bit_quant_linear_wrapper_matches_dense_reference(layout: str, m: int):
     pytest.importorskip("triton")
     torch.manual_seed(19)
     device = torch.device("cuda")
-    k, n = 256, 96
+    k, n = 256, 128
     codes, packed, scales = _packed_buffers(
         layout=layout,
         k=k,
@@ -385,7 +389,7 @@ def test_3bit_quant_linear_wrapper_matches_dense_reference(layout: str, m: int):
     ).to(device)
     bias = torch.linspace(-0.25, 0.25, n, dtype=torch.float16, device=device)
 
-    linear_cls = TritonV2Linear if layout == LAYOUT_GPTQ else AwqGEMMTritonLinear
+    linear_cls = TrilinLinear if layout == LAYOUT_GPTQ else AwqTrilinLinear
     module = linear_cls(
         bits=BITS,
         group_size=GROUP_SIZE,
@@ -417,6 +421,43 @@ def test_3bit_quant_linear_wrapper_matches_dense_reference(layout: str, m: int):
 
     assert actual.shape == expected.shape
     torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.25)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Trilin BF16 load test")
+@pytest.mark.parametrize("layout", [LAYOUT_GPTQ, LAYOUT_AWQ])
+def test_trilin_post_init_normalizes_bf16_loaded_scales(layout: str):
+    pytest.importorskip("triton")
+    device = torch.device("cuda")
+    k, n = 256, 128
+    _, packed, scales = _packed_buffers(layout=layout, k=k, n=n, device=device)
+    zeros = pack_3bit(
+        torch.full((k // GROUP_SIZE, n), ZERO, dtype=torch.int32),
+        axis=1,
+    ).to(device)
+
+    linear_cls = TrilinLinear if layout == LAYOUT_GPTQ else AwqTrilinLinear
+    module = linear_cls(
+        bits=BITS,
+        group_size=GROUP_SIZE,
+        sym=True,
+        desc_act=False,
+        in_features=k,
+        out_features=n,
+        bias=False,
+        pack_dtype=torch.int32,
+        register_buffers=True,
+    ).to(device)
+    module.qweight.copy_(packed)
+    module.qzeros.copy_(zeros)
+    module.scales = scales.to(torch.bfloat16)
+    if layout == LAYOUT_GPTQ:
+        module.g_idx.copy_(torch.arange(k, dtype=torch.int32, device=device) // GROUP_SIZE)
+
+    module.post_init()
+
+    assert module.scales.dtype == torch.float16
+    assert module.scales.is_contiguous()
+    assert module._trilin_native_3bit
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for 3-bit backend quality test")
@@ -469,7 +510,7 @@ def test_3bit_backend_quality_matches_eager_torch_reference(
     reference.post_init()
     reference.eval()
 
-    linear_cls = TritonV2Linear if layout == LAYOUT_GPTQ else AwqGEMMTritonLinear
+    linear_cls = TrilinLinear if layout == LAYOUT_GPTQ else AwqTrilinLinear
     candidate = linear_cls(
         bits=BITS,
         group_size=GROUP_SIZE,
@@ -589,7 +630,10 @@ def test_grouped_3bit_backend_matches_torch_and_fp32_references(
     reference.post_init()
     reference.eval()
 
-    linear_cls = TritonV2Linear if layout == LAYOUT_GPTQ else AwqGEMMTritonLinear
+    if group_size == -1:
+        linear_cls = TritonV2Linear if layout == LAYOUT_GPTQ else AwqGEMMTritonLinear
+    else:
+        linear_cls = TrilinLinear if layout == LAYOUT_GPTQ else AwqTrilinLinear
     candidate = linear_cls(
         bits=BITS,
         group_size=group_size,
@@ -610,7 +654,8 @@ def test_grouped_3bit_backend_matches_torch_and_fp32_references(
     candidate.post_init()
     candidate.eval()
 
-    assert candidate._trilin_native_3bit == (group_size in {16, 32, 64, 96, 192, 256, 384, 512, 1024})
+    if group_size != -1:
+        assert candidate._trilin_native_3bit
     x = torch.randn((1, m, k), dtype=dtype, device=device)
     with torch.inference_mode():
         torch_reference = reference(x)
@@ -692,7 +737,7 @@ def test_3bit_quant_linear_uses_nonpersistent_native_cache(
     ).to(device)
     bias = torch.linspace(-0.25, 0.25, n, dtype=torch.float16, device=device)
 
-    linear_cls = TritonV2Linear if layout == LAYOUT_GPTQ else AwqGEMMTritonLinear
+    linear_cls = TrilinLinear if layout == LAYOUT_GPTQ else AwqTrilinLinear
     module = linear_cls(
         bits=BITS,
         group_size=GROUP_SIZE,

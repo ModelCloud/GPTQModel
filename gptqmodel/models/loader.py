@@ -1670,7 +1670,9 @@ def ModelLoader(cls):
         else:
             qlinear_kernel = select_quant_linear(
                 bits=qcfg.runtime_bits,
-                dynamic=qcfg.dynamic,
+                # make_quant already selected dynamic modules independently;
+                # this value represents the default model contract.
+                dynamic=None,
                 group_size=qcfg.group_size,
                 desc_act=qcfg.desc_act,
                 sym=qcfg.sym,
@@ -1697,7 +1699,15 @@ def ModelLoader(cls):
 
         model.eval()
 
-        if qcfg.runtime_bits == 3 and qcfg.group_size == 128 and not qcfg.desc_act and qcfg.sym:
+        from ..nn_modules.qlinear.trilin import AwqTrilinLinear, TrilinLinear
+
+        if (
+            qlinear_kernel in (TrilinLinear, AwqTrilinLinear)
+            and qcfg.runtime_bits == 3
+            and qcfg.group_size == 128
+            and not qcfg.desc_act
+            and qcfg.sym
+        ):
             from ..nn_modules.triton_utils.trilin_qkv import install_trilin_3bit_qkv
             from ..nn_modules.triton_utils.trilin_swiglu import install_trilin_3bit_swiglu
 
