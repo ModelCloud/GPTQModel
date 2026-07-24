@@ -24,7 +24,7 @@ from ..quantization import QuantizeConfig
 from ..quantization.config import FallbackStrategy, ScaleSearchConfig, SmoothMSE
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_sync
+from ..utils.torch import TORCH_GTE_28, torch_compile, torch_sync
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gar import (
     compose_final_perm,
@@ -154,6 +154,35 @@ def get_number_of_rows_and_cols(layer: nn.Module):
     else:
         # weight shape is (n_out, n_in)
         return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
+
+
+@torch.inference_mode()
+def _hessian_inverse_try_cholesky(H: torch.Tensor, diag_delta: torch.Tensor):
+    """Add a diagonal delta to a clone of H and attempt its Cholesky decomposition.
+
+    Returns the lower Cholesky factor ``L`` and a 0-dim boolean ``success``
+    tensor (``info == 0``) without using exceptions or Python scalar control flow.
+    """
+    H_eff = H.clone()
+    H_eff.diagonal().add_(diag_delta)
+    L, info = torch.linalg.cholesky_ex(H_eff, upper=False)
+    success = (info == 0).view(())
+    return L, success
+
+
+@torch.inference_mode()
+def _hessian_inverse_factor(L: torch.Tensor):
+    """Return the upper Cholesky factor of ``H^{-1}`` from the lower Cholesky
+    factor ``L`` of ``H``, matching the original ``cholesky_inverse`` + ``cholesky``
+    sequence: ``U^T U = H^{-1}`` with ``U`` upper triangular.
+    """
+    return torch.linalg.cholesky(torch.cholesky_inverse(L), upper=True)
+
+
+# Compile the heavy Cholesky steps so the dense Hessian inverse path is
+# graph-break free and safe under GIL=0 free-threading.
+_HESSIAN_INVERSE_TRY = torch_compile(_hessian_inverse_try_cholesky, backend="inductor", fullgraph=False)
+_HESSIAN_INVERSE_FACTOR = torch_compile(_hessian_inverse_factor, backend="inductor", fullgraph=False)
 
 
 class GPTQ:
@@ -802,12 +831,12 @@ class GPTQ:
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
                     try:
                         result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
-                    except:
+                    except Exception:
                         log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 1/2 in 0.25s")
                         time.sleep(0.25)
                         try:
                             result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
-                        except:
+                        except Exception:
                             log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 2/2 in 0.75s")
                             time.sleep(0.75)
                             result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
@@ -1128,18 +1157,17 @@ class GPTQ:
 
     @torch.inference_mode()
     def _compute_hessian_inverse_uncached(self, H: torch.Tensor):
-        # Capture a writable view of the Hessian diagonal so we can restore it between attempts.
-        diag_view = H.diagonal()
-        orig_diag = diag_view.clone()
+        # Keep the original Hessian untouched; only a clone's diagonal is modified.
+        orig_diag = H.diagonal().clone()
 
         # When a block is numerically singular, pure damping can stall at 1.0.
         # Prepare a tiny diagonal floor (relative to the largest entry) that we
         # only inject if the normal damping loop fails. Keeping the scale near 1e-6
         # of the dominant entry keeps the bias negligible for healthy layers while
         # still rescuing pathological Hessian blocks.
-        base_abs_max = torch.max(orig_diag.abs()).item()
-        if not math.isfinite(base_abs_max) or base_abs_max == 0.0:
-            base_abs_max = 1.0
+        base_abs_max = torch.max(orig_diag.abs())
+        finite_nonzero = torch.isfinite(base_abs_max) & (base_abs_max != 0)
+        base_abs_max = torch.where(finite_nonzero, base_abs_max, base_abs_max.new_ones(()) * 1.0)
         floor_base = base_abs_max * 1e-6
         max_floor_attempts = 6
         used_damp = self.qcfg.damp_percent
@@ -1150,7 +1178,7 @@ class GPTQ:
             if attempt == 0:
                 current_diag = orig_diag
             else:
-                floor_increment = floor_base * math.pow(10.0, attempt - 1)
+                floor_increment = floor_base * (10.0 ** (attempt - 1))
                 current_diag = torch.clamp(orig_diag + floor_increment, min=floor_increment)
                 if attempt == 1:
                     log.warn(
@@ -1159,8 +1187,7 @@ class GPTQ:
                     log.warn(
                         f"Quantization: Module `{self.name}` -> Increasing Hessian diagonal floor to +{floor_increment:.2e}.")
 
-            diag_view.copy_(current_diag)
-            mean = torch.mean(current_diag)
+            mean = current_diag.mean()
             damp = self.qcfg.damp_percent
 
             damp_recovery_started = False
@@ -1168,15 +1195,43 @@ class GPTQ:
             recovery_last_damp = None
 
             while 0 < damp < 1:
-                try:
-                    diag_view.add_(damp * mean)
-                    if H.device.type == "npu":
-                        Hinv_result = npu_inverse_cholesky_factor(H)
-                    else:
-                        H2 = torch.linalg.cholesky(H)
-                        Hinv_result = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
-                        del H2
-                    diag_view.copy_(current_diag)
+                # Build the diagonal adjustment for this damping attempt.
+                diag_delta = (current_diag - orig_diag) + damp * mean
+
+                if H.device.type == "npu":
+                    # NPU uses a dedicated eager path until a compiled equivalent is validated.
+                    H_eff = H.clone()
+                    H_eff.diagonal().add_(diag_delta)
+                    try:
+                        Hinv_result = npu_inverse_cholesky_factor(H_eff)
+                        used_damp = damp
+                        if damp_recovery_started:
+                            log.warn(
+                                f"Quantization: Module `{self.name}` -> Damp recovery succeeded at `damp_percent={damp:.5f}` "
+                                f"(started at {recovery_initial_damp:.5f})."
+                            )
+                        return Hinv_result, used_damp
+                    except torch._C._LinAlgError as e:
+                        last_error = e
+                        if self.qcfg.damp_auto_increment != 0:
+                            if not damp_recovery_started:
+                                damp_recovery_started = True
+                                recovery_initial_damp = damp
+                                log.warn(
+                                    f"Quantization: Module `{self.name}` -> Starting damp recovery at "
+                                    f"`damp_percent={damp:.5f}`, increment step `{self.qcfg.damp_auto_increment:.5f}`."
+                                )
+                            damp += self.qcfg.damp_auto_increment
+                            recovery_last_damp = damp
+                        else:
+                            log.warn(
+                                f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with `damp_percent={damp:.5f}` and no auto increment configured.")
+                            break
+                    continue
+
+                L, success = _HESSIAN_INVERSE_TRY(H, diag_delta)
+                if success.item():
+                    Hinv_result = _HESSIAN_INVERSE_FACTOR(L)
                     used_damp = damp
                     if damp_recovery_started:
                         log.warn(
@@ -1184,23 +1239,21 @@ class GPTQ:
                             f"(started at {recovery_initial_damp:.5f})."
                         )
                     return Hinv_result, used_damp
-                except torch._C._LinAlgError as e:
-                    last_error = e
-                    diag_view.copy_(current_diag)
-                    if self.qcfg.damp_auto_increment != 0:
-                        if not damp_recovery_started:
-                            damp_recovery_started = True
-                            recovery_initial_damp = damp
-                            log.warn(
-                                f"Quantization: Module `{self.name}` -> Starting damp recovery at "
-                                f"`damp_percent={damp:.5f}`, increment step `{self.qcfg.damp_auto_increment:.5f}`."
-                            )
-                        damp += self.qcfg.damp_auto_increment
-                        recovery_last_damp = damp
-                    else:
+
+                if self.qcfg.damp_auto_increment != 0:
+                    if not damp_recovery_started:
+                        damp_recovery_started = True
+                        recovery_initial_damp = damp
                         log.warn(
-                            f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with `damp_percent={damp:.5f}` and no auto increment configured.")
-                        break
+                            f"Quantization: Module `{self.name}` -> Starting damp recovery at "
+                            f"`damp_percent={damp:.5f}`, increment step `{self.qcfg.damp_auto_increment:.5f}`."
+                        )
+                    damp += self.qcfg.damp_auto_increment
+                    recovery_last_damp = damp
+                else:
+                    log.warn(
+                        f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with `damp_percent={damp:.5f}` and no auto increment configured.")
+                    break
 
             if damp_recovery_started:
                 final_damp = recovery_last_damp if recovery_last_damp is not None else damp
@@ -1275,10 +1328,15 @@ class GPTQ:
             use_hessian = True
             self.finalize_hessian(target_device=target_device)
 
-        # Temporarily disable torch.compile due to compatibility issues with torch 2.8
-        # Will re-enable once the issue is fixed
-        # if not TORCH_GTE_28 and not self.qcfg.mock_quantization:
-        #     self.hessian_inverse = torch_compile(self.hessian_inverse)
+        # The top-level `hessian_inverse` method (cache/locks and the data-dependent
+        # damp-recovery loop) is not compiled: torch.compile cannot represent the
+        # recovery loop without graph breaks. The heavy Cholesky/inverse steps
+        # inside `_compute_hessian_inverse_uncached` are compiled via module-level
+        # helpers, so the dense Hessian path is still graph-break-free on GPU.
+        # The guard is kept for older PyTorch builds where compiling the whole
+        # method was previously enabled.
+        if not TORCH_GTE_28 and not self.qcfg.mock_quantization:
+            self.hessian_inverse = torch_compile(self.hessian_inverse)
 
         if self.qcfg.mock_quantization:
             # Use simplified hessian inverse (identity matrix)
@@ -1855,20 +1913,46 @@ class GPTQ:
 
                             self.quantizer = groups[idx // self.qcfg.group_size]
 
-                    q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                    # Inline the quantizer.quantize() formula to avoid the
+                    # per-column Python method-call overhead and keep the
+                    # column loop in pure eager tensor dispatch.
+                    q_scale = self.quantizer.scale
+                    q_zero = self.quantizer.zero
+                    q_maxq = getattr(self.quantizer, "_maxq_value", int(self.quantizer.maxq.item()))
+                    q_requires_groupwise = self.quantizer.requires_groupwise_processing()
+                    w_col = w.unsqueeze(1)
+                    if q_maxq < 0:
+                        q = (
+                            (w_col > q_scale / 2).to(w_col.dtype) * q_scale
+                            + (w_col < q_zero / 2).to(w_col.dtype) * q_zero
+                        )
+                    elif q_requires_groupwise:
+                        q = q_scale * torch.clamp(
+                            torch.round(w_col / q_scale), -q_maxq, q_maxq
+                        )
+                    else:
+                        q = q_scale * (
+                            torch.clamp(
+                                torch.round(w_col / q_scale) + q_zero, 0, q_maxq
+                            )
+                            - q_zero
+                        )
+                    q = q.flatten()
                     Q1[:, i] = q
                     if Hinv is not None:
                         # Reuse the exact same column diff for loss reporting
                         # and GPTQ error feedback instead of recomputing w - q.
                         diff = w - q
-                        loss_sum.add_(torch.sum(diff ** 2 / d**2) / 2)
+                        loss_sum.add_(torch.sum(diff * diff / (d * d)) / 2)
                         err1 = diff / d
-                        W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                        W1[:, i:] = torch.addr(W1[:, i:], err1, Hinv1[i, i:], alpha=-1.0)
                         Err1[:, i] = err1
 
                 Q[:, i1:i2] = Q1
                 if Hinv is not None:
-                    W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                    W[:, i2:] = torch.addmm(
+                        W[:, i2:], Err1, Hinv[i1:i2, i2:], beta=1.0, alpha=-1.0
+                    )
 
                 del W1, Q1, Err1
                 if Hinv is not None:
