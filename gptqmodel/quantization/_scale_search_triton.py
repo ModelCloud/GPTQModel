@@ -234,20 +234,23 @@ if _triton_available():
     @triton.jit
     def _scale_search_hessian_kernel(
         x_ptr,
-        xmin_ptr,
-        xmax_ptr,
+        scale_ptr,
+        zero_ptr,
         hessian_ptr,
         loss_out_ptr,
         rows,
         num_groups,
         group_size,
         maxq: tl.float32,
-        grid: tl.int32,
         candidate_count: tl.int32,
-        sym: tl.int32,
         x_stride_r: tl.int32,
         x_stride_g: tl.int32,
-        min_stride_r: tl.int32,
+        scale_stride_r: tl.int32,
+        scale_stride_g: tl.int32,
+        scale_stride_c: tl.int32,
+        zero_stride_r: tl.int32,
+        zero_stride_g: tl.int32,
+        zero_stride_c: tl.int32,
         h_stride_g: tl.int32,
         h_stride_r: tl.int32,
         h_stride_c: tl.int32,
@@ -280,27 +283,15 @@ if _triton_available():
         h_mask = col_mask[:, None] & col_mask[None, :]
         h = tl.load(hessian_ptr + g * h_stride_g + h_offs, mask=h_mask, other=0.0)
 
-        min_offsets = row_idx * min_stride_r + g
-        xmin = tl.load(xmin_ptr + min_offsets, mask=row_mask, other=-1.0)
-        xmax = tl.load(xmax_ptr + min_offsets, mask=row_mask, other=1.0)
+        scale_base = scale_ptr + g * scale_stride_g + row_idx * scale_stride_r
+        zero_base = zero_ptr + g * zero_stride_g + row_idx * zero_stride_r
 
-        grid_f = tl.cast(grid, tl.float32)
         maxq_f = maxq
-        sym_b = sym != 0
-        const_zero_sym = (maxq_f + 1.0) / 2.0
 
         loss_base = loss_out_ptr + g * loss_stride_g + row_idx * loss_stride_r
         for c in tl.range(0, candidate_count):
-            p = 1.0 - tl.cast(c, tl.float32) / grid_f
-            xmin_p = p * xmin
-            xmax_p = p * xmax
-            scale_c = (xmax_p - xmin_p) / maxq_f
-
-            zero_c = tl.where(
-                sym_b,
-                const_zero_sym,
-                _round_half_to_even(-xmin_p / scale_c),
-            )
+            scale_c = tl.load(scale_base + c * scale_stride_c, mask=row_mask, other=1.0)
+            zero_c = tl.load(zero_base + c * zero_stride_c, mask=row_mask, other=0.0)
 
             q_raw = _round_half_to_even(x / scale_c[:, None])
             q_int = q_raw + zero_c[:, None]
@@ -345,28 +336,45 @@ if _triton_available():
                 torch.empty((rows, num_groups), dtype=torch.float32, device=device),
             )
 
+        # Precompute scales/zeros with the same int64 maxq tensor as the eager
+        # fallback so the Triton kernel quantizes identically to the PyTorch path.
+        maxq_t = torch.tensor(int(maxq), device=device, dtype=torch.int64)
+        shrink = torch.arange(candidate_count, device=device, dtype=torch.float32)
+        shrink = 1.0 - shrink / grid
+        p = shrink.view(-1, 1, 1)
+        xmin_all = p * xmin.unsqueeze(0)
+        xmax_all = p * xmax.unsqueeze(0)
+        scale_all = (xmax_all - xmin_all) / maxq_t
+        if sym:
+            zero_all = torch.full_like(scale_all, (maxq_t + 1.0) / 2.0)
+        else:
+            zero_all = torch.round(-xmin_all / scale_all)
+
+        scale_perm = scale_all.permute(1, 2, 0)
+        zero_perm = zero_all.permute(1, 2, 0)
+
         loss_out = torch.empty((rows, num_groups, candidate_count), dtype=torch.float32, device=device)
 
-        # Use a tight tile that matches the group size so the batched matrix
-        # multiply in the Hessian/Hybrid objective does not pad tiny groups to
-        # the full 128-column block size.
         block_col = group_size
         _scale_search_hessian_kernel[(total_programs,)](
             x,
-            xmin,
-            xmax,
+            scale_perm,
+            zero_perm,
             prepared_hessian,
             loss_out,
             rows,
             num_groups,
             group_size,
             float(maxq),
-            int(grid),
             int(candidate_count),
-            int(sym),
             x.stride(0),
             x.stride(1),
-            xmin.stride(0),
+            scale_perm.stride(0),
+            scale_perm.stride(1),
+            scale_perm.stride(2),
+            zero_perm.stride(0),
+            zero_perm.stride(1),
+            zero_perm.stride(2),
             prepared_hessian.stride(0),
             prepared_hessian.stride(1),
             prepared_hessian.stride(2),
@@ -384,20 +392,14 @@ if _triton_available():
 
         # Recompute the reference scale/zero only for the short-listed candidates.
         # Use the same int64 maxq tensor as the eager precompute.
-        maxq_t = torch.tensor(int(maxq), device=device, dtype=torch.int64)
         maxq_f = float(maxq)
-        p = 1.0 - topk_indices.float() / grid
-        xmin_k = xmin.unsqueeze(-1) * p
-        xmax_k = xmax.unsqueeze(-1) * p
-        scale_k = (xmax_k - xmin_k) / maxq_t
-        if sym:
-            zero_k = torch.full_like(scale_k, (maxq_t + 1) / 2)
-        else:
-            zero_k = torch.round(-xmin_k / scale_k)
+        scale_perm_k = scale_perm.gather(2, topk_indices)
+        zero_perm_k = zero_perm.gather(2, topk_indices)
 
+        # scale_k/zero_k are [rows, num_groups, k]; expand for per-element work.
         x_exp = x.unsqueeze(2).expand(-1, -1, k, -1)  # [rows, num_groups, k, group_size]
-        scale_k_exp = scale_k.unsqueeze(-1)
-        zero_k_exp = zero_k.unsqueeze(-1)
+        scale_k_exp = scale_perm_k.unsqueeze(-1)
+        zero_k_exp = zero_perm_k.unsqueeze(-1)
         q = torch.clamp(torch.round(x_exp / scale_k_exp) + zero_k_exp, 0.0, maxq_f)
         dequant = (q - zero_k_exp) * scale_k_exp
         error = dequant - x_exp
@@ -408,8 +410,8 @@ if _triton_available():
 
         best_local = losses_k.argmin(dim=-1)
 
-        final_scale = scale_k.gather(2, best_local.unsqueeze(-1)).squeeze(-1)
-        final_zero = zero_k.gather(2, best_local.unsqueeze(-1)).squeeze(-1)
+        final_scale = scale_perm_k.gather(2, best_local.unsqueeze(-1)).squeeze(-1)
+        final_zero = zero_perm_k.gather(2, best_local.unsqueeze(-1)).squeeze(-1)
         return final_scale, final_zero
 
 else:

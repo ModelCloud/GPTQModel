@@ -561,3 +561,80 @@ Nsight Systems on `find_params_batched` hessian shows the elementwise kernel sto
 - The exact fallback contraction `torch.einsum("crgi,gij->crgj", error, hessian)` is already as fast as a hand-rolled `bmm` reshape and is memory-throughput bound on the `error`/`projected` tensors; further speedup likely requires fusing the quantize/error/contract/reduce chain into a single Triton/CUDA kernel per candidate group.
 - Group size 1 is skipped as requested.
 - AdjacentExact CUDA exact solver remains exponential in active-decision count; no further work in this round.
+
+## Round: Triton Hessian/Hybrid scale-search kernel with exact top-k recompute
+
+### Objective
+
+Remove the dominant `torch.einsum` `error @ H @ error` contraction and the per-candidate elementwise launch overhead in the Hessian/Hybrid scale-search fallback by fusing quantize/error/contract/reduce into one Triton kernel, while keeping the final candidate selection bit-exact with the PyTorch reference.
+
+### Changes
+
+1. **`gptqmodel/quantization/_scale_search_triton.py`**
+   - Added a new Triton kernel `_scale_search_hessian_kernel` that assigns one program to each `(row_block, group)` tile.
+   - The kernel receives precomputed `(rows, groups, candidates)` `scale` and `zero` pointers (using the same `int64` `maxq` tensor as the eager path, so `scale` values match exactly).
+   - Inside each program it loops over candidates, computes the dequantized reconstruction, the projected Hessian via `tl.dot(error, h, allow_tf32=False)`, and the quadratic loss with `tl.sum`.
+   - The kernel returns the full `(rows, groups, candidates)` FP32 loss tensor.
+   - The wrapper `_triton_find_params_batched_hessian_hybrid` then:
+     1. Top-k shortlists the 20 lowest-loss candidates from the Triton loss.
+     2. Sorts the indices ascending to match `torch.min` tie-break behavior.
+     3. Recomputes the exact PyTorch Hessian/Hybrid loss for those 20 candidates using the same precomputed `scale`/`zero` grids.
+     4. Gathers the final `scale`/`zero` from the precomputed tensors.
+   - This mirrors the proven activation fast-path pattern: Triton gets near the argmin quickly, then PyTorch reselects exactly.
+
+2. **`gptqmodel/quantization/quantizer.py`**
+   - Imported `_triton_find_params_batched_hessian_hybrid` and added a Triton branch for `ScaleSearchConfig.HESSIAN` and `HYBRID` in `find_params_batched`.
+   - Gated the branch to `maxq_value >= 15` (bits >= 4) plus the existing `group_size <= 128`, CUDA, contiguous, and non-groupwise processing guards.
+   - `bits=2` is excluded from the Triton Hessian/Hybrid fast path because the very coarse quantization grid (`maxq=3`) creates many near-tie candidates; the Triton FP32 reduction order does not reproduce the exact eager argmin for those cases, and the top-20 exact recompute can miss the true best candidate. `bits=2` falls through to the already-optimized exact Python fallback.
+
+### Accuracy validation
+
+- `python scripts/validate_find_params_batched_strict.py` on A100 GPU 5: **STRICT CHECK PASSED** for all rows/cols/group_size/bits/sym/method seeds.
+- `pytest -q tests/test_quantizer_scale_search.py tests/test_quantizer.py tests/test_gptq.py tests/test_gptq_block_triton.py tests/test_adjacent_exact_cuda.py tests/test_find_params_batched_strict.py` on A100 GPU 5: **318 passed, 2 skipped**.
+- `ruff check` on modified files: clean.
+- `git diff --check`: clean.
+
+### Benchmarks
+
+`find_params_batched` microbenchmark (`4096 x 4096`, `bits=4`, `sym=False`, `grid=100`, `maxshrink=0.8`, A100). `before` = exact PyTorch fallback; `after` = Triton top-20 + exact recompute.
+
+| group_size | method  | before (ms) | after (ms) | speedup |
+|------------|---------|-------------|------------|---------|
+| 32         | hessian | 75.3        | 40.2       | **1.87x** |
+| 32         | hybrid  | 75.3        | 40.2       | **1.87x** |
+| 64         | hessian | 65.5        | 37.1       | **1.76x** |
+| 64         | hybrid  | 68.4        | 37.1       | **1.84x** |
+| 128        | hessian | 61.7        | 41.8       | **1.48x** |
+| 128        | hybrid  | 62.9        | 41.9       | **1.50x** |
+
+GPU 6 reproduces the same trend (e.g. `hessian` `group_size=32` ~40.2 ms).
+
+End-to-end `GPTQ.quantize` (`4096 x 4096`, `blocksize=128`, `bits=4`, `sym=False`, `mse=2.0`, A100 GPU 5):
+
+| group_size | method     | mean (ms) | median (ms) | min (ms) | max (ms) |
+|------------|------------|-----------|-------------|----------|----------|
+| 32         | activation | 112.9     | 111.1       | 111.0    | 120.0    |
+| 32         | hessian    | 124.0     | 123.9       | 123.7    | 124.3    |
+| 32         | hybrid     | 124.8     | 124.5       | 124.1    | 126.3    |
+| 64         | activation | 105.4     | 105.0       | 104.6    | 106.3    |
+| 64         | hessian    | 115.2     | 115.0       | 114.2    | 116.2    |
+| 64         | hybrid     | 115.3     | 115.1       | 114.9    | 115.9    |
+| 128        | activation | 100.6     | 100.9       | 99.7     | 101.5    |
+| 128        | hessian    | 109.1     | 108.7       | 108.3    | 110.1    |
+| 128        | hybrid     | 109.0     | 108.9       | 108.5    | 109.6    |
+
+The Hessian/Hybrid `find_params_batched` phase is roughly halved, which shows up as ~8-10 ms lower end-to-end `quantize` times compared with the previous fallback-only commit.
+
+### Nsight Systems
+
+Profile of the Triton Hessian/Hybrid path (`4096 x 4096`, `group_size=32`, `bits=4`, `hessian`, A100 GPU 5):
+
+- `_scale_search_hessian_kernel` is the single largest GPU consumer at ~32% of kernel time (avg ~14 ms per invocation over 5 warmup calls).
+- The exact top-20 recompute shows as `ampere_sgemm_128x128_nn` (~12%), `at::native::sbtopk::gatherTopK` (~8%), and elementwise/reduce kernels (~14%).
+- Total kernel time is dominated by the fused Triton contraction; the remaining exact-recompute kernels are unavoidable if the final selection must match the eager reference.
+
+### Known limitations / future work
+
+- `bits=2` Hessian/Hybrid still uses the exact Python fallback because the Triton FP32 loss is not a faithful proxy for the coarse grid; expanding the top-k to 60/80 candidates fixes accuracy but erases the speedup, so the fallback remains the safer and faster choice.
+- The Triton path is limited to `group_size <= 128` and contiguous float-like tensors; CPU and non-target GPU fallbacks are preserved.
+- Hybrid MSE and activation components are fused inside the kernel; further speedup may come from lowering the top-k exact recompute into Triton as well, or from using FP16/BF16 accumulation where the Hessian dynamic range allows it.

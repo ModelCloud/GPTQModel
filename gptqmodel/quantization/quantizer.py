@@ -12,7 +12,10 @@ import torch.nn as nn
 
 from ..utils.logger import setup_logger
 from .config import BaseQuantizeConfig, ScaleSearchConfig, _normalize_quant_bits, resolve_quant_format
-from ._scale_search_triton import _triton_find_params_batched_activation
+from ._scale_search_triton import (
+    _triton_find_params_batched_activation,
+    _triton_find_params_batched_hessian_hybrid,
+)
 
 
 log = setup_logger()
@@ -542,11 +545,36 @@ class Quantizer(nn.Module):
                 except Exception as e:
                     log.warn(f"Triton activation scale-search failed, falling back: {e}")
 
-            # Hessian/Hybrid objectives have a flat loss landscape, so the
-            # approximate Triton top-k can miss the true best candidate on
-            # ill-conditioned dense Hessians. Fall through to the exact
-            # candidate-chunk loop, which already vectorizes all candidates
-            # for these methods in one launch.
+            if (
+                os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON", "1") != "0"
+                and _triton_find_params_batched_hessian_hybrid is not None
+                and method in (ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID)
+                and prepared_hessian is not None
+                and not self.requires_groupwise_processing()
+                and group_size <= 128
+                and maxq_value >= 15
+                and x.is_cuda
+                and x.is_contiguous()
+                and x.dtype in (torch.float16, torch.float32, torch.bfloat16)
+            ):
+                try:
+                    return _triton_find_params_batched_hessian_hybrid(
+                        x,
+                        xmin,
+                        xmax,
+                        prepared_hessian,
+                        self.grid,
+                        self.maxshrink,
+                        float(maxq_value),
+                        int(self.qcfg.sym),
+                        candidate_count,
+                    )
+                except Exception as e:
+                    log.warn(f"Triton hessian/hybrid scale-search failed, falling back: {e}")
+
+            # Fallback exact candidate-chunk loop. This is kept as the
+            # strict-accuracy reference and is used when the Triton fast path
+            # is disabled or unsupported.
             if candidate_count > 0:
                 shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
                 shrink = 1.0 - shrink / self.grid
