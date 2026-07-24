@@ -135,8 +135,6 @@ if _triton_available():
         xmin: torch.Tensor,
         xmax: torch.Tensor,
         importance: torch.Tensor,
-        scale_all: torch.Tensor,
-        zero_all: torch.Tensor,
         grid: int,
         maxshrink: float,
         maxq: float,
@@ -200,12 +198,19 @@ if _triton_available():
         topk_indices, sort_order = topk_indices.sort(dim=-1)
         topk_values = topk_values.gather(2, sort_order)
 
-        # scale_all/zero_all are already in [candidate_count, rows, num_groups]
-        # from the eager precompute, so scale_perm matches the reference values.
-        scale_perm = scale_all.permute(1, 2, 0)  # [rows, num_groups, candidate_count]
-        zero_perm = zero_all.permute(1, 2, 0)
-        scale_k = scale_perm.gather(2, topk_indices)
-        zero_k = zero_perm.gather(2, topk_indices)
+        # Recompute the reference scale/zero only for the short-listed candidates
+        # instead of materializing the full candidate grid. Use the same int64
+        # maxq tensor as the eager precompute so scale/zero are bit-identical.
+        maxq_t = torch.tensor(int(maxq), device=device, dtype=torch.int64)
+        maxq_f = float(maxq)
+        p = 1.0 - topk_indices.float() / grid
+        xmin_k = xmin.unsqueeze(-1) * p
+        xmax_k = xmax.unsqueeze(-1) * p
+        scale_k = (xmax_k - xmin_k) / maxq_t
+        if sym:
+            zero_k = torch.full_like(scale_k, (maxq_t + 1) / 2)
+        else:
+            zero_k = torch.round(-xmin_k / scale_k)
 
         # Recompute exact loss for the top-k candidates in one vectorized batch.
         # x: [rows, num_groups, group_size]
@@ -214,18 +219,17 @@ if _triton_available():
         x_exp = x.unsqueeze(2).expand(-1, -1, k, -1)  # [rows, num_groups, k, group_size]
         scale_k_exp = scale_k.unsqueeze(-1)
         zero_k_exp = zero_k.unsqueeze(-1)
-        q = torch.clamp(torch.round(x_exp / scale_k_exp) + zero_k_exp, 0.0, maxq)
+        q = torch.clamp(torch.round(x_exp / scale_k_exp) + zero_k_exp, 0.0, maxq_f)
         dequant = (q - zero_k_exp) * scale_k_exp
         error = dequant - x_exp
         importance_exp = importance.unsqueeze(0).unsqueeze(2)  # [1, num_groups, 1, group_size]
         losses_k = (error * error * importance_exp).sum(dim=-1)  # [rows, num_groups, k]
 
         best_local = losses_k.argmin(dim=-1)
-        best_idx = topk_indices.gather(2, best_local.unsqueeze(-1)).squeeze(-1)
 
-        scale_out = scale_perm.gather(2, best_idx.unsqueeze(-1)).squeeze(-1)
-        zero_out = zero_perm.gather(2, best_idx.unsqueeze(-1)).squeeze(-1)
-        return scale_out, zero_out
+        final_scale = scale_k.gather(2, best_local.unsqueeze(-1)).squeeze(-1)
+        final_zero = zero_k.gather(2, best_local.unsqueeze(-1)).squeeze(-1)
+        return final_scale, final_zero
 
     @triton.jit
     def _scale_search_hessian_kernel(
@@ -318,8 +322,6 @@ if _triton_available():
         xmin: torch.Tensor,
         xmax: torch.Tensor,
         prepared_hessian: torch.Tensor,
-        scale_all: torch.Tensor,
-        zero_all: torch.Tensor,
         grid: int,
         maxshrink: float,
         maxq: float,
@@ -380,15 +382,23 @@ if _triton_available():
         topk_indices, sort_order = topk_indices.sort(dim=-1)
         topk_values = topk_values.gather(2, sort_order)
 
-        scale_perm = scale_all.permute(1, 2, 0)  # [rows, num_groups, candidate_count]
-        zero_perm = zero_all.permute(1, 2, 0)
-        scale_k = scale_perm.gather(2, topk_indices)
-        zero_k = zero_perm.gather(2, topk_indices)
+        # Recompute the reference scale/zero only for the short-listed candidates.
+        # Use the same int64 maxq tensor as the eager precompute.
+        maxq_t = torch.tensor(int(maxq), device=device, dtype=torch.int64)
+        maxq_f = float(maxq)
+        p = 1.0 - topk_indices.float() / grid
+        xmin_k = xmin.unsqueeze(-1) * p
+        xmax_k = xmax.unsqueeze(-1) * p
+        scale_k = (xmax_k - xmin_k) / maxq_t
+        if sym:
+            zero_k = torch.full_like(scale_k, (maxq_t + 1) / 2)
+        else:
+            zero_k = torch.round(-xmin_k / scale_k)
 
         x_exp = x.unsqueeze(2).expand(-1, -1, k, -1)  # [rows, num_groups, k, group_size]
         scale_k_exp = scale_k.unsqueeze(-1)
         zero_k_exp = zero_k.unsqueeze(-1)
-        q = torch.clamp(torch.round(x_exp / scale_k_exp) + zero_k_exp, 0.0, maxq)
+        q = torch.clamp(torch.round(x_exp / scale_k_exp) + zero_k_exp, 0.0, maxq_f)
         dequant = (q - zero_k_exp) * scale_k_exp
         error = dequant - x_exp
 
@@ -397,11 +407,10 @@ if _triton_available():
         losses_k = (error * projected).sum(dim=-1).clamp_min(0.0)
 
         best_local = losses_k.argmin(dim=-1)
-        best_idx = topk_indices.gather(2, best_local.unsqueeze(-1)).squeeze(-1)
 
-        scale_out = scale_perm.gather(2, best_idx.unsqueeze(-1)).squeeze(-1)
-        zero_out = zero_perm.gather(2, best_idx.unsqueeze(-1)).squeeze(-1)
-        return scale_out, zero_out
+        final_scale = scale_k.gather(2, best_local.unsqueeze(-1)).squeeze(-1)
+        final_zero = zero_k.gather(2, best_local.unsqueeze(-1)).squeeze(-1)
+        return final_scale, final_zero
 
 else:
     _triton_find_params_batched_activation = None

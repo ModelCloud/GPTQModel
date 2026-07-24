@@ -303,3 +303,60 @@ def test_find_params_batched_triton_matches_eager(group_size, bits, sym, method)
     zero_diff = (zero_tri - zero_ref).abs().max().item()
     assert scale_diff < 1e-6, f"scale mismatch {scale_diff} for {group_size=}, {bits=}, {sym=}, {method=}"
     assert zero_diff < 1e-6, f"zero mismatch {zero_diff} for {group_size=}, {bits=}, {sym=}, {method=}"
+
+
+def _make_dense_pd_hessian(cols: int, device: str = "cuda", dtype=torch.float32):
+    """Build a dense positive-definite Hessian for multi-group scale-search tests."""
+    generator = torch.Generator(device=device).manual_seed(10000 + cols)
+    a = torch.randn(cols, max(cols // 2, 1), generator=generator, device=device, dtype=dtype)
+    h = a.matmul(a.t())
+    h = (h + h.t()) * 0.5
+    return h
+
+
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("sym", [False, True])
+@pytest.mark.parametrize("method", [ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID])
+def test_find_params_batched_dense_matches_per_group_reference(group_size, bits, sym, method):
+    """Batched grouped search must reproduce per-group find_params on dense Hessians with Triton enabled."""
+    rows = 128
+    cols = 256
+    device = "cuda"
+    generator = torch.Generator(device=device).manual_seed(
+        5050 + group_size + bits + int(sym) + _method_seed(method)
+    )
+    W = torch.randn(rows, cols, generator=generator, device=device, dtype=torch.float32)
+    hessian = _make_dense_pd_hessian(cols, device=device)
+
+    qcfg = QuantizeConfig(
+        bits=bits,
+        group_size=group_size,
+        sym=sym,
+        mse=2.0,
+        scale_search=method,
+    )
+
+    # Reference per-group find_params (always CPU/CUDA fallback, no Triton)
+    scale_ref, zero_ref = _reference_find_params(W, hessian, qcfg)
+
+    # Batched path with Triton enabled (activation uses Triton; hessian/hybrid use vectorized fallback)
+    num_groups = cols // group_size
+    q = Quantizer(qcfg)
+    q.configure(perchannel=True, grid=100, maxshrink=0.8)
+    q.maxq = q.maxq.to(device)
+    W3d = W.reshape(rows, num_groups, group_size)
+    if method == ScaleSearchConfig.ACTIVATION:
+        hessian_batched = hessian.diagonal().reshape(num_groups, group_size)
+    else:
+        hessian_batched = torch.stack(
+            [hessian[g * group_size : (g + 1) * group_size, g * group_size : (g + 1) * group_size] for g in range(num_groups)],
+            dim=0,
+        )
+    scale_b, zero_b = q.find_params_batched(W3d, weight=True, hessian=hessian_batched)
+    torch.cuda.synchronize()
+
+    scale_diff = (scale_b - scale_ref).abs().max().item()
+    zero_diff = (zero_b - zero_ref).abs().max().item()
+    assert scale_diff < 1e-6, f"scale mismatch {scale_diff} for {group_size=}, {bits=}, {sym=}, {method=}"
+    assert zero_diff < 1e-6, f"zero mismatch {zero_diff} for {group_size=}, {bits=}, {sym=}, {method=}"
