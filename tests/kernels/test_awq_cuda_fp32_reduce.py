@@ -38,6 +38,15 @@ def _make_packed_buffers(bits: int, in_features: int, out_features: int, group_s
     )
 
 
+def _make_random_packed_buffers(in_features: int, out_features: int, group_size: int, dtype: torch.dtype):
+    groups = in_features // group_size
+    return (
+        torch.randint(-(2**31), 2**31 - 1, (in_features, out_features // 8), dtype=torch.int32),
+        torch.randint(-(2**31), 2**31 - 1, (groups, out_features // 8), dtype=torch.int32),
+        ((torch.rand(groups, out_features) * 0.04) + 0.01).to(dtype),
+    )
+
+
 def _dense_reference(x: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor, scales: torch.Tensor, bits: int, group_size: int):
     dense_weight = dequantize_gemm(
         qweight=qweight,
@@ -87,6 +96,51 @@ def test_awq_cuda_fp32_reduce_reduces_dense_error():
 
     assert candidate_abs.max().item() <= legacy_abs.max().item()
     assert candidate_abs.mean().item() < legacy_abs.mean().item() * 0.1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for AWQ CUDA M32 prefill test")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "rows,in_features,out_features",
+    [(128, 4096, 12288), (128, 12288, 4096), (512, 4096, 4096)],
+)
+def test_awq_cuda_m32_qwen_prefill_preserves_dense_error(dtype, rows, in_features, out_features, monkeypatch):
+    if not awq_runtime_available():
+        pytest.skip("AWQ CUDA fp32-reduce extension entrypoint unavailable.")
+
+    _require_dtype_support(dtype)
+    properties = torch.cuda.get_device_properties("cuda")
+    if (properties.major, properties.minor, properties.multi_processor_count) != (8, 0, 124):
+        pytest.skip("The M32 Qwen prefill tile is measured only on the 124-SM sm_80 target.")
+
+    torch.manual_seed(in_features + out_features)
+    group_size = 128
+    qweight, qzeros, scales = _make_random_packed_buffers(
+        in_features,
+        out_features,
+        group_size,
+        dtype,
+    )
+    x = torch.randn(rows, in_features, device="cuda", dtype=dtype)
+    qweight = qweight.cuda()
+    qzeros = qzeros.cuda()
+    scales = scales.cuda()
+    reference = _dense_reference(x, qweight, qzeros, scales, bits=4, group_size=group_size)
+
+    monkeypatch.setenv("GPTQMODEL_AWQ_DISABLE_M32_QWEN_PREFILL", "1")
+    with torch.inference_mode():
+        legacy = awq_gemm_forward(x, qweight, scales, qzeros, 4, False)
+        m16_fp32 = awq_gemm_forward(x, qweight, scales, qzeros, 4, True)
+
+    monkeypatch.delenv("GPTQMODEL_AWQ_DISABLE_M32_QWEN_PREFILL")
+    with torch.inference_mode():
+        candidate = awq_gemm_forward(x, qweight, scales, qzeros, 4, True)
+
+    legacy_abs = (legacy - reference).abs()
+    candidate_abs = (candidate - reference).abs()
+    assert torch.equal(candidate, m16_fp32)
+    assert candidate_abs.max().item() <= legacy_abs.max().item()
+    assert candidate_abs.mean().item() < legacy_abs.mean().item()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant CUDA fp32-reduce test")
@@ -156,9 +210,15 @@ def test_awq_cuda_fused_splitk_reduce_matches_default(dtype, monkeypatch):
         baseline = awq_gemm_forward(x, qweight, scales, qzeros, 4, True)
 
     monkeypatch.delenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", raising=False)
+    monkeypatch.setenv("GPTQMODEL_AWQ_DISABLE_VEC4_SPLITK_REDUCE", "1")
+    with torch.inference_mode():
+        scalar_reducer = awq_gemm_forward(x, qweight, scales, qzeros, 4, True)
+
+    monkeypatch.delenv("GPTQMODEL_AWQ_DISABLE_VEC4_SPLITK_REDUCE", raising=False)
     with torch.inference_mode():
         candidate = awq_gemm_forward(x, qweight, scales, qzeros, 4, True)
 
+    assert torch.equal(scalar_reducer, baseline)
     assert torch.equal(candidate, baseline)
 
 
@@ -197,7 +257,13 @@ def test_paroquant_fused_splitk_reduce_matches_default(dtype, monkeypatch):
         baseline = awq_gemm_forward(rotated, qweight, scales, qzeros, 4, True)
 
     monkeypatch.delenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", raising=False)
+    monkeypatch.setenv("GPTQMODEL_AWQ_DISABLE_VEC4_SPLITK_REDUCE", "1")
+    with torch.inference_mode():
+        scalar_reducer = awq_gemm_forward(rotated, qweight, scales, qzeros, 4, True)
+
+    monkeypatch.delenv("GPTQMODEL_AWQ_DISABLE_VEC4_SPLITK_REDUCE", raising=False)
     with torch.inference_mode():
         candidate = awq_gemm_forward(rotated, qweight, scales, qzeros, 4, True)
 
+    assert torch.equal(scalar_reducer, baseline)
     assert torch.equal(candidate, baseline)

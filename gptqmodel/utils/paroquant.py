@@ -40,6 +40,11 @@ _ROTATION_LAUNCH_CONFIG_CACHE: dict[tuple[object, ...], tuple[int, int]] = {}
 # from multiple threads racing the same cold shape.
 _ROTATION_LAUNCH_CONFIG_CACHE_LOCK = threading.Lock()
 _ROTATION_AUTOTUNE_SERIALIZE_LOCK = threading.Lock()
+# The combined rotation/AWQ op makes a native dispatcher call into the AWQ
+# extension. Resolve that dependency once so the steady path does not repeat
+# extension-registry work on every projection.
+_PAROQUANT_AWQ_DISPATCH_READY = False
+_PAROQUANT_AWQ_DISPATCH_READY_LOCK = threading.Lock()
 
 
 def _normalize_group_size(group_size: int, in_features: int) -> int:
@@ -97,6 +102,74 @@ def is_identity_rotation(theta: torch.Tensor, channel_scales: Optional[torch.Ten
     if channel_scales is None:
         return True
     return bool(torch.all(channel_scales == 1))
+
+
+def build_paroquant_rotation_lookup(
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    *,
+    group_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Expand pairwise rotations into gather-friendly inference metadata.
+
+    The fused Triton matmul keeps each 128-feature activation group in registers.
+    For every rotation round and feature, ``partner`` identifies the other value
+    in the pair while ``cos`` and signed ``sin`` encode the update
+
+    ``next[k] = current[k] * cos[k] + current[partner[k]] * sin[k]``.
+
+    Building this lookup once avoids trigonometric work and inverse-permutation
+    construction in every megakernel launch. The persisted checkpoint contract
+    remains the compact ``pairs``/``theta`` representation.
+    """
+    if pairs.dim() != 2:
+        raise ValueError(f"ParoQuant: `pairs` must be rank 2, got shape {tuple(pairs.shape)}.")
+    if theta.dim() != 2:
+        raise ValueError(f"ParoQuant: `theta` must be rank 2, got shape {tuple(theta.shape)}.")
+
+    krot, hidden = pairs.shape
+    normalized_group_size = _normalize_group_size(group_size, hidden)
+    if theta.shape != (krot, hidden // 2):
+        raise ValueError(
+            "ParoQuant: `theta` must have shape "
+            f"({krot}, {hidden // 2}), got {tuple(theta.shape)}."
+        )
+
+    num_groups = hidden // normalized_group_size
+    pairs_long = pairs.to(dtype=torch.long).reshape(krot, num_groups, normalized_group_size)
+    expected = torch.arange(
+        normalized_group_size,
+        device=pairs.device,
+        dtype=torch.long,
+    ).reshape(1, 1, normalized_group_size)
+    if not torch.equal(pairs_long.sort(dim=-1).values, expected.expand_as(pairs_long)):
+        raise ValueError("ParoQuant: every rotation round must pair each group feature exactly once.")
+
+    group_offsets = (
+        torch.arange(num_groups, device=pairs.device, dtype=torch.long)
+        .mul(normalized_group_size)
+        .reshape(1, num_groups, 1)
+    )
+    global_slots = (pairs_long + group_offsets).reshape(krot, hidden)
+    paired_slots = (
+        (pairs_long + group_offsets)
+        .reshape(krot, num_groups, normalized_group_size // 2, 2)
+        .flip(-1)
+        .reshape(krot, hidden)
+    )
+
+    angles = theta.to(dtype=torch.float32).reshape(krot, num_groups, normalized_group_size // 2)
+    cos_by_slot = angles.cos().unsqueeze(-1).expand(-1, -1, -1, 2).reshape(krot, hidden)
+    sin = angles.sin()
+    signed_sin_by_slot = torch.stack((sin, -sin), dim=-1).reshape(krot, hidden)
+
+    partner = torch.empty((krot, hidden), device=pairs.device, dtype=torch.int32)
+    cos_lookup = torch.empty((krot, hidden), device=theta.device, dtype=torch.float32)
+    sin_lookup = torch.empty_like(cos_lookup)
+    partner.scatter_(1, global_slots, paired_slots.to(dtype=torch.int32))
+    cos_lookup.scatter_(1, global_slots, cos_by_slot)
+    sin_lookup.scatter_(1, global_slots, signed_sin_by_slot)
+    return partner.contiguous(), cos_lookup.contiguous(), sin_lookup.contiguous()
 
 
 def apply_paroquant_rotation_reference(
@@ -203,7 +276,7 @@ def _rotation_extra_cuda_cflags() -> list[str]:
 _PAROQUANT_ROTATION_EXTENSION = TorchOpsJitExtension(
     name="gptqmodel_paroquant_rotation",
     namespace="gptqmodel_paroquant",
-    required_ops=("rotate", "launch_config", "clear_autotune_cache", "autotune_cache_size"),
+    required_ops=("rotate", "rotate_awq_gemm", "launch_config", "clear_autotune_cache", "autotune_cache_size"),
     sources=_rotation_sources,
     build_root_env="GPTQMODEL_PAROQUANT_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("paroquant"),
@@ -464,6 +537,72 @@ def _apply_fused_rotation(
         group_size,
         cta_m=cta_m,
         row_pad=row_pad,
+    )
+
+
+def _ensure_paroquant_awq_dispatch_ready() -> bool:
+    """Load the AWQ operator once before the combined native dispatcher uses it."""
+    global _PAROQUANT_AWQ_DISPATCH_READY
+
+    if _PAROQUANT_AWQ_DISPATCH_READY:
+        return True
+    with _PAROQUANT_AWQ_DISPATCH_READY_LOCK:
+        if _PAROQUANT_AWQ_DISPATCH_READY:
+            return True
+        from .awq import awq_runtime_available
+
+        _PAROQUANT_AWQ_DISPATCH_READY = bool(awq_runtime_available())
+        return _PAROQUANT_AWQ_DISPATCH_READY
+
+
+def apply_paroquant_rotation_awq(
+    x: torch.Tensor,
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    rotation_scales: Optional[torch.Tensor],
+    qweight: torch.Tensor,
+    weight_scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    *,
+    group_size: int,
+    split_k_iters: int,
+    fp32_accum: bool,
+) -> Optional[torch.Tensor]:
+    """Submit rotation and the established AWQ GEMM through one native dispatch."""
+    if not _rotation_kernel_ready(x, pairs, theta, rotation_scales, group_size):
+        return None
+    if not _ensure_paroquant_awq_dispatch_ready():
+        return None
+    fused_op = _rotation_native_op_if_loaded("rotate_awq_gemm")
+    if fused_op is None:
+        if not _load_rotation_extension():
+            return None
+        fused_op = _extension_api().op("paroquant", "rotate_awq_gemm")
+
+    requested_cta_m, requested_row_pad = _rotation_requested_launch()
+    cta_m, row_pad = _resolve_rotation_launch(
+        x,
+        scales=rotation_scales,
+        group_size=int(group_size),
+        krot=int(theta.shape[0]),
+        requested_cta_m=requested_cta_m,
+        requested_row_pad=requested_row_pad,
+    )
+    return fused_op(
+        x,
+        pairs,
+        theta,
+        rotation_scales,
+        qweight,
+        weight_scales,
+        qzeros,
+        bias,
+        int(group_size),
+        int(cta_m),
+        int(row_pad),
+        int(split_k_iters),
+        bool(fp32_accum),
     )
 
 

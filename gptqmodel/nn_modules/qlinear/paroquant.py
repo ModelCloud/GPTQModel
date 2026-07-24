@@ -19,7 +19,12 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
-from ...utils.paroquant import apply_paroquant_rotation, build_identity_rotation_buffers, is_identity_rotation
+from ...utils.paroquant import (
+    apply_paroquant_rotation,
+    apply_paroquant_rotation_awq,
+    build_identity_rotation_buffers,
+    is_identity_rotation,
+)
 from .gemm_awq import FP32_ACCUM, _awq_cuda_gemm_forward
 from .komodo import AwqKomodoLinear, _assert_fp16_inference_input, _weight_quant_matmul
 
@@ -95,6 +100,7 @@ class ParoLinear(AwqKomodoLinear):
         self._rotation_runtime_device: Optional[torch.device] = None
         self._runtime_theta: Optional[torch.Tensor] = None
         self._runtime_channel_scales: Optional[torch.Tensor] = None
+        self.paroquant_cuda_awq_fused_dispatch_enabled = True
 
         super().__init__(
             bits=bits,
@@ -325,19 +331,92 @@ class ParoLinear(AwqKomodoLinear):
             out = out.to(dtype=x_flat.dtype)
         return out
 
+    def _forward_cuda_awq_fused(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
+        """Submit rotation and AWQ GEMM from one native op on the inference fast path."""
+        if (
+            not self.paroquant_cuda_awq_fused_dispatch_enabled
+            or self.training
+            or torch.is_grad_enabled()
+            or self._rotation_identity
+            or x_flat.device.type != "cuda"
+        ):
+            return None
+
+        compute_dtype = x_flat.dtype if x_flat.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        kernel_input = (
+            x_flat
+            if x_flat.dtype == compute_dtype and x_flat.is_contiguous()
+            else x_flat.to(device=x_flat.device, dtype=compute_dtype).contiguous()
+        )
+        use_cached_runtime_dtype = self.cache_runtime_dtype or (
+            self.auto_cache_bf16_runtime_dtype and compute_dtype == torch.bfloat16
+        )
+        if use_cached_runtime_dtype:
+            self._ensure_runtime_dtype(kernel_input.device, compute_dtype)
+            kernel_scales = self.scales
+            kernel_bias = self.bias
+        else:
+            kernel_scales = self.scales
+            if (
+                kernel_scales.device != kernel_input.device
+                or kernel_scales.dtype != compute_dtype
+                or not kernel_scales.is_contiguous()
+            ):
+                kernel_scales = kernel_scales.to(device=kernel_input.device, dtype=compute_dtype).contiguous()
+            kernel_bias = self.bias
+            if (
+                kernel_bias is not None
+                and (
+                    kernel_bias.device != kernel_input.device
+                    or kernel_bias.dtype != compute_dtype
+                    or not kernel_bias.is_contiguous()
+                )
+            ):
+                kernel_bias = kernel_bias.to(device=kernel_input.device, dtype=compute_dtype).contiguous()
+
+        use_cached_rotation_dtype = self.cache_rotation_dtype or (
+            self.auto_cache_bf16_rotation_dtype and compute_dtype == torch.bfloat16
+        )
+        theta = self.theta
+        channel_scales = self.channel_scales
+        if use_cached_rotation_dtype:
+            theta, channel_scales = self._ensure_rotation_runtime_dtype(kernel_input.device, compute_dtype)
+
+        try:
+            out = apply_paroquant_rotation_awq(
+                kernel_input.reshape(-1, kernel_input.shape[-1]),
+                self.pairs,
+                theta,
+                channel_scales,
+                self.qweight,
+                kernel_scales,
+                self.qzeros,
+                kernel_bias,
+                group_size=self.group_size,
+                split_k_iters=_PAROQUANT_AWQ_SPLIT_K,
+                fp32_accum=self.fp32_accum,
+            )
+        except (NotImplementedError, RuntimeError):
+            return None
+        if out is not None and out.dtype != x_flat.dtype:
+            out = out.to(dtype=x_flat.dtype)
+        return out
+
     def forward(self, x: torch.Tensor):
         """Rotate inputs, run quantized matmul, then apply adapters in input space."""
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
-        rotated = self._rotate_inputs(x_flat)
-
-        compute_dtype = torch.float16
-        if self._can_use_native_int4(rotated, compute_dtype):
-            return self._forward_npu_native(rotated, original_shape, x_flat)
-
-        out = self._forward_cuda_awq_kernel(rotated)
+        out = self._forward_cuda_awq_fused(x_flat)
         if out is None:
-            out = self._forward_dense(rotated)
+            rotated = self._rotate_inputs(x_flat)
+
+            compute_dtype = torch.float16
+            if self._can_use_native_int4(rotated, compute_dtype):
+                return self._forward_npu_native(rotated, original_shape, x_flat)
+
+            out = self._forward_cuda_awq_kernel(rotated)
+            if out is None:
+                out = self._forward_dense(rotated)
 
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)

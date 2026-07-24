@@ -8,6 +8,7 @@
 
 #include "rotation.cuh"
 #include <ATen/ATen.h>
+#include <ATen/core/dispatch/Dispatcher.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <algorithm>
 #include <array>
@@ -631,6 +632,24 @@ torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
                                  config.row_pad);
 }
 
+torch::Tensor rotate_awq_gemm_dynamic(
+    at::Tensor x, at::Tensor idx, at::Tensor theta, c10::optional<at::Tensor> rotation_scales_opt,
+    at::Tensor qweight, at::Tensor weight_scales, at::Tensor qzeros,
+    c10::optional<at::Tensor> bias_opt, int64_t group_size = 128,
+    int64_t requested_cta_m = -1, int64_t requested_row_pad = -1,
+    int64_t split_k_iters = 4, bool fp32_accum = true) {
+  at::Tensor rotated = rotate_dynamic(x, idx, theta, rotation_scales_opt, group_size,
+                                      requested_cta_m, requested_row_pad);
+  using AwqGemmSignature = at::Tensor(at::Tensor, at::Tensor, at::Tensor, at::Tensor, int64_t,
+                                      bool, c10::optional<at::Tensor>);
+  static const auto awq_gemm = c10::Dispatcher::singleton()
+                                   .findSchemaOrThrow("gptqmodel_awq::gemm_forward_bias", "")
+                                   .typed<AwqGemmSignature>();
+  at::Tensor out = awq_gemm.call(rotated, qweight, weight_scales, qzeros, split_k_iters,
+                                 fp32_accum, bias_opt);
+  return out;
+}
+
 std::vector<int64_t> rotate_launch_config(at::Tensor x, int64_t krot = 8, bool has_scale = true,
                                           int64_t group_size = 128, int64_t cta_m = -1,
                                           int64_t row_pad = -1) {
@@ -648,6 +667,7 @@ std::vector<int64_t> rotate_launch_config(at::Tensor x, int64_t krot = 8, bool h
 
 TORCH_LIBRARY(gptqmodel_paroquant, m) {
   m.def("rotate(Tensor x, Tensor idx_ij, Tensor theta, Tensor? scales=None, int group_size=128, int cta_m=-1, int row_pad=-1) -> Tensor");
+  m.def("rotate_awq_gemm(Tensor x, Tensor idx_ij, Tensor theta, Tensor? rotation_scales, Tensor qweight, Tensor weight_scales, Tensor qzeros, Tensor? bias=None, int group_size=128, int cta_m=-1, int row_pad=-1, int split_k_iters=4, bool fp32_accum=True) -> Tensor");
   m.def("launch_config(Tensor x, int krot=8, bool has_scale=True, int group_size=128, int cta_m=-1, int row_pad=-1) -> int[]");
   m.def("clear_autotune_cache() -> ()");
   m.def("autotune_cache_size() -> int");
@@ -655,6 +675,7 @@ TORCH_LIBRARY(gptqmodel_paroquant, m) {
 
 TORCH_LIBRARY_IMPL(gptqmodel_paroquant, CUDA, m) {
   m.impl("rotate", &rotate_dynamic);
+  m.impl("rotate_awq_gemm", &rotate_awq_gemm_dynamic);
   m.impl("launch_config", &rotate_launch_config);
 }
 

@@ -67,6 +67,7 @@ _AWQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     namespace=_AWQ_OPS_NAMESPACE,
     required_ops=(
         "gemm_forward",
+        "gemm_forward_bias",
         "gemm_forward_fp32_reduce",
         "gemmv2_forward",
         "gemv_forward",
