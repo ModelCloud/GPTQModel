@@ -49,6 +49,23 @@ __global__ void adjacent_exact_candidates_kernel(
   const int lane = threadIdx.x & (kWarpSize - 1);
   const int warp_in_block = threadIdx.x / kWarpSize;
   const int64_t worker = static_cast<int64_t>(blockIdx.x) * kWarpsPerBlock + warp_in_block;
+
+  // Load the small QUBO data into shared memory once per block and store
+  // interaction transposed (column-major per row lane) to avoid 32-way bank
+  // conflicts when every warp lane reads the same decision column.
+  extern __shared__ char smem[];
+  double* const smem_interaction = reinterpret_cast<double*>(smem);
+  double* const smem_linear = smem_interaction + size * size;
+  for (int idx = threadIdx.x; idx < size * size; idx += kThreadsPerBlock) {
+    const int row = idx / size;
+    const int col = idx % size;
+    smem_interaction[col * size + row] = interaction[row * size + col];
+  }
+  for (int idx = threadIdx.x; idx < size; idx += kThreadsPerBlock) {
+    smem_linear[idx] = linear[idx];
+  }
+  __syncthreads();
+
   if (worker >= worker_warps) {
     return;
   }
@@ -74,11 +91,11 @@ __global__ void adjacent_exact_candidates_kernel(
     if ((local_index & (kRebaseInterval - 1)) == 0) {
       state = gray_code(index);
       if (lane < size) {
-        field = linear[lane];
+        field = smem_linear[lane];
 #pragma unroll 1
         for (int other = 0; other < size; ++other) {
           if ((state >> other) & 1u) {
-            field += interaction[lane * size + other];
+            field += smem_interaction[other * size + lane];
           }
         }
       } else {
@@ -86,7 +103,7 @@ __global__ void adjacent_exact_candidates_kernel(
       }
 
       const double contribution =
-          lane < size && ((state >> lane) & 1u) ? 0.5 * (linear[lane] + field) : 0.0;
+          lane < size && ((state >> lane) & 1u) ? 0.5 * (smem_linear[lane] + field) : 0.0;
       const double contribution_sum = warp_sum(contribution);
       if (lane == 0) {
         energy = constant[0] + contribution_sum;
@@ -109,7 +126,7 @@ __global__ void adjacent_exact_candidates_kernel(
         energy += direction * flipped_field;
       }
       if (lane < size) {
-        field += direction * interaction[lane * size + flipped];
+        field += direction * smem_interaction[flipped * size + lane];
       }
       state = next_state;
     }
@@ -117,18 +134,18 @@ __global__ void adjacent_exact_candidates_kernel(
 
   best_state = __shfl_sync(0xffffffffu, best_state, 0);
   if (lane < size) {
-    field = linear[lane];
+    field = smem_linear[lane];
 #pragma unroll 1
     for (int other = 0; other < size; ++other) {
       if ((best_state >> other) & 1u) {
-        field += interaction[lane * size + other];
+        field += smem_interaction[other * size + lane];
       }
     }
   } else {
     field = 0.0;
   }
   const double best_contribution =
-      lane < size && ((best_state >> lane) & 1u) ? 0.5 * (linear[lane] + field) : 0.0;
+      lane < size && ((best_state >> lane) & 1u) ? 0.5 * (smem_linear[lane] + field) : 0.0;
   const double best_contribution_sum = warp_sum(best_contribution);
   if (lane == 0) {
     candidate_states[worker] = static_cast<int64_t>(best_state);
@@ -178,7 +195,8 @@ std::tuple<at::Tensor, at::Tensor> adjacent_exact_candidates_cuda(
   auto candidate_costs = at::empty({worker_warps}, linear.options());
   const int64_t blocks = (worker_warps + kWarpsPerBlock - 1) / kWarpsPerBlock;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(linear.get_device());
-  adjacent_exact_candidates_kernel<<<blocks, kThreadsPerBlock, 0, stream>>>(
+  const size_t adjacent_exact_smem = sizeof(double) * (static_cast<size_t>(size) * size + size);
+  adjacent_exact_candidates_kernel<<<blocks, kThreadsPerBlock, adjacent_exact_smem, stream>>>(
       constant.data_ptr<double>(),
       linear.data_ptr<double>(),
       interaction.data_ptr<double>(),

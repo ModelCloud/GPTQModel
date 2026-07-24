@@ -802,12 +802,12 @@ class GPTQ:
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
                     try:
                         result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
-                    except:
+                    except Exception:
                         log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 1/2 in 0.25s")
                         time.sleep(0.25)
                         try:
                             result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
-                        except:
+                        except Exception:
                             log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 2/2 in 0.75s")
                             time.sleep(0.75)
                             result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
@@ -1828,6 +1828,44 @@ class GPTQ:
                 if Hinv is not None:
                     Hinv1 = Hinv[i1:i2, i1:i2]
 
+                group_size = self.qcfg.group_size
+                batched_scale = batched_zero = None
+                batched_group_count = 0
+                batched_first_global_idx = 0
+                if (
+                    group_size != -1
+                    and not self.qcfg.static_groups
+                    and group_size <= count
+                ):
+                    # Batch full groups in this block to amortize Python/kernel launch overhead.
+                    full_groups_end = i2 - ((i2 - i1) % group_size)
+                    if full_groups_end > i1:
+                        batched_first_global_idx = i1 // group_size
+                        batched_group_count = (full_groups_end - i1) // group_size
+                        batched_last = i1 + batched_group_count * group_size
+                        x_3d = W[:, i1:batched_last].reshape(W.shape[0], batched_group_count, group_size)
+                        batched_hessian = None
+                        if (
+                            scale_search == ScaleSearchConfig.ACTIVATION
+                            and group_scale_search_diagonal is not None
+                        ):
+                            batched_hessian = group_scale_search_diagonal[i1:batched_last].reshape(
+                                batched_group_count, group_size
+                            )
+                        elif (
+                            scale_search in {ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID}
+                            and group_scale_search_hessians is not None
+                        ):
+                            batched_hessian = torch.stack(
+                                group_scale_search_hessians[
+                                    batched_first_global_idx : batched_first_global_idx + batched_group_count
+                                ],
+                                dim=0,
+                            )
+                        batched_scale, batched_zero = self.quantizer.find_params_batched(
+                            x_3d, weight=True, hessian=batched_hessian
+                        )
+
                 for i in range(count):
                     w = W1[:, i]
                     if Hinv is not None:
@@ -1838,11 +1876,16 @@ class GPTQ:
                             if (i1 + i) % self.qcfg.group_size == 0:
                                 group_start = i1 + i
                                 group_end = min(group_start + self.qcfg.group_size, self.columns)
-                                self.quantizer.find_params(
-                                    W[:, group_start:group_end],
-                                    weight=True,
-                                    hessian=group_scale_search_hessian(group_start, group_end),
-                                )
+                                local_group = (group_start - i1) // group_size
+                                if local_group < batched_group_count:
+                                    self.quantizer.scale = batched_scale[:, local_group : local_group + 1]
+                                    self.quantizer.zero = batched_zero[:, local_group : local_group + 1]
+                                else:
+                                    self.quantizer.find_params(
+                                        W[:, group_start:group_end],
+                                        weight=True,
+                                        hessian=group_scale_search_hessian(group_start, group_end),
+                                    )
 
                             if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
                                 scale.append(self.quantizer.scale)

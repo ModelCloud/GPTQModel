@@ -180,6 +180,80 @@ class Quantizer(nn.Module):
 
         raise ValueError(f"Unsupported scale search method: `{method}`.")
 
+    def _prepare_scale_search_hessian_batched(
+        self,
+        hessian: torch.Tensor | None,
+        *,
+        method: ScaleSearchConfig,
+    ) -> torch.Tensor | None:
+        """Prepare Hessian/diagonal data for batched multi-group scale search."""
+
+        if hessian is None:
+            return None
+
+        if method == ScaleSearchConfig.ACTIVATION:
+            if hessian.ndim == 1:
+                hessian = hessian.unsqueeze(0)
+            if hessian.ndim != 2:
+                raise ValueError(
+                    f"Activation scale search expects a 2D group-diagonal tensor, got {tuple(hessian.shape)}."
+                )
+            importance = hessian.detach().to(dtype=torch.float32, device=hessian.device)
+            importance = torch.nan_to_num(importance, nan=0.0, posinf=0.0, neginf=0.0).clamp_min_(0)
+            diagonal_mean = importance.mean()
+            valid = torch.isfinite(diagonal_mean) & (diagonal_mean > 0)
+            safe_mean = torch.where(valid, diagonal_mean, torch.ones_like(diagonal_mean))
+            normalized = importance / safe_mean
+            return torch.where(valid, normalized, torch.ones_like(normalized))
+
+        if hessian.ndim != 3:
+            raise ValueError(
+                f"{method.value.capitalize()} batched scale search expects a 3D group-Hessian tensor, "
+                f"got {tuple(hessian.shape)}."
+            )
+        prepared = hessian.detach().to(dtype=torch.float32, device=hessian.device)
+        prepared = torch.nan_to_num(prepared, nan=0.0, posinf=0.0, neginf=0.0)
+        prepared = (prepared + prepared.transpose(-2, -1)) * 0.5
+        diagonal = prepared.diagonal(dim1=-2, dim2=-1).clamp_min(0)
+        diagonal_mean = diagonal.mean()
+        if not torch.isfinite(diagonal_mean) or diagonal_mean <= 0:
+            return None
+        prepared = prepared / diagonal_mean
+        if method == ScaleSearchConfig.HYBRID:
+            prepared.mul_(0.5)
+            prepared.diagonal(dim1=-2, dim2=-1).mul_(2.0)
+        return prepared
+
+    def _scale_search_error_batched(
+        self,
+        error: torch.Tensor,
+        *,
+        method: ScaleSearchConfig,
+        mse: float,
+        hessian: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Score candidates for every (output row, group) pair in one launch."""
+
+        if method == ScaleSearchConfig.MSE or hessian is None:
+            return error.abs_().pow_(mse).sum(dim=-1)
+
+        error_fp32 = error.to(dtype=torch.float32)
+        if method == ScaleSearchConfig.ACTIVATION:
+            importance = hessian.unsqueeze(0).unsqueeze(0) if hessian.ndim == 2 else hessian
+            return error_fp32.square_().mul_(importance).sum(dim=-1)
+
+        if method in {ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID}:
+            # error: [candidates, rows, groups, group_size]
+            # hessian: [groups, group_size, group_size]
+            # For HYBRID the Hessian is already folded into 0.5*(full + diagonal)
+            # during _prepare_scale_search_hessian_batched, so the quadratic form
+            # alone matches the per-group objective.
+            projected = torch.einsum("crgi,gij->crgj", error_fp32, hessian)
+            objective = (error_fp32 * projected).sum(dim=-1)
+            return objective.clamp_min_(0)
+
+        raise ValueError(f"Unsupported scale search method: `{method}`.")
+
     @staticmethod
     def _scale_search_candidate_chunk_size(
         x: torch.Tensor,
@@ -356,6 +430,124 @@ class Quantizer(nn.Module):
         if len(shape) == 2:
             self.scale = self.scale.unsqueeze(0)
             self.zero = self.zero.unsqueeze(0)
+
+    def find_params_batched(
+        self,
+        x: torch.Tensor,
+        weight: bool = False,
+        *,
+        hessian: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute scales and zeros for all groups in x at once.
+
+        x is expected to have shape [rows, num_groups, group_size] and
+        hessian is either None, a [num_groups, group_size] diagonal for
+        activation search, or a [num_groups, group_size, group_size] group
+        Hessian for correlated objectives.  Returns (scale, zero) of shape
+        [rows, num_groups].
+        """
+
+        if x.ndim != 3:
+            raise ValueError(f"find_params_batched expects a 3D tensor, got {tuple(x.shape)}.")
+        if not (weight and self.perchannel):
+            raise ValueError("find_params_batched is only supported for per-channel weight quantization.")
+
+        dev = x.device
+        self.maxq = self.maxq.to(dev)
+        maxq_value = getattr(self, "_maxq_value", None)
+        if maxq_value is None:
+            maxq_value = int(self.maxq.item())
+            self._maxq_value = maxq_value
+
+        rows, num_groups, group_size = x.shape
+
+        # Min/max over the group dimension (last).
+        tmp = torch.zeros((rows, num_groups), device=dev)
+        xmin = torch.minimum(x.amin(dim=-1), tmp)
+        xmax = torch.maximum(x.amax(dim=-1), tmp)
+
+        if self.qcfg.sym:
+            xmax = torch.maximum(torch.abs(xmin), xmax)
+            tmp = xmin < 0
+            xmin = torch.where(tmp, -xmax, xmin)
+        tmp = (xmin == 0) & (xmax == 0)
+        xmin = torch.where(tmp, -torch.ones_like(xmin), xmin)
+        xmax = torch.where(tmp, torch.ones_like(xmax), xmax)
+
+        if maxq_value < 0:
+            scale = xmax
+            zero = xmin
+        else:
+            if self.requires_groupwise_processing():
+                scale = xmax / self.maxq
+                zero = torch.zeros_like(scale)
+            else:
+                scale = (xmax - xmin) / self.maxq
+                if self.qcfg.sym:
+                    zero = torch.full_like(scale, (self.maxq + 1) / 2)
+                else:
+                    zero = torch.round(-xmin / scale)
+
+        mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
+        method = getattr(self.qcfg, "scale_search", None)
+        if method is None and mse > 0:
+            method = ScaleSearchConfig.MSE
+        elif isinstance(method, str):
+            method = ScaleSearchConfig(method)
+
+        if method is not None and mse > 0.0:
+            prepared_hessian = None
+            if method != ScaleSearchConfig.MSE:
+                prepared_hessian = self._prepare_scale_search_hessian_batched(
+                    hessian,
+                    method=method,
+                )
+            best = torch.full((rows, num_groups), float("inf"), device=dev)
+            candidate_count = int(self.maxshrink * self.grid)
+            chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
+
+            shrink = torch.tensor(
+                [1 - i / self.grid for i in range(candidate_count)],
+                device=dev,
+                dtype=torch.float32,
+            )
+            x_batch = x.unsqueeze(0)
+            for start in range(0, candidate_count, chunk_size):
+                end = min(start + chunk_size, candidate_count)
+                p = shrink[start:end].view(-1, 1, 1)
+                xmin1 = p * xmin.unsqueeze(0)
+                xmax1 = p * xmax.unsqueeze(0)
+                if self.requires_groupwise_processing():
+                    scale1 = xmax1 / self.maxq
+                else:
+                    scale1 = (xmax1 - xmin1) / self.maxq
+                zero1 = (
+                    torch.round(-xmin1 / scale1)
+                    if not self.qcfg.sym
+                    else zero.unsqueeze(0).expand(end - start, -1, -1)
+                )
+                candidate = self._quantize_scale_search_candidates(
+                    x_batch.expand(end - start, -1, -1, -1),
+                    scale1.unsqueeze(-1),
+                    zero1.unsqueeze(-1),
+                    maxq_value=maxq_value,
+                )
+                errors = self._scale_search_error_batched(
+                    candidate - x_batch,
+                    method=method,
+                    mse=mse,
+                    hessian=prepared_hessian,
+                )
+                chunk_best, chunk_index = errors.min(dim=0)
+                gather_index = chunk_index.unsqueeze(0)
+                chunk_scale = scale1.gather(0, gather_index).squeeze(0)
+                chunk_zero = zero1.gather(0, gather_index).squeeze(0)
+                take = chunk_best < best
+                best = torch.where(take, chunk_best, best)
+                scale = torch.where(take, chunk_scale, scale)
+                zero = torch.where(take, chunk_zero, zero)
+
+        return scale, zero
 
     def quantize(self, x):
         return quantize(x, self.scale, self.zero, self.maxq, self.requires_groupwise_processing())
