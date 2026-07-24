@@ -337,3 +337,34 @@ The largest end-to-end impact is for `group_size=128 hessian` on dense per-block
 - `find_params_batched` Triton Hessian/Hybrid is restricted to `group_size in (32, 64, 128)` so `tl.dot` operates on power-of-two tile sizes.
 - The `find_params_batched` activation path still uses `BLOCK_COL=128` for all group sizes; tightening that tile could further speed up `group_size=32/64 activation`.
 - AdjacentExact CUDA exact solver remains exponential in active-decision count; no further work in this round.
+
+---
+
+## Round follow-up: tight `BLOCK_COL` for activation scale-search kernel
+
+### Changes
+
+- `gptqmodel/quantization/_scale_search_triton.py`: launch the activation scale-search kernel with `BLOCK_COL=group_size` instead of the fixed 128. This removes masked-off columns for `group_size=32/64` and lets Triton schedule a tighter tile.
+- `tests/test_quantizer_scale_search.py`: extended `test_find_params_batched_triton_matches_eager` to also cover `ScaleSearchConfig.ACTIVATION` (36 parameter combos total).
+
+### Accuracy validation
+
+- `test_find_params_batched_triton_matches_eager` with activation: 36 passed, Triton vs eager `scale`/`zero` match to `<1e-6`.
+- `pytest -q tests/test_quantizer_scale_search.py tests/test_gptq.py tests/test_quantizer.py`: **119 passed, 2 skipped**.
+
+### Benchmarks
+
+`find_params_batched` activation (4096 x 4096, all groups, A100 GPU 5):
+
+| group_size | method     | before (ms) | after (ms) | speedup |
+|------------|------------|-------------|------------|---------|
+| 32         | activation | 33.0        | 27.2       | **1.2x** |
+| 64         | activation | 22.8        | 20.2       | **1.1x** |
+| 128        | activation | 18.0        | 18.0       | 1.0x    |
+
+`group_size=128` is unchanged because `BLOCK_COL` already equals 128. End-to-end `GPTQ.quantize` with the small `nsamples=4` profile harness is within noise; the gain is expected to be more visible when `find_params` dominates the total time (dense Hessians, larger batches, or many blocks).
+
+### Known limitations / future work
+
+- `find_params_batched` Triton activation now uses `group_size` as the tile width; for non-power-of-two group sizes this may compile less efficient kernels, but the target configurations (32/64/128) are power-of-two.
+- AdjacentExact CUDA exact solver remains exponential in active-decision count; no further work in this round.

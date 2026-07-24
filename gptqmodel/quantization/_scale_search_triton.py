@@ -152,7 +152,6 @@ if _triton_available():
             return scale, zero
 
         BLOCK_ROW = 8
-        BLOCK_COL = 128
         row_blocks = (rows + BLOCK_ROW - 1) // BLOCK_ROW
         total_programs = num_groups * row_blocks
         if total_programs == 0:
@@ -163,6 +162,9 @@ if _triton_available():
 
         loss_out = torch.empty((rows, num_groups, candidate_count), dtype=torch.float32, device=device)
 
+        # Use a tile width that matches the actual group size so we do not
+        # waste work masking off columns past the group boundary.
+        block_col = group_size
         _scale_search_activation_kernel[(total_programs,)](
             x,
             xmin,
@@ -184,7 +186,7 @@ if _triton_available():
             loss_out.stride(1),
             loss_out.stride(2),
             BLOCK_ROW=BLOCK_ROW,
-            BLOCK_COL=BLOCK_COL,
+            BLOCK_COL=block_col,
         )
 
         # The approximate Triton loss is only used to narrow the search to a

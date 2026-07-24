@@ -256,7 +256,7 @@ def test_find_params_matches_fp64_grid_reference(group_size, bits, sym, method):
 @pytest.mark.parametrize("group_size", [32, 64, 128])
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("sym", [False, True])
-@pytest.mark.parametrize("method", [ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID])
+@pytest.mark.parametrize("method", [ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID])
 def test_find_params_batched_triton_matches_eager(group_size, bits, sym, method):
     """Triton fast path for grouped find_params_batched must match the eager path."""
     rows = 64
