@@ -492,3 +492,72 @@ End-to-end `GPTQ.quantize` on the same shape is within noise for activation beca
 
 The Hessian/Hybrid scale search still falls back to the exact vectorized chunk loop and is 6-12x slower than activation per `find_params_batched` call. Next round: investigate whether an exact or larger-top-k Triton loss kernel can safely accelerate Hessian/Hybrid, or whether the chunk size / `einsum` path in `_scale_search_error_batched` can be reordered to use `torch.bmm` over `group_size` blocks with less global memory traffic.
 - AdjacentExact CUDA exact solver remains exponential in active-decision count; no further work in this round.
+
+---
+
+## Round: fused quantize/error step in the scale-search fallback
+
+### Objective
+
+Reduce the elementwise launch overhead in the exact PyTorch Hessian/Hybrid (and MSE) scale-search fallback by folding the dequantized `candidate` -> `error` subtraction into `_quantize_scale_search_candidates` and replacing the `add(zero).clamp(0,maxq).sub(zero)` sequence with a single `clamp(-zero, maxq-zero)`. Also expand the strict unit-test matrix to include `bits=2` and larger model-like shapes.
+
+### Notes on rejected experiments
+
+- **Triton Hessian/Hybrid top-k shortlisting** was investigated by calling `_scale_search_hessian_kernel` to get an approximate loss, then recomputing the exact objective for the top-k candidates using the fallback `torch.einsum`. Even with `k=80` (all candidates) the Triton loss produced a different argmin than the eager fallback because the kernel's FP32 reduction order is not equivalent to `torch.einsum` / `torch.sum`. A sweep over `k ∈ {2,5,10,20,40,60,80}` showed 399-401 failures per 972 cases against the per-group reference, so the Triton Hessian/Hybrid kernel remains disabled in `quantizer.py`. The activation Triton path still uses the proven top-2 exact recompute.
+
+### Changes
+
+1. **`gptqmodel/quantization/quantizer.py`**
+   - `_quantize_scale_search_candidates` now returns the reconstruction `error` (`dequant - x`) instead of the dequantized `candidate`. This removes a separate `candidate - x` elementwise launch in both `find_params` and `find_params_batched` callers.
+   - The quantize clamp is rewritten as `q.clamp_(-zero, maxq - zero).mul_(scale).sub_(x)`, which is algebraically identical to `(round(x/scale)+zero).clamp(0,maxq).sub(zero))*scale - x` but avoids two elementwise `add`/`sub` of `zero`.
+   - Callers in `find_params` and `find_params_batched` updated to consume `error` directly.
+
+2. **`tests/test_find_params_batched_strict.py` (new)**
+   - 108 additional strict-accuracy cases covering `rows={128,4096}`, `cols={512,4096}`, `group_size={32,64,128}`, `bits={2,4,8}`, `sym={False,True}`, methods `activation/hessian/hybrid`.
+   - Activation cases explicitly enable Triton; Hessian/Hybrid cases explicitly disable it to validate the exact fallback.
+   - Uses a cheap block-diagonal positive-definite Hessian so the square 4096x4096 matrix is feasible in unit-test time.
+
+### Accuracy validation
+
+- `pytest -q tests/test_quantizer_scale_search.py tests/test_quantizer.py tests/test_gptq.py tests/test_gptq_block_triton.py tests/test_adjacent_exact_cuda.py tests/test_find_params_batched_strict.py`: **318 passed, 2 skipped** on A100 GPU 5.
+- `python scripts/validate_find_params_batched_strict.py`: **STRICT CHECK PASSED** on GPU 5.
+- All new `test_find_params_batched_strict.py` cases match per-group `find_params` to `<1e-6`.
+
+### Benchmarks
+
+`find_params_batched` microbenchmark (`4096 x 4096`, `bits=4`, `sym=False`, `grid=100`, A100 GPU 5). `before` = previous committed top-2 activation + exact fallback; `after` = fused quantize/error step.
+
+| group_size | method     | before (ms) | after (ms) | speedup |
+|------------|------------|-------------|------------|---------|
+| 32         | activation | 11.86       | 11.86      | 1.00x   |
+| 32         | hessian    | 114.52      | 75.17      | **1.52x** |
+| 32         | hybrid     | 113.29      | 75.18      | **1.51x** |
+| 64         | activation | 9.06        | 7.16       | **1.27x** |
+| 64         | hessian    | 100.45      | 65.45      | **1.53x** |
+| 64         | hybrid     | 100.78      | 65.44      | **1.54x** |
+| 128        | activation | 6.83        | 5.93       | **1.15x** |
+| 128        | hessian    | 95.43       | 61.34      | **1.56x** |
+| 128        | hybrid     | 92.62       | 61.55      | **1.50x** |
+
+End-to-end `GPTQ.quantize` (`4096 x 4096`, `blocksize=128`, `bits=4`, `sym=False`, `mse=2.0`, A100 GPU 5):
+
+| group_size | method     | mean (ms) | median (ms) | min (ms) | max (ms) |
+|------------|------------|-----------|-------------|----------|----------|
+| 32         | activation | 111.62    | 111.30      | 111.06   | 113.11   |
+| 32         | hessian    | 124.05    | 123.99      | 123.86   | 124.33   |
+| 32         | hybrid     | 124.51    | 124.71      | 124.02   | 124.98   |
+| 64         | activation | 105.01    | 105.04      | 104.76   | 105.18   |
+| 64         | hessian    | 114.16    | 114.03      | 113.94   | 114.44   |
+| 64         | hybrid     | 114.45    | 114.47      | 114.33   | 114.51   |
+| 128        | activation | 99.83     | 99.78       | 99.66    | 100.08   |
+| 128        | hessian    | 108.89    | 109.08      | 108.17   | 109.55   |
+| 128        | hybrid     | 111.33    | 111.24      | 109.01   | 113.70   |
+
+Nsight Systems on `find_params_batched` hessian shows the elementwise kernel storm (`div`, `round`, `add`, `clamp`, `sub`, `mul`) is reduced; the remaining time is dominated by the `torch.einsum` `error @ H @ error` contraction and the per-candidate reductions, not launch overhead.
+
+### Known limitations / future work
+
+- Hessian/Hybrid Triton shortlisting remains disabled because the approximate FP32 kernel loss reorders the argmin relative to the eager `torch.einsum` path. The next round should either improve the kernel loss to be bit-exact with eager or find a provably safe top-k bound.
+- The exact fallback contraction `torch.einsum("crgi,gij->crgj", error, hessian)` is already as fast as a hand-rolled `bmm` reshape and is memory-throughput bound on the `error`/`projected` tensors; further speedup likely requires fusing the quantize/error/contract/reduce chain into a single Triton/CUDA kernel per candidate group.
+- Group size 1 is skipped as requested.
+- AdjacentExact CUDA exact solver remains exponential in active-decision count; no further work in this round.

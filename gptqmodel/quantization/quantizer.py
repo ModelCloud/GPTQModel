@@ -291,7 +291,7 @@ class Quantizer(nn.Module):
         *,
         maxq_value: int,
     ) -> torch.Tensor:
-        """Quantize one candidate batch without synchronizing on a CUDA scalar."""
+        """Quantize one candidate batch and return the reconstruction error."""
 
         if maxq_value < 0:
             return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
@@ -299,8 +299,8 @@ class Quantizer(nn.Module):
         q.round_()
         maxq_f = float(maxq_value)
         if self.requires_groupwise_processing():
-            return q.clamp_(-maxq_f, maxq_f).mul_(scale)
-        return q.add_(zero).clamp_(0, maxq_f).sub_(zero).mul_(scale)
+            return q.clamp_(-maxq_f, maxq_f).mul_(scale).sub_(x)
+        return q.clamp_(-zero, maxq_f - zero).mul_(scale).sub_(x)
 
     def find_params(self, x, weight=False, *, hessian: torch.Tensor | None = None):
         dev = x.device
@@ -395,14 +395,14 @@ class Quantizer(nn.Module):
                 end = min(start + chunk_size, candidate_count)
                 scale1 = scale_all[start:end]
                 zero1 = zero_all[start:end]
-                candidate = self._quantize_scale_search_candidates(
+                error = self._quantize_scale_search_candidates(
                     x_batch,
                     scale1.unsqueeze(2),
                     zero1.unsqueeze(2),
                     maxq_value=maxq_value,
                 )
                 errors = self._scale_search_error(
-                    candidate.sub_(x_batch),
+                    error,
                     method=method,
                     mse=mse,
                     hessian=prepared_hessian,
@@ -573,14 +573,14 @@ class Quantizer(nn.Module):
                 end = min(start + chunk_size, candidate_count)
                 scale1 = scale_all[start:end]
                 zero1 = zero_all[start:end]
-                candidate = self._quantize_scale_search_candidates(
+                error = self._quantize_scale_search_candidates(
                     x_batch.expand(end - start, -1, -1, -1),
                     scale1.unsqueeze(-1),
                     zero1.unsqueeze(-1),
                     maxq_value=maxq_value,
                 )
                 errors = self._scale_search_error_batched(
-                    candidate - x_batch,
+                    error,
                     method=method,
                     mse=mse,
                     hessian=prepared_hessian,
