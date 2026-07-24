@@ -367,4 +367,61 @@ The largest end-to-end impact is for `group_size=128 hessian` on dense per-block
 ### Known limitations / future work
 
 - `find_params_batched` Triton activation now uses `group_size` as the tile width; for non-power-of-two group sizes this may compile less efficient kernels, but the target configurations (32/64/128) are power-of-two.
+
+---
+
+## Round: lazy scale/zero top-k recompute and strict-accuracy fixes
+
+### Objective
+
+Reduce the remaining elementwise launch overhead in `find_params_batched` by materializing `scale`/`zero` only for the Triton top-k candidates instead of the full shrink grid, while keeping strict bit-for-bit agreement with the eager fallback. Also restore correctness for Hessian/Hybrid scale search on dense, ill-conditioned Hessians.
+
+### Notes on reverted experiments
+
+- **Hessian inverse replacement** (`torch.linalg.solve_triangular(L, I, upper=False).T` instead of `cholesky(cholesky_inverse(...))`) was reverted: it is ~2.5x faster on a 4096x4096 SPD matrix and more accurate against `torch.linalg.inv(H)`, but the resulting `W` update diverges enough to break `test_gptq_block_triton[128]` (scale diff 3e-5, relative 1.1%).
+- **Triton kernels emitting per-candidate scale/zero** were reverted: writing `scale`/`zero` inside the kernel avoided the Python recompute but produced ULP-different values that reordered the exact-loss argmin and caused order-dependent `sym=True` failures in `test_quantizer_scale_search.py`.
+
+### Changes
+
+1. **`gptqmodel/quantization/quantizer.py`**
+   - Moved the full `scale_all`/`zero_all` precompute to *after* the Triton activation fast path, so it is skipped when the Triton wrapper is used.
+   - Disabled the `_triton_find_params_batched_hessian_hybrid` call. The approximate Triton top-20 loss can miss the true best candidate on dense/ill-conditioned Hessians (`seed=42 rows=4096 cols=256 gs=64 sym=True bits=4 hessian` produced a 0.031 scale diff). The exact vectorized fallback already evaluates all 80 candidates in one launch and passes the strict check.
+
+2. **`gptqmodel/quantization/_scale_search_triton.py`**
+   - The activation wrapper now recomputes `scale_k`/`zero_k` only for the top-k shortlisted candidates instead of receiving the full `scale_all`/`zero_all` tensors.
+   - Recompute uses a `torch.int64` `maxq` tensor matching the eager precompute (`self.maxq`), eliminating ULP differences that previously reordered the exact-loss argmin.
+   - The Hessian/Hybrid wrapper and kernel remain in the file but are no longer invoked from `quantizer.py`.
+
+3. **`tests/test_quantizer_scale_search.py`**
+   - Added `test_find_params_batched_dense_matches_per_group_reference` with a dense positive-definite Hessian, `rows=128`, `cols=256`, and multi-group inputs for `activation/hessian/hybrid` across `group_size={32,64,128}`, `bits={4,8}`, and `sym={False,True}`. This catches FP32/Triton top-k regressions that the small block-diagonal tests miss.
+
+### Accuracy validation
+
+- `pytest -q tests/test_gptq.py tests/test_quantizer.py tests/test_quantizer_scale_search.py tests/test_adjacent_exact_cuda.py tests/test_gptq_block_triton.py`: **174 passed, 2 skipped** (GPU 5).
+- `python scripts/validate_find_params_batched_strict.py`: **STRICT CHECK PASSED** on both GPU 5 and GPU 6.
+- New `test_find_params_batched_dense_matches_per_group_reference`: **36/36 passed**.
+
+### Benchmarks
+
+End-to-end `GPTQ.quantize` (`4096 x 4096`, `blocksize=128`, `bits=4`, `sym=False`, `mse=2.0`, A100 GPU 5). `before` = previous committed state using full `scale_all`/`zero_all` precompute and Triton Hessian/Hybrid top-20; `after` = lazy activation recompute + fallback for Hessian/Hybrid.
+
+| group_size | method     | before (ms) | after (ms) | delta   |
+|------------|------------|-------------|------------|---------|
+| 32         | activation | 122.36      | 122.37     | +0.01   |
+| 32         | hessian    | 134.92      | 135.02     | +0.10   |
+| 32         | hybrid     | 134.92      | 135.07     | +0.15   |
+| 64         | activation | 113.52      | 113.48     | -0.04   |
+| 64         | hessian    | 125.40      | 125.28     | -0.12   |
+| 64         | hybrid     | 127.17      | 125.31     | -1.86   |
+| 128        | activation | 110.49      | 108.61     | -1.88   |
+| 128        | hessian    | 120.65      | 119.56     | -1.09   |
+| 128        | hybrid     | 120.80      | 119.65     | -1.15   |
+
+The activation path avoids the full `scale_all`/`zero_all` precompute, giving measurable savings for `group_size=128`. Hessian/Hybrid run through the exact vectorized fallback and are at parity or slightly faster than the approximate Triton top-20 path.
+
+### Known limitations / future work
+
+- Hessian/Hybrid Triton scale search is disabled until an exact (or provably tight top-k) loss computation is implemented.
+- The lazy activation recompute still materializes `scale_k`/`zero_k` and `losses_k` for the top-20 candidates; fusing the exact recompute into the Triton kernel would remove the remaining Python->CUDA launch overhead.
+- Group size 1 remains skipped as requested.
 - AdjacentExact CUDA exact solver remains exponential in active-decision count; no further work in this round.
