@@ -18,12 +18,12 @@ HF_OPTIMUM = "hf_optimum"
 
 # Bound temporary candidate tensors while still amortizing eager CUDA launch
 # overhead for the 128-column groups used by GPTQ.
-SCALE_SEARCH_TARGET_ELEMENTS = 8 * 1024 * 1024
+SCALE_SEARCH_TARGET_ELEMENTS = 64 * 1024 * 1024
 SCALE_SEARCH_MAX_CANDIDATES_PER_CHUNK = 16
 # Correlated objectives benefit more from large GEMMs than elementwise
 # objectives. Give them a larger, still-bounded workspace without increasing
 # activation or MSE search memory.
-CORRELATED_SCALE_SEARCH_TARGET_ELEMENTS = 16 * 1024 * 1024
+CORRELATED_SCALE_SEARCH_TARGET_ELEMENTS = 128 * 1024 * 1024
 CORRELATED_SCALE_SEARCH_MAX_CANDIDATES_PER_CHUNK = 80
 
 

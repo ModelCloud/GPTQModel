@@ -65,6 +65,26 @@ Wall-clock `quantize(...)` time with the new batched path (single GPU):
 
 The `group_size=32 activation` `find_params` phase dropped from ~313 ms to ~108 ms, a ~200 ms saving that directly reduces the end-to-end quantize time by roughly 14-15% for that configuration.
 
+### ScaleSearch `find_params_batched` chunk size
+
+The `find_params_batched` scale-search loop was constrained to very small candidate chunks (`SCALE_SEARCH_TARGET_ELEMENTS = 8 MB`, `CORRELATED_SCALE_SEARCH_TARGET_ELEMENTS = 16 MB`) for the 128-column groups used by GPTQ, often forcing one candidate per chunk and many tiny kernel launches. Raising the target workspace to `64 MB` / `128 MB` lets the chunker build larger candidate batches while staying inside the A100 memory envelope.
+
+A100 `find_params_batched` timing for `4096 x 4096`:
+
+| group_size | method     | before (ms) | after (ms) | speedup |
+|------------|------------|-------------|------------|---------|
+| 32         | activation | 78.9        | 70.6       | 1.12x   |
+| 32         | hessian    | 96.4        | 86.6       | 1.11x   |
+| 32         | hybrid     | 96.0        | 86.1       | 1.11x   |
+| 64         | activation | 71.4        | 64.2       | 1.11x   |
+| 64         | hessian    | 87.0        | 77.0       | 1.13x   |
+| 64         | hybrid     | 86.6        | 76.5       | 1.13x   |
+| 128        | activation | 68.4        | 60.8       | 1.12x   |
+| 128        | hessian    | 83.5        | 72.5       | 1.15x   |
+| 128        | hybrid     | 83.8        | 72.6       | 1.15x   |
+
+`validate_find_params_batched_quick.py` and `validate_find_params_batched_strict.py` still pass with zero diff.
+
 ### AdjacentExact CUDA exact kernel
 
 Active-decision timing (all `size` decisions non-zero, `warps=0`) on a single A100:
