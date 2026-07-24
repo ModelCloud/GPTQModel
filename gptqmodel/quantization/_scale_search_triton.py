@@ -187,13 +187,13 @@ if _triton_available():
             BLOCK_COL=block_col,
         )
 
-        # The approximate Triton loss is only used to narrow the search to a
-        # small top-k. We then recompute the exact PyTorch loss for those
-        # candidates and select the first minimizer, matching the eager path's
-        # torch.min tie-breaking behaviour. Sorting the top-k indices ascending
-        # before recomputing ensures ties resolve to the smallest candidate
-        # index, just like the reference.
-        k = min(candidate_count, 20)
+        # The approximate Triton loss is only used to narrow the search to the
+        # two most promising candidates. We then recompute the exact PyTorch loss
+        # for those two candidates and select the first minimizer, matching the
+        # eager path's torch.min tie-breaking behaviour. Sorting the top-2
+        # indices ascending before recomputing ensures ties resolve to the
+        # smallest candidate index, just like the reference.
+        k = min(candidate_count, 2)
         topk_values, topk_indices = loss_out.topk(k, dim=-1, largest=False, sorted=False)
         topk_indices, sort_order = topk_indices.sort(dim=-1)
         topk_values = topk_values.gather(2, sort_order)
