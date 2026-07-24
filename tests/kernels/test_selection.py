@@ -16,12 +16,19 @@ from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.importer import AUTO_BACKEND_KERNEL_MAPPING, auto_select_device, select_quant_linear
+from gptqmodel.utils.importer import (
+    AUTO_BACKEND_KERNEL_MAPPING,
+    auto_select_device,
+    build_kernel_support_maps,
+    iter_quant_linear_kernels,
+    select_quant_linear,
+)
 from gptqmodel.utils.rocm import IS_ROCM
 from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
@@ -140,6 +147,17 @@ def test_auto_select_normalizes_torch_device_before_device_prefilter(monkeypatch
     )
 
     assert qlinear_cls is CudaKernel
+
+
+def test_role_only_kernel_is_excluded_from_backend_discovery():
+    assert TorchQuantEmbeddings.SUPPORTS_BACKEND_SELECTION is False
+    assert TorchQuantEmbeddings not in iter_quant_linear_kernels()
+    auto_mapping, _ = build_kernel_support_maps()
+    assert all(
+        TorchQuantEmbeddings not in backend_mapping.values()
+        for format_mapping in auto_mapping.values()
+        for backend_mapping in format_mapping.values()
+    )
 
 
 CASES = []
