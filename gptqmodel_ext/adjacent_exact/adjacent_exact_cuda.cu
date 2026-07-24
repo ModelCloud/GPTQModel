@@ -20,16 +20,24 @@ constexpr int kWarpSize = 32;
 constexpr int kWarpsPerBlock = 8;
 constexpr int kThreadsPerBlock = kWarpSize * kWarpsPerBlock;
 constexpr int64_t kMaxWorkerWarps = int64_t{1} << 20;
-// Recompute from the bit pattern frequently so incremental FP64 drift cannot
-// accumulate across a long Gray-code range. 2048 is large enough to amortize
-// the O(size^2) rebase cost while small enough to keep FP64 rounding stable.
-constexpr uint64_t kRebaseInterval = 2048;
+// Recompute from the bit pattern frequently so FP32 incremental drift cannot
+// accumulate across a long Gray-code range. 1024 is large enough to amortize
+// the O(size^2) rebase cost while small enough to keep FP32 rounding stable
+// for the internal accumulator; the final candidate cost is always recomputed
+// from the original FP64 QUBO values using the selected best state.
+constexpr uint64_t kRebaseInterval = 1024;
+
+// Internal accumulator type.  FP32 is much faster on Ampere than FP64 and is
+// sufficient for the incremental Gray-code energy, because we recompute from
+// the original FP64 data at every rebase point and again at the end.
+using acc_t = float;
 
 __device__ __forceinline__ uint32_t gray_code(uint64_t index) {
   return static_cast<uint32_t>(index ^ (index >> 1));
 }
 
-__device__ __forceinline__ double warp_sum(double value) {
+template <typename T>
+__device__ __forceinline__ T warp_sum(T value) {
 #pragma unroll
   for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
     value += __shfl_down_sync(0xffffffffu, value, offset);
@@ -83,31 +91,33 @@ __global__ void adjacent_exact_candidates_kernel(
 
   uint32_t state = 0;
   uint32_t best_state = 0;
-  double field = 0.0;
-  double energy = 0.0;
-  double best_energy = DBL_MAX;
+  acc_t field = 0.0;
+  acc_t energy = 0.0;
+  acc_t best_energy = FLT_MAX;
 
   for (uint64_t index = begin; index < end; ++index) {
     const uint64_t local_index = index - begin;
     if ((local_index & (kRebaseInterval - 1)) == 0) {
       state = gray_code(index);
       if (lane < size) {
-        field = smem_linear[lane];
+        field = static_cast<acc_t>(smem_linear[lane]);
         uint32_t bits = state;
         while (bits) {
           const int other = __ffs(bits) - 1;
-          field += smem_interaction[other * size + lane];
+          field += static_cast<acc_t>(smem_interaction[other * size + lane]);
           bits &= bits - 1;
         }
       } else {
         field = 0.0;
       }
 
-      const double contribution =
-          lane < size && ((state >> lane) & 1u) ? 0.5 * (smem_linear[lane] + field) : 0.0;
-      const double contribution_sum = warp_sum(contribution);
+      const acc_t contribution =
+          lane < size && ((state >> lane) & 1u)
+              ? static_cast<acc_t>(0.5) * (static_cast<acc_t>(smem_linear[lane]) + field)
+              : acc_t(0.0);
+      const acc_t contribution_sum = warp_sum(contribution);
       if (lane == 0) {
-        energy = constant[0] + contribution_sum;
+        energy = static_cast<acc_t>(constant[0]) + contribution_sum;
       }
     }
 
@@ -123,13 +133,13 @@ __global__ void adjacent_exact_candidates_kernel(
       const uint32_t n = static_cast<uint32_t>(index + 1);
       const int flipped = __ffs(n) - 1;
       const uint32_t bit = 1u << flipped;
-      const double direction = ((state >> flipped) & 1u) ? -1.0 : 1.0;
-      const double flipped_field = __shfl_sync(0xffffffffu, field, flipped);
+      const acc_t direction = ((state >> flipped) & 1u) ? acc_t(-1.0) : acc_t(1.0);
+      const acc_t flipped_field = __shfl_sync(0xffffffffu, field, flipped);
       if (lane == 0) {
         energy += direction * flipped_field;
       }
       if (lane < size) {
-        field += direction * smem_interaction[flipped * size + lane];
+        field += direction * static_cast<acc_t>(smem_interaction[flipped * size + lane]);
       }
       state ^= bit;
     }
