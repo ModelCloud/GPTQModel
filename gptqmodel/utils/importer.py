@@ -52,7 +52,10 @@ def iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
                 continue
             seen.add(subcls)
             _walk(subcls)
-            if "SUPPORTS_FORMATS" in subcls.__dict__:
+            if (
+                "SUPPORTS_FORMATS" in subcls.__dict__
+                and getattr(subcls, "SUPPORTS_BACKEND_SELECTION", True)
+            ):
                 kernels.append(subcls)
 
     _walk(BaseQuantLinear)

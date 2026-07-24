@@ -64,6 +64,9 @@ def _torch_left_shift(values: t.Tensor, shifts: int | t.Tensor) -> t.Tensor:
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BACKENDS: List[BACKEND] = None
+    # False for role-specific modules that are instantiated explicitly and
+    # must never participate in general backend discovery.
+    SUPPORTS_BACKEND_SELECTION: bool = True
     SUPPORTS_METHODS: List[METHOD] = None
     SUPPORTS_FORMATS: Dict[FORMAT, int] = None
     SUPPORTS_BITS: List[int] = None

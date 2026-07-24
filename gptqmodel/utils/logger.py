@@ -82,6 +82,18 @@ class _AdaptiveLoggerProxy:
         return self._logger.spinner(title=title, interval=interval, tail_length=tail_length)
 
     def __getattr__(self, name):
+        # __getattr__ only runs when normal attribute lookup misses. If _logger
+        # itself is missing from the instance -- e.g. on a copy/pickle
+        # reconstructed proxy created via __new__ without __init__ -- then
+        # evaluating self._logger below re-enters __getattr__ and recurses
+        # forever (RecursionError). This happens in practice when an object that
+        # holds this proxy (see line ~223) is deepcopied: copy probes dunders
+        # such as __deepcopy__/__setstate__ on the freshly __new__'d instance
+        # before its __dict__ is restored. Raise a clean AttributeError for
+        # dunders and _logger so those probes fail normally and copy/pickle fall
+        # back to their default (which restores _logger).
+        if name == "_logger" or (name.startswith("__") and name.endswith("__")):
+            raise AttributeError(name)
         return getattr(self._logger, name)
 
 

@@ -73,7 +73,9 @@ from ..utils.model import (
     get_checkpoints,
     get_layers_with_prefixes,
     get_module_by_name_prefix,
+    get_module_name,
     gptqmodel_post_init,
+    is_embeddings_module_quantized,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
     simple_dispatch_model,
@@ -1224,9 +1226,23 @@ def ModelLoader(cls):
 
             modules = find_modules(model)
             ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
+            input_embeddings = model.get_input_embeddings()
+            output_embeddings = model.get_output_embeddings()
+            input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
+            output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
+            input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
+                model_dir=model_local_path,
+                input_embed_name=input_embed_name,
+                output_embed_name=output_embed_name,
+            )
 
             simple_layer_modules = cls.simple_layer_modules(config, qcfg)
             for name in list(modules.keys()):
+                if input_embed_quantized and name == input_embed_name:
+                    continue
+                if output_embed_quantized and name == output_embed_name:
+                    continue
+
                 # allow loading of quantized lm_head
                 if qcfg.lm_head and name == cls.lm_head:
                     continue
