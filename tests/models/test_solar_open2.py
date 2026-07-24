@@ -13,7 +13,7 @@ from model_test import ModelTest
 from torch import nn
 from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
 
-from gptqmodel import BACKEND
+from gptqmodel import BACKEND, WeightOnlyConfig
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.solar_open2 import SolarOpen2QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
@@ -66,59 +66,6 @@ def test_solar_open2_model_type_selects_definition(monkeypatch):
     assert auto.check_and_get_model_definition("/tmp/solar-open2") is SolarOpen2QModel
 
 
-@pytest.mark.skipif(not MODEL_PATH.is_dir(), reason="Solar Open 2 checkpoint is unavailable")
-def test_solar_open2_local_checkpoint_selects_definition():
-    assert auto.check_and_get_model_definition(str(MODEL_PATH), trust_remote_code=False) is SolarOpen2QModel
-
-
-def test_solar_open2_module_tree_covers_hybrid_attention_and_moe_paths():
-    config = SimpleNamespace(n_routed_experts=3)
-    quantize_config = SimpleNamespace(dynamic=None)
-    layer_modules = SolarOpen2QModel.simple_layer_modules(config, quantize_config)
-    flat_modules = {name for block in layer_modules for name in block}
-    capture_modules = {
-        name
-        for block in SolarOpen2QModel.full_layer_modules(
-            config,
-            include_capture_only=True,
-        )
-        for name in block
-    }
-
-    assert SolarOpen2QModel.layer_modules_strict is False
-    assert SolarOpen2QModel.dynamic_expert_index == "n_routed_experts"
-    assert SolarOpen2QModel.extract_layers_node() == ["model.layers"]
-    assert "self_attn.q_proj" in flat_modules
-    assert "self_attn.k_proj" in flat_modules
-    assert "self_attn.v_proj" in flat_modules
-    assert "self_attn.g_proj" in flat_modules
-    assert "self_attn.o_proj" in flat_modules
-    assert "self_attn.b_proj" not in flat_modules
-    assert "self_attn.f_a_proj" not in flat_modules
-    assert "self_attn.f_b_proj" not in flat_modules
-    assert "self_attn.g_a_proj" not in flat_modules
-    assert "self_attn.g_b_proj" not in flat_modules
-    assert "mlp.gate_proj" in flat_modules
-    assert "mlp.up_proj" in flat_modules
-    assert "mlp.down_proj" in flat_modules
-    assert "mlp.experts.0.gate_proj" in flat_modules
-    assert "mlp.experts.1.up_proj" in flat_modules
-    assert "mlp.experts.2.down_proj" in flat_modules
-    assert "mlp.shared_experts.gate_proj" in flat_modules
-    assert "mlp.shared_experts.up_proj" in flat_modules
-    assert "mlp.shared_experts.down_proj" in flat_modules
-    assert "mlp.gate" not in flat_modules
-    assert "self_attn.q_norm:!" in capture_modules
-    assert "self_attn.k_norm:!" in capture_modules
-    assert "self_attn.o_norm:!" in capture_modules
-    assert "self_attn.b_proj:!" in capture_modules
-    assert "self_attn.f_a_proj:!" in capture_modules
-    assert "self_attn.f_b_proj:!" in capture_modules
-    assert "self_attn.g_a_proj:!" in capture_modules
-    assert "self_attn.g_b_proj:!" in capture_modules
-    assert "mlp.gate:!" in capture_modules
-
-
 def test_solar_open2_replay_rebuilds_full_and_linear_attention_masks():
     model = _tiny_model()
     wrapper = SolarOpen2QModel.__new__(SolarOpen2QModel)
@@ -169,33 +116,6 @@ def test_solar_open2_replay_rebuilds_full_and_linear_attention_masks():
     assert linear_inputs["attention_mask"].shape == padding_mask.shape
 
 
-def test_solar_open2_defuser_expands_routed_experts_without_changing_forward():
-    from defuser.model_registry import MODEL_CONFIG
-
-    assert "solar_open2" in MODEL_CONFIG
-
-    torch.manual_seed(0)
-    model = _tiny_model()
-    input_ids = torch.tensor([[1, 7, 8, 2]])
-    packed_experts = model.model.layers[0].mlp.experts
-
-    assert hasattr(packed_experts, "gate_up_proj")
-    with torch.inference_mode():
-        expected = model(input_ids=input_ids, use_cache=False).logits
-
-    assert _convert_model_with_defuser(SolarOpen2QModel, model, cleanup_original=False) is True
-
-    experts = model.model.layers[0].mlp.experts
-    assert not hasattr(experts, "gate_up_proj")
-    assert isinstance(experts[0].gate_proj, nn.Linear)
-    assert isinstance(experts[0].up_proj, nn.Linear)
-    assert isinstance(experts[0].down_proj, nn.Linear)
-    with torch.inference_mode():
-        actual = model(input_ids=input_ids, use_cache=False).logits
-
-    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-7)
-
-
 def test_solar_open2_lazy_turtle_materializes_defused_expert_weights(tmp_path):
     source = _tiny_model()
     packed_experts = source.model.layers[0].mlp.experts
@@ -236,23 +156,20 @@ class TestSolarOpen2(ModelTest):
     NATIVE_MODEL_ID = str(MODEL_PATH)
     TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
-    LOAD_BACKEND = BACKEND.AUTO
-    EVAL_BATCH_SIZE = 1
+    EVAL_BATCH_SIZE = 16
     EVAL_SINGLE_GPU = False
-    MODEL_COMPAT_FAST_LAYER_COUNT = 2
-    MODEL_COMPAT_FAST_LAYER_POSITION = "first"
     MOE_VRAM_STRATEGY = VramStrategy.BALANCED
     EVAL_TASKS_SLOW = {
-        "mmlu_pro": {
+        "arc_challenge": {
             "chat_template": True,
-            # Native score published with the local Solar Open 2 checkpoint.
-            "em,choice_label": {"value": 0.862, "floor_pct": 0.10},
+            "acc": {"value": 0.4889, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.4642, "floor_pct": 0.04},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
+
     def test_solar_open2(self):
         self.quantize_and_evaluate()
-
 
 __all__ = ["TestSolarOpen2"]

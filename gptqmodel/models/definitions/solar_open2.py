@@ -60,7 +60,7 @@ class SolarOpen2QModel(BaseQModel):
                 "gate": ("gate:!",),
                 # Match SolarOpen2MoE.forward(): routed experts run before the
                 # shared expert contribution is added.
-                "experts:0": {
+                "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
                 "shared_experts:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
