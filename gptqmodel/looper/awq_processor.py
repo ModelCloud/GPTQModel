@@ -194,6 +194,17 @@ class AWQProcessor(LoopProcessor):
         self._scale_context = threading.local()
         self.gptq_model = gptq_model
 
+        self.adjacent_model = getattr(qcfg, "adjacent_model", None)
+        if self.adjacent_model is not None:
+            from ..quantization.adjacent_model import AdjacentModelConfig
+
+            if not isinstance(self.adjacent_model, AdjacentModelConfig):
+                raise TypeError("adjacent_model must be an AdjacentModelConfig.")
+            if int(qcfg.bits) not in (2, 3, 4, 8):
+                raise ValueError("AWQ AdjacentExact supports 2, 3, 4, or 8 bits.")
+            if not 1 <= int(qcfg.group_size) <= 128:
+                raise ValueError("AWQ AdjacentExact requires group_size in [1, 128].")
+
         model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
         self.format = resolve_quant_format(qcfg.format, qcfg.method)
         self.qlinear_kernel = model_kernel or self._select_qlinear_kernel_for_format(self.format)
@@ -248,6 +259,40 @@ class AWQProcessor(LoopProcessor):
         self._module_forward_kwargs.setdefault("attention_mask", None)
         # Preserve fallback preference so AWQ can optionally fall back when no calibration data or activations are available.
         self.fallback = qcfg.fallback
+
+    def _capture_adjacent_reference_weights(
+        self,
+        named_linears: Dict[str, NamedModule],
+    ) -> Dict[str, torch.Tensor]:
+        """Snapshot scaled dense weights before AWQ clipping mutates them."""
+
+        if self.adjacent_model is None:
+            return {}
+
+        references: Dict[str, torch.Tensor] = {}
+        for name, named_module in named_linears.items():
+            linear_layer = self.resolve_quant_source_module(named_module)
+            weight = getattr(linear_layer, "weight", None)
+            if not isinstance(weight, torch.Tensor):
+                raise TypeError(f"AWQ AdjacentExact expected `{named_module.full_name}` to expose a weight tensor.")
+            references[name] = weight.detach().to(device="cpu", copy=True).contiguous()
+        return references
+
+    def _record_adjacent_skip(self, named_module: NamedModule, reason: str) -> None:
+        """Expose intentional AWQ fallback skips through the shared Adjacent statistics sink."""
+
+        if self.adjacent_model is None:
+            return
+        self.adjacent_model.record(
+            {
+                "module": named_module.full_name,
+                "quant_method": "awq",
+                "status": "skipped",
+                "reason": reason,
+                "bits": int(self.qcfg.bits),
+                "group_size": int(self.qcfg.group_size),
+            }
+        )
 
     @staticmethod
     def _tensor_cache_fingerprint(tensor: torch.Tensor) -> Tuple[object, ...]:
@@ -1356,6 +1401,14 @@ class AWQProcessor(LoopProcessor):
                 debug_entries[:5],
             )
             raise
+
+        adjacent_targets = {
+            name: named
+            for name, named in named_childs.items()
+            if name in input_feat and name not in fallback_names
+        }
+        adjacent_references = self._capture_adjacent_reference_weights(adjacent_targets)
+
         scales_list = append_str_prefix(
             scales_list,
             get_op_name(self.model, layer_module_ref) + ".",
@@ -1381,7 +1434,12 @@ class AWQProcessor(LoopProcessor):
 
         named_childs = {name: named for name, named in named_childs.items() if name in input_feat and name not in fallback_names}
 
-        self.apply_quant(named_childs, scales_list)
+        self.apply_quant(
+            named_childs,
+            scales_list,
+            input_features=input_feat if self.adjacent_model is not None else None,
+            adjacent_references=adjacent_references if self.adjacent_model is not None else None,
+        )
 
         if fallback_named_childs:
             log.warning(
@@ -2181,8 +2239,19 @@ class AWQProcessor(LoopProcessor):
         for ref_chunk in reference_output:
             yield ref_chunk
 
-    def apply_quant(self, named_linears: Dict[str, NamedModule], scales_list):
+    def apply_quant(
+        self,
+        named_linears: Dict[str, NamedModule],
+        scales_list,
+        *,
+        input_features: Optional[Dict[str, torch.Tensor]] = None,
+        adjacent_references: Optional[Dict[str, torch.Tensor]] = None,
+    ):
         """Pseudo-quantizes selected linears and stages AWQ tensors for packing."""
+
+        if (input_features is None) != (adjacent_references is None):
+            raise ValueError("AWQ AdjacentExact requires both input features and reference weights.")
+        adjacent_context_supplied = input_features is not None
 
         start_time = time.time()
         for name, named_module in named_linears.items():
@@ -2204,9 +2273,56 @@ class AWQProcessor(LoopProcessor):
                 pad = weight_for_quant.new_zeros(weight_for_quant.shape[0], pad_cols)
                 weight_for_quant = torch.cat((weight_for_quant, pad), dim=1)
 
+            adjacent_reference = None
+            adjacent_activations = None
+            if self.adjacent_model is not None:
+                if not adjacent_context_supplied:
+                    self._record_adjacent_skip(
+                        named_module,
+                        "AWQ fallback quantization has no scaled activation/reference pair.",
+                    )
+                else:
+                    assert adjacent_references is not None and input_features is not None
+                    if name not in adjacent_references or name not in input_features:
+                        raise RuntimeError(
+                            f"AWQ AdjacentExact context is missing module `{named_module.full_name}`."
+                        )
+                    adjacent_reference = adjacent_references[name].to(
+                        device=weight_for_quant.device,
+                        dtype=weight_for_quant.dtype,
+                    )
+                    adjacent_activations = input_features[name]
+                    if adjacent_reference.shape[0] != weight_for_quant.shape[0]:
+                        raise ValueError(
+                            f"AWQ AdjacentExact reference rows do not match `{named_module.full_name}`."
+                        )
+                    if pad_cols:
+                        reference_pad = adjacent_reference.new_zeros(adjacent_reference.shape[0], pad_cols)
+                        adjacent_reference = torch.cat((adjacent_reference, reference_pad), dim=1)
+                    if adjacent_reference.shape != weight_for_quant.shape:
+                        raise ValueError(
+                            f"AWQ AdjacentExact reference shape does not match `{named_module.full_name}`."
+                        )
+
             wq, scales, zeros = self.pseudo_quantize_tensor(
                 weight_for_quant
             )
+
+            if adjacent_reference is not None and adjacent_activations is not None:
+                from ..quantization.adjacent_model import apply_adjacent_awq_hybrid
+
+                wq, adjacent_stats = apply_adjacent_awq_hybrid(
+                    module_name=named_module.full_name,
+                    reference_weight=adjacent_reference,
+                    activations=adjacent_activations,
+                    classic_quantized=wq,
+                    scales=scales,
+                    zeros=zeros,
+                    bits=int(self.qcfg.bits),
+                    group_size=int(self.qcfg.group_size),
+                    config=self.adjacent_model,
+                )
+                self.adjacent_model.record(adjacent_stats)
 
             if pad_cols:
                 wq = wq[:, :original_cols]

@@ -1,24 +1,26 @@
 # AdjacentExact optimization log
 
 This file records the reproducible performance and correctness work for the
-classical AdjacentExact/GPTQ hybrid. It separates implementation optimization
-from the broader quantum-feasibility narrative in `quantum.md`.
+classical AdjacentExact GPTQ and AWQ hybrids. It separates implementation
+optimization from the broader quantum-feasibility narrative in `quantum.md`.
 
 ## Optimization contract
 
 - Quality is the primary constraint. A faster path is retained only when its
   adjacent states, convergence flags, flip counts, and Hessian costs match the
   existing FP64 reference within the stated tolerance.
-- The whole-model method remains complementary to Classic GPTQ. Full-row
-  objective selection must continue to prevent a worse adjacent candidate from
-  replacing the Classic result.
+- The whole-model methods remain complementary to their Classic GPTQ or AWQ
+  baseline. Full-row objective selection must continue to prevent a worse
+  adjacent candidate from replacing the baseline result.
+- Both integrations are disabled unless
+  `adjacent_model=AdjacentModelConfig(...)` is explicitly configured.
 - Architecture-specific GPU work is selected from runtime device properties.
   Commands bind by UUID and never infer capability from a fixed CUDA index.
 - CPU and CUDA fallbacks remain available for unsupported execution paths.
 - Timings exclude JIT compilation and allocator warmup unless explicitly
   labeled otherwise.
 
-## 2026-07-24 lifecycle and production configuration checkpoint
+## 2026-07-24 GPTQ lifecycle and production configuration checkpoint
 
 AdjacentExact is an explicit, quantization-time extension of GPTQ. It does not
 replace Hessian collection, GPTQ's sequential error-feedback loop, range
@@ -69,10 +71,11 @@ The former `_adjacent_model_config` and `adjacent_config` hooks now fail with a
 migration message instead of silently doing nothing. `candidate_device` was
 renamed to `executor`; the research runner exposes the matching
 `--executor {auto,cpu,cuda}` option and module statistics report
-`executor_requested` and `executor`. The runtime policy is deliberately
-omitted from checkpoint metadata: inference only needs the already-selected
-packed weights, so this rename does not change the saved GPTQ format or Marlin
-compatibility.
+`executor_requested` and `executor`. When configured, the complete policy is
+stored under `meta.adjacent_model` and reconstructed on load. This changes
+configuration metadata but not packed GPTQ tensors or Marlin compatibility;
+inference still consumes the already-selected weights and does not rerun the
+quantization-time search.
 
 ### Mathematical investigation: why it complements GPTQ
 
@@ -206,75 +209,172 @@ couplings, jointly reconsider range parameters where pack compatibility
 allows it, or use a downstream-aware acceptance proxy while retaining Classic
 GPTQ as the fallback.
 
-### AWQ applicability investigation
+### AWQ implementation checkpoint
 
-Verdict: the adjacent binary optimization is mathematically applicable to AWQ,
-but the current whole-model integration is not. The implementation now rejects
-`adjacent_model` with `method="awq"` instead of silently accepting an unused
-option.
+Verdict: the fixed-grid binary optimization is now integrated into AWQ as an
+explicit, quantization-time-only option. It complements AWQ's activation-aware
+scale and clipping searches; it does not replace them.
 
-The QUBO is not inherently GPTQ-specific. It needs four objects: a dense
-reference weight, a calibration curvature or equivalent activation matrix, a
-fixed affine quantization grid, and a baseline candidate. AWQ has three of
-these directly:
+The AWQ lifecycle is:
 
-- it retains calibration input features;
-- after activation-aware rescaling and clipping, `pseudo_quantize_tensor`
-  produces a fixed scale and zero point for every row-group;
-- its normal pseudo-quantized weight is the baseline RTN candidate on that
-  grid.
+1. Normal AWQ scale search completes. `apply_scale` transforms both the dense
+   weights and each module's captured inputs.
+2. Only when AdjacentExact is configured, the processor snapshots the scaled
+   dense weights to CPU before clipping mutates them.
+3. Normal AWQ clipping and `pseudo_quantize_tensor` produce the final affine
+   scales, zero points, and post-clip RTN baseline.
+4. The preserved reference returns to the weight's runtime CUDA device. The
+   transformed activation tensor builds `H = (2/N) X_A.T @ X_A` in sample
+   chunks. Tensor-parallel weight padding receives matching zero Hessian rows
+   and columns.
+5. The shared group candidate engine chooses adjacent lower/upper codes on
+   AWQ's final grid. `executor` controls CUDA, parallel CPU, or conservative
+   automatic candidate execution.
+6. A second, authoritative guard streams the direct activation objective
+   `2/N ||X_A(W_ref-Q).T||²` for the ordinary AWQ and Hessian-selected
+   candidates. A row changes only when the candidate is strictly better beyond
+   `selection_tolerance`.
+7. The selected weight continues through the unchanged AWQ scale, zero-point,
+   state, packing, save, and inference path.
 
-AWQ does not currently materialize a Hessian and never enters `GPTQ.quantize`.
-Its scale search uses activation statistics and explicit reconstruction
-forwards, and its clip search directly compares group outputs. Therefore the
-existing GPTQ hook cannot simply be enabled for AWQ.
+The pre-clipping reference makes the comparison cover both AWQ clipping and
+rounding relative to the same scaled dense layer. Comparing only against the
+already clipped weight would protect post-clip rounding error while ignoring
+clipping error. The direct guard is intentionally evaluated from activations
+after candidate generation: floating-point Gram-matrix error can reject a row
+but cannot admit a row that is worse than ordinary AWQ on the captured
+activation objective.
 
-A mathematically consistent AWQ adaptation would run in this order:
+Activation is explicit:
 
-1. Complete AWQ's activation-aware scaling search and preserve the scaled
-   full-precision weight before clipping.
-2. Complete clipping and derive AWQ's final scales, zero points, and normal
-   RTN weight.
-3. Use the correspondingly scaled captured inputs `X_A` to form group
-   Hessians `H_g = (2/N) X_A,gᵀX_A,g`.
-4. Build the same lower/upper-code QUBO on AWQ's final affine grid.
-5. Compare the completed AWQ and Adjacent rows against the preserved
-   pre-clipping scaled reference, using either the full Hessian or the
-   equivalent direct output error `||X_A(W_ref-Q)ᵀ||²`.
-6. Pass the selected grid-exact row through the unchanged AWQ packer.
+```python
+from gptqmodel.quantization.adjacent_model import AdjacentModelConfig
+from gptqmodel.quantization.config import AWQConfig, FORMAT
 
-The pre-clipping reference matters. Comparing only against AWQ's already
-clipped weight would guarantee lower post-clipping quantization error but could
-still increase total error relative to the full-precision scaled layer. Using
-the pre-clipping reference makes the acceptance test cover both clipping and
-rounding relative to the same AWQ baseline.
+quantize_config = AWQConfig(
+    bits=4,
+    group_size=128,
+    sym=True,
+    format=FORMAT.GEMM,
+    adjacent_model=AdjacentModelConfig(executor="auto"),
+)
+```
 
-AWQ can avoid storing a full dense Hessian: its captured activations can
-produce each at-most-128-column group Hessian on demand, while the final guard
-can stream direct output-error chunks. Its symmetric path already exposes the
-signed grid through a shifted unsigned zero point, so the existing affine
-floor/ceiling algebra remains valid and pack-compatible.
+`GPTQConfig().adjacent_model` and `AWQConfig().adjacent_model` both default to
+`None`. In that state, GPTQ does not capture its extra weight/Hessian
+references, while AWQ does not snapshot scaled weights, thread Adjacent
+contexts into `apply_quant`, build a Hessian, call the candidate engine, or
+record Adjacent statistics. In that default state, `adjacent_model` is absent
+from checkpoint metadata and reload remains disabled. When explicitly
+configured, every policy field is stored under `meta.adjacent_model` and
+reconstructed as a validated `AdjacentModelConfig`; per-run module statistics
+and synchronization state are deliberately excluded. Inference consumes the
+already selected packed values and does not execute AdjacentExact again.
 
-Required engineering work remains substantial: preserve the correct
-pre-clipping reference, thread transformed module-specific activations into
-`apply_quant`, handle shared AWQ scaling groups and tensor-parallel padding,
-generalize the current CUDA-resident GPTQ hook, and verify every AWQ packing
-format. An AWQ experiment must compare dense, normal AWQ, and AWQ-plus-Adjacent
-with identical calibration data before this becomes a supported config.
+AWQ fallback modules without a valid scaled activation/reference pair retain
+ordinary AWQ RTN and record an explicit `skipped` reason when the option is
+enabled. Tensor-parallel zero padding is supported. The algorithm accepts
+2/3/4/8-bit grids and group sizes from 1 through 128, but inference backend
+capabilities remain independent: the current end-to-end save/load validation
+is 4-bit GEMM and does not claim that every AWQ backend packs every listed bit
+width.
+
+### AWQ focused validation
 
 Validation used physical GPU 0 UUID
-`GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2` (PG506-230, 96 GiB, compute
-capability 8.0) with `PYTHON_GIL=0` and `TORCH_CUDA_ARCH_LIST=8.0`:
+`GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2`, an NVIDIA PG506-230 with
+98,304 MiB, compute capability 8.0, and 124 SMs. The software stack was Torch
+2.13.0+cu130 with CUDA runtime 13.0.
 
-- 60/60 Adjacent math, public-config, AWQ rejection, whole-model hook, CPU/CUDA
-  executor-equivalence, native CUDA, scenario, and quantum-bridge tests passed
-  in 14.04 seconds.
-- The runner help exposes `--executor {auto,cpu,cuda}` and no
-  `--candidate-device` option.
-- `git diff --check` passed.
-- Ruff passed on every changed Adjacent path when excluding `E722`. The
-  unfiltered invocation remains blocked by two pre-existing bare `except`
-  clauses in `gptq.py` lines 805 and 810, outside this change.
+`tests/test_adjacent_awq.py` passed 20/20 cases in 19.20 seconds:
+
+- default-off AWQ performs ordinary pseudo quantization and cannot call the
+  monkeypatched Adjacent helper;
+- symmetric and asymmetric 2/3/4/8-bit candidates remain on the final affine
+  grid and never exceed RTN's direct captured-activation objective;
+- symmetric 2/3-bit groups 32, 64, and 128 execute natively;
+- parallel CPU and CUDA executors return bit-identical hybrids and statistics;
+- processor integration preserves scales and zero points and passes the
+  existing AWQ pack/dequantization contract;
+- fallback skip accounting and tensor-parallel zero padding pass.
+
+The existing GPTQ hybrid suite passed 11/11 cases in 35.15 seconds, including a
+native CUDA JIT compile and execution. Three focused AWQ serialization and
+constructor-dispatch checks also passed. The final combined lint and regression
+results are recorded with the publication checkpoint below.
+
+### Qwen3-0.6B serial AWQ A/B
+
+The model-level smoke used seed 898, one identical local calibration row,
+concatenation size 64, FP16 source weights, 4-bit group-size-128 `sym=True`
+GEMM output, and physical GPU 0. Despite one raw row, preprocessing yielded 650
+non-padding calibration tokens over 11 replay batches. The two arms ran
+serially in the same process:
+
+| Arm | Adjacent modules | Selected rows | Quant wall | Peak Torch allocated | Allocation delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Classic AWQ, unconfigured | 0 | 0 | 50.588 s | 161.208 MiB | 161.208 MiB |
+| AWQ + AdjacentExact | 196 | 344,062 / 344,064 | 97.961 s | 284.228 MiB | 187.312 MiB |
+
+The enabled path took 1.936x the Classic wall time. Its module-reported
+Adjacent time summed to 47.339 seconds: 31.277 seconds in candidate generation,
+0.033 seconds building Hessians, and 0.430 seconds in the direct activation
+guard, with the remainder in refinement and objective work. No module skipped.
+
+On the same activations used to optimize the candidates, the summed direct
+objective fell from `61414.27365621389` to `1488.0760996834924`, a
+`97.57699%` reduction. This is a valid in-sample objective measurement, not a
+downstream-quality claim. With only 650 samples, the 1,024- and 3,072-wide
+activation Hessians are strongly rank-deficient, giving the discrete search
+many calibration-null directions and a material overfitting risk. Held-out
+perplexity or task evaluation is required before interpreting this number as
+model-quality improvement.
+
+A serialization-specific enabled Qwen3-0.6B run completed all 196 modules,
+saved the checkpoint, reloaded it with the GEMM backend on CUDA, and generated:
+
+```text
+The capital city of France is Paris, the capital city of France is
+```
+
+Quantization took 93.953 seconds, save took 0.694 seconds, and reload took
+1.736 seconds. The serialized `meta.adjacent_model` dictionary matched every
+configured field. Reload produced an `AdjacentModelConfig` with the same
+policy and an empty statistics list, proving that configuration persists
+without leaking run results into the model artifact.
+
+### AWQ validation incidents
+
+- The first full-model Classic smoke quantized successfully but attempted
+  generation before moving/reloading the packed model onto CUDA. The selected
+  `AwqGEMMLinear` has no CPU forward, so generation failed. The corrected
+  save/reload smoke above explicitly loads `BACKEND.GEMM` with `device="cuda"`
+  and passes.
+- A planned faster save/load smoke using local `tinyllama-15M` failed before
+  GPT-QModel quantization. Its source `config.json` declares `dtype="tf32"`;
+  Transformers 5.14.1 tried to access nonexistent `torch.tf32`. The Qwen
+  replacement passed, so this is recorded as an unrelated source-checkpoint
+  compatibility failure.
+- Early focused-test failures exposed test-contract mistakes rather than
+  algorithm regressions: a nonexistent `METHOD.RTN` enum, an over-tight
+  float16 8-bit code-distance assertion, a CPU generator passed to CUDA tensor
+  construction, and an AWQ packing fixture with too few output features. Each
+  fixture was corrected, and the complete 20-case suite passes.
+
+### AWQ publication validation
+
+- All six Adjacent test files passed 80/80 cases on physical GPU 0 in 19.16
+  seconds. CUDA coordinate, exhaustive, branch-and-bound, native group-64/128,
+  GPTQ lifecycle, and AWQ lifecycle paths executed rather than skipped.
+- The combined Adjacent plus existing AWQ clipping, shared-activation, and
+  weight-stat regression run passed 69 cases and skipped one two-GPU case
+  because the command intentionally exposed only GPU 0. Runtime was 126.52
+  seconds.
+- Quantization-config dispatch, AWQ zero-point normalization, and focused
+  GPTQ/AWQ Adjacent saved-config round trips passed 41/41 cases plus two
+  method subtests in 8.00 seconds.
+- Ruff, Python bytecode compilation, and `git diff --check` passed for every
+  changed implementation and test path.
 
 ## 2026-07-23 baseline: Qwen3-8B production-shaped candidate phase
 

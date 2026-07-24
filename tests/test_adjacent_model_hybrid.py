@@ -14,7 +14,7 @@ from gptqmodel.quantization.adjacent_model import (
     _resolve_executor,
     apply_adjacent_model_hybrid,
 )
-from gptqmodel.quantization.config import METHOD, QuantizeConfig
+from gptqmodel.quantization.config import AWQConfig, GPTQConfig, METHOD, QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
 
 
@@ -29,27 +29,76 @@ def test_adjacent_model_config_rejects_invalid_budgets():
         AdjacentModelConfig(cpu_workers=0)
     with pytest.raises(ValueError, match="cpu_min_row_groups"):
         AdjacentModelConfig(cpu_min_row_groups=0)
+    with pytest.raises(ValueError, match="activation_chunk_size"):
+        AdjacentModelConfig(activation_chunk_size=0)
+    with pytest.raises(TypeError, match="dictionary"):
+        AdjacentModelConfig.from_dict([])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="unknown fields"):
+        AdjacentModelConfig.from_dict({"future_policy": True})
+    with pytest.raises(TypeError, match="not a string"):
+        AdjacentModelConfig(coordinate_starts="nearest")  # type: ignore[arg-type]
     config = AdjacentModelConfig()
     assert copy.deepcopy(config) is config
 
 
-def test_adjacent_model_is_a_runtime_only_gptq_config():
-    adjacent_model = AdjacentModelConfig(executor="auto")
-    qcfg = QuantizeConfig(
+def test_adjacent_model_is_an_opt_in_serialized_gptq_or_awq_config():
+    adjacent_model = AdjacentModelConfig(
+        coordinate_starts=("linear", "nearest"),
+        max_coordinate_flips=17,
+        coordinate_rebase_interval=5,
+        batch_coordinate_starts_on_cuda=False,
+        executor="auto",
+        row_chunk_size=321,
+        cpu_row_chunk_size=123,
+        cpu_workers=7,
+        cpu_min_row_groups=456,
+        objective_row_chunk_size=89,
+        activation_chunk_size=144,
+        native_refinements_per_module=3,
+        native_split_depth=4,
+        native_max_nodes_per_worker=211,
+        certificate_tolerance=2e-11,
+        selection_tolerance=3e-6,
+    )
+    gptq_qcfg = QuantizeConfig(
         bits=4,
         group_size=128,
         desc_act=False,
         adjacent_model=adjacent_model,
     )
+    awq_qcfg = QuantizeConfig(
+        bits=4,
+        group_size=128,
+        method=METHOD.AWQ,
+        adjacent_model=adjacent_model,
+    )
 
-    assert qcfg.adjacent_model is adjacent_model
-    assert copy.deepcopy(qcfg).adjacent_model is adjacent_model
-    assert "adjacent_model" not in qcfg.to_dict()
+    assert GPTQConfig().adjacent_model is None
+    assert AWQConfig().adjacent_model is None
+    assert gptq_qcfg.adjacent_model is adjacent_model
+    assert awq_qcfg.adjacent_model is adjacent_model
+    assert copy.deepcopy(gptq_qcfg).adjacent_model is adjacent_model
+    assert copy.deepcopy(awq_qcfg).adjacent_model is adjacent_model
+    assert "adjacent_model" not in GPTQConfig().to_dict().get("meta", {})
+    assert "adjacent_model" not in AWQConfig().to_dict().get("meta", {})
+    for qcfg in (gptq_qcfg, awq_qcfg):
+        payload = qcfg.to_dict()
+        assert "adjacent_model" not in payload
+        assert payload["meta"]["adjacent_model"] == adjacent_model.to_dict()
+        loaded = QuantizeConfig.from_quant_config(payload)
+        assert isinstance(loaded.adjacent_model, AdjacentModelConfig)
+        assert loaded.adjacent_model is not adjacent_model
+        assert loaded.adjacent_model.to_dict() == adjacent_model.to_dict()
+        assert loaded.adjacent_model.snapshot() == []
     for legacy_name in ("_adjacent_model_config", "adjacent_config"):
         with pytest.raises(ValueError, match=f"{legacy_name}.*adjacent_model"):
             QuantizeConfig(**{legacy_name: adjacent_model})
-    with pytest.raises(ValueError, match="adjacent_model.*GPTQ"):
-        QuantizeConfig(method=METHOD.AWQ, adjacent_model=adjacent_model)
+    with pytest.raises(ValueError, match="adjacent_model.*GPTQ and AWQ"):
+        QuantizeConfig(method=METHOD.FP8, adjacent_model=adjacent_model)
+    unsupported_payload = QuantizeConfig(method=METHOD.FP8).to_dict()
+    unsupported_payload.setdefault("meta", {})["adjacent_model"] = adjacent_model.to_dict()
+    with pytest.raises(ValueError, match="adjacent_model.*GPTQ and AWQ"):
+        QuantizeConfig.from_quant_config(unsupported_payload)
 
 
 def test_auto_executor_is_conservative_and_runtime_probed():
@@ -324,7 +373,7 @@ def test_parallel_cpu_executor_matches_cuda_hybrid():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_gptq_adjacent_model_hook_preserves_scales_and_records_full_hessian_improvement():
+def test_gptq_adjacent_model_hook_preserves_scales_and_records_full_hessian_improvement(monkeypatch):
     device = torch.device("cuda")
     generator = torch.Generator().manual_seed(77)
     source = torch.nn.Linear(16, 9, bias=False, dtype=torch.float16).to(device)
@@ -358,7 +407,15 @@ def test_gptq_adjacent_model_hook_preserves_scales_and_records_full_hessian_impr
     adjacent_task.quantizer.configure(perchannel=True)
     classic_task.add_batch(calibration, classic_module(calibration))
     adjacent_task.add_batch(calibration, adjacent_module(calibration))
+    monkeypatch.setattr(
+        "gptqmodel.quantization.adjacent_model.apply_adjacent_model_hybrid",
+        lambda **_kwargs: pytest.fail("disabled GPTQ unexpectedly invoked AdjacentExact"),
+    )
     classic_quantized, classic_scales, classic_zeros, classic_g_idx, *_ = classic_task.quantize()
+    monkeypatch.setattr(
+        "gptqmodel.quantization.adjacent_model.apply_adjacent_model_hybrid",
+        apply_adjacent_model_hybrid,
+    )
     adjacent_quantized, adjacent_scales, adjacent_zeros, adjacent_g_idx, *_ = adjacent_task.quantize()
 
     torch.testing.assert_close(adjacent_scales, classic_scales, rtol=0.0, atol=0.0)

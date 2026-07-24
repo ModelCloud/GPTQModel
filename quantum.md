@@ -1,6 +1,6 @@
 # Quantum-assisted ultra-low-bit quantization log
 
-Last updated: 2026-07-24 01:23:51 UTC
+Last updated: 2026-07-24 02:45:30 UTC
 
 ## Goal
 
@@ -98,9 +98,15 @@ The next qubit doubles the state vector to 128 GiB and does not fit this 96 GiB 
 - 2026-07-24: Documented the mathematical relationship between GPTQ's damped-inverse-Hessian
   sequential compensation and AdjacentExact's undamped-Hessian binary floor/ceiling QUBO, including
   the row-level no-regression proof and its limits.
-- 2026-07-24: Audited AWQ applicability. The fixed-grid binary QUBO transfers mathematically, but
-  AWQ needs a separate post-scaling/post-clipping lifecycle integration and currently rejects the
-  unsupported `adjacent_model` option.
+- 2026-07-24: Implemented the separate AWQ lifecycle integration: opt-in pre-clip scaled-reference
+  capture, chunked activation Hessian, shared CPU/CUDA candidate generation, direct activation
+  guard, tensor-parallel padding, unchanged AWQ packing, and persistent configuration. Both GPTQ
+  and AWQ remain disabled by default when `adjacent_model` is unset.
+- 2026-07-24: Passed 20 focused AWQ Adjacent tests, including symmetric/asymmetric 2/3/4/8-bit
+  grids, symmetric 2/3-bit groups 32/64/128, CPU/CUDA identity, fallback, padding, and pack/dequant.
+  A serial Qwen3-0.6B 4-bit/group-128 smoke applied 196/196 modules, then saved, reloaded with GEMM,
+  and generated successfully while proving that every policy field was serialized and restored
+  without carrying per-run statistics into the checkpoint.
 
 ## Result
 
@@ -430,11 +436,11 @@ held-out and weight MSE, build flags, exact GPU UUID, software versions, and cer
 AdjacentExact should complement GPTQ rather than replace it. A quality-first group path can produce
 both candidates and select the lower Hessian error. This guarantees the hybrid is no worse than
 either candidate on the measured objective and preserves GPTQ for cases where sequential error
-feedback reaches non-adjacent codes. The whole-model integration is opt-in through the runtime-only
-`QuantizeConfig.adjacent_model` field. It runs after Classic GPTQ and before packing, keeps GPTQ's
+feedback reaches non-adjacent codes. The whole-model integration is opt-in through
+`QuantizeConfig.adjacent_model`. It runs after Classic GPTQ and before packing, keeps GPTQ's
 scales/zeros/group index, and substitutes only rows that strictly improve the original full-Hessian
-objective. It does not alter checkpoint serialization, CPU fallbacks, or normal GPTQ behavior when
-the field is unset.
+objective. The configured policy is serialized for reproducibility without changing packed tensor
+formats. CPU fallbacks and normal GPTQ behavior remain unchanged when the field is unset.
 
 Mathematically, GPTQ greedily quantizes a compensated sequence of weights using a Cholesky factor
 of the damped inverse Hessian. AdjacentExact freezes GPTQ's scale and zero point but jointly chooses
@@ -449,12 +455,21 @@ no worse than Classic GPTQ on that calibration objective, but not necessarily on
 downstream accuracy. A full derivation, the cross-group coupling limitation, and the Llama/Qwen
 evidence are recorded in `adjacent_exact.md`.
 
-The same binary floor/ceiling math can complement AWQ after AWQ finishes activation-aware rescaling
-and clipping. AWQ already has captured inputs and final affine scales/zeros, so group Hessians can
-be formed on demand and the final guard can use direct calibration-output error. This is not wired
-today: AWQ has no GPTQ Hessian task, mutates weights and inputs during scaling, and needs a preserved
-pre-clipping reference for a valid no-regression comparison. Until that separate lifecycle is
-implemented and tested, `adjacent_model` is explicitly GPTQ-only.
+The same binary floor/ceiling math now complements AWQ through a separate lifecycle. After AWQ's
+activation-aware rescaling, the opt-in path preserves the scaled dense weight before clipping.
+Normal clipping and RTN then establish the final affine grid and baseline. The transformed captured
+inputs build `H = (2/N)X.T@X` in chunks for candidate generation, and a streamed direct
+calibration-output guard accepts only rows that improve against the pre-clip reference. AWQ scales,
+zero points, and packing remain unchanged.
+
+`GPTQConfig().adjacent_model` and `AWQConfig().adjacent_model` both default to `None`. Unconfigured
+quantization performs no Adjacent reference capture or Hessian/candidate work, and no Adjacent
+metadata is saved. When configured, all policy fields are stored in `meta.adjacent_model` and
+restored as a fresh `AdjacentModelConfig`; statistics and locks are excluded. The algorithmic path
+accepts 2/3/4/8-bit groups through size 128, while actual save/load inference remains limited by each
+AWQ backend's independent bit-width support. Focused validation and the Qwen3-0.6B serial A/B are
+recorded in `adjacent_exact.md`; its 97.58% captured-activation reduction is explicitly in-sample
+and is not yet a downstream-quality result.
 
 ## Whole-model Llama 3.2 1B A/B
 
@@ -664,5 +679,6 @@ explicitly reported as candidates rather than optima.
 A dense 32-variable QAOA is simulatable, but joint good-state probability remains the quality
 bottleneck. Arbitrary code selection still does not fit the quantum simulator: it needs 64 qubits
 for 2-bit or 96 qubits for 3-bit. The strongest practical result remains the classical
-AdjacentExact/GPTQ hybrid candidate rule, now with a native full-coupling 64/128 CUDA candidate and
-an honest certificate contract, not a production CUDA-Q quantizer.
+AdjacentExact candidate rule: guarded against Classic GPTQ with the full Hessian, or against
+ordinary AWQ with direct transformed-activation error. It now has native full-coupling 64/128 CUDA
+candidates and an honest certificate contract; it is not a production CUDA-Q quantizer.

@@ -1850,6 +1850,28 @@ def normalize_scale_search(
     )
 
 
+def _normalize_adjacent_model(value: Optional[Any]) -> Optional[Any]:
+    """Restore a validated AdjacentExact policy from serialized metadata."""
+
+    if value is None:
+        return None
+
+    from .adjacent_model import AdjacentModelConfig
+
+    if isinstance(value, AdjacentModelConfig):
+        return value
+    if isinstance(value, dict):
+        return AdjacentModelConfig.from_dict(value)
+    raise TypeError("QuantizeConfig: `adjacent_model` must be an AdjacentModelConfig or dictionary.")
+
+
+def _serialize_adjacent_model(value: Optional[Any]) -> Optional[Dict[str, Any]]:
+    """Serialize an AdjacentExact policy without its per-run statistics."""
+
+    normalized = _normalize_adjacent_model(value)
+    return normalized.to_dict() if normalized is not None else None
+
+
 def _normalize_format(value: Union[str, FORMAT]) -> FORMAT:
     if isinstance(value, str):
         try:
@@ -2358,7 +2380,7 @@ def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) 
     target_field_names = {field.name for field in fields(target_cls) if field.init}
     if normalized.get("adjacent_model") is not None and "adjacent_model" not in target_field_names:
         raise ValueError(
-            "QuantizeConfig: `adjacent_model` currently supports the Hessian-driven GPTQ lifecycle only."
+            "QuantizeConfig: `adjacent_model` currently supports GPTQ and AWQ quantization only."
         )
     if target_cls is RTNConfig:
         normalized = _normalize_rtn_kwargs(normalized)
@@ -2923,6 +2945,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "scale_search": "scale_search",
             "mock_quantization": "mock_quantization",
             "act_group_aware": "act_group_aware",
+            "adjacent_model": "adjacent_model",
             "true_sequential": "true_sequential",
             "damp_percent": "damp_percent",
             "damp_auto_increment": "damp_auto_increment",
@@ -2968,6 +2991,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     normalized[normalized_key] = meta_payload.get(meta_key)
 
         target_cls = cls if cls not in {BaseQuantizeConfig, QuantizeConfig} else _resolve_quantize_config_class(normalized)
+        target_field_names = {config_field.name for config_field in fields(target_cls) if config_field.init}
+        if normalized.get("adjacent_model") is not None and "adjacent_model" not in target_field_names:
+            raise ValueError(
+                "QuantizeConfig: `adjacent_model` currently supports GPTQ and AWQ quantization only."
+            )
         normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, normalized)
         if target_cls is RTNConfig:
             normalized = _normalize_rtn_kwargs(normalized)
@@ -3199,14 +3227,13 @@ class GPTQConfig(PreProcessorConfig):
         metadata={"help": "Skip heavy computations for fast model loading validation"},
     )
     hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
-    # Experimental quantization-time AdjacentExact policy. It is intentionally
-    # omitted from checkpoint metadata because inference only consumes the
-    # already-selected packed weights.
+    # Experimental quantization-time AdjacentExact policy. Checkpoints retain
+    # the policy for reproducibility and optional future requantization.
     adjacent_model: Optional[Any] = field(
         default=None,
         repr=False,
         compare=False,
-        metadata={"help": "Optional AdjacentModelConfig used during GPTQ quantization only."},
+        metadata={"help": "Optional AdjacentModelConfig used during GPTQ quantization; disabled by default."},
     )
     enable_shared_hessian_cache: bool = field(
         default=True,
@@ -3239,6 +3266,7 @@ class GPTQConfig(PreProcessorConfig):
         act_group_aware_user_value = self.act_group_aware
         super().__post_init__()
 
+        self.adjacent_model = _normalize_adjacent_model(self.adjacent_model)
         if self.adjacent_model is not None and self.method != METHOD.GPTQ:
             raise ValueError(
                 "QuantizeConfig: `adjacent_model` currently supports `method=\"gptq\"` only."
@@ -3390,6 +3418,10 @@ class GPTQConfig(PreProcessorConfig):
         meta_payload["scale_search"] = self.scale_search.value if self.scale_search is not None else None
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
+        if self.adjacent_model is None:
+            meta_payload.pop("adjacent_model", None)
+        else:
+            meta_payload["adjacent_model"] = _serialize_adjacent_model(self.adjacent_model)
         meta_payload["enable_shared_hessian_cache"] = self.enable_shared_hessian_cache
         meta_payload["quantization_diagnostics"] = self.quantization_diagnostics.value
         meta_payload["hessian"] = {
@@ -3407,6 +3439,14 @@ class GPTQConfig(PreProcessorConfig):
 class AWQConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.AWQ)
     format: FORMAT = field(default=FORMAT.GEMM)
+    # Experimental quantization-time AdjacentExact policy. Checkpoints retain
+    # the policy for reproducibility and optional future requantization.
+    adjacent_model: Optional[Any] = field(
+        default=None,
+        repr=False,
+        compare=False,
+        metadata={"help": "Optional AdjacentModelConfig used during AWQ quantization; disabled by default."},
+    )
     scale_search_chunked_activations: bool = field(
         default=True,
         metadata={
@@ -3446,6 +3486,7 @@ class AWQConfig(PreProcessorConfig):
     def __post_init__(self):
         self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
+        self.adjacent_model = _normalize_adjacent_model(self.adjacent_model)
         if self.format not in self.supported_export_formats():
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
@@ -3472,6 +3513,10 @@ class AWQConfig(PreProcessorConfig):
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)
+        if self.adjacent_model is None:
+            meta_payload.pop("adjacent_model", None)
+        else:
+            meta_payload["adjacent_model"] = _serialize_adjacent_model(self.adjacent_model)
         meta_payload["scale_search_chunked_activations"] = self.scale_search_chunked_activations
         meta_payload["enable_activation_x_mean_cache"] = self.enable_activation_x_mean_cache
         meta_payload["scale_search_gpu_weight_restore"] = self.scale_search_gpu_weight_restore

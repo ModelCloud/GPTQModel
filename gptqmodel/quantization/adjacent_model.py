@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experimental whole-model AdjacentExact hybridization for GPTQ research."""
+"""Experimental whole-model AdjacentExact hybridization for GPTQ and AWQ research."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 import math
 import os
 import sys
@@ -40,6 +40,7 @@ class AdjacentModelConfig:
     cpu_workers: int = 64
     cpu_min_row_groups: int = 393_216
     objective_row_chunk_size: int = 256
+    activation_chunk_size: int = 2048
     native_refinements_per_module: int = 4
     native_split_depth: int = 6
     native_max_nodes_per_worker: int = 500
@@ -49,6 +50,12 @@ class AdjacentModelConfig:
     _stats_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if isinstance(self.coordinate_starts, str):
+            raise TypeError("coordinate_starts must be an iterable of start names, not a string.")
+        try:
+            self.coordinate_starts = tuple(self.coordinate_starts)
+        except TypeError as exc:
+            raise TypeError("coordinate_starts must be an iterable of start names.") from exc
         allowed_starts = {"nearest", "zero", "one", "linear"}
         unknown = set(self.coordinate_starts) - allowed_starts
         if unknown:
@@ -65,6 +72,7 @@ class AdjacentModelConfig:
             "cpu_workers",
             "cpu_min_row_groups",
             "objective_row_chunk_size",
+            "activation_chunk_size",
         ):
             if int(getattr(self, name)) < 1:
                 raise ValueError(f"{name} must be positive.")
@@ -78,6 +86,29 @@ class AdjacentModelConfig:
             raise ValueError("certificate_tolerance must be finite and non-negative.")
         if not math.isfinite(self.selection_tolerance) or self.selection_tolerance < 0:
             raise ValueError("selection_tolerance must be finite and non-negative.")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize only the stable runtime policy, excluding statistics and synchronization state."""
+
+        payload = {
+            config_field.name: copy.deepcopy(getattr(self, config_field.name))
+            for config_field in fields(self)
+            if config_field.init
+        }
+        payload["coordinate_starts"] = list(self.coordinate_starts)
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> AdjacentModelConfig:
+        """Reconstruct a validated runtime policy from checkpoint metadata."""
+
+        if not isinstance(payload, dict):
+            raise TypeError("Serialized AdjacentModelConfig must be a dictionary.")
+        field_names = {config_field.name for config_field in fields(cls) if config_field.init}
+        unknown = sorted(set(payload) - field_names)
+        if unknown:
+            raise ValueError(f"Serialized AdjacentModelConfig contains unknown fields: {unknown}.")
+        return cls(**copy.deepcopy(payload))
 
     def __deepcopy__(self, memo: dict[int, Any]) -> AdjacentModelConfig:
         """Share one immutable run configuration and statistics sink across per-module qcfg clones."""
@@ -472,6 +503,97 @@ def _row_hessian_costs(
     return costs
 
 
+def _activation_hessian(
+    *,
+    activations: Tensor,
+    columns: int,
+    device: torch.device,
+    sample_chunk_size: int,
+) -> tuple[Tensor, int]:
+    """Build ``2 / N * X.T @ X`` without materializing all AWQ activations on the GPU."""
+
+    if activations.ndim < 1:
+        raise ValueError("AWQ AdjacentExact activations must have at least one dimension.")
+    activation_columns = int(activations.shape[-1])
+    if activation_columns < 1 or activation_columns > columns:
+        raise ValueError(
+            "AWQ AdjacentExact activation columns are incompatible with the quantized weight: "
+            f"found {activation_columns}, expected at most {columns}."
+        )
+
+    flattened = activations.reshape(-1, activation_columns)
+    sample_count = int(flattened.shape[0])
+    if sample_count < 1:
+        raise ValueError("AWQ AdjacentExact requires at least one captured activation sample.")
+
+    hessian_core = torch.zeros(
+        (activation_columns, activation_columns),
+        dtype=torch.float32,
+        device=device,
+    )
+    normalization = 2.0 / sample_count
+    for start in range(0, sample_count, sample_chunk_size):
+        stop = min(start + sample_chunk_size, sample_count)
+        activation_chunk = flattened[start:stop].to(device=device, dtype=torch.float32)
+        hessian_core.addmm_(
+            activation_chunk.mT,
+            activation_chunk,
+            beta=1.0,
+            alpha=normalization,
+        )
+
+    if activation_columns == columns:
+        return hessian_core, sample_count
+
+    # Tensor-parallel padding adds zero-valued weight columns. Represent their
+    # absent activation dimensions with zero Hessian rows and columns.
+    hessian = torch.zeros((columns, columns), dtype=torch.float32, device=device)
+    hessian[:activation_columns, :activation_columns].copy_(hessian_core)
+    return hessian, sample_count
+
+
+def _row_activation_costs(
+    *,
+    weight: Tensor,
+    quantized: Tensor,
+    activations: Tensor,
+    row_chunk_size: int,
+    sample_chunk_size: int,
+) -> Tensor:
+    """Measure each output row directly as ``2 / N * ||X (W-Q).T||²``."""
+
+    if weight.shape != quantized.shape or weight.ndim != 2:
+        raise ValueError("AWQ AdjacentExact activation costs require matching 2D weights.")
+    activation_columns = int(activations.shape[-1])
+    if not 1 <= activation_columns <= weight.shape[1]:
+        raise ValueError("AWQ AdjacentExact activation columns do not match the weight.")
+
+    flattened = activations.reshape(-1, activation_columns)
+    sample_count = int(flattened.shape[0])
+    if sample_count < 1:
+        raise ValueError("AWQ AdjacentExact requires at least one captured activation sample.")
+
+    costs = torch.zeros(weight.shape[0], dtype=torch.float64, device=weight.device)
+    for sample_start in range(0, sample_count, sample_chunk_size):
+        sample_stop = min(sample_start + sample_chunk_size, sample_count)
+        activation_chunk = flattened[sample_start:sample_stop].to(
+            device=weight.device,
+            dtype=torch.float32,
+        )
+        for row_start in range(0, weight.shape[0], row_chunk_size):
+            row_stop = min(row_start + row_chunk_size, weight.shape[0])
+            error = (
+                weight[row_start:row_stop, :activation_columns].to(torch.float32)
+                - quantized[row_start:row_stop, :activation_columns].to(torch.float32)
+            )
+            projected_error = activation_chunk @ error.mT
+            costs[row_start:row_stop].add_(
+                projected_error.to(torch.float64).square_().sum(dim=0)
+            )
+
+    return costs.mul_(2.0 / sample_count)
+
+
 def _native_refine_candidates(
     *,
     weight: Tensor,
@@ -703,7 +825,145 @@ def apply_adjacent_model_hybrid(
     return hybrid.to(classic_quantized.dtype), stats
 
 
+@torch.inference_mode()
+def apply_adjacent_awq_hybrid(
+    *,
+    module_name: str,
+    reference_weight: Tensor,
+    activations: Tensor,
+    classic_quantized: Tensor,
+    scales: Tensor,
+    zeros: Tensor,
+    bits: int,
+    group_size: int,
+    config: AdjacentModelConfig,
+) -> tuple[Tensor, dict[str, Any]]:
+    """Improve AWQ's final affine-grid rounding without changing scales, zeros, or packing."""
+
+    start_time = time.perf_counter()
+    if reference_weight.device.type != "cuda":
+        raise ValueError("AWQ AdjacentExact requires a CUDA-resident reference weight.")
+    if reference_weight.ndim != 2:
+        raise ValueError("AWQ AdjacentExact reference weight must be two-dimensional.")
+    if classic_quantized.shape != reference_weight.shape:
+        raise ValueError("AWQ AdjacentExact reference and classic weights must have matching shapes.")
+    if classic_quantized.device != reference_weight.device:
+        raise ValueError("AWQ AdjacentExact reference and classic weights must share one device.")
+    if bits not in (2, 3, 4, 8):
+        raise ValueError("AWQ AdjacentExact supports 2, 3, 4, or 8 bits.")
+    if not 1 <= group_size <= 128:
+        raise ValueError("AWQ AdjacentExact requires group_size in [1, 128].")
+    if scales.ndim != 2 or zeros.shape != scales.shape:
+        raise ValueError("AWQ AdjacentExact scales and zeros must be matching 2D tensors.")
+
+    expected_groups = math.ceil(reference_weight.shape[1] / group_size)
+    expected_metadata_shape = (reference_weight.shape[0], expected_groups)
+    if scales.shape != expected_metadata_shape:
+        raise ValueError(
+            "AWQ AdjacentExact scale/zero tensors do not match the weight groups: "
+            f"expected {expected_metadata_shape}, found {tuple(scales.shape)}."
+        )
+    scales = scales.to(reference_weight.device)
+    zeros = zeros.to(reference_weight.device)
+
+    hessian_start = time.perf_counter()
+    hessian, sample_count = _activation_hessian(
+        activations=activations,
+        columns=reference_weight.shape[1],
+        device=reference_weight.device,
+        sample_chunk_size=config.activation_chunk_size,
+    )
+    hessian_build_wall_seconds = time.perf_counter() - hessian_start
+
+    hessian_hybrid, stats = apply_adjacent_model_hybrid(
+        module_name=module_name,
+        weight=reference_weight,
+        hessian=hessian,
+        classic_quantized=classic_quantized,
+        scale_parts=list(scales.split(1, dim=1)),
+        zero_parts=list(zeros.split(1, dim=1)),
+        bits=bits,
+        group_size=group_size,
+        config=config,
+    )
+
+    # AWQ's authoritative objective is activation reconstruction. Re-evaluate
+    # the Hessian-selected rows directly against the transformed calibration
+    # activations so numerical Gram-matrix error can only reject, never admit,
+    # a row that is worse than ordinary AWQ rounding.
+    guard_start = time.perf_counter()
+    classic_costs = _row_activation_costs(
+        weight=reference_weight,
+        quantized=classic_quantized,
+        activations=activations,
+        row_chunk_size=config.objective_row_chunk_size,
+        sample_chunk_size=config.activation_chunk_size,
+    )
+    hessian_hybrid_costs = _row_activation_costs(
+        weight=reference_weight,
+        quantized=hessian_hybrid,
+        activations=activations,
+        row_chunk_size=config.objective_row_chunk_size,
+        sample_chunk_size=config.activation_chunk_size,
+    )
+    threshold = config.selection_tolerance * (1.0 + classic_costs.abs())
+    select_hybrid = hessian_hybrid_costs < classic_costs - threshold
+    hybrid = classic_quantized.clone()
+    hybrid[select_hybrid] = hessian_hybrid[select_hybrid]
+    hybrid_costs = torch.where(select_hybrid, hessian_hybrid_costs, classic_costs)
+    if bool((hybrid_costs > classic_costs + threshold).any()):
+        raise AssertionError("AWQ AdjacentExact exceeded the classic AWQ activation objective.")
+    activation_guard_wall_seconds = time.perf_counter() - guard_start
+
+    final_hessian_costs = _row_hessian_costs(
+        weight=reference_weight,
+        quantized=hybrid,
+        hessian=hessian,
+        row_chunk_size=config.objective_row_chunk_size,
+    )
+    classic_total = float(classic_costs.sum().item())
+    hybrid_total = float(hybrid_costs.sum().item())
+    final_hessian_total = float(final_hessian_costs.sum().item())
+    stats.update(
+        {
+            "quant_method": "awq",
+            "status": "applied",
+            "reference_stage": "post_scale_pre_clip",
+            "baseline": "awq_post_clip_rtn",
+            "objective": "scaled_activation_reconstruction",
+            "activation_samples": sample_count,
+            "activation_columns": int(activations.shape[-1]),
+            "activation_chunk_size": config.activation_chunk_size,
+            "hessian_bytes": hessian.numel() * hessian.element_size(),
+            "hessian_build_wall_seconds": hessian_build_wall_seconds,
+            "activation_guard_wall_seconds": activation_guard_wall_seconds,
+            "hessian_guard_selected_rows": stats["hybrid_selected_rows"],
+            "hybrid_selected_rows": int(select_hybrid.sum().item()),
+            "classic_activation_error": classic_total,
+            "hybrid_activation_error": hybrid_total,
+            "hybrid_activation_error_reduction": classic_total - hybrid_total,
+            "hybrid_activation_error_reduction_pct": (
+                100.0 * (classic_total - hybrid_total) / classic_total
+                if classic_total > 0
+                else 0.0
+            ),
+            "hybrid_full_hessian_error": final_hessian_total,
+            "hybrid_full_hessian_error_reduction": stats["classic_full_hessian_error"] - final_hessian_total,
+            "hybrid_full_hessian_error_reduction_pct": (
+                100.0
+                * (stats["classic_full_hessian_error"] - final_hessian_total)
+                / stats["classic_full_hessian_error"]
+                if stats["classic_full_hessian_error"] > 0
+                else 0.0
+            ),
+            "adjacent_model_wall_seconds": time.perf_counter() - start_time,
+        }
+    )
+    return hybrid, stats
+
+
 __all__ = [
     "AdjacentModelConfig",
+    "apply_adjacent_awq_hybrid",
     "apply_adjacent_model_hybrid",
 ]

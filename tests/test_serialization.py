@@ -33,6 +33,7 @@ from gptqmodel.quantization.config import (  # noqa: E402  # noqa: E402
     HessianConfig,
     VramStrategy,
 )
+from gptqmodel.quantization.adjacent_model import AdjacentModelConfig  # noqa: E402
 
 
 class TestSerialization(unittest.TestCase):
@@ -170,6 +171,49 @@ class TestSerialization(unittest.TestCase):
         self.assertFalse(loaded.scale_search_chunked_activations)
         self.assertEqual(loaded.scale_search_refine_steps, 7)
         self.assertEqual(loaded.dynamic[qkv_pattern]["scale_search_refine_steps"], 4)
+
+    def test_adjacent_model_saved_config_roundtrip(self):
+        adjacent = AdjacentModelConfig(
+            coordinate_starts=("linear", "nearest"),
+            max_coordinate_flips=19,
+            executor="auto",
+            cpu_workers=8,
+            activation_chunk_size=257,
+            native_refinements_per_module=2,
+            selection_tolerance=4e-7,
+        )
+        adjacent.record({"status": "must-not-serialize"})
+        expected = adjacent.to_dict()
+        cases = {
+            "gptq": QuantizeConfig(
+                bits=4,
+                group_size=128,
+                desc_act=False,
+                adjacent_model=adjacent,
+                offload_to_disk=False,
+            ),
+            "awq": AWQConfig(
+                bits=4,
+                group_size=128,
+                adjacent_model=adjacent,
+                offload_to_disk=False,
+            ),
+        }
+
+        for method, cfg in cases.items():
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as tmpdir:
+                cfg.save_pretrained(tmpdir)
+                with open(os.path.join(tmpdir, "quantize_config.json"), encoding="utf-8") as config_file:
+                    payload = json.load(config_file)
+
+                self.assertNotIn("adjacent_model", payload)
+                self.assertEqual(payload["meta"]["adjacent_model"], expected)
+                loaded = QuantizeConfig.from_pretrained(tmpdir)
+                self.assertIsInstance(loaded.adjacent_model, AdjacentModelConfig)
+                self.assertEqual(loaded.adjacent_model.to_dict(), expected)
+                self.assertEqual(loaded.adjacent_model.snapshot(), [])
+                loaded.adjacent_model = None
+                self.assertNotIn("adjacent_model", loaded.to_dict().get("meta", {}))
 
     def test_awq_scale_search_refine_steps_validation(self):
         for invalid in (-1, 1, 1.5, True):
