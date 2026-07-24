@@ -1866,48 +1866,68 @@ class GPTQ:
                             x_3d, weight=True, hessian=batched_hessian
                         )
 
-                for i in range(count):
-                    w = W1[:, i]
-                    if Hinv is not None:
-                        d = Hinv1[i, i]
+                # Process the block in mini-panels so the expensive trailing-column
+                # weight update can be performed as a single addmm per panel instead
+                # of one small outer-product kernel per column.
+                block_step = 32 if count >= 32 else count
+                for mb in range(0, count, block_step):
+                    me = min(mb + block_step, count)
+                    for i in range(mb, me):
+                        w = W1[:, i]
+                        if Hinv is not None:
+                            d = Hinv1[i, i]
 
-                    if self.qcfg.group_size != -1:
-                        if not self.qcfg.static_groups:
-                            if (i1 + i) % self.qcfg.group_size == 0:
-                                group_start = i1 + i
-                                group_end = min(group_start + self.qcfg.group_size, self.columns)
-                                local_group = (group_start - i1) // group_size
-                                if local_group < batched_group_count:
-                                    self.quantizer.scale = batched_scale[:, local_group : local_group + 1]
-                                    self.quantizer.zero = batched_zero[:, local_group : local_group + 1]
-                                else:
-                                    self.quantizer.find_params(
-                                        W[:, group_start:group_end],
-                                        weight=True,
-                                        hessian=group_scale_search_hessian(group_start, group_end),
-                                    )
+                        if self.qcfg.group_size != -1:
+                            if not self.qcfg.static_groups:
+                                if (i1 + i) % self.qcfg.group_size == 0:
+                                    group_start = i1 + i
+                                    group_end = min(group_start + self.qcfg.group_size, self.columns)
+                                    local_group = (group_start - i1) // group_size
+                                    if local_group < batched_group_count:
+                                        self.quantizer.scale = batched_scale[:, local_group : local_group + 1]
+                                        self.quantizer.zero = batched_zero[:, local_group : local_group + 1]
+                                    else:
+                                        self.quantizer.find_params(
+                                            W[:, group_start:group_end],
+                                            weight=True,
+                                            hessian=group_scale_search_hessian(group_start, group_end),
+                                        )
 
-                            if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
-                                scale.append(self.quantizer.scale)
-                                zero.append(self.quantizer.zero)
-                                now_idx += 1
-                        else:
-                            idx = i1 + i
-                            if self.qcfg.desc_act:
-                                idx = perm[idx]
+                                if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
+                                    scale.append(self.quantizer.scale)
+                                    zero.append(self.quantizer.zero)
+                                    now_idx += 1
+                            else:
+                                idx = i1 + i
+                                if self.qcfg.desc_act:
+                                    idx = perm[idx]
 
-                            self.quantizer = groups[idx // self.qcfg.group_size]
+                                self.quantizer = groups[idx // self.qcfg.group_size]
 
-                    q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
-                    Q1[:, i] = q
-                    if Hinv is not None:
-                        # Reuse the exact same column diff for loss reporting
-                        # and GPTQ error feedback instead of recomputing w - q.
-                        diff = w - q
-                        loss_sum.add_(torch.sum(diff ** 2 / d**2) / 2)
-                        err1 = diff / d
-                        W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                        Err1[:, i] = err1
+                        q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                        Q1[:, i] = q
+                        if Hinv is not None:
+                            # Reuse the exact same column diff for loss reporting
+                            # and GPTQ error feedback instead of recomputing w - q.
+                            diff = w - q
+                            loss_sum.add_(torch.sum(diff ** 2 / d**2) / 2)
+                            err1 = diff / d
+                            if i + 1 < me:
+                                W1[:, i + 1 : me] -= err1.unsqueeze(1).matmul(
+                                    Hinv1[i, i + 1 : me].unsqueeze(0)
+                                )
+                            Err1[:, i] = err1
+
+                    if Hinv is not None and me < count:
+                        # Apply all column updates from this mini-panel to the
+                        # remaining columns in one addmm instead of many kernels.
+                        W1[:, me:count] = torch.addmm(
+                            W1[:, me:count],
+                            Err1[:, mb:me],
+                            Hinv1[mb:me, me:count],
+                            alpha=-1,
+                            beta=1,
+                        )
 
                 Q[:, i1:i2] = Q1
                 if Hinv is not None:

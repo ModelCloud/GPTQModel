@@ -207,9 +207,35 @@ The raw Triton argmin-only numbers were 12.6 / 5.6 / 3.1 ms, so the top-20 exact
 
 After the activation scale-search fast path is enabled, `scripts/profile_gptq_scale_search.py` (4096 x 4096, A100 GPU 5) still reports ~1.27–1.38 s for all group sizes and methods. The `find_params_batched` phase is now ~25–35 ms, so the dominant cost is the per-column GPTQ weight update loop, not scale search. The next optimization round should target that loop.
 
+### Mini-panel weight update in `GPTQ.quantize`
+
+The per-column update `W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))` launches one small outer-product kernel per column (up to 128 launches per 128-column block on GPU 5). This was the largest remaining kernel-launch source after the scale-search work. The block loop now processes each 128-column block as four 32-column mini-panels:
+- columns inside a panel are still updated sequentially so the `w` value for each column stays numerically identical to the original loop;
+- after each panel, the remaining columns in the block are updated with a single `torch.addmm` using the panel's `Err1` slice and the corresponding `Hinv1` sub-block.
+
+This converts most of the per-column outer-product work into a few larger `addmm` calls without changing the quantization math.
+
+End-to-end `GPTQ.quantize` timing on A100 GPU 5 (`PYTHON_GIL=0`, 4096 x 4096, `blocksize=128`):
+
+| group_size | method     | before (ms) | after (ms) | speedup |
+|------------|------------|-------------|------------|---------|
+| 32         | activation | 1402.5      | 1381.2     | 1.02x   |
+| 32         | hessian    | 1412.9      | 1375.1     | 1.03x   |
+| 32         | hybrid     | 1439.0      | 1388.3     | 1.04x   |
+| 64         | activation | 1415.1      | 1354.2     | 1.04x   |
+| 64         | hessian    | 1428.3      | 1387.0     | 1.03x   |
+| 64         | hybrid     | 1434.8      | 1369.9     | 1.05x   |
+| 128        | activation | 1458.3      | 1370.4     | **1.06x** |
+| 128        | hessian    | 1525.7      | 1330.8     | **1.15x** |
+| 128        | hybrid     | 1521.9      | 1340.8     | **1.14x** |
+
+The win is largest for `group_size=128` because there are fewer scale-search groups and the per-column weight update dominates. `MINIBLOCK=16` and `MINIBLOCK=64` experiments on `group_size=128 activation` both regressed to ~3.4 s, confirming `block_step=32` is the sweet spot for this shape.
+
+Nsight Systems after the change still shows `cudaStreamSynchronize` dominating CPU wait time and many small `elementwise_kernel` launches from the per-column quantize arithmetic, so the next round should target fusing the quantize+diff+err+update steps per column.
+
 ## Known limitations / future work
 
 - **Group size 1** was skipped at user request; it is not a supported quantization option.
 - The `find_params_batched` path currently targets `act_group_aware=True` grouped search. The legacy ungrouped / full-tensor path is untouched and still uses the per-call `find_params`.
 - AdjacentExact CUDA exact solver is still exponential in the active-decision count. The shared-memory optimization lowers memory overhead but does not change asymptotic complexity; for components larger than ~32 decisions the existing branch-and-bound solver remains the practical fallback.
-- The Triton activation scale-search kernel is fast but requires the next round to align its FP32 division/sum tie-breaking with the PyTorch reference before it can be enabled by default.
+- The per-column quantize and error-feedback arithmetic remains a large source of small kernel launches; fusing it (Triton or custom CUDA) is the next target.
