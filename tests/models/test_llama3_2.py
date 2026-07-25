@@ -11,9 +11,9 @@ from model_test import ModelTest
 
 # | Metric                                             |   MARLIN |
 # |----------------------------------------------------|----------|
-# | arc_challenge :: acc,none                          |   0.3166 |
-# | arc_challenge :: acc_norm,none                     |   0.3430 |
-# | gsm8k_platinum_cot :: acc,num                      |   0.3906 |
+# | arc_challenge :: acc,none                          |   0.3140 |
+# | arc_challenge :: acc_norm,none                     |   0.3507 |
+# | gsm8k_platinum_cot :: acc,num                      |   0.4690 |
 # | mmlu_stem :: acc,none                              |   0.3942 |
 class TestLlama3_2(ModelTest):
     # Keep one stable saved checkpoint so eval-only repro runs can reuse the exact post-quant model.
@@ -68,7 +68,7 @@ class TestLlama3_2(ModelTest):
                 "stream": True,
             },
             "acc,num": {
-                "value": 0.390625,
+                "value": 0.4690,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
@@ -85,12 +85,12 @@ class TestLlama3_2(ModelTest):
         "arc_challenge": {
             "chat_template": True,
             "acc": {
-                "value": 0.3166,
+                "value": 0.3140,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
             "acc_norm": {
-                "value": 0.3430,
+                "value": 0.3507,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
