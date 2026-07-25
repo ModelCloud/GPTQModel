@@ -100,6 +100,13 @@ _EXTENSION_SPECS = (
         aliases=("paroquant_rotation",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.paroquant", "_PAROQUANT_ROTATION_EXTENSION"),
     ),
+    _ExtensionSpec(
+        name="hadamard",
+        aliases=("fast_hadamard_transform",),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.hadamard", "_HADAMARD_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.hadamard", "hadamard_supported")(),
+        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.hadamard", "hadamard_runtime_error")(),
+    ),
 )
 
 _EXTENSION_SPECS_BY_NAME = {spec.name: spec for spec in _EXTENSION_SPECS}

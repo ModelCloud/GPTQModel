@@ -306,6 +306,7 @@ class TorchLinear(PackableQuantLinear):
         return out
 
     def _forward(self, x, out_shape):
+        x = self._apply_rotation_to_input(x)
         cached = self._maybe_get_cached_weights(x)
         if cached is not None:
             out = torch.matmul(x, cached).reshape(out_shape)

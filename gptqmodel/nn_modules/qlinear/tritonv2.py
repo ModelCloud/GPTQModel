@@ -179,6 +179,8 @@ class TritonV2Linear(TorchLinear):
         if self.training:
             return super().forward(x)
 
+        x = self._apply_rotation_to_input(x)
+
         # if in_features is padded, we need to pad the input as well
         # if x.size(-1) != self.padded_infeatures:
         #     x = F.pad(x, (0, self.padded_infeatures - self.in_features))
