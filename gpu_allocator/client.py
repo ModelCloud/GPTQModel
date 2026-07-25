@@ -14,6 +14,7 @@ from typing import Any, Dict, Generator, List, Optional
 
 from logbar import LogBar
 
+from .env import force_pci_bus_order
 from .models import GPU
 
 
@@ -21,6 +22,8 @@ log = LogBar("gpu_allocator.client")
 # Register the LogBar instance with the stdlib manager so setLevel()
 # invalidates its level cache correctly.
 logging.Logger.manager.loggerDict[log.name] = log
+
+force_pci_bus_order()
 
 
 def _default_session_id() -> str:

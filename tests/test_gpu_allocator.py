@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -949,4 +949,106 @@ def test_devin_session_termination_releases_gpu_lease(
         pytest.fail("GPU lease was not reclaimed for an exited Devin session")
 
     assert status["leases"] == []
+    allocator.shutdown()
+
+
+def test_parse_gpu_subset():
+    from gpu_allocator.server import _parse_gpu_subset
+
+    assert _parse_gpu_subset(None) is None
+    assert _parse_gpu_subset("") is None
+    assert _parse_gpu_subset("0-3") == {0, 1, 2, 3}
+    assert _parse_gpu_subset("3-0") == {0, 1, 2, 3}
+    assert _parse_gpu_subset("0,2,4") == {0, 2, 4}
+    assert _parse_gpu_subset("5") == {5}
+    assert _parse_gpu_subset(" 0-1 , 3 , 5-7 ") == {0, 1, 3, 5, 6, 7}
+
+
+def test_filter_gpus_by_subset():
+    from gpu_allocator.server import _filter_gpus
+
+    gpus = _fake_gpus(8)
+    assert len(_filter_gpus(gpus, {0, 1, 2, 3})) == 4
+    assert [g.pci_order_index for g in _filter_gpus(gpus, {0, 2, 4})] == [0, 2, 4]
+    with pytest.raises(ValueError):
+        _filter_gpus(gpus, {10})
+
+
+def test_allocator_manages_gpu_subset_only():
+    subset = [g for g in _fake_gpus(8) if g.pci_order_index in {0, 1, 2, 3}]
+    allocator = GPUAllocator(gpus=subset, enable_ttl_janitor=False)
+    assert allocator.total_gpus == 4
+    lease = allocator.allocate("s1", count=4, timeout=0)
+    assert len(lease.gpus) == 4
+    with pytest.raises(TimeoutError):
+        allocator.allocate("s2", count=1, timeout=0)
+    allocator.shutdown()
+
+
+def test_allocator_skips_non_idle_gpu():
+    gpus = _fake_gpus(2)
+    bus_ids = [gpu.pci_bus_id for gpu in gpus]
+
+    def gpu_status_checker() -> Dict[str, Tuple[int, int, int]]:
+        return {
+            bus_ids[0]: (500, 1024, 0),
+            bus_ids[1]: (0, 1024, 0),
+        }
+
+    allocator = GPUAllocator(
+        gpus=gpus,
+        idle_memory_mib=100,
+        gpu_status_interval=60.0,
+        gpu_status_checker=gpu_status_checker,
+        enable_ttl_janitor=False,
+    )
+    lease = allocator.allocate("s1", count=1, timeout=0)
+    assert lease.gpus[0].pci_order_index == 1
+    assert allocator.status()["free_count"] == 0
+    allocator.shutdown()
+
+
+def test_allocator_skips_non_idle_compute_for_exclusive():
+    gpus = _fake_gpus(2)
+    bus_ids = [gpu.pci_bus_id for gpu in gpus]
+
+    def gpu_status_checker() -> Dict[str, Tuple[int, int, int]]:
+        return {
+            bus_ids[0]: (0, 1024, 0),
+            bus_ids[1]: (0, 1024, 50),
+        }
+
+    allocator = GPUAllocator(
+        gpus=gpus,
+        idle_memory_mib=100,
+        idle_gpu_percent=0,
+        gpu_status_interval=60.0,
+        gpu_status_checker=gpu_status_checker,
+        enable_ttl_janitor=False,
+    )
+    lease = allocator.allocate("s1", count=1, timeout=0, exclusive=True)
+    assert lease.gpus[0].pci_order_index == 0
+    allocator.shutdown()
+
+
+def test_allocator_idles_all_gpus_when_memory_check_disabled():
+    gpus = _fake_gpus(2)
+    bus_ids = [gpu.pci_bus_id for gpu in gpus]
+
+    def gpu_status_checker() -> Dict[str, Tuple[int, int, int]]:
+        return {
+            bus_ids[0]: (1024, 1024, 100),
+            bus_ids[1]: (1024, 1024, 100),
+        }
+
+    allocator = GPUAllocator(
+        gpus=gpus,
+        idle_memory_mib=-1,
+        idle_gpu_percent=-1,
+        gpu_status_interval=60.0,
+        gpu_status_checker=gpu_status_checker,
+        enable_ttl_janitor=False,
+    )
+    lease = allocator.allocate("s1", count=2, timeout=0)
+    assert len(lease.gpus) == 2
     allocator.shutdown()

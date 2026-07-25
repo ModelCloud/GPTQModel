@@ -10,12 +10,14 @@ import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from logbar import LogBar
 
 from .allocator import GPUAllocator
-from .inventory import discover_gpus
+from .env import force_pci_bus_order
+from .inventory import discover_gpus, get_all_gpu_status
+from .models import GPU
 from .session_monitor import DevinApiSessionMonitor, NullSessionMonitor, SessionMonitor
 
 
@@ -239,6 +241,29 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=30.0,
         help="Seconds between periodic GPU status table logs (0 disables)",
     )
+    parser.add_argument(
+        "--gpus",
+        default=None,
+        help="Subset of GPUs to manage by pci_order_index, e.g. '0-3' or '0,2,4' (default: all)",
+    )
+    parser.add_argument(
+        "--idle-memory-mib",
+        type=int,
+        default=100,
+        help="Maximum used memory (MiB) for a GPU to be considered idle (default: 100, -1 disables)",
+    )
+    parser.add_argument(
+        "--idle-gpu-percent",
+        type=int,
+        default=0,
+        help="Maximum GPU utilization percent for an exclusive lease (default: 0, -1 disables)",
+    )
+    parser.add_argument(
+        "--gpu-status-interval",
+        type=float,
+        default=5.0,
+        help="Seconds between GPU status (memory/utilization) refreshes (default: 5.0)",
+    )
     return parser.parse_args(argv)
 
 
@@ -257,6 +282,10 @@ def _log_status_table(allocator: GPUAllocator) -> None:
             {"label": "lease_id", "width": 34},
             {"label": "session_id", "width": "fit"},
             {"label": "expires_in", "width": "fit"},
+            {"label": "mem_total", "width": "fit"},
+            {"label": "mem_used", "width": "fit"},
+            {"label": "mem_free", "width": "fit"},
+            {"label": "util%", "width": "fit"},
         ],
         padding=1,
     )
@@ -271,6 +300,10 @@ def _log_status_table(allocator: GPUAllocator) -> None:
             row["lease_id"],
             row["session_id"],
             row["expires_in"],
+            row["memory_total_mib"],
+            row["memory_used_mib"],
+            row["memory_free_mib"],
+            row["utilization_gpu"],
         )
 
 
@@ -288,6 +321,44 @@ def _status_reporter(
             log.error("Status reporter failed: %s", exc)
 
 
+def _parse_gpu_subset(spec: Optional[str]) -> Optional[set[int]]:
+    """Parse a GPU subset spec like '0-3' or '0,2,4' into a set of indices."""
+    if not spec:
+        return None
+    indices: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_str, end_str = part.split("-", 1)
+            start = int(start_str.strip())
+            end = int(end_str.strip())
+            if start > end:
+                start, end = end, start
+            indices.update(range(start, end + 1))
+        else:
+            indices.add(int(part))
+    return indices
+
+
+def _filter_gpus(
+    gpus: List[GPU],
+    allowed: Optional[set[int]],
+) -> List[GPU]:
+    """Return GPUs whose pci_order_index is in the allowed set."""
+    if allowed is None:
+        return gpus
+    available = {gpu.pci_order_index for gpu in gpus}
+    missing = sorted(allowed - available)
+    if missing:
+        raise ValueError(
+            f"Requested GPU indices not discovered: {missing}. "
+            f"Available pci_order_index values: {sorted(available)}"
+        )
+    return [gpu for gpu in gpus if gpu.pci_order_index in allowed]
+
+
 def _session_monitor_from_args(args: argparse.Namespace) -> SessionMonitor:
     if args.disable_session_monitor:
         return NullSessionMonitor()
@@ -303,11 +374,14 @@ def _session_monitor_from_args(args: argparse.Namespace) -> SessionMonitor:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    force_pci_bus_order()
     args = _parse_args(argv)
     log.setLevel(args.log_level)
 
-    gpus = discover_gpus()
-    log.info("Discovered %d GPUs", len(gpus))
+    all_gpus = discover_gpus()
+    allowed = _parse_gpu_subset(args.gpus)
+    gpus = _filter_gpus(all_gpus, allowed)
+    log.info("Discovered %d GPUs; managing %d", len(all_gpus), len(gpus))
     for gpu in gpus:
         log.info(
             "  pci_order_index=%d pci_bus_id=%s uuid=%s name=%s",
@@ -323,6 +397,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         lease_ttl_seconds=args.lease_ttl,
         enable_ttl_janitor=not args.disable_ttl_janitor,
         session_monitor=session_monitor,
+        idle_memory_mib=args.idle_memory_mib,
+        idle_gpu_percent=args.idle_gpu_percent,
+        gpu_status_interval=args.gpu_status_interval,
+        gpu_status_checker=get_all_gpu_status,
     )
     server = GPUAllocatorServer((args.host, args.port), allocator)
     log.info("GPU allocator listening on http://%s:%d", args.host, args.port)

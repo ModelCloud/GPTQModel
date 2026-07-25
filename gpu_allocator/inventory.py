@@ -7,7 +7,7 @@ import csv
 import re
 import shutil
 import subprocess
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from .models import GPU
 
@@ -44,7 +44,7 @@ def _from_nvidia_smi() -> List[GPU]:
 
     command = [
         "nvidia-smi",
-        "--query-gpu=index,pci.bus_id,uuid,name,memory.total",
+        "--query-gpu=index,pci.bus_id,uuid,name,memory.total,memory.used,utilization.gpu",
         "--format=csv,noheader,nounits",
     ]
     result = subprocess.run(command, check=True, capture_output=True, text=True)
@@ -55,10 +55,14 @@ def _from_nvidia_smi() -> List[GPU]:
         if not line:
             continue
         fields = [f.strip() for f in line]
-        if len(fields) < 5:
+        if len(fields) < 7:
             continue
-        _, bus_id, uuid, name, memory_total_str = fields[:5]
+        _, bus_id, uuid, name, memory_total_str, memory_used_str, util_str = fields[:7]
         memory_total_mib = int(memory_total_str)
+        memory_used_mib = int(memory_used_str)
+        memory_free_mib = memory_total_mib - memory_used_mib
+        # utilization.gpu is returned as "0 %"; strip the percent sign.
+        utilization_gpu = int(util_str.replace("%", "").strip())
         sort_key = _parse_pci_bus_id(bus_id)
         gpu = GPU(
             pci_order_index=-1,
@@ -66,6 +70,9 @@ def _from_nvidia_smi() -> List[GPU]:
             uuid=uuid.strip(),
             name=name,
             memory_total_mib=memory_total_mib,
+            memory_used_mib=memory_used_mib,
+            memory_free_mib=memory_free_mib,
+            utilization_gpu=utilization_gpu,
         )
         rows.append((sort_key, gpu))
 
@@ -96,12 +103,23 @@ def _from_torch() -> List[GPU]:
         if not uuid.startswith("GPU-"):
             uuid = f"GPU-{uuid}"
         sort_key = (domain, bus, device, function)
+        total_mib = int(props.total_memory / (1024 * 1024))
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(i)
+            free_mib = int(free_bytes / (1024 * 1024))
+            total_mib = int(total_bytes / (1024 * 1024))
+            used_mib = total_mib - free_mib
+        except Exception:
+            used_mib = 0
+            free_mib = total_mib
         gpu = GPU(
             pci_order_index=-1,
             pci_bus_id=bus_id,
             uuid=uuid,
             name=props.name,
-            memory_total_mib=int(props.total_memory / (1024 * 1024)),
+            memory_total_mib=total_mib,
+            memory_used_mib=used_mib,
+            memory_free_mib=free_mib,
         )
         rows.append((sort_key, gpu))
 
@@ -134,6 +152,98 @@ def discover_gpus(prefer_nvidia_smi: bool = True) -> List[GPU]:
                 uuid=gpu.uuid,
                 name=gpu.name,
                 memory_total_mib=gpu.memory_total_mib,
+                memory_used_mib=gpu.memory_used_mib,
+                memory_free_mib=gpu.memory_free_mib,
             )
         )
     return ordered
+
+
+def _query_nvidia_smi_status() -> Dict[str, Tuple[int, int, int]]:
+    """Return a mapping from lower-case PCI bus id to (used_mib, total_mib, util_percent)."""
+    if shutil.which("nvidia-smi") is None:
+        raise RuntimeError("nvidia-smi not found")
+
+    command = [
+        "nvidia-smi",
+        "--query-gpu=pci.bus_id,memory.used,memory.total,utilization.gpu",
+        "--format=csv,noheader,nounits",
+    ]
+    result = subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    status: Dict[str, Tuple[int, int, int]] = {}
+    reader = csv.reader(result.stdout.splitlines())
+    for line in reader:
+        if not line:
+            continue
+        fields = [f.strip() for f in line]
+        if len(fields) < 4:
+            continue
+        bus_id, used_str, total_str, util_str = fields[:4]
+        used_mib = int(used_str)
+        total_mib = int(total_str)
+        util_percent = int(util_str.replace("%", "").strip())
+        status[bus_id.lower()] = (used_mib, total_mib, util_percent)
+    return status
+
+
+def _query_torch_status() -> Dict[str, Tuple[int, int, int]]:
+    """Return a mapping from lower-case PCI bus id to (used_mib, total_mib, util_percent) via torch."""
+    try:
+        import torch
+    except Exception as exc:
+        raise RuntimeError("torch is not available for GPU status query") from exc
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("torch reports no CUDA devices")
+
+    status: Dict[str, Tuple[int, int, int]] = {}
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        domain = getattr(props, "pci_domain_id", 0)
+        bus = getattr(props, "pci_bus_id", 0)
+        device = getattr(props, "pci_device_id", 0)
+        bus_id = _pci_bus_id_from_properties(domain, bus, device, 0)
+        free_bytes, total_bytes = torch.cuda.mem_get_info(i)
+        total_mib = int(total_bytes / (1024 * 1024))
+        free_mib = int(free_bytes / (1024 * 1024))
+        used_mib = total_mib - free_mib
+        # torch does not expose per-device utilization easily.
+        status[bus_id.lower()] = (used_mib, total_mib, 0)
+    return status
+
+
+def get_all_gpu_status(
+    prefer_nvidia_smi: bool = True,
+) -> Dict[str, Tuple[int, int, int]]:
+    """Return a mapping from lower-case PCI bus id to (used_mib, total_mib, util_percent)."""
+    errors: List[Exception] = []
+    funcs = [_query_nvidia_smi_status, _query_torch_status]
+    if not prefer_nvidia_smi:
+        funcs = [_query_torch_status, _query_nvidia_smi_status]
+    for func in funcs:
+        try:
+            return func()
+        except Exception as exc:
+            errors.append(exc)
+    if errors:
+        raise errors[0]
+    raise RuntimeError("No GPU status source available")
+
+
+def get_gpu_status(
+    pci_bus_id: str, prefer_nvidia_smi: bool = True
+) -> Tuple[int, int, int]:
+    """Return (used_mib, total_mib, util_percent) for a single GPU identified by PCI bus id."""
+    status = get_all_gpu_status(prefer_nvidia_smi=prefer_nvidia_smi)
+    normalized_bus_id = pci_bus_id.lower()
+    if normalized_bus_id in status:
+        return status[normalized_bus_id]
+    for key, value in status.items():
+        if key.endswith(normalized_bus_id) or normalized_bus_id.endswith(key):
+            return value
+    raise RuntimeError(f"GPU {pci_bus_id} not found for status query")

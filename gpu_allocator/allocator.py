@@ -8,11 +8,14 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, replace
-from typing import Any, Deque, Dict, List, Optional, Set
+from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
+from .env import force_pci_bus_order
 from .inventory import discover_gpus
 from .models import GPU, Lease
 from .session_monitor import NullSessionMonitor, SessionMonitor
+
+force_pci_bus_order()
 
 
 @dataclass
@@ -44,6 +47,12 @@ class GPUAllocator:
         lease_check_interval: float = 5.0,
         enable_ttl_janitor: bool = True,
         session_monitor: Optional[SessionMonitor] = None,
+        idle_memory_mib: int = -1,
+        idle_gpu_percent: int = -1,
+        gpu_status_interval: float = 5.0,
+        gpu_status_checker: Optional[
+            Callable[[], Dict[str, Tuple[int, int, int]]]
+        ] = None,
     ):
         if gpus is None:
             gpus = discover_gpus()
@@ -71,6 +80,14 @@ class GPUAllocator:
             session_monitor if session_monitor is not None else NullSessionMonitor()
         )
 
+        self._idle_memory_mib = int(idle_memory_mib)
+        self._idle_gpu_percent = int(idle_gpu_percent)
+        self._gpu_status_interval = float(gpu_status_interval)
+        self._gpu_status_checker = gpu_status_checker
+        self._gpu_status_cache: Optional[
+            Tuple[float, Dict[str, Tuple[int, int, int]]]
+        ] = None
+
         if enable_ttl_janitor:
             self._janitor = threading.Thread(
                 target=self._ttl_janitor, name="GPUAllocator-TTL", daemon=True
@@ -81,13 +98,58 @@ class GPUAllocator:
     # Internal helpers (lock must be held by caller where noted)
     # ------------------------------------------------------------------ #
 
+    def _current_status(self, bus_id: str) -> Tuple[int, int, int]:
+        """Return (used_mib, total_mib, util_percent) for a GPU, refreshing the cache if stale."""
+        gpu = self._gpu_by_bus_id[bus_id]
+        static = (gpu.memory_used_mib, gpu.memory_total_mib, gpu.utilization_gpu)
+        if self._gpu_status_checker is None:
+            return static
+
+        now = time.monotonic()
+        if (
+            self._gpu_status_cache is not None
+            and now - self._gpu_status_cache[0] < self._gpu_status_interval
+        ):
+            return self._gpu_status_cache[1].get(bus_id, static)
+
+        try:
+            status = self._gpu_status_checker()
+        except Exception:
+            # Fail safe: if we cannot read GPU status, fall back to discovery values.
+            status = {
+                b: (
+                    self._gpu_by_bus_id[b].memory_used_mib,
+                    self._gpu_by_bus_id[b].memory_total_mib,
+                    self._gpu_by_bus_id[b].utilization_gpu,
+                )
+                for b in self._all_bus_ids
+            }
+        self._gpu_status_cache = (now, status)
+        return status.get(bus_id, static)
+
+    def _is_gpu_memory_idle(self, bus_id: str) -> bool:
+        """Return True if the GPU has no more than idle_memory_mib in use."""
+        if self._idle_memory_mib < 0:
+            return True
+        used, _, _ = self._current_status(bus_id)
+        return used <= self._idle_memory_mib
+
+    def _is_gpu_compute_idle(self, bus_id: str) -> bool:
+        """Return True if the GPU has no more than idle_gpu_percent utilization."""
+        if self._idle_gpu_percent < 0:
+            return True
+        _, _, util = self._current_status(bus_id)
+        return util <= self._idle_gpu_percent
+
     def _free_gpu_bus_ids(self) -> List[str]:
-        """Return bus ids with no active lease."""
+        """Return bus ids with no active lease, idle memory and idle compute."""
         return sorted(
             (
                 bus_id
                 for bus_id in self._all_bus_ids
                 if not self._gpu_leases.get(bus_id)
+                and self._is_gpu_memory_idle(bus_id)
+                and self._is_gpu_compute_idle(bus_id)
             ),
             key=lambda b: self._gpu_by_bus_id[b].pci_order_index,
         )
@@ -102,12 +164,13 @@ class GPUAllocator:
         return self._leases[lease_id].exclusive
 
     def _shared_candidate_bus_ids(self) -> List[str]:
-        """Return bus ids not exclusively leased, sorted to prefer already-shared GPUs."""
+        """Return bus ids not exclusively leased with idle memory, sorted to prefer already-shared GPUs."""
         return sorted(
             (
                 bus_id
                 for bus_id in self._all_bus_ids
                 if not self._is_exclusively_leased(bus_id)
+                and self._is_gpu_memory_idle(bus_id)
             ),
             key=lambda b: (
                 -len(self._gpu_leases.get(b, set())),
@@ -283,13 +346,25 @@ class GPUAllocator:
             return new_lease
 
     def status(self) -> Dict[str, object]:
-        """Return a snapshot of free GPUs and active leases."""
+        """Return a snapshot of free GPUs and active leases with current status."""
         with self._lock:
             free = self._free_gpu_bus_ids()
+            free_gpus = []
+            for bus_id in free:
+                gpu = self._gpu_by_bus_id[bus_id]
+                used, total, util = self._current_status(bus_id)
+                free_gpus.append(
+                    {
+                        **gpu.to_dict(),
+                        "memory_used_mib": used,
+                        "memory_free_mib": total - used,
+                        "utilization_gpu": util,
+                    }
+                )
             return {
                 "total": len(self._gpus),
                 "free_count": len(free),
-                "free_gpus": [self._gpu_by_bus_id[bus_id].to_dict() for bus_id in free],
+                "free_gpus": free_gpus,
                 "leases": [lease.to_dict() for lease in self._leases.values()],
             }
 
@@ -300,6 +375,8 @@ class GPUAllocator:
             rows: List[Dict[str, Any]] = []
             for gpu in self._gpus:
                 bus_id = gpu.pci_bus_id
+                used, total, util = self._current_status(bus_id)
+                free_mib = total - used
                 lease_ids = self._gpu_leases.get(bus_id, set())
                 if not lease_ids:
                     rows.append(
@@ -311,6 +388,10 @@ class GPUAllocator:
                             "lease_id": "",
                             "session_id": "",
                             "expires_in": "",
+                            "memory_total_mib": total,
+                            "memory_used_mib": used,
+                            "memory_free_mib": free_mib,
+                            "utilization_gpu": util,
                         }
                     )
                     continue
@@ -325,6 +406,10 @@ class GPUAllocator:
                             "lease_id": lease.lease_id,
                             "session_id": lease.session_id,
                             "expires_in": f"{max(0.0, lease.expires_at - now):.0f}s",
+                            "memory_total_mib": total,
+                            "memory_used_mib": used,
+                            "memory_free_mib": free_mib,
+                            "utilization_gpu": util,
                         }
                     )
             return rows

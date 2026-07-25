@@ -13,6 +13,7 @@ import sys
 from typing import Optional, Sequence
 
 from .client import GPUAllocatorClient, GPUAllocatorError
+from .env import force_pci_bus_order
 
 
 def _client_from_args(args: argparse.Namespace) -> GPUAllocatorClient:
@@ -270,6 +271,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    force_pci_bus_order()
     parser = _build_parser()
     args = parser.parse_args(argv)
     func = getattr(args, "func", None)

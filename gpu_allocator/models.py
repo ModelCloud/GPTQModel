@@ -16,6 +16,9 @@ class GPU:
     uuid: str
     name: str
     memory_total_mib: int
+    memory_used_mib: int = 0
+    memory_free_mib: int = 0
+    utilization_gpu: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -24,6 +27,9 @@ class GPU:
             "uuid": self.uuid,
             "name": self.name,
             "memory_total_mib": self.memory_total_mib,
+            "memory_used_mib": self.memory_used_mib,
+            "memory_free_mib": self.memory_free_mib,
+            "utilization_gpu": self.utilization_gpu,
         }
 
 
