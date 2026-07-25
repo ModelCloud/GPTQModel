@@ -53,7 +53,7 @@ if _triton_available():
         xmin_ptr,
         xmax_ptr,
         importance_ptr,
-        loss_out_ptr,
+        topk_idx_ptr,
         rows,
         num_groups,
         group_size,
@@ -65,9 +65,9 @@ if _triton_available():
         x_stride_g: tl.int32,
         min_stride_r: tl.int32,
         imp_stride_g: tl.int32,
-        loss_stride_r: tl.int32,
-        loss_stride_g: tl.int32,
-        loss_stride_c: tl.int32,
+        topk_idx_stride_r: tl.int32,
+        topk_idx_stride_g: tl.int32,
+        topk_idx_stride_k: tl.int32,
         BLOCK_ROW: tl.constexpr,
         BLOCK_COL: tl.constexpr,
     ):
@@ -105,8 +105,11 @@ if _triton_available():
         sym_b = sym != 0
         const_zero_sym = (maxq_f + 1.0) / 2.0
 
-        # loss base for this (row block, group) over all candidates
-        loss_base = loss_out_ptr + g * loss_stride_g + row_idx * loss_stride_r
+        best_loss = tl.full((BLOCK_ROW,), float("inf"), tl.float32)
+        best_idx = tl.full((BLOCK_ROW,), -1, tl.int32)
+        second_loss = tl.full((BLOCK_ROW,), float("inf"), tl.float32)
+        second_idx = tl.full((BLOCK_ROW,), -1, tl.int32)
+
         for c in tl.range(0, candidate_count):
             p = 1.0 - tl.cast(c, tl.float32) / grid_f
             xmin_p = p * xmin
@@ -128,7 +131,20 @@ if _triton_available():
             weighted_sq = tl.where(mask_2d, weighted_sq, 0.0)
             loss = tl.sum(weighted_sq, axis=1)
 
-            tl.store(loss_base + c * loss_stride_c, loss, mask=row_mask)
+            is_best = loss < best_loss
+            is_second = (loss < second_loss) & (~is_best)
+            second_loss = tl.where(is_best, best_loss, tl.where(is_second, loss, second_loss))
+            second_idx = tl.where(is_best, best_idx, tl.where(is_second, c, second_idx))
+            best_loss = tl.where(is_best, loss, best_loss)
+            best_idx = tl.where(is_best, c, best_idx)
+
+        swap = best_idx > second_idx
+        idx0 = tl.where(swap, second_idx, best_idx)
+        idx1 = tl.where(swap, best_idx, second_idx)
+
+        topk_idx_base = topk_idx_ptr + g * topk_idx_stride_g + row_idx * topk_idx_stride_r
+        tl.store(topk_idx_base + 0 * topk_idx_stride_k, idx0, mask=row_mask)
+        tl.store(topk_idx_base + 1 * topk_idx_stride_k, idx1, mask=row_mask)
 
     def _triton_find_params_batched_activation(
         x: torch.Tensor,
@@ -144,7 +160,7 @@ if _triton_available():
         rows, num_groups, group_size = x.shape
         device = x.device
 
-        if candidate_count <= 0:
+        if candidate_count <= 1:
             scale = (xmax - xmin) / maxq
             zero = torch.round(-xmin / scale) if not sym else torch.full_like(scale, (maxq + 1.0) / 2.0)
             return scale, zero
@@ -158,7 +174,11 @@ if _triton_available():
                 torch.empty((rows, num_groups), dtype=torch.float32, device=device),
             )
 
-        loss_out = torch.empty((rows, num_groups, candidate_count), dtype=torch.float32, device=device)
+        # Fast path: maintain the two best candidate indices directly in the
+        # Triton kernel and emit them sorted ascending. This avoids allocating
+        # the full [rows, num_groups, candidate_count] loss tensor and the
+        # subsequent topk/sort calls.
+        topk_idx = torch.empty((rows, num_groups, 2), dtype=torch.int32, device=device)
 
         # Use a tile width that matches the actual group size so we do not
         # waste work masking off columns past the group boundary.
@@ -168,7 +188,7 @@ if _triton_available():
             xmin,
             xmax,
             importance,
-            loss_out,
+            topk_idx,
             rows,
             num_groups,
             group_size,
@@ -180,23 +200,15 @@ if _triton_available():
             x.stride(1),
             xmin.stride(0),
             importance.stride(0),
-            loss_out.stride(0),
-            loss_out.stride(1),
-            loss_out.stride(2),
+            topk_idx.stride(0),
+            topk_idx.stride(1),
+            topk_idx.stride(2),
             BLOCK_ROW=BLOCK_ROW,
             BLOCK_COL=block_col,
         )
 
-        # The approximate Triton loss is only used to narrow the search to the
-        # two most promising candidates. We then recompute the exact PyTorch loss
-        # for those two candidates and select the first minimizer, matching the
-        # eager path's torch.min tie-breaking behaviour. Sorting the top-2
-        # indices ascending before recomputing ensures ties resolve to the
-        # smallest candidate index, just like the reference.
-        k = min(candidate_count, 2)
-        topk_values, topk_indices = loss_out.topk(k, dim=-1, largest=False, sorted=False)
-        topk_indices, sort_order = topk_indices.sort(dim=-1)
-        topk_values = topk_values.gather(2, sort_order)
+        # The kernel returns the two best candidate indices sorted ascending.
+        topk_indices = topk_idx.to(torch.int64)
 
         # Recompute the reference scale/zero only for the short-listed candidates
         # instead of materializing the full candidate grid. Use the same int64

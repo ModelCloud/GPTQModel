@@ -753,3 +753,53 @@ End-to-end `GPTQ.quantize` (`4096 x 4096`, `blocksize=128`, `bits=4`, `sym=False
 - `bits=2` Hessian/Hybrid still falls back to the exact Python loop.
 - Multi-GPU candidate splitting is not pursued; any future multi-GPU work should target module-level parallelism or larger fused kernels rather than per-call `find_params_batched` splitting.
 - End-to-end `GPTQ.quantize` is still dominated by the fused GPTQ block kernel and Cholesky inversion; the next ScaleSearch round should either lower the exact-recompute launch overhead further or move on to the block-kernel/cholesky phase.
+
+---
+
+## Round: activation ScaleSearch top-2 selection inside the Triton kernel
+
+### Objective
+
+Avoid materializing the full `[rows, num_groups, candidate_count]` approximate-loss tensor and the PyTorch `topk`/`sort` calls by maintaining the two best candidate indices directly inside the activation Triton kernel.
+
+### Changes
+
+1. **`gptqmodel/quantization/_scale_search_triton.py`**
+   - `_scale_search_activation_kernel` now outputs a compact `[rows, num_groups, 2]` int32 tensor of the two best candidate indices, sorted ascending, instead of writing every candidate loss.
+   - The kernel keeps running `best_loss`/`best_idx` and `second_loss`/`second_idx` registers across the candidate loop using strict `<` comparisons, preserving lower-index tie-breaking.
+   - `_triton_find_params_batched_activation` allocates the small `topk_idx` tensor, skips `loss_out.topk(...)` and `.sort(...)`, and feeds the kernel's sorted indices directly into the PyTorch exact-recompute step.
+   - Candidate grids with `candidate_count <= 1` now short-circuit to the `c=0` (no-shrink) scale/zero result, avoiding an invalid top-2 path.
+
+### Accuracy validation
+
+- `python scripts/validate_find_params_batched_strict.py` on A100 GPU 5: **STRICT CHECK PASSED**.
+- `pytest -q tests/test_gptq.py tests/test_quantizer.py tests/test_quantizer_scale_search.py tests/test_adjacent_exact_cuda.py tests/test_gptq_block_triton.py` on A100 GPU 5: **210 passed, 2 skipped**.
+- `ruff check gptqmodel/quantization/_scale_search_triton.py` and `git diff --check`: clean.
+
+### Benchmarks
+
+`find_params_batched` microbenchmark (`4096 x 4096`, `bits=4`, `sym=False`, `grid=100`, `maxshrink=0.8`, A100 GPU 5). Before = in-place exact recompute + full `loss_out` tensor; after = in-kernel top-2.
+
+| group_size | method     | before (ms) | after (ms) | speedup |
+|------------|------------|-------------|------------|---------|
+| 32         | activation | 10.34       | 5.58       | 1.85x   |
+| 64         | activation | 7.09        | 4.94       | 1.43x   |
+| 128        | activation | 6.04        | 5.25       | 1.15x   |
+
+End-to-end `GPTQ.quantize` (`4096 x 4096`, `blocksize=128`, `bits=4`, `sym=False`, `mse=2.0`, A100 GPU 5) is close to noise because the fused GPTQ block kernel and Cholesky inversion now dominate, but the activation `find_params_batched` step is roughly halved:
+
+| group_size | method     | mean (ms) | median (ms) | min (ms) | max (ms) |
+|------------|------------|-----------|-------------|----------|----------|
+| 32         | activation | 114.1     | 111.4       | 110.6    | 125.8    |
+| 64         | activation | 104.6     | 104.6       | 104.4    | 104.9    |
+| 128        | activation | 99.6      | 99.6        | 99.3     | 99.8     |
+
+### Nsight Systems
+
+A capture of `GPTQ.quantize` with `group_size=64 activation` on A100 GPU 5 confirms the largest single-kernel consumers are now the fused `_gptq_block_kernel` (~37 ms summed) and the Cholesky factorization/solve kernels (~27 ms summed), with scale-search elementwise work greatly reduced.
+
+### Known limitations / future work
+
+- `bits=2` Hessian/Hybrid still fall back to the exact Python loop.
+- Multi-GPU candidate splitting remains off the table per user direction.
+- The next speedup round should target the fused GPTQ block kernel (per-row scalar extraction via `tl.where`+`tl.sum` is expensive) and/or the Cholesky/inversion path, as those are now the end-to-end bottlenecks.
