@@ -10,6 +10,7 @@ import transformers
 from accelerate.utils import has_offloaded_params
 from torch import nn
 
+from ..quantization.rotation.hadamard_utils import apply_online_hadamard
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.logger import setup_logger
 
@@ -248,6 +249,11 @@ class HookedLinear(torch.nn.Linear):
         custom_linear = HookedLinear(linear.in_features, linear.out_features)
         custom_linear.weight = linear.weight
         custom_linear.bias = linear.bias
+        custom_linear.online_full_had = getattr(linear, "online_full_had", False)
+        custom_linear.online_partial_had = getattr(linear, "online_partial_had", False)
+        custom_linear.had_dim = getattr(linear, "had_dim", -1)
+        custom_linear.had_K = getattr(linear, "had_K", None)
+        custom_linear.K = getattr(linear, "K", 1)
         return custom_linear
 
     @torch.inference_mode()
@@ -264,6 +270,14 @@ class HookedLinear(torch.nn.Linear):
         )
         if original_device != target_device:
             input = input.to(device=target_device)
+        input = apply_online_hadamard(
+            input,
+            online_full_had=getattr(self, "online_full_had", False),
+            online_partial_had=getattr(self, "online_partial_had", False),
+            had_K=getattr(self, "had_K", None),
+            K=getattr(self, "K", 1),
+            had_dim=getattr(self, "had_dim", -1),
+        )
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)

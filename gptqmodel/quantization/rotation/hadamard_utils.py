@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+from typing import Optional
 
 import torch
 
@@ -11,6 +12,8 @@ from gptqmodel.utils.logger import setup_logger
 
 
 # Adapted from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/utils/matmul_had.py
+# The optional underlying fast Hadamard transform CUDA kernel is vendored from
+# https://github.com/Dao-AILab/fast-hadamard-transform (Tri Dao, BSD-3-Clause).
 
 log = setup_logger()
 
@@ -102,10 +105,22 @@ def random_hadamard_matrix(size, device):
     Q = torch.diag(Q)
     return matmul_hadU(Q).to(device)
 
+class _FastHadamardTransform:
+    """Minimal drop-in replacement for the `fast_hadamard_transform` package.
+
+    Uses the GPT-QModel JIT `torch.ops.gptqmodel_hadamard` extension.
+    """
+
+    @staticmethod
+    def hadamard_transform(x, scale=1.0):
+        from gptqmodel.utils.hadamard import hadamard_transform
+
+        return hadamard_transform(x, scale)
+
+
 fast_hadamard_transform = None
 
 
-# TODO make this a util
 def import_fast_hadamard_transform():
     global fast_hadamard_transform
     if fast_hadamard_transform is not None:
@@ -113,10 +128,19 @@ def import_fast_hadamard_transform():
 
     try:
         import fast_hadamard_transform as fht
+
         fast_hadamard_transform = fht
-    except ImportError as e:
-        log.error("Package: Please install missing `fast_hadamard_transform` module via: `pip install -U git+https://github.com/Dao-AILab/fast-hadamard-transform.git --no-build-isolation -v`")
-        raise e
+    except ImportError:
+        from gptqmodel.utils.hadamard import hadamard_available
+
+        if hadamard_available():
+            fast_hadamard_transform = _FastHadamardTransform()
+        else:
+            log.error(
+                "Package: `fast_hadamard_transform` is not installed and the GPT-QModel JIT Hadamard extension "
+                "is unavailable. Install `fast_hadamard_transform` or ensure CUDA is available."
+            )
+            raise
 
 def matmul_hadU_cuda(X, hadK, K):
     import_fast_hadamard_transform()
@@ -134,6 +158,34 @@ def matmul_hadU_cuda(X, hadK, K):
     )
     input = hadK.to(input.device).to(input.dtype) @ input
     return input.reshape(X.shape)
+
+
+def apply_online_hadamard(
+    x: torch.Tensor,
+    online_full_had: bool,
+    online_partial_had: bool,
+    had_K: Optional[torch.Tensor],
+    K: int,
+    had_dim: int = -1,
+) -> torch.Tensor:
+    """Apply the online Hadamard transform used by QuaRot/SpinQuant inference.
+
+    This mirrors ``BaseQuantLinear._apply_rotation_to_input`` so the same transform
+    can be reused by ``HookedLinear`` during calibration/replay.
+    """
+    if not online_full_had and not online_partial_had:
+        return x
+    if had_K is None and K != 1:
+        return x
+
+    if online_full_had:
+        return matmul_hadU_cuda(x, had_K, K)
+
+    if online_partial_had:
+        init_shape = x.shape
+        x = x.reshape(-1, had_dim)
+        x = matmul_hadU_cuda(x, had_K, K)
+        return x.reshape(init_shape)
 
 
 # def matmul_hadUt_cuda(X, hadK, K):

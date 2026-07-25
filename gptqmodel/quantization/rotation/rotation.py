@@ -12,7 +12,7 @@ from transformers import PreTrainedModel
 from ...utils.logger import setup_logger
 from ...utils.model import get_module_by_name_prefix
 from ...utils.torch import torch_empty_cache
-from .hadamard_utils import apply_exact_had_to_linear, random_hadamard_matrix
+from .hadamard_utils import apply_exact_had_to_linear, get_hadK, random_hadamard_matrix
 
 
 log = setup_logger()
@@ -150,7 +150,18 @@ def rotate_mlp_output(layer, Q, device):
     dtype = W.weight.data.dtype
     W_ = W.weight.data.to(device=device, dtype=torch.float64)
     W.weight.data = torch.matmul(Q.T, W_).to(device="cpu", dtype=dtype)
-    # apply_exact_had_to_linear(W, had_dim=-1, output=False) #apply exact (inverse) hadamard on the weights of mlp output
+    apply_exact_had_to_linear(W, had_dim=-1, output=False)  # apply exact (inverse) hadamard on the weights of mlp output
+
+    # down_proj receives the elementwise SiLU*up activation, so the Hadamard
+    # fused into the weight must be re-applied to the activation at both
+    # calibration and inference time.
+    W.online_full_had = True
+    W.online_partial_had = False
+    W.had_dim = -1
+    had_K, K = get_hadK(W.in_features)
+    W.had_K = had_K
+    W.K = K
+
     if W.bias is not None:
         b = W.bias.data.to(device=device, dtype=torch.float64)
         W.bias.data = torch.matmul(Q.T, b).to(device="cpu", dtype=dtype)

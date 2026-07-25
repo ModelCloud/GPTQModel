@@ -216,6 +216,46 @@ def _set_paged_attention_safe_cuda_graphs(model) -> None:
         cb_config.use_cuda_graph = (False, False)
 
 
+def _setup_rotation_online_had(model, rotation: Optional[str]) -> None:
+    """Attach online Hadamard transform state to QuantLinear modules for rotation inference.
+
+    Rotation (QuaRot/SpinQuant/Hadamard) fuses an orthogonal ``Q`` and an exact
+    Hadamard ``H`` into the weights. The ``H`` must be re-applied to activations
+    at inference before the quantized matmul for ``mlp.down_proj``. The per-head
+    Hadamard fused into ``v_proj``/``o_proj`` cancels inside the attention path,
+    so ``self_attn.o_proj`` does not require an online transform. Only the
+    ``rotation`` string is persisted; ``had_K``/``K`` are recomputed from the
+    model dimensions at load time.
+    """
+    if not rotation:
+        return
+
+    from ..quantization.rotation.hadamard_utils import get_hadK
+
+    if rotation not in {"hadamard", "random"}:
+        raise ValueError(f"Unsupported rotation mode: `{rotation}`")
+
+    online_count = 0
+    for name, module in model.named_modules():
+        if not isinstance(module, BaseQuantLinear):
+            continue
+
+        if name.endswith("mlp.down_proj"):
+            intermediate_size = module.in_features
+            had_K, K = get_hadK(intermediate_size)
+            module.online_full_had = True
+            module.K = K
+            if had_K is not None:
+                module.register_buffer("had_K", had_K, persistent=False)
+            online_count += 1
+
+    if online_count == 0:
+        log.warn(
+            f"Rotation `{rotation}` requested but no `mlp.down_proj` QuantLinear "
+            "modules were found; online Hadamard transform was not applied."
+        )
+
+
 def _is_accelerated_attention_device(device: object) -> bool:
     """Return True when the selected device can run CUDA/ROCm flash attention."""
 
@@ -1302,6 +1342,19 @@ def ModelLoader(cls):
                     log.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
+            if qcfg.rotation:
+                if format_code not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+                    raise NotImplementedError(
+                        f"`rotation` is only supported for GPTQ/GPTQ_V2 checkpoints, got `{format_code}`."
+                    )
+                backend = normalize_backend(backend, quant_method=qcfg.method)
+                if backend == BACKEND.AUTO:
+                    backend = BACKEND.GPTQ_TORCH
+                if backend not in (BACKEND.GPTQ_TORCH, BACKEND.GPTQ_TRITON):
+                    raise NotImplementedError(
+                        f"`rotation` is only supported with `gptq_torch` or `gptq_triton` backend, got `{backend}`."
+                    )
+
             if format_code == FORMAT.EXL3:
                 if not isinstance(qcfg.tensor_storage, dict) or not qcfg.tensor_storage:
                     raise ValueError("EXL3 checkpoints require `quantization_config.tensor_storage` metadata.")
@@ -1728,6 +1781,7 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
         )
+        _setup_rotation_online_had(instance.model, qcfg.rotation)
         _set_paged_attention_safe_cuda_graphs(instance.model)
         return instance
 

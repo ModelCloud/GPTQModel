@@ -2556,6 +2556,13 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.meta = {}
 
         self.adapter = normalize_adapter(self.adapter)
+
+        # Rotation fuses orthogonal transforms into the weights and requires
+        # materialized tensors; meta-device/shell loading cannot be used.
+        if self.rotation and self.offload_to_disk:
+            log.warn(f"{self.__class__.__name__}: `rotation` is incompatible with `offload_to_disk`; disabling disk offload.")
+            self.offload_to_disk = False
+
         self._ensure_offload_temp_dir()
 
         self.dense_vram_strategy = _normalize_dense_vram_strategy(self.dense_vram_strategy)
@@ -2940,6 +2947,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             FORMAT_FIELD_CODE: self.format,
             FORMAT_FIELD_CHECKPOINT: self.format,
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
+            "rotation": self.rotation,
             META_FIELD: meta_payload,
         }
         self._update_output_payload(out)
@@ -3732,6 +3740,13 @@ class EXL3Config(BaseQuantizeConfig):
             self.meta = {}
 
         self.adapter = normalize_adapter(self.adapter)
+
+        # Rotation fuses orthogonal transforms into the weights and requires
+        # materialized tensors; meta-device/shell loading cannot be used.
+        if self.rotation and self.offload_to_disk:
+            log.warn(f"{self.__class__.__name__}: `rotation` is incompatible with `offload_to_disk`; disabling disk offload.")
+            self.offload_to_disk = False
+
         self._ensure_offload_temp_dir()
 
         self.dense_vram_strategy = _normalize_dense_vram_strategy(self.dense_vram_strategy)
