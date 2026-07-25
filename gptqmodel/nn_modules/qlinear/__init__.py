@@ -472,23 +472,16 @@ class BaseQuantLinear(nn.Module):
 
     def _apply_rotation_to_input(self, x: t.Tensor) -> t.Tensor:
         """Apply online Hadamard transform to the input for SpinQuant/QuaRot inference."""
-        if not self.online_full_had and not self.online_partial_had:
-            return x
-        if self.had_K is None and self.K != 1:
-            return x
+        from ...quantization.rotation.hadamard_utils import apply_online_hadamard
 
-        from ...quantization.rotation.hadamard_utils import matmul_hadU_cuda
-
-        if self.online_full_had:
-            return matmul_hadU_cuda(x, self.had_K, self.K)
-
-        if self.online_partial_had:
-            init_shape = x.shape
-            x = x.reshape(-1, self.had_dim)
-            x = matmul_hadU_cuda(x, self.had_K, self.K)
-            return x.reshape(init_shape)
-
-        return x
+        return apply_online_hadamard(
+            x,
+            online_full_had=self.online_full_had,
+            online_partial_had=self.online_partial_had,
+            had_K=self.had_K,
+            K=self.K,
+            had_dim=self.had_dim,
+        )
 
 
 class GroupedQuantLinear(BaseQuantLinear):

@@ -179,3 +179,45 @@ def test_rotation_loaded_from_quantized_down_proj_has_online_state():
     assert raw.get("rotation") == "hadamard"
     cfg = QuantizeConfig.from_quant_config(raw)
     assert cfg.rotation == "hadamard"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for fast Hadamard transform")
+def test_hooked_linear_online_hadamard_cancels_in_forward():
+    """HookedLinear must re-apply the online Hadamard during calibration/replay.
+
+    Fusing ``H`` into ``mlp.down_proj`` and applying ``H`` to the activation
+    before ``super().forward`` must cancel, matching the original dense matmul.
+    """
+    from gptqmodel.nn_modules.hooked_linear import HookedLinear
+    from gptqmodel.quantization.rotation import hadamard_utils
+
+    in_features, out_features = 4096, 2048
+    x = torch.randn(2, 5, in_features, device="cuda", dtype=torch.float32)
+    W = torch.randn(out_features, in_features, device="cuda", dtype=torch.float32)
+
+    expected = x @ W.T
+
+    # Fuse a full normalized Hadamard into the input dimension of W.
+    W_fused = hadamard_utils.matmul_hadU_cuda(W, None, 1)
+
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=torch.float32, device="cuda")
+    linear.weight.data = W_fused
+    linear.online_full_had = True
+    linear.online_partial_had = False
+    linear.had_dim = -1
+    linear.had_K = None
+    linear.K = 1
+
+    hl = HookedLinear.from_linear(linear)
+    out = hl(x)
+    assert torch.allclose(out, expected, atol=1e-2)
+
+    # The forward hook should observe the Hadamard-transformed input, not the raw one.
+    seen_inputs = []
+    def capture_hook(module, inp, out):
+        seen_inputs.append(inp[0])
+
+    hl.forward_hook = capture_hook
+    _ = hl(x)
+    assert len(seen_inputs) == 1
+    assert torch.allclose(seen_inputs[0], hadamard_utils.matmul_hadU_cuda(x, None, 1), atol=1e-2)

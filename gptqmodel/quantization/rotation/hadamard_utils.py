@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+from typing import Optional
 
 import torch
 
@@ -157,6 +158,34 @@ def matmul_hadU_cuda(X, hadK, K):
     )
     input = hadK.to(input.device).to(input.dtype) @ input
     return input.reshape(X.shape)
+
+
+def apply_online_hadamard(
+    x: torch.Tensor,
+    online_full_had: bool,
+    online_partial_had: bool,
+    had_K: Optional[torch.Tensor],
+    K: int,
+    had_dim: int = -1,
+) -> torch.Tensor:
+    """Apply the online Hadamard transform used by QuaRot/SpinQuant inference.
+
+    This mirrors ``BaseQuantLinear._apply_rotation_to_input`` so the same transform
+    can be reused by ``HookedLinear`` during calibration/replay.
+    """
+    if not online_full_had and not online_partial_had:
+        return x
+    if had_K is None and K != 1:
+        return x
+
+    if online_full_had:
+        return matmul_hadU_cuda(x, had_K, K)
+
+    if online_partial_had:
+        init_shape = x.shape
+        x = x.reshape(-1, had_dim)
+        x = matmul_hadU_cuda(x, had_K, K)
+        return x.reshape(init_shape)
 
 
 # def matmul_hadUt_cuda(X, hadK, K):
