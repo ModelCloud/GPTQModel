@@ -429,7 +429,7 @@ def make_quant(
         elif qcfg.quant_method == METHOD.AWQ and format == FORMAT.GEMM:
             backend = BACKEND.AWQ_TORCH
 
-    # returns multiple validated kernels
+    # returns multiple validated kernels across all effective dynamic contracts
     quant_linear_candidates = select_quant_linear(
         bits=bits,
         group_size=group_size,
@@ -439,9 +439,7 @@ def make_quant(
         format=format,
         quant_method=export_quant_method,
         pack=pack,
-        # Select the default contract here. create_quant_layer validates and
-        # selects each dynamic module against its own effective contract.
-        dynamic=None,
+        dynamic=dynamic,
         device=device,
         pack_dtype=pack_dtype,
         dtype=dtype,

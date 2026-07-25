@@ -13,9 +13,11 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
@@ -28,6 +30,7 @@ from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import (
     AUTO_BACKEND_KERNEL_MAPPING,
+    _iter_dynamic_contracts,
     auto_select_device,
     iter_quant_linear_kernels,
     select_quant_linear,
@@ -770,3 +773,136 @@ def test_gguf_does_not_accept_generic_torch_backend():
             quant_method=METHOD.GGUF,
             pack_dtype=torch.int32,
         )
+
+
+def test_iter_dynamic_contracts_yields_base_and_distinct_overrides():
+    dynamic = {
+        "+:^lm_head$": {"bits": 4, "group_size": 64},
+        "+:^embed_tokens$": {"bits": 4, "group_size": 64},
+        "model.layers.0.self_attn.q_proj": {"bits": 2, "sym": False},
+    }
+    contracts = list(
+        _iter_dynamic_contracts(
+            dynamic=dynamic,
+            bits=3,
+            group_size=32,
+            desc_act=False,
+            sym=True,
+            pack_dtype=torch.int32,
+            format_value=FORMAT.GPTQ,
+        )
+    )
+    assert len(contracts) == 3
+    assert {"bits": 3, "group_size": 32, "desc_act": False, "sym": True, "pack_dtype": torch.int32} in contracts
+    assert {"bits": 4, "group_size": 64, "desc_act": False, "sym": True, "pack_dtype": torch.int32} in contracts
+    assert {"bits": 2, "group_size": 32, "desc_act": False, "sym": False, "pack_dtype": torch.int32} in contracts
+
+
+def test_select_quant_linear_multi_select_expands_dynamic_contracts(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GPTQ, FORMAT.GPTQ)
+    # Marlin's validate_device inspects actual GPU compute capability; neutralize it
+    # so the test depends only on declared capability contracts.
+    monkeypatch.setattr(
+        MarlinLinear,
+        "validate_device",
+        classmethod(lambda _cls, _device: None),
+    )
+
+    dynamic = {
+        "+:^lm_head$": {"bits": 4, "group_size": 32, "desc_act": False, "sym": True},
+        "+:^model\\.layers\\.0\\.self_attn\\.q_proj$": {
+            "bits": 2,
+            "group_size": 32,
+            "desc_act": False,
+            "sym": True,
+        },
+    }
+    candidates = select_quant_linear(
+        bits=3,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+        dynamic=dynamic,
+        multi_select=True,
+    )
+    # 4-bit contract enables Marlin/Exllama; base 3-bit enables Trilin; Triton/Torch cover all.
+    assert MarlinLinear in candidates
+    assert ExllamaV2Linear in candidates
+    assert TrilinLinear in candidates
+    assert TritonV2Linear in candidates
+    assert TorchLinear in candidates
+    assert candidates[0] is MarlinLinear
+
+
+def test_select_quant_linear_single_select_stays_model_wide_compatible(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GPTQ, FORMAT.GPTQ)
+    monkeypatch.setattr(
+        MarlinLinear,
+        "validate_device",
+        classmethod(lambda _cls, _device: None),
+    )
+
+    dynamic = {
+        "+:^lm_head$": {"bits": 4, "group_size": 32, "desc_act": False, "sym": True},
+    }
+    selected = select_quant_linear(
+        bits=3,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+        dynamic=dynamic,
+    )
+    # Marlin fails on base bits=3; Trilin rejects dynamic 4-bit; Triton handles the whole map.
+    assert selected is TritonV2Linear
+
+
+def test_create_quant_layer_selects_marlin_for_4bit_and_trilin_for_3bit(monkeypatch):
+    for cls in (MarlinLinear, TrilinLinear, TritonV2Linear, TorchLinear):
+        monkeypatch.setattr(
+            cls,
+            "cached_validate_once",
+            classmethod(lambda _qlinear_cls: (True, None)),
+        )
+    monkeypatch.setattr(
+        MarlinLinear,
+        "validate_device",
+        classmethod(lambda _cls, _device: None),
+    )
+
+    model = torch.nn.Module()
+    model.proj = torch.nn.Linear(128, 32, bias=False)
+    model.lm_head = torch.nn.Linear(128, 32, bias=False)
+    dynamic = {
+        "+:^lm_head$": {"bits": 4, "group_size": 32, "desc_act": False, "sym": True},
+    }
+    _ = create_quant_layer(
+        linear_candidates=[MarlinLinear, TrilinLinear, TritonV2Linear, TorchLinear],
+        bits=3,
+        desc_act=False,
+        dynamic=dynamic,
+        group_size=128,
+        quant_result={"proj": {}, "lm_head": {}},
+        module=model,
+        sym=True,
+        device=DEVICE.CUDA,
+        lm_head_name="lm_head",
+        pack_dtype=torch.int32,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ,
+        dtype=torch.float16,
+    )
+    assert isinstance(model.proj, TrilinLinear)
+    assert isinstance(model.lm_head, MarlinLinear)
+    assert not isinstance(model.lm_head, TrilinLinear)
