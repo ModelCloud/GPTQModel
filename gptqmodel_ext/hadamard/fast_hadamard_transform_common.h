@@ -1,5 +1,8 @@
 /******************************************************************************
  * Copyright (c) 2023, Tri Dao.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Adapted for GPT-QModel as a torch.ops JIT extension.
  ******************************************************************************/
 
 #pragma once

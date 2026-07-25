@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+# JIT wrapper around the vendored fast-hadamard-transform kernel from
+# https://github.com/Dao-AILab/fast-hadamard-transform (Tri Dao, BSD-3-Clause).
+
 from __future__ import annotations
 
 from pathlib import Path

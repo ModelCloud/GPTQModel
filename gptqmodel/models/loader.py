@@ -227,14 +227,19 @@ def _setup_rotation_online_had(model, rotation: Optional[str]) -> None:
 
     Rotation (QuaRot/SpinQuant/Hadamard) fuses an orthogonal ``Q`` and an exact
     Hadamard ``H`` into the weights. The ``H`` must be re-applied to activations
-    at inference before the quantized matmul (only for ``mlp.down_proj`` in the
-    current pipeline). Only the ``rotation`` string is persisted; ``had_K``/``K``
-    are recomputed from the model dimensions at load time.
+    at inference before the quantized matmul for ``mlp.down_proj``. The per-head
+    Hadamard fused into ``v_proj``/``o_proj`` cancels inside the attention path,
+    so ``self_attn.o_proj`` does not require an online transform. Only the
+    ``rotation`` string is persisted; ``had_K``/``K`` are recomputed from the
+    model dimensions at load time.
     """
     if not rotation:
         return
 
     from ..quantization.rotation.hadamard_utils import get_hadK
+
+    if rotation not in {"hadamard", "random"}:
+        raise ValueError(f"Unsupported rotation mode: `{rotation}`")
 
     online_count = 0
     for name, module in model.named_modules():
@@ -249,9 +254,6 @@ def _setup_rotation_online_had(model, rotation: Optional[str]) -> None:
             if had_K is not None:
                 module.register_buffer("had_K", had_K, persistent=False)
             online_count += 1
-
-    if rotation not in {"hadamard", "random"}:
-        raise ValueError(f"Unsupported rotation mode: `{rotation}`")
 
     if online_count == 0:
         log.warn(
