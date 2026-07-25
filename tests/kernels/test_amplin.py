@@ -120,6 +120,55 @@ def packed_case() -> dict[str, torch.Tensor]:
 
 
 @pytest.fixture(scope="module")
+def packed_case_n256() -> dict[str, torch.Tensor]:
+    size_n = 512
+    rows = torch.arange(SIZE_K, dtype=torch.int64).view(-1, 1)
+    columns = torch.arange(size_n, dtype=torch.int64).view(1, -1)
+    codes = ((rows * 5 + columns * 3 + rows // 17) & 0xF).to(torch.int32)
+    group_indices = torch.arange(SIZE_K, dtype=torch.int32) // GROUP_SIZE
+    scale_steps = (
+        torch.arange(SIZE_K // GROUP_SIZE, dtype=torch.int32).view(-1, 1) * 3
+        + torch.arange(size_n, dtype=torch.int32).view(1, -1)
+    ) % 8 + 1
+    scales = scale_steps.to(torch.float32) / 1024.0
+    zeros = torch.full_like(scales, ZERO, dtype=torch.int32)
+    dense_weight = scales[group_indices.long()] * (codes.to(torch.float32) - ZERO)
+
+    linear = torch.nn.Linear(SIZE_K, size_n, bias=False, dtype=torch.float32)
+    with torch.no_grad():
+        linear.weight.copy_(dense_weight.t())
+
+    module = TorchLinear(
+        bits=BITS,
+        group_size=GROUP_SIZE,
+        sym=True,
+        desc_act=False,
+        in_features=SIZE_K,
+        out_features=size_n,
+        bias=False,
+        pack_dtype=torch.int32,
+        register_buffers=False,
+    )
+    module.pack_original(
+        linear=linear,
+        scales=scales.t().contiguous(),
+        zeros=zeros.t().contiguous(),
+        g_idx=group_indices,
+    )
+    module.post_init()
+
+    unpacked = _unpack_gptq_w4(module.qweight, SIZE_K)
+    torch.testing.assert_close(unpacked, codes.to(torch.int64), rtol=0, atol=0)
+    torch.testing.assert_close(module.scales, scales.to(torch.float16), rtol=0, atol=0)
+    torch.testing.assert_close(module.dequantize_weight(), dense_weight.to(torch.float16), rtol=0, atol=0)
+    return {
+        "codes": unpacked,
+        "qweight": module.qweight,
+        "scales": module.scales,
+    }
+
+
+@pytest.fixture(scope="module")
 def sm80_device() -> torch.device:
     if not torch.cuda.is_available():
         pytest.skip("Amplin kernel tests require CUDA")
@@ -749,9 +798,9 @@ def test_amplin_hmma_gemm_rejects_inputs_outside_contract(sm80_device: torch.dev
             packed_scales,
             logical_n=SIZE_N - 1,
         )
-    with pytest.raises(RuntimeError, match="flattened M must be one of 2, 4, 8, or 16"):
+    with pytest.raises(RuntimeError, match="flattened M must be between 1 and 16"):
         amplin.mma_lane_m16_n16_padded(
-            input[:1].contiguous(),
+            torch.ones((17, GROUP_SIZE), device=sm80_device, dtype=torch.float16),
             packed_mma_lane_qweight,
             packed_scales,
             logical_n=SIZE_N,
@@ -763,63 +812,85 @@ def test_amplin_hmma_gemm_rejects_inputs_outside_contract(sm80_device: torch.dev
             packed_scales,
             logical_n=SIZE_N - 1,
         )
-    with pytest.raises(RuntimeError, match="split-K4 requires K=12288"):
+    with pytest.raises(RuntimeError, match="evenly divisible"):
         amplin.mma_lane_m16_n16_splitk4(
             input,
             packed_mma_lane_qweight,
             packed_scales,
             logical_n=SIZE_N,
         )
-    with pytest.raises(RuntimeError, match="split-K8 requires K=12288"):
+    with pytest.raises(RuntimeError, match="evenly divisible"):
         amplin.mma_lane_m16_n16_splitk8(
             input,
             packed_mma_lane_qweight,
             packed_scales,
             logical_n=SIZE_N,
         )
-    with pytest.raises(RuntimeError, match="split-K12 requires K=12288"):
+    with pytest.raises(RuntimeError, match="evenly divisible"):
         amplin.mma_lane_m16_n16_splitk12(
             input,
             packed_mma_lane_qweight,
             packed_scales,
             logical_n=SIZE_N,
         )
-    with pytest.raises(RuntimeError, match="split-K16 requires K=12288"):
+    with pytest.raises(RuntimeError, match="evenly divisible"):
         amplin.mma_lane_m16_n32_splitk16(
             input,
             packed_mma_lane_qweight,
             packed_scales,
             logical_n=SIZE_N,
         )
-    with pytest.raises(RuntimeError, match="split-K12 requires K=12288"):
+    with pytest.raises(RuntimeError, match="evenly divisible"):
+        amplin.mma_lane_m16_n32_splitk8(
+            input,
+            packed_mma_lane_qweight,
+            packed_scales,
+            logical_n=SIZE_N,
+        )
+    with pytest.raises(RuntimeError, match="evenly divisible"):
+        amplin.mma_lane_m16_n32_splitk8_pipe2(
+            input,
+            packed_mma_lane_qweight,
+            packed_scales,
+            logical_n=SIZE_N,
+        )
+    with pytest.raises(RuntimeError, match="evenly divisible"):
         amplin.mma_lane_m16_n32_splitk12(
             input,
             packed_mma_lane_qweight,
             packed_scales,
             logical_n=SIZE_N,
         )
-    with pytest.raises(RuntimeError, match="split-K12 requires K=12288"):
+    with pytest.raises(RuntimeError, match="evenly divisible"):
         amplin.mma_lane_m16_n32_splitk12_pipe2_interleaved(
             input,
             packed_mma_lane_n32_qweight,
             packed_scales,
             logical_n=SIZE_N,
         )
-    with pytest.raises(RuntimeError, match="N64 split-K24 requires K=12288"):
-        amplin.mma_lane_m16_n64_splitk24_pipe2_interleaved(
-            input,
-            packed_mma_lane_n64_qweight,
-            packed_scales,
-            logical_n=SIZE_N,
-        )
-    with pytest.raises(RuntimeError, match="N64 split-K12x2 requires K=12288"):
-        amplin.mma_lane_m16_n64_splitk12x2_coop_interleaved(
-            input,
-            packed_mma_lane_n64_qweight,
-            packed_scales,
-            logical_n=SIZE_N,
-        )
-    with pytest.raises(RuntimeError, match="split-K16 requires K=12288"):
+    # Split-K24 N64 is now legal for any positive group count; verify it runs on
+    # a non-multiple-of-24 group count (1 group) and matches the deterministic
+    # dequantized result for zero qweight and unit scales.
+    output = amplin.mma_lane_m16_n64_splitk24_pipe2_interleaved(
+        input,
+        packed_mma_lane_n64_qweight,
+        packed_scales,
+        logical_n=SIZE_N,
+    )
+    expected = torch.full(
+        (16, SIZE_N), -1024.0, device=sm80_device, dtype=torch.float16
+    )
+    assert torch.allclose(output, expected, atol=0.0, rtol=0.0)
+    # Split-K12x2 N64 cooperative should now be legal for any positive group
+    # count (one group here) and match the deterministic reference.
+    output = amplin.mma_lane_m16_n64_splitk12x2_coop_interleaved(
+        input,
+        packed_mma_lane_n64_qweight,
+        packed_scales,
+        logical_n=SIZE_N,
+    )
+    assert torch.allclose(output, expected, atol=0.0, rtol=0.0)
+    with pytest.raises(RuntimeError, match="evenly divisible"):
         amplin.mma_lane_m16_n16_splitk16(
             input,
             packed_mma_lane_qweight,
@@ -1097,11 +1168,7 @@ def test_amplin_padded_m16_large_mlp_projection_matches_fp32_dequant_reference(
         if size_k == 12288
         else None
     )
-    packed_n64_qweight = (
-        amplin.pack_mma_lane_n64_qweight(qweight)
-        if size_k == 12288
-        else None
-    )
+    packed_n64_qweight = amplin.pack_mma_lane_n64_qweight(qweight)
     packed_scales = amplin.pack_hmma_scales(scales)
     full_input = (
         torch.randn(
@@ -1150,6 +1217,12 @@ def test_amplin_padded_m16_large_mlp_projection_matches_fp32_dequant_reference(
                     packed_scales,
                     logical_n=size_n,
                 )
+                outputs["split-k8-n32"] = amplin.mma_lane_m16_n32_splitk8(
+                    input,
+                    packed_qweight,
+                    packed_scales,
+                    logical_n=size_n,
+                )
                 outputs["split-k12-n32"] = amplin.mma_lane_m16_n32_splitk12(
                     input,
                     packed_qweight,
@@ -1163,6 +1236,12 @@ def test_amplin_padded_m16_large_mlp_projection_matches_fp32_dequant_reference(
                     logical_n=size_n,
                 )
                 outputs["split-k12-n32-pipe2"] = amplin.mma_lane_m16_n32_splitk12_pipe2(
+                    input,
+                    packed_qweight,
+                    packed_scales,
+                    logical_n=size_n,
+                )
+                outputs["split-k8-n32-pipe2"] = amplin.mma_lane_m16_n32_splitk8_pipe2(
                     input,
                     packed_qweight,
                     packed_scales,
@@ -1192,6 +1271,24 @@ def test_amplin_padded_m16_large_mlp_projection_matches_fp32_dequant_reference(
                         logical_n=size_n,
                     )
                 )
+                if size_n % 256 == 0:
+                    outputs["tile4-n64-shared-a"] = (
+                        amplin.mma_lane_m16_n64_tile4_shared_a(
+                            input,
+                            packed_n64_qweight,
+                            packed_scales,
+                            logical_n=size_n,
+                        )
+                    )
+                    if size_n % 512 == 0:
+                        outputs["tile8-n64-shared-a"] = (
+                            amplin.mma_lane_m16_n64_tile8_shared_a(
+                                input,
+                                packed_n64_qweight,
+                                packed_scales,
+                                logical_n=size_n,
+                            )
+                        )
                 outputs["split-k16-n32-pipe2"] = amplin.mma_lane_m16_n32_splitk16_pipe2(
                     input,
                     packed_qweight,
@@ -1222,6 +1319,103 @@ def test_amplin_padded_m16_large_mlp_projection_matches_fp32_dequant_reference(
                     f"K={size_k}, N={size_n}, dtype={dtype}: {message}"
                 ),
             )
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_amplin_mma_lane_m32_n64_splitk24_matches_fp32_reference(
+    packed_case: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+    dtype: torch.dtype,
+):
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported(sm80_device):
+        pytest.skip("CUDA BF16 support required")
+
+    generator = torch.Generator(device=sm80_device)
+    generator.manual_seed(20260724)
+    input = torch.randn((32, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator).mul_(0.25).to(dtype)
+    qweight = packed_case["qweight"].to(device=sm80_device).contiguous()
+    scales = packed_case["scales"].to(device=sm80_device, dtype=dtype).contiguous()
+    codes = packed_case["codes"].to(device=sm80_device)
+    group_indices = torch.arange(SIZE_K, device=sm80_device, dtype=torch.int64) // GROUP_SIZE
+    dense_weight = (codes.to(torch.float32) - ZERO) * scales.to(torch.float32)[group_indices]
+    expected = input.to(torch.float32) @ dense_weight
+
+    packed_n64_qweight = amplin.pack_mma_lane_n64_qweight(qweight)
+    _, packed_scales = amplin.pack_hmma_weights(qweight, scales)
+    actual = amplin.mma_lane_m32_n64_splitk24_pipe2_interleaved(
+        input,
+        packed_n64_qweight,
+        packed_scales,
+        logical_n=SIZE_N,
+    )
+    torch.cuda.synchronize(sm80_device)
+
+    assert actual.shape == (32, SIZE_N)
+    assert actual.dtype == dtype
+    assert actual.device == sm80_device
+    assert torch.isfinite(actual).all()
+    atol = 2e-3 if dtype == torch.float16 else 2e-2
+    torch.testing.assert_close(
+        actual.to(torch.float32),
+        expected,
+        rtol=0,
+        atol=atol,
+    )
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    ("dtype", "atol"),
+    [
+        (torch.float16, 2e-3),
+        (torch.bfloat16, 2e-2),
+    ],
+)
+def test_amplin_mma_lane_m32_n64_tile4_matches_fp32_reference(
+    packed_case_n256: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+    dtype: torch.dtype,
+    atol: float,
+):
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported(sm80_device):
+        pytest.skip("CUDA BF16 support required")
+
+    generator = torch.Generator(device=sm80_device)
+    generator.manual_seed(20260724)
+    input = torch.randn((32, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator).mul_(0.25).to(dtype)
+    qweight = packed_case_n256["qweight"].to(device=sm80_device).contiguous()
+    scales = packed_case_n256["scales"].to(device=sm80_device, dtype=dtype).contiguous()
+    codes = packed_case_n256["codes"].to(device=sm80_device)
+    group_indices = torch.arange(SIZE_K, device=sm80_device, dtype=torch.int64) // GROUP_SIZE
+    dense_weight = (codes.to(torch.float32) - ZERO) * scales.to(torch.float32)[group_indices]
+    expected = input.to(torch.float32) @ dense_weight
+
+    packed_n64_qweight = amplin.pack_mma_lane_n64_qweight(qweight)
+    _, packed_scales = amplin.pack_hmma_weights(qweight, scales)
+
+    for name, op in (
+        ("tile4", amplin.mma_lane_m32_n64_tile4_shared_a),
+        ("tile8", amplin.mma_lane_m32_n64_tile8_shared_a),
+    ):
+        actual = op(
+            input,
+            packed_n64_qweight,
+            packed_scales,
+            logical_n=512,
+        )
+        torch.cuda.synchronize(sm80_device)
+
+        assert actual.shape == (32, 512), name
+        assert actual.dtype == dtype, name
+        assert actual.device == sm80_device, name
+        assert torch.isfinite(actual).all(), name
+        torch.testing.assert_close(
+            actual.to(torch.float32),
+            expected,
+            rtol=0,
+            atol=atol,
+        )
 
 
 @pytest.mark.cuda

@@ -55,10 +55,7 @@ class ShapeSpec:
 
 
 SHAPES = (
-    ShapeSpec("qwen3-8b", "kv-proj", 4096, 1024),
-    ShapeSpec("qwen3-8b", "q/o-proj", 4096, 4096),
-    ShapeSpec("qwen3-8b", "mlp-up", 4096, 12288),
-    ShapeSpec("qwen3-8b", "mlp-down", 12288, 4096),
+    # Laguna S 2.1
     ShapeSpec("laguna-s-2.1", "expert-down", 1024, 3072),
     ShapeSpec("laguna-s-2.1", "attn-g48", 3072, 48),
     ShapeSpec("laguna-s-2.1", "attn-g72", 3072, 72),
@@ -69,15 +66,42 @@ SHAPES = (
     ShapeSpec("laguna-s-2.1", "o-proj-6144", 6144, 3072),
     ShapeSpec("laguna-s-2.1", "o-proj-9216", 9216, 3072),
     ShapeSpec("laguna-s-2.1", "dense-down", 12288, 3072),
+    ShapeSpec("laguna-s-2.1", "router-gate", 3072, 256),
+    # GLM 5.2
+    ShapeSpec("glm-5.2", "q-a-proj", 6144, 2048),
+    ShapeSpec("glm-5.2", "q-b-proj", 2048, 4096),
+    ShapeSpec("glm-5.2", "q-b-proj-large", 2048, 16384),
+    ShapeSpec("glm-5.2", "kv-a-proj", 6144, 128),
+    ShapeSpec("glm-5.2", "kv-a-proj-mqa", 6144, 576),
+    ShapeSpec("glm-5.2", "kv-b-proj", 512, 28672),
+    ShapeSpec("glm-5.2", "o-proj", 16384, 6144),
+    ShapeSpec("glm-5.2", "dense-up", 6144, 12288),
+    ShapeSpec("glm-5.2", "dense-down", 12288, 6144),
+    ShapeSpec("glm-5.2", "moe-up", 6144, 2048),
+    ShapeSpec("glm-5.2", "moe-down", 2048, 6144),
+    ShapeSpec("glm-5.2", "indexer-wq-b", 2048, 4096),
+    ShapeSpec("glm-5.2", "lm-head", 6144, 154880),
+    # Kimi K2.5 / K2.6 (K2.6 is a strict subset)
+    ShapeSpec("kimi-k2.5", "q-a-proj", 7168, 1536),
+    ShapeSpec("kimi-k2.5", "q-b-proj", 1536, 12288),
+    ShapeSpec("kimi-k2.5", "kv-a-proj-mqa", 7168, 576),
+    ShapeSpec("kimi-k2.5", "kv-b-proj", 512, 16384),
+    ShapeSpec("kimi-k2.5", "o-proj", 8192, 7168),
+    ShapeSpec("kimi-k2.5", "dense-up", 7168, 18432),
+    ShapeSpec("kimi-k2.5", "dense-down", 18432, 7168),
+    ShapeSpec("kimi-k2.5", "shared-up", 7168, 2048),
+    ShapeSpec("kimi-k2.5", "shared-down", 2048, 7168),
+    ShapeSpec("kimi-k2.5", "router-gate", 7168, 384),
+    ShapeSpec("kimi-k2.5", "lm-head", 7168, 163840),
 )
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Benchmark raw Amplin over exact Qwen3-8B and Laguna S 2.1 GPTQ W4 linear shapes."
+        description="Benchmark raw Amplin over exact Laguna S 2.1, GLM 5.2, and Kimi K2.5 GPTQ W4 linear shapes."
     )
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--model", choices=("all", "qwen3-8b", "laguna-s-2.1"), default="all")
+    parser.add_argument("--model", choices=("all", "laguna-s-2.1", "glm-5.2", "kimi-k2.5"), default="all")
     parser.add_argument("--shape", action="append", help="Optional repeated KxN filter, for example 4096x12288.")
     parser.add_argument("--dtype", choices=("fp16", "bf16", "both"), default="both")
     parser.add_argument(
@@ -137,7 +161,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--splitk-n32-pipe2",
         action="store_true",
-        help="Also time the K12288 N32 split-K12/K16 controls with two-stage register prefetching.",
+        help="Also time the N32 split-K8/K12/K16 controls with two-stage register prefetching.",
     )
     parser.add_argument(
         "--splitk12-n32-interleaved",
@@ -166,6 +190,16 @@ def _parse_args() -> argparse.Namespace:
             "With --hmma, time M32 direct-A, legal M64 direct-A, and Marlin paths; "
             "M<32 retains canonical Amplin for a legal small-batch comparison."
         ),
+    )
+    parser.add_argument(
+        "--m32-splitk12x2-n64-coop",
+        action="store_true",
+        help="Also time two cooperative K12 CTAs per interleaved N64 tile for M<=32.",
+    )
+    parser.add_argument(
+        "--m32-splitk24-n64",
+        action="store_true",
+        help="Also time single-CTA K24 split per interleaved N64 tile for M=17..32.",
     )
     parser.add_argument(
         "--dense-ceiling",
@@ -237,12 +271,15 @@ def _benchmark_shape_dtype(
     amplin_mma_lane_m64_global_a_op,
     amplin_mma_lane_m32_global_a_op,
     amplin_mma_lane_m32_n32_global_a_op,
+    amplin_mma_lane_m32_n64_splitk12x2_coop_interleaved_op,
+    amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_op,
     amplin_mma_lane_m16_n16_padded_op,
     amplin_mma_lane_m16_n16_splitk4_op,
     amplin_mma_lane_m16_n16_splitk8_op,
     amplin_mma_lane_m16_n16_splitk12_op,
     amplin_mma_lane_m16_n32_splitk12_op,
     amplin_mma_lane_m16_n32_splitk16_op,
+    amplin_mma_lane_m16_n32_splitk8_pipe2_op,
     amplin_mma_lane_m16_n32_splitk12_pipe2_op,
     amplin_mma_lane_m16_n32_splitk12_pipe2_interleaved_op,
     amplin_mma_lane_m16_n64_splitk24_pipe2_interleaved_op,
@@ -271,61 +308,89 @@ def _benchmark_shape_dtype(
         amplin_mma_lane_m32_n32_global_a_op is not None and spec.size_n % 8 == 0
     )
     padded_m16_shape_legal = (
-        amplin_mma_lane_m16_n16_padded_op is not None and spec.size_n % 16 == 0
+        amplin_mma_lane_m16_n16_padded_op is not None
+        and spec.size_k % 128 == 0
+        and spec.size_n % 16 == 0
     )
     splitk4_m16_shape_legal = (
         amplin_mma_lane_m16_n16_splitk4_op is not None
-        and spec.size_k == 12288
+        and spec.size_k % 128 == 0
+        and (spec.size_k // 128) % 4 == 0
         and spec.size_n % 16 == 0
     )
     splitk8_m16_shape_legal = (
         amplin_mma_lane_m16_n16_splitk8_op is not None
-        and spec.size_k == 12288
+        and spec.size_k % 128 == 0
+        and (spec.size_k // 128) % 8 == 0
         and spec.size_n % 16 == 0
     )
     splitk12_m16_shape_legal = (
         amplin_mma_lane_m16_n16_splitk12_op is not None
-        and spec.size_k == 12288
+        and spec.size_k % 128 == 0
+        and (spec.size_k // 128) % 12 == 0
         and spec.size_n % 16 == 0
     )
     splitk12_n32_shape_legal = (
         amplin_mma_lane_m16_n32_splitk12_op is not None
-        and spec.size_k == 12288
+        and spec.size_k % 128 == 0
+        and (spec.size_k // 128) % 12 == 0
         and spec.size_n % 32 == 0
     )
     splitk16_n32_shape_legal = (
         amplin_mma_lane_m16_n32_splitk16_op is not None
-        and spec.size_k == 12288
+        and spec.size_k % 128 == 0
+        and (spec.size_k // 128) % 16 == 0
+        and spec.size_n % 32 == 0
+    )
+    splitk8_n32_pipe2_shape_legal = (
+        amplin_mma_lane_m16_n32_splitk8_pipe2_op is not None
+        and spec.size_k % 128 == 0
+        and (spec.size_k // 128) % 8 == 0
         and spec.size_n % 32 == 0
     )
     splitk12_n32_pipe2_shape_legal = (
         amplin_mma_lane_m16_n32_splitk12_pipe2_op is not None
-        and spec.size_k == 12288
+        and spec.size_k % 128 == 0
+        and (spec.size_k // 128) % 12 == 0
         and spec.size_n % 32 == 0
     )
     splitk12_n32_interleaved_shape_legal = (
         amplin_mma_lane_m16_n32_splitk12_pipe2_interleaved_op is not None
-        and spec.size_k == 12288
+        and spec.size_k % 128 == 0
+        and (spec.size_k // 128) % 12 == 0
         and spec.size_n % 32 == 0
     )
     splitk24_n64_interleaved_shape_legal = (
         amplin_mma_lane_m16_n64_splitk24_pipe2_interleaved_op is not None
-        and spec.size_k == 12288
+        and spec.size_k % 128 == 0
         and spec.size_n % 64 == 0
     )
     splitk12x2_n64_coop_shape_legal = (
         amplin_mma_lane_m16_n64_splitk12x2_coop_interleaved_op is not None
-        and spec.size_k == 12288
+        and spec.size_k % 128 == 0
+        and spec.size_n % 64 == 0
+        and (spec.size_n // 64) * 2 <= sm_count * 2
+    )
+    m32_splitk12x2_n64_coop_shape_legal = (
+        amplin_mma_lane_m32_n64_splitk12x2_coop_interleaved_op is not None
+        and spec.size_k % 128 == 0
+        and spec.size_n % 64 == 0
+    )
+    m32_splitk24_n64_shape_legal = (
+        amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_op is not None
+        and spec.size_k % 128 == 0
         and spec.size_n % 64 == 0
     )
     splitk16_n32_pipe2_shape_legal = (
         amplin_mma_lane_m16_n32_splitk16_pipe2_op is not None
-        and spec.size_k == 12288
+        and spec.size_k % 128 == 0
+        and (spec.size_k // 128) % 16 == 0
         and spec.size_n % 32 == 0
     )
     splitk16_m16_shape_legal = (
         amplin_mma_lane_m16_n16_splitk16_op is not None
-        and spec.size_k == 12288
+        and spec.size_k % 128 == 0
+        and (spec.size_k // 128) % 16 == 0
         and spec.size_n % 16 == 0
     )
     packed_hmma_qweight = amplin.pack_hmma_qweight(canonical_qweight) if hmma_shape_legal else None
@@ -340,6 +405,7 @@ def _benchmark_shape_dtype(
             or splitk12_m16_shape_legal
             or splitk12_n32_shape_legal
             or splitk16_n32_shape_legal
+            or splitk8_n32_pipe2_shape_legal
             or splitk12_n32_pipe2_shape_legal
             or splitk12_n32_interleaved_shape_legal
             or splitk24_n64_interleaved_shape_legal
@@ -360,6 +426,7 @@ def _benchmark_shape_dtype(
             or splitk12_m16_shape_legal
             or splitk12_n32_shape_legal
             or splitk16_n32_shape_legal
+            or splitk8_n32_pipe2_shape_legal
             or splitk12_n32_pipe2_shape_legal
             or splitk12_n32_interleaved_shape_legal
             or splitk24_n64_interleaved_shape_legal
@@ -376,7 +443,12 @@ def _benchmark_shape_dtype(
     )
     packed_mma_lane_n64_qweight = (
         amplin.pack_mma_lane_n64_qweight(canonical_qweight)
-        if splitk24_n64_interleaved_shape_legal or splitk12x2_n64_coop_shape_legal
+        if (
+            splitk24_n64_interleaved_shape_legal
+            or splitk12x2_n64_coop_shape_legal
+            or m32_splitk12x2_n64_coop_shape_legal
+            or m32_splitk24_n64_shape_legal
+        )
         else None
     )
     marlin_module = (
@@ -426,7 +498,7 @@ def _benchmark_shape_dtype(
                     canonical_qweight,
                     canonical_scales,
                 )
-            padded_m16_legal = padded_m16_shape_legal and size_m in (2, 4, 8, 16)
+            padded_m16_legal = padded_m16_shape_legal and 1 <= size_m <= 16
             if padded_m16_legal:
                 functions["amplin_mma_lane_m16_n16_padded_raw"] = (
                     lambda: amplin_mma_lane_m16_n16_padded_op(
@@ -436,7 +508,7 @@ def _benchmark_shape_dtype(
                         spec.size_n,
                     )
                 )
-            splitk4_m16_legal = splitk4_m16_shape_legal and size_m in (2, 4, 8, 16)
+            splitk4_m16_legal = splitk4_m16_shape_legal and 1 <= size_m <= 16
             if splitk4_m16_legal:
                 functions["amplin_mma_lane_m16_n16_splitk4_raw"] = (
                     lambda: amplin_mma_lane_m16_n16_splitk4_op(
@@ -446,7 +518,7 @@ def _benchmark_shape_dtype(
                         spec.size_n,
                     )
                 )
-            splitk8_m16_legal = splitk8_m16_shape_legal and size_m in (2, 4, 8, 16)
+            splitk8_m16_legal = splitk8_m16_shape_legal and 1 <= size_m <= 16
             if splitk8_m16_legal:
                 functions["amplin_mma_lane_m16_n16_splitk8_raw"] = (
                     lambda: amplin_mma_lane_m16_n16_splitk8_op(
@@ -456,7 +528,7 @@ def _benchmark_shape_dtype(
                         spec.size_n,
                     )
                 )
-            splitk12_m16_legal = splitk12_m16_shape_legal and size_m in (2, 4, 8, 16)
+            splitk12_m16_legal = splitk12_m16_shape_legal and 1 <= size_m <= 16
             if splitk12_m16_legal:
                 functions["amplin_mma_lane_m16_n16_splitk12_raw"] = (
                     lambda: amplin_mma_lane_m16_n16_splitk12_op(
@@ -466,7 +538,7 @@ def _benchmark_shape_dtype(
                         spec.size_n,
                     )
                 )
-            splitk12_n32_legal = splitk12_n32_shape_legal and size_m in (2, 4, 8, 16)
+            splitk12_n32_legal = splitk12_n32_shape_legal and 1 <= size_m <= 16
             if splitk12_n32_legal:
                 functions["amplin_mma_lane_m16_n32_splitk12_raw"] = (
                     lambda: amplin_mma_lane_m16_n32_splitk12_op(
@@ -476,7 +548,7 @@ def _benchmark_shape_dtype(
                         spec.size_n,
                     )
                 )
-            splitk16_n32_legal = splitk16_n32_shape_legal and size_m in (2, 4, 8, 16)
+            splitk16_n32_legal = splitk16_n32_shape_legal and 1 <= size_m <= 16
             if splitk16_n32_legal:
                 functions["amplin_mma_lane_m16_n32_splitk16_raw"] = (
                     lambda: amplin_mma_lane_m16_n32_splitk16_op(
@@ -487,7 +559,7 @@ def _benchmark_shape_dtype(
                     )
                 )
             splitk12_n32_pipe2_legal = (
-                splitk12_n32_pipe2_shape_legal and size_m in (2, 4, 8, 16)
+                splitk12_n32_pipe2_shape_legal and 1 <= size_m <= 16
             )
             if splitk12_n32_pipe2_legal:
                 functions["amplin_mma_lane_m16_n32_splitk12_pipe2_raw"] = (
@@ -498,8 +570,20 @@ def _benchmark_shape_dtype(
                         spec.size_n,
                     )
                 )
+            splitk8_n32_pipe2_legal = (
+                splitk8_n32_pipe2_shape_legal and 1 <= size_m <= 16
+            )
+            if splitk8_n32_pipe2_legal:
+                functions["amplin_mma_lane_m16_n32_splitk8_pipe2_raw"] = (
+                    lambda: amplin_mma_lane_m16_n32_splitk8_pipe2_op(
+                        input,
+                        packed_mma_lane_qweight,
+                        packed_hmma_scales,
+                        spec.size_n,
+                    )
+                )
             splitk12_n32_interleaved_legal = (
-                splitk12_n32_interleaved_shape_legal and size_m in (2, 4, 8, 16)
+                splitk12_n32_interleaved_shape_legal and 1 <= size_m <= 16
             )
             if splitk12_n32_interleaved_legal:
                 functions["amplin_mma_lane_m16_n32_splitk12_pipe2_interleaved_raw"] = (
@@ -511,7 +595,7 @@ def _benchmark_shape_dtype(
                     )
                 )
             splitk24_n64_interleaved_legal = (
-                splitk24_n64_interleaved_shape_legal and size_m in (2, 4, 8, 16)
+                splitk24_n64_interleaved_shape_legal and 1 <= size_m <= 16
             )
             if splitk24_n64_interleaved_legal:
                 functions["amplin_mma_lane_m16_n64_splitk24_pipe2_interleaved_raw"] = (
@@ -523,7 +607,7 @@ def _benchmark_shape_dtype(
                     )
                 )
             splitk12x2_n64_coop_legal = (
-                splitk12x2_n64_coop_shape_legal and size_m in (2, 4, 8, 16)
+                splitk12x2_n64_coop_shape_legal and 1 <= size_m <= 16
             )
             if splitk12x2_n64_coop_legal:
                 functions["amplin_mma_lane_m16_n64_splitk12x2_coop_interleaved_raw"] = (
@@ -534,8 +618,32 @@ def _benchmark_shape_dtype(
                         spec.size_n,
                     )
                 )
+            m32_splitk12x2_n64_coop_legal = (
+                m32_splitk12x2_n64_coop_shape_legal and 17 <= size_m <= 32
+            )
+            if m32_splitk12x2_n64_coop_legal:
+                functions["amplin_mma_lane_m32_n64_splitk12x2_coop_interleaved_raw"] = (
+                    lambda: amplin_mma_lane_m32_n64_splitk12x2_coop_interleaved_op(
+                        input,
+                        packed_mma_lane_n64_qweight,
+                        packed_hmma_scales,
+                        spec.size_n,
+                    )
+                )
+            m32_splitk24_n64_legal = (
+                m32_splitk24_n64_shape_legal and 17 <= size_m <= 32
+            )
+            if m32_splitk24_n64_legal:
+                functions["amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_raw"] = (
+                    lambda: amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_op(
+                        input,
+                        packed_mma_lane_n64_qweight,
+                        packed_hmma_scales,
+                        spec.size_n,
+                    )
+                )
             splitk16_n32_pipe2_legal = (
-                splitk16_n32_pipe2_shape_legal and size_m in (2, 4, 8, 16)
+                splitk16_n32_pipe2_shape_legal and 1 <= size_m <= 16
             )
             if splitk16_n32_pipe2_legal:
                 functions["amplin_mma_lane_m16_n32_splitk16_pipe2_raw"] = (
@@ -546,7 +654,7 @@ def _benchmark_shape_dtype(
                         spec.size_n,
                     )
                 )
-            splitk16_m16_legal = splitk16_m16_shape_legal and size_m in (2, 4, 8, 16)
+            splitk16_m16_legal = splitk16_m16_shape_legal and 1 <= size_m <= 16
             if splitk16_m16_legal:
                 functions["amplin_mma_lane_m16_n16_splitk16_raw"] = (
                     lambda: amplin_mma_lane_m16_n16_splitk16_op(
@@ -653,6 +761,14 @@ def _benchmark_shape_dtype(
                 }
                 if size_m < 32:
                     retained_names.add("amplin_raw")
+                if m32_splitk12x2_n64_coop_legal:
+                    retained_names.add(
+                        "amplin_mma_lane_m32_n64_splitk12x2_coop_interleaved_raw"
+                    )
+                if m32_splitk24_n64_legal:
+                    retained_names.add(
+                        "amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_raw"
+                    )
                 functions = {
                     name: function
                     for name, function in functions.items()
@@ -713,6 +829,12 @@ def _benchmark_shape_dtype(
                 + output_bytes
             )
             mma_lane_m16_n64_splitk24_requested_bytes = (
+                canonical_weight_bytes
+                + 4 * canonical_scale_bytes
+                + (spec.size_n // 64) * activation_bytes
+                + output_bytes
+            )
+            mma_lane_m32_n64_splitk24_requested_bytes = (
                 canonical_weight_bytes
                 + 4 * canonical_scale_bytes
                 + (spec.size_n // 64) * activation_bytes
@@ -836,6 +958,8 @@ def _benchmark_shape_dtype(
                     "amplin_mma_lane_m16_n64_splitk12x2_coop_interleaved_raw",
                 ):
                     requested_bytes = mma_lane_m16_n64_splitk24_requested_bytes
+                elif name == "amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_raw":
+                    requested_bytes = mma_lane_m32_n64_splitk24_requested_bytes
                 elif name == "amplin_hmma_raw":
                     requested_bytes = hmma_requested_bytes
                 elif name == "amplin_hmma_v0_raw":
@@ -884,6 +1008,9 @@ def _benchmark_shape_dtype(
                         ),
                         "mma_lane_m16_n64_splitk24_requested_bytes": (
                             mma_lane_m16_n64_splitk24_requested_bytes
+                        ),
+                        "mma_lane_m32_n64_splitk24_requested_bytes": (
+                            mma_lane_m32_n64_splitk24_requested_bytes
                         ),
                         "hmma_v0_requested_bytes": hmma_v0_requested_bytes,
                         "hmma_m64_requested_bytes": hmma_m64_requested_bytes,
@@ -1123,6 +1250,16 @@ def main() -> None:
             if args.hmma
             else None
         )
+        amplin_mma_lane_m32_n64_splitk12x2_coop_interleaved_op = (
+            extension.op("amplin", "mma_lane_m32_n64_splitk12x2_coop_interleaved")
+            if args.m32_splitk12x2_n64_coop
+            else None
+        )
+        amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_op = (
+            extension.op("amplin", "mma_lane_m32_n64_splitk24_pipe2_interleaved")
+            if args.m32_splitk24_n64
+            else None
+        )
         amplin_mma_lane_m16_n16_padded_op = (
             extension.op("amplin", "mma_lane_m16_n16_padded")
             if args.padded_m16
@@ -1151,6 +1288,11 @@ def main() -> None:
         amplin_mma_lane_m16_n32_splitk16_op = (
             extension.op("amplin", "mma_lane_m16_n32_splitk16")
             if args.splitk16_n32
+            else None
+        )
+        amplin_mma_lane_m16_n32_splitk8_pipe2_op = (
+            extension.op("amplin", "mma_lane_m16_n32_splitk8_pipe2")
+            if args.splitk_n32_pipe2
             else None
         )
         amplin_mma_lane_m16_n32_splitk12_pipe2_op = (
@@ -1211,6 +1353,8 @@ def main() -> None:
                     amplin_mma_lane_m64_global_a_op=amplin_mma_lane_m64_global_a_op,
                     amplin_mma_lane_m32_global_a_op=amplin_mma_lane_m32_global_a_op,
                     amplin_mma_lane_m32_n32_global_a_op=amplin_mma_lane_m32_n32_global_a_op,
+                    amplin_mma_lane_m32_n64_splitk12x2_coop_interleaved_op=amplin_mma_lane_m32_n64_splitk12x2_coop_interleaved_op,
+                    amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_op=amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_op,
                     amplin_mma_lane_m16_n16_padded_op=amplin_mma_lane_m16_n16_padded_op,
                     amplin_mma_lane_m16_n16_splitk4_op=amplin_mma_lane_m16_n16_splitk4_op,
                     amplin_mma_lane_m16_n16_splitk8_op=amplin_mma_lane_m16_n16_splitk8_op,
@@ -1219,6 +1363,9 @@ def main() -> None:
                     amplin_mma_lane_m16_n32_splitk16_op=amplin_mma_lane_m16_n32_splitk16_op,
                     amplin_mma_lane_m16_n32_splitk12_pipe2_op=(
                         amplin_mma_lane_m16_n32_splitk12_pipe2_op
+                    ),
+                    amplin_mma_lane_m16_n32_splitk8_pipe2_op=(
+                        amplin_mma_lane_m16_n32_splitk8_pipe2_op
                     ),
                     amplin_mma_lane_m16_n32_splitk12_pipe2_interleaved_op=(
                         amplin_mma_lane_m16_n32_splitk12_pipe2_interleaved_op
@@ -1268,6 +1415,7 @@ def main() -> None:
             "splitk12_n32_interleaved": args.splitk12_n32_interleaved,
             "splitk24_n64_interleaved": args.splitk24_n64_interleaved,
             "splitk12x2_n64_coop": args.splitk12x2_n64_coop,
+            "m32_splitk24_n64": args.m32_splitk24_n64,
             "splitk16_m16": args.splitk16_m16,
             "hmma": args.hmma,
             "m32_sweep": args.m32_sweep,
@@ -1288,7 +1436,7 @@ def main() -> None:
             "splitk12_n32_constraint": "prototype requires M=2,4,8,16, K=12288, and N divisible by 32",
             "splitk16_n32_constraint": "prototype requires M=2,4,8,16, K=12288, and N divisible by 32",
             "splitk_n32_pipe2_constraint": (
-                "prototype requires M=2,4,8,16, K=12288, and N divisible by 32"
+                "prototype requires M=2,4,8,16, K divisible by 1024, and N divisible by 32"
             ),
             "splitk12_n32_interleaved_constraint": (
                 "prototype requires M=2,4,8,16, K=12288, N divisible by 32, "
@@ -1301,6 +1449,10 @@ def main() -> None:
             "splitk12x2_n64_coop_constraint": (
                 "prototype requires M=2,4,8,16, K=12288, N divisible by 64, "
                 "sm_80 cooperative launch, no CUDA graph capture, and resident grid capacity"
+            ),
+            "m32_splitk24_n64_constraint": (
+                "prototype requires M=17..32, K divisible by 128, N divisible by 64, "
+                "sm_80, and 96 KB opt-in shared memory"
             ),
             "splitk16_m16_constraint": "prototype requires M=2,4,8,16, K=12288, and N divisible by 16",
             "mma_lane_n32_constraint": "M must be divisible by 32 and N by 8; N tails use padded lane weights",

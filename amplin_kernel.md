@@ -7716,3 +7716,906 @@ sha256 8929f9c584522307dedcfdf68b68972b4558956e7284c834814c22310cdba7ea
 
 Result: accepted success. Both permitted devices now independently reproduce the Laguna M8/M16 median win,
 while Qwen remains a clear loss and is not a candidate for this schedule.
+
+
+## 2026-07-24 split-K8 N32 pipe2 sweep and split-K8 N32 pipe2 interleaved experiment
+
+**Revision:** `fbfeefd3`  
+**Device:** NVIDIA PG506-230 (GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2), compute capability 8.0, 124 SMs  
+**Config:** GPTQ W4 group_size=128 sym=True desc_act=False, BF16, batch-event median  
+
+### `mma_lane_m16_n32_splitk8_pipe2` results (new op) vs Marlin
+
+| model | role | K | N | M | median (us) | speedup vs Marlin | max abs err |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| glm-5.2 | dense-down | 12288 | 6144 | 1 | 36.37 | 0.852 | 0.007304 |
+| glm-5.2 | dense-down | 12288 | 6144 | 2 | 36.59 | 0.871 | 0.007304 |
+| glm-5.2 | dense-down | 12288 | 6144 | 4 | 37.03 | 0.870 | 0.008194 |
+| glm-5.2 | dense-down | 12288 | 6144 | 6 | 37.34 | 0.869 | 0.008194 |
+| glm-5.2 | dense-down | 12288 | 6144 | 8 | 38.49 | 0.820 | 0.008833 |
+| glm-5.2 | dense-down | 12288 | 6144 | 16 | 48.68 | 0.733 | 0.008926 |
+| glm-5.2 | moe-up | 6144 | 2048 | 1 | 11.38 | 2.002 | 0.004492 |
+| glm-5.2 | moe-up | 6144 | 2048 | 2 | 11.40 | 1.966 | 0.004492 |
+| glm-5.2 | moe-up | 6144 | 2048 | 4 | 11.99 | 2.112 | 0.005216 |
+| glm-5.2 | moe-up | 6144 | 2048 | 6 | 12.23 | 2.005 | 0.005384 |
+| glm-5.2 | moe-up | 6144 | 2048 | 8 | 12.36 | 1.952 | 0.005384 |
+| glm-5.2 | moe-up | 6144 | 2048 | 16 | 15.29 | 1.616 | 0.005384 |
+| glm-5.2 | o-proj | 16384 | 6144 | 1 | 50.54 | 0.813 | 0.008586 |
+| glm-5.2 | o-proj | 16384 | 6144 | 2 | 50.67 | 0.833 | 0.008586 |
+| glm-5.2 | o-proj | 16384 | 6144 | 4 | 51.12 | 0.844 | 0.010273 |
+| glm-5.2 | o-proj | 16384 | 6144 | 6 | 51.47 | 0.827 | 0.010273 |
+| glm-5.2 | o-proj | 16384 | 6144 | 8 | 51.92 | 0.803 | 0.010273 |
+| glm-5.2 | o-proj | 16384 | 6144 | 16 | 61.76 | 0.737 | 0.010274 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 1 | 11.38 | 2.055 | 0.004148 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 2 | 11.40 | 2.076 | 0.004637 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 4 | 11.99 | 2.099 | 0.004764 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 6 | 12.21 | 1.924 | 0.004764 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 8 | 12.36 | 2.104 | 0.005100 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 16 | 15.28 | 1.594 | 0.005100 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 1 | 58.90 | 0.877 | 0.009195 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 2 | 59.13 | 0.887 | 0.009195 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 4 | 59.38 | 0.887 | 0.009506 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 6 | 59.67 | 0.905 | 0.009597 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 8 | 60.04 | 0.875 | 0.009597 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 16 | 70.24 | 0.808 | 0.011276 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 1 | 20.36 | 1.183 | 0.005133 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 2 | 20.73 | 1.217 | 0.005406 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 4 | 21.04 | 1.206 | 0.005487 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 6 | 21.62 | 1.208 | 0.005487 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 8 | 23.00 | 1.066 | 0.006782 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 16 | 32.07 | 0.883 | 0.007412 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 1 | 19.43 | 1.224 | 0.006025 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 2 | 20.45 | 1.209 | 0.007977 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 4 | 21.39 | 1.155 | 0.007977 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 6 | 22.05 | 1.093 | 0.007977 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 8 | 23.19 | 0.985 | 0.007977 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 16 | 31.92 | 0.786 | 0.008317 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 1 | 14.99 | 1.636 | 0.004511 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 2 | 15.08 | 1.561 | 0.004511 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 4 | 15.32 | 1.557 | 0.004511 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 6 | 16.62 | 1.388 | 0.004548 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 8 | 19.02 | 1.306 | 0.004548 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 16 | 26.42 | 0.940 | 0.004671 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 1 | 11.72 | 2.041 | 0.004089 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 2 | 11.74 | 1.978 | 0.004665 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 4 | 13.15 | 1.847 | 0.004899 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 6 | 13.67 | 1.848 | 0.004899 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 8 | 13.82 | 1.769 | 0.005395 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 16 | 18.08 | 1.413 | 0.005395 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 1 | 15.56 | 1.590 | 0.007415 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 2 | 15.68 | 1.481 | 0.007415 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 4 | 16.07 | 1.698 | 0.007415 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 6 | 16.45 | 1.466 | 0.007415 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 8 | 16.95 | 1.501 | 0.008519 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 16 | 21.86 | 1.112 | 0.008519 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 1 | 9.66 | 2.677 | 0.003950 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 2 | 10.07 | 2.444 | 0.003950 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 4 | 10.27 | 2.201 | 0.004200 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 6 | 11.34 | 2.147 | 0.004200 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 8 | 12.93 | 2.093 | 0.004200 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 16 | 16.51 | 1.576 | 0.004325 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 1 | 12.53 | 1.961 | 0.004102 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 2 | 12.59 | 2.197 | 0.004102 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 4 | 12.70 | 1.837 | 0.004508 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 6 | 13.88 | 1.747 | 0.004508 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 8 | 15.57 | 1.824 | 0.004508 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 16 | 20.57 | 1.285 | 0.004508 |
+
+### `mma_lane_m16_n32_splitk8_pipe2_interleaved` results vs Marlin and vs best Amplin path
+
+| model | role | K | N | M | interleaved (us) | best Amplin path | best (us) | Marlin (us) | interleaved vs best | interleaved vs Marlin |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| glm-5.2 | dense-down | 12288 | 6144 | 1 | 68.13 | amplin_mma_lane_m16_n16_splitk12_raw | 30.53 | 31.00 | +123.2% | 2.198 |
+| glm-5.2 | dense-down | 12288 | 6144 | 2 | 68.29 | amplin_mma_lane_m16_n16_splitk12_raw | 31.38 | 31.86 | +117.6% | 2.144 |
+| glm-5.2 | dense-down | 12288 | 6144 | 4 | 68.53 | amplin_mma_lane_m16_n16_splitk8_raw | 35.60 | 32.22 | +92.5% | 2.127 |
+| glm-5.2 | dense-down | 12288 | 6144 | 6 | 68.59 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 37.34 | 32.44 | +83.7% | 2.115 |
+| glm-5.2 | dense-down | 12288 | 6144 | 8 | 68.74 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 38.49 | 31.58 | +78.6% | 2.177 |
+| glm-5.2 | dense-down | 12288 | 6144 | 16 | 72.05 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 48.68 | 35.70 | +48.0% | 2.018 |
+| glm-5.2 | moe-up | 6144 | 2048 | 1 | 17.36 | amplin_mma_lane_m16_n16_splitk16_raw | 9.89 | 22.78 | +75.5% | 0.762 |
+| glm-5.2 | moe-up | 6144 | 2048 | 2 | 17.47 | amplin_mma_lane_m16_n16_splitk12_raw | 9.99 | 22.41 | +74.9% | 0.780 |
+| glm-5.2 | moe-up | 6144 | 2048 | 4 | 17.48 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 10.73 | 25.31 | +62.9% | 0.691 |
+| glm-5.2 | moe-up | 6144 | 2048 | 6 | 17.59 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 11.19 | 24.51 | +57.3% | 0.718 |
+| glm-5.2 | moe-up | 6144 | 2048 | 8 | 17.61 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 11.55 | 24.14 | +52.5% | 0.730 |
+| glm-5.2 | moe-up | 6144 | 2048 | 16 | 18.82 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 14.64 | 24.70 | +28.5% | 0.762 |
+| glm-5.2 | o-proj | 16384 | 6144 | 1 | 93.12 | amplin_mma_lane_m16_n16_splitk8_raw | 45.60 | 41.08 | +104.2% | 2.267 |
+| glm-5.2 | o-proj | 16384 | 6144 | 2 | 92.96 | amplin_mma_lane_m16_n16_splitk8_raw | 46.01 | 42.19 | +102.0% | 2.204 |
+| glm-5.2 | o-proj | 16384 | 6144 | 4 | 92.79 | amplin_mma_lane_m16_n16_splitk8_raw | 49.19 | 43.14 | +88.6% | 2.151 |
+| glm-5.2 | o-proj | 16384 | 6144 | 6 | 93.58 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 51.47 | 42.56 | +81.8% | 2.199 |
+| glm-5.2 | o-proj | 16384 | 6144 | 8 | 92.92 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 51.92 | 41.68 | +79.0% | 2.230 |
+| glm-5.2 | o-proj | 16384 | 6144 | 16 | 96.40 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 61.76 | 45.51 | +56.1% | 2.118 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 1 | 17.34 | amplin_mma_lane_m16_n16_splitk16_raw | 9.86 | 23.38 | +75.9% | 0.742 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 2 | 17.44 | amplin_mma_lane_m16_n16_splitk12_raw | 9.99 | 23.66 | +74.5% | 0.737 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 4 | 17.48 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 10.74 | 25.17 | +62.9% | 0.695 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 6 | 17.58 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 11.17 | 23.49 | +57.5% | 0.748 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 8 | 17.62 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 11.55 | 26.00 | +52.6% | 0.678 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 16 | 18.80 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 14.63 | 24.36 | +28.5% | 0.772 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 1 | 104.02 | amplin_mma_lane_m16_n16_splitk8_raw | 53.92 | 51.65 | +92.9% | 2.014 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 2 | 104.13 | amplin_mma_lane_m16_n16_splitk8_raw | 54.79 | 52.47 | +90.1% | 1.985 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 4 | 104.88 | amplin_mma_lane_m16_n16_splitk8_raw | 58.95 | 52.65 | +77.9% | 1.992 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 6 | 104.68 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 59.67 | 53.99 | +75.4% | 1.939 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 8 | 105.56 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 60.04 | 52.52 | +75.8% | 2.010 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 16 | 108.84 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 70.24 | 56.75 | +55.0% | 1.918 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 1 | 35.24 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 20.36 | 24.08 | +73.0% | 1.463 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 2 | 35.47 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 20.73 | 25.23 | +71.1% | 1.406 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 4 | 36.71 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 21.04 | 25.38 | +74.5% | 1.446 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 6 | 36.96 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 21.62 | 26.11 | +71.0% | 1.416 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 8 | 37.38 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 23.00 | 24.52 | +62.5% | 1.524 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 16 | 40.23 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 32.07 | 28.31 | +25.4% | 1.421 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 1 | 31.47 | amplin_mma_lane_m16_n16_splitk16_raw | 15.73 | 23.78 | +100.0% | 1.323 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 2 | 31.65 | amplin_mma_lane_m16_n16_splitk16_raw | 16.27 | 24.73 | +94.6% | 1.279 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 4 | 31.78 | amplin_mma_lane_m16_n16_splitk16_raw | 19.05 | 24.70 | +66.9% | 1.287 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 6 | 32.27 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 20.47 | 24.09 | +57.7% | 1.339 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 8 | 32.87 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 21.27 | 22.84 | +54.5% | 1.439 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 16 | 38.33 | amplin_mma_lane_m16_n32_splitk16_pipe2_raw | 28.69 | 25.09 | +33.6% | 1.528 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 1 | 16.37 | amplin_mma_lane_m16_n16_splitk8_raw | 14.37 | 24.52 | +13.9% | 0.668 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 2 | 16.39 | amplin_mma_lane_m16_n16_splitk8_raw | 14.77 | 23.54 | +11.0% | 0.697 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 4 | 16.71 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 15.32 | 23.86 | +9.0% | 0.700 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 6 | 17.53 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 16.62 | 23.08 | +5.5% | 0.760 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 8 | 19.55 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 18.93 | 24.84 | +3.3% | 0.787 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 16 | 26.28 | amplin_mma_lane_m16_n32_splitk8_pipe2_interleaved_raw | 26.28 | 24.85 | +0.0% | 1.058 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 1 | 17.56 | amplin_mma_lane_m16_n16_splitk16_raw | 10.12 | 23.92 | +73.5% | 0.734 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 2 | 17.69 | amplin_mma_lane_m16_n16_splitk12_raw | 10.02 | 23.21 | +76.5% | 0.762 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 4 | 17.80 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 11.59 | 24.28 | +53.5% | 0.733 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 6 | 17.99 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 13.15 | 25.25 | +36.8% | 0.712 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 8 | 18.01 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 13.48 | 24.45 | +33.6% | 0.737 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 16 | 20.77 | amplin_mma_lane_m16_n32_splitk16_pipe2_raw | 17.05 | 25.55 | +21.8% | 0.813 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 1 | 24.63 | amplin_mma_lane_m16_n16_splitk12_raw | 12.98 | 24.74 | +89.7% | 0.995 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 2 | 24.79 | amplin_mma_lane_m16_n16_splitk12_raw | 13.97 | 23.23 | +77.4% | 1.067 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 4 | 24.88 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 15.23 | 27.28 | +63.4% | 0.912 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 6 | 25.08 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 15.86 | 24.12 | +58.1% | 1.040 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 8 | 25.30 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 16.89 | 25.44 | +49.8% | 0.995 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 16 | 26.68 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 21.86 | 24.32 | +22.0% | 1.097 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 1 | 13.30 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 9.66 | 25.86 | +37.7% | 0.514 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 2 | 11.45 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 9.98 | 24.60 | +14.7% | 0.465 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 4 | 11.60 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 10.15 | 22.59 | +14.3% | 0.513 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 6 | 12.56 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 11.34 | 24.34 | +10.8% | 0.516 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 8 | 14.63 | amplin_mma_lane_m16_n32_splitk12_pipe2_raw | 12.72 | 27.06 | +15.0% | 0.540 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 16 | 17.87 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 16.51 | 26.01 | +8.3% | 0.687 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 1 | 13.28 | amplin_mma_lane_m16_n16_splitk8_raw | 11.55 | 24.57 | +15.0% | 0.541 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 2 | 13.47 | amplin_mma_lane_m16_n16_splitk8_raw | 11.67 | 27.66 | +15.4% | 0.487 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 4 | 13.73 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 12.70 | 23.32 | +8.1% | 0.589 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 6 | 14.81 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 13.88 | 24.24 | +6.7% | 0.611 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 8 | 16.58 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 15.57 | 28.40 | +6.5% | 0.584 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 16 | 21.16 | amplin_mma_lane_m16_n32_splitk8_pipe2_raw | 20.57 | 26.43 | +2.9% | 0.801 |
+
+### Observations
+
+- `splitk8_pipe2` is the fastest Amplin path for several medium/large N32 shapes (GLM o-proj M≥6, Kimi o-proj M≥1, Kimi dense-down M≥6) and beats Marlin on Kimi o-proj for M=1..8.
+- It is still slower than Marlin on GLM o-proj (K=16384, N=6144) and Kimi dense-down (K=18432, N=7168).
+- `splitk8_pipe2_interleaved` is slower than the non-interleaved `splitk8_pipe2` across all measured target shapes; the uint2 load did not translate to a wall-time win, likely because the two 4-byte loads were already coalesced and the vector load increased register pressure or reduced scheduling flexibility.
+- The interleaved variant is therefore **not committed**; this entry records the negative result for future tuning.
+
+## 2026-07-24 Nsight profile of `mma_lane_m16_n32_splitk8_pipe2` (GLM o-proj 16384x6144, M=8, BF16)
+
+**Device:** NVIDIA PG506-230 `GPU-cb9e7784` sm_80 124 SMs  \n**Kernel:** `void <unnamed>::amplin_mma_lane_m16_n32_splitk8_pipe2_kernel<__nv_bfloat16>`  \n**Grid/Block:** `(192, 1, 1)` blocks, `(256, 1, 1)` threads  \n
+### Key Nsight Compute metrics
+
+| Section | Metric | Value | Interpretation |
+| --- | --- | --- | --- |
+| GPU Speed Of Light | Memory Throughput | 49.03% | Moderate memory utilization |
+| GPU Speed Of Light | DRAM Throughput | 38.53% | Not DRAM-saturated |
+| GPU Speed Of Light | Compute (SM) Throughput | 26.96% | Not compute-saturated |
+| GPU Speed Of Light | L1/TEX Hit Rate | 45.28% | Half the requests hit L1 |
+| GPU Speed Of Light | L2 Hit Rate | 36.64% | Poor L2 reuse |
+| Launch Statistics | Registers Per Thread | 64 | High register pressure |
+| Launch Statistics | Static Shared Memory Per Block | 16,384 bytes | 16 KB fixed per block |
+| Launch Statistics | Waves Per SM | 0.39 | Grid too small to fill 124 SMs |
+| Occupancy | Theoretical Occupancy | 50.0% | Limited by registers |
+| Occupancy | Achieved Occupancy | 19.40% | Low; warps not being kept active |
+| Occupancy | Block Limit Registers | 4 blocks/SM | 64 regs * 256 threads = 16,384 regs/block, 4 per SM |
+| Occupancy | Block Limit Shared Mem | 5 blocks/SM | 16 KB/block fits 5 per SM |
+
+### Observations
+
+- The kernel is **latency/occupancy-bound**, not memory or compute bound: SOL% in both memory and compute is below 50%, but occupancy is far below theoretical (19.4% achieved vs 50% theoretical).
+- The grid of 192 blocks is too small for 124 SMs; ncu reports only 0.39 waves per SM and warns the grid is too small to fill the device.
+- Register usage (64 per thread) limits occupancy to 4 blocks per SM. Shared memory would allow 5, so registers are the binding constraint.
+- The L2 hit rate is low (36.6%), suggesting the weight streaming footprint for M=8 does not reuse cached scales/weights across K groups; this is consistent with M=8 streaming K large and each warp owning a small output tile.
+
+### Hypothesis for next step
+
+Raising the number of resident blocks per SM by reducing register pressure should improve achieved occupancy and hide latency. The next experiment is to change `__launch_bounds__(kMmaLaneSplitK8Threads)` to `__launch_bounds__(kMmaLaneSplitK8Threads, 5)` for the split-K8 pipe2 N32 kernel, which caps registers to 51 per thread (65536 / (256*5)) and allows up to 5 blocks per SM, matching the shared-memory limit.
+
+## 2026-07-24 M-split experiment on `mma_lane_m16_n32_splitk8_pipe2`
+
+**Motivation:** The N32 split-K8 pipe2 kernel processes at most 16 rows per block; for large M this leaves occupancy low and also serializes the 16 rows. Splitting M into 8-row tiles should double the grid for M=16 and give the device more blocks to hide latency.
+
+**Change:** In `amplin_mma_lane_m16_n32_splitk8_pipe2_kernel`, compute `tile_m = blockIdx.y * 8` and `tile_m_size = min(8, size_m - tile_m)`, then pass `input + tile_m*size_k`, `output + tile_m*size_n`, and `tile_m_size` to the generic `splitk12_body`. Launch as `dim3(grid_n, (size_m+7)/8, 1)`.
+
+**Verification:** `pytest -q tests/kernels/test_amplin.py` passed (78 passed), so the tiled indexing is numerically correct.
+
+**Benchmark result on GLM o-proj 16384x6144 BF16:**
+
+| M | original splitk8_pipe2 (us) | M-split splitk8_pipe2 (us) | splitk16_pipe2 (us) | Marlin (us) |
+|---|---|---|---|---|
+| 1 | 55.5 | ~120 | - | - |
+| 2 | - | ~120 | - | - |
+| 4 | 52.0 | 112-116 | 54.3 | 42.5 |
+| 6 | 53.0 | 112-113 | 55.3 | 42.8 |
+| 8 | 57.0 | 112-123 | 56.6 | 42.2 |
+| 16 | 62.0 | 112-120 | 63.7 | 45.3 |
+
+Even M=8 (where `blockIdx.y == 0` and `tile_m == 0`) regressed ~2x, so the slowdown is not extra blocks or tile overhead.
+
+**Nsight Compute on the M-split kernel (M=8):**
+
+- `gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed` dropped from ~49% to ~22%.
+- `dram__throughput.avg.pct_of_peak_sustained_elapsed` dropped from ~39% to ~18%.
+- Registers per thread went from 64 to 63, occupancy stayed ~18.8% (achieved).
+- ncu flagged **uncoalesced global loads/stores** and shared-memory bank conflicts for the tiled kernel.
+- The dominant warp-stall reason was still L1/TEX scoreboard wait.
+
+**Interpretation:** Offsetting the `input`/`output` pointers inside the split-K8 pipe2 kernel (or replacing the `size_m` guard with a locally-computed `tile_m_size`) caused the compiler to emit much less efficient global access, likely because the `__restrict__`/no-alias information on the original parameters was lost and the uniform `size_m` guard could no longer be exploited. Reverting the offset restored the original ~57 us performance.
+
+**Conclusion:** M-split via pointer offset/local `tile_m_size` is not a viable path. A future M-split must keep the original `__restrict__` `input`/`output` pointers and pass the tile offset/count into the body itself, or it must specialize the kernel by tile size so the compiler can constant-fold the guard. This experiment is **reverted** and recorded here as a negative result.
+
+## 2026-07-24 Mega-kernel route: relax splitk24 N64 group-divisibility constraint
+**Change:** remove the `num_groups %% 24 == 0` check from `amplin_mma_lane_m16_n64_splitk24_pipe2_interleaved`.
+**Rationale:** the body loop already skips out-of-range groups, so warps that own no group contribute zero partials and the reduction stays correct.
+**Verification:** `pytest -q tests/kernels/test_amplin.py` passes (78 passed) after updating the reject-inputs test.
+**BF16 wall-time summary** (median µs, speedup ratio < 1.0 means Amplin is faster than Marlin):
+
+### GLM 5.2
+| role | M | K | N | best_amplin | splitk24 µs | marlin µs | ratio | vs splitk8 µs |
+|---|---|---|---|---|---|---|---|---|
+| dense-down | 1 | 12288 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 29.21 | 30.52 | 0.957 | 53.97 |
+| dense-down | 2 | 12288 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 29.25 | 31.62 | 0.925 | 89.23 |
+| dense-down | 4 | 12288 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 29.89 | 32.07 | 0.932 | 159.04 |
+| dense-down | 6 | 12288 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 31.09 | 32.76 | 0.949 | 230.20 |
+| dense-down | 8 | 12288 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 31.66 | 31.95 | 0.991 | 301.58 |
+| dense-down | 16 | 12288 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 34.86 | 36.26 | 0.961 | 599.57 |
+| dense-up | 1 | 6144 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 30.31 | 30.34 | 0.999 | 49.61 |
+| dense-up | 2 | 6144 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 30.44 | 31.08 | 0.979 | 81.40 |
+| dense-up | 4 | 6144 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 31.87 | 31.63 | 1.008 | 155.74 |
+| dense-up | 6 | 6144 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 33.34 | 31.72 | 1.051 | 232.43 |
+| dense-up | 8 | 6144 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 33.10 | 31.98 | 1.035 | 305.71 |
+| dense-up | 16 | 6144 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 39.15 | 35.68 | 1.097 | 604.55 |
+| indexer-wq-b | 1 | 2048 | 4096 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.30 | 23.93 | 0.347 | 9.65 |
+| indexer-wq-b | 2 | 2048 | 4096 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.32 | 21.26 | 0.391 | 13.51 |
+| indexer-wq-b | 4 | 2048 | 4096 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.57 | 22.23 | 0.386 | 20.44 |
+| indexer-wq-b | 6 | 2048 | 4096 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.49 | 22.44 | 0.378 | 27.72 |
+| indexer-wq-b | 8 | 2048 | 4096 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.29 | 21.19 | 0.391 | 35.10 |
+| indexer-wq-b | 16 | 2048 | 4096 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 9.09 | 21.02 | 0.432 | 65.52 |
+| kv-a-proj | 1 | 6144 | 128 | amplin | 15.68 | 55.28 | 0.284 | 13.19 |
+| kv-a-proj | 2 | 6144 | 128 | amplin | 15.71 | 69.24 | 0.227 | 13.52 |
+| kv-a-proj | 4 | 6144 | 128 | amplin | 15.85 | 71.40 | 0.222 | 13.81 |
+| kv-a-proj | 6 | 6144 | 128 | amplin | 15.90 | 71.73 | 0.222 | 13.85 |
+| kv-a-proj | 8 | 6144 | 128 | amplin | 15.94 | 58.21 | 0.274 | 13.89 |
+| kv-a-proj | 16 | 6144 | 128 | amplin | 16.94 | 66.74 | 0.254 | 16.42 |
+| kv-a-proj-mqa | 1 | 6144 | 576 | amplin | 15.76 | 23.35 | 0.675 | 13.86 |
+| kv-a-proj-mqa | 2 | 6144 | 576 | amplin | 15.84 | 23.13 | 0.685 | 14.01 |
+| kv-a-proj-mqa | 4 | 6144 | 576 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 15.89 | 22.80 | 0.697 | 16.75 |
+| kv-a-proj-mqa | 6 | 6144 | 576 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 15.94 | 22.77 | 0.700 | 16.78 |
+| kv-a-proj-mqa | 8 | 6144 | 576 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 16.22 | 21.60 | 0.751 | 22.41 |
+| kv-a-proj-mqa | 16 | 6144 | 576 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.31 | 22.35 | 0.774 | 33.20 |
+| kv-b-proj | 1 | 512 | 28672 | amplin | 16.45 | 20.94 | 0.786 | 11.91 |
+| kv-b-proj | 2 | 512 | 28672 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 16.45 | 20.96 | 0.785 | 18.33 |
+| kv-b-proj | 4 | 512 | 28672 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 16.48 | 20.93 | 0.788 | 31.81 |
+| kv-b-proj | 6 | 512 | 28672 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 16.72 | 21.90 | 0.763 | 44.91 |
+| kv-b-proj | 8 | 512 | 28672 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.12 | 21.58 | 0.793 | 57.90 |
+| kv-b-proj | 16 | 512 | 28672 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.03 | 21.30 | 0.846 | 111.21 |
+| lm-head | 1 | 6144 | 154880 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 308.77 | 328.92 | 0.939 | 490.47 |
+| lm-head | 2 | 6144 | 154880 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 311.87 | 331.97 | 0.939 | 963.80 |
+| lm-head | 4 | 6144 | 154880 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 323.79 | 334.55 | 0.968 | 1917.59 |
+| lm-head | 6 | 6144 | 154880 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 331.19 | 336.65 | 0.984 | 2883.34 |
+| lm-head | 8 | 6144 | 154880 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 337.89 | 337.53 | 1.001 | 3841.40 |
+| lm-head | 16 | 6144 | 154880 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 387.67 | 378.18 | 1.025 | 7666.92 |
+| moe-down | 1 | 2048 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.84 | 22.23 | 0.398 | 11.67 |
+| moe-down | 2 | 2048 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 9.06 | 22.79 | 0.398 | 17.16 |
+| moe-down | 4 | 2048 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.81 | 22.50 | 0.391 | 27.88 |
+| moe-down | 6 | 2048 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 9.45 | 22.66 | 0.417 | 38.90 |
+| moe-down | 8 | 2048 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.76 | 21.41 | 0.409 | 49.85 |
+| moe-down | 16 | 2048 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 11.30 | 23.48 | 0.481 | 95.20 |
+| moe-up | 1 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 15.90 | 22.24 | 0.715 | 16.00 |
+| moe-up | 2 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 15.93 | 21.57 | 0.738 | 22.12 |
+| moe-up | 4 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 15.97 | 22.90 | 0.698 | 32.88 |
+| moe-up | 6 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 16.06 | 22.60 | 0.711 | 43.51 |
+| moe-up | 8 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 16.19 | 22.45 | 0.721 | 53.52 |
+| moe-up | 16 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.14 | 22.76 | 0.753 | 95.70 |
+| o-proj | 1 | 16384 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 39.75 | 41.18 | 0.965 | 81.01 |
+| o-proj | 2 | 16384 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 39.82 | 42.30 | 0.941 | 119.36 |
+| o-proj | 4 | 16384 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 40.69 | 42.78 | 0.951 | 212.64 |
+| o-proj | 6 | 16384 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 42.40 | 43.33 | 0.979 | 312.09 |
+| o-proj | 8 | 16384 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 42.63 | 42.64 | 1.000 | 413.35 |
+| o-proj | 16 | 16384 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 45.56 | 46.55 | 0.979 | 817.33 |
+| q-a-proj | 1 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.32 | 24.92 | 0.735 | 18.68 |
+| q-a-proj | 2 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 15.90 | 21.69 | 0.733 | 22.12 |
+| q-a-proj | 4 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 15.94 | 22.24 | 0.717 | 32.86 |
+| q-a-proj | 6 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 16.08 | 21.10 | 0.762 | 43.47 |
+| q-a-proj | 8 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 16.17 | 21.06 | 0.768 | 53.47 |
+| q-a-proj | 16 | 6144 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.13 | 22.60 | 0.758 | 95.66 |
+| q-b-proj | 1 | 2048 | 4096 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.15 | 20.64 | 0.395 | 9.66 |
+| q-b-proj | 2 | 2048 | 4096 | amplin | 62.43 | 170.01 | 0.367 | 58.51 |
+| q-b-proj | 4 | 2048 | 4096 | amplin | 62.74 | 172.62 | 0.363 | 58.39 |
+| q-b-proj | 6 | 2048 | 4096 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 9.57 | 21.10 | 0.454 | 32.30 |
+| q-b-proj | 8 | 2048 | 4096 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.27 | 21.43 | 0.386 | 35.04 |
+| q-b-proj | 16 | 2048 | 4096 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 9.06 | 20.91 | 0.433 | 65.46 |
+| q-b-proj-large | 1 | 2048 | 16384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.93 | 22.96 | 0.824 | 20.37 |
+| q-b-proj-large | 2 | 2048 | 16384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.95 | 21.46 | 0.883 | 35.06 |
+| q-b-proj-large | 4 | 2048 | 16384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 19.18 | 21.40 | 0.896 | 65.52 |
+| q-b-proj-large | 6 | 2048 | 16384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 19.43 | 21.63 | 0.898 | 95.04 |
+| q-b-proj-large | 8 | 2048 | 16384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 19.67 | 21.07 | 0.933 | 125.44 |
+| q-b-proj-large | 16 | 2048 | 16384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 23.36 | 23.22 | 1.006 | 245.78 |
+
+### Kimi K2.5
+| role | M | K | N | best_amplin | splitk24 µs | marlin µs | ratio | vs splitk8 µs |
+|---|---|---|---|---|---|---|---|---|
+| dense-down | 1 | 18432 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 44.04 | 52.13 | 0.845 | 93.50 |
+| dense-down | 2 | 18432 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 44.48 | 53.30 | 0.835 | 157.93 |
+| dense-down | 4 | 18432 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 46.04 | 53.94 | 0.854 | 284.44 |
+| dense-down | 6 | 18432 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 46.95 | 54.87 | 0.856 | 413.18 |
+| dense-down | 8 | 18432 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 47.72 | 53.81 | 0.887 | 540.41 |
+| dense-down | 16 | 18432 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 51.75 | 59.80 | 0.865 | 1073.48 |
+| dense-up | 1 | 7168 | 18432 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 56.56 | 51.81 | 1.092 | 88.72 |
+| dense-up | 2 | 7168 | 18432 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 57.07 | 52.65 | 1.084 | 143.15 |
+| dense-up | 4 | 7168 | 18432 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 58.56 | 52.98 | 1.105 | 275.45 |
+| dense-up | 6 | 7168 | 18432 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 59.39 | 53.31 | 1.114 | 404.96 |
+| dense-up | 8 | 7168 | 18432 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 60.42 | 53.26 | 1.135 | 538.34 |
+| dense-up | 16 | 7168 | 18432 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 66.65 | 58.42 | 1.141 | 1065.40 |
+| kv-a-proj-mqa | 1 | 7168 | 576 | amplin | 18.15 | 21.47 | 0.845 | 17.06 |
+| kv-a-proj-mqa | 2 | 7168 | 576 | amplin | 18.15 | 22.02 | 0.824 | 17.13 |
+| kv-a-proj-mqa | 4 | 7168 | 576 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.22 | 23.44 | 0.777 | 20.20 |
+| kv-a-proj-mqa | 6 | 7168 | 576 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.30 | 22.71 | 0.806 | 20.26 |
+| kv-a-proj-mqa | 8 | 7168 | 576 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.50 | 21.40 | 0.865 | 26.50 |
+| kv-a-proj-mqa | 16 | 7168 | 576 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 19.92 | 21.28 | 0.936 | 39.52 |
+| kv-b-proj | 1 | 512 | 16384 | amplin | 12.43 | 23.41 | 0.531 | 8.98 |
+| kv-b-proj | 2 | 512 | 16384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 12.46 | 23.35 | 0.534 | 12.75 |
+| kv-b-proj | 4 | 512 | 16384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 12.49 | 22.51 | 0.555 | 20.78 |
+| kv-b-proj | 6 | 512 | 16384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 12.57 | 21.26 | 0.591 | 27.97 |
+| kv-b-proj | 8 | 512 | 16384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 12.81 | 21.10 | 0.607 | 35.54 |
+| kv-b-proj | 16 | 512 | 16384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 13.45 | 21.47 | 0.626 | 65.80 |
+| lm-head | 1 | 7168 | 163840 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 401.97 | 403.41 | 0.996 | 606.93 |
+| lm-head | 2 | 7168 | 163840 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 403.75 | 406.81 | 0.992 | 1201.52 |
+| lm-head | 4 | 7168 | 163840 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 414.32 | 409.95 | 1.011 | 2389.13 |
+| lm-head | 6 | 7168 | 163840 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 427.73 | 414.33 | 1.032 | 3579.28 |
+| lm-head | 8 | 7168 | 163840 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 436.77 | 414.56 | 1.054 | 4793.67 |
+| lm-head | 16 | 7168 | 163840 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 493.73 | 466.64 | 1.058 | 9603.96 |
+| o-proj | 1 | 8192 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 20.25 | 24.04 | 0.842 | 38.74 |
+| o-proj | 2 | 8192 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 20.30 | 25.29 | 0.803 | 67.57 |
+| o-proj | 4 | 8192 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 20.35 | 25.28 | 0.805 | 117.84 |
+| o-proj | 6 | 8192 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 20.84 | 27.31 | 0.763 | 168.03 |
+| o-proj | 8 | 8192 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 20.84 | 24.73 | 0.843 | 220.51 |
+| o-proj | 16 | 8192 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 22.49 | 28.67 | 0.784 | 436.22 |
+| q-a-proj | 1 | 7168 | 1536 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.21 | 21.00 | 0.867 | 20.08 |
+| q-a-proj | 2 | 7168 | 1536 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.21 | 21.92 | 0.831 | 20.30 |
+| q-a-proj | 4 | 7168 | 1536 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.31 | 22.06 | 0.830 | 33.19 |
+| q-a-proj | 6 | 7168 | 1536 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.59 | 22.54 | 0.825 | 39.52 |
+| q-a-proj | 8 | 7168 | 1536 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.61 | 21.52 | 0.865 | 51.49 |
+| q-a-proj | 16 | 7168 | 1536 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 61.46 | 174.77 | 0.352 | 88.43 |
+| q-b-proj | 1 | 1536 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 12.11 | 22.61 | 0.536 | 14.31 |
+| q-b-proj | 2 | 1536 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 12.12 | 21.03 | 0.577 | 22.18 |
+| q-b-proj | 4 | 1536 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 12.22 | 20.96 | 0.583 | 38.96 |
+| q-b-proj | 6 | 1536 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 12.51 | 20.72 | 0.604 | 56.23 |
+| q-b-proj | 8 | 1536 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 13.35 | 22.64 | 0.590 | 73.10 |
+| q-b-proj | 16 | 1536 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 15.89 | 23.45 | 0.678 | 141.15 |
+| router-gate | 1 | 7168 | 384 | amplin | 18.12 | 35.25 | 0.514 | 17.06 |
+| router-gate | 2 | 7168 | 384 | amplin | 18.13 | 43.10 | 0.421 | 17.08 |
+| router-gate | 4 | 7168 | 384 | amplin | 18.19 | 44.55 | 0.408 | 17.22 |
+| router-gate | 6 | 7168 | 384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.30 | 46.09 | 0.397 | 20.11 |
+| router-gate | 8 | 7168 | 384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.44 | 37.97 | 0.486 | 20.21 |
+| router-gate | 16 | 7168 | 384 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 19.82 | 41.91 | 0.473 | 32.97 |
+| shared-down | 1 | 2048 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.34 | 21.81 | 0.382 | 11.71 |
+| shared-down | 2 | 2048 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 9.87 | 26.82 | 0.368 | 18.85 |
+| shared-down | 4 | 2048 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 10.48 | 26.77 | 0.392 | 31.51 |
+| shared-down | 6 | 2048 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.80 | 22.45 | 0.392 | 44.23 |
+| shared-down | 8 | 2048 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.61 | 21.35 | 0.403 | 56.89 |
+| shared-down | 16 | 2048 | 7168 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 12.04 | 22.19 | 0.542 | 109.85 |
+| shared-up | 1 | 7168 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.23 | 22.11 | 0.824 | 19.06 |
+| shared-up | 2 | 7168 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.24 | 21.69 | 0.841 | 26.16 |
+| shared-up | 4 | 7168 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.20 | 21.67 | 0.840 | 39.05 |
+| shared-up | 6 | 7168 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.26 | 21.20 | 0.862 | 51.21 |
+| shared-up | 8 | 7168 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.36 | 21.58 | 0.851 | 62.76 |
+| shared-up | 16 | 7168 | 2048 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 19.66 | 22.84 | 0.861 | 112.04 |
+
+### Laguna S 2.1
+| role | M | K | N | best_amplin | splitk24 µs | marlin µs | ratio | vs splitk8 µs |
+|---|---|---|---|---|---|---|---|---|
+| dense-down | 1 | 12288 | 3072 | amplin | 27.49 | 21.23 | 1.295 | 25.97 |
+| dense-down | 2 | 12288 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 27.50 | 22.46 | 1.225 | 50.60 |
+| dense-down | 4 | 12288 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 27.72 | 22.90 | 1.211 | 81.94 |
+| dense-down | 6 | 12288 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 27.92 | 23.11 | 1.208 | 112.18 |
+| dense-down | 8 | 12288 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 27.98 | 22.74 | 1.231 | 143.16 |
+| dense-down | 16 | 12288 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 30.27 | 26.83 | 1.128 | 273.92 |
+| dense-up | 1 | 3072 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.39 | 21.77 | 0.799 | 24.65 |
+| dense-up | 2 | 3072 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.46 | 22.04 | 0.792 | 40.24 |
+| dense-up | 4 | 3072 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.67 | 21.50 | 0.822 | 72.48 |
+| dense-up | 6 | 3072 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.92 | 22.70 | 0.789 | 106.64 |
+| dense-up | 8 | 3072 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.74 | 22.34 | 0.839 | 139.30 |
+| dense-up | 16 | 3072 | 12288 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 21.83 | 21.36 | 1.022 | 274.83 |
+| expert-down | 1 | 1024 | 3072 | amplin | 9.15 | 22.68 | 0.404 | 8.18 |
+| expert-down | 2 | 1024 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.10 | 20.85 | 0.389 | 9.03 |
+| expert-down | 4 | 1024 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.16 | 20.70 | 0.394 | 11.08 |
+| expert-down | 6 | 1024 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.56 | 24.09 | 0.355 | 13.76 |
+| expert-down | 8 | 1024 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.74 | 22.58 | 0.387 | 16.68 |
+| expert-down | 16 | 1024 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 8.73 | 21.86 | 0.399 | 31.20 |
+| kv/expert-up | 1 | 3072 | 1024 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 11.35 | 21.09 | 0.538 | 11.54 |
+| kv/expert-up | 2 | 3072 | 1024 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 10.10 | 27.14 | 0.372 | 11.16 |
+| kv/expert-up | 4 | 3072 | 1024 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 9.88 | 22.09 | 0.448 | 13.61 |
+| kv/expert-up | 6 | 3072 | 1024 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 9.97 | 22.30 | 0.447 | 16.87 |
+| kv/expert-up | 8 | 3072 | 1024 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 10.06 | 20.99 | 0.479 | 19.54 |
+| kv/expert-up | 16 | 3072 | 1024 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 10.74 | 21.21 | 0.506 | 29.80 |
+| o-proj-6144 | 1 | 6144 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 15.71 | 20.69 | 0.759 | 16.16 |
+| o-proj-6144 | 2 | 6144 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 15.74 | 23.76 | 0.662 | 27.32 |
+| o-proj-6144 | 4 | 6144 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 15.90 | 22.28 | 0.713 | 43.10 |
+| o-proj-6144 | 6 | 6144 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 16.15 | 22.65 | 0.713 | 58.29 |
+| o-proj-6144 | 8 | 6144 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 16.21 | 22.79 | 0.711 | 73.97 |
+| o-proj-6144 | 16 | 6144 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.54 | 25.87 | 0.678 | 137.67 |
+| o-proj-9216 | 1 | 9216 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 21.63 | 23.00 | 0.940 | 23.53 |
+| o-proj-9216 | 2 | 9216 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 21.63 | 22.55 | 0.959 | 40.04 |
+| o-proj-9216 | 4 | 9216 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 21.68 | 22.81 | 0.951 | 63.78 |
+| o-proj-9216 | 6 | 9216 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 21.87 | 25.02 | 0.874 | 86.44 |
+| o-proj-9216 | 8 | 9216 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 22.02 | 25.08 | 0.878 | 109.71 |
+| o-proj-9216 | 16 | 9216 | 3072 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 23.85 | 23.78 | 1.003 | 205.80 |
+| q-proj-6144 | 1 | 3072 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 10.01 | 21.55 | 0.465 | 16.70 |
+| q-proj-6144 | 2 | 3072 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 10.07 | 21.18 | 0.476 | 24.62 |
+| q-proj-6144 | 4 | 3072 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 10.20 | 21.45 | 0.476 | 40.51 |
+| q-proj-6144 | 6 | 3072 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 10.45 | 21.02 | 0.497 | 56.57 |
+| q-proj-6144 | 8 | 3072 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 10.57 | 22.92 | 0.461 | 72.62 |
+| q-proj-6144 | 16 | 3072 | 6144 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 11.65 | 22.80 | 0.511 | 139.08 |
+| q-proj-9216 | 1 | 3072 | 9216 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.12 | 22.80 | 0.751 | 19.47 |
+| q-proj-9216 | 2 | 3072 | 9216 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.16 | 22.84 | 0.752 | 32.25 |
+| q-proj-9216 | 4 | 3072 | 9216 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.40 | 25.93 | 0.671 | 56.52 |
+| q-proj-9216 | 6 | 3072 | 9216 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 17.56 | 21.83 | 0.804 | 80.63 |
+| q-proj-9216 | 8 | 3072 | 9216 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 18.10 | 22.75 | 0.796 | 106.58 |
+| q-proj-9216 | 16 | 3072 | 9216 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 20.91 | 22.32 | 0.937 | 207.34 |
+| router-gate | 1 | 3072 | 256 | amplin | 9.74 | 29.76 | 0.327 | 9.62 |
+| router-gate | 2 | 3072 | 256 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 9.76 | 36.58 | 0.267 | 9.81 |
+| router-gate | 4 | 3072 | 256 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 9.85 | 37.12 | 0.265 | 9.89 |
+| router-gate | 6 | 3072 | 256 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 9.94 | 38.14 | 0.261 | 10.00 |
+| router-gate | 8 | 3072 | 256 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 10.04 | 31.37 | 0.320 | 11.08 |
+| router-gate | 16 | 3072 | 256 | mma_lane_m16_n64_splitk24_pipe2_interleaved | 10.73 | 35.61 | 0.301 | 13.60 |
+
+### 2026-07-24 — Success: split-K12x2 cooperative N64 no longer requires num_groups % 24
+
+Revision: `f26a01d8`
+Target: GPTQ 4-bit group_size=128 desc_act=False sym=True, batch sizes 1/2/4/6/8/16 on PG506-230/232 (sm_80, 124 SMs), BF16.
+
+The `mma_lane_m16_n64_splitk12x2_coop_interleaved` kernel was gated to `num_groups % 24 == 0` and the benchmark script mirrored that. The kernel body already handles warps with no assigned K group by writing zero partials and participating in the cooperative grid reduction, so the guard was removed. `test_amplin` now asserts the kernel runs and matches the deterministic reference on a non-multiple-of-24 group count.
+
+A full-shape sweep with `splitk24` + `splitk12x2` enabled shows the cooperative mega-kernel closes the remaining small-N gaps and is now selected for many shapes:
+
+| model | role | M | K | N | best Amplin path | batch median us | Marlin us | vs Marlin |
+|---|---|---|---|---|---|---|---|---|
+| Laguna | dense-down | 1-16 | 12288 | 3072 | splitk12x2 | 18.4-21.3 | 22.4-25.4 | 1.19-1.27x |
+| Laguna | o-proj-6144 | 1-16 | 6144 | 3072 | splitk12x2 | 11.8-14.3 | 21.8-22.9 | 1.56-1.85x |
+| Laguna | o-proj-9216 | 1-16 | 9216 | 3072 | splitk12x2 | 15.1-18.1 | 21.7-23.4 | 1.24-1.48x |
+| Laguna | q-a-proj | 1-16 | 6144 | 2048 | splitk12x2 | 13.2-16.4 | 22.9-26.1 | 1.71-2.24x |
+| Laguna | moe-up | 1-16 | 6144 | 2048 | splitk12x2 | 11.7-13.2 | 21.4-24.4 | 1.63-2.03x |
+| GLM | q-a-proj | 1-16 | 6144 | 2048 | splitk12x2 | 11.6-16.4 | 22.9-26.1 | 1.78-2.24x |
+| GLM | moe-up | 1-16 | 6144 | 2048 | splitk12x2 | 11.6-15.4 | 21.4-25.6 | 1.63-2.15x |
+| Kimi | q-a-proj | 1-16 | 7168 | 1536 | splitk12x2 | 13.9-16.2 | 21.9-23.8 | 1.40-1.69x |
+| Kimi | shared-up | 1-16 | 7168 | 2048 | splitk12x2 | 14.0-15.8 | 21.7-23.4 | 1.48-1.62x |
+| Kimi | kv-a-proj-mqa | 1-16 | 7168 | 576 | splitk12x2 | 13.7-15.6 | 22.4-29.0 | 1.51-1.86x |
+| Kimi | router-gate | 1-16 | 7168 | 384 | splitk12x2 | 13.7-15.6 | 34.9-45.9 | 2.54-3.25x |
+
+Remaining Amplin losses after this change (splitk24 is the best available path for these; splitk12x2 grid is too large):
+
+| model | role | M | K | N | vs Marlin |
+|---|---|---|---|---|---|
+| GLM | dense-down | 8 | 12288 | 6144 | 0.974x |
+| GLM | dense-up | 6/8/16 | 6144 | 12288 | 0.974/0.951/0.902x |
+| GLM | lm-head | 16 | 6144 | 154880 | 0.980x |
+| GLM | o-proj | 8 | 16384 | 6144 | 0.991x |
+| Kimi | dense-up | 1-16 | 7168 | 18432 | 0.850-0.916x |
+| Kimi | lm-head | 4-16 | 7168 | 163840 | 0.944-0.987x |
+
+Observation: the losses are now concentrated in `dense-up` and `lm-head` shapes with very large N, where the splitk24 24-warp N64 kernel is the fastest Amplin path but still trails Marlin by 2-15%. A shared-A mega-kernel that reuses A across N tiles or a larger-K-split layout is the next hypothesis. M=32 is still uncovered and is the target after M=16 gaps are closed.
+
+### 2026-07-24 — Failure: shared-A M16/M32 N64 mega-kernel is correct but slower than Marlin
+
+Revision: working tree on `devin/1784898993-amplin-batches` after `f26a01d8`
+Target: GPTQ 4-bit group_size=128 desc_act=False sym=True, batch 16 and 32, FP16 on PG506-230/232 (sm_80, 124 SMs).
+
+Implemented `amplin_mma_lane_mN_n64_shared_a_kernel<Scalar, BlockM>` (BlockM=16 and 32) in `gptqmodel_ext/amplin/amplin_kernel.cu` plus host wrappers `mma_lane_m16_n64_shared_a` and `mma_lane_m32_n64_shared_a`. The kernel loads the full A tile for the block into shared memory once per K group, then all N warps reuse that A tile while streaming the lane-packed weights. Output is guarded by `store_mma_fragment_guard_m` so it supports any `size_m <= BlockM`.
+
+Correctness: verified against the same `(codes - 8) * scales` FP32 dequantized reference; max abs error is ~2e-3 for FP16, well inside the FP16 quantization noise floor.
+
+Performance (FP16, median CUDA-event us, GPU 0, warmup 10 iters 30):
+
+| M | K | N | Marlin | m16 shared-A | m32 shared-A | splitk24 M16 | m32 global-a |
+|---|---|---|---|---|---|---|---|---|
+| 16 | 6144 | 12288 | 69.2 | 170.8 | - | 80.9 | - |
+| 16 | 7168 | 18432 | 91.8 | 229.1 | - | 110.7 | - |
+| 16 | 7168 | 163840 | 452.8 | 1025.2 | - | 472.1 | - |
+| 32 | 6144 | 12288 | 74.9 | - | 247.2 | - | 251.1 |
+| 32 | 7168 | 18432 | 100.1 | - | 370.5 | - | 301.7 |
+| 32 | 7168 | 163840 | 499.2 | - | 1995.9 | - | 1134.0 |
+
+Result: the shared-A mega-kernel is 2.0-4.0x slower than Marlin and also loses to `splitk24` for M=16 and to the existing `m32_global_a` for most M=32 cases.
+
+Nsight Compute on `M=32 K=7168 N=18432` (FP16) shows the kernel is not memory bound:
+
+```text
+sm__throughput.avg.pct_of_peak_sustained_elapsed: 15.09%
+dram__throughput.avg.pct_of_peak_sustained_elapsed: 8.86%
+smsp__cycles_elapsed.avg: 399168 cycles
+launch: (288,1,1) x (256,1,1)
+```
+
+The bottleneck is low SM utilization because the block only has 8 warps and processes the entire K dimension sequentially. Each thread issues a scalar `MmaLaneDequant` + `MmaInstruction` chain per K step with little independent work to hide latency. By comparison `splitk24` on the same shape achieves ~34% SM throughput and 40% DRAM throughput by splitting K across 24 warps.
+
+Conclusion: a shared-A N64 kernel is not enough; it must also K-split across warps and use vector `uint4` weight loads to expose the same instruction-level parallelism as `splitk24`. M=32 support additionally requires handling two 16-row A tiles, which doubles accumulator/partial storage. The next candidate is a K-split shared-A N64 kernel (e.g. 2 K-slices x 4 N warps) for M<=32, or a cooperative multi-CTA variant that keeps partials within the device-wide shared budget.
+
+### 2026-07-24 — Failure: K-split shared-A M16/M32 N64 mega-kernel is correct but still slower than Marlin
+
+Revision: working tree on `devin/1784898993-amplin-batches` after `f26a01d8`
+Target: GPTQ 4-bit group_size=128 desc_act=False sym=True, batch 16 and 32, FP16 on PG506-230/232 (sm_80, 124 SMs).
+
+Implemented `amplin_mma_lane_mN_n64_shared_a_kernel<Scalar, BlockM>` as a K-split shared-A N64 mega-kernel.  Each block uses `NWarp=2` (each warp owns two adjacent N16 tiles) and `KSplit=10` for `BlockM=16` / `KSplit=5` for `BlockM=32` so the combined shared-A + partials scratch fits in the 96 KB opt-in shared-memory limit.  The kernel loads `KSplit` K-group A tiles into shared memory, has `MWarpGroups * KSplit * NWarp` warps per block, and performs a per-warp K-slice accumulation followed by a shared-memory reduction across K-slices before storing.  Weight packing was switched to `pack_mma_lane_n64_qweight` (`[N/64, K/128, 8, 32, 4]`) so each warp can `uint4`-load the four N-group words at once.  Host wrappers call `cudaFuncSetAttribute` with `cudaFuncAttributeMaxDynamicSharedMemorySize` and pass the total dynamic shared bytes at launch.
+
+Correctness: verified against the FP32 `(codes - 8) * scales` dequantized reference for both M=16 and M=32 on `6144x12288`, `7168x18432`, and `7168x163840`.  Max abs error is ~1e-3 for FP16, inside the quantization noise floor.  `pytest -q tests/kernels/test_amplin.py` passes (78/78).
+
+Performance (FP16, median CUDA-event us, GPU 0, warmup 10 iters 30):
+
+| M | K | N | Marlin | m16 shared-A K-split | m32 shared-A K-split | splitk24 M16 | m32 global-a |
+|---|---|---|---|---|---|---|---|---|
+| 16 | 6144 | 12288 | 70.3 | 133.1 | - | 82.0 | - |
+| 16 | 7168 | 18432 | 93.0 | 196.3 | - | 112.0 | - |
+| 16 | 7168 | 163840 | 454.2 | 959.7 | - | 475.3 | - |
+| 32 | 6144 | 12288 | 70.9 | - | 194.6 | - | 234.9 |
+| 32 | 7168 | 18432 | 93.6 | - | 303.1 | - | 277.3 |
+| 32 | 7168 | 163840 | 501.1 | - | 1872.3 | - | 1154.0 |
+
+Result: the K-split shared-A mega-kernel is 1.9-3.7x slower than Marlin for M=16 and 2.7-3.7x slower for M=32.  It also loses to the existing `splitk24` M16 path and to the existing `m32_global_a` M32 path for the tested shapes.
+
+`pytest -q tests/kernels/test_amplin.py`: 78 passed.
+
+Conclusion: K-split + shared-A does not close the M=16/32 dense-up/lm-head gap on its own.  The extra reduction and dynamic shared-memory traffic outweigh the benefit of A reuse, and the 96 KB shared limit caps the number of independent warps below `splitk24`.  The next mega-kernel route should either avoid the shared-A reduction (e.g. a cooperative multi-CTA K-split that keeps partials in device memory) or target M=32 with a different tile geometry (e.g. M64 with global A and more N warps).
+
+### 2026-07-24 — Cooperative multi-CTA K-split N64 for M<=32 (device-memory partials)
+
+Revision: working tree on `devin/1784898993-amplin-batches` after the K-split shared-A failure entry.
+Target: GPTQ 4-bit group_size=128 desc_act=False sym=True, batches 1,2,4,6,8,16,32, FP16/BF16 on PG506-230/232 (sm_80, 124 SMs).
+
+Implemented `amplin_mma_lane_mN_n64_splitk12x2_coop_interleaved_kernel<Scalar, BlockM>` in `gptqmodel_ext/amplin/amplin_kernel.cu`, registered as `mma_lane_m32_n64_splitk12x2_coop_interleaved` in `gptqmodel_ext/amplin/amplin.cpp`, `gptqmodel/utils/amplin.py`, and exposed via `--m32-splitk12x2-n64-coop` in `scripts/benchmark_amplin_model_shapes.py`.
+
+Design:
+- 12-warps per CTA, 2 CTAs per cooperative pair (24 K-slices total).
+- Each CTA is split into `MWarpGroups = BlockM / 16` M-groups (1 for M=16, 2 for M=32) with `WarpsPerMGroup = 6`.
+- Each M-group processes the same K-slice partition; each warp accumulates `MWarpGroups` consecutive K-groups (1 for M=16, 2 for M=32) before reduction, so every M-group covers the full K dimension.
+- The grid loops over N64 tiles: `gridDim.x = min(N/64, active_blocks_per_sm * sm_count / 2)`, escaping the original `(N/64)*2 <= active_blocks_per_sm * sm_count` cooperative-residency limit.
+- Per-CTA partials are reduced in shared memory; the two CTAs then reduce through a `float[2][M][N]` device scratch buffer and `cooperative_groups::this_grid().sync()`.
+- Weight layout uses `pack_mma_lane_n64_qweight` (`[N/64, K/128, 8, 32, 4]`) for aligned `uint4` lane loads; scales use `pack_hmma_scales`.
+
+Correctness: verified against the FP32 `(codes - 8) * scales` dequantized reference for M=32 on `6144x12288`, `7168x18432`, and `7168x163840`. Max abs error is ~1e-3 for FP16, inside the quantization noise floor. `pytest -q tests/kernels/test_amplin.py`: 78 passed.
+
+Performance (FP16, median CUDA-event us, GPU 0, warmup 20 iters 50) on the Laguna S 2.1 / GLM 5.2 / Kimi K2.5 shape list at M=32:
+
+| model | role | K | N | Marlin | m32_global_a | m32_splitk12x2_coop | coop err |
+|---|---|---|---|---|---|---|---|
+| laguna-s-2.1 | expert-down | 1024 | 3072 | 56.8 | 64.3 | 67.2 | 0.0003 |
+| laguna-s-2.1 | kv/expert-up | 3072 | 1024 | 62.6 | 92.3 | 66.0 | 0.0005 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 56.1 | 94.9 | 67.7 | 0.0006 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 57.6 | 98.2 | 87.2 | 0.0007 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 57.8 | 98.6 | 87.9 | 0.0006 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 57.0 | 143.8 | 69.4 | 0.0007 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 60.8 | 193.1 | 74.6 | 0.0011 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 61.6 | 225.7 | 81.8 | 0.0012 |
+| laguna-s-2.1 | router-gate | 3072 | 256 | 80.2 | 86.1 | 65.7 | 0.0005 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 58.1 | 135.4 | 68.6 | 0.0010 |
+| glm-5.2 | q-b-proj | 2048 | 4096 | 55.6 | 74.9 | 66.9 | 0.0005 |
+| glm-5.2 | q-b-proj-large | 2048 | 16384 | 56.8 | 91.5 | 88.1 | 0.0006 |
+| glm-5.2 | kv-a-proj | 6144 | 128 | 122.3 | 128.2 | 66.8 | 0.0006 |
+| glm-5.2 | kv-a-proj-mqa | 6144 | 576 | 57.5 | 131.6 | 67.1 | 0.0007 |
+| glm-5.2 | kv-b-proj | 512 | 28672 | 55.8 | 63.7 | 83.8 | 0.0004 |
+| glm-5.2 | o-proj | 16384 | 6144 | 80.0 | 523.1 | 130.4 | 0.0013 |
+| glm-5.2 | dense-up | 6144 | 12288 | 69.3 | 229.3 | 115.6 | 0.0009 |
+| glm-5.2 | dense-down | 12288 | 6144 | 71.1 | 385.9 | 108.3 | 0.0012 |
+| glm-5.2 | moe-up | 6144 | 2048 | 57.2 | 128.9 | 68.0 | 0.0010 |
+| glm-5.2 | moe-down | 2048 | 6144 | 56.1 | 73.4 | 67.6 | 0.0006 |
+| glm-5.2 | indexer-wq-b | 2048 | 4096 | 55.7 | 73.3 | 66.8 | 0.0005 |
+| glm-5.2 | lm-head | 6144 | 154880 | 420.7 | 982.6 | 751.1 | 0.0010 |
+| kimi-k2.5 | q-a-proj | 7168 | 1536 | 58.8 | 148.4 | 71.5 | 0.0008 |
+| kimi-k2.5 | q-b-proj | 1536 | 12288 | 56.1 | 68.9 | 74.4 | 0.0005 |
+| kimi-k2.5 | kv-a-proj-mqa | 7168 | 576 | 56.6 | 140.6 | 69.9 | 0.0006 |
+| kimi-k2.5 | kv-b-proj | 512 | 16384 | 55.2 | 61.5 | 73.9 | 0.0003 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 63.3 | 183.7 | 89.7 | 0.0010 |
+| kimi-k2.5 | dense-up | 7168 | 18432 | 92.4 | 276.3 | 175.7 | 0.0011 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 91.4 | 595.0 | 135.2 | 0.0014 |
+| kimi-k2.5 | shared-up | 7168 | 2048 | 56.9 | 143.5 | 70.0 | 0.0007 |
+| kimi-k2.5 | shared-down | 2048 | 7168 | 56.1 | 76.0 | 67.3 | 0.0005 |
+| kimi-k2.5 | router-gate | 7168 | 384 | 84.5 | 136.1 | 69.6 | 0.0006 |
+| kimi-k2.5 | lm-head | 7168 | 163840 | 499.3 | 1148.7 | 978.2 | 0.0011 |
+
+Result: the cooperative multi-CTA kernel is the fastest Amplin path for M=32 across the tested model shapes (2-6x faster than `m32_global_a`). It also beats Marlin for small-N M=32 cases (`router-gate`, `kv-a-proj`, `kv-a-proj-mqa` with N <= 576). It is still slower than Marlin for `dense-up` and `lm-head` large-N shapes, where Marlin's scheduling remains superior.
+
+`pytest -q tests/kernels/test_amplin.py`: 78 passed.
+`ruff check gptqmodel/utils/amplin.py scripts/benchmark_amplin_model_shapes.py tests/kernels/test_amplin.py`: passed.
+`git diff --check`: passed.
+
+Conclusion: the cooperative multi-CTA K-split N64 mega-kernel is a verified M=32 improvement for Amplin and closes the gap on small-N M=32 shapes, but it does not yet beat Marlin on `dense-up` / `lm-head` at M=16/32. The remaining large-N losses likely need a different tile geometry or a persistent/cross-SM schedule that can hide latency with more independent warps than the 12-warps-per-CTA design allows.
+
+## 2026-07-24: M32 N64 single-CTA K24 split (pipe2 interleaved)
+
+Revision: working tree on `devin/1784898993-amplin-batches`.
+Target: same as above.
+
+Hypothesis: the cooperative M32 kernel is limited by device-memory partial traffic and a small grid (`gridDim.x` capped at ~124) for very large N. A single-CTA K24 split that keeps partials in shared memory and launches one CTA per N64 tile should expose more memory-level parallelism and reduce scratch traffic.
+
+Implementation:
+- Added `amplin_mma_lane_mN_n64_splitk24_pipe2_interleaved_body<Scalar>` and `amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_kernel<Scalar>` in `gptqmodel_ext/amplin/amplin_kernel.cu`.
+- Uses 24 warps per CTA, 2 M groups of 12 warps each; each M group has a 12-way K-split.
+- Each warp owns one K-slice and computes a full N64 tile for both M groups; partials are accumulated in shared memory and reduced before a single store to global output.
+- Dynamic shared memory: 96 KB (48 KB partials + 48 KB reserved; the compiler currently allocates only the partials array through the extern pointer and the launch requests 96 KB to match the sm_80 opt-in limit).
+- Registered as `mma_lane_m32_n64_splitk24_pipe2_interleaved` in `gptqmodel_ext/amplin/amplin.cpp`, `gptqmodel/utils/amplin.py`, and `scripts/benchmark_amplin_model_shapes.py` (`--m32-splitk24-n64`).
+- Added `test_amplin_mma_lane_m32_n64_splitk24_matches_fp32_reference` in `tests/kernels/test_amplin.py` for M=32 on the fixture shape.
+
+Correctness: `pytest -q tests/kernels/test_amplin.py`: 80 passed. FP16 max abs error on `7168x163840` is ~2e-3, inside the quantization noise floor. Manual checks on M=17,24,32 (small K=1024,N=256) also pass.
+
+Nsight Compute on `kimi-k2.5 lm-head M=32 K=7168 N=163840`:
+- Duration: ~921 us (cooperative was ~1030 us; Marlin is ~502 us).
+- Memory Throughput: 65.9%, DRAM Throughput: 27.5%, Max Bandwidth: 41.3%, Compute (SM) Throughput: 48.1%.
+- Occupancy: 37.5%, 1 block per SM due to 96 KB shared memory and 80 registers per thread.
+
+Focused micro-benchmark (FP16, median CUDA-event us, GPU 0):
+
+| M | K | N | cooperative | splitk24-single-CTA | speedup vs coop | Marlin (wall) |
+|---|---|---|-------------|---------------------|-----------------|---------------|
+| 32 | 7168 | 163840 | 1038.8 | 866.3 | 1.20x | 555.2 |
+| 32 | 7168 | 18432  | 142.5  | 124.9 | 1.14x | 73.1 |
+| 32 | 6144 | 12288  | 77.4   | 71.8  | 1.08x | 45.6 |
+| 32 | 4096 | 4096   | 41.4   | 36.5  | 1.13x | 25.2 |
+| 32 | 6144 | 4096   | 40.6   | 37.5  | 1.08x | - |
+
+Result: the single-CTA K24 split is a consistent improvement over the cooperative kernel for M=32 (8-20% faster), but it still loses to Marlin on large-N `dense-up` / `lm-head` shapes. The kernel is memory-bound with ~41% of peak memory bandwidth; the remaining gap suggests the next route should reduce activation traffic (e.g., reuse A across multiple N tiles via shared memory) rather than increase K-split alone.
+
+`pytest -q tests/kernels/test_amplin.py`: 80 passed.
+`ruff check gptqmodel/utils/amplin.py scripts/benchmark_amplin_model_shapes.py tests/kernels/test_amplin.py`: passed.
+`git diff --check`: passed.
+
+## 2026-07-24: A-reuse across multiple N64 tiles (failed)
+
+Hypothesis: the M32 large-N losses are memory-bound; loading the activation tile A into shared memory once and reusing it across several N64 tiles should cut activation traffic while keeping the warp count high enough to saturate memory.
+
+Prototype: `amplin_mma_lane_mN_n64_multitile_shared_a` in `gptqmodel_ext/amplin/amplin_kernel.cu`. A single 768-thread CTA uses 24 warps to process `NTiles = 12` N64 tiles for `BlockM=32` (or 24 tiles for `BlockM=16`). The full A tile for the current K group is copied into shared memory once, then each warp reads its own `fragment_a` via `ldmatrix` and processes one N64 tile for all `num_groups`. A is re-loaded every K group.
+
+Correctness: passes for `M=1..32, K=4096, N=256` and `M=32, K=7168, N=18432/163840` against the FP32 dequantized reference; max FP16 error ~1.3e-3.
+
+Focused micro-benchmark (FP16, median CUDA-event us, GPU 0, seed 1234, 3 warmup + 20 iters):
+
+| M | K | N | multi-tile shared-A | splitk24 single-CTA | Marlin |
+|---|---|---|--------------------:|--------------------:|-------:|
+| 16 | 7168 | 18432  | 479.6 |  -  | 120.9 |
+| 32 | 7168 | 18432  | 475.3 | 175.6 | 127.8 |
+| 32 | 7168 | 163840 | 833.1 / 921.5 | 847.1 | 529.3 / 530.8 |
+
+Nsight Compute on `M=32 K=7168 N=163840`:
+
+| Metric | Value |
+| --- | --- |
+| Duration | ~885 us |
+| Memory Throughput | 703.82 GB/s |
+| Max Bandwidth | 28.77 % |
+| Mem Busy | 67.55 % |
+| L1/TEX Hit Rate | 49.11 % |
+| L2 Hit Rate | 33.89 % |
+| dram__sectors_read.sum | ~608 MB |
+
+Conclusion: the multi-N-tile shared-A kernel is 2-3x slower than the current `splitk24` path and ~1.6-1.8x slower than Marlin. The Nsight profile shows the kernel is memory-bound but only achieves ~29% of max bandwidth; the L1 global-load hit rate is low and DRAM read traffic is much larger than the nominal activation+weight size. The root cause is that mapping one warp per N tile reduces the total warp count by 12x versus `splitk24`, which lowers memory-level parallelism and prevents the memory pipeline from saturating. Activation reuse alone is not enough; the next route must combine activation reuse with K-split across warps (more independent memory requests per N tile) and/or share the weight load across the two M groups to avoid duplicating the 4-bit weights for M=32.
+
+## 2026-07-25: M16 shared-A N64 tile4 / tile8 full-k kernels
+
+Hypothesis: for M<=16, the activation tile is small enough to be kept in shared memory while one warp processes a full N64 tile over all K groups. Loading the `BlockM x K` activation once and reusing it across several consecutive N64 tiles should reduce A traffic and kernel overhead on very large-N shapes (lm-head and kv-b-proj) without the synchronization cost of a K-split reduction.
+
+Prototype: `amplin_mma_lane_mN_n64_tiled_fullk_kernel<Scalar, BlockM, NTiles>` in `gptqmodel_ext/amplin/amplin_kernel.cu` and host wrappers `amplin_mma_lane_m16_n64_tile4_shared_a_cuda` / `amplin_mma_lane_m16_n64_tile8_shared_a_cuda`. The kernel copies `BlockM x 128` of A into shared memory per K group. One warp owns one N64 tile and accumulates the full K for that tile; the A tile is reused for `NTiles` consecutive N64 tiles in the CTA. No K-split is used, so there is no partial reduction. Registered as `mma_lane_m16_n64_tile4_shared_a` and `mma_lane_m16_n64_tile8_shared_a` in `amplin.cpp` with Python wrappers in `gptqmodel/utils/amplin.py`.
+
+A K-split variant (`NTiles=4, KSplit=2`) was implemented and tested; it was not faster than the no-K-split tile4 path, so its public wrapper was removed before commit and only the template remains as a future building block.
+
+Correctness: `tests/kernels/test_amplin.py` `test_amplin_padded_m16_large_mlp_projection_matches_fp32_dequant_reference` now exercises tile4 and tile8 for the Laguna/Qwen MLP shapes. `pytest -q tests/kernels/test_amplin.py`: 80 passed. Max FP16 error is ~1e-3 against the FP32 dequantized reference, matching the existing `splitk24` error.
+
+Focused benchmark script: `scripts/benchmark_amplin_m16_tile4.py` (FP16, GPU 0, seed 20260724, 20 warmup, 100 iters, 5 rounds, median CUDA-event us).
+
+M=16 results across Laguna S 2.1, GLM 5.2, and Kimi K2.5 shapes:
+
+| model | role | K | N | splitk24 | tile4 | tile8 | marlin | fastest |
+|---|---|---|---:|---:|---:|---:|---|
+| laguna-s-2.1 | expert-down | 1024 | 3072 | 62.3 | 63.5 | 72.8 | 84.6 | splitk24 |
+| laguna-s-2.1 | kv/expert-up | 3072 | 1024 | 61.8 | 94.3 | 117.5 | 85.1 | splitk24 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 62.5 | 90.3 | 111.8 | 86.2 | splitk24 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 62.6 | 88.8 | 108.7 | 84.9 | splitk24 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 62.5 | 89.0 | 109.3 | 86.1 | splitk24 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 62.0 | 130.8 | 169.3 | 85.2 | splitk24 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 63.2 | 173.6 | 230.1 | 83.9 | splitk24 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 69.4 | 216.4 | 291.7 | 84.2 | splitk24 |
+| laguna-s-2.1 | router-gate | 3072 | 256 | 62.6 | 86.7 | - | 92.2 | splitk24 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 62.9 | 129.6 | 168.4 | 86.3 | splitk24 |
+| glm-5.2 | q-b-proj | 2048 | 4096 | 62.1 | 73.1 | 86.8 | 84.1 | splitk24 |
+| glm-5.2 | q-b-proj-large | 2048 | 16384 | 63.6 | 74.0 | 87.6 | 84.7 | splitk24 |
+| glm-5.2 | kv-a-proj | 6144 | 128 | 62.2 | - | - | 123.9 | splitk24 |
+| glm-5.2 | kv-a-proj-mqa | 6144 | 576 | 62.0 | - | - | 83.1 | splitk24 |
+| glm-5.2 | kv-b-proj | 512 | 28672 | 62.7 | 62.2 | 62.1 | 84.6 | tile8 |
+| glm-5.2 | o-proj | 16384 | 6144 | 83.2 | 354.6 | 438.2 | 101.0 | splitk24 |
+| glm-5.2 | dense-up | 6144 | 12288 | 76.3 | 158.8 | 195.4 | 90.9 | splitk24 |
+| glm-5.2 | dense-down | 12288 | 6144 | 71.6 | 271.7 | 338.0 | 90.4 | splitk24 |
+| glm-5.2 | moe-up | 6144 | 2048 | 61.8 | 129.3 | 168.4 | 83.7 | splitk24 |
+| glm-5.2 | moe-down | 2048 | 6144 | 61.5 | 73.4 | 88.7 | 83.2 | splitk24 |
+| glm-5.2 | indexer-wq-b | 2048 | 4096 | 61.5 | 73.5 | 86.4 | 84.7 | splitk24 |
+| glm-5.2 | lm-head | 6144 | 154880 | 393.4 | 326.1 | - | 409.2 | tile4 |
+| kimi-k2.5 | q-a-proj | 7168 | 1536 | 64.8 | 144.7 | 190.7 | 84.9 | splitk24 |
+| kimi-k2.5 | q-b-proj | 1536 | 12288 | 64.5 | 68.3 | 79.8 | 85.5 | splitk24 |
+| kimi-k2.5 | kv-a-proj-mqa | 7168 | 576 | 65.2 | - | - | 86.0 | splitk24 |
+| kimi-k2.5 | kv-b-proj | 512 | 16384 | 64.9 | 64.5 | 64.0 | 85.2 | tile8 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 65.2 | 161.5 | 211.1 | 85.9 | splitk24 |
+| kimi-k2.5 | dense-up | 7168 | 18432 | 103.7 | 186.8 | 226.5 | 112.6 | splitk24 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 86.7 | 395.8 | 492.3 | 111.2 | splitk24 |
+| kimi-k2.5 | shared-up | 7168 | 2048 | 62.8 | 143.1 | 187.9 | 84.9 | splitk24 |
+| kimi-k2.5 | shared-down | 2048 | 7168 | 63.4 | 74.2 | 87.6 | 85.6 | splitk24 |
+| kimi-k2.5 | router-gate | 7168 | 384 | 64.5 | - | - | 99.5 | splitk24 |
+| kimi-k2.5 | lm-head | 7168 | 163840 | 502.1 | 477.2 | 496.6 | 484.5 | tile4 |
+
+Key wins at M=16:
+- `glm-5.2 lm-head` 6144x154880: tile4 326us vs splitk24 393us (-17%) vs Marlin 409us (-20%).
+- `kimi-k2.5 lm-head` 7168x163840: tile4 477us vs splitk24 502us (-5%) vs Marlin 484us (-1%).
+- `glm-5.2 kv-b-proj` 512x28672: tile8 62us vs splitk24 63us vs Marlin 85us.
+- `kimi-k2.5 kv-b-proj` 512x16384: tile8 64us vs splitk24 65us vs Marlin 85us.
+
+Dense-up M=16 shapes remain fastest with `splitk24` (laguna 62.5us vs Marlin 86.1us; glm 76.3us vs Marlin 90.9us; kimi 103.7us vs Marlin 112.6us), so the M16 large-N gap is now essentially the lm-head class, where tile4 is the new best.
+
+Conclusion: tile4 is the best Amplin kernel for M=16 `lm-head` shapes. The remaining M=16 opportunity outside lm-head is small, and the tile4 path should only be selected for very large N (lm-head / kv-b-proj). The next gap is M=32 large-N (dense-up, lm-head, dense-down), where neither the current single-CTA K24 split nor shared-A tile4 closes the Marlin gap.
+
+`ruff check gptqmodel/utils/amplin.py tests/kernels/test_amplin.py scripts/benchmark_amplin_m16_tile4.py`: passed.
+`git diff --check`: passed.
+
+## 2026-07-25: Extend shared-A N64 tile4 / tile8 full-k kernel to M=32
+
+Goal: close the M=32 large-N gap by reusing the M16 shared-A tile4/tile8 N64 kernel for BlockM=32.
+
+Change: `gptqmodel_ext/amplin/amplin_kernel.cu`:
+- Fixed `__launch_bounds__` for `amplin_mma_lane_mN_n64_tiled_fullk_kernel` to `(BlockM / kMmaM) * NTiles * kMmaLanes`, so M=32 uses 2 warp rows (16 warps for tile4, 32 for tile8).
+- Fixed the host wrapper `amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl` `Threads` to match.
+- Added host wrappers `amplin_mma_lane_m32_n64_tile4_shared_a_cuda` and `amplin_mma_lane_m32_n64_tile8_shared_a_cuda`.
+- Added `TORCH_LIBRARY`/`TORCH_LIBRARY_IMPL` registrations in `gptqmodel_ext/amplin/amplin.cpp`.
+- Added Python wrappers and `required_ops`/`__all__` entries in `gptqmodel/utils/amplin.py`.
+- Added correctness test `test_amplin_mma_lane_m32_n64_tile4_matches_fp32_reference` in `tests/kernels/test_amplin.py` and a fixture `packed_case_n256` with N=512.
+- Added focused benchmark `scripts/benchmark_amplin_m32_tile4.py`.
+
+Correctness: `pytest -q tests/kernels/test_amplin.py`: 82 passed. Max FP16 error vs FP32 dequantized reference is ~1e-3.
+
+Focused M=32 benchmark (FP16, GPU UUID `GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2`, seed 20260724, 20 warmup, 100 iters, 5 rounds, median CUDA-event us):
+
+| model | role | K | N | splitk24 | tile4 | tile8 | marlin | fastest |
+|---|---|---|---:|---:|---:|---:|---|
+| laguna-s-2.1 | expert-down | 1024 | 3072 | 62.3 | 73.5 | 94.6 | 83.5 | splitk24 |
+| laguna-s-2.1 | kv/expert-up | 3072 | 1024 | 63.3 | 120.9 | 173.8 | 84.2 | splitk24 |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | 63.0 | 111.5 | 159.3 | 82.9 | splitk24 |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | 77.3 | 110.8 | 158.6 | 83.5 | splitk24 |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | 78.9 | 111.1 | 159.5 | 83.1 | splitk24 |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | 72.9 | 174.7 | 266.2 | 83.0 | splitk24 |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | 85.8 | 238.8 | 372.9 | 83.9 | splitk24 |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 98.7 | 302.5 | 479.7 | 83.8 | splitk24 |
+| laguna-s-2.1 | router-gate | 3072 | 256 | 62.1 | 108.4 | - | 100.8 | splitk24 |
+| glm-5.2 | q-a-proj | 6144 | 2048 | 72.3 | 172.8 | 263.6 | 83.1 | splitk24 |
+| glm-5.2 | q-b-proj | 2048 | 4096 | 62.0 | 88.2 | 120.0 | 82.7 | splitk24 |
+| glm-5.2 | q-b-proj-large | 2048 | 16384 | 79.9 | 88.9 | 120.5 | 83.6 | splitk24 |
+| glm-5.2 | kv-a-proj | 6144 | 128 | 71.7 | - | - | 140.2 | splitk24 |
+| glm-5.2 | kv-a-proj-mqa | 6144 | 576 | 72.3 | - | - | 83.0 | splitk24 |
+| glm-5.2 | kv-b-proj | 512 | 28672 | 65.2 | 62.6 | 69.5 | 83.2 | tile4 |
+| glm-5.2 | o-proj | 16384 | 6144 | 122.8 | 450.3 | 658.0 | 104.0 | splitk24 |
+| glm-5.2 | dense-up | 6144 | 12288 | 107.2 | 198.8 | 280.8 | 93.2 | splitk24 |
+| glm-5.2 | dense-down | 12288 | 6144 | 103.9 | 350.1 | 506.7 | 94.4 | splitk24 |
+| glm-5.2 | moe-up | 6144 | 2048 | 72.0 | 172.5 | 263.0 | 83.4 | splitk24 |
+| glm-5.2 | moe-down | 2048 | 6144 | 61.7 | 89.7 | 122.6 | 83.1 | splitk24 |
+| glm-5.2 | indexer-wq-b | 2048 | 4096 | 61.5 | 88.2 | 120.1 | 83.1 | splitk24 |
+| glm-5.2 | lm-head | 6144 | 154880 | 731.7 | 684.8 | - | 455.6 | tile4 |
+| kimi-k2.5 | q-a-proj | 7168 | 1536 | 78.5 | 196.7 | 300.8 | 83.6 | splitk24 |
+| kimi-k2.5 | q-b-proj | 1536 | 12288 | 64.9 | 79.5 | 105.2 | 83.0 | splitk24 |
+| kimi-k2.5 | kv-a-proj-mqa | 7168 | 576 | 76.4 | - | - | 83.4 | splitk24 |
+| kimi-k2.5 | kv-b-proj | 512 | 16384 | 62.5 | 61.8 | 66.7 | 82.4 | tile4 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 83.6 | 220.2 | 335.2 | 87.4 | splitk24 |
+| kimi-k2.5 | dense-up | 7168 | 18432 | 156.4 | 230.2 | 321.2 | 117.6 | splitk24 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 132.1 | 504.5 | 736.0 | 116.5 | splitk24 |
+| kimi-k2.5 | shared-up | 7168 | 2048 | 77.1 | 193.9 | 298.5 | 83.1 | splitk24 |
+| kimi-k2.5 | shared-down | 2048 | 7168 | 61.8 | 88.9 | 121.9 | 83.0 | splitk24 |
+| kimi-k2.5 | router-gate | 7168 | 384 | 76.8 | - | - | 108.9 | splitk24 |
+| kimi-k2.5 | lm-head | 7168 | 163840 | 901.5 | 809.7 | 912.1 | 554.1 | tile4 |
+
+Key wins at M=32:
+- `glm-5.2 kv-b-proj` 512x28672: tile4 62.6us vs Marlin 83.2us (-25%).
+- `kimi-k2.5 kv-b-proj` 512x16384: tile4 61.8us vs Marlin 82.4us (-25%).
+- `glm-5.2 lm-head` 6144x154880: tile4 685us vs splitk24 732us (-6%) but still behind Marlin 456us.
+- `kimi-k2.5 lm-head` 7168x163840: tile4 810us vs splitk24 902us (-10%) but still behind Marlin 554us.
+
+M=32 dense-up/dense-down/o-proj shapes remain fastest with `splitk24`; the M=32 large-N `lm-head` and `dense-up` gaps to Marlin are smaller than before for `lm-head` but still open.
+
+`ruff check gptqmodel/utils/amplin.py tests/kernels/test_amplin.py scripts/benchmark_amplin_m32_tile4.py`: passed.
+`git diff --check`: passed.
+
+## 2026-07-25: Comprehensive M=32 head-to-head (splitk24, coop, tile4/tile8, global_a, n32_global_a, Marlin)
+
+Updated `scripts/benchmark_amplin_m32_tile4.py` to also time `mma_lane_m32_global_a`, `mma_lane_m32_n32_global_a`, and `mma_lane_m32_n64_splitk12x2_coop_interleaved` alongside splitk24, tile4/tile8, and Marlin.
+
+FP16 results (GPU UUID `GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2`, 20 warmup, 100 iters, 5 rounds, median CUDA-event us). Only the fastest Amplin path and Marlin are shown for each shape:
+
+| model | role | K | N | fastest_amplin | us | marlin_us | result |
+|---|---|---|---:|---|---:|---:|---|
+| laguna-s-2.1 | expert-down | 1024 | 3072 | splitk24 | 64.0 | 84.1 | win |
+| laguna-s-2.1 | kv/expert-up | 3072 | 1024 | splitk24 | 63.1 | 83.9 | win |
+| laguna-s-2.1 | q-proj-6144 | 3072 | 6144 | splitk24 | 64.1 | 82.5 | win |
+| laguna-s-2.1 | q-proj-9216 | 3072 | 9216 | splitk24 | 77.8 | 82.5 | win |
+| laguna-s-2.1 | dense-up | 3072 | 12288 | splitk24 | 79.9 | 83.4 | win |
+| laguna-s-2.1 | o-proj-6144 | 6144 | 3072 | splitk24 | 74.3 | 83.7 | win |
+| laguna-s-2.1 | o-proj-9216 | 9216 | 3072 | splitk24 | 87.3 | 82.8 | loss |
+| laguna-s-2.1 | dense-down | 12288 | 3072 | splitk24 | 99.8 | 84.1 | loss |
+| laguna-s-2.1 | router-gate | 3072 | 256 | splitk24 | 64.0 | 101.5 | win |
+| glm-5.2 | q-a-proj | 6144 | 2048 | splitk24 | 73.9 | 82.6 | win |
+| glm-5.2 | q-b-proj | 2048 | 4096 | splitk24 | 62.8 | 83.9 | win |
+| glm-5.2 | q-b-proj-large | 2048 | 16384 | splitk24 | 81.5 | 84.4 | win |
+| glm-5.2 | kv-a-proj | 6144 | 128 | splitk24 | 73.2 | 141.2 | win |
+| glm-5.2 | kv-a-proj-mqa | 6144 | 576 | splitk24 | 73.7 | 85.4 | win |
+| glm-5.2 | kv-b-proj | 512 | 28672 | global_a | 64.6 | 85.1 | win |
+| glm-5.2 | o-proj | 16384 | 6144 | splitk24 | 124.8 | 105.3 | loss |
+| glm-5.2 | dense-up | 6144 | 12288 | splitk24 | 109.1 | 94.7 | loss |
+| glm-5.2 | dense-down | 12288 | 6144 | splitk24 | 106.0 | 95.5 | loss |
+| glm-5.2 | moe-up | 6144 | 2048 | splitk24 | 73.9 | 84.6 | win |
+| glm-5.2 | moe-down | 2048 | 6144 | splitk24 | 63.9 | 83.6 | win |
+| glm-5.2 | indexer-wq-b | 2048 | 4096 | splitk24 | 63.9 | 84.7 | win |
+| glm-5.2 | lm-head | 6144 | 154880 | tile4 | 690.9 | 460.6 | loss |
+| kimi-k2.5 | q-a-proj | 7168 | 1536 | splitk24 | 79.9 | 85.5 | win |
+| kimi-k2.5 | q-b-proj | 1536 | 12288 | splitk24 | 66.1 | 84.2 | win |
+| kimi-k2.5 | kv-a-proj-mqa | 7168 | 576 | splitk24 | 78.1 | 85.0 | win |
+| kimi-k2.5 | kv-b-proj | 512 | 16384 | global_a | 62.1 | 83.4 | win |
+| kimi-k2.5 | o-proj | 8192 | 7168 | splitk24 | 84.9 | 87.7 | win |
+| kimi-k2.5 | dense-up | 7168 | 18432 | splitk24 | 157.3 | 117.9 | loss |
+| kimi-k2.5 | dense-down | 18432 | 7168 | splitk24 | 133.6 | 116.7 | loss |
+| kimi-k2.5 | shared-up | 7168 | 2048 | splitk24 | 78.3 | 84.4 | win |
+| kimi-k2.5 | shared-down | 2048 | 7168 | splitk24 | 64.0 | 84.4 | win |
+| kimi-k2.5 | router-gate | 7168 | 384 | splitk24 | 78.8 | 109.9 | win |
+| kimi-k2.5 | lm-head | 7168 | 163840 | tile4 | 814.4 | 558.8 | loss |
+
+Revised M=32 status:
+- `splitk24` is the fastest Amplin path for the majority of M=32 shapes and already beats Marlin on most small/medium-N modules.
+- `m32_global_a` / `m32_n32_global_a` win the `kv-b-proj` shapes (large N, tiny K).
+- `tile4` is the fastest Amplin path for `lm-head` M=32 and is closer to Marlin than `splitk24`, but still loses.
+- Remaining Marlin wins at M=32 are concentrated in `dense-up`, `dense-down`, `lm-head`, and a few `o-proj` shapes. The `dense-up`/`dense-down` losses are the largest in absolute time and are currently best served by `splitk24`.
+- The gap on `dense-up`/`dense-down` is likely because the no-K-split shared-A tile kernels do not create enough independent warps per N tile for moderate N; a small K-split (2/4/8) shared-A N64 tile kernel for M=32 is the next candidate.
+
+`ruff check scripts/benchmark_amplin_m32_tile4.py`: passed.
+`git diff --check`: passed.
+
+## 2026-07-25: Failed attempt — M32 N64 16-warp K-split (`splitk16`)
+
+Motivated by Nsight Compute on `kimi-k2.5 dense-up` M=32 K=7168 N=18432:
+
+- `m32_n64_splitk24_pipe2_interleaved`: grid 288, block 768 threads, dynamic shared 98.30 KB, Waves/SM 2.32, Memory Throughput 50.53%, Compute 36.93%, Duration 135.4 us.
+- NCU estimates a 33% tail-wave cost and notes low compute/memory utilization (latency-bound), suggesting occupancy is the bottleneck.
+
+A 16-warp variant (`splitk16`) was prototyped to reduce shared memory from 96 KB to 64 KB and target 2 blocks/SM occupancy. It compiled, passed `test_amplin_mma_lane_m32_n64_splitk16_matches_fp32_reference`, and was benchmarked, but it is slower than `splitk24` on nearly all shapes:
+
+| model | role | K | N | splitk24_us | splitk16_us | marlin_us |
+|---|---|---|---:|---:|---:|---:|
+| laguna-s-2.1 | dense-down | 12288 | 3072 | 98.9 | 151.9 | 84.0 |
+| glm-5.2 | o-proj | 16384 | 6144 | 123.2 | 236.3 | 104.2 |
+| glm-5.2 | dense-up | 6144 | 12288 | 107.4 | 163.2 | 93.5 |
+| glm-5.2 | lm-head | 6144 | 154880 | 731.3 | 1398.7 | 461.1 |
+| kimi-k2.5 | o-proj | 8192 | 7168 | 84.3 | 140.8 | 86.9 |
+| kimi-k2.5 | dense-up | 7168 | 18432 | 155.9 | 272.1 | 117.0 |
+| kimi-k2.5 | dense-down | 18432 | 7168 | 132.8 | 265.3 | 116.1 |
+| kimi-k2.5 | lm-head | 7168 | 163840 | 902.5 | 1705.7 | 555.9 |
+
+The prototype was reverted. Losing K-split warp count (24 -> 16) reduced memory-level parallelism enough to outweigh the occupancy gain. The next candidate is to keep 24 K-split warps but reduce shared memory via a tree reduction, or to profile Marlin's scheduling for `dense-up` to identify a different high-level schedule.
+
+`ruff check gptqmodel/utils/amplin.py tests/kernels/test_amplin.py scripts/benchmark_amplin_m32_tile4.py`: passed.
+`git diff --check`: passed.
+
+## 2026-07-25: Failed attempt — Marlin-style M32 N64 2-tile A-reuse K-split24
+
+Marlin profiles on `kimi-k2.5 dense-up` (M=32 K=7168 N=18432, 72.77 us, grid 124x128, 167 KB shared, 4 pipeline stages) show it uses a single wave of small blocks that each process a large contiguous N chunk and amortize A loads. Hypothesis: keep Amplin's 24 K-split warps but process 2 contiguous N64 tiles per block, loading A once per K step and reusing it across tiles.
+
+Prototype `m32_n64_splitk24_2tile_pipe2_interleaved` was added to `gptqmodel_ext/amplin/amplin_kernel.cu`, registered in `amplin.cpp`/`amplin.py`, tested in `test_amplin.py`, and benchmarked in `scripts/benchmark_amplin_m32_tile4.py`. It compiled and passed correctness (`84 passed` in `tests/kernels/test_amplin.py`, `ruff` and `git diff --check` clean). Timing (FP16, cuda:0, 100 iters x 5 rounds) on Kimi K2.5 M=32 shapes:
+
+| role | K | N | splitk24_us | splitk24_2tile_us | marlin_us |
+|---|---|---:|---:|---:|---:|
+| q-a-proj | 7168 | 1536 | 84.7 | 226.4 | 85.6 |
+| q-b-proj | 1536 | 12288 | 65.1 | 104.1 | 84.8 |
+| kv-b-proj | 512 | 16384 | 64.4 | 89.9 | 84.3 |
+| o-proj | 8192 | 7168 | 85.2 | 275.8 | 88.0 |
+| dense-up | 7168 | 18432 | 157.3 | 549.2 | 117.4 |
+| dense-down | 18432 | 7168 | 133.4 | 545.4 | 117.3 |
+| shared-up | 7168 | 2048 | 77.3 | 198.8 | 83.5 |
+| shared-down | 2048 | 7168 | 63.6 | 108.1 | 85.6 |
+| router-gate | 7168 | 384 | 78.3 | 200.1 | 109.2 |
+| lm-head | 7168 | 163840 | 903.0 | 3631.0 | 556.5 |
+
+The 2-tile kernel is 1.5–4× slower than the single-tile `splitk24` and never beats Marlin. The likely causes are extra register pressure from `tile_accumulators[2][8]`, per-tile `__syncthreads` serialization, and a 50% smaller grid that under-utilizes memory-level parallelism. A-reuse is not the binding bottleneck; the `m32_splitk24` kernel is already latency-bound, not A-bandwidth-bound.
+
+This prototype was not committed. The remaining M32 large-N gap requires a different schedule: smaller blocks (4–8 warps), a 2–4 stage `cp.async` pipeline for A/B, and a larger contiguous N chunk per CTA, i.e. a Marlin-style micro-kernel rather than incremental tuning of the 24-warp lane-MMA design.

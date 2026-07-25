@@ -576,20 +576,21 @@ __device__ __forceinline__ void store_mma_fragment_guard_m(
     int size_m,
     int size_n,
     int column_base,
-    int lane) {
+    int lane,
+    int row_base = 0) {
   const int quad = lane >> 2;
   const int thread_in_quad = lane & 3;
   const int column = column_base + thread_in_quad * 2;
-  if (quad < size_m) {
-    output[static_cast<int64_t>(quad) * size_n + column] =
+  if (row_base + quad < size_m) {
+    output[static_cast<int64_t>(row_base + quad) * size_n + column] =
         ScalarTraits<Scalar>::from_float(fragment.values[0]);
-    output[static_cast<int64_t>(quad) * size_n + column + 1] =
+    output[static_cast<int64_t>(row_base + quad) * size_n + column + 1] =
         ScalarTraits<Scalar>::from_float(fragment.values[1]);
   }
-  if (quad + 8 < size_m) {
-    output[static_cast<int64_t>(quad + 8) * size_n + column] =
+  if (row_base + quad + 8 < size_m) {
+    output[static_cast<int64_t>(row_base + quad + 8) * size_n + column] =
         ScalarTraits<Scalar>::from_float(fragment.values[2]);
-    output[static_cast<int64_t>(quad + 8) * size_n + column + 1] =
+    output[static_cast<int64_t>(row_base + quad + 8) * size_n + column + 1] =
         ScalarTraits<Scalar>::from_float(fragment.values[3]);
   }
 }
@@ -742,6 +743,575 @@ __global__ __launch_bounds__(kHmmaReuseThreads) void amplin_mma_lane_m64_kernel(
       global_m + warp_m + kMmaM,
       global_n + kMmaN,
       lane);
+}
+
+template <typename Scalar, int BlockM>
+__global__ __launch_bounds__((BlockM / kMmaM) * ((BlockM == kMmaM) ? 10 : 5) * 2 * kMmaLanes)
+void amplin_mma_lane_mN_n64_shared_a_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  constexpr int MWarpGroups = BlockM / kMmaM;
+  // Tune K-split so the combined shared-A + partials scratch fits in the
+  // 96 KB opt-in limit on sm_80.  With NWarp==2 each warp owns two N16 tiles.
+  constexpr int KSplit = (BlockM == kMmaM) ? 10 : 5;
+  constexpr int NWarp = 2;
+  constexpr int FragmentsPerWarp = NWarp * 2;
+  constexpr int TotalWarps = MWarpGroups * KSplit * NWarp;
+  constexpr int Threads = TotalWarps * kMmaLanes;
+  constexpr int ACopies = KSplit * BlockM * kHmmaBlockK / kScalarsPerCpAsync;
+  constexpr int FragmentsPerBlock = MWarpGroups * kMmaLaneSplitKN64Fragments;
+  // Shared memory is allocated dynamically at launch so the combined
+  // shared-A + partials scratch can exceed the default 48 KB limit.
+  // Use a non-template byte array for the extern shared declaration so
+  // the same symbol is not redefined with a different type per Scalar
+  // instantiation.
+  constexpr int SharedAElements = KSplit * BlockM * kHmmaBlockK;
+  constexpr size_t SharedABytes = SharedAElements * sizeof(uint16_t);
+  extern __shared__ __align__(32) unsigned char shared_memory[];
+  Scalar* const shared_a = reinterpret_cast<Scalar*>(shared_memory);
+  float* const partials =
+      reinterpret_cast<float*>(shared_memory + SharedABytes);
+
+  const int thread = threadIdx.x;
+  const int lane = thread & 31;
+  const int warp = thread >> 5;
+  const int m_group = warp / (KSplit * NWarp);
+  const int k_warp = (warp / NWarp) % KSplit;
+  const int warp_n = warp % NWarp;
+  const int warp_m = m_group * kMmaM;
+  const int word_base = warp_n * NWarp;
+  const int quad = lane >> 2;
+  const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
+  const int address_column = (lane >> 4) * 8;
+  const int tile_m = static_cast<int>(blockIdx.y);
+  const int tile_n = static_cast<int>(blockIdx.x);
+  const int global_m_base = tile_m * BlockM;
+
+  MmaFragmentC accumulators[FragmentsPerWarp] = {};
+
+  const int copies_per_k = BlockM * kHmmaBlockK / kScalarsPerCpAsync;
+  for (int group_base = 0; group_base < num_groups; group_base += KSplit) {
+    for (
+        int copy_index = thread;
+        copy_index < ACopies;
+        copy_index += Threads) {
+      const int k_copy = copy_index / copies_per_k;
+      const int copy_in_k = copy_index - k_copy * copies_per_k;
+      const int row = copy_in_k / (kHmmaBlockK / kScalarsPerCpAsync);
+      const int row_copy =
+          copy_in_k - row * (kHmmaBlockK / kScalarsPerCpAsync);
+      const int group_k = row_copy * kScalarsPerCpAsync;
+      const int source_m = global_m_base + row;
+      const int group = group_base + k_copy;
+      Scalar* const shared_a_tile =
+          shared_a + k_copy * BlockM * kHmmaBlockK + row * kHmmaBlockK + group_k;
+      if (group < num_groups && source_m < size_m) {
+        cp_async_16(
+            shared_a_tile,
+            input +
+                static_cast<int64_t>(source_m) * size_k +
+                group * kHmmaBlockK +
+                group_k);
+      } else {
+        *reinterpret_cast<int4*>(shared_a_tile) = make_int4(0, 0, 0, 0);
+      }
+    }
+    cp_async_commit_group();
+    cp_async_wait_all();
+    __syncthreads();
+
+    const int group = group_base + k_warp;
+    if (group < num_groups) {
+      const int64_t scale_offset =
+          (static_cast<int64_t>(tile_n) * num_groups + group) * kHmmaBlockN;
+      Scalar scales[FragmentsPerWarp];
+#pragma unroll
+      for (int s = 0; s < FragmentsPerWarp; ++s) {
+        const int fragment = (word_base * 2) + s;
+        scales[s] = packed_scales[scale_offset + fragment * kMmaN + quad];
+      }
+
+      const Scalar* const shared_a_slice =
+          shared_a + k_warp * BlockM * kHmmaBlockK;
+
+#pragma unroll
+      for (int k_step = 0; k_step < kHmmaBlockK / kMmaK; ++k_step) {
+        const int64_t word_offset =
+            (((static_cast<int64_t>(tile_n) * num_groups + group) *
+                  (kHmmaBlockK / kMmaK) +
+              k_step) *
+                 kMmaLanes +
+             lane) *
+                kHmmaWarps;
+        const uint4 packed_words =
+            *reinterpret_cast<const uint4*>(packed_lane_qweight + word_offset);
+        const uint32_t words[4] = {
+            packed_words.x,
+            packed_words.y,
+            packed_words.z,
+            packed_words.w,
+        };
+
+        MmaFragmentA fragment_a;
+        const int group_k = k_step * kMmaK + address_column;
+        load_mma_fragment_a(
+            fragment_a,
+            shared_a_slice +
+                (warp_m + address_row) * kHmmaBlockK +
+                group_k);
+
+#pragma unroll
+        for (int i = 0; i < NWarp; ++i) {
+          const uint32_t packed_word = words[word_base + i];
+          MmaFragmentB fragment_b_0;
+          MmaFragmentB fragment_b_1;
+          MmaLaneDequant<Scalar>::run(
+              packed_word,
+              scales[i * 2],
+              fragment_b_0);
+          MmaLaneDequant<Scalar>::run(
+              packed_word >> 8,
+              scales[i * 2 + 1],
+              fragment_b_1);
+          MmaInstruction<Scalar>::run(
+              fragment_a,
+              fragment_b_0,
+              accumulators[i * 2]);
+          MmaInstruction<Scalar>::run(
+              fragment_a,
+              fragment_b_1,
+              accumulators[i * 2 + 1]);
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  // Write per-K-slice partials to shared memory, then reduce across K-splits.
+#pragma unroll
+  for (int i = 0; i < FragmentsPerWarp; ++i) {
+#pragma unroll
+    for (int value = 0; value < kMmaLaneAccumulatorValues; ++value) {
+      partials[
+          ((warp * FragmentsPerWarp + i) * kMmaLanes + lane) *
+              kMmaLaneAccumulatorValues +
+          value] = accumulators[i].values[value];
+    }
+  }
+  __syncthreads();
+
+  for (int frag = warp; frag < FragmentsPerBlock; frag += TotalWarps) {
+    const int frag_m_group = frag / kMmaLaneSplitKN64Fragments;
+    const int local_frag = frag % kMmaLaneSplitKN64Fragments;
+    const int word = local_frag / 2;
+    const int scale = local_frag & 1;
+    const int row_base = global_m_base + frag_m_group * kMmaM;
+
+    const int warp_n_reduce = word / NWarp;
+    const int word_in_warp = word % NWarp;
+
+    MmaFragmentC reduced = {};
+#pragma unroll
+    for (int k = 0; k < KSplit; ++k) {
+      // Warps are laid out as m_group * (KSplit * NWarp) + k_warp * NWarp + warp_n.
+      const int partial_warp =
+          frag_m_group * KSplit * NWarp + k * NWarp + warp_n_reduce;
+      const int partial_index =
+          ((partial_warp * FragmentsPerWarp + word_in_warp * 2 + scale) *
+               kMmaLanes +
+           lane) *
+          kMmaLaneAccumulatorValues;
+#pragma unroll
+      for (int value = 0; value < kMmaLaneAccumulatorValues; ++value) {
+        reduced.values[value] += partials[partial_index + value];
+      }
+    }
+
+    const int column =
+        tile_n * kHmmaBlockN + word * kMmaLaneTileN + scale * kMmaN;
+    store_mma_fragment_guard_m(
+        reduced,
+        output,
+        size_m,
+        size_n,
+        column,
+        lane,
+        row_base);
+  }
+}
+
+template <typename Scalar, int BlockM, int NTiles>
+__global__ __launch_bounds__((BlockM / kMmaM) * NTiles * kMmaLanes, 1)
+void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  constexpr int kSteps = kHmmaBlockK / kMmaK;
+  constexpr int kThreads = NTiles * kMmaLanes;
+  constexpr int MWarpGroups = BlockM / kMmaM;
+
+  __shared__ __align__(32) Scalar shared_a[BlockM * kHmmaBlockK];
+
+  const int thread = threadIdx.x;
+  const int lane = thread & (kMmaLanes - 1);
+  const int warp = thread / kMmaLanes;
+  const int quad = lane >> 2;
+
+  const int tile_m = static_cast<int>(blockIdx.y);
+  const int base_tile_n = static_cast<int>(blockIdx.x) * NTiles;
+  const int global_m_base = tile_m * BlockM;
+
+  const int m_group = warp / NTiles;
+  const int tile_idx = warp - m_group * NTiles;
+  const int tile_n = base_tile_n + tile_idx;
+  const int global_n = tile_n * kHmmaBlockN;
+  const int row_base = global_m_base + m_group * kMmaM;
+  const int m_rows = (row_base < size_m) ? min(kMmaM, size_m - row_base) : 0;
+
+  const bool valid_tile = (global_n < size_n);
+
+  const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
+  const int address_column = (lane >> 4) * 8;
+  Scalar* const shared_a_m_base = shared_a + m_group * kMmaM * kHmmaBlockK;
+
+  MmaFragmentC accumulators[kMmaLaneSplitKN64Fragments] = {};
+
+  for (int group = 0; group < num_groups; ++group) {
+    const int a_elements = BlockM * kHmmaBlockK;
+    for (int idx = thread;
+         idx < a_elements / kScalarsPerCpAsync;
+         idx += kThreads) {
+      const int flat = idx * kScalarsPerCpAsync;
+      const int row = flat / kHmmaBlockK;
+      const int col = flat - row * kHmmaBlockK;
+      const int source_m = global_m_base + row;
+      Scalar* const shared_dest = shared_a + row * kHmmaBlockK + col;
+      if (source_m < size_m && col + kScalarsPerCpAsync <= kHmmaBlockK) {
+        cp_async_16(
+            shared_dest,
+            input +
+                static_cast<int64_t>(source_m) * size_k +
+                group * kHmmaBlockK +
+                col);
+      } else {
+        *reinterpret_cast<uint4*>(shared_dest) = make_uint4(0u, 0u, 0u, 0u);
+      }
+    }
+    cp_async_commit_group();
+    cp_async_wait_all();
+    __syncthreads();
+
+    if (valid_tile && m_rows > 0) {
+      const int64_t scale_offset =
+          (static_cast<int64_t>(tile_n) * num_groups + group) * kHmmaBlockN;
+      Scalar scales[kMmaLaneSplitKN64Fragments];
+#pragma unroll
+      for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+        scales[fragment] =
+            packed_scales[scale_offset + fragment * kMmaN + quad];
+      }
+
+      const int64_t group_word_base =
+          (((static_cast<int64_t>(tile_n) * num_groups + group) *
+                kSteps *
+                kMmaLanes +
+            lane) *
+           kHmmaWarps);
+
+      MmaFragmentA fragment_a;
+      load_mma_fragment_a(
+          fragment_a,
+          shared_a_m_base + address_row * kHmmaBlockK + address_column);
+      uint4 packed_words =
+          *reinterpret_cast<const uint4*>(packed_lane_qweight + group_word_base);
+
+#pragma unroll
+      for (int k_step = 0; k_step < kSteps; ++k_step) {
+        MmaFragmentA next_fragment_a;
+        uint4 next_packed_words = {};
+        if (k_step + 1 < kSteps) {
+          load_mma_fragment_a(
+              next_fragment_a,
+              shared_a_m_base +
+                  address_row * kHmmaBlockK +
+                  (k_step + 1) * kMmaK +
+                  address_column);
+          const int64_t next_word_offset =
+              group_word_base +
+              static_cast<int64_t>(k_step + 1) * kMmaLanes * kHmmaWarps;
+          next_packed_words =
+              *reinterpret_cast<const uint4*>(
+                  packed_lane_qweight + next_word_offset);
+        }
+
+        const uint32_t words[kHmmaWarps] = {
+            packed_words.x,
+            packed_words.y,
+            packed_words.z,
+            packed_words.w,
+        };
+#pragma unroll
+        for (int word = 0; word < kHmmaWarps; ++word) {
+          MmaFragmentB fragment_b_0;
+          MmaFragmentB fragment_b_1;
+          MmaLaneDequant<Scalar>::run(
+              words[word],
+              scales[word * 2],
+              fragment_b_0);
+          MmaLaneDequant<Scalar>::run(
+              words[word] >> 8,
+              scales[word * 2 + 1],
+              fragment_b_1);
+          MmaInstruction<Scalar>::run(
+              fragment_a,
+              fragment_b_0,
+              accumulators[word * 2]);
+          MmaInstruction<Scalar>::run(
+              fragment_a,
+              fragment_b_1,
+              accumulators[word * 2 + 1]);
+        }
+
+        if (k_step + 1 < kSteps) {
+          fragment_a = next_fragment_a;
+          packed_words = next_packed_words;
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  if (valid_tile && m_rows > 0) {
+#pragma unroll
+    for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+      store_mma_fragment_guard_m(
+          accumulators[fragment],
+          output,
+          size_m,
+          size_n,
+          global_n + fragment * kMmaN,
+          lane,
+          row_base);
+    }
+  }
+}
+
+template <typename Scalar, int BlockM, int NTiles, int KSplit>
+__global__ __launch_bounds__(((BlockM / kMmaM) * NTiles * KSplit * kMmaLanes), 1)
+void amplin_mma_lane_mN_n64_tiled_splitk_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  constexpr int kSteps = kHmmaBlockK / kMmaK;
+  constexpr int MWarpGroups = BlockM / kMmaM;
+  constexpr int kThreads = MWarpGroups * NTiles * KSplit * kMmaLanes;
+
+  constexpr int AElements = KSplit * BlockM * kHmmaBlockK;
+  constexpr int PartialsElements =
+      kThreads / kMmaLanes * kMmaLaneSplitKN64Fragments * kMmaLanes *
+      kMmaLaneAccumulatorValues;
+  extern __shared__ __align__(32) unsigned char shared_memory[];
+  Scalar* const shared_a = reinterpret_cast<Scalar*>(shared_memory);
+  float* const partials =
+      reinterpret_cast<float*>(shared_memory + AElements * sizeof(Scalar));
+
+  const int thread = threadIdx.x;
+  const int lane = thread & (kMmaLanes - 1);
+  const int warp = thread / kMmaLanes;
+  const int quad = lane >> 2;
+
+  const int tile_m = static_cast<int>(blockIdx.y);
+  const int base_tile_n = static_cast<int>(blockIdx.x) * NTiles;
+  const int global_m_base = tile_m * BlockM;
+
+  const int warps_per_m_group = NTiles * KSplit;
+  const int m_group = warp / warps_per_m_group;
+  const int sub_warp = warp - m_group * warps_per_m_group;
+  const int tile_idx = sub_warp % NTiles;
+  const int k_warp = sub_warp / NTiles;
+  const int tile_n = base_tile_n + tile_idx;
+  const int global_n = tile_n * kHmmaBlockN;
+  const int row_base = global_m_base + m_group * kMmaM;
+  const int m_rows = (row_base < size_m) ? min(kMmaM, size_m - row_base) : 0;
+
+  const bool valid_tile = (global_n < size_n);
+
+  const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
+  const int address_column = (lane >> 4) * 8;
+  Scalar* const shared_a_m_base =
+      shared_a + k_warp * BlockM * kHmmaBlockK + m_group * kMmaM * kHmmaBlockK;
+
+  MmaFragmentC accumulators[kMmaLaneSplitKN64Fragments] = {};
+
+  for (int group_base = 0; group_base < num_groups; group_base += KSplit) {
+    for (int idx = thread;
+         idx < AElements / kScalarsPerCpAsync;
+         idx += kThreads) {
+      const int flat = idx * kScalarsPerCpAsync;
+      const int k_group = flat / (BlockM * kHmmaBlockK);
+      const int rem = flat - k_group * BlockM * kHmmaBlockK;
+      const int row = rem / kHmmaBlockK;
+      const int col = rem - row * kHmmaBlockK;
+      const int source_m = global_m_base + row;
+      const int group = group_base + k_group;
+      Scalar* const shared_dest =
+          shared_a + k_group * BlockM * kHmmaBlockK + row * kHmmaBlockK + col;
+      if (source_m < size_m && group < num_groups &&
+          col + kScalarsPerCpAsync <= kHmmaBlockK) {
+        cp_async_16(
+            shared_dest,
+            input +
+                static_cast<int64_t>(source_m) * size_k +
+                group * kHmmaBlockK +
+                col);
+      } else {
+        *reinterpret_cast<uint4*>(shared_dest) = make_uint4(0u, 0u, 0u, 0u);
+      }
+    }
+    cp_async_commit_group();
+    cp_async_wait_all();
+    __syncthreads();
+
+    const int group = group_base + k_warp;
+    if (valid_tile && m_rows > 0 && group < num_groups) {
+      const int64_t scale_offset =
+          (static_cast<int64_t>(tile_n) * num_groups + group) * kHmmaBlockN;
+      Scalar scales[kMmaLaneSplitKN64Fragments];
+#pragma unroll
+      for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+        scales[fragment] =
+            packed_scales[scale_offset + fragment * kMmaN + quad];
+      }
+
+      const int64_t group_word_base =
+          (((static_cast<int64_t>(tile_n) * num_groups + group) *
+                kSteps *
+                kMmaLanes +
+            lane) *
+           kHmmaWarps);
+
+      MmaFragmentA fragment_a;
+      load_mma_fragment_a(
+          fragment_a,
+          shared_a_m_base + address_row * kHmmaBlockK + address_column);
+      uint4 packed_words =
+          *reinterpret_cast<const uint4*>(packed_lane_qweight + group_word_base);
+
+#pragma unroll
+      for (int k_step = 0; k_step < kSteps; ++k_step) {
+        MmaFragmentA next_fragment_a;
+        uint4 next_packed_words = {};
+        if (k_step + 1 < kSteps) {
+          load_mma_fragment_a(
+              next_fragment_a,
+              shared_a_m_base +
+                  address_row * kHmmaBlockK +
+                  (k_step + 1) * kMmaK +
+                  address_column);
+          const int64_t next_word_offset =
+              group_word_base +
+              static_cast<int64_t>(k_step + 1) * kMmaLanes * kHmmaWarps;
+          next_packed_words =
+              *reinterpret_cast<const uint4*>(
+                  packed_lane_qweight + next_word_offset);
+        }
+
+        const uint32_t words[kHmmaWarps] = {
+            packed_words.x,
+            packed_words.y,
+            packed_words.z,
+            packed_words.w,
+        };
+#pragma unroll
+        for (int word = 0; word < kHmmaWarps; ++word) {
+          MmaFragmentB fragment_b_0;
+          MmaFragmentB fragment_b_1;
+          MmaLaneDequant<Scalar>::run(
+              words[word],
+              scales[word * 2],
+              fragment_b_0);
+          MmaLaneDequant<Scalar>::run(
+              words[word] >> 8,
+              scales[word * 2 + 1],
+              fragment_b_1);
+          MmaInstruction<Scalar>::run(
+              fragment_a,
+              fragment_b_0,
+              accumulators[word * 2]);
+          MmaInstruction<Scalar>::run(
+              fragment_a,
+              fragment_b_1,
+              accumulators[word * 2 + 1]);
+        }
+
+        if (k_step + 1 < kSteps) {
+          fragment_a = next_fragment_a;
+          packed_words = next_packed_words;
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  // Write per-K-split partials to shared memory.
+  const int partial_base =
+      ((warp * kMmaLaneSplitKN64Fragments) * kMmaLanes + lane) *
+      kMmaLaneAccumulatorValues;
+#pragma unroll
+  for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+    const int partial_index = partial_base + fragment * kMmaLanes * kMmaLaneAccumulatorValues;
+#pragma unroll
+    for (int value = 0; value < kMmaLaneAccumulatorValues; ++value) {
+      partials[partial_index + value] = accumulators[fragment].values[value];
+    }
+  }
+  __syncthreads();
+
+  // Each warp reduces its assigned fragments across the K-split warps for the
+  // same N tile and M group, then stores them.
+  if (valid_tile && m_rows > 0) {
+    for (int fragment = k_warp;
+         fragment < kMmaLaneSplitKN64Fragments;
+         fragment += KSplit) {
+      MmaFragmentC reduced = {};
+      for (int k = 0; k < KSplit; ++k) {
+        const int partial_warp =
+            m_group * warps_per_m_group + k * NTiles + tile_idx;
+        const int read_index =
+            ((partial_warp * kMmaLaneSplitKN64Fragments + fragment) * kMmaLanes +
+             lane) *
+            kMmaLaneAccumulatorValues;
+#pragma unroll
+        for (int value = 0; value < kMmaLaneAccumulatorValues; ++value) {
+          reduced.values[value] += partials[read_index + value];
+        }
+      }
+      store_mma_fragment_guard_m(
+          reduced,
+          output,
+          size_m,
+          size_n,
+          global_n + fragment * kMmaN,
+          lane,
+          row_base);
+    }
+  }
 }
 
 template <typename Scalar>
@@ -1790,6 +2360,203 @@ __device__ __forceinline__ void amplin_mma_lane_m16_n64_splitk24_pipe2_interleav
 }
 
 template <typename Scalar>
+__device__ __forceinline__ void amplin_mma_lane_mN_n64_splitk24_pipe2_interleaved_body(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups,
+    float* __restrict__ partials,
+    int block_m) {
+  constexpr int kWarpsTotal = kMmaLaneSplitK24Warps;
+  const int lane = threadIdx.x & (kMmaLanes - 1);
+  const int warp = threadIdx.x / kMmaLanes;
+  const int quad = lane >> 2;
+  const int tile_n = static_cast<int>(blockIdx.x);
+  const int global_n = tile_n * kHmmaBlockN;
+
+  const int m_warp_groups = block_m / kMmaM;
+  const int warps_per_m_group = kWarpsTotal / m_warp_groups;
+  const int m_group = warp / warps_per_m_group;
+  const int local_warp = warp - m_group * warps_per_m_group;
+  const int row_base = m_group * kMmaM;
+  const int m_rows =
+      (row_base < size_m) ? min(kMmaM, size_m - row_base) : 0;
+  const Scalar* const input_m = input + static_cast<int64_t>(row_base) * size_k;
+
+  MmaFragmentC accumulators[kMmaLaneSplitKN64Fragments] = {};
+  constexpr int kSteps = kHmmaBlockK / kMmaK;
+
+  for (int group = local_warp;
+       group < num_groups;
+       group += warps_per_m_group) {
+    const int64_t scale_offset =
+        (static_cast<int64_t>(tile_n) * num_groups + group) *
+        kHmmaBlockN;
+    Scalar scales[kMmaLaneSplitKN64Fragments];
+#pragma unroll
+    for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+      scales[fragment] =
+          packed_scales[scale_offset + fragment * kMmaN + quad];
+    }
+
+    const int64_t group_word_base =
+        (((static_cast<int64_t>(tile_n) * num_groups + group) *
+              kSteps *
+              kMmaLanes +
+          lane) *
+         kHmmaWarps);
+    MmaFragmentA fragment_a;
+    load_mma_fragment_a_global_guard_m(
+        fragment_a,
+        input_m,
+        m_rows,
+        size_k,
+        group * kHmmaBlockK,
+        lane);
+    uint4 packed_words =
+        *reinterpret_cast<const uint4*>(
+            packed_lane_qweight + group_word_base);
+
+#pragma unroll
+    for (int k_step = 0; k_step < kSteps; ++k_step) {
+      MmaFragmentA next_fragment_a;
+      uint4 next_packed_words = {};
+      if (k_step + 1 < kSteps) {
+        const int next_k_step = k_step + 1;
+        load_mma_fragment_a_global_guard_m(
+            next_fragment_a,
+            input_m,
+            m_rows,
+            size_k,
+            group * kHmmaBlockK + next_k_step * kMmaK,
+            lane);
+        const int64_t next_word_offset =
+            group_word_base +
+            static_cast<int64_t>(next_k_step) *
+                kMmaLanes *
+                kHmmaWarps;
+        next_packed_words =
+            *reinterpret_cast<const uint4*>(
+                packed_lane_qweight + next_word_offset);
+      }
+
+      const uint32_t words[kHmmaWarps] = {
+          packed_words.x,
+          packed_words.y,
+          packed_words.z,
+          packed_words.w,
+      };
+      MmaFragmentB fragment_b;
+#pragma unroll
+      for (int word = 0; word < kHmmaWarps; ++word) {
+        MmaLaneDequant<Scalar>::run(
+            words[word],
+            scales[word * 2],
+            fragment_b);
+        MmaInstruction<Scalar>::run(
+            fragment_a,
+            fragment_b,
+            accumulators[word * 2]);
+        MmaLaneDequant<Scalar>::run(
+            words[word] >> 8,
+            scales[word * 2 + 1],
+            fragment_b);
+        MmaInstruction<Scalar>::run(
+            fragment_a,
+            fragment_b,
+            accumulators[word * 2 + 1]);
+      }
+
+      if (k_step + 1 < kSteps) {
+        fragment_a = next_fragment_a;
+        packed_words = next_packed_words;
+      }
+    }
+  }
+
+  const int warp_partial_base =
+      warp *
+      kMmaLaneSplitKN64Fragments *
+      kMmaLanes *
+      kMmaLaneAccumulatorValues;
+  const int lane_partial_base = lane * kMmaLaneAccumulatorValues;
+#pragma unroll
+  for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+#pragma unroll
+    for (int value = 0; value < kMmaLaneAccumulatorValues; ++value) {
+      partials[
+          warp_partial_base +
+          fragment * kMmaLanes * kMmaLaneAccumulatorValues +
+          lane_partial_base +
+          value] = accumulators[fragment].values[value];
+    }
+  }
+  __syncthreads();
+
+  if (warp < m_warp_groups * kMmaLaneSplitKN64Fragments) {
+    const int m_group_reduce = warp / kMmaLaneSplitKN64Fragments;
+    const int fragment = warp % kMmaLaneSplitKN64Fragments;
+    const int partial_warp_base = m_group_reduce * warps_per_m_group;
+    MmaFragmentC reduced = {};
+#pragma unroll
+    for (int partial_warp = 0;
+         partial_warp < warps_per_m_group;
+         ++partial_warp) {
+      const int partial_warp_idx = partial_warp_base + partial_warp;
+      const int partial_base =
+          partial_warp_idx *
+              kMmaLaneSplitKN64Fragments *
+              kMmaLanes *
+              kMmaLaneAccumulatorValues +
+          fragment * kMmaLanes * kMmaLaneAccumulatorValues;
+#pragma unroll
+      for (int value = 0; value < kMmaLaneAccumulatorValues; ++value) {
+        reduced.values[value] +=
+            partials[partial_base + lane_partial_base + value];
+      }
+    }
+    const int store_row_base = m_group_reduce * kMmaM;
+    store_mma_fragment_guard_m(
+        reduced,
+        output,
+        size_m,
+        size_n,
+        global_n + fragment * kMmaN,
+        lane,
+        store_row_base);
+  }
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__(kMmaLaneSplitK24Threads, 1)
+void amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  extern __shared__ float partials[];
+  amplin_mma_lane_mN_n64_splitk24_pipe2_interleaved_body(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      num_groups,
+      partials,
+      kMmaLaneM32BlockM);
+}
+
+template <typename Scalar>
 __global__ __launch_bounds__(kMmaLaneSplitK12Threads)
 void amplin_mma_lane_m16_n64_splitk12x2_coop_interleaved_kernel(
     const Scalar* __restrict__ input,
@@ -1975,6 +2742,241 @@ void amplin_mma_lane_m16_n64_splitk12x2_coop_interleaved_kernel(
           scratch[index] + scratch[plane_stride + index]);
       output[index + 1] = ScalarTraits<Scalar>::from_float(
           scratch[index + 1] + scratch[plane_stride + index + 1]);
+    }
+  }
+}
+
+template <typename Scalar, int BlockM>
+__global__ __launch_bounds__(kMmaLaneSplitK12Threads)
+void amplin_mma_lane_mN_n64_splitk12x2_coop_interleaved_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    float* __restrict__ scratch,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  constexpr int MWarpGroups = BlockM / kMmaM;
+  constexpr int WarpsPerMGroup = kMmaLaneSplitK12Warps / MWarpGroups;
+  constexpr int TotalKSplit = kMmaLaneSplitK12Warps * 2;
+  constexpr int kSteps = kHmmaBlockK / kMmaK;
+
+  __shared__ float partials[
+      kMmaLaneSplitK12Warps *
+      kMmaLaneSplitKN64Fragments *
+      kMmaLanes *
+      kMmaLaneAccumulatorValues];
+
+  const int lane = threadIdx.x & (kMmaLanes - 1);
+  const int warp = threadIdx.x / kMmaLanes;
+  const int quad = lane >> 2;
+  const int thread_in_quad = lane & 3;
+  const int split = static_cast<int>(blockIdx.y);
+  const int m_group = warp / WarpsPerMGroup;
+  const int local_warp = warp - m_group * WarpsPerMGroup;
+  const int row_base = m_group * kMmaM;
+  const int m_rows =
+      (row_base < size_m) ? min(kMmaM, size_m - row_base) : 0;
+  const Scalar* const input_m = input + static_cast<int64_t>(row_base) * size_k;
+  const int64_t plane_stride = static_cast<int64_t>(size_m) * size_n;
+
+  MmaFragmentC accumulators[kMmaLaneSplitKN64Fragments] = {};
+
+  const int num_n_tiles = size_n / kHmmaBlockN;
+  for (int tile_n = static_cast<int>(blockIdx.x);
+       tile_n < num_n_tiles;
+       tile_n += gridDim.x) {
+    const int global_n = tile_n * kHmmaBlockN;
+
+#pragma unroll
+    for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+#pragma unroll
+      for (int value = 0; value < kMmaLaneAccumulatorValues; ++value) {
+        accumulators[fragment].values[value] = 0.0f;
+      }
+    }
+
+    const int group_start =
+        split * kMmaLaneSplitK12Warps + local_warp * MWarpGroups;
+    for (int group = group_start;
+         group < num_groups;
+         group += TotalKSplit) {
+#pragma unroll
+      for (int sub = 0; sub < MWarpGroups; ++sub) {
+        const int g = group + sub;
+        if (g >= num_groups) {
+          break;
+        }
+        const int64_t scale_offset =
+            (static_cast<int64_t>(tile_n) * num_groups + g) * kHmmaBlockN;
+        Scalar scales[kMmaLaneSplitKN64Fragments];
+#pragma unroll
+        for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+          scales[fragment] = packed_scales[scale_offset + fragment * kMmaN + quad];
+        }
+
+        const int64_t group_word_base =
+            (((static_cast<int64_t>(tile_n) * num_groups + g) *
+                  kSteps *
+                  kMmaLanes +
+              lane) *
+             kHmmaWarps);
+        MmaFragmentA fragment_a;
+        load_mma_fragment_a_global_guard_m(
+            fragment_a,
+            input_m,
+            m_rows,
+            size_k,
+            g * kHmmaBlockK,
+            lane);
+        uint4 packed_words =
+            *reinterpret_cast<const uint4*>(packed_lane_qweight + group_word_base);
+
+#pragma unroll
+        for (int k_step = 0; k_step < kSteps; ++k_step) {
+          MmaFragmentA next_fragment_a;
+          uint4 next_packed_words = {};
+          if (k_step + 1 < kSteps) {
+            const int next_k_step = k_step + 1;
+            load_mma_fragment_a_global_guard_m(
+                next_fragment_a,
+                input_m,
+                m_rows,
+                size_k,
+                g * kHmmaBlockK + next_k_step * kMmaK,
+                lane);
+            const int64_t next_word_offset =
+                group_word_base +
+                static_cast<int64_t>(next_k_step) * kMmaLanes * kHmmaWarps;
+            next_packed_words =
+                *reinterpret_cast<const uint4*>(
+                    packed_lane_qweight + next_word_offset);
+          }
+
+          const uint32_t words[kHmmaWarps] = {
+              packed_words.x,
+              packed_words.y,
+              packed_words.z,
+              packed_words.w,
+          };
+          MmaFragmentB fragment_b;
+#pragma unroll
+          for (int word = 0; word < kHmmaWarps; ++word) {
+            MmaLaneDequant<Scalar>::run(
+                words[word], scales[word * 2], fragment_b);
+            MmaInstruction<Scalar>::run(
+                fragment_a, fragment_b, accumulators[word * 2]);
+            MmaLaneDequant<Scalar>::run(
+                words[word] >> 8, scales[word * 2 + 1], fragment_b);
+            MmaInstruction<Scalar>::run(
+                fragment_a, fragment_b, accumulators[word * 2 + 1]);
+          }
+
+          if (k_step + 1 < kSteps) {
+            fragment_a = next_fragment_a;
+            packed_words = next_packed_words;
+          }
+        }
+      }
+    }
+
+    const int warp_partial_base =
+        warp *
+        kMmaLaneSplitKN64Fragments *
+        kMmaLanes *
+        kMmaLaneAccumulatorValues;
+    const int lane_partial_base = lane * kMmaLaneAccumulatorValues;
+#pragma unroll
+    for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+#pragma unroll
+      for (int value = 0; value < kMmaLaneAccumulatorValues; ++value) {
+        partials[
+            warp_partial_base +
+            fragment * kMmaLanes * kMmaLaneAccumulatorValues +
+            lane_partial_base +
+            value] = accumulators[fragment].values[value];
+      }
+    }
+    __syncthreads();
+
+    if (warp < kMmaLaneSplitKN64Fragments) {
+      const int fragment = warp;
+      MmaFragmentC reduced[MWarpGroups];
+#pragma unroll
+      for (int m_group_reduce = 0; m_group_reduce < MWarpGroups; ++m_group_reduce) {
+        reduced[m_group_reduce] = {};
+#pragma unroll
+        for (int partial_warp = 0; partial_warp < WarpsPerMGroup; ++partial_warp) {
+          const int partial_index =
+              (m_group_reduce * WarpsPerMGroup + partial_warp) *
+                  kMmaLaneSplitKN64Fragments *
+                  kMmaLanes *
+                  kMmaLaneAccumulatorValues +
+              fragment * kMmaLanes * kMmaLaneAccumulatorValues +
+              lane * kMmaLaneAccumulatorValues;
+#pragma unroll
+          for (int value = 0; value < kMmaLaneAccumulatorValues; ++value) {
+            reduced[m_group_reduce].values[value] +=
+                partials[partial_index + value];
+          }
+        }
+      }
+
+      const int column = global_n + fragment * kMmaN + thread_in_quad * 2;
+      float* split_scratch = scratch + static_cast<int64_t>(split) * plane_stride;
+#pragma unroll
+      for (int m_group_reduce = 0; m_group_reduce < MWarpGroups; ++m_group_reduce) {
+        const int rb = m_group_reduce * kMmaM;
+        const int mr = (rb < size_m) ? min(kMmaM, size_m - rb) : 0;
+        if (quad < mr) {
+          const int64_t index =
+              static_cast<int64_t>(rb + quad) * size_n + column;
+          split_scratch[index] = reduced[m_group_reduce].values[0];
+          split_scratch[index + 1] = reduced[m_group_reduce].values[1];
+        }
+        if (quad + 8 < mr) {
+          const int64_t index =
+              static_cast<int64_t>(rb + quad + 8) * size_n + column;
+          split_scratch[index] = reduced[m_group_reduce].values[2];
+          split_scratch[index + 1] = reduced[m_group_reduce].values[3];
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  cooperative_groups::this_grid().sync();
+
+  if (split == 0 && warp < kMmaLaneSplitKN64Fragments) {
+    const int fragment = warp;
+    for (int tile_n = static_cast<int>(blockIdx.x);
+         tile_n < num_n_tiles;
+         tile_n += gridDim.x) {
+      const int global_n = tile_n * kHmmaBlockN;
+      const int column = global_n + fragment * kMmaN + thread_in_quad * 2;
+#pragma unroll
+      for (int m_group_reduce = 0; m_group_reduce < MWarpGroups; ++m_group_reduce) {
+        const int rb = m_group_reduce * kMmaM;
+        const int mr = (rb < size_m) ? min(kMmaM, size_m - rb) : 0;
+        if (quad < mr) {
+          const int64_t index =
+              static_cast<int64_t>(rb + quad) * size_n + column;
+          output[index] = ScalarTraits<Scalar>::from_float(
+              scratch[index] + scratch[plane_stride + index]);
+          output[index + 1] = ScalarTraits<Scalar>::from_float(
+              scratch[index + 1] + scratch[plane_stride + index + 1]);
+        }
+        if (quad + 8 < mr) {
+          const int64_t index =
+              static_cast<int64_t>(rb + quad + 8) * size_n + column;
+          output[index] = ScalarTraits<Scalar>::from_float(
+              scratch[index] + scratch[plane_stride + index]);
+          output[index + 1] = ScalarTraits<Scalar>::from_float(
+              scratch[index + 1] + scratch[plane_stride + index + 1]);
+        }
+      }
     }
   }
 }
@@ -2218,6 +3220,63 @@ __global__ __launch_bounds__(kMmaLaneSplitK16Threads) void amplin_mma_lane_m16_n
   amplin_mma_lane_m16_n32_splitk12_body<
       Scalar,
       kMmaLaneSplitK16Warps,
+      true>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      num_groups,
+      partials);
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__(kMmaLaneSplitK8Threads) void amplin_mma_lane_m16_n32_splitk8_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  __shared__ float partials[
+      kMmaLaneSplitK8Warps *
+      kMmaLaneSplitKN32Fragments *
+      kMmaLanes *
+      kMmaLaneAccumulatorValues];
+  amplin_mma_lane_m16_n32_splitk12_body<Scalar, kMmaLaneSplitK8Warps>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      num_groups,
+      partials);
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__(kMmaLaneSplitK8Threads) void amplin_mma_lane_m16_n32_splitk8_pipe2_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  __shared__ float partials[
+      kMmaLaneSplitK8Warps *
+      kMmaLaneSplitKN32Fragments *
+      kMmaLanes *
+      kMmaLaneAccumulatorValues];
+  amplin_mma_lane_m16_n32_splitk12_body<
+      Scalar,
+      kMmaLaneSplitK8Warps,
       true>(
       input,
       packed_lane_qweight,
@@ -4019,14 +5078,14 @@ torch::Tensor amplin_mma_lane_m16_n16_cuda_impl(
       "Amplin padded-M16 input K must match packed K/128 groups");
   if constexpr (SplitKWarps != 0) {
     TORCH_CHECK(
-        size_k == kWideSizeK && num_groups % SplitKWarps == 0,
+        size_k == num_groups * kHmmaBlockK && num_groups % SplitKWarps == 0,
         "Amplin padded-M16 split-K",
         SplitKWarps,
-        " requires K=12288 and evenly divisible groups");
+        " requires K to match the packed groups and the group count to be evenly divisible by the split-K warp count");
   }
   TORCH_CHECK(
-      size_m == 2 || size_m == 4 || size_m == 8 || size_m == 16,
-      "Amplin padded-M16 flattened M must be one of 2, 4, 8, or 16");
+      size_m >= 1 && size_m <= 16,
+      "Amplin padded-M16 flattened M must be between 1 and 16");
   TORCH_CHECK(
       logical_n > 0 &&
           logical_n % (OutputN32 ? 2 * kMmaLanePaddedBlockN : kMmaLanePaddedBlockN) == 0 &&
@@ -4062,7 +5121,31 @@ torch::Tensor amplin_mma_lane_m16_n16_cuda_impl(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   if (input.scalar_type() == at::kHalf) {
     if constexpr (OutputN32) {
-      if constexpr (SplitKWarps == kMmaLaneSplitK12Warps) {
+      if constexpr (SplitKWarps == kMmaLaneSplitK8Warps) {
+        if constexpr (PipelineKSteps) {
+          amplin_mma_lane_m16_n32_splitk8_pipe2_kernel<half>
+              <<<static_cast<unsigned int>(grid_n), kMmaLaneSplitK8Threads, 0, stream>>>(
+                  reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+                  packed_lane_qweight.data_ptr<int32_t>(),
+                  reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+                  reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+                  static_cast<int>(size_m),
+                  static_cast<int>(size_k),
+                  static_cast<int>(logical_n),
+                  static_cast<int>(num_groups));
+        } else {
+          amplin_mma_lane_m16_n32_splitk8_kernel<half>
+              <<<static_cast<unsigned int>(grid_n), kMmaLaneSplitK8Threads, 0, stream>>>(
+                  reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+                  packed_lane_qweight.data_ptr<int32_t>(),
+                  reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+                  reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+                  static_cast<int>(size_m),
+                  static_cast<int>(size_k),
+                  static_cast<int>(logical_n),
+                  static_cast<int>(num_groups));
+        }
+      } else if constexpr (SplitKWarps == kMmaLaneSplitK12Warps) {
         if constexpr (PipelineKSteps) {
           if constexpr (InterleavedN32Words) {
             amplin_mma_lane_m16_n32_splitk12_pipe2_interleaved_kernel<half>
@@ -4183,7 +5266,31 @@ torch::Tensor amplin_mma_lane_m16_n16_cuda_impl(
     }
   } else {
     if constexpr (OutputN32) {
-      if constexpr (SplitKWarps == kMmaLaneSplitK12Warps) {
+      if constexpr (SplitKWarps == kMmaLaneSplitK8Warps) {
+        if constexpr (PipelineKSteps) {
+          amplin_mma_lane_m16_n32_splitk8_pipe2_kernel<__nv_bfloat16>
+              <<<static_cast<unsigned int>(grid_n), kMmaLaneSplitK8Threads, 0, stream>>>(
+                  reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+                  packed_lane_qweight.data_ptr<int32_t>(),
+                  reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+                  reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+                  static_cast<int>(size_m),
+                  static_cast<int>(size_k),
+                  static_cast<int>(logical_n),
+                  static_cast<int>(num_groups));
+        } else {
+          amplin_mma_lane_m16_n32_splitk8_kernel<__nv_bfloat16>
+              <<<static_cast<unsigned int>(grid_n), kMmaLaneSplitK8Threads, 0, stream>>>(
+                  reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+                  packed_lane_qweight.data_ptr<int32_t>(),
+                  reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+                  reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+                  static_cast<int>(size_m),
+                  static_cast<int>(size_k),
+                  static_cast<int>(logical_n),
+                  static_cast<int>(num_groups));
+        }
+      } else if constexpr (SplitKWarps == kMmaLaneSplitK12Warps) {
         if constexpr (PipelineKSteps) {
           if constexpr (InterleavedN32Words) {
             amplin_mma_lane_m16_n32_splitk12_pipe2_interleaved_kernel<__nv_bfloat16>
@@ -4371,13 +5478,11 @@ torch::Tensor amplin_mma_lane_m16_n64_splitk24_pipe2_interleaved_cuda(
   const int64_t size_k = input.size(-1);
   const int64_t size_m = input.numel() / size_k;
   TORCH_CHECK(
-      size_k == kWideSizeK &&
-          size_k == num_groups * kHmmaBlockK &&
-          num_groups % kMmaLaneSplitK24Warps == 0,
-      "Amplin N64 split-K24 requires K=12288 and evenly divisible groups");
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin N64 split-K24 requires K to match the packed groups");
   TORCH_CHECK(
-      size_m == 2 || size_m == 4 || size_m == 8 || size_m == 16,
-      "Amplin N64 split-K24 flattened M must be one of 2, 4, 8, or 16");
+      size_m >= 1 && size_m <= 16,
+      "Amplin N64 split-K24 flattened M must be between 1 and 16");
   TORCH_CHECK(
       logical_n > 0 &&
           logical_n % kHmmaBlockN == 0 &&
@@ -4431,6 +5536,146 @@ torch::Tensor amplin_mma_lane_m16_n64_splitk24_pipe2_interleaved_cuda(
     configure_amplin_mma_lane_m16_n64_splitk24_dynamic_shared<__nv_bfloat16>(
         input.get_device());
     amplin_mma_lane_m16_n64_splitk24_pipe2_interleaved_kernel<__nv_bfloat16>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK24Threads,
+           kMmaLaneSplitKN64SharedBytes,
+           stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+template <typename Scalar>
+void configure_amplin_mma_lane_m32_n64_splitk24_dynamic_shared(
+    int device_index) {
+  static thread_local int configured_device = -1;
+  if (configured_device == device_index) {
+    return;
+  }
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_kernel<Scalar>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      kMmaLaneSplitKN64SharedBytes));
+  configured_device = device_index;
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  TORCH_CHECK(input.is_cuda(), "Amplin M32 N64 split-K24 input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin M32 N64 split-K24 weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin M32 N64 split-K24 tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin M32 N64 split-K24 input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_lane_qweight.scalar_type() == at::kInt,
+      "Amplin M32 N64 split-K24 qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin M32 N64 split-K24 scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin M32 N64 split-K24 input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin M32 N64 split-K24 tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin M32 N64 split-K24 qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin M32 N64 split-K24 scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin M32 N64 split-K24 requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 17 && size_m <= 32,
+      "Amplin M32 N64 split-K24 flattened M must be between 17 and 32");
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % kHmmaBlockN == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin M32 N64 split-K24 logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin M32 N64 split-K24 tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin M32 N64 split-K24 requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+  TORCH_CHECK(
+      properties->sharedMemPerBlockOptin >= kMmaLaneSplitKN64SharedBytes,
+      "Amplin M32 N64 split-K24 requires at least ",
+      kMmaLaneSplitKN64SharedBytes,
+      " bytes of opt-in shared memory per block");
+  const int64_t grid_n = logical_n / kHmmaBlockN;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin M32 N64 split-K24 grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if (input.scalar_type() == at::kHalf) {
+    configure_amplin_mma_lane_m32_n64_splitk24_dynamic_shared<half>(
+        input.get_device());
+    amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_kernel<half>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK24Threads,
+           kMmaLaneSplitKN64SharedBytes,
+           stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    configure_amplin_mma_lane_m32_n64_splitk24_dynamic_shared<__nv_bfloat16>(
+        input.get_device());
+    amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_kernel<__nv_bfloat16>
         <<<static_cast<unsigned int>(grid_n),
            kMmaLaneSplitK24Threads,
            kMmaLaneSplitKN64SharedBytes,
@@ -4555,13 +5800,11 @@ torch::Tensor amplin_mma_lane_m16_n64_splitk12x2_coop_interleaved_cuda(
   const int64_t size_k = input.size(-1);
   const int64_t size_m = input.numel() / size_k;
   TORCH_CHECK(
-      size_k == kWideSizeK &&
-          size_k == num_groups * kHmmaBlockK &&
-          num_groups % kMmaLaneSplitK24Warps == 0,
-      "Amplin N64 split-K12x2 requires K=12288 and evenly divisible groups");
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin N64 split-K12x2 requires K to match the packed groups");
   TORCH_CHECK(
-      size_m == 2 || size_m == 4 || size_m == 8 || size_m == 16,
-      "Amplin N64 split-K12x2 flattened M must be one of 2, 4, 8, or 16");
+      size_m >= 1 && size_m <= 16,
+      "Amplin N64 split-K12x2 flattened M must be between 1 and 16");
   TORCH_CHECK(
       logical_n > 0 &&
           logical_n % kHmmaBlockN == 0 &&
@@ -4638,6 +5881,549 @@ torch::Tensor amplin_mma_lane_m16_n64_splitk12x2_coop_interleaved_cuda(
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
+}
+
+template <typename Scalar, int BlockM>
+void launch_amplin_mma_lane_mN_n64_splitk12x2_coop_interleaved(
+    const Scalar* input,
+    const int32_t* packed_lane_qweight,
+    const Scalar* packed_scales,
+    Scalar* output,
+    float* scratch,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups,
+    int sm_count,
+    cudaStream_t stream) {
+  int active_blocks_per_sm = 0;
+  cudaError_t status = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &active_blocks_per_sm,
+      amplin_mma_lane_mN_n64_splitk12x2_coop_interleaved_kernel<Scalar, BlockM>,
+      kMmaLaneSplitK12Threads,
+      0);
+  TORCH_CHECK(
+      status == cudaSuccess,
+      "Amplin M",
+      BlockM,
+      " N64 split-K12x2 cooperative failed to query occupancy: ",
+      cudaGetErrorString(status));
+  const int num_n_tiles = size_n / kHmmaBlockN;
+  const int max_grid_x = (active_blocks_per_sm * sm_count) / 2;
+  const int grid_x = max(1, min(num_n_tiles, max_grid_x));
+  TORCH_CHECK(
+      grid_x * 2 <= active_blocks_per_sm * sm_count,
+      "Amplin M",
+      BlockM,
+      " N64 split-K12x2 cooperative grid requires ",
+      grid_x * 2,
+      " resident CTAs but the selected device supports ",
+      active_blocks_per_sm * sm_count);
+
+  void* arguments[] = {
+      &input,
+      &packed_lane_qweight,
+      &packed_scales,
+      &output,
+      &scratch,
+      &size_m,
+      &size_k,
+      &size_n,
+      &num_groups,
+  };
+  status = cudaLaunchCooperativeKernel(
+      reinterpret_cast<const void*>(
+          amplin_mma_lane_mN_n64_splitk12x2_coop_interleaved_kernel<Scalar, BlockM>),
+      dim3(static_cast<unsigned int>(grid_x), 2, 1),
+      dim3(kMmaLaneSplitK12Threads),
+      arguments,
+      0,
+      stream);
+  TORCH_CHECK(
+      status == cudaSuccess,
+      "Amplin M",
+      BlockM,
+      " N64 split-K12x2 cooperative launch failed: ",
+      cudaGetErrorString(status));
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_splitk12x2_coop_interleaved_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  TORCH_CHECK(input.is_cuda(), "Amplin M32 N64 split-K12x2 input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin M32 N64 split-K12x2 weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin M32 N64 split-K12x2 tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin M32 N64 split-K12x2 input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_lane_qweight.scalar_type() == at::kInt,
+      "Amplin M32 N64 split-K12x2 qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin M32 N64 split-K12x2 scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin M32 N64 split-K12x2 input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin M32 N64 split-K12x2 tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin M32 N64 split-K12x2 qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin M32 N64 split-K12x2 scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin M32 N64 split-K12x2 requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 1 && size_m <= kMmaLaneM32BlockM,
+      "Amplin M32 N64 split-K12x2 flattened M must be between 1 and ",
+      kMmaLaneM32BlockM);
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % kHmmaBlockN == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin M32 N64 split-K12x2 logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_m <= std::numeric_limits<int>::max() &&
+          size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin M32 N64 split-K12x2 tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin M32 N64 split-K12x2 requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+  TORCH_CHECK(
+      properties->cooperativeLaunch != 0,
+      "Amplin M32 N64 split-K12x2 requires cooperative CUDA launch support");
+  TORCH_CHECK(
+      properties->sharedMemPerBlock >= kMmaLaneSplitKN64K12SharedBytes,
+      "Amplin M32 N64 split-K12x2 requires at least ",
+      kMmaLaneSplitKN64K12SharedBytes,
+      " bytes of shared memory per block");
+
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+  cudaError_t status = cudaStreamIsCapturing(stream, &capture_status);
+  TORCH_CHECK(
+      status == cudaSuccess,
+      "Amplin M32 N64 split-K12x2 failed to query CUDA graph capture state: ",
+      cudaGetErrorString(status));
+  TORCH_CHECK(
+      capture_status == cudaStreamCaptureStatusNone,
+      "Amplin M32 N64 split-K12x2 cooperative launch does not support CUDA graph capture");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  auto scratch = torch::empty(
+      {2, size_m, logical_n},
+      input.options().dtype(at::kFloat));
+
+  if (input.scalar_type() == at::kHalf) {
+    launch_amplin_mma_lane_mN_n64_splitk12x2_coop_interleaved<half, kMmaLaneM32BlockM>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        packed_lane_qweight.data_ptr<int32_t>(),
+        reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+        reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+        scratch.data_ptr<float>(),
+        static_cast<int>(size_m),
+        static_cast<int>(size_k),
+        static_cast<int>(logical_n),
+        static_cast<int>(num_groups),
+        properties->multiProcessorCount,
+        stream);
+  } else {
+    launch_amplin_mma_lane_mN_n64_splitk12x2_coop_interleaved<__nv_bfloat16, kMmaLaneM32BlockM>(
+        reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+        packed_lane_qweight.data_ptr<int32_t>(),
+        reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+        scratch.data_ptr<float>(),
+        static_cast<int>(size_m),
+        static_cast<int>(size_k),
+        static_cast<int>(logical_n),
+        static_cast<int>(num_groups),
+        properties->multiProcessorCount,
+        stream);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+template <int BlockM>
+size_t amplin_mma_lane_mN_n64_shared_a_shared_bytes() {
+  constexpr int MWarpGroups = BlockM / kMmaM;
+  constexpr int KSplit = (BlockM == kMmaM) ? 10 : 5;
+  constexpr int NWarp = 2;
+  constexpr int FragmentsPerWarp = NWarp * 2;
+  constexpr int TotalWarps = MWarpGroups * KSplit * NWarp;
+  // FP16/BF16 are both 16-bit scalars.
+  return KSplit * BlockM * kHmmaBlockK * sizeof(uint16_t) +
+      TotalWarps * FragmentsPerWarp * kMmaLanes * kMmaLaneAccumulatorValues *
+          sizeof(float);
+}
+
+template <typename Scalar, int BlockM>
+void configure_amplin_mma_lane_mN_n64_shared_a(
+    int device_index,
+    size_t shared_bytes) {
+  static thread_local int configured_device = -1;
+  if (configured_device == device_index) {
+    return;
+  }
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      amplin_mma_lane_mN_n64_shared_a_kernel<Scalar, BlockM>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(shared_bytes)));
+  configured_device = device_index;
+}
+
+template <int BlockM>
+torch::Tensor amplin_mma_lane_mN_n64_shared_a_cuda_impl(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  static_assert(BlockM == kMmaM || BlockM == kMmaLaneM32BlockM, "Amplin M N64 shared-A supports only BlockM 16 or 32");
+
+  TORCH_CHECK(input.is_cuda(), "Amplin M N64 shared-A input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin M N64 shared-A weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin M N64 shared-A tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin M N64 shared-A supports only FP16/BF16");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin M N64 shared-A scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin M N64 shared-A input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin M N64 shared-A tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin M N64 shared-A qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin M N64 shared-A scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin M N64 shared-A requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 1 && size_m <= BlockM,
+      "Amplin M N64 shared-A flattened M must be between 1 and ", BlockM);
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % kHmmaBlockN == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin M N64 shared-A logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_m <= std::numeric_limits<int>::max() &&
+          size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin M N64 shared-A tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin M N64 shared-A requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+
+  const int64_t grid_n = logical_n / kHmmaBlockN;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin M N64 shared-A grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+
+  constexpr int KSplit = (BlockM == kMmaM) ? 10 : 5;
+  constexpr int NWarp = 2;
+  constexpr int Threads = (BlockM / kMmaM) * KSplit * NWarp * kMmaLanes;
+  const dim3 grid(static_cast<unsigned int>(grid_n), 1U);
+  const size_t shared_bytes =
+      amplin_mma_lane_mN_n64_shared_a_shared_bytes<BlockM>();
+
+  if (input.scalar_type() == at::kHalf) {
+    configure_amplin_mma_lane_mN_n64_shared_a<half, BlockM>(
+        input.get_device(), shared_bytes);
+    amplin_mma_lane_mN_n64_shared_a_kernel<half, BlockM>
+        <<<grid, Threads, shared_bytes, stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    configure_amplin_mma_lane_mN_n64_shared_a<__nv_bfloat16, BlockM>(
+        input.get_device(), shared_bytes);
+    amplin_mma_lane_mN_n64_shared_a_kernel<__nv_bfloat16, BlockM>
+        <<<grid, Threads, shared_bytes, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+torch::Tensor amplin_mma_lane_m16_n64_shared_a_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_mN_n64_shared_a_cuda_impl<kMmaM>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      logical_n);
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_shared_a_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_mN_n64_shared_a_cuda_impl<kMmaLaneM32BlockM>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      logical_n);
+}
+
+template <int BlockM, int NTiles>
+torch::Tensor amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  static_assert(BlockM == kMmaM || BlockM == kMmaLaneM32BlockM, "Amplin M N64 tiled-A supports only BlockM 16 or 32");
+  static_assert(NTiles > 0, "Amplin M N64 tiled-A requires positive NTiles");
+
+  TORCH_CHECK(input.is_cuda(), "Amplin M N64 tiled-A input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin M N64 tiled-A weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin M N64 tiled-A tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin M N64 tiled-A supports only FP16/BF16");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin M N64 tiled-A scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin M N64 tiled-A input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin M N64 tiled-A tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin M N64 tiled-A qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin M N64 tiled-A scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin M N64 tiled-A requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 1 && size_m <= BlockM,
+      "Amplin M N64 tiled-A flattened M must be between 1 and ", BlockM);
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % (NTiles * kHmmaBlockN) == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin M N64 tiled-A logical N must be positive, divisible by ", NTiles * kHmmaBlockN, ", and fit the packed layout");
+  TORCH_CHECK(
+      size_m <= std::numeric_limits<int>::max() &&
+          size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin M N64 tiled-A tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin M N64 tiled-A requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+
+  const int64_t n_tiles_per_block = NTiles * kHmmaBlockN;
+  const int64_t grid_n = logical_n / n_tiles_per_block;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin M N64 tiled-A grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+
+  const dim3 grid(static_cast<unsigned int>(grid_n), 1U);
+  constexpr int Threads = (BlockM / kMmaM) * NTiles * kMmaLanes;
+
+  if (input.scalar_type() == at::kHalf) {
+    amplin_mma_lane_mN_n64_tiled_fullk_kernel<half, BlockM, NTiles>
+        <<<grid, Threads, 0, stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    amplin_mma_lane_mN_n64_tiled_fullk_kernel<__nv_bfloat16, BlockM, NTiles>
+        <<<grid, Threads, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+torch::Tensor amplin_mma_lane_m16_n64_tile4_shared_a_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl<kMmaM, 4>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      logical_n);
+}
+
+torch::Tensor amplin_mma_lane_m16_n64_tile8_shared_a_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl<kMmaM, 8>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      logical_n);
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_tile4_shared_a_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl<kMmaLaneM32BlockM, 4>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      logical_n);
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_tile8_shared_a_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl<kMmaLaneM32BlockM, 8>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      logical_n);
 }
 
 torch::Tensor amplin_mma_lane_m16_n16_padded_cuda(
@@ -4750,6 +6536,33 @@ torch::Tensor amplin_mma_lane_m16_n32_splitk16_pipe2_cuda(
     int64_t logical_n) {
   return amplin_mma_lane_m16_n16_cuda_impl<
       kMmaLaneSplitK16Warps,
+      true,
+      true>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      logical_n);
+}
+
+torch::Tensor amplin_mma_lane_m16_n32_splitk8_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_m16_n16_cuda_impl<kMmaLaneSplitK8Warps, true>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      logical_n);
+}
+
+torch::Tensor amplin_mma_lane_m16_n32_splitk8_pipe2_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_m16_n16_cuda_impl<
+      kMmaLaneSplitK8Warps,
       true,
       true>(
       input,

@@ -80,15 +80,25 @@ _AMPLIN_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "mma_lane_m64_global_a",
         "mma_lane_m32_global_a",
         "mma_lane_m32_n32_global_a",
+        "mma_lane_m16_n64_shared_a",
+        "mma_lane_m16_n64_tile4_shared_a",
+        "mma_lane_m16_n64_tile8_shared_a",
+        "mma_lane_m32_n64_tile4_shared_a",
+        "mma_lane_m32_n64_tile8_shared_a",
+        "mma_lane_m32_n64_shared_a",
+        "mma_lane_m32_n64_splitk12x2_coop_interleaved",
         "mma_lane_m16_n16_padded",
         "mma_lane_m16_n16_splitk4",
         "mma_lane_m16_n16_splitk8",
         "mma_lane_m16_n16_splitk12",
         "mma_lane_m16_n32_splitk12",
         "mma_lane_m16_n32_splitk16",
+        "mma_lane_m16_n32_splitk8",
+        "mma_lane_m16_n32_splitk8_pipe2",
         "mma_lane_m16_n32_splitk12_pipe2",
         "mma_lane_m16_n32_splitk12_pipe2_interleaved",
         "mma_lane_m16_n64_splitk24_pipe2_interleaved",
+        "mma_lane_m32_n64_splitk24_pipe2_interleaved",
         "mma_lane_m16_n64_splitk12x2_coop_interleaved",
         "mma_lane_m16_n32_splitk16_pipe2",
         "mma_lane_m16_n16_splitk16",
@@ -662,6 +672,125 @@ def mma_lane_m32_n32_global_a(
     )
 
 
+def mma_lane_m16_n64_shared_a(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M16 N64 with A resident in shared memory (128 threads)."""
+
+    return _extension_api().op("amplin", "mma_lane_m16_n64_shared_a")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m16_n64_tile4_shared_a(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M16 N64 with A resident in shared memory, 4 N64 tiles per block (128 threads)."""
+
+    return _extension_api().op("amplin", "mma_lane_m16_n64_tile4_shared_a")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m16_n64_tile8_shared_a(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M16 N64 with A resident in shared memory, 8 N64 tiles per block (256 threads)."""
+
+    return _extension_api().op("amplin", "mma_lane_m16_n64_tile8_shared_a")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_tile4_shared_a(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with A resident in shared memory, 4 N64 tiles per block (256 threads)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_tile4_shared_a")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_tile8_shared_a(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with A resident in shared memory, 8 N64 tiles per block (512 threads)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_tile8_shared_a")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_shared_a(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with A resident in shared memory (256 threads)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_shared_a")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_splitk12x2_coop_interleaved(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with two cooperative K12 CTAs and device-memory partials."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_splitk12x2_coop_interleaved")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
 def mma_lane_m16_n16_padded(
     input: torch.Tensor,
     packed_lane_qweight: torch.Tensor,
@@ -723,6 +852,40 @@ def mma_lane_m16_n16_splitk12(
     """Run the K12288 12-warp intra-CTA split-K padded-M16 control."""
 
     return _extension_api().op("amplin", "mma_lane_m16_n16_splitk12")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m16_n32_splitk8(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run the eight-warp split-K path with N32 activation reuse."""
+
+    return _extension_api().op("amplin", "mma_lane_m16_n32_splitk8")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m16_n32_splitk8_pipe2(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run the eight-warp N32 path with two-stage register prefetching."""
+
+    return _extension_api().op("amplin", "mma_lane_m16_n32_splitk8_pipe2")(
         input,
         packed_lane_qweight,
         packed_scales,
@@ -815,6 +978,23 @@ def mma_lane_m16_n64_splitk24_pipe2_interleaved(
     )
 
 
+def mma_lane_m32_n64_splitk24_pipe2_interleaved(
+    input: torch.Tensor,
+    packed_lane_n64_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with single-CTA K24 split and shared-memory partials."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_splitk24_pipe2_interleaved")(
+        input,
+        packed_lane_n64_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
 def mma_lane_m16_n64_splitk12x2_coop_interleaved(
     input: torch.Tensor,
     packed_lane_n64_qweight: torch.Tensor,
@@ -889,10 +1069,19 @@ __all__ = [
     "mma_lane_m16_n16_splitk12",
     "mma_lane_m16_n32_splitk12",
     "mma_lane_m16_n32_splitk16",
+    "mma_lane_m16_n32_splitk8",
+    "mma_lane_m16_n32_splitk8_pipe2",
     "mma_lane_m16_n32_splitk12_pipe2",
     "mma_lane_m16_n32_splitk12_pipe2_interleaved",
     "mma_lane_m16_n64_splitk24_pipe2_interleaved",
     "mma_lane_m16_n64_splitk12x2_coop_interleaved",
+    "mma_lane_m16_n64_shared_a",
+    "mma_lane_m16_n64_tile4_shared_a",
+    "mma_lane_m16_n64_tile8_shared_a",
+    "mma_lane_m32_n64_tile4_shared_a",
+    "mma_lane_m32_n64_tile8_shared_a",
+    "mma_lane_m32_n64_shared_a",
+    "mma_lane_m32_n64_splitk12x2_coop_interleaved",
     "mma_lane_m16_n32_splitk16_pipe2",
     "mma_lane_m16_n16_splitk16",
     "mma_lane_m32_global_a",
