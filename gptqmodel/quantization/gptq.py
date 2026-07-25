@@ -1962,7 +1962,9 @@ class GPTQ:
                     # Recompute the block loss from Err1 instead of per-column
                     # scalar add_ calls; this avoids thousands of tiny syncs.
                     loss_sum.add_((Err1.float() ** 2).sum() / 2)
-                    W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                    # Update the remaining weights in-place with a single fused
+                    # addmm instead of matmul+sub, avoiding a temporary tensor.
+                    torch.addmm(W[:, i2:], Err1, Hinv[i1:i2, i2:], alpha=-1, out=W[:, i2:])
 
                 del W1, Q1, Err1
                 if Hinv is not None:
