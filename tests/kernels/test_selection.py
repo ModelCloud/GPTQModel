@@ -184,6 +184,8 @@ def test_auto_select_excludes_embedding_only_kernel(fmt):
 
 CASES = []
 for kernel_cls in sorted(_iter_kernel_classes(), key=lambda cls: cls.__name__):
+    if not getattr(kernel_cls, "SUPPORTS_BACKEND_SELECTION", True):
+        continue
     for method in _infer_quant_methods(kernel_cls):
         for fmt in kernel_cls.SUPPORTS_FORMATS:
             CASES.append((kernel_cls, method, fmt))

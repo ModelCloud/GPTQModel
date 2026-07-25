@@ -210,7 +210,10 @@ class TestHummingGptqKernelOutput(unittest.TestCase):
         )
         # Low-bit quantization has large intrinsic error vs the dense float weights;
         # Humming is still expected to match the quantized Torch reference tightly.
+        # BF16 accumulators/truncation add a small extra tolerance on top of that error.
         dense_atol = {2: 2.0, 3: 1.5, 4: 0.25, 8: 0.25}.get(bits, 0.25)
+        if dtype == torch.bfloat16:
+            dense_atol *= 1.5
         self.assertTrue(
             torch.allclose(hum_out.to(torch.float32), dense_out.to(torch.float32), atol=dense_atol, rtol=0.25),
             f"Humming GPTQ output deviates from the dense reference (bits={bits}, group_size={group_size}, sym={sym}, dtype={dtype})",

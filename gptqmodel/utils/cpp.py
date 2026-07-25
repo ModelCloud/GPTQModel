@@ -526,6 +526,19 @@ def resolved_jit_opt_level(opt_level: str | None = "O3") -> str | None:
     )
 
 
+def _jit_cxx_standard() -> str:
+    """Return the C++ standard required by the installed PyTorch headers."""
+
+    try:
+        import re
+
+        match = re.match(r"(\d+)\.(\d+)", torch.__version__)
+        major, minor = int(match.group(1)), int(match.group(2)) if match else (0, 0)
+        return "c++20" if (major, minor) >= (2, 14) else "c++17"
+    except Exception:
+        return "c++17"
+
+
 def default_jit_cflags(
     *,
     opt_level: str | None = "O3",
@@ -535,7 +548,7 @@ def default_jit_cflags(
     """Return the common C++ compiler flags for torch.ops JIT extensions."""
 
     resolved_opt_level = resolved_jit_opt_level(opt_level)
-    flags = ["-std=c++17"]
+    flags = [f"-std={_jit_cxx_standard()}"]
     if resolved_opt_level is not None:
         flags.insert(0, f"-{resolved_opt_level}")
     if enable_bf16:
@@ -1104,7 +1117,7 @@ def _pack_block_extension() -> TorchOpsJitExtension:
             build_root_env="GPTQMODEL_EXT_BUILD",
             default_build_root=lambda: default_torch_ops_build_root("pack_block_cpu"),
             display_name="pack_block_cpu",
-            extra_cflags=["-O3", "-std=c++17"],
+            extra_cflags=["-O3", f"-std={_jit_cxx_standard()}"],
             extra_ldflags=[],
             verbose_env="GPTQMODEL_EXT_VERBOSE",
             requires_cuda=False,
@@ -1125,7 +1138,7 @@ def _floatx_cpu_extension() -> TorchOpsJitExtension:
             build_root_env="GPTQMODEL_EXT_BUILD",
             default_build_root=lambda: default_torch_ops_build_root("floatx_cpu"),
             display_name="floatx_cpu",
-            extra_cflags=["-O3", "-std=c++17"],
+            extra_cflags=["-O3", f"-std={_jit_cxx_standard()}"],
             extra_ldflags=[],
             verbose_env="GPTQMODEL_EXT_VERBOSE",
             requires_cuda=False,
