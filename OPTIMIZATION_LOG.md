@@ -638,3 +638,57 @@ Profile of the Triton Hessian/Hybrid path (`4096 x 4096`, `group_size=32`, `bits
 - `bits=2` Hessian/Hybrid still uses the exact Python fallback because the Triton FP32 loss is not a faithful proxy for the coarse grid; expanding the top-k to 60/80 candidates fixes accuracy but erases the speedup, so the fallback remains the safer and faster choice.
 - The Triton path is limited to `group_size <= 128` and contiguous float-like tensors; CPU and non-target GPU fallbacks are preserved.
 - Hybrid MSE and activation components are fused inside the kernel; further speedup may come from lowering the top-k exact recompute into Triton as well, or from using FP16/BF16 accumulation where the Hessian dynamic range allows it.
+
+---
+
+## Round: Triton scale-search tile-size tuning and documentation
+
+### Objective
+
+Tune the row-tile size of the activation and Hessian/Hybrid Triton scale-search kernels and add user-facing documentation for the ScaleSearch feature, algorithms, usage, and accuracy checks.
+
+### Changes
+
+1. **`gptqmodel/quantization/_scale_search_triton.py`**
+   - Increased `BLOCK_ROW` from `8` to `32` for both the activation and Hessian/Hybrid `find_params_batched` Triton fast paths.
+   - A larger row tile amortizes candidate-loop control overhead and improves SM occupancy for the common per-block `rows=4096` case while keeping register pressure low for `group_size` 32/64/128.
+   - `k=20` for Hessian/Hybrid and `k=2` for activation remain unchanged; the tile-size change does not affect the final exact-recompute accuracy path.
+
+2. **`docs/scale_search.md` (new)**
+   - Documents the four ScaleSearch modes (`MSE`, `ACTIVATION`, `HESSIAN`, `HYBRID`), when each runs, speed/quality trade-offs, `QuantizeConfig` usage examples, per-module `dynamic` overrides, tuning knobs (`mse`, `grid`, `maxshrink`, `group_size`), and the strict-accuracy validation command.
+
+3. **`README.md`**
+   - Added a `### ScaleSearch` subsection under `## Quantization Support` that links to `docs/scale_search.md`.
+
+### Accuracy validation
+
+- `python scripts/validate_find_params_batched_strict.py` on A100 GPU 5: **STRICT CHECK PASSED**.
+- `pytest -q tests/test_gptq.py tests/test_quantizer.py tests/test_quantizer_scale_search.py tests/test_adjacent_exact_cuda.py tests/test_gptq_block_triton.py` on A100 GPU 5: **210 passed, 2 skipped**.
+- `ruff check gptqmodel/quantization/_scale_search_triton.py` and `git diff --check`: clean.
+
+### Benchmarks
+
+`find_params_batched` microbenchmark (`4096 x 4096`, `bits=4`, `sym=False`, `grid=100`, `maxshrink=0.8`, A100 GPU 5). `before` = `BLOCK_ROW=8`; `after` = `BLOCK_ROW=32`.
+
+| group_size | method     | before (ms) | after (ms) | speedup |
+|------------|------------|-------------|------------|---------|
+| 32         | activation | 11.86       | 10.37      | 1.14x   |
+| 32         | hessian    | 40.2        | 34.7       | 1.16x   |
+| 32         | hybrid     | 40.2        | 34.7       | 1.16x   |
+| 64         | activation | 9.06        | 7.13       | 1.27x   |
+| 64         | hessian    | 37.1        | 37.4       | 0.99x   |
+| 64         | hybrid     | 37.1        | 37.4       | 0.99x   |
+| 128        | activation | 6.83        | 5.93       | 1.15x   |
+| 128        | hessian    | 41.8        | 41.8       | 1.00x   |
+| 128        | hybrid     | 41.9        | 41.8       | 1.00x   |
+
+Per-block `find_params_batched` (`rows=4096`, `cols=128`, `group_size=32`, `bits=4`, `sym=False`): 2.22 ms -> 2.09 ms (1.06x). End-to-end `GPTQ.quantize` is within run-to-run noise because the fused block kernel and Cholesky inversion still dominate.
+
+### Nsight Systems
+
+No new Nsight capture in this round; the tile-size change primarily reduces Triton launch/loop overhead and is reflected in the microbenchmark timing.
+
+### Known limitations / future work
+
+- `bits=2` Hessian/Hybrid still falls back to the exact Python loop.
+- The activation path is now the default `scale_search` mode; further speedup may come from fusing the top-k exact recompute, parallelizing the candidate dimension across the two target GPUs, or tuning `BLOCK_ROW` per `group_size`.

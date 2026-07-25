@@ -149,7 +149,7 @@ if _triton_available():
             zero = torch.round(-xmin / scale) if not sym else torch.full_like(scale, (maxq + 1.0) / 2.0)
             return scale, zero
 
-        BLOCK_ROW = 8
+        BLOCK_ROW = 32
         row_blocks = (rows + BLOCK_ROW - 1) // BLOCK_ROW
         total_programs = num_groups * row_blocks
         if total_programs == 0:
@@ -327,7 +327,7 @@ if _triton_available():
             zero = torch.round(-xmin / scale) if not sym else torch.full_like(scale, (maxq + 1.0) / 2.0)
             return scale, zero
 
-        BLOCK_ROW = 8
+        BLOCK_ROW = 32
         row_blocks = (rows + BLOCK_ROW - 1) // BLOCK_ROW
         total_programs = num_groups * row_blocks
         if total_programs == 0:
