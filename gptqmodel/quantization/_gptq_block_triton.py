@@ -130,12 +130,8 @@ if _triton_available():
             # Apply the outer-product update to the remainder of the row.
             w_row = w_row - err * hinv_row
 
-        # Write the updated working row back.
-        tl.store(
-            w_ptr + row * stride_w0 + offs * stride_w1,
-            w_row,
-            mask=col_mask,
-        )
+        # The updated working row is only needed while processing this block;
+        # the caller does not use W1 after the kernel, so skip the final writeback.
 
     def gptq_block_triton(
         W1: torch.Tensor,
