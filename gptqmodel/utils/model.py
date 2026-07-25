@@ -32,7 +32,6 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
-from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
@@ -449,42 +448,28 @@ def make_quant(
 
     log.info(f"Kernel: candidates -> `[{', '.join(cls.__name__ for cls in quant_linear_candidates)}]`")
 
-    # loop over actual QLinear init, catch errors and use fallbacks if applicable
-    for cls in quant_linear_candidates:
-        try:
-            # if linear is not selectedQLinear:
-            #     logger.info(f"make_quant: Faild linear: `{selectedQLinear}` failed, trying to use fallback: `{linear}`")
-            # else:
-            #     logger.info("make_quant: Testing linear: {linear}")
-
-            linear_cls = create_quant_layer(
-                linear_cls=cls,
-                bits=bits,
-                desc_act=desc_act,
-                dynamic=dynamic,
-                group_size=group_size,
-                module=module,
-                sym=sym,
-                device=device,
-                quant_result=quant_result,
-                lm_head_name=lm_head_name,
-                pack_dtype=pack_dtype,
-                backend=backend,
-                adapter=qcfg.adapter,
-                format=format,
-                init_kwargs=init_kwargs,
-                dtype=dtype,
-            )
-            log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
-            return linear_cls
-        except NotImplementedError as e:
-            log.info(f"Kernel: skipped -> `{cls}`.")
-
-            # only fallback to other quant linears when backend is auto.
-            if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-                raise e
-
-    raise ValueError(f"No compatible quant linear was found for this module: {module.__class__.__name__}")
+    # Per-module kernel selection: each submodule picks the first candidate that
+    # validates against its effective (possibly dynamic-overridden) quant config.
+    linear_cls = create_quant_layer(
+        linear_candidates=quant_linear_candidates,
+        bits=bits,
+        desc_act=desc_act,
+        dynamic=dynamic,
+        group_size=group_size,
+        module=module,
+        sym=sym,
+        device=device,
+        quant_result=quant_result,
+        lm_head_name=lm_head_name,
+        pack_dtype=pack_dtype,
+        backend=backend,
+        adapter=qcfg.adapter,
+        format=format,
+        init_kwargs=init_kwargs,
+        dtype=dtype,
+    )
+    log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
+    return linear_cls
 
 def create_quant_module(
     name: str,
@@ -658,7 +643,7 @@ def create_quant_module(
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
 
 def create_quant_layer(
-        linear_cls: Type[BaseQuantLinear],
+        linear_candidates: List[Type[BaseQuantLinear]],
         bits,
         desc_act: bool,
         dynamic,
@@ -676,36 +661,64 @@ def create_quant_layer(
         dtype: Optional[torch.dtype] = None,
 
 ) -> Type[BaseQuantLinear]:
-    if isinstance(module, linear_cls):
-        return linear_cls
+    if any(isinstance(module, candidate) for candidate in linear_candidates):
+        return type(module)
+
+    selected_counts = {candidate: 0 for candidate in linear_candidates}
+    selected_counts[TorchQuantEmbeddings] = 0
     for name, submodule in module.named_modules():
         # skip non-quantized modules
         if name not in quant_result:
             continue
 
-        qlinear_cls = TorchQuantEmbeddings if isinstance(submodule, nn.Embedding) else linear_cls
+        candidates = [TorchQuantEmbeddings] if isinstance(submodule, nn.Embedding) else linear_candidates
+        last_error = None
+        for qlinear_cls in candidates:
+            try:
+                create_quant_module(
+                    name=name,
+                    linear_cls=qlinear_cls,
+                    bits=bits,
+                    desc_act=desc_act,
+                    dynamic=dynamic,
+                    group_size=group_size,
+                    module=module,
+                    submodule=submodule,
+                    sym=sym,
+                    device=device,
+                    lm_head_name=lm_head_name,
+                    pack_dtype=pack_dtype,
+                    format=format,
+                    backend=backend,
+                    adapter=adapter,
+                    init_kwargs=init_kwargs,
+                    dtype=dtype,
+                )
+            except NotImplementedError as error:
+                last_error = error
+                if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
+                    raise
+                continue
 
-        create_quant_module(
-            name=name,
-            linear_cls=qlinear_cls,
-            bits=bits,
-            desc_act=desc_act,
-            dynamic=dynamic,
-            group_size=group_size,
-            module=module,
-            submodule=submodule,
-            sym=sym,
-            device=device,
-            lm_head_name=lm_head_name,
-            pack_dtype=pack_dtype,
-            format=format,
-            backend=backend,
-            adapter=adapter,
-            init_kwargs=init_kwargs,
-            dtype=dtype,
-        )
+            selected_counts[qlinear_cls] = selected_counts.get(qlinear_cls, 0) + 1
+            break
+        else:
+            if last_error is not None:
+                raise last_error
+            raise ValueError(f"No compatible quant linear was found for module `{name}`.")
 
-    return linear_cls
+    selected_counts = {candidate: count for candidate, count in selected_counts.items() if count}
+    if not selected_counts:
+        raise ValueError(f"No compatible quant linear was found for this module: {module.__class__.__name__}")
+
+    summary = ", ".join(f"{candidate.__name__}={count}" for candidate, count in selected_counts.items())
+    log.info(f"Kernel: per-module selections -> `[{summary}]`")
+    non_embedding_counts = {
+        candidate: count
+        for candidate, count in selected_counts.items()
+        if candidate is not TorchQuantEmbeddings
+    }
+    return max(non_embedding_counts or selected_counts, key=(non_embedding_counts or selected_counts).get)
 
 # public/stable api exposed to transformer/optimum
 def hf_convert_gptq_v1_to_v2_format(
@@ -716,8 +729,11 @@ def hf_convert_gptq_v1_to_v2_format(
     meta: Optional[Dict[str, any]],
 ) -> Tuple[nn.Module, bool]:
     if checkpoint_format == "gptq":
-        # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-        if qlinear_kernel is MarlinLinear:
+        # Skip v1 to v2 conversion when no loaded quant module requires v2.
+        if not any(
+            isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
+            for m in model.modules()
+        ):
             return model, False
 
         cfg = QuantizeConfig(bits=bits)
@@ -818,10 +834,13 @@ def convert_gptq_v1_to_v2_format(
     cfg: QuantizeConfig,
     qlinear_kernel: Type[BaseQuantLinear],
 ):
-    # skip v2 to v1 conversion for gptq_v1 kernels
-    if cfg.export_quant_method() == METHOD.GPTQ and not qlinear_kernel.REQUIRES_FORMAT_V2:
+    # skip v2 to v1 conversion when no loaded quant module requires v2
+    if cfg.export_quant_method() == METHOD.GPTQ and not any(
+        isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
+        for m in model.modules()
+    ):
         log.info(
-            f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
+            f"Format: Skipped v1 to v2 conversion; no selected kernel requires v2 (`{qlinear_kernel}`).")
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
@@ -835,7 +854,7 @@ def convert_gptq_v1_to_v2_format(
         # additions here do not overflow.
         # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
         # overflow ~<=13% based on testing
-        if isinstance(submodule, qlinear_kernel):
+        if isinstance(submodule, BaseQuantLinear) and getattr(submodule, "REQUIRES_FORMAT_V2", False):
             convert_gptq_v1_to_v2_format_module(
                 module=submodule,
                 bits=getattr(submodule, "bits", cfg.bits),
@@ -907,15 +926,18 @@ def convert_gptq_v2_to_v1_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
 
-    # skip v2 to v1 conversion for gptq_v1 kernels
-    if quantize_config.export_quant_method() == METHOD.GPTQ and not qlinear_kernel.REQUIRES_FORMAT_V2:
+    # skip v2 to v1 conversion when no loaded quant module requires v2
+    if quantize_config.export_quant_method() == METHOD.GPTQ and not any(
+        isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
+        for m in model.modules()
+    ):
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
     # with tctl.threadpool_limits(limits=1):
     for _, submodule in model.named_modules():
         # sym=False has underflow probability of ~<=13% during testing. No underflow possible for sym=True.
-        if isinstance(submodule, qlinear_kernel):
+        if isinstance(submodule, BaseQuantLinear) and getattr(submodule, "REQUIRES_FORMAT_V2", False):
             convert_gptq_v2_to_v1_format_module(module=submodule, quantize_config=quantize_config)
 
     return model
@@ -978,8 +1000,12 @@ def pack_module(
         layers[name] = layer
         qModules[name] = module
 
+    # Use the module's actual class when it is a real BaseQuantLinear; otherwise
+    # fall back to the caller-supplied representative class (e.g. unit-test mocks).
+    module_cls = type(module) if isinstance(module, BaseQuantLinear) else quant_linear_cls
+
     # TODO FIX ME..remove hard coded qqq pack
-    if quant_linear_cls.QUANT_TYPE == "qqq":
+    if module_cls.QUANT_TYPE == "qqq":
         if q_scales_extra is not None:
             q_scales_extra = q_scales_extra.to(CPU)
         packer_label = "module.pack"
@@ -989,7 +1015,7 @@ def pack_module(
             module_name=name,
         ):
             module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
-    elif quant_linear_cls.QUANT_TYPE.startswith("awq_") or quant_linear_cls.QUANT_TYPE == "llm-awq":
+    elif module_cls.QUANT_TYPE.startswith("awq_") or module_cls.QUANT_TYPE == "llm-awq":
         packer_label = "module.pack"
         with log_time_block(
             packer_label,
@@ -1064,7 +1090,7 @@ def pack_module(
             quantize_config is not None
             and quantize_config.export_quant_method() == METHOD.GPTQ
             and resolve_quant_format(quantize_config.format, quantize_config.method) == FORMAT.GPTQ
-            and getattr(quant_linear_cls, "REQUIRES_FORMAT_V2", False)
+            and getattr(module_cls, "REQUIRES_FORMAT_V2", False)
         ):
             with log_time_block(
                 "convert_v2_to_v1",
@@ -1124,9 +1150,13 @@ def pack_model(
         device=DEVICE.CPU,
     )
 
-    qModules = find_modules(model, [quant_linear_cls])
+    qModules = {
+        name: quant_module
+        for name, quant_module in find_modules(model, [BaseQuantLinear]).items()
+        if name in quant_result
+    }
 
-    assert len(qModules) > 0, f"No quantizeed modules[{quant_linear_cls}] found in the model."
+    assert len(qModules) > 0, "No quantized modules found in the model."
 
     names = list(qModules.keys())
     lock = threading.Lock()

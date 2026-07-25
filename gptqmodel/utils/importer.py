@@ -42,6 +42,71 @@ def _supports_pack_api(cls: Type[BaseQuantLinear]) -> bool:
     )
 
 
+def _iter_dynamic_contracts(
+    dynamic,
+    bits: int,
+    group_size: int,
+    desc_act: bool,
+    sym: bool,
+    pack_dtype: torch.dtype,
+    format_value: FORMAT,
+):
+    """Yield distinct effective quantization configs from base + optional dynamic overrides.
+
+    When `dynamic` is provided, auto-selection tests each kernel against the union of
+    effective (bits, group_size, desc_act, sym, pack_dtype) contracts. This lets a
+    mixed-bitwidth model use a kernel that only supports 4-bit weights for its 4-bit
+    layers even when the base `bits` is 3.
+    """
+
+    base_contract = {
+        "bits": bits,
+        "group_size": group_size,
+        "desc_act": desc_act,
+        "sym": sym,
+        "pack_dtype": pack_dtype,
+    }
+    if not dynamic:
+        yield base_contract
+        return
+
+    seen = {(bits, group_size, desc_act, sym, pack_dtype)}
+    yield base_contract
+
+    for pattern, overrides in dynamic.items():
+        if not isinstance(overrides, dict):
+            continue
+        if isinstance(pattern, str) and pattern.startswith("-"):
+            continue
+        if overrides is None:
+            continue
+
+        contract_bits = overrides.get("bits", bits)
+        if contract_bits is not None:
+            contract_bits = quant_bits_width(_normalize_quant_bits(contract_bits, format_value=format_value))
+        else:
+            contract_bits = bits
+
+        contract = {
+            "bits": contract_bits,
+            "group_size": overrides.get("group_size", group_size),
+            "desc_act": overrides.get("desc_act", desc_act),
+            "sym": overrides.get("sym", sym),
+            "pack_dtype": overrides.get("pack_dtype", pack_dtype),
+        }
+        key = (
+            contract["bits"],
+            contract["group_size"],
+            contract["desc_act"],
+            contract["sym"],
+            contract["pack_dtype"],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        yield contract
+
+
 def iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
     kernels = []
     seen = set()
@@ -473,53 +538,76 @@ def select_quant_linear(
         if not allow_quant_linears:
             raise ValueError(f"No auto-select kernels found for `{quant_method}` with format `{format}`.")
 
-        err = None
+        last_err = None
         global message_logged
-        # Suppose all quant linears in the model should have the same backend.
+        # For multi-select (used by make_quant/create_quant_layer) we test each kernel
+        # against the union of effective quant contracts (base + dynamic). This lets
+        # mixed-bitwidth models pick different kernels per layer, e.g. a 4-bit-only
+        # kernel for 4-bit dynamic layers while the base bits is 3. For single-select
+        # we keep the original base contract with the full dynamic map so callers
+        # asking for one representative kernel get a model-wide-compatible answer.
+        if multi_select:
+            contracts = list(_iter_dynamic_contracts(dynamic, bits, group_size, desc_act, sym, pack_dtype, format))
         for k, cls in allow_quant_linears:
             if DEVICE.ALL not in cls.SUPPORTS_DEVICES and device is not None and device not in cls.SUPPORTS_DEVICES:
                 if os.environ.get("DEBUG"):
                     log.info(f"skip {k} for unsupported device `{device}`")
                 continue
-            validate, err = cls.validate(
-                bits=bits,
-                group_size=group_size,
-                desc_act=desc_act,
-                sym=sym,
-                pack_dtype=pack_dtype,
-                dtype=dtype,
-                dynamic=dynamic,
-                device=device,
-                trainable=trainable,
-                adapter=adapter,
-            )
-            if os.environ.get("DEBUG") and not validate:
-                log.info(f"skip {k} for {str(err)}")
-            if validate:
-                if pack:
-                    if _supports_pack_api(cls):
-                        #if not message_logged:
-                        #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
-                        #    message_logged = True
-                        log.info(f"{'Packing ' if pack else ''}Kernel: Auto-selection: adding candidate `{cls.__name__}`")
-                        validated_qlinears.append(cls)
-                        if not multi_select:
-                            log.info(f"Kernel: selected -> `{cls.__name__}`.")
-                            return cls
-                else:
-                    #if not message_logged:
-                    #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
-                    #    message_logged = True
+
+            validated = False
+            contract_err = None
+            if multi_select:
+                for contract in contracts:
+                    validated, contract_err = cls.validate(
+                        bits=contract["bits"],
+                        group_size=contract["group_size"],
+                        desc_act=contract["desc_act"],
+                        sym=contract["sym"],
+                        pack_dtype=contract["pack_dtype"],
+                        dtype=dtype,
+                        dynamic=None,
+                        device=device,
+                        trainable=trainable,
+                        adapter=adapter,
+                    )
+                    if validated:
+                        break
+            else:
+                validated, contract_err = cls.validate(
+                    bits=bits,
+                    group_size=group_size,
+                    desc_act=desc_act,
+                    sym=sym,
+                    pack_dtype=pack_dtype,
+                    dtype=dtype,
+                    dynamic=dynamic,
+                    device=device,
+                    trainable=trainable,
+                    adapter=adapter,
+                )
+            if not validated:
+                last_err = contract_err
+                if os.environ.get("DEBUG"):
+                    log.info(f"skip {k} for {str(contract_err)}")
+                continue
+
+            if pack:
+                if _supports_pack_api(cls):
                     log.info(f"{'Packing ' if pack else ''}Kernel: Auto-selection: adding candidate `{cls.__name__}`")
                     validated_qlinears.append(cls)
                     if not multi_select:
                         log.info(f"Kernel: selected -> `{cls.__name__}`.")
                         return cls
-
-        if err:
-            raise err
+            else:
+                log.info(f"{'Packing ' if pack else ''}Kernel: Auto-selection: adding candidate `{cls.__name__}`")
+                validated_qlinears.append(cls)
+                if not multi_select:
+                    log.info(f"Kernel: selected -> `{cls.__name__}`.")
+                    return cls
 
         if len(validated_qlinears) == 0:
+            if last_err:
+                raise last_err
             raise ValueError("No valid quant linear")
 
         return validated_qlinears
