@@ -36,6 +36,13 @@ from .gar import (
 from .npu_linalg import npu_inverse_cholesky_factor
 from .quantizer import HF_OPTIMUM, Quantizer
 
+try:
+    from ._gptq_block_triton import gptq_block_triton
+except Exception:
+    gptq_block_triton = None
+
+_USE_GPTQ_TRITON_BLOCK = os.environ.get("GPTQMODEL_TRITON_BLOCK", "1") != "0"
+
 
 log = setup_logger()
 
@@ -1753,8 +1760,9 @@ class GPTQ:
             self.H = None
 
         # Loss is only reported after quantization; keep a scalar accumulator
-        # instead of a second full weight-sized tensor during GPTQ.
-        loss_sum = W.new_zeros(()) if Hinv is not None else None
+        # instead of a second full weight-sized tensor during GPTQ. Accumulate
+        # in FP32 so the diagnostic is stable even when W1 is FP16.
+        loss_sum = torch.zeros((), device=W.device, dtype=torch.float32) if Hinv is not None else None
         # The retained full output buffer is not used for further arithmetic,
         # only permutation/slicing/final return. Store it in the final module
         # dtype while keeping block scratch tensors in fp32.
@@ -1886,73 +1894,160 @@ class GPTQ:
                 if Hinv is not None:
                     Hinv1 = Hinv[i1:i2, i1:i2]
 
-                for i in range(count):
-                    w = W1[:, i]
-                    if Hinv is not None:
-                        d = Hinv1[i, i]
-
-                    if self.qcfg.group_size != -1:
-                        if not self.qcfg.static_groups:
-                            if (i1 + i) % self.qcfg.group_size == 0:
-                                group_start = i1 + i
-                                group_end = min(group_start + self.qcfg.group_size, self.columns)
-                                self.quantizer.find_params(
-                                    W[:, group_start:group_end],
-                                    weight=True,
-                                    hessian=group_scale_search_hessian(group_start, group_end),
-                                )
-
-                            if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
-                                scale.append(self.quantizer.scale)
-                                zero.append(self.quantizer.zero)
-                                now_idx += 1
-                        else:
-                            idx = i1 + i
-                            if self.qcfg.desc_act:
-                                idx = perm[idx]
-
-                            self.quantizer = groups[idx // self.qcfg.group_size]
-
-                    # Inline the quantizer.quantize() formula to avoid the
-                    # per-column Python method-call overhead and keep the
-                    # column loop in pure eager tensor dispatch.
-                    q_scale = self.quantizer.scale
-                    q_zero = self.quantizer.zero
-                    q_maxq = getattr(self.quantizer, "_maxq_value", int(self.quantizer.maxq.item()))
-                    q_requires_groupwise = self.quantizer.requires_groupwise_processing()
-                    w_col = w.unsqueeze(1)
-                    if q_maxq < 0:
-                        q = (
-                            (w_col > q_scale / 2).to(w_col.dtype) * q_scale
-                            + (w_col < q_zero / 2).to(w_col.dtype) * q_zero
-                        )
-                    elif q_requires_groupwise:
-                        q = q_scale * torch.clamp(
-                            torch.round(w_col / q_scale), -q_maxq, q_maxq
-                        )
-                    else:
-                        q = q_scale * (
-                            torch.clamp(
-                                torch.round(w_col / q_scale) + q_zero, 0, q_maxq
+                group_size = self.qcfg.group_size
+                batched_scale = batched_zero = None
+                batched_group_count = 0
+                batched_first_global_idx = 0
+                if (
+                    group_size != -1
+                    and not self.qcfg.static_groups
+                    and group_size <= count
+                ):
+                    # Batch full groups in this block to amortize Python/kernel launch overhead.
+                    full_groups_end = i2 - ((i2 - i1) % group_size)
+                    if full_groups_end > i1:
+                        batched_first_global_idx = i1 // group_size
+                        batched_group_count = (full_groups_end - i1) // group_size
+                        batched_last = i1 + batched_group_count * group_size
+                        x_3d = W[:, i1:batched_last].reshape(W.shape[0], batched_group_count, group_size)
+                        batched_hessian = None
+                        if (
+                            scale_search == ScaleSearchConfig.ACTIVATION
+                            and group_scale_search_diagonal is not None
+                        ):
+                            batched_hessian = group_scale_search_diagonal[i1:batched_last].reshape(
+                                batched_group_count, group_size
                             )
-                            - q_zero
+                        elif (
+                            scale_search in {ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID}
+                            and group_scale_search_hessians is not None
+                        ):
+                            batched_hessian = torch.stack(
+                                group_scale_search_hessians[
+                                    batched_first_global_idx : batched_first_global_idx + batched_group_count
+                                ],
+                                dim=0,
+                            )
+                        batched_scale, batched_zero = self.quantizer.find_params_batched(
+                            x_3d, weight=True, hessian=batched_hessian
                         )
-                    q = q.flatten()
-                    Q1[:, i] = q
-                    if Hinv is not None:
-                        # Reuse the exact same column diff for loss reporting
-                        # and GPTQ error feedback instead of recomputing w - q.
-                        diff = w - q
-                        loss_sum.add_(torch.sum(diff * diff / (d * d)) / 2)
-                        err1 = diff / d
-                        W1[:, i:] = torch.addr(W1[:, i:], err1, Hinv1[i, i:], alpha=-1.0)
-                        Err1[:, i] = err1
+
+                # Fast fused Triton path: one kernel launch per block for the
+                # common grouped-GPTQ case. Falls back to the serial loop below
+                # for unsupported configurations.
+                triton_block_done = False
+                if (
+                    _USE_GPTQ_TRITON_BLOCK
+                    and gptq_block_triton is not None
+                    and Hinv is not None
+                    and count <= 128
+                    and group_size > 0
+                    and not self.qcfg.static_groups
+                    and count % group_size == 0
+                    and batched_group_count == count // group_size
+                ):
+                    try:
+                        maxq_value = (
+                            2 ** (self.qcfg.bits - 1) - 1
+                            if self.quantizer.requires_groupwise_processing()
+                            else 2 ** self.qcfg.bits - 1
+                        )
+                        gptq_block_triton(
+                            W1,
+                            Q1,
+                            Err1,
+                            Hinv1,
+                            batched_scale,
+                            batched_zero,
+                            maxq_value,
+                            group_size,
+                            groupwise=self.quantizer.requires_groupwise_processing(),
+                        )
+                        # Append per-group scale/zero for downstream packing/return.
+                        if batched_group_count > 0:
+                            scale.extend(batched_scale.chunk(batched_group_count, dim=1))
+                            zero.extend(batched_zero.chunk(batched_group_count, dim=1))
+                            now_idx = batched_first_global_idx + batched_group_count + 1
+                        triton_block_done = True
+                    except Exception as exc:
+                        log.warn(
+                            f"Quantization: Module `{self.name}` -> Triton block kernel failed, "
+                            f"falling back to serial loop: {exc}"
+                        )
+
+                if not triton_block_done:
+                    for i in range(count):
+                        w = W1[:, i]
+                        if Hinv is not None:
+                            d = Hinv1[i, i]
+
+                        if self.qcfg.group_size != -1:
+                            if not self.qcfg.static_groups:
+                                if (i1 + i) % self.qcfg.group_size == 0:
+                                    group_start = i1 + i
+                                    group_end = min(group_start + self.qcfg.group_size, self.columns)
+                                    local_group = (group_start - i1) // group_size
+                                    if local_group < batched_group_count:
+                                        self.quantizer.scale = batched_scale[:, local_group : local_group + 1]
+                                        self.quantizer.zero = batched_zero[:, local_group : local_group + 1]
+                                    else:
+                                        self.quantizer.find_params(
+                                            W[:, group_start:group_end],
+                                            weight=True,
+                                            hessian=group_scale_search_hessian(group_start, group_end),
+                                        )
+
+                                if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
+                                    scale.append(self.quantizer.scale)
+                                    zero.append(self.quantizer.zero)
+                                    now_idx += 1
+                            else:
+                                idx = i1 + i
+                                if self.qcfg.desc_act:
+                                    idx = perm[idx]
+
+                                self.quantizer = groups[idx // self.qcfg.group_size]
+
+                        # Inline the quantizer.quantize() formula to avoid the
+                        # per-column Python method-call overhead and keep the
+                        # column loop in pure eager tensor dispatch.
+                        q_scale = self.quantizer.scale
+                        q_zero = self.quantizer.zero
+                        q_maxq = getattr(self.quantizer, "_maxq_value", int(self.quantizer.maxq.item()))
+                        q_requires_groupwise = self.quantizer.requires_groupwise_processing()
+                        w_col = w.unsqueeze(1)
+                        if q_maxq < 0:
+                            q = (
+                                (w_col > q_scale / 2).to(w_col.dtype) * q_scale
+                                + (w_col < q_zero / 2).to(w_col.dtype) * q_zero
+                            )
+                        elif q_requires_groupwise:
+                            q = q_scale * torch.clamp(
+                                torch.round(w_col / q_scale), -q_maxq, q_maxq
+                            )
+                        else:
+                            q = q_scale * (
+                                torch.clamp(
+                                    torch.round(w_col / q_scale) + q_zero, 0, q_maxq
+                                )
+                                - q_zero
+                            )
+                        q = q.flatten()
+                        Q1[:, i] = q
+                        if Hinv is not None:
+                            diff = w - q
+                            err1 = diff / d
+                            W1[:, i:] = torch.addr(W1[:, i:], err1, Hinv1[i, i:], alpha=-1.0)
+                            Err1[:, i] = err1
 
                 Q[:, i1:i2] = Q1
                 if Hinv is not None:
-                    W[:, i2:] = torch.addmm(
-                        W[:, i2:], Err1, Hinv[i1:i2, i2:], beta=1.0, alpha=-1.0
-                    )
+                    # Recompute the block loss from Err1 instead of per-column
+                    # scalar add_ calls; this avoids thousands of tiny syncs.
+                    loss_sum.add_((Err1.float() ** 2).sum() / 2)
+                    # Update the remaining weights in-place with a single fused
+                    # addmm instead of matmul+sub, avoiding a temporary tensor.
+                    torch.addmm(W[:, i2:], Err1, Hinv[i1:i2, i2:], alpha=-1, out=W[:, i2:])
 
                 del W1, Q1, Err1
                 if Hinv is not None:

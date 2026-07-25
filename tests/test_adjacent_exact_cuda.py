@@ -13,6 +13,7 @@ from gptqmodel.quantization.adjacent import (
     build_adjacent_rounding_qubo,
 )
 from gptqmodel.utils.adjacent_exact import (
+    _MAX_WORKER_WARPS,
     adjacent_branch_bound_candidates,
     adjacent_exact_candidates,
 )
@@ -233,3 +234,52 @@ def test_adjacent_exact_cuda_rejects_invalid_native_coefficients():
     linear[0] = torch.nan
     with pytest.raises(ValueError, match="finite"):
         adjacent_exact_candidates(constant, linear, interaction)
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("sym", [False, True])
+def test_adjacent_exact_cuda_fp32_matches_cpu_exhaustive(bits: int, sym: bool):
+    """FP32 Gray-code exact solver must match the FP64 CPU exhaustive reference."""
+    cpu_problem = _problem(bits, 20, sym=sym, device="cpu")
+    cuda_problem = _problem(bits, 20, sym=sym, device="cuda")
+    expected = adjacent_exact(cpu_problem)
+
+    actual = adjacent_exact_cuda(cuda_problem, decompose=False, warps=0)
+
+    assert actual.states_checked == 1 << cuda_problem.active_decisions
+    torch.testing.assert_close(actual.state.cpu(), expected.state, rtol=0.0, atol=0.0)
+    assert actual.cost == pytest.approx(expected.cost, rel=1e-12, abs=1e-12)
+
+
+@pytest.mark.parametrize("size", [28, 30, 32])
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("sym", [False, True])
+def test_adjacent_exact_cuda_fp32_stable_across_warp_granularity(
+    size: int, bits: int, sym: bool
+):
+    """Different warp granularities must agree; this catches FP32 rounding drift."""
+    problem = _problem(bits, size, sym=sym, device="cuda")
+    default = adjacent_exact_cuda(problem, decompose=False, warps=0)
+    fine = adjacent_exact_cuda(problem, decompose=False, warps=_MAX_WORKER_WARPS)
+
+    total_states = 1 << problem.active_decisions
+    assert default.states_checked == total_states
+    assert fine.states_checked == total_states
+    assert default.optimal
+    assert fine.optimal
+    torch.testing.assert_close(default.state, fine.state, rtol=0.0, atol=0.0)
+    assert default.cost == pytest.approx(fine.cost, rel=1e-12, abs=1e-12)
+
+
+@pytest.mark.parametrize("size", [28, 30, 32])
+def test_adjacent_exact_cuda_fp32_finds_dense_planted_optimum(size: int):
+    """The FP32 accumulator must still recover the known all-ones optimum."""
+    problem = _dense_planted_problem(size)
+    expected_state = torch.ones_like(problem.weight)
+
+    for warps in (0, _MAX_WORKER_WARPS):
+        actual = adjacent_exact_cuda(problem, decompose=False, warps=warps)
+        assert actual.optimal
+        torch.testing.assert_close(
+            actual.state, expected_state, rtol=0.0, atol=0.0
+        )

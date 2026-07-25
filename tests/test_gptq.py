@@ -210,9 +210,9 @@ def test_gptq_act_group_aware_rejects_non_positive_group_size():
 @pytest.mark.parametrize(
     ("method", "expected_hessian_shape"),
     [
-        (ScaleSearchConfig.ACTIVATION, (4,)),
-        (ScaleSearchConfig.HESSIAN, (4, 4)),
-        (ScaleSearchConfig.HYBRID, (4, 4)),
+        (ScaleSearchConfig.ACTIVATION, (1, 4)),
+        (ScaleSearchConfig.HESSIAN, (1, 4, 4)),
+        (ScaleSearchConfig.HYBRID, (1, 4, 4)),
     ],
 )
 def test_grouped_scale_search_skips_overwritten_full_tensor_search(
@@ -235,17 +235,17 @@ def test_grouped_scale_search_skips_overwritten_full_tensor_search(
 
     searched_shapes = []
     searched_hessian_shapes = []
-    find_params = gptq.quantizer.find_params
+    find_params_batched = gptq.quantizer.find_params_batched
 
-    def _record_find_params(weights, *args, **kwargs):
+    def _record_find_params_batched(weights, *args, **kwargs):
         searched_shapes.append(tuple(weights.shape))
         searched_hessian_shapes.append(tuple(kwargs["hessian"].shape))
-        return find_params(weights, *args, **kwargs)
+        return find_params_batched(weights, *args, **kwargs)
 
-    monkeypatch.setattr(gptq.quantizer, "find_params", _record_find_params)
+    monkeypatch.setattr(gptq.quantizer, "find_params_batched", _record_find_params_batched)
     gptq.quantize(blocksize=4)
 
-    assert searched_shapes == [(6, 4), (6, 4)]
+    assert searched_shapes == [(6, 1, 4), (6, 1, 4)]
     assert searched_hessian_shapes == [expected_hessian_shape, expected_hessian_shape]
 
 

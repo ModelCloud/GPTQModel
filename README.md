@@ -247,6 +247,10 @@ AWQ ScaleSearch uses the stable canonical coarse grid by default with `AWQConfig
 
 See [Quantization Runtime Sharing](docs/quantization_runtime_sharing.md) for implementation notes and regression test coverage.
 
+### ScaleSearch
+
+GPT-QModel supports four scale-search objectives for GPTQ-style quantization: `MSE`, `ACTIVATION` (default), `HESSIAN`, and `HYBRID`. Each trades speed for different quality characteristics, and the Triton fast paths are validated against the exact per-group reference. See [docs/scale_search.md](docs/scale_search.md) for algorithm details, usage examples, per-module overrides, and accuracy checks.
+
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
