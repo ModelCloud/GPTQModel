@@ -10,6 +10,8 @@ import os
 import tempfile
 import unittest
 
+import torch
+
 from datasets import load_dataset
 from models.model_test import ModelTest
 from parameterized import parameterized
@@ -17,6 +19,7 @@ from transformers import AutoTokenizer
 
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
+from gptqmodel.quantization.qqq import QQQ
 from gptqmodel.utils.torch import torch_empty_cache
 
 
@@ -107,3 +110,57 @@ class TestGroupSize(unittest.TestCase):
                 has_qqq = True
                 break
         self.assertTrue(has_qqq)
+
+
+class TestQQQHessian(unittest.TestCase):
+    """Verify QQQ Hessian accumulation matches the closed-form reference."""
+
+    def _reference_hessian(self, *tensors):
+        """Compute 2/N * (X^T X) for one or more (B, S, C) activation tensors."""
+        target = tensors[0].device
+        x = torch.cat([t.to(target) for t in tensors], dim=0).reshape(-1, tensors[0].shape[-1]).float()
+        return (2.0 / x.shape[0]) * x.t().matmul(x)
+
+    def test_single_batch_matches_reference(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, dtype=torch.float32)
+        qqq = QQQ(layer)
+        x = torch.randn(4, 8, 16, dtype=torch.float32)
+        qqq.add_batch(x, None)
+        H = qqq.materialize_hessian()
+        H_ref = self._reference_hessian(x)
+        self.assertTrue(torch.allclose(H, H_ref, rtol=1e-4, atol=1e-5))
+
+    def test_multiple_batches_matches_reference(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, dtype=torch.float32)
+        qqq = QQQ(layer)
+        batches = [torch.randn(2, 8, 16, dtype=torch.float32) for _ in range(3)]
+        for x in batches:
+            qqq.add_batch(x, None)
+        H = qqq.materialize_hessian()
+        H_ref = self._reference_hessian(*batches)
+        self.assertTrue(torch.allclose(H, H_ref, rtol=1e-4, atol=1e-5))
+
+    def test_multi_device_matches_reference(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, dtype=torch.float32, device="cpu")
+        qqq = QQQ(layer)
+        x_cpu = torch.randn(2, 8, 16, dtype=torch.float32, device="cpu")
+        x_gpu = torch.randn(2, 8, 16, dtype=torch.float32, device="cuda:0")
+        qqq.add_batch(x_cpu, None)
+        qqq.add_batch(x_gpu, None)
+        H = qqq.materialize_hessian()
+        H_ref = self._reference_hessian(x_cpu, x_gpu)
+        self.assertTrue(torch.allclose(H, H_ref, rtol=1e-4, atol=1e-5))
+
+    def test_empty_batch_is_noop(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, dtype=torch.float32)
+        qqq = QQQ(layer)
+        qqq.add_batch(torch.zeros(0, 8, 16, dtype=torch.float32), None)
+        H = qqq.materialize_hessian()
+        self.assertEqual(H.shape, (16, 16))
+        self.assertTrue(torch.allclose(H, torch.zeros_like(H)))
