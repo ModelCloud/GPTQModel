@@ -691,4 +691,65 @@ No new Nsight capture in this round; the tile-size change primarily reduces Trit
 ### Known limitations / future work
 
 - `bits=2` Hessian/Hybrid still falls back to the exact Python loop.
-- The activation path is now the default `scale_search` mode; further speedup may come from fusing the top-k exact recompute, parallelizing the candidate dimension across the two target GPUs, or tuning `BLOCK_ROW` per `group_size`.
+- The activation path is now the default `scale_search` mode; further speedup may come from fusing the top-k exact recompute or tuning `BLOCK_ROW` per `group_size`.
+
+---
+
+## Round: fix Hessian/Hybrid tile-size regression and reduce activation exact-recompute allocations
+
+### Objective
+
+Re-tune `BLOCK_ROW` after discovering that `BLOCK_ROW=32` causes a large regression in the Hessian/Hybrid Triton kernel for `group_size=128`, and reduce the temporary allocations in the activation exact-recompute step.
+
+### Changes
+
+1. **`gptqmodel/quantization/_scale_search_triton.py`**
+   - Restored `BLOCK_ROW = 8` for the Hessian/Hybrid `_scale_search_hessian_kernel` path. `BLOCK_ROW=32` raised register pressure for `group_size=128` and made the `tl.dot(error, h)` step ~13x slower (~553 ms vs ~42 ms). Activation remains at `BLOCK_ROW=32` where it is faster.
+   - Reimplemented the activation top-2 exact recompute with in-place PyTorch operations and broadcasting views to avoid separate `dequant` and `error` tensors. The sequence `round → clamp → subtract zero → multiply scale → subtract x → square → multiply importance → sum` now reuses a single `q` tensor.
+
+### Notes on rejected experiments
+
+- **Multi-GPU candidate split** was prototyped for the activation Triton kernel and shown to be slower than the single-GPU path for both full-tensor and per-block `find_params_batched` due to cross-device copy overhead. It has been removed and is not part of this commit.
+- **Triton-based exact recompute** was also prototyped and failed strict validation because Triton's `tl.sum` reduction order does not match `torch.sum` exactly, causing argmin flips on near-tie candidates. The PyTorch exact recompute is kept.
+
+### Accuracy validation
+
+- `python scripts/validate_find_params_batched_strict.py` on A100 GPU 5: **STRICT CHECK PASSED**.
+- `pytest -q tests/test_gptq.py tests/test_quantizer.py tests/test_quantizer_scale_search.py tests/test_adjacent_exact_cuda.py tests/test_gptq_block_triton.py` on A100 GPU 5: **210 passed, 2 skipped**.
+- `ruff check gptqmodel/quantization/_scale_search_triton.py` and `git diff --check`: clean.
+
+### Benchmarks
+
+`find_params_batched` microbenchmark (`4096 x 4096`, `bits=4`, `sym=False`, `grid=100`, `maxshrink=0.8`, A100 GPU 5). `activation` uses `BLOCK_ROW=32` and in-place exact recompute; `hessian`/`hybrid` use `BLOCK_ROW=8`.
+
+| group_size | method     | time (ms) |
+|------------|------------|-----------|
+| 32         | activation | 10.34     |
+| 32         | hessian    | 40.19     |
+| 32         | hybrid     | 40.20     |
+| 64         | activation | 7.09      |
+| 64         | hessian    | 37.11     |
+| 64         | hybrid     | 37.14     |
+| 128        | activation | 6.04      |
+| 128        | hessian    | 41.78     |
+| 128        | hybrid     | 41.78     |
+
+End-to-end `GPTQ.quantize` (`4096 x 4096`, `blocksize=128`, `bits=4`, `sym=False`, `mse=2.0`, A100 GPU 5) is within run-to-run noise:
+
+| group_size | method     | mean (ms) | median (ms) | min (ms) | max (ms) |
+|------------|------------|-----------|-------------|----------|----------|
+| 32         | activation | 112.6     | 111.1       | 110.7    | 118.7    |
+| 32         | hessian    | 124.3     | 124.1       | 124.0    | 124.7    |
+| 32         | hybrid     | 124.4     | 124.3       | 124.2    | 124.9    |
+| 64         | activation | 104.9     | 104.9       | 104.5    | 105.2    |
+| 64         | hessian    | 114.7     | 114.7       | 114.2    | 115.2    |
+| 64         | hybrid     | 114.6     | 114.5       | 114.4    | 114.9    |
+| 128        | activation | 99.7      | 99.6        | 99.4     | 99.9     |
+| 128        | hessian    | 109.2     | 108.7       | 108.3    | 111.3    |
+| 128        | hybrid     | 108.9     | 109.0       | 108.6    | 109.4    |
+
+### Known limitations / future work
+
+- `bits=2` Hessian/Hybrid still falls back to the exact Python loop.
+- Multi-GPU candidate splitting is not pursued; any future multi-GPU work should target module-level parallelism or larger fused kernels rather than per-call `find_params_batched` splitting.
+- End-to-end `GPTQ.quantize` is still dominated by the fused GPTQ block kernel and Cholesky inversion; the next ScaleSearch round should either lower the exact-recompute launch overhead further or move on to the block-kernel/cholesky phase.

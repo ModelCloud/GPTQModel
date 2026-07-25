@@ -213,17 +213,21 @@ if _triton_available():
             zero_k = torch.round(-xmin_k / scale_k)
 
         # Recompute exact loss for the top-k candidates in one vectorized batch.
+        # Reuse a single intermediate tensor to avoid allocating dequant/error copies.
         # x: [rows, num_groups, group_size]
         # scale_k/zero_k: [rows, num_groups, k]
         # importance: [num_groups, group_size]
-        x_exp = x.unsqueeze(2).expand(-1, -1, k, -1)  # [rows, num_groups, k, group_size]
-        scale_k_exp = scale_k.unsqueeze(-1)
-        zero_k_exp = zero_k.unsqueeze(-1)
-        q = torch.clamp(torch.round(x_exp / scale_k_exp) + zero_k_exp, 0.0, maxq_f)
-        dequant = (q - zero_k_exp) * scale_k_exp
-        error = dequant - x_exp
-        importance_exp = importance.unsqueeze(0).unsqueeze(2)  # [1, num_groups, 1, group_size]
-        losses_k = (error * error * importance_exp).sum(dim=-1)  # [rows, num_groups, k]
+        x_view = x[:, :, None, :]  # [rows, num_groups, 1, group_size] broadcasts with k dim
+        scale_k_exp = scale_k[..., None]
+        zero_k_exp = zero_k[..., None]
+        q = x_view / scale_k_exp
+        q.round_()
+        q.add_(zero_k_exp).clamp_(0.0, maxq_f)  # q = clamp(round(x/scale)+zero, 0, maxq)
+        q.sub_(zero_k_exp).mul_(scale_k_exp)  # q = (q - zero) * scale = dequant
+        q.sub_(x_view)  # q = dequant - x = error
+        q.pow_(2)
+        q.mul_(importance[None, :, None, :])  # weight by importance
+        losses_k = q.sum(dim=-1)  # [rows, num_groups, k]
 
         best_local = losses_k.argmin(dim=-1)
 
@@ -327,7 +331,10 @@ if _triton_available():
             zero = torch.round(-xmin / scale) if not sym else torch.full_like(scale, (maxq + 1.0) / 2.0)
             return scale, zero
 
-        BLOCK_ROW = 32
+        # Use a smaller row tile for the Hessian/Hybrid kernel: the per-program
+        # H tile is group_size x group_size, so increasing BLOCK_ROW also
+        # increases register pressure and can make tl.dot spill for gs=128.
+        BLOCK_ROW = 8
         row_blocks = (rows + BLOCK_ROW - 1) // BLOCK_ROW
         total_programs = num_groups * row_blocks
         if total_programs == 0:
