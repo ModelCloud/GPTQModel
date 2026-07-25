@@ -422,6 +422,52 @@ class GPTQ:
         g_idx.div_(group_size, rounding_mode="floor")
         return g_idx
 
+    def _reshape_input(self, inp: torch.Tensor) -> Tuple[int, torch.Tensor, torch.device]:
+        inp_device = get_device(inp)
+
+        if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
+            reshaped_inp = inp.reshape(-1, inp.shape[-1])
+        else:
+            if isinstance(self.module, nn.Conv1d):
+                reshaped_inp = inp.reshape(
+                    inp.size(0) * self.module.groups,
+                    inp.size(1) // self.module.groups,
+                    inp.shape[2],
+                    1,
+                )
+                unfold = nn.Unfold(
+                    self.module.kernel_size + (1,),
+                    dilation=self.module.dilation + (1,),
+                    padding=self.module.padding + (0,),
+                    stride=self.module.stride + (1,),
+                )
+                reshaped_inp = unfold(reshaped_inp)
+            else:
+                reshaped_inp = inp.reshape(
+                    inp.size(0) * self.module.groups,
+                    inp.size(1) // self.module.groups,
+                    inp.shape[2],
+                    inp.shape[3],
+                )
+                unfold = nn.Unfold(
+                    self.module.kernel_size,
+                    dilation=self.module.dilation,
+                    padding=self.module.padding,
+                    stride=self.module.stride,
+                )
+                reshaped_inp = unfold(reshaped_inp)
+            reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
+
+        reshaped_inp = reshaped_inp.contiguous()
+        if self._tp_pad_cols:
+            pad = reshaped_inp.new_zeros((reshaped_inp.shape[0], self._tp_pad_cols))
+            reshaped_inp = torch.cat((reshaped_inp, pad), dim=1)
+            del pad
+
+        canonical_device = torch.device(inp_device)
+        batch_token_size = reshaped_inp.shape[0]
+        return batch_token_size, reshaped_inp, canonical_device
+
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
         # Embedding: accumulate token counts only (1D)
         if isinstance(self.module, nn.Embedding):
@@ -443,22 +489,59 @@ class GPTQ:
                 self._hessian_dirty = True
             return
 
-        # Non-Embedding: original 2D path
-        batch_token_size, xtx, device = self.process_batch(inp)
-        if batch_token_size == 0 or xtx is None:
+        # Non-Embedding: accumulate directly into a per-device partial to avoid
+        # allocating a columns x columns temporary for every batch.
+        batch_token_size, reshaped_inp, canonical_device = self._reshape_input(inp)
+        if batch_token_size == 0:
+            del reshaped_inp
             return
 
-        dev = torch.device(device)
+        dev = torch.device(canonical_device)
 
         with self.lock:
             self.fwd_counter += 1
 
             existing = self._device_hessian_partials.get(dev)
             if existing is None:
-                self._device_hessian_partials[dev] = xtx
+                existing = torch.zeros(
+                    (self.columns, self.columns),
+                    dtype=torch.float32,
+                    device=dev,
+                )
+                self._device_hessian_partials[dev] = existing
+
+            try:
+                self.compute_hessian_xtx(reshaped_inp, out=existing)
+            except RuntimeError as exc:
+                if (
+                    dev.type == "cuda"
+                    and "out of memory" in str(exc).lower()
+                ):
+                    log.warn(
+                        "GPTQ module '%s' fell back to CPU Hessian accumulation due to GPU OOM during batch processing.",
+                        getattr(self, "name", "<unknown>"),
+                    )
+                    reshaped_inp_cpu = reshaped_inp.to(device=torch.device("cpu"))
+                    del reshaped_inp
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    cpu_dev = torch.device("cpu")
+                    existing_cpu = self._device_hessian_partials.get(cpu_dev)
+                    if existing_cpu is None:
+                        existing_cpu = torch.zeros(
+                            (self.columns, self.columns),
+                            dtype=torch.float32,
+                            device=cpu_dev,
+                        )
+                        self._device_hessian_partials[cpu_dev] = existing_cpu
+                    self.compute_hessian_xtx(reshaped_inp_cpu, out=existing_cpu)
+                    del reshaped_inp_cpu
+                    dev = cpu_dev
+                else:
+                    del reshaped_inp
+                    raise
             else:
-                existing.add_(xtx)
-                del xtx
+                del reshaped_inp
 
             self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
             self.nsamples += batch_token_size
@@ -622,9 +705,15 @@ class GPTQ:
                         if device.type == "cuda":
                             torch.cuda.current_stream(device).synchronize()
 
-    def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
+    def compute_hessian_xtx(
+        self,
+        matrix: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         rows = matrix.shape[0]
         if rows == 0:
+            if out is not None:
+                return out
             return torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
         stage_dtype = self.preferred_staging_dtype(matrix.dtype, matrix.device)
@@ -634,89 +723,49 @@ class GPTQ:
 
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
-            xtx = torch.matmul(mat32.T, mat32)
+            if out is None:
+                xtx = torch.matmul(mat32.T, mat32)
+            else:
+                out.addmm_(mat32.T, mat32, beta=1.0, alpha=1.0)
+                xtx = out
             del mat32
             torch_sync(device=xtx.device)
             return xtx
 
-        xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
+        if out is None:
+            xtx = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
+        else:
+            xtx = out
 
         for start in range(0, rows, chunk_size):
             rows_this = min(chunk_size, rows - start)
             source = matrix[start:start + rows_this]
             with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
-                materialized32 = materialized
-                xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
+                if out is None:
+                    xtx.add_(torch.matmul(materialized.T, materialized))
+                else:
+                    xtx.addmm_(materialized.T, materialized, beta=1.0, alpha=1.0)
 
-        torch_sync(device=xtx_accum.device)
-        return xtx_accum
+        torch_sync(device=xtx.device)
+        return xtx
 
     def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
-        # print(f"inp = {inp.shape}")
-        # print(f"self.module = {self.module} device = {self.module.target_device}")
-        inp_device = get_device(inp)
-
-        #inp = inp.to(device=self.module.target_device, dtype=torch.float32)
-
         if isinstance(self.module, nn.Embedding):
+            inp_device = get_device(inp)
             ids = inp.reshape(-1).to(torch.long)
             counts = torch.bincount(ids, minlength=self.columns).to(torch.float32)
             return ids.numel(), counts, torch.device(inp_device)
 
-        if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-            reshaped_inp = inp.reshape(-1, inp.shape[-1])
-        else:
-            if isinstance(self.module, nn.Conv1d):
-                reshaped_inp = inp.reshape(
-                    inp.size(0) * self.module.groups,
-                    inp.size(1) // self.module.groups,
-                    inp.shape[2],
-                    1,
-                )
-                unfold = nn.Unfold(
-                    self.module.kernel_size + (1,),
-                    dilation=self.module.dilation + (1,),
-                    padding=self.module.padding + (0,),
-                    stride=self.module.stride + (1,),
-                )
-                # output size (batch_size, channels * \prod kernel_size, num_patches)
-                reshaped_inp = unfold(reshaped_inp)
-            else:
-                reshaped_inp = inp.reshape(
-                    inp.size(0) * self.module.groups,
-                    inp.size(1) // self.module.groups,
-                    inp.shape[2],
-                    inp.shape[3],
-                )
-                unfold = nn.Unfold(
-                    self.module.kernel_size,
-                    dilation=self.module.dilation,
-                    padding=self.module.padding,
-                    stride=self.module.stride,
-                )
-                # output size (batch_size, channels * \prod kernel_size, num_patches)
-                reshaped_inp = unfold(reshaped_inp)
-            reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
-
-        # Delay dtype conversion until we materialize Hessian chunks to avoid unnecessary temporaries
-        reshaped_inp = reshaped_inp.contiguous()
-        if self._tp_pad_cols:
-            pad = reshaped_inp.new_zeros((reshaped_inp.shape[0], self._tp_pad_cols))
-            reshaped_inp = torch.cat((reshaped_inp, pad), dim=1)
-            del pad
-        canonical_device = torch.device(inp_device)
-
-        batch_token_size = reshaped_inp.shape[0]
-
+        batch_token_size, reshaped_inp, canonical_device = self._reshape_input(inp)
         if batch_token_size == 0:
             del reshaped_inp
             return 0, None, canonical_device
 
         try:
-            xtx = self.compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
+            xtx = self.compute_hessian_xtx(reshaped_inp)
         except RuntimeError as exc:
             if (
-                torch.device(inp_device).type == "cuda"
+                canonical_device.type == "cuda"
                 and "out of memory" in str(exc).lower()
             ):
                 log.warn(
@@ -728,14 +777,12 @@ class GPTQ:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 canonical_device = torch.device("cpu")
-                xtx = self.compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
-                xtx = xtx.detach()
+                xtx = self.compute_hessian_xtx(reshaped_inp_cpu)
                 del reshaped_inp_cpu
             else:
                 del reshaped_inp
                 raise
         else:
-            xtx = xtx.detach()
             del reshaped_inp
 
         self._snapshot_borrow_workspace_stats(context="process_batch")
@@ -834,7 +881,10 @@ class GPTQ:
                 self._device_sample_counts.clear()
                 return
 
-            for partial_device, partial in self._device_hessian_partials.items():
+            # Merge per-device partials into the final Hessian and delete each
+            # partial as it is added so the peak stays at result + one partial.
+            while self._device_hessian_partials:
+                _, partial = self._device_hessian_partials.popitem()
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
                     try:
                         result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
@@ -849,6 +899,7 @@ class GPTQ:
                             result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
                 else:
                     result_accum.add_(partial)
+                del partial
 
             result_accum.mul_(2.0 / float(total_samples))
 
@@ -856,7 +907,6 @@ class GPTQ:
             self.nsamples = total_samples
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
-            self._device_hessian_partials.clear()
             self._device_sample_counts.clear()
             del result_accum
 
@@ -902,17 +952,19 @@ class GPTQ:
                 )
 
             if total_samples:
-                for partial in partials.values():
+                # Merge shared partials and delete each one as it is added.
+                while partials:
+                    _, partial = partials.popitem()
                     if partial.device != result_accum.device or partial.dtype != torch.float32:
                         result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
                     else:
                         result_accum.add_(partial)
+                    del partial
                 result_accum.mul_(2.0 / float(total_samples))
 
             shared_state["H"] = result_accum
             shared_state["dirty"] = False
             shared_state["total_samples"] = total_samples
-            partials.clear()
             sample_counts.clear()
 
             self.H = result_accum

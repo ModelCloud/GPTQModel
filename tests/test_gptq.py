@@ -12,8 +12,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import pytest
+import random
 import torch
 import torch.nn as nn
+from gptqmodel.looper.named_module import NamedModule
 from models.model_test import ModelTest
 
 from gptqmodel.quantization import gptq as gptq_mod
@@ -892,3 +894,178 @@ def test_hessian_inverse_compile_and_eager_match(dtype):
     H_eff = H_orig + torch.eye(n, dtype=dtype, device="cuda") * c
     identity = Hinv_comp.T @ Hinv_comp @ H_eff
     torch.testing.assert_close(identity, torch.eye(n, dtype=dtype, device="cuda"), atol=1e-4, rtol=1e-4)
+
+
+class TestGPTQHessian:
+    """Verify GPTQ Hessian accumulation matches the closed-form reference."""
+
+    def _reference(self, *tensors):
+        target = tensors[0].device
+        total = sum(t.numel() // t.shape[-1] for t in tensors)
+        X = torch.cat(
+            [t.reshape(-1, t.shape[-1]).to(target).float().t() for t in tensors],
+            dim=1,
+        )
+        if total == 0:
+            return torch.zeros((X.shape[0], X.shape[0]), dtype=torch.float32, device=target)
+        return (2.0 / total) * X.matmul(X.t())
+
+    def _make_gptq(self, layer):
+        from gptqmodel.looper.named_module import NamedModule
+        named = NamedModule(layer, name="l", full_name="m.l", layer_index=0)
+        return GPTQ(named, QuantizeConfig())
+
+    def test_single_batch_matches_reference(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, bias=False, dtype=torch.float32)
+        gptq = self._make_gptq(layer)
+        x = torch.randn(4, 8, 16, dtype=torch.float32)
+        gptq.add_batch(x, None)
+        gptq.materialize_global_hessian()
+        H_ref = self._reference(x)
+        assert torch.allclose(gptq.H, H_ref, rtol=1e-4, atol=1e-5)
+
+    def test_multiple_batches_matches_reference(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, bias=False, dtype=torch.float32)
+        gptq = self._make_gptq(layer)
+        batches = [torch.randn(2, 8, 16, dtype=torch.float32) for _ in range(3)]
+        for x in batches:
+            gptq.add_batch(x, None)
+        gptq.materialize_global_hessian()
+        H_ref = self._reference(*batches)
+        assert torch.allclose(gptq.H, H_ref, rtol=1e-4, atol=1e-5)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_multi_device_matches_reference(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, bias=False, dtype=torch.float32, device="cpu")
+        gptq = self._make_gptq(layer)
+        x_cpu = torch.randn(2, 8, 16, dtype=torch.float32, device="cpu")
+        x_gpu = torch.randn(2, 8, 16, dtype=torch.float32, device="cuda:0")
+        gptq.add_batch(x_cpu, None)
+        gptq.add_batch(x_gpu, None)
+        gptq.materialize_global_hessian()
+        H_ref = self._reference(x_cpu, x_gpu)
+        assert torch.allclose(gptq.H, H_ref, rtol=1e-4, atol=1e-5)
+
+    def test_empty_batch_is_noop(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, bias=False, dtype=torch.float32)
+        gptq = self._make_gptq(layer)
+        gptq.add_batch(torch.zeros(0, 8, 16, dtype=torch.float32), None)
+        gptq.materialize_global_hessian()
+        assert gptq.H.shape == (16, 16)
+        assert torch.allclose(gptq.H, torch.zeros_like(gptq.H))
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_add_batch_second_call_avoids_hessian_temporary(self):
+        """A second batch should not allocate another columns x columns temporary."""
+        columns = 4096
+        layer = torch.nn.Linear(columns, columns // 2, bias=False, dtype=torch.float16, device="cuda:0")
+        gptq = self._make_gptq(layer)
+        x = torch.randn(1, 64, columns, dtype=torch.float16, device="cuda:0")
+
+        gptq.add_batch(x, None)
+        torch.cuda.reset_peak_memory_stats()
+        base = torch.cuda.memory_allocated()
+        gptq.add_batch(x, None)
+        peak = torch.cuda.max_memory_allocated()
+
+        # The columns x columns fp32 output tensor is ~64 MiB.  A second in-place
+        # batch should only allocate the small activation cast + workspace.
+        assert peak - base < (columns * columns * 4) // 2
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_compute_hessian_xtx_out_saves_memory(self):
+        """compute_hessian_xtx(out=...) should not allocate an extra CxC output."""
+        columns = 4096
+        rows = 128
+        layer = torch.nn.Linear(columns, columns // 2, bias=False, dtype=torch.float16, device="cuda:0")
+        gptq = self._make_gptq(layer)
+        matrix = torch.randn(rows, columns, dtype=torch.float16, device="cuda:0")
+        H = torch.zeros(columns, columns, dtype=torch.float32, device="cuda:0")
+
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        base = torch.cuda.memory_allocated()
+        gptq.compute_hessian_xtx(matrix, out=H)
+        new_with_out = torch.cuda.max_memory_allocated() - base
+
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        base = torch.cuda.memory_allocated()
+        xtx = gptq.compute_hessian_xtx(matrix)
+        new_without_out = torch.cuda.max_memory_allocated() - base
+        del xtx
+
+        expected_savings = columns * columns * 4
+        assert new_without_out >= new_with_out + int(expected_savings * 0.8)
+
+
+def _gptq_reference(*tensors):
+    target = tensors[0].device
+    total = sum(t.numel() // t.shape[-1] for t in tensors)
+    X = torch.cat(
+        [t.reshape(-1, t.shape[-1]).to(target).float().t() for t in tensors],
+        dim=1,
+    )
+    if total == 0:
+        return torch.zeros((X.shape[0], X.shape[0]), dtype=torch.float32, device=target)
+    return (2.0 / total) * X.matmul(X.t())
+
+
+@pytest.mark.parametrize("seed", range(10000))
+def test_gptq_hessian_randomized(seed: int):
+    """Run many random shapes/datasets through the Hessian path."""
+    rng = random.Random(seed)
+    columns = rng.choice([8, 16, 32, 64, 128, 256, 512, 1024, 2048])
+    batch_count = rng.choice([1, 2, 3, 5])
+    samples = rng.choice([1, 2, 3])
+    seq_len = rng.choice([1, 4, 8, 16, 32, 64])
+
+    # Keep total token count bounded so the suite stays fast on CPU.
+    max_tokens = 1_000_000
+    total = columns * samples * seq_len * batch_count
+    if total > max_tokens:
+        seq_len = max(1, max_tokens // (columns * samples * batch_count))
+
+    torch.manual_seed(seed)
+    layer = nn.Linear(columns, columns // 2, bias=False, dtype=torch.float32)
+    named = NamedModule(layer, name="l", full_name="m.l", layer_index=0)
+    gptq = GPTQ(named, QuantizeConfig())
+    batches = [
+        torch.randn(samples, seq_len, columns, dtype=torch.float32)
+        for _ in range(batch_count)
+    ]
+
+    for x in batches:
+        gptq.add_batch(x, None)
+    gptq.materialize_global_hessian()
+
+    H_ref = _gptq_reference(*batches)
+    assert torch.allclose(gptq.H, H_ref, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.parametrize("seed", range(1000))
+def test_gptq_hessian_randomized_multi_device(seed: int):
+    """Randomized multi-device accumulation (cpu + cuda:0)."""
+    rng = random.Random(seed)
+    columns = rng.choice([8, 16, 32, 64, 128, 256, 512, 1024])
+    seq_len = rng.choice([1, 4, 8, 16, 32])
+
+    torch.manual_seed(seed)
+    layer = nn.Linear(columns, columns // 2, bias=False, dtype=torch.float32, device="cpu")
+    named = NamedModule(layer, name="l", full_name="m.l", layer_index=0)
+    gptq = GPTQ(named, QuantizeConfig())
+
+    x_cpu = torch.randn(1, seq_len, columns, dtype=torch.float32, device="cpu")
+    x_gpu = torch.randn(1, seq_len, columns, dtype=torch.float32, device="cpu").to("cuda:0")
+
+    gptq.add_batch(x_cpu, None)
+    gptq.add_batch(x_gpu, None)
+    gptq.materialize_global_hessian()
+
+    H_ref = _gptq_reference(x_cpu, x_gpu)
+    assert torch.allclose(gptq.H, H_ref, rtol=1e-4, atol=1e-5)
