@@ -64,7 +64,7 @@ def test_default_jit_cflags_allow_noopt(monkeypatch):
 
     flags = cpp_module.default_jit_cflags(opt_level=None)
 
-    assert "-std=c++17" in flags
+    assert any(flag.startswith("-std=c++") for flag in flags)
     assert not any(flag.startswith("-O") for flag in flags)
 
 

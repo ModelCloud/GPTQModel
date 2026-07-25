@@ -11,11 +11,13 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 import torch
 
 from ..utils.cpp import (
     TorchOpsJitExtension,
+    _jit_cxx_standard,
     cuda_include_paths_with_fallback,
     default_jit_cflags,
     default_jit_cuda_cflags,
@@ -113,7 +115,7 @@ def _exllamav3_include_paths() -> list[str]:
 
 def _extra_cflags() -> list[str]:
     if windows:
-        flags = ["/O2", "/std:c++17"]
+        flags = ["/O2", f"/std:{_jit_cxx_standard()}"]
     else:
         flags = default_jit_cflags(opt_level="O2")
 
