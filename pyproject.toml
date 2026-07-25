@@ -66,7 +66,7 @@ hf = [
     "optimum>=1.21.2",
 ]
 eval = [
-    "Evalution>=0.0.8",
+    "Evalution>=0.0.9",
 ]
 triton = [
     "triton>=3.4.0",
