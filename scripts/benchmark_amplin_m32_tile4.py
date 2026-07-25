@@ -159,6 +159,12 @@ def _bench_shape(spec, dtype, size_m, device, warmup, iters, rounds, seed, pre_t
             packed_scales,
             logical_n=spec.size_n,
         )
+        functions["tile2_interleaved_dequant"] = lambda: amplin.mma_lane_m32_n64_tile2_interleaved_dequant(
+            input_tensor,
+            packed_n64_qweight,
+            packed_scales,
+            logical_n=spec.size_n,
+        )
     if tile2_splitk2_legal:
         functions["tile2_splitk2"] = lambda: amplin.mma_lane_m32_n64_tile2_splitk2(
             input_tensor,

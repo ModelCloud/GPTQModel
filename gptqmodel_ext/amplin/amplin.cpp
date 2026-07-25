@@ -127,6 +127,12 @@ torch::Tensor amplin_mma_lane_m32_n64_tile2_shared_a_cuda(
     torch::Tensor packed_scales,
     int64_t logical_n);
 
+torch::Tensor amplin_mma_lane_m32_n64_tile2_interleaved_dequant_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n);
+
 torch::Tensor amplin_mma_lane_m32_n64_tile4_shared_a_cuda(
     torch::Tensor input,
     torch::Tensor packed_lane_qweight,
@@ -523,6 +529,18 @@ torch::Tensor amplin_mma_lane_m32_n64_tile2_shared_a_dispatch(
       logical_n);
 }
 
+torch::Tensor amplin_mma_lane_m32_n64_tile2_interleaved_dequant_dispatch(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_m32_n64_tile2_interleaved_dequant_cuda(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      logical_n);
+}
+
 torch::Tensor amplin_mma_lane_m32_n64_tile4_shared_a_dispatch(
     torch::Tensor input,
     torch::Tensor packed_lane_qweight,
@@ -883,6 +901,154 @@ torch::Tensor amplin_mma_lane_m16_n16_splitk16_dispatch(
       logical_n);
 }
 
+using MarlinGemmFp16Fn = at::Tensor (
+    at::Tensor,
+    c10::optional<at::Tensor>,
+    at::Tensor,
+    const c10::optional<at::Tensor>&,
+    at::Tensor,
+    const c10::optional<at::Tensor>&,
+    const c10::optional<at::Tensor>&,
+    const c10::optional<at::Tensor>&,
+    const c10::optional<at::Tensor>&,
+    at::Tensor,
+    int64_t,
+    int64_t,
+    int64_t,
+    int64_t,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    int64_t);
+
+c10::TypedOperatorHandle<MarlinGemmFp16Fn>& get_marlin_fp16_op() {
+  static c10::TypedOperatorHandle<MarlinGemmFp16Fn> op =
+      c10::Dispatcher::singleton()
+          .findSchemaOrThrow(
+              "gptqmodel_marlin_fp16::gptq_marlin_gemm_fp16", "")
+          .typed<MarlinGemmFp16Fn>();
+  return op;
+}
+
+using MarlinGemmBf16Fn = at::Tensor (
+    at::Tensor,
+    c10::optional<at::Tensor>,
+    at::Tensor,
+    const c10::optional<at::Tensor>&,
+    at::Tensor,
+    const c10::optional<at::Tensor>&,
+    const c10::optional<at::Tensor>&,
+    const c10::optional<at::Tensor>&,
+    const c10::optional<at::Tensor>&,
+    at::Tensor,
+    int64_t,
+    int64_t,
+    int64_t,
+    int64_t,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    int64_t);
+
+c10::TypedOperatorHandle<MarlinGemmBf16Fn>& get_marlin_bf16_op() {
+  static c10::TypedOperatorHandle<MarlinGemmBf16Fn> op =
+      c10::Dispatcher::singleton()
+          .findSchemaOrThrow(
+              "gptqmodel_marlin_bf16::gptq_marlin_gemm_bf16", "")
+          .typed<MarlinGemmBf16Fn>();
+  return op;
+}
+
+torch::Tensor amplin_marlin_style_run(
+    torch::Tensor input,
+    torch::Tensor marlin_qweight,
+    torch::Tensor marlin_scales,
+    torch::Tensor workspace,
+    int64_t b_q_type_id,
+    int64_t size_n,
+    int64_t size_k) {
+  int64_t size_m = input.numel() / size_k;
+  auto input_2d = input.reshape({size_m, size_k}).contiguous();
+  at::Tensor output;
+  if (input.dtype() == torch::kFloat16) {
+    output = get_marlin_fp16_op().call(
+        input_2d,
+        c10::nullopt,
+        marlin_qweight,
+        c10::nullopt,
+        marlin_scales,
+        c10::nullopt,
+        c10::nullopt,
+        c10::nullopt,
+        c10::nullopt,
+        workspace,
+        b_q_type_id,
+        size_m,
+        size_n,
+        size_k,
+        true,
+        false,
+        true,
+        false,
+        false,
+        0);
+  } else if (input.dtype() == torch::kBFloat16) {
+    output = get_marlin_bf16_op().call(
+        input_2d,
+        c10::nullopt,
+        marlin_qweight,
+        c10::nullopt,
+        marlin_scales,
+        c10::nullopt,
+        c10::nullopt,
+        c10::nullopt,
+        c10::nullopt,
+        workspace,
+        b_q_type_id,
+        size_m,
+        size_n,
+        size_k,
+        true,
+        false,
+        true,
+        false,
+        false,
+        0);
+  } else {
+    AT_ERROR(
+        "marlin_style_run only supports torch.float16 or torch.bfloat16 input, got ",
+        input.dtype());
+  }
+  if (input.dim() == 2) {
+    return output;
+  }
+  auto out_shape = input.sizes().vec();
+  out_shape.back() = size_n;
+  return output.reshape(out_shape);
+}
+
+torch::Tensor amplin_marlin_style_run_dispatch(
+    torch::Tensor input,
+    torch::Tensor marlin_qweight,
+    torch::Tensor marlin_scales,
+    torch::Tensor workspace,
+    int64_t b_q_type_id,
+    int64_t size_n,
+    int64_t size_k) {
+  return amplin_marlin_style_run(
+      input,
+      marlin_qweight,
+      marlin_scales,
+      workspace,
+      b_q_type_id,
+      size_n,
+      size_k);
+}
+
 }  // namespace
 
 TORCH_LIBRARY(gptqmodel_amplin, m) {
@@ -917,6 +1083,8 @@ TORCH_LIBRARY(gptqmodel_amplin, m) {
       "mma_lane_m16_n64_tile8_shared_a(Tensor input, Tensor packed_lane_qweight, Tensor packed_scales, int logical_n) -> Tensor");
   m.def(
       "mma_lane_m32_n64_tile2_shared_a(Tensor input, Tensor packed_lane_qweight, Tensor packed_scales, int logical_n) -> Tensor");
+  m.def(
+      "mma_lane_m32_n64_tile2_interleaved_dequant(Tensor input, Tensor packed_lane_qweight, Tensor packed_scales, int logical_n) -> Tensor");
   m.def(
       "mma_lane_m32_n64_tile4_shared_a(Tensor input, Tensor packed_lane_qweight, Tensor packed_scales, int logical_n) -> Tensor");
   m.def(
@@ -977,6 +1145,9 @@ TORCH_LIBRARY(gptqmodel_amplin, m) {
       "mma_lane_m16_n32_splitk8_pipe2(Tensor input, Tensor packed_lane_qweight, Tensor packed_scales, int logical_n) -> Tensor");
   m.def(
       "mma_lane_m16_n16_splitk16(Tensor input, Tensor packed_lane_qweight, Tensor packed_scales, int logical_n) -> Tensor");
+  m.def(
+      "marlin_style_run(Tensor input, Tensor marlin_qweight, Tensor marlin_scales, Tensor workspace, "
+      "int b_q_type_id, int size_n, int size_k) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_amplin, CUDA, m) {
@@ -1008,6 +1179,8 @@ TORCH_LIBRARY_IMPL(gptqmodel_amplin, CUDA, m) {
       "mma_lane_m16_n64_tile8_shared_a", &amplin_mma_lane_m16_n64_tile8_shared_a_dispatch);
   m.impl(
       "mma_lane_m32_n64_tile2_shared_a", &amplin_mma_lane_m32_n64_tile2_shared_a_dispatch);
+  m.impl(
+      "mma_lane_m32_n64_tile2_interleaved_dequant", &amplin_mma_lane_m32_n64_tile2_interleaved_dequant_dispatch);
   m.impl(
       "mma_lane_m32_n64_tile4_shared_a", &amplin_mma_lane_m32_n64_tile4_shared_a_dispatch);
   m.impl(
@@ -1076,4 +1249,7 @@ TORCH_LIBRARY_IMPL(gptqmodel_amplin, CUDA, m) {
       "mma_lane_m16_n32_splitk8_pipe2",
       &amplin_mma_lane_m16_n32_splitk8_pipe2_dispatch);
   m.impl("mma_lane_m16_n16_splitk16", &amplin_mma_lane_m16_n16_splitk16_dispatch);
+  m.impl(
+      "marlin_style_run",
+      &amplin_marlin_style_run_dispatch);
 }

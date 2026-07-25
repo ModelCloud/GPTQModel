@@ -435,6 +435,29 @@ struct MmaFragmentC {
   float values[4];
 };
 
+template <typename Scalar>
+struct MmaScalar2 {
+  using type = typename std::conditional<
+      std::is_same<Scalar, half>::value,
+      half2,
+      __nv_bfloat162>::type;
+};
+
+template <typename Scalar>
+__device__ __forceinline__ typename MmaScalar2<Scalar>::type make_mma_scalar2(
+    Scalar value);
+
+template <>
+__device__ __forceinline__ half2 make_mma_scalar2<half>(half value) {
+  return __half2half2(value);
+}
+
+template <>
+__device__ __forceinline__ __nv_bfloat162 make_mma_scalar2<__nv_bfloat16>(
+    __nv_bfloat16 value) {
+  return __bfloat162bfloat162(value);
+}
+
 __device__ __forceinline__ void load_mma_fragment_a(
     MmaFragmentA& fragment,
     const void* shared_source) {
@@ -566,6 +589,59 @@ struct MmaLaneDequant<half> {
     result.values = __hmul2(result.values, scale_pair);
     fragment.values[1] = result.bits;
   }
+
+  __device__ __forceinline__ static void run2(
+      uint32_t packed_word,
+      const half2& scale0_pair,
+      const half2& scale1_pair,
+      MmaFragmentB& fragment0,
+      MmaFragmentB& fragment1) {
+    constexpr uint32_t kLowMask = 0x000f000f;
+    constexpr uint32_t kHighMask = 0x00f000f0;
+    constexpr uint32_t kExponent = 0x64006400;
+    constexpr uint32_t kSubtract = 0x64086408;
+    constexpr uint32_t kMultiply = 0x2c002c00;
+    constexpr uint32_t kAdd = 0xd480d480;
+    constexpr int kLop3AndOr = (0xf0 & 0xcc) | 0xaa;
+
+    const uint32_t low =
+        mma_lop3<kLop3AndOr>(packed_word, kLowMask, kExponent);
+    const uint32_t high =
+        mma_lop3<kLop3AndOr>(packed_word, kHighMask, kExponent);
+    const uint32_t low_h =
+        mma_lop3<kLop3AndOr>(packed_word >> 8, kLowMask, kExponent);
+    const uint32_t high_h =
+        mma_lop3<kLop3AndOr>(packed_word >> 8, kHighMask, kExponent);
+
+    union {
+      uint32_t bits;
+      half2 values;
+    } pair, constant, add_pair, result;
+
+    pair.bits = low;
+    constant.bits = kSubtract;
+    result.values = __hmul2(__hsub2(pair.values, constant.values), scale0_pair);
+    fragment0.values[0] = result.bits;
+
+    pair.bits = high;
+    constant.bits = kMultiply;
+    add_pair.bits = kAdd;
+    result.values =
+        __hmul2(__hfma2(pair.values, constant.values, add_pair.values), scale0_pair);
+    fragment0.values[1] = result.bits;
+
+    pair.bits = low_h;
+    constant.bits = kSubtract;
+    result.values = __hmul2(__hsub2(pair.values, constant.values), scale1_pair);
+    fragment1.values[0] = result.bits;
+
+    pair.bits = high_h;
+    constant.bits = kMultiply;
+    add_pair.bits = kAdd;
+    result.values =
+        __hmul2(__hfma2(pair.values, constant.values, add_pair.values), scale1_pair);
+    fragment1.values[1] = result.bits;
+  }
 };
 
 template <>
@@ -597,6 +673,54 @@ struct MmaLaneDequant<__nv_bfloat16> {
     result.values =
         __hmul2(__hsub2(high_pair.values, subtract_pair.values), scale_pair);
     fragment.values[1] = result.bits;
+  }
+
+  __device__ __forceinline__ static void run2(
+      uint32_t packed_word,
+      const __nv_bfloat162& scale0_pair,
+      const __nv_bfloat162& scale1_pair,
+      MmaFragmentB& fragment0,
+      MmaFragmentB& fragment1) {
+    constexpr uint32_t kMask = 0x000f000f;
+    constexpr uint32_t kExponent = 0x43004300;
+    constexpr uint32_t kSubtract = 0x43084308;
+    constexpr int kLop3AndOr = (0xf0 & 0xcc) | 0xaa;
+
+    const uint32_t shifted_word = packed_word >> 8;
+    const uint32_t low0 =
+        mma_lop3<kLop3AndOr>(packed_word, kMask, kExponent);
+    const uint32_t high0 =
+        mma_lop3<kLop3AndOr>(packed_word >> 4, kMask, kExponent);
+    const uint32_t low1 =
+        mma_lop3<kLop3AndOr>(shifted_word, kMask, kExponent);
+    const uint32_t high1 =
+        mma_lop3<kLop3AndOr>(shifted_word >> 4, kMask, kExponent);
+
+    union {
+      uint32_t bits;
+      __nv_bfloat162 values;
+    } pair, subtract_pair, result;
+    subtract_pair.bits = kSubtract;
+
+    pair.bits = low0;
+    result.values =
+        __hmul2(__hsub2(pair.values, subtract_pair.values), scale0_pair);
+    fragment0.values[0] = result.bits;
+
+    pair.bits = high0;
+    result.values =
+        __hmul2(__hsub2(pair.values, subtract_pair.values), scale0_pair);
+    fragment0.values[1] = result.bits;
+
+    pair.bits = low1;
+    result.values =
+        __hmul2(__hsub2(pair.values, subtract_pair.values), scale1_pair);
+    fragment1.values[0] = result.bits;
+
+    pair.bits = high1;
+    result.values =
+        __hmul2(__hsub2(pair.values, subtract_pair.values), scale1_pair);
+    fragment1.values[1] = result.bits;
   }
 };
 
@@ -1180,8 +1304,11 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
   // original 16-way bank conflict to a 2-way conflict.  The row size (136 halfs
   // = 272 bytes) is a multiple of 16 bytes, so cp.async remains aligned.
   constexpr int kSharedAK = kHmmaBlockK + 8;
+  constexpr int kSharedAElements = BlockM * kSharedAK;
 
-  __shared__ __align__(32) Scalar shared_a[BlockM * kSharedAK];
+  // Two-stage cp.async pipeline for the A tile so the next K-group's activation
+  // tile is fetched while the current group is computed.
+  __shared__ __align__(32) Scalar shared_a[2 * kSharedAElements];
 
   const int thread = threadIdx.x;
   const int lane = thread & (kMmaLanes - 1);
@@ -1203,11 +1330,9 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
 
   const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
   const int address_column = (lane >> 4) * 8;
-  Scalar* const shared_a_m_base = shared_a + m_group * kMmaM * kSharedAK;
 
-  MmaFragmentC accumulators[kMmaLaneSplitKN64Fragments] = {};
-
-  for (int group = 0; group < num_groups; ++group) {
+  auto load_a_tile_to_stage = [=] (int stage, int group) {
+    Scalar* const shared_a_stage = shared_a + stage * kSharedAElements;
     const int a_elements = BlockM * kHmmaBlockK;
     for (int idx = thread;
          idx < a_elements / kScalarsPerCpAsync;
@@ -1216,7 +1341,7 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
       const int row = flat / kHmmaBlockK;
       const int col = flat - row * kHmmaBlockK;
       const int source_m = global_m_base + row;
-      Scalar* const shared_dest = shared_a + row * kSharedAK + col;
+      Scalar* const shared_dest = shared_a_stage + row * kSharedAK + col;
       if (source_m < size_m && col + kScalarsPerCpAsync <= kHmmaBlockK) {
         cp_async_16(
             shared_dest,
@@ -1229,8 +1354,21 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
       }
     }
     cp_async_commit_group();
-    cp_async_wait_all();
-    __syncthreads();
+  };
+
+  MmaFragmentC accumulators[kMmaLaneSplitKN64Fragments] = {};
+
+  // Prime stage 0 with group 0.
+  load_a_tile_to_stage(0, 0);
+  cp_async_wait_all();
+  __syncthreads();
+
+  int a_stage = 0;
+  for (int group = 0; group < num_groups; ++group) {
+    if (group + 1 < num_groups) {
+      const int next_stage = 1 - a_stage;
+      load_a_tile_to_stage(next_stage, group + 1);
+    }
 
     if (valid_tile && m_rows > 0) {
       const int64_t scale_offset =
@@ -1241,6 +1379,12 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
         scales[fragment] =
             packed_scales[scale_offset + fragment * kMmaN + quad];
       }
+      using Scalar2 = typename MmaScalar2<Scalar>::type;
+      Scalar2 scale_pairs[kMmaLaneSplitKN64Fragments];
+#pragma unroll
+      for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+        scale_pairs[fragment] = make_mma_scalar2(scales[fragment]);
+      }
 
       const int64_t group_word_base =
           (((static_cast<int64_t>(tile_n) * num_groups + group) *
@@ -1249,24 +1393,16 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
             lane) *
            kHmmaWarps);
 
-      MmaFragmentA fragment_a;
-      load_mma_fragment_a(
-          fragment_a,
-          shared_a_m_base + address_row * kSharedAK + address_column);
+      Scalar* const shared_a_m_base =
+          shared_a + a_stage * kSharedAElements + m_group * kMmaM * kSharedAK;
+
       uint4 packed_words =
           *reinterpret_cast<const uint4*>(packed_lane_qweight + group_word_base);
 
 #pragma unroll
       for (int k_step = 0; k_step < kSteps; ++k_step) {
-        MmaFragmentA next_fragment_a;
         uint4 next_packed_words = {};
         if (k_step + 1 < kSteps) {
-          load_mma_fragment_a(
-              next_fragment_a,
-              shared_a_m_base +
-                  address_row * kSharedAK +
-                  (k_step + 1) * kMmaK +
-                  address_column);
           const int64_t next_word_offset =
               group_word_base +
               static_cast<int64_t>(k_step + 1) * kMmaLanes * kHmmaWarps;
@@ -1274,6 +1410,14 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
               *reinterpret_cast<const uint4*>(
                   packed_lane_qweight + next_word_offset);
         }
+
+        MmaFragmentA fragment_a;
+        load_mma_fragment_a(
+            fragment_a,
+            shared_a_m_base +
+                address_row * kSharedAK +
+                k_step * kMmaK +
+                address_column);
 
         const uint32_t words[kHmmaWarps] = {
             packed_words.x,
@@ -1285,13 +1429,11 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
         for (int word = 0; word < kHmmaWarps; ++word) {
           MmaFragmentB fragment_b_0;
           MmaFragmentB fragment_b_1;
-          MmaLaneDequant<Scalar>::run(
+          MmaLaneDequant<Scalar>::run2(
               words[word],
-              scales[word * 2],
-              fragment_b_0);
-          MmaLaneDequant<Scalar>::run(
-              words[word] >> 8,
-              scales[word * 2 + 1],
+              scale_pairs[word * 2],
+              scale_pairs[word * 2 + 1],
+              fragment_b_0,
               fragment_b_1);
           MmaInstruction<Scalar>::run(
               fragment_a,
@@ -1304,12 +1446,207 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
         }
 
         if (k_step + 1 < kSteps) {
-          fragment_a = next_fragment_a;
           packed_words = next_packed_words;
         }
       }
     }
-    __syncthreads();
+
+    if (group + 1 < num_groups) {
+      cp_async_wait_all();
+      __syncthreads();
+      a_stage = 1 - a_stage;
+    }
+  }
+
+  if (valid_tile && m_rows > 0) {
+#pragma unroll
+    for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+      store_mma_fragment_guard_m(
+          accumulators[fragment],
+          output,
+          size_m,
+          size_n,
+          global_n + fragment * kMmaN,
+          lane,
+          row_base);
+    }
+  }
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__((kMmaLaneM32BlockM / kMmaM) * 2 * kMmaLanes, 1)
+void amplin_mma_lane_m32_n64_tile2_interleaved_dequant_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  constexpr int kBlockM = kMmaLaneM32BlockM;
+  constexpr int kNTiles = 2;
+  constexpr int kThreads = (kBlockM / kMmaM) * kNTiles * kMmaLanes;
+  constexpr int kSteps = kHmmaBlockK / kMmaK;
+
+  constexpr int kSharedAK = kHmmaBlockK + 8;
+  constexpr int kSharedAElements = kBlockM * kSharedAK;
+
+  __shared__ __align__(32) Scalar shared_a[2 * kSharedAElements];
+
+  const int thread = threadIdx.x;
+  const int lane = thread & (kMmaLanes - 1);
+  const int warp = thread / kMmaLanes;
+  const int quad = lane >> 2;
+
+  const int tile_m = static_cast<int>(blockIdx.y);
+  const int base_tile_n = static_cast<int>(blockIdx.x) * kNTiles;
+  const int global_m_base = tile_m * kBlockM;
+
+  const int m_group = warp / kNTiles;
+  const int tile_idx = warp - m_group * kNTiles;
+  const int tile_n = base_tile_n + tile_idx;
+  const int global_n = tile_n * kHmmaBlockN;
+  const int row_base = global_m_base + m_group * kMmaM;
+  const int m_rows = (row_base < size_m) ? min(kMmaM, size_m - row_base) : 0;
+
+  const bool valid_tile = (global_n < size_n);
+
+  const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
+  const int address_column = (lane >> 4) * 8;
+
+  auto load_a_tile_to_stage = [=](int stage, int group) {
+    Scalar* const shared_a_stage = shared_a + stage * kSharedAElements;
+    const int a_elements = kBlockM * kHmmaBlockK;
+    for (int copy_index = thread; copy_index < a_elements / kScalarsPerCpAsync;
+         copy_index += kThreads) {
+      const int flat = copy_index * kScalarsPerCpAsync;
+      const int row = flat / kHmmaBlockK;
+      const int col = flat - row * kHmmaBlockK;
+      const int source_m = global_m_base + row;
+      Scalar* const shared_dest = shared_a_stage + row * kSharedAK + col;
+      if (source_m < size_m && col + kScalarsPerCpAsync <= kHmmaBlockK) {
+        cp_async_16(
+            shared_dest,
+            input + static_cast<int64_t>(source_m) * size_k + group * kHmmaBlockK + col);
+      } else {
+        *reinterpret_cast<uint4*>(shared_dest) = make_uint4(0u, 0u, 0u, 0u);
+      }
+    }
+    cp_async_commit_group();
+  };
+
+  MmaFragmentC accumulators[kMmaLaneSplitKN64Fragments] = {};
+
+  // Prime stage 0 with group 0.
+  load_a_tile_to_stage(0, 0);
+  cp_async_wait_all();
+  __syncthreads();
+
+  int a_stage = 0;
+  for (int group = 0; group < num_groups; ++group) {
+    if (group + 1 < num_groups) {
+      const int next_stage = 1 - a_stage;
+      load_a_tile_to_stage(next_stage, group + 1);
+    }
+
+    if (valid_tile && m_rows > 0) {
+      const int64_t scale_offset =
+          (static_cast<int64_t>(tile_n) * num_groups + group) * kHmmaBlockN;
+      Scalar scales[kMmaLaneSplitKN64Fragments];
+#pragma unroll
+      for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+        scales[fragment] = packed_scales[scale_offset + fragment * kMmaN + quad];
+      }
+      using Scalar2 = typename MmaScalar2<Scalar>::type;
+      Scalar2 scale_pairs[kMmaLaneSplitKN64Fragments];
+#pragma unroll
+      for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+        scale_pairs[fragment] = make_mma_scalar2(scales[fragment]);
+      }
+
+      const int64_t group_word_base =
+          (((static_cast<int64_t>(tile_n) * num_groups + group) * kSteps * kMmaLanes +
+            lane) *
+           kHmmaWarps);
+
+      Scalar* const shared_a_m_base =
+          shared_a + a_stage * kSharedAElements + m_group * kMmaM * kSharedAK;
+
+      uint4 packed_words =
+          *reinterpret_cast<const uint4*>(packed_lane_qweight + group_word_base);
+
+#pragma unroll
+      for (int k_step = 0; k_step < kSteps; ++k_step) {
+        uint4 next_packed_words = {};
+        if (k_step + 1 < kSteps) {
+          const int64_t next_word_offset =
+              group_word_base +
+              static_cast<int64_t>(k_step + 1) * kMmaLanes * kHmmaWarps;
+          next_packed_words =
+              *reinterpret_cast<const uint4*>(packed_lane_qweight + next_word_offset);
+        }
+
+        MmaFragmentA fragment_a;
+        load_mma_fragment_a(
+            fragment_a,
+            shared_a_m_base + address_row * kSharedAK + k_step * kMmaK + address_column);
+
+        const uint32_t words[kHmmaWarps] = {
+            packed_words.x,
+            packed_words.y,
+            packed_words.z,
+            packed_words.w,
+        };
+
+        // Pre-dequantize word 0 of the current k_step.  The inner loop then
+        // issues the MMA for word w while dequantizing word w+1, overlapping
+        // the tensor-core work with the integer/fp dequant math.
+        MmaFragmentB current_b0;
+        MmaFragmentB current_b1;
+        MmaFragmentB next_b0;
+        MmaFragmentB next_b1;
+        MmaLaneDequant<Scalar>::run2(
+            words[0],
+            scale_pairs[0],
+            scale_pairs[1],
+            current_b0,
+            current_b1);
+
+#pragma unroll
+        for (int word = 0; word < kHmmaWarps; ++word) {
+          MmaInstruction<Scalar>::run(
+              fragment_a, current_b0, accumulators[word * 2]);
+
+          if (word + 1 < kHmmaWarps) {
+            MmaLaneDequant<Scalar>::run2(
+                words[word + 1],
+                scale_pairs[(word + 1) * 2],
+                scale_pairs[(word + 1) * 2 + 1],
+                next_b0,
+                next_b1);
+          }
+
+          MmaInstruction<Scalar>::run(
+              fragment_a, current_b1, accumulators[word * 2 + 1]);
+
+          if (word + 1 < kHmmaWarps) {
+            current_b0 = next_b0;
+            current_b1 = next_b1;
+          }
+        }
+
+        if (k_step + 1 < kSteps) {
+          packed_words = next_packed_words;
+        }
+      }
+    }
+
+    if (group + 1 < num_groups) {
+      cp_async_wait_all();
+      __syncthreads();
+      a_stage = 1 - a_stage;
+    }
   }
 
   if (valid_tile && m_rows > 0) {
@@ -1419,6 +1756,12 @@ void amplin_mma_lane_mN_n64_tiled_splitk_kernel(
         scales[fragment] =
             packed_scales[scale_offset + fragment * kMmaN + quad];
       }
+      using Scalar2 = typename MmaScalar2<Scalar>::type;
+      Scalar2 scale_pairs[kMmaLaneSplitKN64Fragments];
+#pragma unroll
+      for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+        scale_pairs[fragment] = make_mma_scalar2(scales[fragment]);
+      }
 
       const int64_t group_word_base =
           (((static_cast<int64_t>(tile_n) * num_groups + group) *
@@ -1463,13 +1806,11 @@ void amplin_mma_lane_mN_n64_tiled_splitk_kernel(
         for (int word = 0; word < kHmmaWarps; ++word) {
           MmaFragmentB fragment_b_0;
           MmaFragmentB fragment_b_1;
-          MmaLaneDequant<Scalar>::run(
+          MmaLaneDequant<Scalar>::run2(
               words[word],
-              scales[word * 2],
-              fragment_b_0);
-          MmaLaneDequant<Scalar>::run(
-              words[word] >> 8,
-              scales[word * 2 + 1],
+              scale_pairs[word * 2],
+              scale_pairs[word * 2 + 1],
+              fragment_b_0,
               fragment_b_1);
           MmaInstruction<Scalar>::run(
               fragment_a,
@@ -2458,6 +2799,12 @@ __device__ __forceinline__ void amplin_mma_lane_m16_n64_splitk24_pipe2_interleav
       scales[fragment] =
           packed_scales[scale_offset + fragment * kMmaN + quad];
     }
+    using Scalar2 = typename MmaScalar2<Scalar>::type;
+    Scalar2 scale_pairs[kMmaLaneSplitKN64Fragments];
+#pragma unroll
+    for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+      scale_pairs[fragment] = make_mma_scalar2(scales[fragment]);
+    }
 
     constexpr int kSteps = kHmmaBlockK / kMmaK;
     const int64_t group_word_base =
@@ -2507,24 +2854,23 @@ __device__ __forceinline__ void amplin_mma_lane_m16_n64_splitk24_pipe2_interleav
           packed_words.z,
           packed_words.w,
       };
-      MmaFragmentB fragment_b;
+      MmaFragmentB fragment_b_0;
+      MmaFragmentB fragment_b_1;
 #pragma unroll
       for (int word = 0; word < kHmmaWarps; ++word) {
-        MmaLaneDequant<Scalar>::run(
+        MmaLaneDequant<Scalar>::run2(
             words[word],
-            scales[word * 2],
-            fragment_b);
+            scale_pairs[word * 2],
+            scale_pairs[word * 2 + 1],
+            fragment_b_0,
+            fragment_b_1);
         MmaInstruction<Scalar>::run(
             fragment_a,
-            fragment_b,
+            fragment_b_0,
             accumulators[word * 2]);
-        MmaLaneDequant<Scalar>::run(
-            words[word] >> 8,
-            scales[word * 2 + 1],
-            fragment_b);
         MmaInstruction<Scalar>::run(
             fragment_a,
-            fragment_b,
+            fragment_b_1,
             accumulators[word * 2 + 1]);
       }
 
@@ -2623,6 +2969,12 @@ __device__ __forceinline__ void amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved
       scales[fragment] =
           packed_scales[scale_offset + fragment * kMmaN + quad];
     }
+    using Scalar2 = typename MmaScalar2<Scalar>::type;
+    Scalar2 scale_pairs[kMmaLaneSplitKN64Fragments];
+#pragma unroll
+    for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+      scale_pairs[fragment] = make_mma_scalar2(scales[fragment]);
+    }
 
     const int64_t group_word_base =
         (((static_cast<int64_t>(tile_n) * num_groups + group) *
@@ -2671,24 +3023,23 @@ __device__ __forceinline__ void amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved
           packed_words.z,
           packed_words.w,
       };
-      MmaFragmentB fragment_b;
+      MmaFragmentB fragment_b_0;
+      MmaFragmentB fragment_b_1;
 #pragma unroll
       for (int word = 0; word < kHmmaWarps; ++word) {
-        MmaLaneDequant<Scalar>::run(
+        MmaLaneDequant<Scalar>::run2(
             words[word],
-            scales[word * 2],
-            fragment_b);
+            scale_pairs[word * 2],
+            scale_pairs[word * 2 + 1],
+            fragment_b_0,
+            fragment_b_1);
         MmaInstruction<Scalar>::run(
             fragment_a,
-            fragment_b,
+            fragment_b_0,
             accumulators[word * 2]);
-        MmaLaneDequant<Scalar>::run(
-            words[word] >> 8,
-            scales[word * 2 + 1],
-            fragment_b);
         MmaInstruction<Scalar>::run(
             fragment_a,
-            fragment_b,
+            fragment_b_1,
             accumulators[word * 2 + 1]);
       }
 
@@ -2893,6 +3244,12 @@ void amplin_mma_lane_m16_n64_splitk12x2_coop_interleaved_kernel(
       scales[fragment] =
           packed_scales[scale_offset + fragment * kMmaN + quad];
     }
+    using Scalar2 = typename MmaScalar2<Scalar>::type;
+    Scalar2 scale_pairs[kMmaLaneSplitKN64Fragments];
+#pragma unroll
+    for (int fragment = 0; fragment < kMmaLaneSplitKN64Fragments; ++fragment) {
+      scale_pairs[fragment] = make_mma_scalar2(scales[fragment]);
+    }
 
     constexpr int kSteps = kHmmaBlockK / kMmaK;
     const int64_t group_word_base =
@@ -2942,24 +3299,23 @@ void amplin_mma_lane_m16_n64_splitk12x2_coop_interleaved_kernel(
           packed_words.z,
           packed_words.w,
       };
-      MmaFragmentB fragment_b;
+      MmaFragmentB fragment_b_0;
+      MmaFragmentB fragment_b_1;
 #pragma unroll
       for (int word = 0; word < kHmmaWarps; ++word) {
-        MmaLaneDequant<Scalar>::run(
+        MmaLaneDequant<Scalar>::run2(
             words[word],
-            scales[word * 2],
-            fragment_b);
+            scale_pairs[word * 2],
+            scale_pairs[word * 2 + 1],
+            fragment_b_0,
+            fragment_b_1);
         MmaInstruction<Scalar>::run(
             fragment_a,
-            fragment_b,
+            fragment_b_0,
             accumulators[word * 2]);
-        MmaLaneDequant<Scalar>::run(
-            words[word] >> 8,
-            scales[word * 2 + 1],
-            fragment_b);
         MmaInstruction<Scalar>::run(
             fragment_a,
-            fragment_b,
+            fragment_b_1,
             accumulators[word * 2 + 1]);
       }
 
@@ -8303,6 +8659,124 @@ torch::Tensor amplin_mma_lane_m32_n64_tile8_shared_a_cuda(
       packed_lane_qweight,
       packed_scales,
       logical_n);
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_tile2_interleaved_dequant_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  constexpr int BlockM = kMmaLaneM32BlockM;
+  constexpr int NTiles = 2;
+
+  TORCH_CHECK(input.is_cuda(), "Amplin M32 N64 tile2 interleaved dequant input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin M32 N64 tile2 interleaved dequant weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin M32 N64 tile2 interleaved dequant tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin M32 N64 tile2 interleaved dequant supports only FP16/BF16");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin M32 N64 tile2 interleaved dequant scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin M32 N64 tile2 interleaved dequant input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin M32 N64 tile2 interleaved dequant tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin M32 N64 tile2 interleaved dequant qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin M32 N64 tile2 interleaved dequant scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin M32 N64 tile2 interleaved dequant requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 1 && size_m <= BlockM,
+      "Amplin M32 N64 tile2 interleaved dequant flattened M must be between 1 and ", BlockM);
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % (NTiles * kHmmaBlockN) == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin M32 N64 tile2 interleaved dequant logical N must be positive, divisible by ", NTiles * kHmmaBlockN, ", and fit the packed layout");
+  TORCH_CHECK(
+      size_m <= std::numeric_limits<int>::max() &&
+          size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin M32 N64 tile2 interleaved dequant tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin M32 N64 tile2 interleaved dequant requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+
+  const int64_t n_tiles_per_block = NTiles * kHmmaBlockN;
+  const int64_t grid_n = logical_n / n_tiles_per_block;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin M32 N64 tile2 interleaved dequant grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+
+  const dim3 grid(static_cast<unsigned int>(grid_n), 1U);
+  constexpr int Threads = (BlockM / kMmaM) * NTiles * kMmaLanes;
+
+  if (input.scalar_type() == at::kHalf) {
+    amplin_mma_lane_m32_n64_tile2_interleaved_dequant_kernel<half>
+        <<<grid, Threads, 0, stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    amplin_mma_lane_m32_n64_tile2_interleaved_dequant_kernel<__nv_bfloat16>
+        <<<grid, Threads, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
 }
 
 template <typename Scalar, int NTiles, int KSplit>

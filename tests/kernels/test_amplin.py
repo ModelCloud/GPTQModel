@@ -1402,6 +1402,7 @@ def test_amplin_mma_lane_m32_n64_tile4_matches_fp32_reference(
 
     for name, op in (
         ("tile2", amplin.mma_lane_m32_n64_tile2_shared_a),
+        ("tile2_interleaved_dequant", amplin.mma_lane_m32_n64_tile2_interleaved_dequant),
         ("tile2_splitk2", amplin.mma_lane_m32_n64_tile2_splitk2),
         ("tile2_splitk4", amplin.mma_lane_m32_n64_tile2_splitk4),
         ("tile1_splitk4", amplin.mma_lane_m32_n64_tile1_splitk4),
@@ -1556,3 +1557,62 @@ def test_amplin_dynamic_routes_and_matches_fp32_reference(
     # Cached path should reuse the same kernel and produce identical output.
     cached = amplin.dynamic(input, qweight, scales)
     torch.testing.assert_close(cached, actual, rtol=0, atol=0)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_amplin_marlin_style_matches_fp32_reference(
+    packed_case: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+    dtype: torch.dtype,
+):
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA BF16 support required")
+
+    size_m = 32
+    qweight = packed_case["qweight"].to(sm80_device).contiguous()
+    scales = packed_case["scales"].to(sm80_device, dtype=dtype).contiguous()
+    codes = packed_case["codes"].to(sm80_device)
+    group_indices = torch.arange(SIZE_K, device=sm80_device, dtype=torch.int64) // GROUP_SIZE
+    dense_weight = (codes.to(torch.float32) - ZERO) * scales.to(torch.float32)[group_indices]
+
+    generator = torch.Generator(device=sm80_device)
+    generator.manual_seed(20260724 + size_m)
+    input = (
+        torch.randn((size_m, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator)
+        .mul_(0.25)
+        .to(dtype)
+    )
+    expected = input.to(torch.float32) @ dense_weight
+
+    # Force the marlin_style path and verify correctness against the dense reference.
+    key = (size_m, SIZE_K, SIZE_N, "fp16" if dtype == torch.float16 else "bf16")
+    previous_static = amplin.get_static_routing_table()
+    try:
+        amplin.set_routing_table({**previous_static, key: "marlin_style"})
+        amplin.clear_dynamic_routing_table()
+        actual = amplin.dynamic(input, qweight, scales, warmup=1, iters=3)
+    finally:
+        amplin.set_routing_table(previous_static)
+        amplin.clear_dynamic_routing_table()
+
+    torch.cuda.synchronize(sm80_device)
+    assert actual.shape == (size_m, SIZE_N)
+    assert actual.dtype == dtype
+    assert actual.device == sm80_device
+    assert torch.isfinite(actual).all()
+
+    atol = 2e-3 if dtype == torch.float16 else 2e-2
+    torch.testing.assert_close(actual.to(torch.float32), expected, rtol=0, atol=atol)
+
+    # Second call should use the fast-dispatch cache and be identical.
+    cached = amplin.dynamic(input, qweight, scales)
+    torch.testing.assert_close(cached, actual, rtol=0, atol=0)
+
+    # 3-D batched inputs must flatten to the same M and return the original prefix shape.
+    batched_input = input.reshape(2, 16, SIZE_K)
+    batched_expected = batched_input.to(torch.float32) @ dense_weight
+    batched = amplin.dynamic(batched_input, qweight, scales)
+    torch.cuda.synchronize(sm80_device)
+    assert batched.shape == (2, 16, SIZE_N)
+    torch.testing.assert_close(batched.to(torch.float32), batched_expected, rtol=0, atol=atol)

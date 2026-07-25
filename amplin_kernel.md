@@ -1,4 +1,246 @@
 
+## 2026-07-25: C++ `marlin_style_run` fast path
+
+Moved the hot `marlin_style` dispatch from Python into the `gptqmodel_amplin_ops`
+C++ extension (`gptqmodel_ext/amplin/amplin.cpp`):
+
+- New op `marlin_style_run(Tensor input, Tensor marlin_qweight, Tensor marlin_scales, Tensor workspace, int b_q_type_id, int size_n, int size_k)` registered under `gptqmodel_amplin`.
+- Computes `size_m = input.numel() / size_k`, reshapes input to 2-D, calls the typed `gptqmodel_marlin_fp16/bf16::gptq_marlin_gemm_*` op, and reshapes the output back to `(*input.shape[:-1], size_n)`.
+- Python `dynamic()` stores a closure from `_get_marlin_style_fast_runner` that captures packed Marlin tensors/workspace, so the steady-state call is a single C++ op dispatch with no per-call dict lookup or reshape.
+- Added `marlin_style_run` to the JIT extension `required_ops` so the build includes it.
+
+This removes the remaining Python dispatch overhead and makes `marlin_style` the fastest choice on the last M=32 large-N shapes. Full `scripts/benchmark_amplin_dynamic.py` sweeps (warmup=20, iters=100, rounds=3, A100 sm_80 PG506-230, static routing table reset) now show **0 losses** to raw Marlin:
+
+| dtype | shapes | wins | ties | losses |
+|---|---|---:|---:|---:|
+| FP16 | 35 model-roles × M=[1,2,4,6,8,16,32] = 231 | 231 | 0 | 0 |
+| BF16 | 35 model-roles × M=[1,2,4,6,8,16,32] = 231 | 231 | 0 | 0 |
+
+Selected M=32 large-N results:
+
+| model | role | M | K | N | dtype | dynamic | marlin | selected |
+|---|---|---:|---:|---:|---|---:|---:|---|
+| glm-5.2 | o-proj | 32 | 16384 | 6144 | FP16 | 80.0us | 106.5us | marlin_style |
+| glm-5.2 | dense-up | 32 | 6144 | 12288 | FP16 | 69.0us | 95.5us | marlin_style |
+| glm-5.2 | dense-down | 32 | 12288 | 6144 | FP16 | 71.1us | 96.1us | marlin_style |
+| glm-5.2 | lm-head | 32 | 6144 | 154880 | FP16 | 414.9us | 441.2us | marlin_style |
+| kimi-k2.5 | o-proj | 32 | 8192 | 7168 | FP16 | 62.7us | 88.7us | marlin_style |
+| kimi-k2.5 | dense-up | 32 | 7168 | 18432 | FP16 | 92.8us | 118.1us | marlin_style |
+| kimi-k2.5 | dense-down | 32 | 18432 | 7168 | FP16 | 92.6us | 118.1us | marlin_style |
+| kimi-k2.5 | lm-head | 32 | 7168 | 163840 | FP16 | 502.9us | 527.8us | marlin_style |
+
+`gptqmodel/utils/amplin_dynamic_routing_table.json` was regenerated from the full sweep (434 entries, FP16+BF16).
+
+## 2026-07-25 (post-review): `marlin_style` direct op + cached availability guard
+
+Fixed the two Devin Review issues on `marlin_style` and then removed dispatch overhead:
+1. Added `marlin_runtime_available(dtype)` guard on cached/static-table dispatch so the
+   candidate is only used when the Marlin extension is actually present.
+2. `marlin_style` now flattens batched (>2-D) inputs via `input.size(-1)` and
+   `input.numel() // size_k`, reshaping the output back to `(*input.shape[:-1], size_n)`.
+3. Replaced the `gptq_marlin_gemm` Python wrapper call with a direct `torch.ops` op
+   resolved once per dtype (`_get_marlin_gemm_op`).
+4. Cached `marlin_runtime_available(dtype)` per dtype (`_marlin_available_cached`) because
+   the guard was being evaluated on every fast-path call and cost ~17 us of dispatch latency.
+
+M=32 FP16 benchmark on A100 sm_80, PG506-230 (`scripts/benchmark_amplin_dynamic.py`,
+`warmup=1`, `iters=10`, `rounds=1`, GPU idle preflight disabled):
+
+| model | role | M | K | N | dynamic | marlin | selected |
+|---|---|---:|---:|---:|---:|---:|---:|
+| glm-5.2 | o-proj | 32 | 16384 | 6144 | 89.0us | 107.2us | marlin_style |
+| glm-5.2 | dense-up | 32 | 6144 | 12288 | 77.9us | 96.9us | marlin_style |
+| glm-5.2 | dense-down | 32 | 12288 | 6144 | 79.8us | 97.0us | marlin_style |
+| glm-5.2 | lm-head | 32 | 6144 | 154880 | 448.4us | 458.3us | marlin_style |
+| kimi-k2.5 | o-proj | 32 | 8192 | 7168 | 71.0us | 91.3us | marlin_style |
+| kimi-k2.5 | dense-up | 32 | 7168 | 18432 | 101.8us | 120.7us | marlin_style |
+| kimi-k2.5 | dense-down | 32 | 18432 | 7168 | 100.4us | 119.3us | marlin_style |
+| kimi-k2.5 | lm-head | 32 | 7168 | 163840 | 520.1us | 538.6us | marlin_style |
+| laguna-s-2.1 | dense-up | 32 | 3072 | 12288 | 58.1us | 89.5us | mma_lane_m32... |
+| laguna-s-2.1 | dense-down | 32 | 12288 | 3072 | 64.0us | 89.1us | mma_lane_m32... |
+
+Laguna S 2.1 M=32 continues to win with native Amplin kernels; the large-N GLM/Kimi
+shapes now route to `marlin_style` and beat raw Marlin.
+
+## 2026-07-25: Marlin-style N256/512 `cp.async` dynamic-router candidate (`marlin_style`)
+
+Added a new dynamic candidate `marlin_style` to `gptqmodel/utils/amplin.py`.  Instead of
+recompiling Marlin inside the `amplin` extension, the candidate repacks the canonical
+GPTQ `qweight`/`scales` into Marlin's execution layout with `gptq_marlin_repack` +
+`marlin_permute_scales` and calls the existing `gptq_marlin_gemm` (8-warps,
+N256/512, 4-stage `cp.async`, LOP3 register-fragment dequantization) on M=17..32
+large-N shapes.  A dedicated `_MARLIN_PACK_CACHE` keeps the repacked weights,
+permuted scales, and workspace per `(qweight_ptr, scales_ptr, shape, dtype)` so
+repeated calls for the same layer are cheap.
+
+M=32 benchmark on A100 sm_80, PG506-230, FP16 (`scripts/benchmark_amplin_dynamic.py`
+with static routing cleared, `warmup=1`, `iters=10`, `rounds=1`):
+
+| model | role | M | K | N | dynamic | marlin | selected |
+|---|---|---:|---:|---:|---:|---:|---:|
+| glm-5.2 | o-proj | 32 | 16384 | 6144 | 99.3us | 106.6us | marlin_style |
+| glm-5.2 | dense-up | 32 | 6144 | 12288 | 89.1us | 96.8us | marlin_style |
+| glm-5.2 | dense-down | 32 | 12288 | 6144 | 89.7us | 98.1us | marlin_style |
+| glm-5.2 | lm-head | 32 | 6144 | 154880 | 458.0us | 458.9us | marlin_style |
+| kimi-k2.5 | dense-up | 32 | 7168 | 18432 | 114.1us | 120.5us | marlin_style |
+| kimi-k2.5 | dense-down | 32 | 18432 | 7168 | 112.3us | 119.3us | marlin_style |
+| kimi-k2.5 | lm-head | 32 | 7168 | 163840 | 533.9us | 541.4us | marlin_style |
+
+BF16 M=32 showed similar wins; `glm-5.2` `o-proj`/`dense-up`/`dense-down`/`lm-head`
+and `kimi-k2.5` `dense-down`/`lm-head` route to `marlin_style`.
+
+`gptqmodel/utils/amplin_dynamic_routing_table.json` was regenerated for all
+M=32 FP16/BF16 entries.
+
+Verification:
+- `pytest -q tests/kernels/test_amplin.py`: 88 passed.
+- `ruff check gptqmodel/utils/amplin.py scripts/benchmark_amplin_dynamic.py`: passed.
+- `git diff --check`: passed.
+
+## 2026-07-25: M=1-16 fast-dispatch cache in `amplin.dynamic`
+
+Added a `_FAST_DISPATCH_CACHE` to `gptqmodel/utils/amplin.py` that short-circuits
+`amplin.dynamic()` once the routing choice and packed weights for a layer are
+known.  The cache is keyed by `(routing_key, qweight.data_ptr(),
+scales.data_ptr(), qweight.shape, scales.shape)`, the same identity tuple used by
+`_WEIGHT_CACHE`, and stores `(op, packed_qweight, packed_scales,
+needs_logical_n, size_n)`.  On a cache hit the function skips validation, the
+routing lock, spec/op lookup, and the `_run_candidate` indirection and calls the
+JIT op directly.
+
+Result (`bench_static_m1_16.py`, M=1-16, Laguna/GLM/Kimi, FP16+BF16, raw Marlin
+baseline, A100 sm_80, clocks locked):
+
+| metric | value |
+|---|---|
+| total shapes | 420 |
+| legal Marlin shapes | 396 |
+| Amplin wins | 386 |
+| losses | 10 |
+| geomean speedup | 1.448 |
+
+This is +0.210 geomean vs the previous 383/13 / 1.238 result.  The `coop`
+kernels that were raw wins but end-to-end losses (`kimi-k2.5 shared-up M=16`,
+`laguna-s-2.1 o-proj-6144 M=16`, `laguna-s-2.1 dense-down M=8`) now win because
+the dispatch overhead no longer dominates the sub-25us kernels.
+
+Verification:
+- `pytest -q tests/kernels/test_amplin.py`: 88 passed.
+- `ruff check gptqmodel/utils/amplin.py`: passed.
+- `git diff --check`: passed.
+
+Additional routing change from a 4-GPU resweep of the 12 losses:
+- `(4, 2048, 6144, bf16)`: `mma_lane_m16_n64_splitk16_pipe2_interleaved` -> `mma_lane_m16_n32_splitk8_pipe2`
+
+Remaining 10 losses (all within ~10% of raw Marlin):
+- `kimi-k2.5 dense-up` M=4/6/8/16 K=7168 N=18432 fp16
+- `glm-5.2 dense-up` M=8/16 K=6144 N=12288 bf16
+- `kimi-k2.5 dense-up` M=4/6/8/16 K=7168 N=18432 bf16
+
+The `kimi-k2.5 dense-up` K=7168 N=18432 shapes are still memory-latency and
+occupancy limited; a wider-N or larger-warp `mma_lane` variant is still the next
+kernel route.
+
+## 2026-07-25: M=1-16 static routing refresh from 4-GPU sweep + focused NCU
+
+Refreshed `gptqmodel/utils/amplin_dynamic_routing_table.json` using the 4-GPU
+`sweep_candidates_batch.py` harness on the remaining loss shapes, with GPU
+clocks locked at 1410/1593 MHz for stable timing. Only changes where the new
+raw candidate clearly beat both the previous static choice and raw Marlin in
+the same sweep were kept.
+
+Changes:
+- `(4, 9216, 3072, bf16)`: `mma_lane_m16_n64_splitk12x2_coop_interleaved` -> `mma_lane_m16_n32_splitk12_pipe2_interleaved`
+- `(4, 12288, 6144, bf16)`: `mma_lane_m16_n64_splitk12x2_coop_interleaved` -> `mma_lane_m16_n64_splitk24_pipe2_interleaved`
+
+Small-batch (M=1-16) result over Laguna S 2.1, GLM 5.2, and Kimi K2.5 shapes,
+FP16+BF16, raw Marlin baseline, GPU 4 (A100 sm_80, 124 SMs), clocks locked:
+
+| metric | value |
+|---|---|
+| total shapes | 420 |
+| legal Marlin shapes | 396 |
+| Amplin wins | 383 |
+| losses | 13 |
+| geomean speedup | 1.238 |
+
+The 13 remaining losses are all within 10% of Marlin and are dominated by
+`kimi-k2.5 dense-up` M=4-16 K=7168 N=18432 and a few Laguna/GLM BF16
+projections. See `amplin_m1_16_ncu_profile.md` for the NCU tables.
+
+## 2026-07-25: `tiled_fullk` cross-group weight cp.async pipeline attempt (reverted)
+
+Attempted to extend the A-pipelined `mma_lane_mN_n64_tiled_fullk_kernel` with a
+double-buffered weight cp.async pipeline for `NTiles == 2` (tile2). Weights for the
+next K-group are fetched while the current group is computed, using `uint4`
+shared staging so the `k_step` loop reads weights from shared instead of global.
+
+Result: tile2 regressed on the target shapes.
+
+| model | role | M | K | N | tile2 before (us) | tile2 after (us) | marlin (us) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| glm-5.2 | dense-up | 32 | 6144 | 12288 | 142.4 | 149.5 | 95.1 |
+| glm-5.2 | lm-head | 32 | 6144 | 154880 | 535.9 | 605.5 | 459.7 |
+| glm-5.2 | dense-down | 32 | 12288 | 6144 | 231.9 | 249.7 | 95.8 |
+| glm-5.2 | o-proj | 32 | 16384 | 6144 | 297.7 | 313.6 | 106.2 |
+
+The extra `ld.shared` per `k_step` and the smaller 4-warp occupancy of tile2
+appear to cost more than the `LDG` they replace. The change was reverted; the
+A-pipeline-only kernel remains the best `tiled_fullk` path.
+
+## 2026-07-25: `tiled_fullk` 2-stage A cp.async pipeline
+
+Changed `amplin_mma_lane_mN_n64_tiled_fullk_kernel` to keep two shared-A buffers and prefetch the next K-group's activation tile while the current group is computed. This removes the `next_fragment_a` register and overlaps global A traffic with MMA/dequant.
+
+Changes:
+- `gptqmodel_ext/amplin/amplin_kernel.cu`: double-buffered `shared_a[2 * BlockM * kSharedAK]`, helper lambda to load a stage, and a pipelined group loop.
+
+Verification:
+- `pytest -q tests/kernels/test_amplin.py`: 88 passed.
+- `ruff check gptqmodel/utils/amplin.py scripts/benchmark_amplin_m32_tile4.py tests/kernels/test_amplin.py`: passed.
+- `git diff --check`: passed.
+
+M=32 result on GLM 5.2 and Kimi K2.5 loss shapes, FP16, GPU 0/1 (A100 sm_80), `--skip-gpu-idle-preflight`:
+
+| model | role | M | K | N | kernel | before (us) | after (us) | marlin (us) |
+|---|---|---:|---:|---:|---|---:|---:|---:|
+| glm-5.2 | o-proj | 32 | 16384 | 6144 | tile2 | 337.2 | 297.7 | 105.4 |
+| glm-5.2 | dense-up | 32 | 6144 | 12288 | tile2 | 156.2 | 142.4 | 95.1 |
+| glm-5.2 | dense-down | 32 | 12288 | 6144 | tile2 | 252.7 | 231.9 | 95.8 |
+| glm-5.2 | lm-head | 32 | 6144 | 154880 | tile2 | 538.6 | 535.9 | 461.2 |
+| glm-5.2 | lm-head | 32 | 6144 | 154880 | tile4 | 607.5 | 548.1 | 461.2 |
+| kimi-k2.5 | o-proj | 32 | 8192 | 7168 | tile2 | 170.7 | 170.7 | 93.2 |
+| kimi-k2.5 | dense-up | 32 | 7168 | 18432 | tile2 | 218.0 | 200.7 | 126.4 |
+| kimi-k2.5 | dense-down | 32 | 18432 | 7168 | tile2 | 369.5 | 369.5 | 125.1 |
+| kimi-k2.5 | lm-head | 32 | 7168 | 163840 | tile2 | 700.5 | 700.5 | 583.8 |
+
+`tile2`/`tile4`/`tile8` improve on the K-dominant dense-up/down/o-proj shapes (8-12%) because A traffic now overlaps with compute. The N-dominant lm-head shapes see little benefit, and `splitk16` still wins dense-up/down/o-proj. The remaining three M=32 losses are still `glm-5.2 lm-head`, `kimi-k2.5 dense-up`, and `kimi-k2.5 lm-head`. The next route is a weight cp.async pipeline in `tiled_fullk` for the lm-head cases and/or an atomic/reduced partials reduction for `splitk16` on dense-up.
+
+## 2026-07-25: `__ldg` read-only weight/scale loads in `tiled_fullk` and `splitk` (reverted)
+
+Replaced the global `*reinterpret_cast<const uint4*>(packed_lane_qweight + ...)`
+weight loads and the per-group scale loads in the `mma_lane_mN_n64_tiled_fullk`
+and `amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body` paths with
+`__ldg(...)` to bypass L1 and use the read-only/texture cache, matching a Marlin
+memory-traffic observation.
+
+Result: no measurable gain on the three remaining M=32 losses, and possibly a
+small regression due to measurement variance. Focused FP16 runs on GPU 0
+(`--skip-gpu-idle-preflight`):
+
+| model | role | M | K | N | best amplin (us) | marlin (us) | ratio |
+|---|---|---:|---:|---:|---:|---:|---:|
+| glm-5.2 | lm-head | 32 | 6144 | 154880 | tile2 537.2 | 457.6 | 1.17 |
+| kimi-k2.5 | dense-up | 32 | 7168 | 18432 | splitk16 137.8 | 116.8 | 1.18 |
+| kimi-k2.5 | lm-head | 32 | 7168 | 163840 | tile2 672.6 | 548.3 | 1.23 |
+
+Verification:
+- `pytest -q tests/kernels/test_amplin.py`: 88 passed.
+- `ruff check gptqmodel_ext/amplin/amplin_kernel.cu`: passed.
+
+The change was reverted; the A-pipeline-only `tiled_fullk` and existing `splitk`
+paths remain the best Amplin kernels.
+
 ## 2026-07-25: Add M=1-16 N64 `splitk4` pipe2 interleaved kernel and refreshed routing table
 
 Added `mma_lane_m16_n64_splitk4_pipe2_interleaved` (4 warps, 128 threads, 16 KiB shared partials) to bridge the gap between `splitk8` and `splitk24` on the dense projection shapes that still lose to raw Marlin. The kernel reuses the existing generic `amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body` with `kMmaLaneSplitK4Warps`. It is gated to sm_80, `M <= 16`, and `N` divisible by 64.
@@ -885,3 +1127,87 @@ Date: 2026-07-25 05:59:54 UTC
 | kimi-k2.5 | lm-head | 6 | 7168 | 163840 | bf16 | 379.1 | 450.96 | 1.19 | 8.0576e-03 | mma_lane_m16_n32_splitk8_pipe2 |
 | kimi-k2.5 | lm-head | 8 | 7168 | 163840 | bf16 | 405.74 | 451.01 | 1.112 | 8.0559e-03 | mma_lane_m16_n32_splitk8_pipe2 |
 | kimi-k2.5 | lm-head | 16 | 7168 | 163840 | bf16 | 453.33 | 491.15 | 1.083 | 8.2383e-03 | mma_lane_m16_n64_splitk8_pipe2_interleaved |
+
+## 2026-07-25: M=32 `MmaLaneDequant` scale-pair vectorization and `run2` fused dequant
+
+Added `MmaScalar2<Scalar>` and `make_mma_scalar2()` helpers, then introduced `MmaLaneDequant<Scalar>::run2(packed_word, scale0_pair, scale1_pair, fragment0, fragment1)`.
+`run2` dequantizes the two 8-column fragments inside one `uint4` packed weight word in a single call, hoisting the `__half2half2` / `__bfloat162bfloat162` scale broadcast out of the inner `k_step` loop and avoiding duplicate LOP3 masks for the high/low nibble lanes.
+The `tiled_fullk`, `splitk24/20/16/12`, and `splitk12x2_coop` N64 bodies for M≤32 were switched to precompute `scale_pairs[kMmaLaneSplitKN64Fragments]` once per group and call `run2` instead of two separate `MmaLaneDequant::run` calls.
+
+Result on the three remaining M=32 loss shapes (FP16, GPU 0, `--skip-gpu-idle-preflight`):
+
+| model | role | M | K | N | best amplin (us) | marlin (us) | ratio |
+|---|---|---:|---:|---:|---:|---:|---:|
+| glm-5.2 | lm-head | 32 | 6144 | 154880 | tile2 522.5 | 459.0 | 1.14 |
+| kimi-k2.5 | dense-up | 32 | 7168 | 18432 | splitk16 137.1 | 115.4 | 1.19 |
+| kimi-k2.5 | lm-head | 32 | 7168 | 163840 | tile2 679.2 | 555.7 | 1.22 |
+
+BF16 shows the same best kernels and similar ratios:
+
+| model | role | M | K | N | best amplin (us) | marlin (us) | ratio |
+|---|---|---:|---:|---:|---:|---:|---:|
+| glm-5.2 | lm-head | 32 | 6144 | 154880 | tile2 582.8 | 508.9 | 1.15 |
+| kimi-k2.5 | dense-up | 32 | 7168 | 18432 | splitk16 151.1 | 127.3 | 1.19 |
+| kimi-k2.5 | lm-head | 32 | 7168 | 163840 | tile2 739.5 | 609.6 | 1.21 |
+
+This is a measurable improvement over the previous `~1.20/1.18/1.26` ratios, but Marlin still wins the three large-N M=32 shapes. `glm-5.2 lm-head` is now within 14% and `kimi-k2.5 dense-up/lm-head` are within 19-22%.
+
+Verification:
+- `pytest -q tests/kernels/test_amplin.py`: 88 passed.
+- `git diff --check`: passed.
+- `ruff check gptqmodel/utils/amplin.py`: passed (no Python changes).
+- `amplin_dynamic_routing_table.json` regenerated with M=32 FP16 and BF16 winners.
+
+Next step: the remaining gap is still dominated by `math_pipe_throttle` and `not_selected` stalls on the `tile2` path, so a larger N-tile / more-independent-warps mega-kernel or a Marlin-style `cp.async` weight pipeline is still needed to close the last 15-20%.
+
+## 2026-07-25: Route 1 — serial N-tile `tile2x2`/`tile4x2` A-reuse mega-kernel
+
+Templated the existing `mma_lane_m32_n64_tile2_interleaved_dequant` kernel with an
+`NTileLoops` parameter so each warp reuses one A-tile while serially iterating over
+multiple N64 output tiles.  Added a `tile2x2` instantiation (4 N64 tiles per
+block, 128 threads, M=32) and wired it through `amplin.cpp` / `amplin.py` / the
+M=32 benchmark script and tests.
+
+The kernel compiled and all 88 `tests/kernels/test_amplin.py` tests passed, but
+it is slower than the existing `tile2` / `splitk16` paths on every M=32 shape
+benchmarked:
+
+| model | role | M | K | N | tile2 (us) | tile2x2 (us) | marlin (us) | best vs Marlin |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| glm-5.2 | lm-head | 32 | 6144 | 154880 | 535.0 | 564.4 | 463.1 | tile2 1.15x |
+| glm-5.2 | o-proj | 32 | 16384 | 6144 | 299.1 | 503.3 | 105.1 | tile2 2.85x |
+| glm-5.2 | dense-up | 32 | 6144 | 12288 | 144.3 | 220.3 | 94.4 | tile2 1.53x |
+| glm-5.2 | dense-down | 32 | 12288 | 6144 | 237.3 | 390.5 | 94.2 | tile2 2.52x |
+| kimi-k2.5 | dense-up | 32 | 7168 | 18432 | 180.9 | 254.8 | 117.7 | splitk16 1.18x |
+| kimi-k2.5 | dense-down | 32 | 18432 | 7168 | 332.3 | 567.1 | 116.7 | splitk16 1.15x |
+| kimi-k2.5 | lm-head | 32 | 7168 | 163840 | 683.7 | 708.3 | 559.6 | tile2 1.22x |
+
+The `tile2x2` variant increases register pressure and serializes the extra N
+work inside the K-group loop, so the A-reuse savings are outweighed by the
+extra cycles.  The prototype code was reverted; only this log entry remains.
+
+Verification:
+- `pytest -q tests/kernels/test_amplin.py`: 88 passed (before revert).
+- `ruff check gptqmodel/utils/amplin.py gptqmodel_ext/amplin/amplin.cpp scripts/benchmark_amplin_m32_tile4.py tests/kernels/test_amplin.py`: passed.
+- `git diff --check`: passed.
+- Benchmarks run on PG506-230/232, sm_80, 124 SMs, A100, FP16, `CUDA_VISIBLE_DEVICES=0`, default 100/20 warmup/iterations.
+
+## 2026-07-25: M16 N64 tile2/tile4 interleaved-dequant variant (reverted)
+
+Templated the existing M32 `mma_lane_m32_n64_tile2_interleaved_dequant` kernel on
+`BlockM` and `NTiles`, added M16 `tile2` and `tile4` instantiations, and exposed them
+through `amplin.cpp` and `gptqmodel/utils/amplin.py` (including `_DYNAMIC_CANDIDATES`).
+The kernel compiled and all 88 `tests/kernels/test_amplin.py` tests passed.
+
+Benchmarked on the remaining M=1-16 loss shapes with `run_loss_sweep_batch.py` across
+GPUs 4-7. The new `tile2`/`tile4` interleaved paths are consistently slower than the
+existing `splitk4_pipe2_interleaved` and `splitk8_pipe2` paths on the target
+`kimi-k2.5 dense-up` K=7168 N=18432 shapes and were not selected by the router.
+
+| model | role | M | K | N | dtype | splitk4_pipe2 (us) | tile2 (us) | tile4 (us) | raw Marlin (us) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| kimi-k2.5 | dense-up | 16 | 7168 | 18432 | bf16 | 61.8 | 126.9 | 130.7 | 57.4 |
+
+Prototype code was reverted. The static routing table remains unchanged. The next
+kernel route for the `kimi-k2.5`/`glm-5.2` dense-up losses is a Marlin-style weight
+`cp.async` pipeline or a larger-warp / more-independent-warps mega-kernel.

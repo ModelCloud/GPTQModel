@@ -20,6 +20,14 @@ from .cpp import (
     default_torch_ops_build_root,
     is_nvcc_compatible,
 )
+from .marlin import (
+    _marlin_resolve_op,
+    gptq_marlin_repack,
+    marlin_make_workspace_new,
+    marlin_permute_scales,
+    marlin_runtime_available,
+)
+from .marlin_scalar_type import scalar_types
 
 
 _AMPLIN_OPS_NAME = "gptqmodel_amplin_ops"
@@ -89,6 +97,7 @@ _AMPLIN_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "mma_lane_m16_n64_shared_a",
         "mma_lane_m16_n64_tile4_shared_a",
         "mma_lane_m16_n64_tile8_shared_a",
+        "mma_lane_m32_n64_tile2_interleaved_dequant",
         "mma_lane_m32_n64_tile4_shared_a",
         "mma_lane_m32_n64_tile8_shared_a",
         "mma_lane_m32_n64_tile2_splitk2",
@@ -119,6 +128,7 @@ _AMPLIN_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "mma_lane_m16_n16_splitk16",
         "mma_lane_tile",
         "mma_lane_tile_global_a",
+        "marlin_style_run",
     ),
     sources=_amplin_sources,
     build_root_env="GPTQMODEL_AMPLIN_BUILD_ROOT",
@@ -786,6 +796,23 @@ def mma_lane_m32_n64_tile2_shared_a(
     """Run M32 N64 with A resident in shared memory, 2 N64 tiles per block (128 threads)."""
 
     return _extension_api().op("amplin", "mma_lane_m32_n64_tile2_shared_a")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_tile2_interleaved_dequant(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 tile2 with word-level interleaved dequantization (dequant w+1 while MMA w)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_tile2_interleaved_dequant")(
         input,
         packed_lane_qweight,
         packed_scales,
@@ -1538,6 +1565,14 @@ _DYNAMIC_CANDIDATES: tuple[_CandidateSpec, ...] = (
         n_multiple=128,
     ),
     _CandidateSpec(
+        "mma_lane_m32_n64_tile2_interleaved_dequant",
+        "mma_lane_m32_n64_tile2_interleaved_dequant",
+        "n64",
+        min_m=17,
+        max_m=32,
+        n_multiple=128,
+    ),
+    _CandidateSpec(
         "mma_lane_m32_n64_tile4_shared_a",
         "mma_lane_m32_n64_tile4_shared_a",
         "n64",
@@ -1587,6 +1622,18 @@ _DYNAMIC_CANDIDATES: tuple[_CandidateSpec, ...] = (
         n_multiple=128,
         k_multiple=512,
     ),
+    # Marlin-style N256/8-warp cp.async pipeline with register-fragment LOP3
+    # dequantization.  This candidate is routed to the existing Marlin GEMM on
+    # large-M shapes where that schedule currently wins.
+    _CandidateSpec(
+        "marlin_style",
+        "marlin_style",
+        "none",
+        min_m=17,
+        max_m=32,
+        n_multiple=64,
+        k_multiple=128,
+    ),
 )
 
 
@@ -1597,6 +1644,30 @@ _WEIGHT_CACHE: dict[
     tuple[int, int, tuple[int, ...], tuple[int, ...], str, torch.dtype],
     tuple[torch.Tensor, torch.Tensor],
 ] = {}
+
+# Fast-dispatch cache keyed like _WEIGHT_CACHE plus the routing key.  When the
+# routing choice and packed weights for a layer are known, repeated calls avoid
+# spec/op lookup and the _run_candidate indirection.
+_FAST_DISPATCH_CACHE: dict[
+    tuple[
+        tuple[int, int, int, str],
+        int,
+        int,
+        tuple[int, ...],
+        tuple[int, ...],
+    ],
+    tuple[Callable, torch.Tensor, torch.Tensor, bool, int],
+] = {}
+
+# Cache for the Marlin-style candidate's repacked weights, permuted scales and
+# workspace.  Keyed by the canonical qweight/scales pointers so repeated calls
+# for the same layer avoid the repack overhead.
+_MARLIN_PACK_CACHE: dict[
+    tuple[int, int, tuple[int, ...], tuple[int, ...], int, str],
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, object],
+] = {}
+_MARLIN_GEMM_OP_CACHE: dict[torch.dtype, Callable] = {}
+_MARLIN_AVAILABLE_CACHE: dict[torch.dtype, bool] = {}
 
 
 def _pack_with_cache(
@@ -1631,6 +1702,136 @@ def _pack_with_cache(
     return packed
 
 
+def _get_marlin_packed(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    size_n: int,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, object]:
+    """Repack canonical GPTQ weights/scales into Marlin's execution layout."""
+    size_k = qweight.size(0) * 8
+    key = (
+        qweight.data_ptr(),
+        scales.data_ptr(),
+        tuple(qweight.shape),
+        tuple(scales.shape),
+        size_n,
+        _dtype_name(dtype),
+    )
+    cached = _MARLIN_PACK_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    perm = torch.empty(0, dtype=torch.int, device=qweight.device)
+    marlin_qweight = gptq_marlin_repack(
+        qweight.contiguous(),
+        perm,
+        size_k=size_k,
+        size_n=size_n,
+        num_bits=4,
+        dtype=dtype,
+    )
+    marlin_scales = marlin_permute_scales(
+        scales.to(dtype).contiguous(),
+        size_k=size_k,
+        size_n=size_n,
+        group_size=128,
+    )
+    workspace = marlin_make_workspace_new(qweight.device)
+    b_q_type = scalar_types.uint4b8
+    packed = (marlin_qweight, marlin_scales, workspace, b_q_type)
+    _MARLIN_PACK_CACHE[key] = packed
+    return packed
+
+
+def _get_marlin_gemm_op(dtype: torch.dtype) -> Callable:
+    op = _MARLIN_GEMM_OP_CACHE.get(dtype)
+    if op is None:
+        op_name = "gptq_marlin_gemm_fp16" if dtype == torch.float16 else "gptq_marlin_gemm_bf16"
+        op = _marlin_resolve_op(dtype=dtype, op_name=op_name)
+        _MARLIN_GEMM_OP_CACHE[dtype] = op
+    return op
+
+
+def _marlin_available_cached(dtype: torch.dtype) -> bool:
+    cached = _MARLIN_AVAILABLE_CACHE.get(dtype)
+    if cached is None:
+        cached = marlin_runtime_available(dtype)
+        _MARLIN_AVAILABLE_CACHE[dtype] = cached
+    return cached
+
+
+def _get_marlin_style_fast_runner(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    size_n: int,
+    dtype: torch.dtype,
+) -> Callable[..., torch.Tensor]:
+    """Return a closure that runs the C++ marlin_style fast path."""
+    marlin_qweight, marlin_scales, workspace, b_q_type = _get_marlin_packed(
+        qweight, scales, size_n, dtype
+    )
+    cpp_op = _get_amplin_op("marlin_style_run")
+    size_k = qweight.size(0) * 8
+
+    def _marlin_style_fast_run(
+        input: torch.Tensor, *_args: object, **_kwargs: object
+    ) -> torch.Tensor:
+        return cpp_op(
+            input,
+            marlin_qweight,
+            marlin_scales,
+            workspace,
+            b_q_type.id,
+            size_n,
+            size_k,
+        )
+
+    return _marlin_style_fast_run
+
+
+def _run_marlin_style(
+    input: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    size_k = input.size(-1)
+    size_m = input.numel() // size_k
+    size_n = logical_n
+    input_2d = input.reshape(-1, size_k).contiguous()
+    marlin_qweight, marlin_scales, workspace, b_q_type = _get_marlin_packed(
+        qweight, scales, size_n, input.dtype
+    )
+    op = _get_marlin_gemm_op(input.dtype)
+    output = op(
+        input_2d,
+        None,
+        marlin_qweight,
+        None,
+        marlin_scales,
+        None,
+        None,
+        None,
+        None,
+        workspace,
+        b_q_type.id,
+        size_m,
+        size_n,
+        size_k,
+        True,
+        False,
+        True,
+        False,
+        False,
+        0,
+    )
+    if input.dim() == 2:
+        return output
+    return output.reshape(*input.shape[:-1], size_n)
+
+
 def _dtype_name(dtype: torch.dtype) -> str:
     return "fp16" if dtype == torch.float16 else "bf16"
 
@@ -1662,6 +1863,8 @@ def _run_candidate(
     packed_scales: torch.Tensor,
     size_n: int,
 ) -> torch.Tensor:
+    if spec.fn_name == "marlin_style":
+        return _run_marlin_style(input, packed_qweight, packed_scales, logical_n=size_n)
     op = _get_amplin_op(spec.fn_name)
     if spec.needs_logical_n:
         return op(input, packed_qweight, packed_scales, logical_n=size_n)
@@ -1712,6 +1915,8 @@ def _select_best_kernel(
     for spec in _DYNAMIC_CANDIDATES:
         if not _is_candidate_legal(spec, size_m, size_k, size_n):
             continue
+        if spec.fn_name == "marlin_style" and not _marlin_available_cached(dtype):
+            continue
         if spec.packer not in packed_cache:
             packed_cache[spec.packer] = _pack_with_cache(spec, qweight, scales, dtype)
         packed_qweight, packed_scales = packed_cache[spec.packer]
@@ -1756,15 +1961,40 @@ def dynamic(
     if not _ensure_amplin_runtime_available():
         raise RuntimeError(amplin_runtime_error())
 
+    if logical_n is None:
+        size_n = qweight.size(-1)
+    else:
+        size_n = logical_n
+
+    # Fast path: repeated calls with the same (M, K, N, dtype) and weights skip
+    # validation, routing-table locks, and spec/op lookups.
+    if input.dim() >= 2 and input.is_contiguous():
+        size_k = input.size(-1)
+        size_m = input.numel() // size_k
+        key = (size_m, size_k, size_n, _dtype_name(input.dtype))
+        fast_key = (
+            key,
+            qweight.data_ptr(),
+            scales.data_ptr(),
+            qweight.shape,
+            scales.shape,
+        )
+        cached = _FAST_DISPATCH_CACHE.get(fast_key)
+        if cached is not None:
+            op, packed_qweight, packed_scales, needs_logical_n, cached_size_n = cached
+            if cached_size_n == size_n and (
+                op is not _run_marlin_style or _marlin_available_cached(input.dtype)
+            ):
+                if needs_logical_n:
+                    return op(input, packed_qweight, packed_scales, logical_n=size_n)
+                return op(input, packed_qweight, packed_scales)
+
     input = input.contiguous()
     if input.dim() < 2:
         raise ValueError("Amplin dynamic input must have at least two dimensions")
 
     size_k = input.size(-1)
     size_m = input.numel() // size_k
-    if logical_n is None:
-        logical_n = qweight.size(-1)
-    size_n = logical_n
     if qweight.dim() != 2 or qweight.size(0) * 8 != size_k:
         raise ValueError(
             "Amplin dynamic qweight must have shape [K/8, N] and match input K"
@@ -1778,6 +2008,8 @@ def dynamic(
     key = _dynamic_key(input, size_n)
     with _ROUTING_LOCK:
         choice = _DYNAMIC_ROUTING_TABLE.get(key) or _STATIC_ROUTING_TABLE.get(key)
+        if choice == "marlin_style" and not _marlin_available_cached(dtype):
+            choice = None
         if choice is None:
             choice, output = _select_best_kernel(
                 input, qweight, scales, dtype, size_m, size_k, size_n, warmup, iters
@@ -1786,11 +2018,41 @@ def dynamic(
                 _DYNAMIC_ROUTING_TABLE[key] = choice
             return output
 
-    spec = _CANDIDATE_BY_NAME.get(choice)
-    if spec is None:
-        raise RuntimeError(f"Amplin dynamic routing table contains unknown kernel {choice!r}")
-    packed_qweight, packed_scales = _pack_with_cache(spec, qweight, scales, dtype)
-    return _run_candidate(spec, input, packed_qweight, packed_scales, size_n)
+        fast_key = (
+            key,
+            qweight.data_ptr(),
+            scales.data_ptr(),
+            qweight.shape,
+            scales.shape,
+        )
+        cached = _FAST_DISPATCH_CACHE.get(fast_key)
+        if cached is not None:
+            op, packed_qweight, packed_scales, needs_logical_n, cached_size_n = cached
+            if cached_size_n == size_n:
+                if needs_logical_n:
+                    return op(input, packed_qweight, packed_scales, logical_n=size_n)
+                return op(input, packed_qweight, packed_scales)
+
+        spec = _CANDIDATE_BY_NAME.get(choice)
+        if spec is None:
+            raise RuntimeError(f"Amplin dynamic routing table contains unknown kernel {choice!r}")
+        packed_qweight, packed_scales = _pack_with_cache(spec, qweight, scales, dtype)
+        if spec.fn_name == "marlin_style":
+            op = _get_marlin_style_fast_runner(qweight, scales, size_n, dtype)
+            needs_logical_n = False
+        else:
+            op = _get_amplin_op(spec.fn_name)
+            needs_logical_n = spec.needs_logical_n
+        _FAST_DISPATCH_CACHE[fast_key] = (
+            op,
+            packed_qweight,
+            packed_scales,
+            needs_logical_n,
+            size_n,
+        )
+        if needs_logical_n:
+            return op(input, packed_qweight, packed_scales, logical_n=size_n)
+        return op(input, packed_qweight, packed_scales)
 
 
 def get_static_routing_table() -> dict[tuple[int, int, int, str], str]:
@@ -1810,6 +2072,7 @@ def set_routing_table(entries: dict[tuple[int, int, int, str], str]) -> None:
     """Replace the static routing table.  Existing dynamic entries are preserved."""
     _STATIC_ROUTING_TABLE.clear()
     _STATIC_ROUTING_TABLE.update(entries)
+    _FAST_DISPATCH_CACHE.clear()
 
 
 def _parse_routing_key(raw_key: object) -> tuple[int, int, int, str]:
@@ -1846,6 +2109,7 @@ def save_routing_table(path: str | Path) -> None:
 
 def clear_dynamic_routing_table() -> None:
     _DYNAMIC_ROUTING_TABLE.clear()
+    _FAST_DISPATCH_CACHE.clear()
 
 
 # Build a name -> spec lookup for cached dispatch.
@@ -1896,6 +2160,7 @@ __all__ = [
     "mma_lane_m16_n64_tile4_shared_a",
     "mma_lane_m16_n64_tile8_shared_a",
     "mma_lane_m32_n64_tile2_shared_a",
+    "mma_lane_m32_n64_tile2_interleaved_dequant",
     "mma_lane_m32_n64_tile4_shared_a",
     "mma_lane_m32_n64_tile8_shared_a",
     "mma_lane_m32_n64_shared_a",

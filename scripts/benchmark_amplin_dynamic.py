@@ -10,6 +10,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 for import_root in (SCRIPT_DIR, REPO_ROOT):
@@ -30,9 +31,11 @@ from gpu_idle_preflight import (  # noqa: E402
     recheck_gpu_exclusivity,
 )
 
+
 _GPU_IDLE_PREFLIGHT = bootstrap_gpu_idle_preflight()
 
 import torch  # noqa: E402
+
 from gptqmodel.utils import amplin  # noqa: E402
 
 
@@ -171,6 +174,11 @@ def main() -> None:
 
     dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
     shapes = [spec for spec in SHAPES if args.model == "all" or spec.model == args.model]
+
+    # Reset static and dynamic routing tables so the benchmark produces a fresh
+    # selection that includes newly-added candidates such as ``marlin_style``.
+    amplin.set_routing_table({})
+    amplin.clear_dynamic_routing_table()
 
     print(
         f"Device: {device} {properties.name} sm_{properties.major}{properties.minor} "
