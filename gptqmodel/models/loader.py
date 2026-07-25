@@ -34,6 +34,7 @@ from transformers.utils import is_flash_attn_2_available
 from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
+from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.gguf import GGUFTorchLinear
 from ..quantization import QuantizeConfig
@@ -1519,7 +1520,10 @@ def ModelLoader(cls):
                         f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                     )
 
-                if preload_qlinear_kernel.REQUIRES_FORMAT_V2:
+                if any(
+                    isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
+                    for m in model.modules()
+                ):
                     model = convert_gptq_v1_to_v2_format(
                         model,
                         cfg=qcfg,
