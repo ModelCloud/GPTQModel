@@ -231,6 +231,11 @@ class TritonV2Linear(TorchLinear):
     def forward(self, x):
         from ..triton_utils.dequant import QuantLinearFunction
 
+        if self.training:
+            return super().forward(x)
+
+        x = self._apply_rotation_to_input(x)
+
         if self.bits == 3 and not self.training:
             from ..triton_utils.three_bit import LAYOUT_GPTQ, matmul_3bit
 
@@ -254,9 +259,6 @@ class TritonV2Linear(TorchLinear):
                     out = self.adapter.apply(x=x, out=out)
 
                 return out.to(dtype=x.dtype)
-
-        if self.training:
-            return super().forward(x)
 
         # if in_features is padded, we need to pad the input as well
         # if x.size(-1) != self.padded_infeatures:

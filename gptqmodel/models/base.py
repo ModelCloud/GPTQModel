@@ -97,7 +97,7 @@ from ._const import (
     EXPERT_INDEX_PLACEHOLDER,
     META,
 )
-from .loader import ModelLoader
+from .loader import ModelLoader, _setup_rotation_online_had
 from .writer import ModelWriter
 
 
@@ -1019,6 +1019,15 @@ class BaseQModel(nn.Module):
             self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
                                             device=rotation_device, **module_name_args)
 
+        if self.quantize_config.rotation:
+            backend = normalize_backend(backend, quant_method=self.quantize_config.method)
+            if backend == BACKEND.AUTO:
+                backend = BACKEND.GPTQ_TORCH
+            if backend not in (BACKEND.GPTQ_TORCH, BACKEND.GPTQ_TRITON):
+                raise NotImplementedError(
+                    f"`rotation` is only supported with `gptq_torch` or `gptq_triton` backend, got `{backend}`."
+                )
+
         if self.quantize_config.uses_weight_only_lifecycle():
             result = self._quantize_weight_only(
                 calibration=calibration,
@@ -1050,6 +1059,7 @@ class BaseQModel(nn.Module):
         if timer is not None:
             timer.flush()
 
+        _setup_rotation_online_had(self.model, self.quantize_config.rotation)
         return result
 
     @staticmethod

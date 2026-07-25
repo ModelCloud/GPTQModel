@@ -8,6 +8,7 @@ recursive-include gptqmodel_ext/paroquant *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/qqq *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/grasshopper *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/adjacent_exact *.h *.cuh *.cu *.cpp
+recursive-include gptqmodel_ext/hadamard *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/cannoe *.h *.hpp *.cpp *.json *.md
 recursive-include gptqmodel/exllamav3/util/hadamard_data *.txt
 include licenses/*
