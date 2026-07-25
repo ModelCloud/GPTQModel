@@ -1007,6 +1007,8 @@ class ModelTest(unittest.TestCase):
                 compare_backends = (BACKEND.MARLIN,)
             else:
                 compare_backends = (self.LOAD_BACKEND,)
+        elif format_family == FORMAT.QQQ:
+            compare_backends = (self.LOAD_BACKEND,)
         else:
             compare_backends = (BACKEND.MARLIN, BACKEND.GEMM)
         fallback_backend = None
