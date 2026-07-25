@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -61,6 +62,7 @@ constexpr int kMmaK = 16;
 constexpr int kMmaLanes = 32;
 constexpr int kMmaLaneTileN = 16;
 constexpr int kMmaLaneWords = kMmaLanes;
+constexpr int kMmaLaneM16BlockM = 16;
 constexpr int kMmaLaneM32BlockM = 32;
 constexpr int kMmaLaneM32WarpN = 32;
 constexpr int kMmaLaneM32Warps = 4;
@@ -75,11 +77,13 @@ constexpr int kMmaLaneSplitK4Warps = 4;
 constexpr int kMmaLaneSplitK8Warps = 8;
 constexpr int kMmaLaneSplitK12Warps = 12;
 constexpr int kMmaLaneSplitK16Warps = 16;
+constexpr int kMmaLaneSplitK20Warps = 20;
 constexpr int kMmaLaneSplitK24Warps = 24;
 constexpr int kMmaLaneSplitK4Threads = kMmaLaneSplitK4Warps * kMmaLanes;
 constexpr int kMmaLaneSplitK8Threads = kMmaLaneSplitK8Warps * kMmaLanes;
 constexpr int kMmaLaneSplitK12Threads = kMmaLaneSplitK12Warps * kMmaLanes;
 constexpr int kMmaLaneSplitK16Threads = kMmaLaneSplitK16Warps * kMmaLanes;
+constexpr int kMmaLaneSplitK20Threads = kMmaLaneSplitK20Warps * kMmaLanes;
 constexpr int kMmaLaneSplitK24Threads = kMmaLaneSplitK24Warps * kMmaLanes;
 constexpr int kMmaLaneSplitKFragments = 2;
 constexpr int kMmaLaneSplitKN32Fragments = 4;
@@ -91,12 +95,94 @@ constexpr int kMmaLaneSplitKN64K12SharedBytes =
     kMmaLanes *
     kMmaLaneAccumulatorValues *
     sizeof(float);
+constexpr int kMmaLaneSplitKN64K16SharedBytes =
+    kMmaLaneSplitK16Warps *
+    kMmaLaneSplitKN64Fragments *
+    kMmaLanes *
+    kMmaLaneAccumulatorValues *
+    sizeof(float);
+constexpr int kMmaLaneSplitKN64K20SharedBytes =
+    kMmaLaneSplitK20Warps *
+    kMmaLaneSplitKN64Fragments *
+    kMmaLanes *
+    kMmaLaneAccumulatorValues *
+    sizeof(float);
+constexpr int kMmaLaneSplitKN64K4SharedBytes =
+    kMmaLaneSplitK4Warps *
+    kMmaLaneSplitKN64Fragments *
+    kMmaLanes *
+    kMmaLaneAccumulatorValues *
+    sizeof(float);
+constexpr int kMmaLaneSplitKN64K8SharedBytes =
+    kMmaLaneSplitK8Warps *
+    kMmaLaneSplitKN64Fragments *
+    kMmaLanes *
+    kMmaLaneAccumulatorValues *
+    sizeof(float);
 constexpr int kMmaLaneSplitKN64SharedBytes =
     kMmaLaneSplitK24Warps *
     kMmaLaneSplitKN64Fragments *
     kMmaLanes *
     kMmaLaneAccumulatorValues *
     sizeof(float);
+
+constexpr int kMmaLaneSharedAK = kHmmaBlockK + 8;
+
+constexpr int kMmaLaneM32N64Tile2SplitK4NTiles = 2;
+constexpr int kMmaLaneM32N64Tile2SplitK4KSplit = 4;
+constexpr int kMmaLaneM32N64Tile2SplitK4Threads =
+    (kMmaLaneM32BlockM / kMmaM) *
+    kMmaLaneM32N64Tile2SplitK4NTiles *
+    kMmaLaneM32N64Tile2SplitK4KSplit *
+    kMmaLanes;
+static_assert(kMmaLaneM32N64Tile2SplitK4Threads == 512);
+constexpr int kMmaLaneM32N64Tile2SplitK4SharedBytes =
+    kMmaLaneM32N64Tile2SplitK4KSplit * kMmaLaneM32BlockM * kMmaLaneSharedAK * sizeof(half) +
+    (kMmaLaneM32N64Tile2SplitK4Threads / kMmaLanes) *
+        kMmaLaneSplitKN64Fragments * kMmaLanes * kMmaLaneAccumulatorValues * sizeof(float);
+static_assert(kMmaLaneM32N64Tile2SplitK4SharedBytes == 100352);
+
+constexpr int kMmaLaneM32N64Tile2SplitK2NTiles = 2;
+constexpr int kMmaLaneM32N64Tile2SplitK2KSplit = 2;
+constexpr int kMmaLaneM32N64Tile2SplitK2Threads =
+    (kMmaLaneM32BlockM / kMmaM) *
+    kMmaLaneM32N64Tile2SplitK2NTiles *
+    kMmaLaneM32N64Tile2SplitK2KSplit *
+    kMmaLanes;
+static_assert(kMmaLaneM32N64Tile2SplitK2Threads == 256);
+constexpr int kMmaLaneM32N64Tile2SplitK2SharedBytes =
+    kMmaLaneM32N64Tile2SplitK2KSplit * kMmaLaneM32BlockM * kMmaLaneSharedAK * sizeof(half) +
+    (kMmaLaneM32N64Tile2SplitK2Threads / kMmaLanes) *
+        kMmaLaneSplitKN64Fragments * kMmaLanes * kMmaLaneAccumulatorValues * sizeof(float);
+static_assert(kMmaLaneM32N64Tile2SplitK2SharedBytes == 50176);
+
+constexpr int kMmaLaneM32N64Tile1SplitK4NTiles = 1;
+constexpr int kMmaLaneM32N64Tile1SplitK4KSplit = 4;
+constexpr int kMmaLaneM32N64Tile1SplitK4Threads =
+    (kMmaLaneM32BlockM / kMmaM) *
+    kMmaLaneM32N64Tile1SplitK4NTiles *
+    kMmaLaneM32N64Tile1SplitK4KSplit *
+    kMmaLanes;
+static_assert(kMmaLaneM32N64Tile1SplitK4Threads == 256);
+constexpr int kMmaLaneM32N64Tile1SplitK4SharedBytes =
+    kMmaLaneM32N64Tile1SplitK4KSplit * kMmaLaneM32BlockM * kMmaLaneSharedAK * sizeof(half) +
+    (kMmaLaneM32N64Tile1SplitK4Threads / kMmaLanes) *
+        kMmaLaneSplitKN64Fragments * kMmaLanes * kMmaLaneAccumulatorValues * sizeof(float);
+static_assert(kMmaLaneM32N64Tile1SplitK4SharedBytes == 67584);
+
+constexpr int kMmaLaneM32N64Tile1SplitK8NTiles = 1;
+constexpr int kMmaLaneM32N64Tile1SplitK8KSplit = 8;
+constexpr int kMmaLaneM32N64Tile1SplitK8Threads =
+    (kMmaLaneM32BlockM / kMmaM) *
+    kMmaLaneM32N64Tile1SplitK8NTiles *
+    kMmaLaneM32N64Tile1SplitK8KSplit *
+    kMmaLanes;
+static_assert(kMmaLaneM32N64Tile1SplitK8Threads == 512);
+constexpr int kMmaLaneM32N64Tile1SplitK8SharedBytes =
+    kMmaLaneM32N64Tile1SplitK8KSplit * kMmaLaneM32BlockM * kMmaLaneSharedAK * sizeof(half) +
+    (kMmaLaneM32N64Tile1SplitK8Threads / kMmaLanes) *
+        kMmaLaneSplitKN64Fragments * kMmaLanes * kMmaLaneAccumulatorValues * sizeof(float);
+static_assert(kMmaLaneM32N64Tile1SplitK8SharedBytes == 135168);
 
 enum class HmmaLaunchMode {
   kAuto,
@@ -128,6 +214,7 @@ static_assert(kMmaLaneM32WarpN == 2 * kMmaLaneTileN);
 static_assert(kMmaLaneM32Threads == 128);
 static_assert(kMmaLaneM32N32BlockN == kMmaLaneM32WarpN);
 static_assert(kMmaLaneM32N32Threads == 64);
+static_assert(kMmaLaneM16BlockM == kMmaM);
 static_assert(kMmaLanePaddedBlockM == kMmaM);
 static_assert(kMmaLanePaddedBlockN == kMmaLaneTileN);
 static_assert(kMmaLanePaddedThreads == 32);
@@ -135,8 +222,13 @@ static_assert(kMmaLaneSplitK4Threads == 128);
 static_assert(kMmaLaneSplitK8Threads == 256);
 static_assert(kMmaLaneSplitK12Threads == 384);
 static_assert(kMmaLaneSplitK16Threads == 512);
+static_assert(kMmaLaneSplitK20Threads == 640);
 static_assert(kMmaLaneSplitK24Threads == 768);
+static_assert(kMmaLaneSplitKN64K4SharedBytes == 16 * 1024);
+static_assert(kMmaLaneSplitKN64K8SharedBytes == 32 * 1024);
 static_assert(kMmaLaneSplitKN64K12SharedBytes == 48 * 1024);
+static_assert(kMmaLaneSplitKN64K16SharedBytes == 64 * 1024);
+static_assert(kMmaLaneSplitKN64K20SharedBytes == 80 * 1024);
 static_assert(kMmaLaneSplitKN64SharedBytes == 96 * 1024);
 
 template <typename Scalar>
@@ -198,17 +290,137 @@ __device__ __forceinline__ uint32_t dequantized_pair_bits(
       static_cast<float>(high_code - 8) * scale);
 }
 
+template <int B, int C>
+__device__ __forceinline__ int lop3_amplin(int a) {
+  int res;
+  asm volatile(
+      "lop3.b32 %0, %1, %2, %3, %4;\n"
+      : "=r"(res)
+      : "r"(a), "n"(B), "n"(C), "n"((0xf0 & 0xcc) | 0xaa));
+  return res;
+}
+
 template <typename Scalar>
 __device__ __forceinline__ void store_dequantized_word_128(
     Scalar* destination,
     uint32_t word,
     float scale) {
-  const uint4 packed = make_uint4(
-      dequantized_pair_bits<Scalar>(word, scale, 0),
-      dequantized_pair_bits<Scalar>(word, scale, 2),
-      dequantized_pair_bits<Scalar>(word, scale, 4),
-      dequantized_pair_bits<Scalar>(word, scale, 6));
-  *reinterpret_cast<uint4*>(destination) = packed;
+  if constexpr (std::is_same_v<Scalar, half>) {
+    const uint32_t K0 = word & 0x0fu;
+    const uint32_t K1 = (word >> 4) & 0x0fu;
+    const uint32_t K2 = (word >> 8) & 0x0fu;
+    const uint32_t K3 = (word >> 12) & 0x0fu;
+    const uint32_t K4 = (word >> 16) & 0x0fu;
+    const uint32_t K5 = (word >> 20) & 0x0fu;
+    const uint32_t K6 = (word >> 24) & 0x0fu;
+    const uint32_t K7 = (word >> 28) & 0x0fu;
+
+    const int q0 = static_cast<int>(K0 | (K2 << 8) | (K1 << 16) | (K3 << 24));
+    const int q1 = static_cast<int>(K4 | (K6 << 8) | (K5 << 16) | (K7 << 24));
+
+    constexpr int LO = 0x000f000f;
+    constexpr int HI = 0x00f000f0;
+    constexpr int EX = 0x64006400;
+    constexpr int SUB = 0x64086408;
+    constexpr int MUL = 0x2c002c00;
+    constexpr int ADD = 0xd480d480;
+
+    const int lo0 = lop3_amplin<LO, EX>(q0);
+    const int hi0 = lop3_amplin<HI, EX>(q0 >> 4);
+    const int lo1 = lop3_amplin<LO, EX>(q1);
+    const int hi1 = lop3_amplin<HI, EX>(q1 >> 4);
+
+    const half2 scale2 = __half2half2(ScalarTraits<half>::from_float(scale));
+    half2 deq[4];
+    deq[0] = __hmul2(
+        __hsub2(
+            *reinterpret_cast<const half2*>(&lo0),
+            *reinterpret_cast<const half2*>(&SUB)),
+        scale2);
+    deq[1] = __hmul2(
+        __hfma2(
+            *reinterpret_cast<const half2*>(&hi0),
+            *reinterpret_cast<const half2*>(&MUL),
+            *reinterpret_cast<const half2*>(&ADD)),
+        scale2);
+    deq[2] = __hmul2(
+        __hsub2(
+            *reinterpret_cast<const half2*>(&lo1),
+            *reinterpret_cast<const half2*>(&SUB)),
+        scale2);
+    deq[3] = __hmul2(
+        __hfma2(
+            *reinterpret_cast<const half2*>(&hi1),
+            *reinterpret_cast<const half2*>(&MUL),
+            *reinterpret_cast<const half2*>(&ADD)),
+        scale2);
+
+    const uint4 packed = make_uint4(
+        *reinterpret_cast<const uint32_t*>(&deq[0]),
+        *reinterpret_cast<const uint32_t*>(&deq[1]),
+        *reinterpret_cast<const uint32_t*>(&deq[2]),
+        *reinterpret_cast<const uint32_t*>(&deq[3]));
+    *reinterpret_cast<uint4*>(destination) = packed;
+  } else if constexpr (std::is_same_v<Scalar, __nv_bfloat16>) {
+    const uint32_t K0 = word & 0x0fu;
+    const uint32_t K1 = (word >> 4) & 0x0fu;
+    const uint32_t K2 = (word >> 8) & 0x0fu;
+    const uint32_t K3 = (word >> 12) & 0x0fu;
+    const uint32_t K4 = (word >> 16) & 0x0fu;
+    const uint32_t K5 = (word >> 20) & 0x0fu;
+    const uint32_t K6 = (word >> 24) & 0x0fu;
+    const uint32_t K7 = (word >> 28) & 0x0fu;
+
+    const int q0 = static_cast<int>(K0 | (K2 << 4) | (K1 << 16) | (K3 << 20));
+    const int q1 = static_cast<int>(K4 | (K6 << 4) | (K5 << 16) | (K7 << 20));
+
+    constexpr int MASK = 0x000f000f;
+    constexpr int EX = 0x43004300;
+    constexpr int SUB = 0x43084308;
+
+    const int lo0 = lop3_amplin<MASK, EX>(q0);
+    const int hi0 = lop3_amplin<MASK, EX>(q0 >> 4);
+    const int lo1 = lop3_amplin<MASK, EX>(q1);
+    const int hi1 = lop3_amplin<MASK, EX>(q1 >> 4);
+
+    const __nv_bfloat162 scale2 = __bfloat162bfloat162(
+        ScalarTraits<__nv_bfloat16>::from_float(scale));
+    __nv_bfloat162 deq[4];
+    deq[0] = __hmul2(
+        __hsub2(
+            *reinterpret_cast<const __nv_bfloat162*>(&lo0),
+            *reinterpret_cast<const __nv_bfloat162*>(&SUB)),
+        scale2);
+    deq[1] = __hmul2(
+        __hsub2(
+            *reinterpret_cast<const __nv_bfloat162*>(&hi0),
+            *reinterpret_cast<const __nv_bfloat162*>(&SUB)),
+        scale2);
+    deq[2] = __hmul2(
+        __hsub2(
+            *reinterpret_cast<const __nv_bfloat162*>(&lo1),
+            *reinterpret_cast<const __nv_bfloat162*>(&SUB)),
+        scale2);
+    deq[3] = __hmul2(
+        __hsub2(
+            *reinterpret_cast<const __nv_bfloat162*>(&hi1),
+            *reinterpret_cast<const __nv_bfloat162*>(&SUB)),
+        scale2);
+
+    const uint4 packed = make_uint4(
+        *reinterpret_cast<const uint32_t*>(&deq[0]),
+        *reinterpret_cast<const uint32_t*>(&deq[1]),
+        *reinterpret_cast<const uint32_t*>(&deq[2]),
+        *reinterpret_cast<const uint32_t*>(&deq[3]));
+    *reinterpret_cast<uint4*>(destination) = packed;
+  } else {
+    const uint4 packed = make_uint4(
+        dequantized_pair_bits<Scalar>(word, scale, 0),
+        dequantized_pair_bits<Scalar>(word, scale, 2),
+        dequantized_pair_bits<Scalar>(word, scale, 4),
+        dequantized_pair_bits<Scalar>(word, scale, 6));
+    *reinterpret_cast<uint4*>(destination) = packed;
+  }
 }
 
 struct MmaFragmentA {
@@ -946,8 +1158,8 @@ void amplin_mma_lane_mN_n64_shared_a_kernel(
   }
 }
 
-template <typename Scalar, int BlockM, int NTiles>
-__global__ __launch_bounds__((BlockM / kMmaM) * NTiles * kMmaLanes, 1)
+template <typename Scalar, int BlockM, int NTiles, int MinBlocks = 1>
+__global__ __launch_bounds__((BlockM / kMmaM) * NTiles * kMmaLanes, MinBlocks)
 void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ packed_lane_qweight,
@@ -958,10 +1170,18 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
     int size_n,
     int num_groups) {
   constexpr int kSteps = kHmmaBlockK / kMmaK;
-  constexpr int kThreads = NTiles * kMmaLanes;
+  constexpr int kThreads = (BlockM / kMmaM) * NTiles * kMmaLanes;
   constexpr int MWarpGroups = BlockM / kMmaM;
 
-  __shared__ __align__(32) Scalar shared_a[BlockM * kHmmaBlockK];
+  // Pad the shared-A row stride to reduce ldmatrix bank conflicts.  kHmmaBlockK
+  // (128 halfs) is an exact number of 32 banks (256 bytes), so every row starts
+  // at bank 0 and all 16 ldmatrix rows collide.  Padding by 8 halfs makes each
+  // row start 4 banks later; rows r and r+8 still share a bank, cutting the
+  // original 16-way bank conflict to a 2-way conflict.  The row size (136 halfs
+  // = 272 bytes) is a multiple of 16 bytes, so cp.async remains aligned.
+  constexpr int kSharedAK = kHmmaBlockK + 8;
+
+  __shared__ __align__(32) Scalar shared_a[BlockM * kSharedAK];
 
   const int thread = threadIdx.x;
   const int lane = thread & (kMmaLanes - 1);
@@ -983,7 +1203,7 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
 
   const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
   const int address_column = (lane >> 4) * 8;
-  Scalar* const shared_a_m_base = shared_a + m_group * kMmaM * kHmmaBlockK;
+  Scalar* const shared_a_m_base = shared_a + m_group * kMmaM * kSharedAK;
 
   MmaFragmentC accumulators[kMmaLaneSplitKN64Fragments] = {};
 
@@ -996,7 +1216,7 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
       const int row = flat / kHmmaBlockK;
       const int col = flat - row * kHmmaBlockK;
       const int source_m = global_m_base + row;
-      Scalar* const shared_dest = shared_a + row * kHmmaBlockK + col;
+      Scalar* const shared_dest = shared_a + row * kSharedAK + col;
       if (source_m < size_m && col + kScalarsPerCpAsync <= kHmmaBlockK) {
         cp_async_16(
             shared_dest,
@@ -1032,7 +1252,7 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
       MmaFragmentA fragment_a;
       load_mma_fragment_a(
           fragment_a,
-          shared_a_m_base + address_row * kHmmaBlockK + address_column);
+          shared_a_m_base + address_row * kSharedAK + address_column);
       uint4 packed_words =
           *reinterpret_cast<const uint4*>(packed_lane_qweight + group_word_base);
 
@@ -1044,7 +1264,7 @@ void amplin_mma_lane_mN_n64_tiled_fullk_kernel(
           load_mma_fragment_a(
               next_fragment_a,
               shared_a_m_base +
-                  address_row * kHmmaBlockK +
+                  address_row * kSharedAK +
                   (k_step + 1) * kMmaK +
                   address_column);
           const int64_t next_word_offset =
@@ -1122,14 +1342,15 @@ void amplin_mma_lane_mN_n64_tiled_splitk_kernel(
   constexpr int MWarpGroups = BlockM / kMmaM;
   constexpr int kThreads = MWarpGroups * NTiles * KSplit * kMmaLanes;
 
-  constexpr int AElements = KSplit * BlockM * kHmmaBlockK;
+  constexpr int AStorageElements = KSplit * BlockM * kMmaLaneSharedAK;
+  constexpr int ADataElements = KSplit * BlockM * kHmmaBlockK;
   constexpr int PartialsElements =
       kThreads / kMmaLanes * kMmaLaneSplitKN64Fragments * kMmaLanes *
       kMmaLaneAccumulatorValues;
   extern __shared__ __align__(32) unsigned char shared_memory[];
   Scalar* const shared_a = reinterpret_cast<Scalar*>(shared_memory);
   float* const partials =
-      reinterpret_cast<float*>(shared_memory + AElements * sizeof(Scalar));
+      reinterpret_cast<float*>(shared_memory + AStorageElements * sizeof(Scalar));
 
   const int thread = threadIdx.x;
   const int lane = thread & (kMmaLanes - 1);
@@ -1155,13 +1376,13 @@ void amplin_mma_lane_mN_n64_tiled_splitk_kernel(
   const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
   const int address_column = (lane >> 4) * 8;
   Scalar* const shared_a_m_base =
-      shared_a + k_warp * BlockM * kHmmaBlockK + m_group * kMmaM * kHmmaBlockK;
+      shared_a + k_warp * BlockM * kMmaLaneSharedAK + m_group * kMmaM * kMmaLaneSharedAK;
 
   MmaFragmentC accumulators[kMmaLaneSplitKN64Fragments] = {};
 
   for (int group_base = 0; group_base < num_groups; group_base += KSplit) {
     for (int idx = thread;
-         idx < AElements / kScalarsPerCpAsync;
+         idx < ADataElements / kScalarsPerCpAsync;
          idx += kThreads) {
       const int flat = idx * kScalarsPerCpAsync;
       const int k_group = flat / (BlockM * kHmmaBlockK);
@@ -1171,7 +1392,7 @@ void amplin_mma_lane_mN_n64_tiled_splitk_kernel(
       const int source_m = global_m_base + row;
       const int group = group_base + k_group;
       Scalar* const shared_dest =
-          shared_a + k_group * BlockM * kHmmaBlockK + row * kHmmaBlockK + col;
+          shared_a + k_group * BlockM * kMmaLaneSharedAK + row * kMmaLaneSharedAK + col;
       if (source_m < size_m && group < num_groups &&
           col + kScalarsPerCpAsync <= kHmmaBlockK) {
         cp_async_16(
@@ -1209,7 +1430,7 @@ void amplin_mma_lane_mN_n64_tiled_splitk_kernel(
       MmaFragmentA fragment_a;
       load_mma_fragment_a(
           fragment_a,
-          shared_a_m_base + address_row * kHmmaBlockK + address_column);
+          shared_a_m_base + address_row * kMmaLaneSharedAK + address_column);
       uint4 packed_words =
           *reinterpret_cast<const uint4*>(packed_lane_qweight + group_word_base);
 
@@ -1221,7 +1442,7 @@ void amplin_mma_lane_mN_n64_tiled_splitk_kernel(
           load_mma_fragment_a(
               next_fragment_a,
               shared_a_m_base +
-                  address_row * kHmmaBlockK +
+                  address_row * kMmaLaneSharedAK +
                   (k_step + 1) * kMmaK +
                   address_column);
           const int64_t next_word_offset =
@@ -2359,8 +2580,8 @@ __device__ __forceinline__ void amplin_mma_lane_m16_n64_splitk24_pipe2_interleav
   }
 }
 
-template <typename Scalar>
-__device__ __forceinline__ void amplin_mma_lane_mN_n64_splitk24_pipe2_interleaved_body(
+template <typename Scalar, int KWarpsTotal>
+__device__ __forceinline__ void amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ packed_lane_qweight,
     const Scalar* __restrict__ packed_scales,
@@ -2371,7 +2592,7 @@ __device__ __forceinline__ void amplin_mma_lane_mN_n64_splitk24_pipe2_interleave
     int num_groups,
     float* __restrict__ partials,
     int block_m) {
-  constexpr int kWarpsTotal = kMmaLaneSplitK24Warps;
+  constexpr int kWarpsTotal = KWarpsTotal;
   const int lane = threadIdx.x & (kMmaLanes - 1);
   const int warp = threadIdx.x / kMmaLanes;
   const int quad = lane >> 2;
@@ -2497,9 +2718,12 @@ __device__ __forceinline__ void amplin_mma_lane_mN_n64_splitk24_pipe2_interleave
   }
   __syncthreads();
 
-  if (warp < m_warp_groups * kMmaLaneSplitKN64Fragments) {
-    const int m_group_reduce = warp / kMmaLaneSplitKN64Fragments;
-    const int fragment = warp % kMmaLaneSplitKN64Fragments;
+  const int total_outputs = m_warp_groups * kMmaLaneSplitKN64Fragments;
+  for (int output_idx = warp;
+       output_idx < total_outputs;
+       output_idx += kWarpsTotal) {
+    const int m_group_reduce = output_idx / kMmaLaneSplitKN64Fragments;
+    const int fragment = output_idx % kMmaLaneSplitKN64Fragments;
     const int partial_warp_base = m_group_reduce * warps_per_m_group;
     MmaFragmentC reduced = {};
 #pragma unroll
@@ -2543,7 +2767,82 @@ void amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_kernel(
     int size_n,
     int num_groups) {
   extern __shared__ float partials[];
-  amplin_mma_lane_mN_n64_splitk24_pipe2_interleaved_body(
+  amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body<Scalar, kMmaLaneSplitK24Warps>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      num_groups,
+      partials,
+      kMmaLaneM32BlockM);
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__(kMmaLaneSplitK12Threads, 1)
+void amplin_mma_lane_m32_n64_splitk12_pipe2_interleaved_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  extern __shared__ float partials[];
+  amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body<Scalar, kMmaLaneSplitK12Warps>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      num_groups,
+      partials,
+      kMmaLaneM32BlockM);
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__(kMmaLaneSplitK16Threads, 1)
+void amplin_mma_lane_m32_n64_splitk16_pipe2_interleaved_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  extern __shared__ float partials[];
+  amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body<Scalar, kMmaLaneSplitK16Warps>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      num_groups,
+      partials,
+      kMmaLaneM32BlockM);
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__(kMmaLaneSplitK20Threads, 1)
+void amplin_mma_lane_m32_n64_splitk20_pipe2_interleaved_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  extern __shared__ float partials[];
+  amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body<Scalar, kMmaLaneSplitK20Warps>(
       input,
       packed_lane_qweight,
       packed_scales,
@@ -3203,6 +3502,131 @@ void amplin_mma_lane_m16_n64_splitk24_pipe2_interleaved_kernel(
 }
 
 template <typename Scalar>
+__global__ __launch_bounds__(kMmaLaneSplitK4Threads)
+void amplin_mma_lane_m16_n64_splitk4_pipe2_interleaved_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  extern __shared__ float partials[];
+  amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body<Scalar, kMmaLaneSplitK4Warps>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      num_groups,
+      partials,
+      kMmaLaneM16BlockM);
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__(kMmaLaneSplitK8Threads)
+void amplin_mma_lane_m16_n64_splitk8_pipe2_interleaved_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  extern __shared__ float partials[];
+  amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body<Scalar, kMmaLaneSplitK8Warps>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      num_groups,
+      partials,
+      kMmaLaneM16BlockM);
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__(kMmaLaneSplitK12Threads)
+void amplin_mma_lane_m16_n64_splitk12_pipe2_interleaved_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  extern __shared__ float partials[];
+  amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body<Scalar, kMmaLaneSplitK12Warps>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      num_groups,
+      partials,
+      kMmaLaneM16BlockM);
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__(kMmaLaneSplitK16Threads)
+void amplin_mma_lane_m16_n64_splitk16_pipe2_interleaved_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  extern __shared__ float partials[];
+  amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body<Scalar, kMmaLaneSplitK16Warps>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      num_groups,
+      partials,
+      kMmaLaneM16BlockM);
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__(kMmaLaneSplitK20Threads)
+void amplin_mma_lane_m16_n64_splitk20_pipe2_interleaved_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_lane_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  extern __shared__ float partials[];
+  amplin_mma_lane_mN_n64_splitkX_pipe2_interleaved_body<Scalar, kMmaLaneSplitK20Warps>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      num_groups,
+      partials,
+      kMmaLaneM16BlockM);
+}
+
+template <typename Scalar>
 __global__ __launch_bounds__(kMmaLaneSplitK16Threads) void amplin_mma_lane_m16_n32_splitk16_pipe2_kernel(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ packed_lane_qweight,
@@ -3340,6 +3764,13 @@ __device__ __forceinline__ void cp_async_commit_group() {
 __device__ __forceinline__ void cp_async_wait_all() {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.wait_group 0;\n" : : : "memory");
+#endif
+}
+
+template <int n>
+__device__ __forceinline__ void cp_async_wait_group() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  asm volatile("cp.async.wait_group %0;\n" : : "n"(n) : "memory");
 #endif
 }
 
@@ -3934,6 +4365,209 @@ __global__ __launch_bounds__(kHmmaReuseThreads) void amplin_gptq_w4_group128_gem
         static_cast<int64_t>(global_m + warp_m + 16 + row) * size_n +
         global_n +
         column] = ScalarTraits<Scalar>::from_float(warp_c[index]);
+  }
+}
+
+template <typename Scalar>
+__global__ __launch_bounds__(128) void amplin_gptq_w4_group128_gemm_hmma_m32_n128_pipeline4_kernel(
+    const Scalar* __restrict__ input,
+    const int32_t* __restrict__ packed_qweight,
+    const Scalar* __restrict__ packed_scales,
+    Scalar* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int num_groups) {
+  constexpr int kBlockM = 32;
+  constexpr int kBlockN = 64;
+  constexpr int kStageK = 32;
+  constexpr int kPipelineStages = 4;
+  constexpr int kWarps = 4;
+  constexpr int kThreads = kWarps * 32;
+  constexpr int kPackedWordsPerStage = kStageK / kPackFactor;
+  constexpr int kKGroupsPerGroup = kGroupSize / kStageK;
+  static_assert(kGroupSize == 128, "Marlin-style kernel assumes group_size 128");
+  static_assert(kStageK == 32, "kStageK must be 32");
+  static_assert(kPackedWordsPerStage * kKGroupsPerGroup == kPackedRowsPerGroup, "stage packing mismatch");
+
+  __shared__ __align__(32) Scalar shared_a[kPipelineStages][kBlockM * kStageK];
+  __shared__ __align__(32) Scalar shared_b[kPipelineStages][kBlockN * kStageK];
+  __shared__ __align__(32) float shared_c[kWarps * kHmmaFragmentElements];
+
+  const int thread = threadIdx.x;
+  const int lane = thread & 31;
+  const int warp = thread >> 5;
+  const int tile_m = static_cast<int>(blockIdx.y);
+  const int base_n_tile = static_cast<int>(blockIdx.x);
+  const int global_m = tile_m * kBlockM;
+
+  const int warp_n = warp;
+
+  nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> accumulators[2] = {};
+
+  auto load_stage = [&](int stage, int buffer) {
+    const int group = stage / kKGroupsPerGroup;
+    const int sub_stage = stage % kKGroupsPerGroup;
+    const int stage_k_offset = sub_stage * kStageK;
+
+    // Load A for [global_m, global_m + kBlockM) x [group*128 + stage_k_offset, +kStageK)
+    for (
+        int copy_index = thread;
+        copy_index < (kBlockM * kStageK) / kScalarsPerCpAsync;
+        copy_index += kThreads) {
+      const int row = copy_index / (kStageK / kScalarsPerCpAsync);
+      const int row_copy = copy_index - row * (kStageK / kScalarsPerCpAsync);
+      const int group_k = row_copy * kScalarsPerCpAsync;
+      const int source_row = global_m + row;
+      if (source_row < size_m) {
+        cp_async_16(
+            &shared_a[buffer][row * kStageK + group_k],
+            input +
+                static_cast<int64_t>(source_row) * size_k +
+                group * kGroupSize +
+                stage_k_offset +
+                group_k);
+      } else {
+        *reinterpret_cast<uint4*>(&shared_a[buffer][row * kStageK + group_k]) =
+            make_uint4(0u, 0u, 0u, 0u);
+      }
+    }
+
+    // Load and dequantize B for one N64 tile (kBlockN = 64 columns).
+    // One column per active thread; load a uint4 with the four packed words for this stage.
+    constexpr int kColumnsPerStage = kHmmaBlockN;
+    for (
+        int column_index = thread;
+        column_index < kColumnsPerStage;
+        column_index += kThreads) {
+      const int column = column_index;
+      const int tile_n = base_n_tile;
+      const int64_t tile_offset =
+          (static_cast<int64_t>(tile_n) * num_groups + group) *
+          kHmmaBlockN *
+          kPackedRowsPerGroup;
+      const float scale = ScalarTraits<Scalar>::to_float(
+          packed_scales[
+              (static_cast<int64_t>(tile_n) * num_groups + group) * kHmmaBlockN +
+              column]);
+      const uint4 words = *reinterpret_cast<const uint4*>(
+          packed_qweight +
+          tile_offset +
+          column * kPackedRowsPerGroup +
+          sub_stage * kPackedWordsPerStage);
+      Scalar* const shared_b_base =
+          &shared_b[buffer][column * kStageK];
+      store_dequantized_word_128(
+          shared_b_base + 0 * kPackFactor,
+          static_cast<uint32_t>(words.x),
+          scale);
+      store_dequantized_word_128(
+          shared_b_base + 1 * kPackFactor,
+          static_cast<uint32_t>(words.y),
+          scale);
+      store_dequantized_word_128(
+          shared_b_base + 2 * kPackFactor,
+          static_cast<uint32_t>(words.z),
+          scale);
+      store_dequantized_word_128(
+          shared_b_base + 3 * kPackFactor,
+          static_cast<uint32_t>(words.w),
+          scale);
+    }
+    cp_async_commit_group();
+  };
+
+  const int total_stages = num_groups * kKGroupsPerGroup;
+
+  // Pipeline prologue: load the first stages.
+  const int prologue_stages = min(kPipelineStages, total_stages);
+  for (int stage = 0; stage < prologue_stages; ++stage) {
+    load_stage(stage, stage);
+  }
+
+  // Main pipeline: compute stage s while loading stage s + kPipelineStages.
+  for (int stage = 0; stage < total_stages; ++stage) {
+    const int buffer = stage % kPipelineStages;
+    cp_async_wait_group<kPipelineStages - 1>();
+    __syncthreads();
+
+#pragma unroll
+    for (int group_k = 0; group_k < kStageK; group_k += 16) {
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_a,
+          16,
+          16,
+          16,
+          Scalar,
+          nvcuda::wmma::row_major>
+          a_fragment_0;
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_a,
+          16,
+          16,
+          16,
+          Scalar,
+          nvcuda::wmma::row_major>
+          a_fragment_1;
+      nvcuda::wmma::load_matrix_sync(
+          a_fragment_0,
+          shared_a[buffer] + 0 * kStageK + group_k,
+          kStageK);
+      nvcuda::wmma::load_matrix_sync(
+          a_fragment_1,
+          shared_a[buffer] + 16 * kStageK + group_k,
+          kStageK);
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_b,
+          16,
+          16,
+          16,
+          Scalar,
+          nvcuda::wmma::col_major>
+          b_fragment;
+      nvcuda::wmma::load_matrix_sync(
+          b_fragment,
+          shared_b[buffer] + warp_n * 16 * kStageK + group_k,
+          kStageK);
+      nvcuda::wmma::mma_sync(
+          accumulators[0],
+          a_fragment_0,
+          b_fragment,
+          accumulators[0]);
+      nvcuda::wmma::mma_sync(
+          accumulators[1],
+          a_fragment_1,
+          b_fragment,
+          accumulators[1]);
+    }
+
+    if (stage + kPipelineStages < total_stages) {
+      load_stage(stage + kPipelineStages, (stage + kPipelineStages) % kPipelineStages);
+    }
+  }
+
+  // Store accumulators to a small shared buffer and then global output.
+  float* const warp_c = shared_c + warp * kHmmaFragmentElements;
+  const int out_col_base = base_n_tile * kHmmaBlockN + warp_n * 16;
+  for (int m = 0; m < 2; ++m) {
+    const int warp_m = m * 16;
+    if (global_m + warp_m + 15 < size_m && out_col_base + 15 < size_n) {
+      nvcuda::wmma::store_matrix_sync(
+          warp_c,
+          accumulators[m],
+          16,
+          nvcuda::wmma::mem_row_major);
+      __syncwarp();
+      for (int index = lane; index < kHmmaFragmentElements; index += 32) {
+        const int row = index / 16;
+        const int column = index - row * 16;
+        const int out_row = global_m + warp_m + row;
+        output[
+            static_cast<int64_t>(out_row) * size_n + out_col_base + column] =
+            ScalarTraits<Scalar>::from_float(warp_c[index]);
+      }
+      __syncwarp();
+    }
   }
 }
 
@@ -4636,6 +5270,124 @@ torch::Tensor amplin_gptq_w4_group128_gemm_hmma_m64_v3_cuda(
       packed_scales,
       logical_n,
       HmmaLaunchMode::kM64V3);
+}
+
+torch::Tensor amplin_gptq_w4_group128_gemm_hmma_m32_n128_pipeline4_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  TORCH_CHECK(input.is_cuda(), "Amplin HMMA M32 N128 pipeline4 input must be CUDA");
+  TORCH_CHECK(
+      packed_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin HMMA M32 N128 pipeline4 weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin HMMA M32 N128 pipeline4 tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin HMMA M32 N128 pipeline4 input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_qweight.scalar_type() == at::kInt,
+      "Amplin HMMA M32 N128 pipeline4 qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin HMMA M32 N128 pipeline4 scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_qweight.dim() == 4 &&
+          packed_scales.dim() == 3,
+      "Amplin HMMA M32 N128 pipeline4 input must have at least two dimensions and packed weights must be 4D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin HMMA M32 N128 pipeline4 tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_qweight.size(0);
+  const int64_t num_groups = packed_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_qweight.size(2) == kHmmaBlockN &&
+          packed_qweight.size(3) == kPackedRowsPerGroup,
+      "Amplin HMMA M32 N128 pipeline4 qweight must have shape [N/64, K/128, 64, 16]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin HMMA M32 N128 pipeline4 scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kGroupSize,
+      "Amplin HMMA M32 N128 pipeline4 requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 17 && size_m <= 32,
+      "Amplin HMMA M32 N128 pipeline4 flattened M must be between 17 and 32");
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % 64 == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin HMMA M32 N64 pipeline4 logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin HMMA M32 N128 pipeline4 tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin HMMA M32 N128 pipeline4 requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+
+  const int64_t grid_n = logical_n / 64;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin HMMA M32 N128 pipeline4 grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  dim3 grid(static_cast<unsigned int>(grid_n), 1);
+  if (input.scalar_type() == at::kHalf) {
+    amplin_gptq_w4_group128_gemm_hmma_m32_n128_pipeline4_kernel<half>
+        <<<grid,
+           128,
+           0,
+           stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    amplin_gptq_w4_group128_gemm_hmma_m32_n128_pipeline4_kernel<__nv_bfloat16>
+        <<<grid,
+           128,
+           0,
+           stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
 }
 
 template <bool GlobalA>
@@ -5426,6 +6178,71 @@ void configure_amplin_mma_lane_m16_n64_splitk24_dynamic_shared(int device_index)
       kMmaLaneSplitKN64SharedBytes));
   configured_device = device_index;
 }
+template <typename Scalar>
+void configure_amplin_mma_lane_m16_n64_splitk4_dynamic_shared(int device_index) {
+  static thread_local int configured_device = -1;
+  if (configured_device == device_index) {
+    return;
+  }
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      amplin_mma_lane_m16_n64_splitk4_pipe2_interleaved_kernel<Scalar>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      kMmaLaneSplitKN64K4SharedBytes));
+  configured_device = device_index;
+}
+
+template <typename Scalar>
+void configure_amplin_mma_lane_m16_n64_splitk8_dynamic_shared(int device_index) {
+  static thread_local int configured_device = -1;
+  if (configured_device == device_index) {
+    return;
+  }
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      amplin_mma_lane_m16_n64_splitk8_pipe2_interleaved_kernel<Scalar>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      kMmaLaneSplitKN64K8SharedBytes));
+  configured_device = device_index;
+}
+
+template <typename Scalar>
+void configure_amplin_mma_lane_m16_n64_splitk12_dynamic_shared(int device_index) {
+  static thread_local int configured_device = -1;
+  if (configured_device == device_index) {
+    return;
+  }
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      amplin_mma_lane_m16_n64_splitk12_pipe2_interleaved_kernel<Scalar>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      kMmaLaneSplitKN64K12SharedBytes));
+  configured_device = device_index;
+}
+
+template <typename Scalar>
+void configure_amplin_mma_lane_m16_n64_splitk16_dynamic_shared(int device_index) {
+  static thread_local int configured_device = -1;
+  if (configured_device == device_index) {
+    return;
+  }
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      amplin_mma_lane_m16_n64_splitk16_pipe2_interleaved_kernel<Scalar>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      kMmaLaneSplitKN64K16SharedBytes));
+  configured_device = device_index;
+}
+
+template <typename Scalar>
+void configure_amplin_mma_lane_m16_n64_splitk20_dynamic_shared(int device_index) {
+  static thread_local int configured_device = -1;
+  if (configured_device == device_index) {
+    return;
+  }
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      amplin_mma_lane_m16_n64_splitk20_pipe2_interleaved_kernel<Scalar>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      kMmaLaneSplitKN64K20SharedBytes));
+  configured_device = device_index;
+}
+
 
 torch::Tensor amplin_mma_lane_m16_n64_splitk24_pipe2_interleaved_cuda(
     torch::Tensor input,
@@ -5552,6 +6369,636 @@ torch::Tensor amplin_mma_lane_m16_n64_splitk24_pipe2_interleaved_cuda(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }
+torch::Tensor amplin_mma_lane_m16_n64_splitk4_pipe2_interleaved_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  TORCH_CHECK(input.is_cuda(), "Amplin N64 split-K4 input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin N64 split-K4 weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin N64 split-K4 tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin N64 split-K4 input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_lane_qweight.scalar_type() == at::kInt,
+      "Amplin N64 split-K4 qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin N64 split-K4 scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin N64 split-K4 input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin N64 split-K4 tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin N64 split-K4 qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin N64 split-K4 scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin N64 split-K4 requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 1 && size_m <= 16,
+      "Amplin N64 split-K4 flattened M must be between 1 and 16");
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % kHmmaBlockN == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin N64 split-K4 logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin N64 split-K4 tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin N64 split-K4 requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+  TORCH_CHECK(
+      properties->sharedMemPerBlockOptin >= kMmaLaneSplitKN64K4SharedBytes,
+      "Amplin N64 split-K4 requires at least ",
+      kMmaLaneSplitKN64K4SharedBytes,
+      " bytes of opt-in shared memory per block");
+  const int64_t grid_n = logical_n / kHmmaBlockN;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin N64 split-K4 grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if (input.scalar_type() == at::kHalf) {
+    configure_amplin_mma_lane_m16_n64_splitk4_dynamic_shared<half>(
+        input.get_device());
+    amplin_mma_lane_m16_n64_splitk4_pipe2_interleaved_kernel<half>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK4Threads,
+           kMmaLaneSplitKN64K4SharedBytes,
+           stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    configure_amplin_mma_lane_m16_n64_splitk4_dynamic_shared<__nv_bfloat16>(
+        input.get_device());
+    amplin_mma_lane_m16_n64_splitk4_pipe2_interleaved_kernel<__nv_bfloat16>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK4Threads,
+           kMmaLaneSplitKN64K4SharedBytes,
+           stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+torch::Tensor amplin_mma_lane_m16_n64_splitk8_pipe2_interleaved_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  TORCH_CHECK(input.is_cuda(), "Amplin N64 split-K8 input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin N64 split-K8 weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin N64 split-K8 tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin N64 split-K8 input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_lane_qweight.scalar_type() == at::kInt,
+      "Amplin N64 split-K8 qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin N64 split-K8 scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin N64 split-K8 input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin N64 split-K8 tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin N64 split-K8 qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin N64 split-K8 scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin N64 split-K8 requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 1 && size_m <= 16,
+      "Amplin N64 split-K8 flattened M must be between 1 and 16");
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % kHmmaBlockN == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin N64 split-K8 logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin N64 split-K8 tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin N64 split-K8 requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+  TORCH_CHECK(
+      properties->sharedMemPerBlockOptin >= kMmaLaneSplitKN64K8SharedBytes,
+      "Amplin N64 split-K8 requires at least ",
+      kMmaLaneSplitKN64K8SharedBytes,
+      " bytes of opt-in shared memory per block");
+  const int64_t grid_n = logical_n / kHmmaBlockN;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin N64 split-K8 grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if (input.scalar_type() == at::kHalf) {
+    configure_amplin_mma_lane_m16_n64_splitk8_dynamic_shared<half>(
+        input.get_device());
+    amplin_mma_lane_m16_n64_splitk8_pipe2_interleaved_kernel<half>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK8Threads,
+           kMmaLaneSplitKN64K8SharedBytes,
+           stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    configure_amplin_mma_lane_m16_n64_splitk8_dynamic_shared<__nv_bfloat16>(
+        input.get_device());
+    amplin_mma_lane_m16_n64_splitk8_pipe2_interleaved_kernel<__nv_bfloat16>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK8Threads,
+           kMmaLaneSplitKN64K8SharedBytes,
+           stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+torch::Tensor amplin_mma_lane_m16_n64_splitk12_pipe2_interleaved_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  TORCH_CHECK(input.is_cuda(), "Amplin N64 split-K12 input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin N64 split-K12 weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin N64 split-K12 tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin N64 split-K12 input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_lane_qweight.scalar_type() == at::kInt,
+      "Amplin N64 split-K12 qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin N64 split-K12 scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin N64 split-K12 input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin N64 split-K12 tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin N64 split-K12 qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin N64 split-K12 scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin N64 split-K12 requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 1 && size_m <= 16,
+      "Amplin N64 split-K12 flattened M must be between 1 and 16");
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % kHmmaBlockN == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin N64 split-K12 logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin N64 split-K12 tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin N64 split-K12 requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+  TORCH_CHECK(
+      properties->sharedMemPerBlockOptin >= kMmaLaneSplitKN64K12SharedBytes,
+      "Amplin N64 split-K12 requires at least ",
+      kMmaLaneSplitKN64K12SharedBytes,
+      " bytes of opt-in shared memory per block");
+  const int64_t grid_n = logical_n / kHmmaBlockN;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin N64 split-K12 grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if (input.scalar_type() == at::kHalf) {
+    configure_amplin_mma_lane_m16_n64_splitk12_dynamic_shared<half>(
+        input.get_device());
+    amplin_mma_lane_m16_n64_splitk12_pipe2_interleaved_kernel<half>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK12Threads,
+           kMmaLaneSplitKN64K12SharedBytes,
+           stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    configure_amplin_mma_lane_m16_n64_splitk12_dynamic_shared<__nv_bfloat16>(
+        input.get_device());
+    amplin_mma_lane_m16_n64_splitk12_pipe2_interleaved_kernel<__nv_bfloat16>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK12Threads,
+           kMmaLaneSplitKN64K12SharedBytes,
+           stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+torch::Tensor amplin_mma_lane_m16_n64_splitk16_pipe2_interleaved_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  TORCH_CHECK(input.is_cuda(), "Amplin N64 split-K16 input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin N64 split-K16 weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin N64 split-K16 tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin N64 split-K16 input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_lane_qweight.scalar_type() == at::kInt,
+      "Amplin N64 split-K16 qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin N64 split-K16 scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin N64 split-K16 input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin N64 split-K16 tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin N64 split-K16 qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin N64 split-K16 scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin N64 split-K16 requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 1 && size_m <= 16,
+      "Amplin N64 split-K16 flattened M must be between 1 and 16");
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % kHmmaBlockN == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin N64 split-K16 logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin N64 split-K16 tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin N64 split-K16 requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+  TORCH_CHECK(
+      properties->sharedMemPerBlockOptin >= kMmaLaneSplitKN64K16SharedBytes,
+      "Amplin N64 split-K16 requires at least ",
+      kMmaLaneSplitKN64K16SharedBytes,
+      " bytes of opt-in shared memory per block");
+  const int64_t grid_n = logical_n / kHmmaBlockN;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin N64 split-K16 grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if (input.scalar_type() == at::kHalf) {
+    configure_amplin_mma_lane_m16_n64_splitk16_dynamic_shared<half>(
+        input.get_device());
+    amplin_mma_lane_m16_n64_splitk16_pipe2_interleaved_kernel<half>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK16Threads,
+           kMmaLaneSplitKN64K16SharedBytes,
+           stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    configure_amplin_mma_lane_m16_n64_splitk16_dynamic_shared<__nv_bfloat16>(
+        input.get_device());
+    amplin_mma_lane_m16_n64_splitk16_pipe2_interleaved_kernel<__nv_bfloat16>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK16Threads,
+           kMmaLaneSplitKN64K16SharedBytes,
+           stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+torch::Tensor amplin_mma_lane_m16_n64_splitk20_pipe2_interleaved_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  TORCH_CHECK(input.is_cuda(), "Amplin N64 split-K20 input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin N64 split-K20 weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin N64 split-K20 tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin N64 split-K20 input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_lane_qweight.scalar_type() == at::kInt,
+      "Amplin N64 split-K20 qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin N64 split-K20 scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin N64 split-K20 input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin N64 split-K20 tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin N64 split-K20 qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin N64 split-K20 scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin N64 split-K20 requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 1 && size_m <= 16,
+      "Amplin N64 split-K20 flattened M must be between 1 and 16");
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % kHmmaBlockN == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin N64 split-K20 logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin N64 split-K20 tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin N64 split-K20 requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+  TORCH_CHECK(
+      properties->sharedMemPerBlockOptin >= kMmaLaneSplitKN64K20SharedBytes,
+      "Amplin N64 split-K20 requires at least ",
+      kMmaLaneSplitKN64K20SharedBytes,
+      " bytes of opt-in shared memory per block");
+  const int64_t grid_n = logical_n / kHmmaBlockN;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin N64 split-K20 grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if (input.scalar_type() == at::kHalf) {
+    configure_amplin_mma_lane_m16_n64_splitk20_dynamic_shared<half>(
+        input.get_device());
+    amplin_mma_lane_m16_n64_splitk20_pipe2_interleaved_kernel<half>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK20Threads,
+           kMmaLaneSplitKN64K20SharedBytes,
+           stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    configure_amplin_mma_lane_m16_n64_splitk20_dynamic_shared<__nv_bfloat16>(
+        input.get_device());
+    amplin_mma_lane_m16_n64_splitk20_pipe2_interleaved_kernel<__nv_bfloat16>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK20Threads,
+           kMmaLaneSplitKN64K20SharedBytes,
+           stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
 
 template <typename Scalar>
 void configure_amplin_mma_lane_m32_n64_splitk24_dynamic_shared(
@@ -5679,6 +7126,426 @@ torch::Tensor amplin_mma_lane_m32_n64_splitk24_pipe2_interleaved_cuda(
         <<<static_cast<unsigned int>(grid_n),
            kMmaLaneSplitK24Threads,
            kMmaLaneSplitKN64SharedBytes,
+           stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+template <typename Scalar>
+void configure_amplin_mma_lane_m32_n64_splitk12_dynamic_shared(
+    int device_index) {
+  static thread_local int configured_device = -1;
+  if (configured_device == device_index) {
+    return;
+  }
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      amplin_mma_lane_m32_n64_splitk12_pipe2_interleaved_kernel<Scalar>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      kMmaLaneSplitKN64K12SharedBytes));
+  configured_device = device_index;
+}
+
+template <typename Scalar>
+void configure_amplin_mma_lane_m32_n64_splitk16_dynamic_shared(
+    int device_index) {
+  static thread_local int configured_device = -1;
+  if (configured_device == device_index) {
+    return;
+  }
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      amplin_mma_lane_m32_n64_splitk16_pipe2_interleaved_kernel<Scalar>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      kMmaLaneSplitKN64K16SharedBytes));
+  configured_device = device_index;
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_splitk12_pipe2_interleaved_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  TORCH_CHECK(input.is_cuda(), "Amplin M32 N64 split-K12 input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin M32 N64 split-K12 weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin M32 N64 split-K12 tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin M32 N64 split-K12 input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_lane_qweight.scalar_type() == at::kInt,
+      "Amplin M32 N64 split-K12 qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin M32 N64 split-K12 scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin M32 N64 split-K12 input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin M32 N64 split-K12 tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin M32 N64 split-K12 qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin M32 N64 split-K12 scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin M32 N64 split-K12 requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 17 && size_m <= 32,
+      "Amplin M32 N64 split-K12 flattened M must be between 17 and 32");
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % kHmmaBlockN == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin M32 N64 split-K12 logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin M32 N64 split-K12 tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin M32 N64 split-K12 requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+  TORCH_CHECK(
+      properties->sharedMemPerBlockOptin >= kMmaLaneSplitKN64K12SharedBytes,
+      "Amplin M32 N64 split-K12 requires at least ",
+      kMmaLaneSplitKN64K12SharedBytes,
+      " bytes of opt-in shared memory per block");
+  const int64_t grid_n = logical_n / kHmmaBlockN;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin M32 N64 split-K12 grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if (input.scalar_type() == at::kHalf) {
+    configure_amplin_mma_lane_m32_n64_splitk12_dynamic_shared<half>(
+        input.get_device());
+    amplin_mma_lane_m32_n64_splitk12_pipe2_interleaved_kernel<half>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK12Threads,
+           kMmaLaneSplitKN64K12SharedBytes,
+           stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    configure_amplin_mma_lane_m32_n64_splitk12_dynamic_shared<__nv_bfloat16>(
+        input.get_device());
+    amplin_mma_lane_m32_n64_splitk12_pipe2_interleaved_kernel<__nv_bfloat16>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK12Threads,
+           kMmaLaneSplitKN64K12SharedBytes,
+           stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_splitk16_pipe2_interleaved_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  TORCH_CHECK(input.is_cuda(), "Amplin M32 N64 split-K16 input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin M32 N64 split-K16 weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin M32 N64 split-K16 tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin M32 N64 split-K16 input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_lane_qweight.scalar_type() == at::kInt,
+      "Amplin M32 N64 split-K16 qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin M32 N64 split-K16 scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin M32 N64 split-K16 input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin M32 N64 split-K16 tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin M32 N64 split-K16 qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin M32 N64 split-K16 scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin M32 N64 split-K16 requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 17 && size_m <= 32,
+      "Amplin M32 N64 split-K16 flattened M must be between 17 and 32");
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % kHmmaBlockN == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin M32 N64 split-K16 logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin M32 N64 split-K16 tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin M32 N64 split-K16 requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+  TORCH_CHECK(
+      properties->sharedMemPerBlockOptin >= kMmaLaneSplitKN64K16SharedBytes,
+      "Amplin M32 N64 split-K16 requires at least ",
+      kMmaLaneSplitKN64K16SharedBytes,
+      " bytes of opt-in shared memory per block");
+  const int64_t grid_n = logical_n / kHmmaBlockN;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin M32 N64 split-K16 grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if (input.scalar_type() == at::kHalf) {
+    configure_amplin_mma_lane_m32_n64_splitk16_dynamic_shared<half>(
+        input.get_device());
+    amplin_mma_lane_m32_n64_splitk16_pipe2_interleaved_kernel<half>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK16Threads,
+           kMmaLaneSplitKN64K16SharedBytes,
+           stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    configure_amplin_mma_lane_m32_n64_splitk16_dynamic_shared<__nv_bfloat16>(
+        input.get_device());
+    amplin_mma_lane_m32_n64_splitk16_pipe2_interleaved_kernel<__nv_bfloat16>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK16Threads,
+           kMmaLaneSplitKN64K16SharedBytes,
+           stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+template <typename Scalar>
+void configure_amplin_mma_lane_m32_n64_splitk20_dynamic_shared(
+    int device_index) {
+  static thread_local int configured_device = -1;
+  if (configured_device == device_index) {
+    return;
+  }
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      amplin_mma_lane_m32_n64_splitk20_pipe2_interleaved_kernel<Scalar>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      kMmaLaneSplitKN64K20SharedBytes));
+  configured_device = device_index;
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_splitk20_pipe2_interleaved_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  TORCH_CHECK(input.is_cuda(), "Amplin M32 N64 split-K20 input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin M32 N64 split-K20 weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin M32 N64 split-K20 tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin M32 N64 split-K20 input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_lane_qweight.scalar_type() == at::kInt,
+      "Amplin M32 N64 split-K20 qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin M32 N64 split-K20 scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin M32 N64 split-K20 input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin M32 N64 split-K20 tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin M32 N64 split-K20 qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin M32 N64 split-K20 scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin M32 N64 split-K20 requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 17 && size_m <= 32,
+      "Amplin M32 N64 split-K20 flattened M must be between 17 and 32");
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % kHmmaBlockN == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin M32 N64 split-K20 logical N must be positive, divisible by 64, and fit the packed layout");
+  TORCH_CHECK(
+      size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin M32 N64 split-K20 tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin M32 N64 split-K20 requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+  TORCH_CHECK(
+      properties->sharedMemPerBlockOptin >= kMmaLaneSplitKN64K20SharedBytes,
+      "Amplin M32 N64 split-K20 requires at least ",
+      kMmaLaneSplitKN64K20SharedBytes,
+      " bytes of opt-in shared memory per block");
+  const int64_t grid_n = logical_n / kHmmaBlockN;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin M32 N64 split-K20 grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if (input.scalar_type() == at::kHalf) {
+    configure_amplin_mma_lane_m32_n64_splitk20_dynamic_shared<half>(
+        input.get_device());
+    amplin_mma_lane_m32_n64_splitk20_pipe2_interleaved_kernel<half>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK20Threads,
+           kMmaLaneSplitKN64K20SharedBytes,
+           stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    configure_amplin_mma_lane_m32_n64_splitk20_dynamic_shared<__nv_bfloat16>(
+        input.get_device());
+    amplin_mma_lane_m32_n64_splitk20_pipe2_interleaved_kernel<__nv_bfloat16>
+        <<<static_cast<unsigned int>(grid_n),
+           kMmaLaneSplitK20Threads,
+           kMmaLaneSplitKN64K20SharedBytes,
            stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
             packed_lane_qweight.data_ptr<int32_t>(),
@@ -6259,7 +8126,7 @@ torch::Tensor amplin_mma_lane_m32_n64_shared_a_cuda(
       logical_n);
 }
 
-template <int BlockM, int NTiles>
+template <int BlockM, int NTiles, int MinBlocks = 1>
 torch::Tensor amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl(
     torch::Tensor input,
     torch::Tensor packed_lane_qweight,
@@ -6352,7 +8219,7 @@ torch::Tensor amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl(
   constexpr int Threads = (BlockM / kMmaM) * NTiles * kMmaLanes;
 
   if (input.scalar_type() == at::kHalf) {
-    amplin_mma_lane_mN_n64_tiled_fullk_kernel<half, BlockM, NTiles>
+    amplin_mma_lane_mN_n64_tiled_fullk_kernel<half, BlockM, NTiles, MinBlocks>
         <<<grid, Threads, 0, stream>>>(
             reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
             packed_lane_qweight.data_ptr<int32_t>(),
@@ -6363,7 +8230,7 @@ torch::Tensor amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl(
             static_cast<int>(logical_n),
             static_cast<int>(num_groups));
   } else {
-    amplin_mma_lane_mN_n64_tiled_fullk_kernel<__nv_bfloat16, BlockM, NTiles>
+    amplin_mma_lane_mN_n64_tiled_fullk_kernel<__nv_bfloat16, BlockM, NTiles, MinBlocks>
         <<<grid, Threads, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
             packed_lane_qweight.data_ptr<int32_t>(),
@@ -6402,6 +8269,18 @@ torch::Tensor amplin_mma_lane_m16_n64_tile8_shared_a_cuda(
       logical_n);
 }
 
+torch::Tensor amplin_mma_lane_m32_n64_tile2_shared_a_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl<kMmaLaneM32BlockM, 2>(
+      input,
+      packed_lane_qweight,
+      packed_scales,
+      logical_n);
+}
+
 torch::Tensor amplin_mma_lane_m32_n64_tile4_shared_a_cuda(
     torch::Tensor input,
     torch::Tensor packed_lane_qweight,
@@ -6424,6 +8303,210 @@ torch::Tensor amplin_mma_lane_m32_n64_tile8_shared_a_cuda(
       packed_lane_qweight,
       packed_scales,
       logical_n);
+}
+
+template <typename Scalar, int NTiles, int KSplit>
+void configure_amplin_mma_lane_m32_n64_tiled_splitk_dynamic_shared(
+    int device_index,
+    int shared_bytes) {
+  static thread_local int configured_device = -1;
+  if (configured_device == device_index) {
+    return;
+  }
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      amplin_mma_lane_mN_n64_tiled_splitk_kernel<
+          Scalar,
+          kMmaLaneM32BlockM,
+          NTiles,
+          KSplit>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      shared_bytes));
+  configured_device = device_index;
+}
+
+template <int NTiles, int KSplit>
+torch::Tensor amplin_mma_lane_m32_n64_tiled_splitk_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  constexpr int kThreads =
+      (kMmaLaneM32BlockM / kMmaM) * NTiles * KSplit * kMmaLanes;
+  constexpr int kSharedBytes =
+      KSplit * kMmaLaneM32BlockM * kMmaLaneSharedAK * sizeof(half) +
+      (kThreads / kMmaLanes) * kMmaLaneSplitKN64Fragments * kMmaLanes *
+          kMmaLaneAccumulatorValues * sizeof(float);
+
+  TORCH_CHECK(input.is_cuda(), "Amplin M32 N64 tiled splitk input must be CUDA");
+  TORCH_CHECK(
+      packed_lane_qweight.is_cuda() && packed_scales.is_cuda(),
+      "Amplin M32 N64 tiled splitk weight tensors must be CUDA");
+  TORCH_CHECK(
+      input.device() == packed_lane_qweight.device() &&
+          input.device() == packed_scales.device(),
+      "Amplin M32 N64 tiled splitk tensors must be on the same CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
+      "Amplin M32 N64 tiled splitk input must be FP16 or BF16");
+  TORCH_CHECK(
+      packed_lane_qweight.scalar_type() == at::kInt,
+      "Amplin M32 N64 tiled splitk qweight must be int32");
+  TORCH_CHECK(
+      packed_scales.scalar_type() == input.scalar_type(),
+      "Amplin M32 N64 tiled splitk scales dtype must match input dtype");
+  TORCH_CHECK(
+      input.dim() >= 2 &&
+          packed_lane_qweight.dim() == 5 &&
+          packed_scales.dim() == 3,
+      "Amplin M32 N64 tiled splitk input must have at least two dimensions and packed weights must be 5D/3D");
+  TORCH_CHECK(
+      input.is_contiguous() &&
+          packed_lane_qweight.is_contiguous() &&
+          packed_scales.is_contiguous(),
+      "Amplin M32 N64 tiled splitk tensors must be contiguous");
+
+  const int64_t packed_n_tiles = packed_lane_qweight.size(0);
+  const int64_t num_groups = packed_lane_qweight.size(1);
+  TORCH_CHECK(
+      packed_n_tiles > 0 &&
+          num_groups > 0 &&
+          packed_lane_qweight.size(2) == kHmmaBlockK / kMmaK &&
+          packed_lane_qweight.size(3) == kMmaLanes &&
+          packed_lane_qweight.size(4) == kHmmaWarps,
+      "Amplin M32 N64 tiled splitk qweight must have shape [N/64, K/128, 8, 32, 4]");
+  TORCH_CHECK(
+      packed_scales.size(0) == packed_n_tiles &&
+          packed_scales.size(1) == num_groups &&
+          packed_scales.size(2) == kHmmaBlockN,
+      "Amplin M32 N64 tiled splitk scales must have shape [N/64, K/128, 64]");
+
+  const int64_t size_k = input.size(-1);
+  const int64_t size_m = input.numel() / size_k;
+  TORCH_CHECK(
+      size_k == num_groups * kHmmaBlockK,
+      "Amplin M32 N64 tiled splitk requires K to match the packed groups");
+  TORCH_CHECK(
+      size_m >= 17 && size_m <= 32,
+      "Amplin M32 N64 tiled splitk flattened M must be between 17 and 32");
+  TORCH_CHECK(
+      logical_n > 0 &&
+          logical_n % (NTiles * kHmmaBlockN) == 0 &&
+          logical_n <= packed_n_tiles * kHmmaBlockN,
+      "Amplin M32 N64 tiled splitk logical N must be positive, divisible by ",
+      NTiles * kHmmaBlockN,
+      ", and fit the packed layout");
+  TORCH_CHECK(
+      num_groups % KSplit == 0,
+      "Amplin M32 N64 tiled splitk requires num_groups divisible by ", KSplit);
+  TORCH_CHECK(
+      size_k <= std::numeric_limits<int>::max() &&
+          logical_n <= std::numeric_limits<int>::max() &&
+          num_groups <= std::numeric_limits<int>::max(),
+      "Amplin M32 N64 tiled splitk tensor dimensions exceed int32 kernel indexing limits");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+  TORCH_CHECK(
+      properties->major == 8 && properties->minor == 0,
+      "Amplin M32 N64 tiled splitk requires CUDA compute capability 8.0, got ",
+      properties->major,
+      ".",
+      properties->minor);
+  TORCH_CHECK(
+      properties->sharedMemPerBlockOptin >= kSharedBytes,
+      "Amplin M32 N64 tiled splitk requires at least ",
+      kSharedBytes,
+      " bytes of opt-in shared memory per block");
+
+  const int64_t n_tiles_per_block = NTiles * kHmmaBlockN;
+  const int64_t grid_n = logical_n / n_tiles_per_block;
+  TORCH_CHECK(
+      grid_n <= properties->maxGridSize[0],
+      "Amplin M32 N64 tiled splitk grid exceeds the selected CUDA device limit");
+
+  std::vector<int64_t> output_sizes = input.sizes().vec();
+  output_sizes.back() = logical_n;
+  auto output = torch::empty(output_sizes, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if (input.scalar_type() == at::kHalf) {
+    configure_amplin_mma_lane_m32_n64_tiled_splitk_dynamic_shared<half, NTiles, KSplit>(
+        input.get_device(), kSharedBytes);
+    amplin_mma_lane_mN_n64_tiled_splitk_kernel<
+        half,
+        kMmaLaneM32BlockM,
+        NTiles,
+        KSplit>
+        <<<static_cast<unsigned int>(grid_n),
+           kThreads,
+           kSharedBytes,
+           stream>>>(
+            reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const half*>(packed_scales.data_ptr<at::Half>()),
+            reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  } else {
+    configure_amplin_mma_lane_m32_n64_tiled_splitk_dynamic_shared<__nv_bfloat16, NTiles, KSplit>(
+        input.get_device(), kSharedBytes);
+    amplin_mma_lane_mN_n64_tiled_splitk_kernel<
+        __nv_bfloat16,
+        kMmaLaneM32BlockM,
+        NTiles,
+        KSplit>
+        <<<static_cast<unsigned int>(grid_n),
+           kThreads,
+           kSharedBytes,
+           stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>()),
+            packed_lane_qweight.data_ptr<int32_t>(),
+            reinterpret_cast<const __nv_bfloat16*>(packed_scales.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+            static_cast<int>(size_m),
+            static_cast<int>(size_k),
+            static_cast<int>(logical_n),
+            static_cast<int>(num_groups));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_tile2_splitk2_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_m32_n64_tiled_splitk_cuda<2, 2>(
+      input, packed_lane_qweight, packed_scales, logical_n);
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_tile1_splitk4_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_m32_n64_tiled_splitk_cuda<1, 4>(
+      input, packed_lane_qweight, packed_scales, logical_n);
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_tile1_splitk8_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_m32_n64_tiled_splitk_cuda<1, 8>(
+      input, packed_lane_qweight, packed_scales, logical_n);
+}
+
+torch::Tensor amplin_mma_lane_m32_n64_tile2_splitk4_cuda(
+    torch::Tensor input,
+    torch::Tensor packed_lane_qweight,
+    torch::Tensor packed_scales,
+    int64_t logical_n) {
+  return amplin_mma_lane_m32_n64_tiled_splitk_cuda<2, 4>(
+      input, packed_lane_qweight, packed_scales, logical_n);
 }
 
 torch::Tensor amplin_mma_lane_m16_n16_padded_cuda(

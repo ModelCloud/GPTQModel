@@ -1343,25 +1343,31 @@ def test_amplin_mma_lane_m32_n64_splitk24_matches_fp32_reference(
 
     packed_n64_qweight = amplin.pack_mma_lane_n64_qweight(qweight)
     _, packed_scales = amplin.pack_hmma_weights(qweight, scales)
-    actual = amplin.mma_lane_m32_n64_splitk24_pipe2_interleaved(
-        input,
-        packed_n64_qweight,
-        packed_scales,
-        logical_n=SIZE_N,
-    )
-    torch.cuda.synchronize(sm80_device)
+    for op in (
+        amplin.mma_lane_m32_n64_splitk24_pipe2_interleaved,
+        amplin.mma_lane_m32_n64_splitk20_pipe2_interleaved,
+        amplin.mma_lane_m32_n64_splitk16_pipe2_interleaved,
+        amplin.mma_lane_m32_n64_splitk12_pipe2_interleaved,
+    ):
+        actual = op(
+            input,
+            packed_n64_qweight,
+            packed_scales,
+            logical_n=SIZE_N,
+        )
+        torch.cuda.synchronize(sm80_device)
 
-    assert actual.shape == (32, SIZE_N)
-    assert actual.dtype == dtype
-    assert actual.device == sm80_device
-    assert torch.isfinite(actual).all()
-    atol = 2e-3 if dtype == torch.float16 else 2e-2
-    torch.testing.assert_close(
-        actual.to(torch.float32),
-        expected,
-        rtol=0,
-        atol=atol,
-    )
+        assert actual.shape == (32, SIZE_N)
+        assert actual.dtype == dtype
+        assert actual.device == sm80_device
+        assert torch.isfinite(actual).all()
+        atol = 2e-3 if dtype == torch.float16 else 2e-2
+        torch.testing.assert_close(
+            actual.to(torch.float32),
+            expected,
+            rtol=0,
+            atol=atol,
+        )
 
 
 @pytest.mark.cuda
@@ -1395,6 +1401,11 @@ def test_amplin_mma_lane_m32_n64_tile4_matches_fp32_reference(
     _, packed_scales = amplin.pack_hmma_weights(qweight, scales)
 
     for name, op in (
+        ("tile2", amplin.mma_lane_m32_n64_tile2_shared_a),
+        ("tile2_splitk2", amplin.mma_lane_m32_n64_tile2_splitk2),
+        ("tile2_splitk4", amplin.mma_lane_m32_n64_tile2_splitk4),
+        ("tile1_splitk4", amplin.mma_lane_m32_n64_tile1_splitk4),
+        ("tile1_splitk8", amplin.mma_lane_m32_n64_tile1_splitk8),
         ("tile4", amplin.mma_lane_m32_n64_tile4_shared_a),
         ("tile8", amplin.mma_lane_m32_n64_tile8_shared_a),
     ):
@@ -1498,3 +1509,50 @@ def test_amplin_gemv_rejects_inputs_outside_contract(
 
     with pytest.raises(RuntimeError, match="weight tensors must be CUDA"):
         amplin.gemv(input, qweight.cpu(), scales)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("size_m", (1, 16, 32))
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_amplin_dynamic_routes_and_matches_fp32_reference(
+    packed_case: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+    size_m: int,
+    dtype: torch.dtype,
+):
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA BF16 support required")
+
+    amplin.clear_dynamic_routing_table()
+    qweight = packed_case["qweight"].to(sm80_device).contiguous()
+    scales = packed_case["scales"].to(sm80_device, dtype=dtype).contiguous()
+    codes = packed_case["codes"].to(sm80_device)
+    group_indices = torch.arange(SIZE_K, device=sm80_device, dtype=torch.int64) // GROUP_SIZE
+    dense_weight = (codes.to(torch.float32) - ZERO) * scales.to(torch.float32)[group_indices]
+
+    generator = torch.Generator(device=sm80_device)
+    generator.manual_seed(20260724 + size_m)
+    input = (
+        torch.randn((size_m, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator)
+        .mul_(0.25)
+        .to(dtype)
+    )
+    expected = input.to(torch.float32) @ dense_weight
+
+    actual = amplin.dynamic(input, qweight, scales, warmup=1, iters=3)
+    torch.cuda.synchronize(sm80_device)
+
+    assert actual.shape == (size_m, SIZE_N)
+    assert actual.dtype == dtype
+    assert actual.device == sm80_device
+    assert torch.isfinite(actual).all()
+
+    key = (size_m, SIZE_K, SIZE_N, "fp16" if dtype == torch.float16 else "bf16")
+    assert key in amplin.get_dynamic_routing_table()
+
+    atol = 2e-3 if dtype == torch.float16 else 2e-2
+    torch.testing.assert_close(actual.to(torch.float32), expected, rtol=0, atol=atol)
+
+    # Cached path should reuse the same kernel and produce identical output.
+    cached = amplin.dynamic(input, qweight, scales)
+    torch.testing.assert_close(cached, actual, rtol=0, atol=0)

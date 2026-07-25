@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+import ast
+import json
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -76,6 +81,7 @@ _AMPLIN_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "gemm_hmma_m64_v2",
         "gemm_hmma_m64_v2_sync_a128",
         "gemm_hmma_m64_v3",
+        "gemm_hmma_m32_n128_pipeline4",
         "mma_lane_m64",
         "mma_lane_m64_global_a",
         "mma_lane_m32_global_a",
@@ -85,6 +91,10 @@ _AMPLIN_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "mma_lane_m16_n64_tile8_shared_a",
         "mma_lane_m32_n64_tile4_shared_a",
         "mma_lane_m32_n64_tile8_shared_a",
+        "mma_lane_m32_n64_tile2_splitk2",
+        "mma_lane_m32_n64_tile1_splitk4",
+        "mma_lane_m32_n64_tile1_splitk8",
+        "mma_lane_m32_n64_tile2_splitk4",
         "mma_lane_m32_n64_shared_a",
         "mma_lane_m32_n64_splitk12x2_coop_interleaved",
         "mma_lane_m16_n16_padded",
@@ -98,7 +108,12 @@ _AMPLIN_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "mma_lane_m16_n32_splitk12_pipe2",
         "mma_lane_m16_n32_splitk12_pipe2_interleaved",
         "mma_lane_m16_n64_splitk24_pipe2_interleaved",
+        "mma_lane_m16_n64_splitk4_pipe2_interleaved",
+        "mma_lane_m16_n64_splitk20_pipe2_interleaved",
         "mma_lane_m32_n64_splitk24_pipe2_interleaved",
+        "mma_lane_m32_n64_splitk12_pipe2_interleaved",
+        "mma_lane_m32_n64_splitk16_pipe2_interleaved",
+        "mma_lane_m32_n64_splitk20_pipe2_interleaved",
         "mma_lane_m16_n64_splitk12x2_coop_interleaved",
         "mma_lane_m16_n32_splitk16_pipe2",
         "mma_lane_m16_n16_splitk16",
@@ -149,6 +164,27 @@ def amplin_runtime_available() -> bool:
     if not amplin_supported():
         return False
     return _extension_api().is_available("amplin")
+
+
+# Cache the runtime-availability check and individual torch.ops handles so the
+# dynamic router does not pay extension-loading overhead on every call.
+_AMPLIN_RUNTIME_AVAILABLE: bool | None = None
+_CANDIDATE_OP_CACHE: dict[str, Callable] = {}
+
+
+def _ensure_amplin_runtime_available() -> bool:
+    global _AMPLIN_RUNTIME_AVAILABLE
+    if _AMPLIN_RUNTIME_AVAILABLE is None:
+        _AMPLIN_RUNTIME_AVAILABLE = amplin_runtime_available()
+    return _AMPLIN_RUNTIME_AVAILABLE
+
+
+def _get_amplin_op(op_name: str) -> Callable:
+    op = _CANDIDATE_OP_CACHE.get(op_name)
+    if op is None:
+        op = _extension_api().op("amplin", op_name)
+        _CANDIDATE_OP_CACHE[op_name] = op
+    return op
 
 
 def pack_hmma_qweight(qweight: torch.Tensor) -> torch.Tensor:
@@ -576,6 +612,23 @@ def gemm_hmma_m64_v3(
     )
 
 
+def gemm_hmma_m32_n128_pipeline4(
+    input: torch.Tensor,
+    packed_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run the Marlin-style 4-warp 4-stage cp.async pipeline for M=32, N multiple of 64."""
+
+    return _extension_api().op("amplin", "gemm_hmma_m32_n128_pipeline4")(
+        input,
+        packed_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
 def mma_lane_tile(
     input: torch.Tensor,
     packed_lane_qweight: torch.Tensor,
@@ -723,6 +776,23 @@ def mma_lane_m16_n64_tile8_shared_a(
     )
 
 
+def mma_lane_m32_n64_tile2_shared_a(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with A resident in shared memory, 2 N64 tiles per block (128 threads)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_tile2_shared_a")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
 def mma_lane_m32_n64_tile4_shared_a(
     input: torch.Tensor,
     packed_lane_qweight: torch.Tensor,
@@ -750,6 +820,74 @@ def mma_lane_m32_n64_tile8_shared_a(
     """Run M32 N64 with A resident in shared memory, 8 N64 tiles per block (512 threads)."""
 
     return _extension_api().op("amplin", "mma_lane_m32_n64_tile8_shared_a")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_tile2_splitk2(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with 2 N64 tiles and K-split=2 in shared memory (256 threads, 49 KiB)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_tile2_splitk2")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_tile1_splitk4(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with 1 N64 tile and K-split=4 in shared memory (256 threads, 66 KiB)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_tile1_splitk4")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_tile1_splitk8(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with 1 N64 tile and K-split=8 in shared memory (512 threads, 132 KiB)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_tile1_splitk8")(
+        input,
+        packed_lane_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_tile2_splitk4(
+    input: torch.Tensor,
+    packed_lane_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with 2 N64 tiles and K-split=4 in shared memory (512 threads, 98 KiB)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_tile2_splitk4")(
         input,
         packed_lane_qweight,
         packed_scales,
@@ -978,6 +1116,91 @@ def mma_lane_m16_n64_splitk24_pipe2_interleaved(
     )
 
 
+def mma_lane_m16_n64_splitk4_pipe2_interleaved(
+    input: torch.Tensor,
+    packed_lane_n64_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run K4/N64 pipe2 with single-CTA split-K for small M and large K/N shapes."""
+
+    return _extension_api().op("amplin", "mma_lane_m16_n64_splitk4_pipe2_interleaved")(
+        input,
+        packed_lane_n64_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m16_n64_splitk8_pipe2_interleaved(
+    input: torch.Tensor,
+    packed_lane_n64_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run K8/N64 pipe2 with single-CTA split-K for small M and large K/N shapes."""
+
+    return _extension_api().op("amplin", "mma_lane_m16_n64_splitk8_pipe2_interleaved")(
+        input,
+        packed_lane_n64_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m16_n64_splitk12_pipe2_interleaved(
+    input: torch.Tensor,
+    packed_lane_n64_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run K12/N64 pipe2 with single-CTA split-K for small M and large K/N shapes."""
+
+    return _extension_api().op("amplin", "mma_lane_m16_n64_splitk12_pipe2_interleaved")(
+        input,
+        packed_lane_n64_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m16_n64_splitk16_pipe2_interleaved(
+    input: torch.Tensor,
+    packed_lane_n64_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run K16/N64 pipe2 with single-CTA split-K for small M and large K/N shapes."""
+
+    return _extension_api().op("amplin", "mma_lane_m16_n64_splitk16_pipe2_interleaved")(
+        input,
+        packed_lane_n64_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m16_n64_splitk20_pipe2_interleaved(
+    input: torch.Tensor,
+    packed_lane_n64_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run K20/N64 pipe2 with single-CTA split-K for small M and large K/N shapes."""
+
+    return _extension_api().op("amplin", "mma_lane_m16_n64_splitk20_pipe2_interleaved")(
+        input,
+        packed_lane_n64_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
 def mma_lane_m32_n64_splitk24_pipe2_interleaved(
     input: torch.Tensor,
     packed_lane_n64_qweight: torch.Tensor,
@@ -988,6 +1211,57 @@ def mma_lane_m32_n64_splitk24_pipe2_interleaved(
     """Run M32 N64 with single-CTA K24 split and shared-memory partials."""
 
     return _extension_api().op("amplin", "mma_lane_m32_n64_splitk24_pipe2_interleaved")(
+        input,
+        packed_lane_n64_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_splitk12_pipe2_interleaved(
+    input: torch.Tensor,
+    packed_lane_n64_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with single-CTA K12 split and shared-memory partials (lower shared, higher occupancy)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_splitk12_pipe2_interleaved")(
+        input,
+        packed_lane_n64_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_splitk16_pipe2_interleaved(
+    input: torch.Tensor,
+    packed_lane_n64_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with single-CTA K16 split and shared-memory partials (16 warps, 64 KiB partials)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_splitk16_pipe2_interleaved")(
+        input,
+        packed_lane_n64_qweight,
+        packed_scales,
+        logical_n,
+    )
+
+
+def mma_lane_m32_n64_splitk20_pipe2_interleaved(
+    input: torch.Tensor,
+    packed_lane_n64_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    *,
+    logical_n: int,
+) -> torch.Tensor:
+    """Run M32 N64 with single-CTA K20 split and shared-memory partials (20 warps, 80 KiB partials)."""
+
+    return _extension_api().op("amplin", "mma_lane_m32_n64_splitk20_pipe2_interleaved")(
         input,
         packed_lane_n64_qweight,
         packed_scales,
@@ -1046,6 +1320,540 @@ def mma_lane_m16_n16_splitk16(
     )
 
 
+# Dynamic routing state -------------------------------------------------
+
+# Key: (size_m, size_k, size_n, dtype_name)
+# Value: selected kernel name (str)
+_STATIC_ROUTING_TABLE: dict[tuple[int, int, int, str], str] = {}
+_DYNAMIC_ROUTING_TABLE: dict[tuple[int, int, int, str], str] = {}
+_ROUTING_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class _CandidateSpec:
+    name: str
+    fn_name: str
+    packer: str
+    needs_logical_n: bool = True
+    min_m: int = 1
+    max_m: int | None = None
+    exact_ms: tuple[int, ...] | None = None
+    m_multiple: int = 1
+    n_multiple: int = 64
+    k_multiple: int = 128
+    exact_ks: tuple[int, ...] | None = None
+
+
+# Full candidate list for M <= 32.  Each kernel is shape-dependent; the router
+# picks the fastest legal one per (M, K, N, dtype).
+_DYNAMIC_CANDIDATES: tuple[_CandidateSpec, ...] = (
+    # GEMV-style paths ------------------------------------------------------
+    _CandidateSpec("gemv", "gemv", "none", needs_logical_n=False, max_m=16, n_multiple=1),
+    _CandidateSpec(
+        "gemv_k12288_wide",
+        "gemv_k12288_wide",
+        "none",
+        needs_logical_n=False,
+        exact_ks=(12288,),
+        max_m=1,
+        n_multiple=16,
+    ),
+    _CandidateSpec(
+        "gemv_multirow",
+        "gemv_multirow",
+        "none",
+        needs_logical_n=False,
+        exact_ms=(2, 4, 8, 16),
+        exact_ks=(3072, 4096, 12288),
+        n_multiple=16,
+    ),
+    # HMMA / WMMA paths ----------------------------------------------------
+    _CandidateSpec("gemm_hmma", "gemm_hmma", "hmma", min_m=16, max_m=32, m_multiple=16),
+    _CandidateSpec("gemm_hmma_v0", "gemm_hmma_v0", "hmma", min_m=16, max_m=32, m_multiple=16),
+    _CandidateSpec(
+        "gemm_hmma_m32_n128_pipeline4",
+        "gemm_hmma_m32_n128_pipeline4",
+        "hmma",
+        min_m=17,
+        max_m=32,
+    ),
+    # M <= 16, N16 / N32 mma_lane split-K paths -----------------------------
+    _CandidateSpec(
+        "mma_lane_m16_n16_padded", "mma_lane_m16_n16_padded", "lane", max_m=16, n_multiple=16
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n16_splitk4", "mma_lane_m16_n16_splitk4", "lane", max_m=16, n_multiple=16, k_multiple=512
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n16_splitk8", "mma_lane_m16_n16_splitk8", "lane", max_m=16, n_multiple=16, k_multiple=1024
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n16_splitk12", "mma_lane_m16_n16_splitk12", "lane", max_m=16, n_multiple=16, k_multiple=1536
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n16_splitk16", "mma_lane_m16_n16_splitk16", "lane", max_m=16, n_multiple=16, k_multiple=2048
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n32_splitk8", "mma_lane_m16_n32_splitk8", "lane", max_m=16, n_multiple=32, k_multiple=1024
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n32_splitk12", "mma_lane_m16_n32_splitk12", "lane", max_m=16, n_multiple=32, k_multiple=1536
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n32_splitk16", "mma_lane_m16_n32_splitk16", "lane", max_m=16, n_multiple=32, k_multiple=2048
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n32_splitk8_pipe2", "mma_lane_m16_n32_splitk8_pipe2", "lane", max_m=16, n_multiple=32, k_multiple=1024
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n32_splitk12_pipe2", "mma_lane_m16_n32_splitk12_pipe2", "lane", max_m=16, n_multiple=32, k_multiple=1536
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n32_splitk16_pipe2", "mma_lane_m16_n32_splitk16_pipe2", "lane", max_m=16, n_multiple=32, k_multiple=2048
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n32_splitk12_pipe2_interleaved",
+        "mma_lane_m16_n32_splitk12_pipe2_interleaved",
+        "n32_interleaved",
+        max_m=16,
+        n_multiple=32,
+        k_multiple=1536,
+    ),
+    # M <= 16, N64 mma_lane paths -------------------------------------------
+    _CandidateSpec(
+        "mma_lane_m16_n64_splitk24_pipe2_interleaved",
+        "mma_lane_m16_n64_splitk24_pipe2_interleaved",
+        "n64",
+        max_m=16,
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n64_splitk4_pipe2_interleaved",
+        "mma_lane_m16_n64_splitk4_pipe2_interleaved",
+        "n64",
+        max_m=16,
+        k_multiple=512,
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n64_splitk8_pipe2_interleaved",
+        "mma_lane_m16_n64_splitk8_pipe2_interleaved",
+        "n64",
+        max_m=16,
+        k_multiple=1024,
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n64_splitk12_pipe2_interleaved",
+        "mma_lane_m16_n64_splitk12_pipe2_interleaved",
+        "n64",
+        max_m=16,
+        k_multiple=1536,
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n64_splitk16_pipe2_interleaved",
+        "mma_lane_m16_n64_splitk16_pipe2_interleaved",
+        "n64",
+        max_m=16,
+        k_multiple=2048,
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n64_splitk20_pipe2_interleaved",
+        "mma_lane_m16_n64_splitk20_pipe2_interleaved",
+        "n64",
+        max_m=16,
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n64_splitk12x2_coop_interleaved",
+        "mma_lane_m16_n64_splitk12x2_coop_interleaved",
+        "n64",
+        max_m=16,
+    ),
+    _CandidateSpec("mma_lane_m16_n64_shared_a", "mma_lane_m16_n64_shared_a", "n64", max_m=16),
+    _CandidateSpec(
+        "mma_lane_m16_n64_tile4_shared_a",
+        "mma_lane_m16_n64_tile4_shared_a",
+        "n64",
+        max_m=16,
+        n_multiple=256,
+    ),
+    _CandidateSpec(
+        "mma_lane_m16_n64_tile8_shared_a",
+        "mma_lane_m16_n64_tile8_shared_a",
+        "n64",
+        max_m=16,
+        n_multiple=512,
+    ),
+    # M32 mma_lane paths ----------------------------------------------------
+    _CandidateSpec(
+        "mma_lane_m32_global_a",
+        "mma_lane_m32_global_a",
+        "lane",
+        exact_ms=(32,),
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n32_global_a",
+        "mma_lane_m32_n32_global_a",
+        "lane",
+        exact_ms=(32,),
+        n_multiple=8,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_splitk24_pipe2_interleaved",
+        "mma_lane_m32_n64_splitk24_pipe2_interleaved",
+        "n64",
+        min_m=17,
+        max_m=32,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_splitk12_pipe2_interleaved",
+        "mma_lane_m32_n64_splitk12_pipe2_interleaved",
+        "n64",
+        min_m=17,
+        max_m=32,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_splitk16_pipe2_interleaved",
+        "mma_lane_m32_n64_splitk16_pipe2_interleaved",
+        "n64",
+        min_m=17,
+        max_m=32,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_splitk20_pipe2_interleaved",
+        "mma_lane_m32_n64_splitk20_pipe2_interleaved",
+        "n64",
+        min_m=17,
+        max_m=32,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_splitk12x2_coop_interleaved",
+        "mma_lane_m32_n64_splitk12x2_coop_interleaved",
+        "n64",
+        max_m=32,
+    ),
+    _CandidateSpec("mma_lane_m32_n64_shared_a", "mma_lane_m32_n64_shared_a", "n64", max_m=32),
+    _CandidateSpec(
+        "mma_lane_m32_n64_tile2_shared_a",
+        "mma_lane_m32_n64_tile2_shared_a",
+        "n64",
+        max_m=32,
+        n_multiple=128,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_tile4_shared_a",
+        "mma_lane_m32_n64_tile4_shared_a",
+        "n64",
+        max_m=32,
+        n_multiple=256,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_tile8_shared_a",
+        "mma_lane_m32_n64_tile8_shared_a",
+        "n64",
+        max_m=32,
+        n_multiple=512,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_tile2_splitk2",
+        "mma_lane_m32_n64_tile2_splitk2",
+        "n64",
+        min_m=17,
+        max_m=32,
+        n_multiple=128,
+        k_multiple=256,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_tile1_splitk4",
+        "mma_lane_m32_n64_tile1_splitk4",
+        "n64",
+        min_m=17,
+        max_m=32,
+        n_multiple=64,
+        k_multiple=512,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_tile1_splitk8",
+        "mma_lane_m32_n64_tile1_splitk8",
+        "n64",
+        min_m=17,
+        max_m=32,
+        n_multiple=64,
+        k_multiple=1024,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_tile2_splitk4",
+        "mma_lane_m32_n64_tile2_splitk4",
+        "n64",
+        min_m=17,
+        max_m=32,
+        n_multiple=128,
+        k_multiple=512,
+    ),
+)
+
+
+# Cache packed weights keyed by tensor memory address, shape, packer, and dtype so
+# repeated calls for the same layer avoid re-packing without reusing stale entries
+# when tensor object ids are recycled after deallocation.
+_WEIGHT_CACHE: dict[
+    tuple[int, int, tuple[int, ...], tuple[int, ...], str, torch.dtype],
+    tuple[torch.Tensor, torch.Tensor],
+] = {}
+
+
+def _pack_with_cache(
+    spec: _CandidateSpec,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    key = (
+        qweight.data_ptr(),
+        scales.data_ptr(),
+        tuple(qweight.shape),
+        tuple(scales.shape),
+        spec.packer,
+        dtype,
+    )
+    packed = _WEIGHT_CACHE.get(key)
+    if packed is None:
+        if spec.packer == "none":
+            packed = (qweight, scales.to(dtype))
+        elif spec.packer == "hmma":
+            packed = (pack_hmma_qweight(qweight), pack_hmma_scales(scales.to(dtype)))
+        elif spec.packer == "lane":
+            packed = (pack_mma_lane_qweight(qweight), pack_hmma_scales(scales.to(dtype)))
+        elif spec.packer == "n32_interleaved":
+            packed = (pack_mma_lane_n32_qweight(qweight), pack_hmma_scales(scales.to(dtype)))
+        elif spec.packer == "n64":
+            packed = (pack_mma_lane_n64_qweight(qweight), pack_hmma_scales(scales.to(dtype)))
+        else:
+            raise ValueError(f"Unknown packer {spec.packer!r}")
+        _WEIGHT_CACHE[key] = packed
+    return packed
+
+
+def _dtype_name(dtype: torch.dtype) -> str:
+    return "fp16" if dtype == torch.float16 else "bf16"
+
+
+def _dynamic_key(input: torch.Tensor, logical_n: int) -> tuple[int, int, int, str]:
+    size_k = input.size(-1)
+    size_m = input.numel() // size_k
+    return (size_m, size_k, logical_n, _dtype_name(input.dtype))
+
+
+def _is_candidate_legal(spec: _CandidateSpec, size_m: int, size_k: int, size_n: int) -> bool:
+    if spec.exact_ms is not None and size_m not in spec.exact_ms:
+        return False
+    if size_m < spec.min_m or (spec.max_m is not None and size_m > spec.max_m):
+        return False
+    if spec.m_multiple > 1 and size_m % spec.m_multiple != 0:
+        return False
+    if spec.exact_ks is not None and size_k not in spec.exact_ks:
+        return False
+    if size_k % spec.k_multiple != 0 or size_n % spec.n_multiple != 0:
+        return False
+    return True
+
+
+def _run_candidate(
+    spec: _CandidateSpec,
+    input: torch.Tensor,
+    packed_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    size_n: int,
+) -> torch.Tensor:
+    op = _get_amplin_op(spec.fn_name)
+    if spec.needs_logical_n:
+        return op(input, packed_qweight, packed_scales, logical_n=size_n)
+    return op(input, packed_qweight, packed_scales)
+
+
+def _time_candidate(
+    spec: _CandidateSpec,
+    input: torch.Tensor,
+    packed_qweight: torch.Tensor,
+    packed_scales: torch.Tensor,
+    size_n: int,
+    warmup: int,
+    iters: int,
+) -> float | None:
+    try:
+        for _ in range(warmup):
+            _run_candidate(spec, input, packed_qweight, packed_scales, size_n)
+            torch.cuda.synchronize(input.device)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(iters):
+            _run_candidate(spec, input, packed_qweight, packed_scales, size_n)
+        end.record()
+        end.synchronize()
+        return start.elapsed_time(end) / iters
+    except Exception:
+        return None
+
+
+def _select_best_kernel(
+    input: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    dtype: torch.dtype,
+    size_m: int,
+    size_k: int,
+    size_n: int,
+    warmup: int,
+    iters: int,
+) -> tuple[str, torch.Tensor]:
+    packed_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    best_spec: _CandidateSpec | None = None
+    best_time = float("inf")
+    best_output: torch.Tensor | None = None
+
+    for spec in _DYNAMIC_CANDIDATES:
+        if not _is_candidate_legal(spec, size_m, size_k, size_n):
+            continue
+        if spec.packer not in packed_cache:
+            packed_cache[spec.packer] = _pack_with_cache(spec, qweight, scales, dtype)
+        packed_qweight, packed_scales = packed_cache[spec.packer]
+        elapsed = _time_candidate(spec, input, packed_qweight, packed_scales, size_n, warmup, iters)
+        if elapsed is not None and elapsed < best_time:
+            best_time = elapsed
+            best_spec = spec
+            best_output = _run_candidate(spec, input, packed_qweight, packed_scales, size_n)
+
+    if best_spec is None:
+        raise RuntimeError(
+            f"No legal Amplin dynamic candidate for M={size_m}, K={size_k}, N={size_n}"
+        )
+
+    # The benchmark already produced the output for the fastest candidate; use it
+    # directly and return the name so the dynamic table can be updated.
+    if best_output is None:
+        packed_qweight, packed_scales = packed_cache[best_spec.packer]
+        best_output = _run_candidate(best_spec, input, packed_qweight, packed_scales, size_n)
+    torch.cuda.synchronize(input.device)
+    return best_spec.name, best_output
+
+
+def dynamic(
+    input: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    logical_n: int | None = None,
+    warmup: int = 5,
+    iters: int = 10,
+    update_dynamic_table: bool = True,
+) -> torch.Tensor:
+    """Dispatch to the best Amplin kernel for this (M, K, N, dtype).
+
+    On the first call for a given shape, the function runs a fast micro-benchmark
+    across the legal candidate kernels, picks the fastest, and stores the choice in
+    the dynamic routing table.  Subsequent calls reuse the cached choice.  A
+    static routing table (populated from benchmarks or ``set_routing_table``) is
+    consulted first and the dynamic table overrides it for newly-discovered shapes.
+    """
+    if not _ensure_amplin_runtime_available():
+        raise RuntimeError(amplin_runtime_error())
+
+    input = input.contiguous()
+    if input.dim() < 2:
+        raise ValueError("Amplin dynamic input must have at least two dimensions")
+
+    size_k = input.size(-1)
+    size_m = input.numel() // size_k
+    if logical_n is None:
+        logical_n = qweight.size(-1)
+    size_n = logical_n
+    if qweight.dim() != 2 or qweight.size(0) * 8 != size_k:
+        raise ValueError(
+            "Amplin dynamic qweight must have shape [K/8, N] and match input K"
+        )
+    if scales.dim() != 2 or scales.size(0) != size_k // HMMA_K_TILE or scales.size(1) != size_n:
+        raise ValueError(
+            "Amplin dynamic scales must have shape [K/128, N] and match input K/output N"
+        )
+
+    dtype = input.dtype
+    key = _dynamic_key(input, size_n)
+    with _ROUTING_LOCK:
+        choice = _DYNAMIC_ROUTING_TABLE.get(key) or _STATIC_ROUTING_TABLE.get(key)
+        if choice is None:
+            choice, output = _select_best_kernel(
+                input, qweight, scales, dtype, size_m, size_k, size_n, warmup, iters
+            )
+            if update_dynamic_table:
+                _DYNAMIC_ROUTING_TABLE[key] = choice
+            return output
+
+    spec = _CANDIDATE_BY_NAME.get(choice)
+    if spec is None:
+        raise RuntimeError(f"Amplin dynamic routing table contains unknown kernel {choice!r}")
+    packed_qweight, packed_scales = _pack_with_cache(spec, qweight, scales, dtype)
+    return _run_candidate(spec, input, packed_qweight, packed_scales, size_n)
+
+
+def get_static_routing_table() -> dict[tuple[int, int, int, str], str]:
+    return _STATIC_ROUTING_TABLE.copy()
+
+
+def get_dynamic_routing_table() -> dict[tuple[int, int, int, str], str]:
+    return _DYNAMIC_ROUTING_TABLE.copy()
+
+
+def get_routing_table() -> dict[tuple[int, int, int, str], str]:
+    """Return the merged static + dynamic routing table."""
+    return {**_STATIC_ROUTING_TABLE, **_DYNAMIC_ROUTING_TABLE}
+
+
+def set_routing_table(entries: dict[tuple[int, int, int, str], str]) -> None:
+    """Replace the static routing table.  Existing dynamic entries are preserved."""
+    _STATIC_ROUTING_TABLE.clear()
+    _STATIC_ROUTING_TABLE.update(entries)
+
+
+def _parse_routing_key(raw_key: object) -> tuple[int, int, int, str]:
+    """Accept JSON array keys or stringified Python tuple keys."""
+    if isinstance(raw_key, str):
+        parsed = ast.literal_eval(raw_key)
+    else:
+        parsed = raw_key
+    m, k, n, dtype = parsed
+    return int(m), int(k), int(n), str(dtype)
+
+
+def load_routing_table(path: str | Path) -> None:
+    """Load a static routing table from JSON.
+
+    Accepts keys as JSON arrays ``[m, k, n, dtype]`` or stringified Python
+    tuples (as written by the benchmark script).  dtype is "fp16" or "bf16".
+    """
+    path = Path(path)
+    data = json.loads(path.read_text())
+    entries = {
+        _parse_routing_key(raw_key): name
+        for raw_key, name in data.items()
+    }
+    set_routing_table(entries)
+
+
+def save_routing_table(path: str | Path) -> None:
+    """Save the merged routing table to JSON using stringified tuple keys."""
+    path = Path(path)
+    serializable = {str(k): v for k, v in get_routing_table().items()}
+    path.write_text(json.dumps(serializable, indent=2))
+
+
+def clear_dynamic_routing_table() -> None:
+    _DYNAMIC_ROUTING_TABLE.clear()
+
+
+# Build a name -> spec lookup for cached dispatch.
+_CANDIDATE_BY_NAME: dict[str, _CandidateSpec] = {
+    spec.name: spec for spec in _DYNAMIC_CANDIDATES
+}
+
+
 __all__ = [
     "HMMA_K_TILE",
     "HMMA_N_TILE",
@@ -1056,11 +1864,20 @@ __all__ = [
     "amplin_runtime_available",
     "amplin_runtime_error",
     "amplin_supported",
+    "clear_dynamic_routing_table",
+    "dynamic",
+    "get_dynamic_routing_table",
+    "get_routing_table",
+    "get_static_routing_table",
+    "load_routing_table",
+    "save_routing_table",
+    "set_routing_table",
     "gemm_hmma",
     "gemm_hmma_m64_v1",
     "gemm_hmma_m64_v2",
     "gemm_hmma_m64_v2_sync_a128",
     "gemm_hmma_m64_v3",
+    "gemm_hmma_m32_n128_pipeline4",
     "gemm_hmma_v0",
     "gemv",
     "mma_lane_m16_n16_padded",
@@ -1078,6 +1895,7 @@ __all__ = [
     "mma_lane_m16_n64_shared_a",
     "mma_lane_m16_n64_tile4_shared_a",
     "mma_lane_m16_n64_tile8_shared_a",
+    "mma_lane_m32_n64_tile2_shared_a",
     "mma_lane_m32_n64_tile4_shared_a",
     "mma_lane_m32_n64_tile8_shared_a",
     "mma_lane_m32_n64_shared_a",
@@ -1102,3 +1920,13 @@ __all__ = [
     "unpack_mma_lane_n32_qweight",
     "unpack_mma_lane_n64_qweight",
 ]
+
+
+# Pre-populate the static routing table from a bundled benchmark snapshot when available.
+# This avoids the first-call micro-benchmark for shapes that have already been profiled.
+_DEFAULT_ROUTING_TABLE = Path(__file__).parent / "amplin_dynamic_routing_table.json"
+if _DEFAULT_ROUTING_TABLE.exists():
+    try:
+        load_routing_table(_DEFAULT_ROUTING_TABLE)
+    except Exception:
+        pass

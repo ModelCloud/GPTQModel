@@ -85,13 +85,22 @@ def _bench_shape(spec, dtype, size_m, device, warmup, iters, rounds, seed, pre_t
     if size_m > 32:
         return None
     marlin_legal = spec.size_n % 64 == 0
+    tile2_legal = spec.size_n % (2 * 64) == 0 and spec.size_k % 128 == 0
+    tile2_splitk2_legal = spec.size_n % (2 * 64) == 0 and spec.size_k % 256 == 0
+    tile2_splitk4_legal = spec.size_n % (2 * 64) == 0 and spec.size_k % 512 == 0
+    tile1_splitk4_legal = spec.size_n % 64 == 0 and spec.size_k % 512 == 0
+    tile1_splitk8_legal = spec.size_n % 64 == 0 and spec.size_k % 1024 == 0
     tile4_legal = spec.size_n % (4 * 64) == 0 and spec.size_k % 128 == 0
     tile8_legal = spec.size_n % (8 * 64) == 0 and spec.size_k % 128 == 0
     splitk24_legal = spec.size_n % 64 == 0 and spec.size_k % 128 == 0
+    splitk20_legal = spec.size_n % 64 == 0 and spec.size_k % 128 == 0
+    splitk16_legal = spec.size_n % 64 == 0 and spec.size_k % 128 == 0
+    splitk12_legal = spec.size_n % 64 == 0 and spec.size_k % 128 == 0
     coop_legal = spec.size_n % 64 == 0 and spec.size_k % 128 == 0
     global_a_legal = spec.size_n % 64 == 0 and spec.size_k % 128 == 0
     n32_global_a_legal = spec.size_n % 32 == 0 and spec.size_k % 128 == 0
-    if not (marlin_legal or tile4_legal or splitk24_legal or coop_legal or global_a_legal or n32_global_a_legal):
+    pipeline4_legal = spec.size_n % 64 == 0 and spec.size_k % 128 == 0
+    if not (marlin_legal or tile2_legal or tile2_splitk2_legal or tile2_splitk4_legal or tile1_splitk4_legal or tile1_splitk8_legal or tile4_legal or splitk24_legal or splitk20_legal or splitk16_legal or splitk12_legal or coop_legal or global_a_legal or n32_global_a_legal or pipeline4_legal):
         return None
 
     input_tensor, canonical_qweight, canonical_scales = _make_case(
@@ -105,7 +114,7 @@ def _bench_shape(spec, dtype, size_m, device, warmup, iters, rounds, seed, pre_t
     reference = _dequantized_reference(input_tensor, canonical_qweight, canonical_scales)
     packed_n64_qweight = amplin.pack_mma_lane_n64_qweight(canonical_qweight)
     packed_mma_qweight = amplin.pack_mma_lane_qweight(canonical_qweight)
-    _, packed_scales = amplin.pack_hmma_weights(canonical_qweight, canonical_scales)
+    packed_hmma_qweight, packed_scales = amplin.pack_hmma_weights(canonical_qweight, canonical_scales)
 
     functions = {}
     if splitk24_legal:
@@ -115,8 +124,64 @@ def _bench_shape(spec, dtype, size_m, device, warmup, iters, rounds, seed, pre_t
             packed_scales,
             logical_n=spec.size_n,
         )
+    if splitk20_legal:
+        functions["splitk20"] = lambda: amplin.mma_lane_m32_n64_splitk20_pipe2_interleaved(
+            input_tensor,
+            packed_n64_qweight,
+            packed_scales,
+            logical_n=spec.size_n,
+        )
+    if splitk16_legal:
+        functions["splitk16"] = lambda: amplin.mma_lane_m32_n64_splitk16_pipe2_interleaved(
+            input_tensor,
+            packed_n64_qweight,
+            packed_scales,
+            logical_n=spec.size_n,
+        )
+    if splitk12_legal:
+        functions["splitk12"] = lambda: amplin.mma_lane_m32_n64_splitk12_pipe2_interleaved(
+            input_tensor,
+            packed_n64_qweight,
+            packed_scales,
+            logical_n=spec.size_n,
+        )
     if coop_legal:
         functions["coop"] = lambda: amplin.mma_lane_m32_n64_splitk12x2_coop_interleaved(
+            input_tensor,
+            packed_n64_qweight,
+            packed_scales,
+            logical_n=spec.size_n,
+        )
+    if tile2_legal:
+        functions["tile2"] = lambda: amplin.mma_lane_m32_n64_tile2_shared_a(
+            input_tensor,
+            packed_n64_qweight,
+            packed_scales,
+            logical_n=spec.size_n,
+        )
+    if tile2_splitk2_legal:
+        functions["tile2_splitk2"] = lambda: amplin.mma_lane_m32_n64_tile2_splitk2(
+            input_tensor,
+            packed_n64_qweight,
+            packed_scales,
+            logical_n=spec.size_n,
+        )
+    if tile2_splitk4_legal:
+        functions["tile2_splitk4"] = lambda: amplin.mma_lane_m32_n64_tile2_splitk4(
+            input_tensor,
+            packed_n64_qweight,
+            packed_scales,
+            logical_n=spec.size_n,
+        )
+    if tile1_splitk4_legal:
+        functions["tile1_splitk4"] = lambda: amplin.mma_lane_m32_n64_tile1_splitk4(
+            input_tensor,
+            packed_n64_qweight,
+            packed_scales,
+            logical_n=spec.size_n,
+        )
+    if tile1_splitk8_legal:
+        functions["tile1_splitk8"] = lambda: amplin.mma_lane_m32_n64_tile1_splitk8(
             input_tensor,
             packed_n64_qweight,
             packed_scales,
@@ -147,6 +212,13 @@ def _bench_shape(spec, dtype, size_m, device, warmup, iters, rounds, seed, pre_t
         functions["n32_global_a"] = lambda: amplin.mma_lane_m32_n32_global_a(
             input_tensor,
             packed_mma_qweight,
+            packed_scales,
+            logical_n=spec.size_n,
+        )
+    if pipeline4_legal:
+        functions["pipeline4"] = lambda: amplin.gemm_hmma_m32_n128_pipeline4(
+            input_tensor,
+            packed_hmma_qweight,
             packed_scales,
             logical_n=spec.size_n,
         )
