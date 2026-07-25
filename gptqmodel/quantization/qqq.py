@@ -4,8 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+import threading
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 import transformers
@@ -16,6 +17,7 @@ from ..looper.named_module import NamedModule
 from ..quantization.config import FallbackStrategy, SmoothMSE
 from ..quantization.quantizer import HF_OPTIMUM
 from ..utils import setup_logger
+from ..utils.device import get_device
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gptq import get_number_of_rows_and_cols
 from .npu_linalg import npu_inverse_cholesky_factor
@@ -242,9 +244,10 @@ class QQQ:
         self.fallback = self.qcfg.fallback
         self.expected_nsamples: Optional[float] = None
 
-        self.H = torch.zeros((self.columns, self.columns),
-                             dtype=torch.float32,
-                             device = self.dev)
+        self.lock = threading.Lock()
+        self.H: Optional[torch.Tensor] = None
+        self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
+        self._device_sample_counts: Dict[torch.device, int] = {}
 
     @staticmethod
     def _validate_module(module):
@@ -424,7 +427,6 @@ class QQQ:
             self.out1 = out
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
-        tmp = inp.shape[0]
         if isinstance(self.layer, nn.Linear) or isinstance(
                 self.layer, transformers.Conv1D
         ):
@@ -441,13 +443,50 @@ class QQQ:
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
-        self.H *= self.nsamples / (self.nsamples + tmp)
-        self.nsamples += tmp
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
+
+        dev = torch.device(get_device(inp))
+        batch_token_size = inp.shape[1]
+        inp = inp.float()
         if self._tp_pad_cols:
             pad = inp.new_zeros((self._tp_pad_cols, inp.shape[1]))
             inp = torch.cat((inp, pad), dim=0)
-        self.H += inp.matmul(inp.t())
+
+        xtx = inp.matmul(inp.t())
+
+        with self.lock:
+            self.fwd_counter += 1
+            existing = self._device_hessian_partials.get(dev)
+            if existing is None:
+                self._device_hessian_partials[dev] = xtx.to(dtype=torch.float32).detach()
+            else:
+                existing.add_(xtx.to(dtype=torch.float32))
+            self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
+            self.nsamples += batch_token_size
+
+    def materialize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
+        if target_device is None:
+            target_device = self.dev
+        target_device = torch.device(target_device)
+
+        total_samples = sum(self._device_sample_counts.values())
+        if total_samples == 0:
+            self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
+            self.nsamples = 0
+            return self.H
+
+        result = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
+        for partial in self._device_hessian_partials.values():
+            if partial.device != target_device or partial.dtype != torch.float32:
+                result.add_(partial.to(device=target_device, dtype=torch.float32))
+            else:
+                result.add_(partial)
+
+        result.mul_(2.0 / float(total_samples))
+        self.H = result
+        self.nsamples = total_samples
+        self._device_hessian_partials.clear()
+        self._device_sample_counts.clear()
+        return self.H
 
     @torch.inference_mode()
     def quantize(
@@ -458,6 +497,8 @@ class QQQ:
         from ..utils.fallback import resolve_fallback_strategy, resolve_threshold, should_use_fallback
 
         resolved_strategy = resolve_fallback_strategy(self.fallback)
+
+        self.materialize_hessian()
 
         percdamp = self.qcfg.damp_percent
         groupsize = self.qcfg.group_size
@@ -696,6 +737,8 @@ class QQQ:
             self.inp1 = None
             self.out1 = None
         self.H = None
+        self._device_hessian_partials.clear()
+        self._device_sample_counts.clear()
         self.Losses = None
         self.Trace = None
         if hasattr(self, "quantizer"):
