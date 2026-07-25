@@ -803,3 +803,39 @@ A capture of `GPTQ.quantize` with `group_size=64 activation` on A100 GPU 5 confi
 - `bits=2` Hessian/Hybrid still fall back to the exact Python loop.
 - Multi-GPU candidate splitting remains off the table per user direction.
 - The next speedup round should target the fused GPTQ block kernel (per-row scalar extraction via `tl.where`+`tl.sum` is expensive) and/or the Cholesky/inversion path, as those are now the end-to-end bottlenecks.
+
+---
+
+## Round: skip unused W1 writeback in fused GPTQ block kernel
+
+### Objective
+
+Reduce global memory traffic in `_gptq_block_kernel` by not writing the updated working weights back to `W1`, since the caller only consumes `Q1` and `Err1`.
+
+### Changes
+
+1. **`gptqmodel/quantization/_gptq_block_triton.py`**
+   - Removed the final `tl.store` of `w_row` to `w_ptr`. The kernel still loads `W1` to initialize the row registers, computes `Q1`/`Err1`, and updates the row in registers, but no longer writes the ~2 MB working-weight slice per block back to global memory.
+
+### Accuracy validation
+
+- `python scripts/validate_find_params_batched_strict.py` on A100 GPU 5: **STRICT CHECK PASSED**.
+- `pytest -q tests/test_gptq.py tests/test_quantizer.py tests/test_quantizer_scale_search.py tests/test_adjacent_exact_cuda.py tests/test_gptq_block_triton.py` on A100 GPU 5: **210 passed, 2 skipped**.
+- `ruff check gptqmodel/quantization/_gptq_block_triton.py` and `git diff --check`: clean.
+
+### Benchmarks
+
+Isolated `gptq_block_triton` microbenchmark (`4096 rows x 128 cols`, `group_size=32`, A100 GPU 5): median **0.74 ms -> 0.66 ms** (~11% faster).
+
+End-to-end `GPTQ.quantize` (`4096 x 4096`, `blocksize=128`, `bits=4`, `sym=False`, `mse=2.0`, A100 GPU 5) is within run-to-run noise because the remaining Cholesky/inversion and other elementwise kernels still dominate:
+
+| group_size | method     | mean (ms) | median (ms) | min (ms) | max (ms) |
+|------------|------------|-----------|-------------|----------|----------|
+| 32         | activation | 115.9     | 112.8       | 112.4    | 127.8    |
+| 64         | activation | 106.6     | 106.7       | 105.9    | 107.1    |
+| 128        | activation | 101.1     | 101.1       | 101.0    | 101.2    |
+
+### Known limitations / future work
+
+- The `_gptq_block_kernel` per-column scalar extraction (`tl.where(offs == i, w_row, 0.0).sum()`) is still the main compute cost inside the kernel and is hard to improve in Triton without memory writes per column.
+- Cholesky/inversion and the trailing `Err1.matmul(Hinv[...])` remain the next largest end-to-end consumers.
