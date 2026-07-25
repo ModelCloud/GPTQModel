@@ -451,15 +451,20 @@ class QQQ:
             pad = inp.new_zeros((self._tp_pad_cols, inp.shape[1]))
             inp = torch.cat((inp, pad), dim=0)
 
-        xtx = inp.matmul(inp.t())
-
         with self.lock:
             self.fwd_counter += 1
             existing = self._device_hessian_partials.get(dev)
             if existing is None:
-                self._device_hessian_partials[dev] = xtx.to(dtype=torch.float32).detach()
-            else:
-                existing.add_(xtx.to(dtype=torch.float32))
+                existing = torch.zeros(
+                    (self.columns, self.columns),
+                    dtype=torch.float32,
+                    device=dev,
+                )
+                self._device_hessian_partials[dev] = existing
+
+            # Accumulate xtx directly into the per-device buffer to avoid
+            # allocating a separate output tensor for every batch.
+            existing.addmm_(inp, inp.t(), beta=1.0, alpha=1.0)
             self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
             self.nsamples += batch_token_size
 
@@ -474,17 +479,21 @@ class QQQ:
             self.nsamples = 0
             return self.H
 
+        # Merge per-device partials into a single Hessian on the target device.
+        # Pop and delete each partial as it is added so the peak memory stays
+        # at result + one partial instead of result + all partials.
         result = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
-        for partial in self._device_hessian_partials.values():
-            if partial.device != target_device or partial.dtype != torch.float32:
-                result.add_(partial.to(device=target_device, dtype=torch.float32))
-            else:
+        while self._device_hessian_partials:
+            dev, partial = self._device_hessian_partials.popitem()
+            if partial.device == target_device and partial.dtype == torch.float32:
                 result.add_(partial)
+            else:
+                result.add_(partial.to(device=target_device, dtype=torch.float32))
+            del partial
 
         result.mul_(2.0 / float(total_samples))
         self.H = result
         self.nsamples = total_samples
-        self._device_hessian_partials.clear()
         self._device_sample_counts.clear()
         return self.H
 
@@ -556,7 +565,7 @@ class QQQ:
         Q = torch.zeros_like(W)
 
         damp = percdamp * torch.mean(torch.diag(H))
-        diag = torch.arange(self.columns, device=self.dev)
+        diag = torch.arange(self.columns, device=H.device)
         H[diag, diag] += damp
         threshold_raw, is_percent = resolve_threshold(self.fallback, self.expected_nsamples)
         fallback_configured = threshold_raw is not None
