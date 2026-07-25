@@ -11,9 +11,9 @@ from model_test import ModelTest
 
 # | Metric                                             |   MARLIN |
 # |----------------------------------------------------|----------|
-# | arc_challenge :: acc,none                          |   0.3166 |
-# | arc_challenge :: acc_norm,none                     |   0.3430 |
-# | gsm8k_platinum_cot :: acc,num                      |   0.3906 |
+# | arc_challenge :: acc,none                          |   0.3242 |
+# | arc_challenge :: acc_norm,none                     |   0.3515 |
+# | gsm8k_platinum_cot :: acc,num                      |   0.4723 |
 # | mmlu_stem :: acc,none                              |   0.3942 |
 class TestLlama3_2(ModelTest):
     # Keep one stable saved checkpoint so eval-only repro runs can reuse the exact post-quant model.
