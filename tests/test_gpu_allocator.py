@@ -1052,3 +1052,90 @@ def test_allocator_idles_all_gpus_when_memory_check_disabled():
     lease = allocator.allocate("s1", count=2, timeout=0)
     assert len(lease.gpus) == 2
     allocator.shutdown()
+
+
+def test_shared_max_four_per_gpu():
+    allocator = GPUAllocator(
+        gpus=_fake_gpus(1),
+        max_shared_per_gpu=4,
+        enable_ttl_janitor=False,
+    )
+    leases = [
+        allocator.allocate(f"shared-{i}", count=1, timeout=0, exclusive=False)
+        for i in range(4)
+    ]
+    assert len({lease.gpus[0].pci_bus_id for lease in leases}) == 1
+    with pytest.raises(TimeoutError):
+        allocator.allocate("shared-4", count=1, timeout=0, exclusive=False)
+
+    allocator.release(leases[0].lease_id)
+    lease5 = allocator.allocate("shared-5", count=1, timeout=0, exclusive=False)
+    assert len(lease5.gpus) == 1
+    allocator.shutdown()
+
+
+def test_shared_blocks_exclusive_then_exclusive_succeeds_after_shared_released():
+    allocator = GPUAllocator(
+        gpus=_fake_gpus(1),
+        max_shared_per_gpu=4,
+        enable_ttl_janitor=False,
+    )
+    shared_leases = [
+        allocator.allocate(f"shared-{i}", count=1, timeout=0, exclusive=False)
+        for i in range(4)
+    ]
+    with pytest.raises(TimeoutError):
+        allocator.allocate("exclusive", count=1, timeout=0, exclusive=True)
+
+    for lease in shared_leases:
+        allocator.release(lease.lease_id)
+
+    exclusive_lease = allocator.allocate(
+        "exclusive", count=1, timeout=0, exclusive=True
+    )
+    assert exclusive_lease.exclusive
+    allocator.shutdown()
+
+
+def test_mixed_shared_and_exclusive_concurrent_within_limits():
+    allocator = GPUAllocator(
+        gpus=_fake_gpus(4),
+        max_shared_per_gpu=4,
+        enable_ttl_janitor=False,
+    )
+    violations: List[str] = []
+    violations_lock = threading.Lock()
+
+    def check_invariants():
+        status = allocator.status()
+        by_bus: Dict[str, List[Dict[str, Any]]] = {}
+        for lease in status["leases"]:
+            for gpu in lease["gpus"]:
+                by_bus.setdefault(gpu["pci_bus_id"], []).append(lease)
+        for bus_id, leases in by_bus.items():
+            if any(lease["exclusive"] for lease in leases) and len(leases) > 1:
+                with violations_lock:
+                    violations.append(f"exclusive overlap on {bus_id}")
+            shared_count = sum(1 for lease in leases if not lease["exclusive"])
+            if shared_count > 4:
+                with violations_lock:
+                    violations.append(f"shared >4 on {bus_id}")
+
+    def worker(worker_id: int):
+        for _ in range(20):
+            exclusive = worker_id % 3 == 0
+            lease = allocator.allocate(
+                f"worker-{worker_id}",
+                count=1,
+                timeout=10.0,
+                exclusive=exclusive,
+            )
+            check_invariants()
+            time.sleep(0.01)
+            allocator.release(lease.lease_id)
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        list(pool.map(worker, range(12)))
+
+    assert not violations
+    allocator.shutdown()

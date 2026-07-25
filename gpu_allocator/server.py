@@ -264,6 +264,12 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=5.0,
         help="Seconds between GPU status (memory/utilization) refreshes (default: 5.0)",
     )
+    parser.add_argument(
+        "--max-shared",
+        type=int,
+        default=4,
+        help="Maximum number of shared leases per GPU (default: 4)",
+    )
     return parser.parse_args(argv)
 
 
@@ -401,6 +407,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         idle_gpu_percent=args.idle_gpu_percent,
         gpu_status_interval=args.gpu_status_interval,
         gpu_status_checker=get_all_gpu_status,
+        max_shared_per_gpu=args.max_shared,
     )
     server = GPUAllocatorServer((args.host, args.port), allocator)
     log.info("GPU allocator listening on http://%s:%d", args.host, args.port)

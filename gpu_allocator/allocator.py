@@ -53,6 +53,7 @@ class GPUAllocator:
         gpu_status_checker: Optional[
             Callable[[], Dict[str, Tuple[int, int, int]]]
         ] = None,
+        max_shared_per_gpu: int = 4,
     ):
         if gpus is None:
             gpus = discover_gpus()
@@ -87,6 +88,7 @@ class GPUAllocator:
         self._gpu_status_cache: Optional[
             Tuple[float, Dict[str, Tuple[int, int, int]]]
         ] = None
+        self._max_shared_per_gpu = int(max_shared_per_gpu)
 
         if enable_ttl_janitor:
             self._janitor = threading.Thread(
@@ -164,13 +166,18 @@ class GPUAllocator:
         return self._leases[lease_id].exclusive
 
     def _shared_candidate_bus_ids(self) -> List[str]:
-        """Return bus ids not exclusively leased with idle memory, sorted to prefer already-shared GPUs."""
+        """Return bus ids not exclusively leased with room for another shared lease.
+
+        A GPU already carrying shared leases is exempt from the memory idle check
+        so subsequent shared clients can pack onto it, up to max_shared_per_gpu.
+        """
         return sorted(
             (
                 bus_id
                 for bus_id in self._all_bus_ids
                 if not self._is_exclusively_leased(bus_id)
-                and self._is_gpu_memory_idle(bus_id)
+                and len(self._gpu_leases.get(bus_id, set())) < self._max_shared_per_gpu
+                and (self._gpu_leases.get(bus_id) or self._is_gpu_memory_idle(bus_id))
             ),
             key=lambda b: (
                 -len(self._gpu_leases.get(b, set())),
