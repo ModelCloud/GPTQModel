@@ -166,6 +166,8 @@ def test_role_only_kernel_is_excluded_from_backend_discovery():
 
 CASES = []
 for kernel_cls in sorted(_iter_kernel_classes(), key=lambda cls: cls.__name__):
+    if not getattr(kernel_cls, "SUPPORTS_BACKEND_SELECTION", True):
+        continue
     for method in _infer_quant_methods(kernel_cls):
         for fmt in kernel_cls.SUPPORTS_FORMATS:
             CASES.append((kernel_cls, method, fmt))
