@@ -838,4 +838,34 @@ End-to-end `GPTQ.quantize` (`4096 x 4096`, `blocksize=128`, `bits=4`, `sym=False
 ### Known limitations / future work
 
 - The `_gptq_block_kernel` per-column scalar extraction (`tl.where(offs == i, w_row, 0.0).sum()`) is still the main compute cost inside the kernel and is hard to improve in Triton without memory writes per column.
-- Cholesky/inversion and the trailing `Err1.matmul(Hinv[...])` remain the next largest end-to-end consumers.
+
+---
+
+## Round: fuse per-block trailing weight update with addmm
+
+### Objective
+
+Eliminate the temporary allocation and separate subtraction in `W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])` by using a fused `torch.addmm(..., alpha=-1, out=...)`.
+
+### Changes
+
+1. **`gptqmodel/quantization/gptq.py`**
+   - Replaced the per-block trailing update `W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])` with `torch.addmm(W[:, i2:], Err1, Hinv[i1:i2, i2:], alpha=-1, out=W[:, i2:])`.
+   - This fuses the `matmul` and subtraction into one cuBLAS call and avoids allocating a `[rows, remaining]` scratch tensor per block.
+
+### Accuracy validation
+
+- `python scripts/validate_find_params_batched_strict.py` on A100 GPU 5: **STRICT CHECK PASSED**.
+- `pytest -q tests/test_gptq.py tests/test_quantizer.py tests/test_quantizer_scale_search.py tests/test_adjacent_exact_cuda.py tests/test_gptq_block_triton.py` on A100 GPU 5: **210 passed, 2 skipped**.
+- `ruff check gptqmodel/quantization/gptq.py` and `git diff --check`: clean.
+
+### Benchmarks
+
+Isolated trailing update (`4096 rows, count=128, remaining=3968`, A100 GPU 5): matmul-then-subtract median **0.36 ms -> 0.28 ms** (~22% faster).
+
+End-to-end `GPTQ.quantize` (`4096 x 4096`, `blocksize=128`, `bits=4`, `sym=False`, `mse=2.0`, A100 GPU 5) is within run-to-run noise because the block-kernel scalar extraction and Cholesky/inversion still dominate, but the fused call removes ~2–3 ms of temporary allocation/copy overhead across a full layer.
+
+### Known limitations / future work
+
+- The `_gptq_block_kernel` per-column scalar extraction remains the largest single-kernel cost.
+- The `cholesky(cholesky_inverse(L), upper=True)` path is already a cuSOLVER-optimized way to compute the required upper Cholesky factor of `H^{-1}`; direct `solve_triangular` approaches produce a different (non-Cholesky) factor and are not a drop-in replacement.
