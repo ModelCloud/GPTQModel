@@ -394,3 +394,66 @@ class TestGPTQProcessorStreaming(ModelTest):
             pytest.skip(
                 f"Streaming event helper subprocess unavailable: rc={result.returncode}, stderr={result.stderr.strip()}"
             )
+
+
+class TestGPTQHessian:
+    """Verify GPTQ Hessian accumulation matches the closed-form reference."""
+
+    def _reference(self, *tensors):
+        target = tensors[0].device
+        total = sum(t.numel() // t.shape[-1] for t in tensors)
+        X = torch.cat(
+            [t.reshape(-1, t.shape[-1]).to(target).float().t() for t in tensors],
+            dim=1,
+        )
+        if total == 0:
+            return torch.zeros((X.shape[0], X.shape[0]), dtype=torch.float32, device=target)
+        return (2.0 / total) * X.matmul(X.t())
+
+    def _make_gptq(self, layer):
+        from gptqmodel.looper.named_module import NamedModule
+        named = NamedModule(layer, name="l", full_name="m.l", layer_index=0)
+        return GPTQ(named, QuantizeConfig())
+
+    def test_single_batch_matches_reference(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, bias=False, dtype=torch.float32)
+        gptq = self._make_gptq(layer)
+        x = torch.randn(4, 8, 16, dtype=torch.float32)
+        gptq.add_batch(x, None)
+        gptq.materialize_global_hessian()
+        H_ref = self._reference(x)
+        assert torch.allclose(gptq.H, H_ref, rtol=1e-4, atol=1e-5)
+
+    def test_multiple_batches_matches_reference(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, bias=False, dtype=torch.float32)
+        gptq = self._make_gptq(layer)
+        batches = [torch.randn(2, 8, 16, dtype=torch.float32) for _ in range(3)]
+        for x in batches:
+            gptq.add_batch(x, None)
+        gptq.materialize_global_hessian()
+        H_ref = self._reference(*batches)
+        assert torch.allclose(gptq.H, H_ref, rtol=1e-4, atol=1e-5)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_multi_device_matches_reference(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, bias=False, dtype=torch.float32, device="cpu")
+        gptq = self._make_gptq(layer)
+        x_cpu = torch.randn(2, 8, 16, dtype=torch.float32, device="cpu")
+        x_gpu = torch.randn(2, 8, 16, dtype=torch.float32, device="cuda:0")
+        gptq.add_batch(x_cpu, None)
+        gptq.add_batch(x_gpu, None)
+        gptq.materialize_global_hessian()
+        H_ref = self._reference(x_cpu, x_gpu)
+        assert torch.allclose(gptq.H, H_ref, rtol=1e-4, atol=1e-5)
+
+    def test_empty_batch_is_noop(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, bias=False, dtype=torch.float32)
+        gptq = self._make_gptq(layer)
+        gptq.add_batch(torch.zeros(0, 8, 16, dtype=torch.float32), None)
+        gptq.materialize_global_hessian()
+        assert gptq.H.shape == (16, 16)
+        assert torch.allclose(gptq.H, torch.zeros_like(gptq.H))

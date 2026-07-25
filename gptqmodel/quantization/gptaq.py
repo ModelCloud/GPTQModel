@@ -10,7 +10,7 @@ import math
 import os
 import sys
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -32,6 +32,11 @@ class GPTAQ(GPTQ):
         self.dXXT = None
 
         self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
+
+        # Per-device Hessian partials for multi-device calibration and lower memory.
+        # GPTAQ keeps both H (X^T X) and dXXT ((X_native - X)^T X) accumulators.
+        self._device_H_partials: Dict[torch.device, torch.Tensor] = {}
+        self._device_dXXT_partials: Dict[torch.device, torch.Tensor] = {}
 
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
         with self.lock:
@@ -79,7 +84,7 @@ class GPTAQ(GPTQ):
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
-                native_inp = native_inp.reshape((-1, inp.shape[-1]))
+                native_inp = native_inp.reshape((-1, native_inp.shape[-1]))
             inp = inp.t()
             native_inp = native_inp.t()
 
@@ -96,21 +101,86 @@ class GPTAQ(GPTQ):
             native_inp = unfold(native_inp)
             native_inp = native_inp.permute([1, 0, 2]).flatten(1)
 
-        if self.H is None:
-            self.H = torch.zeros((self.columns, self.columns),
-                                 dtype=torch.float32,
-                                 device=inp.device)
-            self.dXXT = self.H.clone()
-        else:
-            self.H *= self.nsamples / (self.nsamples + batch_size)
-            self.dXXT *= self.nsamples / (self.nsamples + batch_size)
+        dev = torch.device(inp.device)
+        H_partial = self._device_H_partials.get(dev)
+        if H_partial is None:
+            H_partial = torch.zeros(
+                (self.columns, self.columns),
+                dtype=torch.float32,
+                device=dev,
+            )
+            self._device_H_partials[dev] = H_partial
 
+        dXXT_partial = self._device_dXXT_partials.get(dev)
+        if dXXT_partial is None:
+            dXXT_partial = torch.zeros(
+                (self.columns, self.columns),
+                dtype=torch.float32,
+                device=dev,
+            )
+            self._device_dXXT_partials[dev] = dXXT_partial
+
+        # Accumulate X^T X and (X_native - X)^T X directly into per-device
+        # buffers to avoid allocating a columns x columns temporary for every batch.
+        H_partial.addmm_(inp, inp.t(), beta=1.0, alpha=1.0)
+        native_inp.sub_(inp)
+        dXXT_partial.addmm_(native_inp, inp.t(), beta=1.0, alpha=1.0)
+
+        self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_size
         self.nsamples += batch_size
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
 
-        self.H += inp.matmul(inp.t())
-        native_inp = math.sqrt(2 / self.nsamples) * native_inp
-        self.dXXT += (native_inp - inp).matmul(inp.t())
+    @torch.inference_mode()
+    def materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
+        with self.lock:
+            if target_device is None:
+                target_device = (
+                    getattr(self, "_final_hessian_device_hint", None)
+                    or self.module.weight.device
+                )
+            target_device = torch.device(target_device)
+
+            total_samples = sum(self._device_sample_counts.values())
+
+            H = torch.zeros(
+                (self.columns, self.columns),
+                dtype=torch.float32,
+                device=target_device,
+            )
+            dXXT = torch.zeros(
+                (self.columns, self.columns),
+                dtype=torch.float32,
+                device=target_device,
+            )
+
+            # Merge per-device partials into the final tensors and delete each
+            # partial as it is added to keep the materialization peak low.
+            while self._device_H_partials:
+                _, partial = self._device_H_partials.popitem()
+                if partial.device == target_device and partial.dtype == torch.float32:
+                    H.add_(partial)
+                else:
+                    H.add_(partial.to(device=target_device, dtype=torch.float32))
+                del partial
+
+            while self._device_dXXT_partials:
+                _, partial = self._device_dXXT_partials.popitem()
+                if partial.device == target_device and partial.dtype == torch.float32:
+                    dXXT.add_(partial)
+                else:
+                    dXXT.add_(partial.to(device=target_device, dtype=torch.float32))
+                del partial
+
+            if total_samples > 0:
+                scale = 2.0 / float(total_samples)
+                H.mul_(scale)
+                dXXT.mul_(scale)
+
+            self.H = H
+            self.dXXT = dXXT
+            self.nsamples = total_samples
+            self._device_sample_counts.clear()
+            if hasattr(self, "_hessian_dirty"):
+                self._hessian_dirty = False
 
     @torch.inference_mode()
     def quantize(
@@ -120,6 +190,8 @@ class GPTAQ(GPTQ):
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
+
+        self.finalize_hessian()
 
         # TODO compilation failure for Torch >= 2.8
         if not TORCH_GTE_28:
@@ -275,6 +347,9 @@ class GPTAQ(GPTQ):
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
 
     def free(self):
+        self._device_H_partials.clear()
+        self._device_dXXT_partials.clear()
+
         super().free()
 
         if hasattr(self, 'dXXT'):
