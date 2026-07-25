@@ -12,8 +12,10 @@ from typing import Any, Dict, Mapping, Optional
 
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.inspect import safe_kwargs_call
-from gptqmodel.utils.logger import render_table
+from gptqmodel.utils.logger import render_table, setup_logger
 
+
+log = setup_logger()
 
 _MMLU_LOCAL_DATASET = Path("/monster/data/model/dataset/hails-mmlu_no_train")
 _GSM8K_LOCAL_DATASET = Path("/monster/data/model/dataset/gsm8k")
@@ -47,6 +49,7 @@ _ENGINE_OPTION_KEYS = {
     "tokenizer_revision",
     "tp_size",
     "trust_remote_code",
+    "use_cuda_graph",
     "vllm_path",
 }
 _DROPPED_MODEL_ARG_KEYS = {
@@ -544,6 +547,7 @@ def _build_evalution_runtime(
             "padding_side": engine_padding_side,
             "backend": _normalize_backend_name(backend),
             "gptqmodel_path": str(Path(__file__).resolve().parents[2]),
+            "use_cuda_graph": engine_options.get("use_cuda_graph"),
         }
         engine = safe_kwargs_call(evalution.GPTQModel, kwargs=engine_kwargs)
         model_config = evalution.Model(
