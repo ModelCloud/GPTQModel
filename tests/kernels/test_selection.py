@@ -13,6 +13,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
+from gptqmodel.nn_modules.qlinear.humming import HummingAwqLinear, HummingGptqLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
@@ -92,6 +93,10 @@ def _pick_group_size(cls):
 
 def _pick_desc_act(cls):
     values = list(getattr(cls, "SUPPORTS_DESC_ACT", []))
+    # Prefer False; it is the most compatible default and avoids kernel-specific
+    # restrictions such as AWQ Triton 3-bit fused inference requiring desc_act=False.
+    if False in values:
+        return False
     return values[0] if values else False
 
 
@@ -114,6 +119,16 @@ def _force_auto_candidates_valid(monkeypatch, method, fmt):
             cls,
             "cached_validate_once",
             classmethod(lambda qlinear_cls: (True, None)),
+        )
+
+
+def _disable_humming(monkeypatch):
+    """Force Humming kernels to fail validation so older fallback tests remain deterministic."""
+    for cls in (HummingGptqLinear, HummingAwqLinear):
+        monkeypatch.setattr(
+            cls,
+            "cached_validate_once",
+            classmethod(lambda _cls: (False, None)),
         )
 
 
@@ -318,6 +333,7 @@ def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monke
     ],
 )
 def test_cuda_auto_selects_grouped_3bit_trilin_backend(monkeypatch, method, fmt, kernel_cls, group_size):
+    _disable_humming(monkeypatch)
     monkeypatch.setattr(
         kernel_cls,
         "cached_validate_once",
@@ -349,6 +365,7 @@ def test_cuda_auto_selects_grouped_3bit_trilin_backend(monkeypatch, method, fmt,
 )
 def test_cuda_auto_uses_triton_for_unsupported_trilin_group_size(monkeypatch, method, fmt, expected):
     _force_auto_candidates_valid(monkeypatch, method, fmt)
+    _disable_humming(monkeypatch)
 
     selected = select_quant_linear(
         bits=3,
@@ -409,6 +426,7 @@ def test_cuda_auto_selects_3bit_triton_with_compatible_4bit_overrides(
     fmt,
     kernel_cls,
 ):
+    _disable_humming(monkeypatch)
     monkeypatch.setattr(
         kernel_cls,
         "cached_validate_once",
@@ -842,6 +860,7 @@ def test_select_quant_linear_multi_select_expands_dynamic_contracts(monkeypatch)
 
 def test_select_quant_linear_single_select_stays_model_wide_compatible(monkeypatch):
     _force_auto_candidates_valid(monkeypatch, METHOD.GPTQ, FORMAT.GPTQ)
+    _disable_humming(monkeypatch)
     monkeypatch.setattr(
         MarlinLinear,
         "validate_device",
