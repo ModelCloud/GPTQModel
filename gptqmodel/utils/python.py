@@ -44,6 +44,10 @@ def gte_python_3_13_3():
 def gte_python_3_14():
     return Version(platform.python_version()) >= Version("3.14")
 
-# torch compile requires GIL=1 or python 3.13.3t with GIL=0
+# torch compile requires GIL=1, or GIL=0 with Python >= 3.13.3 and torch >= 2.8
 def log_gil_requirements_for(feature: str):
-    log.warn.once(f"Feature `{feature}` requires Python < 3.14 and Python GIL enabled and Python >= 3.13.3T (T for Threading-Free edition of Python) plus Torch 2.8. Feature is currently skipped/disabled.")
+    log.warn.once(
+        f"Feature `{feature}` requires GIL enabled, or GIL disabled with Python >= 3.13.3 "
+        f"and torch >= 2.8 (>= 2.10 for Python 3.14), plus torch >= 2.6 overall. "
+        f"Feature is currently skipped/disabled."
+    )

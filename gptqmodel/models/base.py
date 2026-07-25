@@ -1135,10 +1135,10 @@ class BaseQModel(nn.Module):
         embed_quant_config: Optional[QuantizeEmbedConfig] = None,
     ):
         from ..adapter.adapter import Lora
+        from ..looper.analysis_processor import AnalysisProcessor
         from ..looper.eora_processor import EoraProcessor
         from ..looper.module_looper import ModuleLooper
         from ..looper.module_preprocessor import ModulePreProcessor
-        from ..looper.analysis_processor import AnalysisProcessor
         from ..quantization.config import AnalysisConfig
 
         needs_lora = isinstance(self.quantize_config.adapter, Lora)
@@ -1881,7 +1881,7 @@ class BaseQModel(nn.Module):
             log.warn("model is not quantized, skip compiling...")
             return self
 
-        if TORCH_HAS_COMPILE:
+        if not TORCH_HAS_COMPILE:
             self.compiled = False
             log.warn("To use compile(), you need to have torch version >= 2.6.0, please "
                            "upgrade it by `pip install -U torch torchaudio torchvision`")

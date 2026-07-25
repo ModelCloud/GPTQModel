@@ -121,7 +121,8 @@ class GPTAQ(GPTQ):
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
 
-        # TODO compilation failure for Torch >= 2.8
+        # `hessian_inverse` compilation remains unsafe on torch >= 2.8
+        # (Inductor `tangents_token` errors on 2.13). Keep eager for modern PyTorch.
         if not TORCH_GTE_28:
             self.hessian_inverse = torch_compile(self.hessian_inverse)
 

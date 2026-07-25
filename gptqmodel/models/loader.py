@@ -34,6 +34,7 @@ from transformers.utils import is_flash_attn_2_available
 from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
+from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.gguf import GGUFTorchLinear
 from ..quantization import QuantizeConfig
@@ -556,9 +557,10 @@ def ModelLoader(cls):
             device: Optional[Union[str, int]] = None,
             **model_init_kwargs,
     ):
-        # quantization is unsafe with GIL=0 and torch.compile/graphs
-        import torch._dynamo
-        torch._dynamo.disable()
+        # Compilation during quantization is gated by `torch_compile` in `utils/torch`
+        # (`hessian_inverse` compilation stays disabled). Do not globally disable
+        # dynamo here; that would also suppress legitimate `TorchLinear` and
+        # `model.optimize()` compilation after quantization.
 
         pretrained_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             pretrained_model_id_or_path,
@@ -1568,7 +1570,10 @@ def ModelLoader(cls):
                         f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                     )
 
-                if preload_qlinear_kernel.REQUIRES_FORMAT_V2:
+                if any(
+                    isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
+                    for m in model.modules()
+                ):
                     model = convert_gptq_v1_to_v2_format(
                         model,
                         cfg=qcfg,

@@ -32,8 +32,6 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
-from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
-
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (
@@ -429,7 +427,7 @@ def make_quant(
         elif qcfg.quant_method == METHOD.AWQ and format == FORMAT.GEMM:
             backend = BACKEND.AWQ_TORCH
 
-    # returns multiple validated kernels
+    # returns multiple validated kernels across all effective dynamic contracts
     quant_linear_candidates = select_quant_linear(
         bits=bits,
         group_size=group_size,
@@ -439,9 +437,7 @@ def make_quant(
         format=format,
         quant_method=export_quant_method,
         pack=pack,
-        # Select the default contract here. create_quant_layer validates and
-        # selects each dynamic module against its own effective contract.
-        dynamic=None,
+        dynamic=dynamic,
         device=device,
         pack_dtype=pack_dtype,
         dtype=dtype,
@@ -730,8 +726,11 @@ def hf_convert_gptq_v1_to_v2_format(
     meta: Optional[Dict[str, any]],
 ) -> Tuple[nn.Module, bool]:
     if checkpoint_format == "gptq":
-        # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-        if qlinear_kernel is MarlinLinear:
+        # skip v1 to v2 conversion when no loaded quant module requires v2
+        if not any(
+            isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
+            for m in model.modules()
+        ):
             return model, False
 
         cfg = QuantizeConfig(bits=bits)
@@ -987,7 +986,9 @@ def pack_module(
         layers[name] = layer
         qModules[name] = module
 
-    module_cls = type(module)
+    # Use the module's actual class when it is a real BaseQuantLinear; otherwise
+    # fall back to the caller-supplied representative class (e.g. unit-test mocks).
+    module_cls = type(module) if isinstance(module, BaseQuantLinear) else quant_linear_cls
 
     # TODO FIX ME..remove hard coded qqq pack
     if module_cls.QUANT_TYPE == "qqq":

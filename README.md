@@ -640,6 +640,94 @@ dynamic = {
 
 ```
 
+### Statistically Lossless Quantization (SLQ)
+
+SLQ utilities (`gptqmodel.quantization.slq`) implement the techniques from
+[arXiv:2605.02404](https://arxiv.org/abs/2605.02404) and turn them into a
+per-layer bitwidth allocation. The allocation is delivered as a
+`QuantizeConfig.dynamic` dict, so the existing GPTQ/AWQ processors quantize each
+module at its assigned bitwidth.
+
+A minimal pipeline:
+
+```python
+from gptqmodel import GPTQModel
+from gptqmodel.quantization import QuantizeConfig
+from gptqmodel.quantization.slq import (
+    allocate_bitwidth_ilp,
+    build_dynamic_bits,
+    linear_sensitivity,
+)
+
+# 1. Load a dense model for weight analysis.
+model_id = "Qwen/Qwen3-8B"
+model = GPTQModel.load(
+    model_id,
+    QuantizeConfig(bits=3, group_size=32),
+)
+model = model.model.to("cuda")
+
+# 2. Collect 2-D weights and candidate bitwidths.
+weights, names = [], []
+for name, param in model.named_parameters():
+    if param.ndim == 2:
+        weights.append(param.detach())
+        names.append(name)
+
+candidate_bits = [2, 3, 4]
+
+# 3. Build a per-layer reconstruction-error cost matrix.
+costs = linear_sensitivity(weights, candidate_bits, symmetric=True)
+
+# 4. Solve for an average budget of ~3.2 bits per weight.
+#    Use parameter counts (or layer sizes) as weights.
+param_counts = [w.numel() for w in weights]
+assignment = allocate_bitwidth_ilp(
+    costs,
+    candidate_bits,
+    weights=param_counts,
+    budget=3.2,
+)
+
+# 5. Convert the assignment into QuantizeConfig.dynamic.
+dynamic = build_dynamic_bits(names, candidate_bits, assignment)
+
+quant_config = QuantizeConfig(
+    bits=3,
+    group_size=32,
+    desc_act=False,
+    sym=True,
+    act_group_aware=True,
+    scale_search="activation",
+    dynamic=dynamic,
+)
+
+# 6. Quantize with the mixed-bitwidth config.
+#    calibration_dataset is a list of text strings or None for weight-only methods.
+quantized = GPTQModel.load(model_id, quant_config)
+quantized.quantize(calibration_dataset, batch_size=1)
+quantized.save("Qwen3-8B-SLQ-3b2")
+```
+
+Key SLQ helpers:
+
+* `linear_sensitivity` / `shapley_sensitivity`: build a cost matrix that
+  predicts quantization degradation for each candidate bitwidth.
+* `allocate_bitwidth_ilp`: solve the mixed-integer allocation for a target
+  average bitwidth or a target quality bound.
+* `binary_search_budget`: find the smallest budget that satisfies a custom
+  predicate (e.g. a distribution-lossless or task-lossless check).
+* `build_dynamic_bits`: convert the integer assignment into the
+  `QuantizeConfig.dynamic` regex-key format used by GPT-QModel.
+* `TaskLosslessCalibrator` / `DistributionLosslessCalibrator`: higher-level
+  calibrators that drive the budget search with task-loss and distribution-loss
+  checks.
+
+For a complete, GPU-aware end-to-end example see
+[`scripts/slq_analyze_and_quantize_qwen3_8b.py`](scripts/slq_analyze_and_quantize_qwen3_8b.py).
+Unit tests for the SLQ utilities live under
+[`tests/quantization/slq/`](tests/quantization/slq/).
+
 ### Group Aware Reordering (GAR)
 
 Group Aware Reordering (GAR) is an enhanced activation reordering scheme developed by Intel to improve the accuracy of quantized models without incurring additional inference overhead. Unlike traditional activation reordering, GAR restricts permutations to within individual groups or rearrangements of entire groups. This ensures each group's associated scales and zero-points remain efficiently accessible during inference, thereby avoiding any inference-time overhead.
@@ -711,6 +799,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
+* Humming Kernel: [InclusionAI](https://github.com/inclusionAI), vendored into `gptqmodel/humming` under the Apache-2.0 license with original attribution preserved in each source file.
 
 ## Citations:
 
