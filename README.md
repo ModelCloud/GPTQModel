@@ -938,3 +938,109 @@ from gptqmodel import TritonPatch
 # Fix Triton crashing under nogil/free-threading Python 3.13+ where the kernel cache storage in Triton is not thread-safe
 TritonPatch.apply()
 ```
+
+## GPU Allocator
+
+`gpu_allocator/` is a standalone, thread-safe, free-threading-compatible GPU lease manager. It lets multiple Devin sessions time-share the same machine's GPUs by acquiring exclusive or shared leases right before GPU work and releasing them while idle.
+
+### Start the server
+
+```bash
+python -m gpu_allocator.server --host 0.0.0.0 --port 17351
+```
+
+The server discovers GPUs via `nvidia-smi`, sorts them by PCI bus id, and exposes each GPU as:
+
+- `pci_order_index` — `0, 1, 2, ...` after PCI-bus sorting.
+- `pci_bus_id` — full PCI bus address, e.g. `00000000:25:00.0`.
+- `uuid` — GPU UUID, e.g. `GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2`.
+- `name` and `memory_total_mib`.
+
+### Request GPUs from the CLI
+
+Acquire two GPUs and print the result as JSON:
+
+```bash
+python -m gpu_allocator.cli --base-url http://127.0.0.1:17351 acquire -n 2 --style uuid
+```
+
+`--style` controls how the returned GPUs are identified:
+
+- `uuid` (default, safest and unambiguous).
+- `pci_bus_id`.
+- `pci_order_index` (requires `CUDA_DEVICE_ORDER=PCI_BUS_ID` to be set in the consumer).
+
+`--format` can be `json`, `shell`, or `ids`. `shell` prints `export` statements you can `eval`:
+
+```bash
+eval $(python -m gpu_allocator.cli --base-url http://127.0.0.1:17351 acquire -n 2 --style uuid --format shell)
+# CUDA_VISIBLE_DEVICES, GPU_ALLOCATOR_LEASE_ID, and GPU_ALLOCATOR_GPU_STYLE are now set
+```
+
+### Run a command under a temporary GPU lease
+
+`run` acquires GPUs, sets `CUDA_VISIBLE_DEVICES` and `CUDA_DEVICE_ORDER` in the child environment, runs your command, and releases the lease when the command exits:
+
+```bash
+python -m gpu_allocator.cli --base-url http://127.0.0.1:17351 run -n 2 -- python bench.py
+```
+
+### Release a lease
+
+If you acquired GPUs directly, release them by lease id:
+
+```bash
+python -m gpu_allocator.cli --base-url http://127.0.0.1:17351 release --lease-id <lease_id>
+```
+
+### Client modes
+
+- `timeout=0` (default for `acquire`) returns immediately with no GPUs if none are free.
+- `timeout>0` blocks up to that many seconds.
+- omitting `timeout` or passing a negative value blocks indefinitely until GPUs are available.
+
+Use `--shared` to allow the lease to overlap with other shared leases on the same GPUs; the default is `--exclusive`, which blocks any other lease on those GPUs.
+
+### Python API
+
+```python
+from gpu_allocator import acquire
+
+with acquire(2, base_url="http://127.0.0.1:17351", exclusive=True) as lease:
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = lease.as_cuda_visible_devices("uuid")
+    # GPU work here
+```
+
+### Environment variables
+
+- `GPU_ALLOCATOR_URL` — default `http://127.0.0.1:17351` for the CLI and Python client.
+- `DEVIN_OUTPOST_SESSION_ID` / `DEVIN_SESSION_ID` — default session identifier if `--session-id` is not supplied.
+- `GPU_ALLOCATOR_LEASE_ID` — set by the `run` subcommand in the child process.
+
+### Devin session monitoring
+
+The server can periodically ask the Devin API whether a session is still alive and release its GPUs if the session has terminated (zombie allocation cleanup). To enable it, provide a Devin API token and organization id:
+
+```bash
+export DEVIN_API_TOKEN="cog_..."
+export DEVIN_ORG_ID="org_..."
+python -m gpu_allocator.server
+```
+
+Or pass them as CLI flags:
+
+```bash
+python -m gpu_allocator.server \
+  --devin-api-token cog_... \
+  --devin-org-id org_...
+```
+
+Sessions that do not look like Devin ids (not starting with `devin-`) are ignored by the monitor and rely on TTL/renewal instead.
+
+### Tests
+
+```bash
+python -m pytest tests/test_gpu_allocator.py -q
+PYTHON_GIL=0 python -m pytest tests/test_gpu_allocator.py -q
+```

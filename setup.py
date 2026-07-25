@@ -14,7 +14,9 @@ def _runtime_version() -> str:
     return version_vars["__version__"]
 
 
-packages = find_packages(exclude=("tests", "tests.*"))
+packages = find_packages(
+    exclude=("tests", "tests.*", "gpu_allocator", "gpu_allocator.*")
+)
 for package_name in find_namespace_packages(include=("gptqmodel_ext.*",)):
     if package_name not in packages:
         packages.append(package_name)
