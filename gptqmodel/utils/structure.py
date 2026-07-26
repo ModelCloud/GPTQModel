@@ -605,6 +605,13 @@ class _LazyTurtleCopyJob:
     target_tensor: torch.Tensor
 
 
+def _log_info(msg: str, *args) -> None:
+    """Emit an info log if the bound logger supports it (tests may monkeypatch `log`)."""
+    info = getattr(log, "info", None)
+    if info is not None:
+        info(msg, *args)
+
+
 def _lazy_turtle_parallel_workers(num_jobs: int) -> int:
     """Return the number of parallel materialization workers to use for LazyTurtle loads."""
 
@@ -2425,11 +2432,23 @@ class LazyTurtle:
             return job.rel_name, _tensor_nbytes(tensor), time.perf_counter() - read_start
 
         max_workers = _lazy_turtle_parallel_workers(len(jobs))
+        group_start = time.perf_counter()
+        total_read_bytes = 0
+        _log_info(
+            "LazyTurtle: loading %d grouped tensors from %d shard(s) using %d worker(s) on %s [module=%s]",
+            len(jobs),
+            len(shard_handlers),
+            max_workers,
+            str(device),
+            module_path or "<root>",
+        )
+
         if max_workers > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [executor.submit(_worker, job) for job in jobs]
                 for future in futures:
                     rel_name, nbytes, read_time = future.result()
+                    total_read_bytes += nbytes
                     disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
                     loaded_entries += 1
                     if progress is not None:
@@ -2439,6 +2458,7 @@ class LazyTurtle:
         else:
             for job in jobs:
                 rel_name, nbytes, read_time = _worker(job)
+                total_read_bytes += nbytes
                 disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
                 loaded_entries += 1
                 if progress is not None:
@@ -2476,12 +2496,24 @@ class LazyTurtle:
             new_buffer = source.to(device=device)
             t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
             t_bufs[rel_name] = new_buffer
-            disk_telemetry.record_read(_tensor_nbytes(tensor), time.perf_counter() - read_start, "lazy_turtle")
+            nbytes = _tensor_nbytes(tensor)
+            total_read_bytes += nbytes
+            disk_telemetry.record_read(nbytes, time.perf_counter() - read_start, "lazy_turtle")
             loaded_entries += 1
             if progress is not None:
                 progress.current_iter_step = loaded_entries
                 progress.subtitle(f"{rel_name}: {loaded_entries}/{total_entries}")
                 progress.draw()
+
+        elapsed = time.perf_counter() - group_start
+        _log_info(
+            "LazyTurtle: loaded %d grouped tensors in %.3fs using %d worker(s), %.2f MB [module=%s]",
+            len(jobs) + len(deferred_buffers),
+            elapsed,
+            max_workers,
+            total_read_bytes / (1024 * 1024),
+            module_path or "<root>",
+        )
 
         return loaded_entries
 
