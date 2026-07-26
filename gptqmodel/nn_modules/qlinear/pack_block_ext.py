@@ -56,3 +56,30 @@ def pack_qqq_cpu(int4_matrix: Tensor, bits: int) -> Tensor:
         int4_matrix,
         int(bits),
     )
+
+
+def hessian_xtx_cpu(
+    X: Tensor,
+    out: Tensor | None = None,
+    beta: float = 0.0,
+    alpha: float = 1.0,
+) -> Tensor:
+    ext = load_pack_block_extension()
+    if ext is None:
+        raise RuntimeError("hessian_xtx_cpu extension unavailable")
+    return torch.ops.gptqmodel.hessian_xtx_cpu(
+        X,
+        out,
+        float(beta),
+        float(alpha),
+    )
+
+
+def hessian_inverse_cholesky_cpu(H: Tensor, diag_delta: Tensor) -> Tuple[Tensor, Tensor]:
+    ext = load_pack_block_extension()
+    if ext is None:
+        raise RuntimeError("hessian_inverse_cholesky_cpu extension unavailable")
+    return torch.ops.gptqmodel.hessian_inverse_cholesky_cpu(
+        H,
+        diag_delta,
+    )

@@ -716,6 +716,41 @@ class GPTQ:
                 return out
             return torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
+        # CPU fallback: route to the compiled extension which calls ATen's
+        # AVX-512/MKL-optimized addmm path with lower Python overhead than
+        # torch.addmm_ in the GPU-OOM fallback loop.
+        if matrix.device.type == "cpu":
+            from ..nn_modules.qlinear.pack_block_ext import hessian_xtx_cpu
+
+            stage_dtype = self.preferred_staging_dtype(matrix.dtype, matrix.device)
+            chunk_size = self.resolve_hessian_chunk_size(rows, stage_dtype)
+            self._borrow_workspace_stage_dtype = stage_dtype
+            self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
+
+            if chunk_size is None:
+                return hessian_xtx_cpu(matrix, out, beta=1.0 if out is not None else 0.0, alpha=1.0)
+
+            if out is None:
+                xtx = torch.zeros(
+                    (self.columns, self.columns),
+                    dtype=torch.float32,
+                    device=matrix.device,
+                )
+            else:
+                xtx = out
+
+            for start in range(0, rows, chunk_size):
+                rows_this = min(chunk_size, rows - start)
+                source = matrix[start:start + rows_this]
+                with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
+                    if out is None:
+                        xtx.add_(hessian_xtx_cpu(materialized, None, beta=0.0, alpha=1.0))
+                    else:
+                        hessian_xtx_cpu(materialized, xtx, beta=1.0, alpha=1.0)
+
+            torch_sync(device=xtx.device)
+            return xtx
+
         stage_dtype = self.preferred_staging_dtype(matrix.dtype, matrix.device)
         chunk_size = self.resolve_hessian_chunk_size(rows, stage_dtype)
         self._borrow_workspace_stage_dtype = stage_dtype
@@ -1288,9 +1323,18 @@ class GPTQ:
                             break
                     continue
 
-                L, success = _HESSIAN_INVERSE_TRY(H, diag_delta)
+                if H.device.type == "cpu":
+                    # Compiled CPU path: fuses diagonal damp + Cholesky + inverse
+                    # into one extension call using ATen's MKL/LAPACK AVX-512 path.
+                    from ..nn_modules.qlinear.pack_block_ext import hessian_inverse_cholesky_cpu
+
+                    Hinv_result, success = hessian_inverse_cholesky_cpu(H, diag_delta)
+                else:
+                    L, success = _HESSIAN_INVERSE_TRY(H, diag_delta)
+                    if success.item():
+                        Hinv_result = _HESSIAN_INVERSE_FACTOR(L)
+
                 if success.item():
-                    Hinv_result = _HESSIAN_INVERSE_FACTOR(L)
                     used_damp = damp
                     if damp_recovery_started:
                         log.warn(

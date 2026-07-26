@@ -1443,6 +1443,96 @@ at::Tensor pack_qqq_cpu(const at::Tensor& int4_matrix, int64_t bits) {
     return q;
 }
 
+// Hessian X^T X accumulation.  This intentionally dispatches to ATen's
+// addmm_out, which on CPU uses MKL/OpenBLAS with AVX-512/AVX2 vectorization,
+// so the result is bit-exact with torch.addmm while removing Python wrapper
+// overhead from the GPU-OOM CPU fallback path.
+at::Tensor hessian_xtx_cpu(
+    const at::Tensor& X,
+    const c10::optional<at::Tensor>& out_opt,
+    double beta,
+    double alpha) {
+    TORCH_CHECK(X.device().is_cpu(), "hessian_xtx_cpu: X must reside on CPU");
+    TORCH_CHECK(X.dim() == 2, "hessian_xtx_cpu: X must be 2D");
+
+    const int64_t rows = X.size(0);
+    const int64_t cols = X.size(1);
+
+    at::Tensor out;
+    if (out_opt.has_value()) {
+        out = *out_opt;
+        TORCH_CHECK(
+            out.sizes() == at::IntArrayRef({cols, cols}),
+            "hessian_xtx_cpu: out shape must be (",
+            cols,
+            ", ",
+            cols,
+            "), got ",
+            out.sizes());
+        TORCH_CHECK(out.device().is_cpu(), "hessian_xtx_cpu: out must reside on CPU");
+        TORCH_CHECK(out.scalar_type() == at::kFloat, "hessian_xtx_cpu: out must be float32");
+    } else {
+        out = at::zeros({cols, cols}, X.options().dtype(at::kFloat));
+    }
+
+    if (rows == 0 || alpha == 0.0) {
+        if (beta == 0.0) {
+            out.zero_();
+        } else {
+            out.mul_(beta);
+        }
+        return out;
+    }
+
+    at::Tensor X_f = X.contiguous().to(at::kFloat);
+
+    if (out_opt.has_value()) {
+        // Match the Python `out.addmm_(mat1.T, mat1, beta=..., alpha=...)`
+        // path bit-exactly so chunked Hessian accumulation stays stable.
+        at::addmm_out(out, out, X_f.t(), X_f, beta, alpha);
+        return out;
+    }
+
+    // No output supplied: mirror `torch.matmul(mat32.T, mat32)` and let ATen
+    // pick the best MKL/OpenBLAS path (including syrk when recognized).
+    at::Tensor prod = at::matmul(X_f.t(), X_f);
+    if (alpha != 1.0) {
+        prod.mul_(alpha);
+    }
+    return prod;
+}
+
+// Hessian inverse via Cholesky.  Clones H, adds diag_delta to the diagonal,
+// attempts Cholesky, and returns the upper Cholesky factor of H^{-1} on
+// success.  Bit-exact with the Python _hessian_inverse_try_cholesky +
+// _hessian_inverse_factor sequence because it uses the same ATen/LAPACK
+// kernels (MKL/LAPACK with AVX-512/AVX2 SIMD on x86).
+std::tuple<at::Tensor, at::Tensor> hessian_inverse_cholesky_cpu(
+    const at::Tensor& H,
+    const at::Tensor& diag_delta) {
+    TORCH_CHECK(H.device().is_cpu(), "hessian_inverse_cholesky_cpu: H must reside on CPU");
+    TORCH_CHECK(H.dim() == 2 && H.size(0) == H.size(1), "hessian_inverse_cholesky_cpu: H must be square");
+    TORCH_CHECK(H.scalar_type() == at::kFloat, "hessian_inverse_cholesky_cpu: H must be float32");
+
+    at::Tensor H_eff = H.clone();
+    if (diag_delta.defined() && diag_delta.numel() > 0) {
+        H_eff.diagonal().add_(diag_delta);
+    }
+
+    auto cholesky_result = at::linalg_cholesky_ex(H_eff, false);
+    at::Tensor L = std::get<0>(cholesky_result);
+    at::Tensor info = std::get<1>(cholesky_result);
+
+    at::Tensor success = (info == 0).view({});
+    at::Tensor Hinv = at::empty({0}, H.options());
+
+    if (success.item<bool>()) {
+        Hinv = at::linalg_cholesky(at::cholesky_inverse(L), true);
+    }
+
+    return {Hinv, success};
+}
+
 } // namespace gptqmodel
 
 TORCH_LIBRARY(gptqmodel, m) {
@@ -1469,5 +1559,21 @@ TORCH_LIBRARY(gptqmodel, m) {
         "pack_qqq_cpu",
         c10::DispatchKey::CPU,
         TORCH_FN(gptqmodel::pack_qqq_cpu)
+    );
+    m.def(
+        "hessian_xtx_cpu(Tensor X, Tensor? out=None, float beta=0, float alpha=1) -> Tensor"
+    );
+    m.impl(
+        "hessian_xtx_cpu",
+        c10::DispatchKey::CPU,
+        TORCH_FN(gptqmodel::hessian_xtx_cpu)
+    );
+    m.def(
+        "hessian_inverse_cholesky_cpu(Tensor H, Tensor diag_delta) -> (Tensor, Tensor)"
+    );
+    m.impl(
+        "hessian_inverse_cholesky_cpu",
+        c10::DispatchKey::CPU,
+        TORCH_FN(gptqmodel::hessian_inverse_cholesky_cpu)
     );
 }
