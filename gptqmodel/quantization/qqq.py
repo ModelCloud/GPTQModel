@@ -573,6 +573,16 @@ class QQQ:
         try:
             if H.device.type == "npu":
                 H = npu_inverse_cholesky_factor(H)
+            elif H.device.type == "cpu":
+                # Compiled CPU extension path: fuses cholesky + inverse + upper-cholesky
+                # into one AVX-512/LAPACK call. diag_delta is zero because the damping
+                # was already applied in-place above.
+                from ..nn_modules.qlinear.pack_block_ext import hessian_inverse_cholesky_cpu
+
+                zero_delta = torch.zeros((), dtype=H.dtype, device=H.device)
+                H, success = hessian_inverse_cholesky_cpu(H, zero_delta)
+                if not success.item():
+                    raise torch._C._LinAlgError("QQQ Hessian Cholesky failed on CPU.")
             else:
                 H = torch.linalg.cholesky(H)
                 H = torch.cholesky_inverse(H)

@@ -896,6 +896,52 @@ def test_hessian_inverse_compile_and_eager_match(dtype):
     torch.testing.assert_close(identity, torch.eye(n, dtype=dtype, device="cuda"), atol=1e-4, rtol=1e-4)
 
 
+def test_hessian_inverse_cpu_extension_matches_eager():
+    """The compiled CPU Hessian inverse op is bit-exact with the eager torch reference."""
+    torch.manual_seed(0)
+    n = 256
+    H = torch.randn(n, n, dtype=torch.float32)
+    H = H @ H.T
+    H.diagonal().add_(0.1)
+
+    from gptqmodel.nn_modules.qlinear.pack_block_ext import hessian_inverse_cholesky_cpu
+
+    damp = torch.tensor(0.05, dtype=torch.float32)
+    Hinv_ext, success = hessian_inverse_cholesky_cpu(H, damp)
+    assert success.item()
+
+    H_eff = H.clone()
+    H_eff.diagonal().add_(damp)
+    L = torch.linalg.cholesky(H_eff)
+    Hinv_ref = torch.linalg.cholesky(torch.cholesky_inverse(L), upper=True)
+
+    assert torch.equal(Hinv_ext, Hinv_ref)
+
+
+def test_hessian_xtx_cpu_extension_matches_eager():
+    """The compiled CPU Hessian X^T X op is bit-exact with torch.matmul and addmm_."""
+    torch.manual_seed(0)
+    rows, cols = 512, 256
+    X1 = torch.randn(rows, cols, dtype=torch.float32)
+    X2 = torch.randn(rows, cols, dtype=torch.float32)
+
+    from gptqmodel.nn_modules.qlinear.pack_block_ext import hessian_xtx_cpu
+
+    # out=None path mirrors torch.matmul(X.T, X)
+    out_ext = hessian_xtx_cpu(X1, None, beta=0.0, alpha=1.0)
+    out_ref = torch.matmul(X1.t(), X1)
+    assert torch.equal(out_ext, out_ref)
+
+    # out=... path mirrors out.addmm_(X.T, X)
+    out = torch.zeros(cols, cols, dtype=torch.float32)
+    out.addmm_(X1.t(), X1, beta=0.0, alpha=1.0)
+    hessian_xtx_cpu(X2, out, beta=1.0, alpha=1.0)
+    out_ref2 = torch.zeros(cols, cols, dtype=torch.float32)
+    out_ref2.addmm_(X1.t(), X1, beta=0.0, alpha=1.0)
+    out_ref2.addmm_(X2.t(), X2, beta=1.0, alpha=1.0)
+    assert torch.equal(out, out_ref2)
+
+
 class TestGPTQHessian:
     """Verify GPTQ Hessian accumulation matches the closed-form reference."""
 
