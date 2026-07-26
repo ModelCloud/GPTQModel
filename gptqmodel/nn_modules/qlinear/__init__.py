@@ -1395,7 +1395,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             int_weight = int_weight.to(t.int32).T.contiguous()
             int_weight = int_weight.numpy().astype(self.pack_np_math_dtype)
 
-            qweight = np.zeros((math.ceil(int_weight.shape[0] / self.pack_factor), int_weight.shape[1]),
+            qweight = np.zeros((math.ceil(int_weight.shape[0] * self.bits / 32), int_weight.shape[1]),
                                dtype=self.pack_np_math_dtype)
             if self.bits in [2, 4, 8]:
                 for row in range(qweight.shape[0]):
@@ -1428,7 +1428,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             self.register_buffer("qweight", t.from_numpy(qweight.astype(self.pack_np_dtype)))
 
             zeros = zeros.numpy().astype(self.pack_np_math_dtype)
-            qzeros = np.zeros((zeros.shape[0], math.ceil(zeros.shape[1] / self.pack_factor)), dtype=self.pack_np_math_dtype)
+            qzeros = np.zeros((zeros.shape[0], math.ceil(zeros.shape[1] * self.bits / 32)), dtype=self.pack_np_math_dtype)
             if self.bits in [2, 4, 8]:
                 for col in range(qzeros.shape[1]):
                     for j in range(self.pack_factor):
