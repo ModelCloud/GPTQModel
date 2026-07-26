@@ -70,8 +70,6 @@ def is_meta_module(m: nn.Module) -> bool:
             return True
     return False
 
-# Serialize access to module.state_dict(), which is not thread-safe under
-# concurrent calls that mutate the same parent module.
 def _prepare_offload_directory(target_dir: str) -> None:
     if os.path.isdir(target_dir):
         shutil.rmtree(target_dir)
@@ -130,34 +128,63 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
     return index
 
 
-def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
-    _offload_to_disk_impl(module=module, model=model, disk_path=disk_path)
+def offload_to_disk(
+    module: List[str] | nn.Module,
+    model: nn.Module,
+    disk_path: str = ".",
+    module_full_name: Optional[str] = None,
+):
+    """Offload a module's tensors to disk.
+
+    When `module` is a single `nn.Module`, callers should supply the already-known
+    `module_full_name` so the implementation can avoid `model.named_modules()`,
+    which is not safe to call while other threads are mutating the model tree.
+    """
+    _offload_to_disk_impl(
+        module=module,
+        model=model,
+        disk_path=disk_path,
+        module_full_name=module_full_name,
+    )
 
 
-def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
+def _offload_to_disk_impl(
+    module: List[str] | nn.Module,
+    model: nn.Module,
+    disk_path: str = ".",
+    module_full_name: Optional[str] = None,
+):
+    """Dispatch offload work for a single module or a list of dotted module paths.
+
+    The whole-model `named_modules()` scan in `get_module_fullname()` is only
+    used as a fallback when `module_full_name` is not supplied. Finalization
+    callers must pass the known full name to keep the path tree-scan-free and
+    safe for concurrent per-leaf replacement.
+    """
     assert module is not None
     assert model is not None
 
-    #with _lock:
     if isinstance(module, List):
+        # Each `name` is already a full dotted path, so no tree lookup is needed.
         for name in module:
             m = get_submodule(model, name)
             # unwrap named module
             if isinstance(m, NamedModule):
-                # print(f"offloading named module: {module.full_name}")
                 m = m.module
 
-            full_name = get_module_fullname(model=model, module=m)
-            _offload_disk(module=m, name=full_name, disk_path=disk_path)
+            _offload_disk(module=m, name=name, disk_path=disk_path)
     else:
         # unwrap named module
         if isinstance(module, NamedModule):
-            # print(f"offloading named module: {module.full_name}")
             module = module.module
 
-        full_name = get_module_fullname(model=model, module=module)
+        # Prefer caller-supplied path and skip `named_modules()` whenever
+        # possible, because that traversal is unsafe while another thread is
+        # replacing a different leaf under a shared ancestor.
+        if module_full_name is None:
+            module_full_name = get_module_fullname(model=model, module=module)
 
-        _offload_disk(module=module, name=full_name, disk_path=disk_path)
+        _offload_disk(module=module, name=module_full_name, disk_path=disk_path)
 
     if hasattr(module, "config") and hasattr(module, "tie_weights") and getattr(module.config,
                                              "tie_word_embeddings", False):
@@ -172,6 +199,9 @@ def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_
 #offload_to_disk = _OFFLOAD_SAFE.offload_to_disk
 
 def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
+    # Serialize `setattr`/hook mutations on siblings under the same parent.
+    # `parent_module_lock` uses the leaf's parent path, so replacing unrelated
+    # branches can still run in parallel while this per-parent write completes.
     with parent_module_lock(name):
         _offload_disk_locked(module=module, name=name, disk_path=disk_path)
 
@@ -184,8 +214,6 @@ def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = "."):
     m_device = get_device(module)
     if m_device.type == "cuda":
         torch.cuda.set_device(m_device)
-
-    # print(f"device_map base_modules: {device_map}")
 
     # skip modules that have no parameters and no buffers since they can't be offloaded
     has_params  = any(p.numel() > 0 for p in module.parameters(recurse=False))

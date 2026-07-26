@@ -92,6 +92,13 @@ def _should_drain_finalize_futures_synchronously(
 ) -> bool:
     """Decide whether one layer must finish finalization before the next begins.
 
+    This is the lifecycle control for serial vs. parallel layer finalization.
+    The default (False) lets a background watcher drain finalizer futures while
+    the main loop proceeds to the next layer, so module packing and disk offload
+    can overlap the next layer's work. The tree-race safety work guarantees
+    that per-leaf replacement and `state_dict()` access in those workers do not
+    corrupt the module tree.
+
     AWQ scale search consumes activations produced by already-processed
     previous layers. Letting AWQ finalizers overlap the next layer makes those
     activations timing-sensitive: a faster capture path can change whether
@@ -121,6 +128,8 @@ def _should_drain_finalize_futures_synchronously(
     }
     if len(active_accelerators) > 1:
         return True
+    # AWQ/ParoQuant finalizers are drained synchronously for correctness/VRAM
+    # reasons noted above; everything else defaults to async parallel drain.
     return any(isinstance(process, (AWQProcessor, ParoQuantProcessor)) for process, *_ in finalize_tasks)
 
 
@@ -831,7 +840,12 @@ def run_layer_stage(
 
                 @torch.inference_mode()
                 def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
-                    """Runs processor finalization and optional disk offload for one module."""
+                    """Runs processor finalization and optional disk offload for one module.
+
+                    The processor returns the new quantized module so we can pass it
+                    (and the already-known full name) to `offload_to_disk()` without
+                    triggering a `model.named_modules()` scan from inside the worker.
+                    """
 
                     resolved_label = module_label or getattr(module, "full_name", getattr(module, "name", ""))
                     module_start = time.perf_counter()
@@ -845,7 +859,7 @@ def run_layer_stage(
                             logger=log,
                             module_name=resolved_label,
                         ):
-                            process.submodule_finalize(module, looper.gptq_model)
+                            qmodule = process.submodule_finalize(module, looper.gptq_model)
                         submodule_elapsed = time.perf_counter() - submodule_start
 
                         # Disk offload (lifecycle TODO note preserved)
@@ -853,23 +867,23 @@ def run_layer_stage(
                             quant_config = getattr(looper.gptq_model, "quantize_config", None)
                             if quant_config and getattr(quant_config, "offload_to_disk", False):
                                 offload_path = getattr(quant_config, "offload_to_disk_path", None)
-                                if offload_path:
+                                if offload_path and qmodule is not None:
                                     module_full_name = getattr(module, "full_name", None)
-                                    target_module = (
-                                        looper.gptq_model.model.get_submodule(module_full_name)
-                                        if module_full_name
-                                        else module
-                                    )
                                     offload_start = time.perf_counter() if region_timer is not None else None
                                     with log_time_block(
                                         "disk_offload",
                                         logger=log,
                                         module_name=resolved_label,
                                     ):
+                                        # Pass the quantized module and its full
+                                        # name to avoid `get_module_fullname()`,
+                                        # which scans `model.named_modules()` and
+                                        # races with concurrent sibling updates.
                                         offload_to_disk(
                                             model=looper.gptq_model.model,
-                                            module=target_module,
+                                            module=qmodule,
                                             disk_path=offload_path,
+                                            module_full_name=module_full_name,
                                         )
                                     offload_elapsed = time.perf_counter() - offload_start
                                     if region_timer is not None and offload_start is not None:
@@ -878,7 +892,7 @@ def run_layer_stage(
                                             offload_elapsed,
                                             source=resolved_label,
                                         )
-                                else:
+                                elif not offload_path:
                                     log.warning(
                                         "Skipping disk offload for %s: no offload path configured",
                                         module_label,
@@ -909,8 +923,10 @@ def run_layer_stage(
                     # ).draw()
 
                 for index, (process, module, module_label, target_dev, layer_idx) in enumerate(finalize_tasks, start=1):
-                    # Schedule finalize work on the device thread pool so CPU
-                    # bound tasks do not stall the main orchestration loop.
+                    # Schedule finalize work on the device thread pool so CPU- and
+                    # I/O-bound pack/offload work can run in parallel. Each worker
+                    # only mutates one leaf under its direct parent lock, and the
+                    # whole-tree scans have been removed from the finalize path.
                     future = DEVICE_THREAD_POOL.submit(
                         target_dev,
                         _finalize_on_worker,

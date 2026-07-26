@@ -483,12 +483,12 @@ class WeightOnlyLooper:
         )
         try:
             with log_time_block("weight_only_submodule_finalize", logger=log, module_name=module_label):
-                self.processor.submodule_finalize(
+                qmodule = self.processor.submodule_finalize(
                     named,
                     self.gptq_model,
                     qcfg=active_qcfg,
                 )
-            self._offload_quantized_module(named)
+            self._offload_quantized_module(named, qmodule=qmodule)
         finally:
             duration = time.perf_counter() - start
             timer = getattr(self.gptq_model, "quant_region_timer", None)
@@ -524,7 +524,14 @@ class WeightOnlyLooper:
         self,
         quantized_modules: List[Tuple[NamedModule, RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig]],
     ) -> None:
-        """Finalize one subset, using the device pool when multiple finalize targets exist."""
+        """Finalize one subset.
+
+        By default this dispatches to the device thread pool whenever there is
+        more than one module to finalize. Because the finalize path no longer
+        performs whole-model `named_modules()` scans and only mutates one leaf
+        under its direct parent lock, it is safe to pack/offload many sibling
+        modules concurrently.
+        """
 
         if not quantized_modules:
             return
@@ -533,11 +540,7 @@ class WeightOnlyLooper:
             (named, active_qcfg, self._finalize_target_device(active_qcfg))
             for named, active_qcfg in quantized_modules
         ]
-        unique_targets = {
-            (target_device.type, target_device.index)
-            for _, _, target_device in finalize_tasks
-        }
-        use_parallel_finalize = len(finalize_tasks) > 1 and len(unique_targets) > 1
+        use_parallel_finalize = len(finalize_tasks) > 1
 
         finalize_count = len(finalize_tasks)
         finalize_pb = log.pb(range(finalize_count)).manual().set(show_left_steps=False)
@@ -591,6 +594,9 @@ class WeightOnlyLooper:
                     _advance_finalize_progress(named, module_label)
                 return
 
+            # Run finalization in parallel on the device thread pool. Each task
+            # replaces a single leaf and the parent lock serializes work on the
+            # same direct parent, so sibling experts can finalize concurrently.
             future_map = {
                 DEVICE_THREAD_POOL.submit(
                     target_device,
@@ -846,7 +852,7 @@ class WeightOnlyLooper:
             self.processor.layer_count = layer_count
         return quantized_names
 
-    def _offload_quantized_module(self, module: NamedModule) -> None:
+    def _offload_quantized_module(self, module: NamedModule, qmodule: Optional[torch.nn.Module] = None) -> None:
         """Persist an already-quantized module to disk when offload is enabled."""
         quant_config = getattr(self.gptq_model, "quantize_config", None)
         if not quant_config or not getattr(quant_config, "offload_to_disk", False):
@@ -855,16 +861,15 @@ class WeightOnlyLooper:
         if not offload_path:
             return
 
+        if qmodule is None:
+            return
+
         module_full_name = getattr(module, "full_name", None)
-        target_module = (
-            self.gptq_model.model.get_submodule(module_full_name)
-            if module_full_name
-            else module
-        )
         offload_to_disk(
             model=self.gptq_model.model,
-            module=target_module,
+            module=qmodule,
             disk_path=offload_path,
+            module_full_name=module_full_name,
         )
 
     def loop(self, **kwargs):

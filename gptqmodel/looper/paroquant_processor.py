@@ -69,7 +69,6 @@ from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import (
     create_quant_module,
-    find_modules,
     get_module_by_name_prefix,
     move_to,
     nested_move_to,
@@ -2829,7 +2828,7 @@ class ParoQuantProcessor(LoopProcessor):
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         """Pack one optimized float module into its ParoQuant runtime form."""
-        self.pack_module(module, model=model)
+        return self.pack_module(module, model=model)
 
     def pack_module(self, module: NamedModule, model: BaseQModel):
         """Replace a float module with a packed ParoQuant quantized module."""
@@ -2845,16 +2844,20 @@ class ParoQuantProcessor(LoopProcessor):
 
         module.weight.data = move_to(pack_weight, device=CPU)
         quant_linear_cls = self._resolve_qlinear_kernel(module.full_name)
-        layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
+        parent_key = getattr(module, "full_name", getattr(module, "name", None))
+        # Snapshot the original leaf and use the quantized module returned by
+        # create_quant_module. This keeps `submodule_finalize` free of whole-tree
+        # `find_modules()` scans that are unsafe under concurrent replacements.
+        original_layer = module.module
 
         with log_time_block(
             "create_quant_module",
             logger=log,
             module_name=module_label,
         ):
-            with parent_module_lock(module.full_name):
-                create_quant_module(
+            with parent_module_lock(parent_key):
+                qmodule = create_quant_module(
                     name=module.full_name,
                     linear_cls=quant_linear_cls,
                     bits=self.qcfg.runtime_bits,
@@ -2872,17 +2875,19 @@ class ParoQuantProcessor(LoopProcessor):
                     init_kwargs=self.qcfg.quant_linear_init_kwargs(),
                 )
 
-        qmodules = {
-            name: submodule
-            for name, submodule in find_modules(model.model, [quant_linear_cls]).items()
-            if name == module.full_name
-        }
+        if qmodule is None:
+            return None
+
+        # Pack using the installed quantized module and captured original leaf
+        # directly; one-entry dicts remove the need for a `find_modules()` scan.
+        qmodules = {module.full_name: qmodule}
+        layers = {module.full_name: original_layer}
         with log_time_block(
             "pack",
             logger=log,
             module_name=module_label,
         ):
-            with parent_module_lock(module.full_name):
+            with parent_module_lock(parent_key):
                 pack_module(
                     name=module.full_name,
                     qModules=qmodules,
@@ -2891,11 +2896,10 @@ class ParoQuantProcessor(LoopProcessor):
                     q_g_idx=None,
                     layers=layers,
                     quant_linear_cls=quant_linear_cls,
-                    lock=self.lock,
+                    lock=None,
                     quantize_config=self.qcfg,
                 )
 
-        qmodule = qmodules[module.full_name]
         if not isinstance(qmodule, ParoLinear):
             raise TypeError(
                 f"Expected `{module.full_name}` to be packed as ParoLinear, got `{type(qmodule).__name__}`."
@@ -2907,6 +2911,8 @@ class ParoQuantProcessor(LoopProcessor):
             channel_scales.to(device=qmodule.channel_scales.device, dtype=qmodule.channel_scales.dtype)
         )
         qmodule.post_init()
+
+        return qmodule
 
     def finalize(self, model: BaseQModel, **kwargs):
         """Mark the model as ParoQuant-quantized before shared finalization work."""

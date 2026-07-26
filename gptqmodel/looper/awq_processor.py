@@ -2531,7 +2531,7 @@ class AWQProcessor(LoopProcessor):
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         """Delegates AWQ module packing to the shared pack helper."""
 
-        self.pack_module(module)
+        return self.pack_module(module)
 
     def pack_module(self, module):
         """Creates the AWQ quantized module and packs saved scales/zero-points into it."""
@@ -2555,9 +2555,12 @@ class AWQProcessor(LoopProcessor):
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
         quant_linear_cls = self._resolve_qlinear_kernel(module.full_name)
-        layers = find_modules(self.gptq_model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
+        # Capture the original leaf and use the module returned by
+        # create_quant_module directly. Avoid model-wide scans that race with
+        # concurrent sibling replacements under a shared parent.
+        original_layer = module.module
         # replace module with quantized module
         timer = getattr(self.gptq_model, "quant_region_timer", None)
         create_start = time.perf_counter() if timer is not None else None
@@ -2567,7 +2570,7 @@ class AWQProcessor(LoopProcessor):
                 module_name=module_label,
         ):
             with parent_module_lock(parent_key):
-                create_quant_module(
+                qmodule = create_quant_module(
                     name=module.full_name,
                     linear_cls=quant_linear_cls,
                     bits=self.qcfg.runtime_bits,
@@ -2589,12 +2592,14 @@ class AWQProcessor(LoopProcessor):
                 time.perf_counter() - create_start,
                 source=module_label,
             )
-        # pack module
-        qModules = {
-            name: submodule
-            for name, submodule in find_modules(self.gptq_model.model, [quant_linear_cls]).items()
-            if name == module.full_name
-        }
+
+        if qmodule is None:
+            return None
+
+        # pack module using the already-installed quantized module and the
+        # original leaf captured above. One-entry dicts avoid `find_modules()`.
+        qModules = {module.full_name: qmodule}
+        layers = {module.full_name: original_layer}
         pack_start = time.perf_counter() if timer is not None else None
         with log_time_block(
                 "pack",
@@ -2610,7 +2615,7 @@ class AWQProcessor(LoopProcessor):
                     q_g_idx=None,
                     layers=layers,
                     quant_linear_cls=quant_linear_cls,
-                    lock=self.lock,
+                    lock=None,
                     quantize_config=self.qcfg,
                 )
         if timer is not None and pack_start is not None:
@@ -2619,6 +2624,8 @@ class AWQProcessor(LoopProcessor):
                 time.perf_counter() - pack_start,
                 source=f"{module_label} [{packer_label or 'module.pack_original'}]",
             )
+
+        return qmodule
 
     def finalize(self, model: BaseQModel, **kwargs):
         """Marks the model as AWQ-quantized and runs shared finalization logic."""

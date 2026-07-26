@@ -21,7 +21,8 @@ from ..utils.fallback import normalize_fallback
 from ..quantization.qqq import QQQ
 from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger, log_time_block
-from ..utils.model import create_quant_module, find_modules, move_to, pack_module
+from ..utils.model import create_quant_module, move_to, pack_module
+from ..utils.module_locks import parent_module_lock
 from ..utils.torch import CPU
 
 log = setup_logger()
@@ -78,7 +79,7 @@ class QQQProcessor(LoopProcessor):
         """Builds the per-module QQQ task after applying dynamic overrides."""
 
         # entire module is skipped
-        if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
+        if self.qcfg.dynamic_get(layer_name=module.full_name) is False:
             return
 
         qcfg_clone = copy.deepcopy(self.qcfg)
@@ -128,7 +129,7 @@ class QQQProcessor(LoopProcessor):
 
         # gptq has no dynamic method of full override (removal)
         t = self.tasks.get(module.name, False)
-        if t == False:
+        if t is False:
             return True
         else:
             return False
@@ -262,9 +263,13 @@ class QQQProcessor(LoopProcessor):
             q_g_idx = module.state.pop("q_g_idx")
             q_scales_extra = module.state.pop("q_scales_extra")
 
-        layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         quant_linear_cls, backend = self._quant_linear_kernel()
+        parent_key = getattr(module, "full_name", getattr(module, "name", None))
+        # Snapshot the original leaf before replacement; use the quantized module
+        # returned below without any `find_modules(model.model)` scan that could
+        # race with concurrent sibling replacements.
+        original_layer = module.module
 
         # replace module with quantized module
         with log_time_block(
@@ -272,53 +277,58 @@ class QQQProcessor(LoopProcessor):
             logger=log,
             module_name=module_label,
         ):
-            create_quant_module(
-                name=module.full_name,
-                linear_cls=quant_linear_cls,
-                bits=self.qcfg.runtime_bits,
-                desc_act=self.qcfg.desc_act,
-                dynamic=self.qcfg.dynamic,
-                group_size=self.qcfg.group_size,
-                module=model.model,
-                submodule=module,
-                sym=self.qcfg.sym,
-                device=self.qcfg.device,
-                lm_head_name=model.lm_head,
-                pack_dtype=self.qcfg.pack_dtype,
-                format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
-                backend=backend,
-                register_buffers=False,
-            )
+            with parent_module_lock(parent_key):
+                qmodule = create_quant_module(
+                    name=module.full_name,
+                    linear_cls=quant_linear_cls,
+                    bits=self.qcfg.runtime_bits,
+                    desc_act=self.qcfg.desc_act,
+                    dynamic=self.qcfg.dynamic,
+                    group_size=self.qcfg.group_size,
+                    module=model.model,
+                    submodule=module,
+                    sym=self.qcfg.sym,
+                    device=self.qcfg.device,
+                    lm_head_name=model.lm_head,
+                    pack_dtype=self.qcfg.pack_dtype,
+                    format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
+                    backend=backend,
+                    register_buffers=False,
+                )
 
-        # pack module
-        qModules = {
-            name: submodule
-            for name, submodule in find_modules(model.model, [quant_linear_cls]).items()
-            if name == module.full_name
-        }
+        if qmodule is None:
+            return None
+
+        # pack module with the new quantized module and original leaf already
+        # in hand. One-entry dicts let pack_module avoid `find_modules()`.
+        qModules = {module.full_name: qmodule}
+        layers = {module.full_name: original_layer}
         with log_time_block(
             "pack",
             logger=log,
             module_name=module_label,
         ):
-            pack_module(
-                name=module.full_name,
-                qModules=qModules,
-                q_scales=q_scales,
-                q_zeros=q_zeros,
-                q_g_idx=q_g_idx,
-                layers=layers,
-                quant_linear_cls=quant_linear_cls,
-                lock=self.lock,
-                q_scales_extra=q_scales_extra,
-                quantize_config=self.qcfg,
-            )
+            with parent_module_lock(parent_key):
+                pack_module(
+                    name=module.full_name,
+                    qModules=qModules,
+                    q_scales=q_scales,
+                    q_zeros=q_zeros,
+                    q_g_idx=q_g_idx,
+                    layers=layers,
+                    quant_linear_cls=quant_linear_cls,
+                    lock=None,
+                    q_scales_extra=q_scales_extra,
+                    quantize_config=self.qcfg,
+                )
 
         # TODO: store module quant results in module, not global processor result
         with self.lock:
             self.result_pop(module.full_name)
 
         module.unregister_parameter("weight")
+
+        return qmodule
 
     def finalize(self, model: BaseQModel, **kwargs):
         """Marks the model as QQQ-quantized and runs shared finalization logic."""

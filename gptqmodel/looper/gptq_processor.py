@@ -54,7 +54,7 @@ from ..quantization.diagnostics import (
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, find_modules, pack_module
+from ..utils.model import create_quant_module, pack_module
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import HAS_NPU
 
@@ -936,9 +936,13 @@ class GPTQProcessor(LoopProcessor):
         assert q_scales.device == CPU
         assert q_g_idx.device == CPU
 
-        layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
+        # Snapshot the original leaf before create_quant_module replaces it.
+        # We must not call find_modules(model.model) or model.named_modules()
+        # here because another thread may be replacing a sibling leaf under a
+        # shared ancestor while we hold a stale iterator.
+        original_layer = module.module
         prepack_comparison = None
         if code_fingerprint is not None:
             prepack_sample = sample_reconstructed_quant_codes(
@@ -965,7 +969,7 @@ class GPTQProcessor(LoopProcessor):
             module_name=module_label,
         ):
             with parent_module_lock(parent_key):
-                create_quant_module(
+                qmodule = create_quant_module(
                     name=module.full_name,
                     linear_cls=model.qlinear_kernel,
                     bits=self.qcfg.runtime_bits,
@@ -988,12 +992,14 @@ class GPTQProcessor(LoopProcessor):
                 source=module_label,
             )
 
-        # pack module
-        qModules = {
-            name: submodule
-            for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items()
-            if name == module.full_name
-        }
+        if qmodule is None:
+            return None
+
+        # Use the quantized module returned by create_quant_module and the
+        # original leaf captured above. Build one-entry dicts so pack_module
+        # never has to scan the whole model tree to locate the target.
+        qModules = {module.full_name: qmodule}
+        layers = {module.full_name: original_layer}
         pack_start = time.perf_counter() if timer is not None else None
         with log_time_block(
             "pack",
@@ -1009,7 +1015,7 @@ class GPTQProcessor(LoopProcessor):
                     q_g_idx=q_g_idx,
                     layers=layers,
                     quant_linear_cls=model.qlinear_kernel,
-                    lock=self.lock,
+                    lock=None,
                     quantize_config=self.qcfg,
                 )
         if timer is not None and pack_start is not None:
@@ -1020,15 +1026,14 @@ class GPTQProcessor(LoopProcessor):
             )
 
         if code_fingerprint is not None:
-            quantized_module = qModules.get(module.full_name)
             packed_sample = (
                 sample_packed_quant_codes(
-                    quantized_module.qweight,
+                    qmodule.qweight,
                     bits=code_fingerprint["bits"],
                     input_indexes=code_fingerprint["input_indexes"],
                     output_indexes=code_fingerprint["output_indexes"],
                 )
-                if quantized_module is not None
+                if qmodule is not None
                 else None
             )
             packed_comparison = compare_quant_code_samples(code_fingerprint["codes"], packed_sample)
@@ -1062,6 +1067,8 @@ class GPTQProcessor(LoopProcessor):
 
         del q_scales, q_zeros, q_g_idx
         module.unregister_parameter("weight")
+
+        return qmodule
 
     def finalize(self, model: BaseQModel, **kwargs):
         """Marks the model as GPTQ-quantized and runs shared finalization logic."""

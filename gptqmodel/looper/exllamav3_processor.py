@@ -57,7 +57,7 @@ def clone_exllamav3_config_for_module(
 ) -> Optional[EXL3Config]:
     """Clones and applies per-module EXL3 dynamic overrides, or skips the module."""
 
-    if qcfg.dynamic_get(layer_name=module_full_name) == False:
+    if qcfg.dynamic_get(layer_name=module_full_name) is False:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
@@ -356,8 +356,10 @@ class EXL3Processor(LoopProcessor):
                     tensors[tensor_name] = tensor.clone()
 
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
+        # create_exllamav3_module both installs and returns the new quantized
+        # module, so we can use it directly instead of re-scanning the model tree.
         with parent_module_lock(parent_key):
-            create_exllamav3_module(
+            qmodule = create_exllamav3_module(
                 module_root=model.model,
                 name=module.full_name,
                 submodule=module,
@@ -367,6 +369,8 @@ class EXL3Processor(LoopProcessor):
         module.unregister_parameter("weight")
         if getattr(module, "bias", None) is not None:
             module.unregister_parameter("bias")
+
+        return qmodule
 
     def finalize(self, model: BaseQModel, **kwargs):
         """Marks the model as EXL3-quantized and runs shared finalization logic."""

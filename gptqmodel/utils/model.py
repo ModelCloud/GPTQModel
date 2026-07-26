@@ -638,6 +638,9 @@ def create_quant_module(
     )
     new_layer.device = ori_layer_device
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
+    # Return the new quantized module so callers can pass it directly to
+    # pack/offload helpers without re-scanning the model tree.
+    return new_layer
 
 def create_quant_layer(
         linear_candidates: List[Type[BaseQuantLinear]],
@@ -661,7 +664,7 @@ def create_quant_layer(
     if any(isinstance(module, candidate) for candidate in linear_candidates):
         return type(module)
 
-    selected_counts = {candidate: 0 for candidate in linear_candidates}
+    selected_counts = dict.fromkeys(linear_candidates, 0)
     selected_counts[TorchQuantEmbeddings] = 0
     for name, submodule in module.named_modules():
         # skip non-quantized modules

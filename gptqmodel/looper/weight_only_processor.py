@@ -35,7 +35,7 @@ from ..quantization.config import (
 )
 from ..quantization.rtn import RTN
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, find_modules, pack_module
+from ..utils.model import create_quant_module, pack_module
 from ..utils.module_locks import parent_module_lock
 
 
@@ -161,16 +161,19 @@ class WeightOnlyProcessor(LoopProcessor):
             assert q_scales.device == CPU
             assert q_g_idx.device == CPU
 
-        layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
-        original_layer = layers.get(module.full_name)
+        # Capture the original leaf before replacement and the quantized module
+        # returned below so we never need a whole-model `find_modules()` scan
+        # during finalize. Model-wide scans race with sibling replacements in
+        # other threads.
+        original_layer = module.module
         timer = getattr(model, "quant_region_timer", None)
 
         create_start = time.perf_counter() if timer is not None else None
         with log_time_block("create_quant_module", logger=log, module_name=module_label):
             with parent_module_lock(parent_key):
-                create_quant_module(
+                qmodule = create_quant_module(
                     name=module.full_name,
                     linear_cls=model.qlinear_kernel,
                     bits=active_qcfg.runtime_bits,
@@ -190,17 +193,16 @@ class WeightOnlyProcessor(LoopProcessor):
         if timer is not None and create_start is not None:
             timer.record("submodule_finalize_create", time.perf_counter() - create_start, source=module_label)
 
-        qmodules = {
-            name: submodule
-            for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items()
-            if name == module.full_name
-        }
+        if qmodule is None:
+            return None
 
+        # The new quantized module is already installed in the tree; use it
+        # directly. The pack helper only needs these two one-entry dicts, so it
+        # does not have to walk `model.named_modules()` while it may be mutated.
         if self._uses_direct_pack(active_qcfg):
             pack_start = time.perf_counter() if timer is not None else None
             with log_time_block("module.pack_original", logger=log, module_name=module_label):
                 with parent_module_lock(parent_key):
-                    qmodule = qmodules[module.full_name]
                     qmodule.pack_original(
                         linear=original_layer,
                         scales=None,
@@ -222,8 +224,12 @@ class WeightOnlyProcessor(LoopProcessor):
             module.state.pop("tp_pad_info", None)
             module.state.pop("quant_source_module", None)
             module.unregister_parameter("weight")
-            return
+            return qmodule
 
+        qmodules = {module.full_name: qmodule}
+        layers = {module.full_name: original_layer}
+        # No whole-model scan: pack_module resolves everything from the leaf
+        # name and the local dicts built above.
         pack_start = time.perf_counter() if timer is not None else None
         with log_time_block("pack", logger=log, module_name=module_label):
             with parent_module_lock(parent_key):
@@ -235,7 +241,7 @@ class WeightOnlyProcessor(LoopProcessor):
                     q_g_idx=q_g_idx,
                     layers=layers,
                     quant_linear_cls=model.qlinear_kernel,
-                    lock=self.lock,
+                    lock=None,
                     quantize_config=active_qcfg,
                 )
         if timer is not None and pack_start is not None:
@@ -249,6 +255,8 @@ class WeightOnlyProcessor(LoopProcessor):
         module.state.pop("tp_pad_info", None)
         module.state.pop("quant_source_module", None)
         module.unregister_parameter("weight")
+
+        return qmodule
 
     def finalize(self, model: BaseQModel, **kwargs):
         """Marks the model quantized and runs shared processor finalization."""
