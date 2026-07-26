@@ -1109,6 +1109,14 @@ def _pack_block_extension() -> TorchOpsJitExtension:
 
     global _PACK_BLOCK_TORCH_OPS_EXTENSION
     if _PACK_BLOCK_TORCH_OPS_EXTENSION is None:
+        # OpenMP is required for at::parallel_for in the C++ extension to use
+        # multiple threads.  It is enabled on Linux (GCC/Clang); other platforms
+        # fall back to the single-threaded build path automatically.
+        _pack_block_extra_cflags = ["-O3", f"-std={_jit_cxx_standard()}"]
+        _pack_block_extra_ldflags: list[str] = []
+        if platform.system() == "Linux":
+            _pack_block_extra_cflags.append("-fopenmp")
+            _pack_block_extra_ldflags.append("-fopenmp")
         _PACK_BLOCK_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
             name="gptqmodel_pack_block_cpu",
             namespace="gptqmodel",
@@ -1117,8 +1125,8 @@ def _pack_block_extension() -> TorchOpsJitExtension:
             build_root_env="GPTQMODEL_EXT_BUILD",
             default_build_root=lambda: default_torch_ops_build_root("pack_block_cpu"),
             display_name="pack_block_cpu",
-            extra_cflags=["-O3", f"-std={_jit_cxx_standard()}"],
-            extra_ldflags=[],
+            extra_cflags=_pack_block_extra_cflags,
+            extra_ldflags=_pack_block_extra_ldflags,
             verbose_env="GPTQMODEL_EXT_VERBOSE",
             requires_cuda=False,
         )

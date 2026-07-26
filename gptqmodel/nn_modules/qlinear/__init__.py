@@ -1006,7 +1006,7 @@ class PackableQuantLinear(GPTQQuantLinear):
                     pack_block_threads,
                 )
 
-        if not disable_ext and bits in (2, 4, 8):
+        if not disable_ext and bits in (2, 3, 4, 8):
             try:
                 from .pack_block_ext import pack_block_cpu as pack_block_cpu_ext
 
