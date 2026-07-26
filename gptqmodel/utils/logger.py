@@ -10,95 +10,13 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from functools import wraps
 from typing import Any, Dict, Iterator, Optional, Sequence
 
 import pcre
 from logbar import LogBar
-from logbar.logbar import _clear_progress_stack_locked, _render_progress_stack_locked
-from logbar.progress import ProgressBar
 
 
 _ANSI_ESCAPE_RE = pcre.compile(r"\x1b\[[0-9;]*m")
-
-
-def _animation_enabled() -> bool:
-    """Check whether LogBar should animate/repaint in the current environment."""
-
-    value = os.environ.get("LOGBAR_ANIMATION", "1")
-    return str(value).strip().lower() not in {"0", "false", "off", "no"}
-
-
-def _throttle_interval_seconds() -> float:
-    """Return the headless progress-bar redraw interval in seconds."""
-
-    value = os.environ.get("LOGBAR_PROGRESS_OUTPUT_INTERVAL", "1")
-    try:
-        return max(0.0, float(value))
-    except (TypeError, ValueError):
-        return 1.0
-
-
-_original_progressbar_draw = ProgressBar.draw
-
-
-@wraps(_original_progressbar_draw)
-def _throttled_progressbar_draw(self, force: bool = False):
-    """Throttle manual `.draw()` calls in headless mode to a wall-clock interval."""
-
-    if not force and not _animation_enabled():
-        interval = _throttle_interval_seconds()
-        if interval > 0.0:
-            now = time.monotonic()
-            last = getattr(self, "_gptqmodel_throttle_last_draw", 0.0)
-            if now - last < interval:
-                return
-            self._gptqmodel_throttle_last_draw = now
-    return _original_progressbar_draw(self, force)
-
-
-ProgressBar.draw = _throttled_progressbar_draw
-
-
-# Headless-mode suppression of the active progress stack redraw that normally
-# happens after every log line. Without this, each INFO log reprints every
-# active progress bar, producing one progress line per log message.
-_skip_stack_render = threading.local()
-
-
-def _headless_clear_progress_stack_locked(*, show_cursor: bool = True, for_log_output: bool = False, backend_state=None):
-    if getattr(_skip_stack_render, "value", False):
-        return
-    _clear_progress_stack_locked(show_cursor=show_cursor, for_log_output=for_log_output, backend_state=backend_state)
-
-
-def _headless_render_progress_stack_locked(precomputed=None, columns_hint=None, backend_state=None):
-    if getattr(_skip_stack_render, "value", False):
-        return
-    _render_progress_stack_locked(precomputed=precomputed, columns_hint=columns_hint, backend_state=backend_state)
-
-
-_logbar_module = __import__("logbar.logbar", fromlist=["_clear_progress_stack_locked"])
-_logbar_module._clear_progress_stack_locked = _headless_clear_progress_stack_locked
-_logbar_module._render_progress_stack_locked = _headless_render_progress_stack_locked
-
-
-_original_emit_log_line_locked = LogBar._emit_log_line_locked
-
-
-@wraps(_original_emit_log_line_locked)
-def _headless_emit_log_line_locked(self, normalized_level, level_label, str_msg, *, allow_defer=True, backend_state=None):
-    animation_enabled = _animation_enabled()
-    if not animation_enabled:
-        _skip_stack_render.value = True
-    try:
-        return _original_emit_log_line_locked(self, normalized_level, level_label, str_msg, allow_defer=allow_defer, backend_state=backend_state)
-    finally:
-        if not animation_enabled:
-            _skip_stack_render.value = False
-
-
-LogBar._emit_log_line_locked = _headless_emit_log_line_locked
 
 
 class _SilentProgress:

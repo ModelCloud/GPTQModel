@@ -38,6 +38,7 @@ from ..nn_modules.fused_group_forward import (
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from ..quantization.config import GcMode, QuantizeEmbed
 from ..utils.device import get_device, get_device_new
+from ..utils.disk_telemetry import disk_telemetry
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
 from ..utils.looper_helpers import normalize_device_like
 from ..utils.model import find_modules, get_layer_name, get_module
@@ -556,7 +557,14 @@ def run_layer_stage(
             else:
                 layer_descriptor = str(layer_index)
 
+        materialize_start = time.perf_counter()
         materialize_model(module)
+        if durable_progress_logs:
+            log.info(
+                "StageLayer: layer=%s materialize_model took %.3fs",
+                layer_index if not is_embeddings_module else "embeddings",
+                time.perf_counter() - materialize_start,
+            )
 
         cur_layer_device = get_device(module)
         if getattr(cur_layer_device, "type", None) == "meta":
@@ -591,6 +599,7 @@ def run_layer_stage(
             # starts running this layer. The rest of the layer stage can then
             # iterate plans instead of repeatedly re-deriving replay, batching,
             # and device-routing state inside the execution loop.
+            subset_plans_start = time.perf_counter()
             subset_plans = build_layer_subset_plans(
                 looper,
                 processor=processor,
@@ -606,6 +615,12 @@ def run_layer_stage(
                 embedding_module_name=embedding_module_name,
             )
             if durable_progress_logs:
+                log.info(
+                    "StageLayer: layer=%s processor=%s subset plans built in %.3fs",
+                    layer_index if not is_lm_head_module else "lm_head",
+                    processor.name(),
+                    time.perf_counter() - subset_plans_start,
+                )
                 log.info(
                     "StageLayer: layer=%s processor=%s begin subsets=%s",
                     layer_index if not is_lm_head_module else "lm_head",
@@ -819,14 +834,19 @@ def run_layer_stage(
                     """Runs processor finalization and optional disk offload for one module."""
 
                     resolved_label = module_label or getattr(module, "full_name", getattr(module, "name", ""))
-                    start = time.perf_counter() if region_timer is not None else None
+                    module_start = time.perf_counter()
+                    start = module_start if region_timer is not None else None
+                    submodule_elapsed = 0.0
+                    offload_elapsed = 0.0
                     try:
+                        submodule_start = time.perf_counter()
                         with log_time_block(
                             "submodule_finalize",
                             logger=log,
                             module_name=resolved_label,
                         ):
                             process.submodule_finalize(module, looper.gptq_model)
+                        submodule_elapsed = time.perf_counter() - submodule_start
 
                         # Disk offload (lifecycle TODO note preserved)
                         if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoQuantProcessor)):
@@ -851,10 +871,11 @@ def run_layer_stage(
                                             module=target_module,
                                             disk_path=offload_path,
                                         )
+                                    offload_elapsed = time.perf_counter() - offload_start
                                     if region_timer is not None and offload_start is not None:
                                         region_timer.record(
                                             "submodule_finalize_offload",
-                                            time.perf_counter() - offload_start,
+                                            offload_elapsed,
                                             source=resolved_label,
                                         )
                                 else:
@@ -863,6 +884,17 @@ def run_layer_stage(
                                         module_label,
                                     )
                     finally:
+                        total_elapsed = time.perf_counter() - module_start
+                        if idx == 1 or idx == total or idx % 50 == 0 or total_elapsed > 1.0 or submodule_elapsed > 0.5 or offload_elapsed > 0.5:
+                            log.info(
+                                "StageLayer: finalized %s (%d/%d) in %.3fs (submodule_finalize %.3fs, offload %.3fs)",
+                                resolved_label,
+                                idx,
+                                total,
+                                total_elapsed,
+                                submodule_elapsed,
+                                offload_elapsed,
+                            )
                         if region_timer is not None and start is not None:
                             region_timer.record(
                                 "submodule_finalize",
@@ -932,11 +964,19 @@ def run_layer_stage(
                     finalize_pb_local,
                     finalize_count_local,
                     layer_idx_for_callback,
+                    drain_label,
                 ):
                     """Consumes finalize futures, updating progress and surfacing errors."""
 
+                    drain_start = time.perf_counter()
                     completed_local = 0
+                    progress_interval = max(1, finalize_count_local // 10)
                     try:
+                        log.info(
+                            "StageLayer: %s finalize drain started for %d module(s)",
+                            drain_label,
+                            finalize_count_local,
+                        )
                         for future in as_completed(futures):
                             # Drain futures as they complete to surface errors
                             # quickly and keep the progress bar in sync.
@@ -967,7 +1007,26 @@ def run_layer_stage(
                             finalize_pb_local.title(
                                 f"{layer_label} Finalize {completed_local}/{finalize_count_local}"
                             ).subtitle(subtitle).draw()
+
+                            if completed_local % progress_interval == 0:
+                                elapsed = time.perf_counter() - drain_start
+                                log.info(
+                                    "StageLayer: %s finalize progress %d/%d (%.1f%%) elapsed %.3fs",
+                                    drain_label,
+                                    completed_local,
+                                    finalize_count_local,
+                                    100.0 * completed_local / finalize_count_local,
+                                    elapsed,
+                                )
                     finally:
+                        elapsed = time.perf_counter() - drain_start
+                        log.info(
+                            "StageLayer: %s finalize drain completed %d/%d in %.3fs",
+                            drain_label,
+                            completed_local,
+                            finalize_count_local,
+                            elapsed,
+                        )
                         finalize_pb_local.close()
                         looper._emit_layer_complete(
                             layer_idx=layer_idx_for_callback,
@@ -987,6 +1046,7 @@ def run_layer_stage(
                             finalize_count,
                             "sync" if drain_sync else "async",
                         )
+                    drain_label = f"layer {layer_index if not is_lm_head_module else 'lm_head'}"
                     if drain_sync:
                         # Synchronous: wait for all finalization to complete before proceeding to next layer
                         # This ensures all packing and writing tasks are done
@@ -995,7 +1055,10 @@ def run_layer_stage(
                             finalize_pb,
                             finalize_count,
                             layer_index,
+                            drain_label,
                         )
+                        if region_timer is not None:
+                            region_timer.flush()
                         if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
                             torch_empty_cache(device=cur_layer_device, sync=True)
                         elif _should_empty_cache_after_sync_finalize(
@@ -1013,6 +1076,7 @@ def run_layer_stage(
                                 finalize_pb,
                                 finalize_count,
                                 layer_index,
+                                drain_label,
                             ),
                             name="SubmoduleFinalizeWatcher",
                             daemon=True,
@@ -1036,3 +1100,14 @@ def run_layer_stage(
                 "StageLayer: handoff complete for layer=%s",
                 layer_index if not is_lm_head_module else "lm_head",
             )
+
+        disk_telemetry.log_summary(
+            log,
+            label=f"layer {layer_index if not is_lm_head_module else 'lm_head'} handoff",
+        )
+
+        # Close per-shard safetensors handles so file descriptors are released
+        # between layers. The handles will be recreated on demand for the next layer.
+        turtle_model = getattr(looper.gptq_model, "turtle_model", None)
+        if turtle_model is not None and hasattr(turtle_model, "close_shard_handlers"):
+            turtle_model.close_shard_handlers()

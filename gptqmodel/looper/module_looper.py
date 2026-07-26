@@ -15,17 +15,15 @@ thread pool.
 
 from __future__ import annotations
 
-import math
+import os
 import threading
 import time
-import logging
-import os
-from concurrent.futures import as_completed
-from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
 
 import torch
 import torch.nn as nn
 
+from .. import DEVICE_THREAD_POOL
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
@@ -35,46 +33,44 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
-from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
+from ..nn_modules.hooked_linear import HookedLinear
 from ..quantization.config import (
     METHOD,
     QuantizeEmbed,
-    VramStrategy,
     QuantizeEmbedConfig,
+    VramStrategy,
 )
 from ..utils.attn_mask import apply_keep_mask_bt
-from ..utils.ctx import ctx
+from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
-from ..utils.device import get_device, get_device_new
 from ..utils.disk import estimate_disk_io_speed
-from ..utils.logger import setup_logger, log_time_block
+from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
-    device_ctx,
     forward_batch_worker,
     normalize_device_like,
     rehome_module_to_device,
     select_forward_devices,
 )
 from ..utils.model import (
-    untie_word_embeddings,
     MoETopKState,
     get_layers_with_prefixes,
     get_module,
+    get_module_by_name_prefix,
     move_to,
     restore_moe_topk,
-    set_moe_topk, get_module_by_name_prefix,
+    set_moe_topk,
+    untie_word_embeddings,
 )
 from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
-from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
-from .. import DEVICE_THREAD_POOL
+from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
-from .qqq_processor import QQQProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
+
 
 log = setup_logger()
 
@@ -1718,6 +1714,7 @@ class ModuleLooper():
     def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fallback, layer_module=None) -> Dict[str, NamedModule]:
         """Build the named-module subset a processor will quantize for one layer."""
 
+        create_start = time.perf_counter()
         subset = {}
         capture_only_flags: Dict[str, bool] = {}
         for n in names:
@@ -1737,7 +1734,9 @@ class ModuleLooper():
             if capture_only:
                 capture_only_flags[n] = True  # forward-only modules should not be finalized
         skipped_modules = []
-        for name in subset:
+        total_modules = len(subset)
+        progress_interval = max(1, total_modules // 10)
+        for idx, name in enumerate(subset, start=1):
             if name in (self.input_embeddings_name, self.output_embeddings_name):
                 layer_name = name
             else:
@@ -1761,13 +1760,30 @@ class ModuleLooper():
             elif capture_only_flags.get(name, False):
                 subset[name].state["capture_only"] = True
 
+            preprocess_start = time.perf_counter()
             if isinstance(processor, GPTQProcessor):
                 processor.preprocess(subset[name], fallback=fallback)
             else:
                 processor.preprocess(subset[name])
+            preprocess_elapsed = time.perf_counter() - preprocess_start
+            if idx == 1 or idx == total_modules or idx % progress_interval == 0 or preprocess_elapsed > 0.5:
+                log.info(
+                    "create_named_modules: preprocess %s (%d/%d) took %.3fs",
+                    layer_name,
+                    idx,
+                    total_modules,
+                    preprocess_elapsed,
+                )
             # some modules are skipped
             if processor.is_skipped(subset[name]):
                 skipped_modules.append(name)
+
+        if total_modules:
+            log.info(
+                "create_named_modules: built subset with %d module(s) in %.3fs",
+                total_modules,
+                time.perf_counter() - create_start,
+            )
 
         for name in skipped_modules:
             subset.pop(name)

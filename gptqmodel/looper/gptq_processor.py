@@ -103,19 +103,22 @@ def clone_gptq_config_for_module(
 ) -> Optional[QuantizeConfig]:
     """Clones and applies per-module GPTQ dynamic overrides, or skips the module."""
 
+    # Resolve all dynamic overrides for this module with a single pattern scan.
+    # The result is cached on the source QuantizeConfig.
+    dynamic_overrides = qcfg.dynamic_get(layer_name=module_full_name)
+
     # entire module is skipped
-    if qcfg.dynamic_get(layer_name=module_full_name) is False:
+    if dynamic_overrides is False:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
 
     # dynamic overrides
-    if qcfg.dynamic is not None:
-        dynamic_overrides = qcfg.dynamic_get(module_full_name)
-        qcfg_clone.bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
-        qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
-        dynamic_mse_present = isinstance(dynamic_overrides, dict) and "mse" in dynamic_overrides
-        dynamic_scale_search_present = isinstance(dynamic_overrides, dict) and "scale_search" in dynamic_overrides
+    if dynamic_overrides is not None:
+        qcfg_clone.bits = dynamic_overrides.get("bits", qcfg_clone.bits)
+        qcfg_clone.sym = dynamic_overrides.get("sym", qcfg_clone.sym)
+        dynamic_mse_present = "mse" in dynamic_overrides
+        dynamic_scale_search_present = "scale_search" in dynamic_overrides
         if dynamic_mse_present:
             qcfg_clone.mse = dynamic_overrides["mse"]
         if dynamic_scale_search_present:
@@ -132,19 +135,19 @@ def clone_gptq_config_for_module(
             qcfg_clone.scale_search = "mse" if float(qcfg_clone.mse or 0.0) > 0 else None
         qcfg_clone._normalize_scale_search()
 
-        qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
-        desc_act_override = qcfg.dynamic_get(module_full_name, "desc_act", None)
+        qcfg_clone.group_size = dynamic_overrides.get("group_size", qcfg_clone.group_size)
+        desc_act_override = dynamic_overrides.get("desc_act", None)
         if desc_act_override is not None:
             qcfg_clone.desc_act = desc_act_override
-        act_group_aware_override = qcfg.dynamic_get(module_full_name, "act_group_aware", None)
+        act_group_aware_override = dynamic_overrides.get("act_group_aware", None)
         if act_group_aware_override is not None:
             qcfg_clone.act_group_aware = act_group_aware_override
-        qcfg_clone.damp_percent = qcfg.dynamic_get(module_full_name, "damp_percent", qcfg_clone.damp_percent)
-        qcfg_clone.static_groups = qcfg.dynamic_get(module_full_name, "static_groups", qcfg_clone.static_groups)
-        fallback_override = qcfg.dynamic_get(module_full_name, "fallback", None)
+        qcfg_clone.damp_percent = dynamic_overrides.get("damp_percent", qcfg_clone.damp_percent)
+        qcfg_clone.static_groups = dynamic_overrides.get("static_groups", qcfg_clone.static_groups)
+        fallback_override = dynamic_overrides.get("fallback", None)
         if fallback_override is not None:
             qcfg_clone.fallback = normalize_fallback(fallback_override, qcfg_clone.fallback)
-        hessian_override = qcfg.dynamic_get(module_full_name, "hessian", None)
+        hessian_override = dynamic_overrides.get("hessian", None)
         if hessian_override is not None:
             if isinstance(hessian_override, dict):
                 qcfg_clone.hessian = HessianConfig(**hessian_override)
@@ -152,8 +155,8 @@ def clone_gptq_config_for_module(
                 qcfg_clone.hessian = hessian_override
             else:
                 raise ValueError("QuantizeConfig: dynamic `hessian` must be a HessianConfig or dict.")
-        gptaq_override = qcfg.dynamic_get(module_full_name, "gptaq", None)
-        foem_override = qcfg.dynamic_get(module_full_name, "foem", None)
+        gptaq_override = dynamic_overrides.get("gptaq", None)
+        foem_override = dynamic_overrides.get("foem", None)
         if gptaq_override is not None:
             if isinstance(gptaq_override, dict):
                 qcfg_clone.gptaq = GPTAQConfig(**gptaq_override)

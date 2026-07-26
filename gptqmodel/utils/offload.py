@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import struct
+import time
 from typing import Iterable, List, Optional, Set, Tuple
 
 import accelerate
@@ -22,6 +23,7 @@ from torch import nn
 
 from ..looper.named_module import NamedModule
 from .device import get_device
+from .disk_telemetry import disk_telemetry
 from .module_locks import parent_module_lock
 from .torch import CPU, META
 
@@ -195,6 +197,7 @@ def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = "."):
 
     total_bytes = 0
 
+    offload_start = time.perf_counter()
     state_items = list(module.state_dict().values())
 
     for tensor in state_items:
@@ -212,6 +215,7 @@ def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = "."):
         offload_buffers=True,
         execution_device=m_device,
     )
+    disk_telemetry.record_write(total_bytes, time.perf_counter() - offload_start)
 
     # print("offload_disk: list item tree")
     # print_module_tree(module)
@@ -282,16 +286,16 @@ def _possible_offload_dirs_from_hook(mod: nn.Module) -> Set[str]:
     return dirs
 
 
-def _restore_leaves_from_weights_map(mod: nn.Module, device: torch.device, dtype: Optional[torch.dtype]) -> bool:
+def _restore_leaves_from_weights_map(mod: nn.Module, device: torch.device, dtype: Optional[torch.dtype]) -> int:
     """
     Fast path: if this version of Accelerate exposes a per-module weights_map (as observed in
     multiple stacks), directly read tensors by name instead of going through a forward-time preloader.
-    Returns True if handled, False to fall back to align+clone.
+    Returns the number of bytes restored from disk, or 0 to fall back to align+clone.
     """
     hook = getattr(mod, "_hf_hook", None)
     wm = getattr(hook, "weights_map", None) if hook is not None else None
     if wm is None:
-        return False
+        return 0
 
     # Some implementations act like a Mapping[str, Tensor]; others expose .dataset.state_dict-like APIs.
     # We feature-detect Mapping behavior; otherwise bail out and let align+clone handle it.
@@ -300,12 +304,14 @@ def _restore_leaves_from_weights_map(mod: nn.Module, device: torch.device, dtype
         # Pick the first leaf (param or buffer) if available.
         sample = next(_iter_leaf_tensors(mod, include_buffers=True), None)
         if sample is None:
-            return True  # nothing to restore for this module
+            return 0  # nothing to restore for this module
         sample_name, _, _ = sample
         _ = wm[sample_name]  # may raise KeyError/TypeError if API is different
     except Exception:
-        return False
+        return 0
 
+    start = time.perf_counter()
+    bytes_loaded = 0
     with torch.inference_mode():
         for name, tensor, is_param in list(_iter_leaf_tensors(mod, include_buffers=True)):
             is_meta = getattr(tensor, "is_meta", False) or tensor.device is META
@@ -317,6 +323,8 @@ def _restore_leaves_from_weights_map(mod: nn.Module, device: torch.device, dtype
                 # Not all buffers are necessarily offloaded; skip quietly.
                 continue
 
+            bytes_loaded += _tensor_nbytes(src)
+
             if is_param:
                 new_p = _clone_into_parameter(src, device=device, dtype=dtype, requires_grad=tensor.requires_grad)
                 setattr(mod, name, new_p)
@@ -324,7 +332,9 @@ def _restore_leaves_from_weights_map(mod: nn.Module, device: torch.device, dtype
                 new_b = _clone_into_buffer(src, device=device, dtype=dtype)
                 setattr(mod, name, new_b)
 
-    return True
+    if bytes_loaded:
+        disk_telemetry.record_read(bytes_loaded, time.perf_counter() - start, "accelerate")
+    return bytes_loaded
 
 
 def undo_offload_to_disk(
@@ -366,12 +376,14 @@ def undo_offload_to_disk(
             offload_dirs |= _possible_offload_dirs_from_hook(sub)
 
             # Prefer a fast path reading directly from the weights_map if exposed by this Accelerate version.
-            handled = _restore_leaves_from_weights_map(sub, device=device, dtype=dtype)
-            if handled:
+            bytes_restored = _restore_leaves_from_weights_map(sub, device=device, dtype=dtype)
+            if bytes_restored:
                 continue
 
             # Fallback path: ask Accelerate to align this submodule to the execution device,
             # then clone+rebind leaves so they become regular, hook-free tensors.
+            start = time.perf_counter()
+            bytes_restored = 0
             with _maybe_align(sub, device=device):
                 for name, tensor, is_param in list(_iter_leaf_tensors(sub, include_buffers=include_buffers)):
                     is_meta = (getattr(tensor, "is_meta", False) or tensor.device is META)
@@ -383,12 +395,17 @@ def undo_offload_to_disk(
                         # After align, meta leaves should be backed by real memory on `device`.
                         src = tensor
 
+                    bytes_restored += _tensor_nbytes(src)
+
                     if is_param:
                         new_p = _clone_into_parameter(src, device=device, dtype=dtype, requires_grad=tensor.requires_grad)
                         setattr(sub, name, new_p)
                     else:
                         new_b = _clone_into_buffer(src, device=device, dtype=dtype)
                         setattr(sub, name, new_b)
+
+            if bytes_restored:
+                disk_telemetry.record_read(bytes_restored, time.perf_counter() - start, "accelerate")
 
         # 2) Remove all Accelerate hooks so future forwards won't offload again.
         remove_hook_from_submodules(module)      # public API

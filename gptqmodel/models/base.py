@@ -69,6 +69,7 @@ from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND, normalize_backend
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
+from ..utils.disk_telemetry import disk_telemetry
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
@@ -1058,6 +1059,8 @@ class BaseQModel(nn.Module):
         timer = getattr(self, "quant_region_timer", None)
         if timer is not None:
             timer.flush()
+
+        disk_telemetry.log_summary(log, label="quantization complete", all_time=True)
 
         _setup_rotation_online_had(self.model, self.quantize_config.rotation)
         return result
