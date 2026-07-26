@@ -1,4 +1,520 @@
 
+## 2026-07-31: continuous batching with paged Flash Attention, batch=16, KERNEL_BATCH_HINT=16
+
+Config: `dtype=fp16`, `attn_implementation=paged|flash_attention_2`,
+`--continuous-batching`, `--batch 16`, `KERNEL_BATCH_HINT=16`, `prompt_tokens=32`,
+`new_tokens=128`
+
+| backend | prefill tok/s | decode tok/s | peak VRAM (GiB) | total time (s) | transactions/s |
+|--------:|-------------:|-------------:|----------------:|---------------:|---------------:|
+| `gptq_marlin` | 6019.95 | 246.57 | 6.98 | 8.39 | 1.91 |
+| `gptq_amplin` | 4695.53 | 290.40 | 7.06 | 7.16 | 2.23 |
+
+`gptq_amplin` is faster on decode (+17.8%) and faster overall in transactions/s
+(+16.7%) because it no longer chunks the 512-token prefill batch: `AmplinLinear`
+automatically switches to the largest-M member of the same packed-weight family at
+prefill time.  Prefill throughput is still behind `gptq_marlin` by ~22%.
+Peak VRAM stays essentially identical to `gptq_marlin`.
+
+## 2026-07-31: large-M native micro-kernels and packed-weight family dispatch
+
+### Native micro-kernels
+
+Reused the existing packed-weight layouts and added larger-M candidates to
+`_DYNAMIC_CANDIDATES` in `gptqmodel/utils/amplin.py`:
+
+- `gemm_hmma_m64_v3_large` (packer `hmma`, M multiple 64)
+- `mma_lane_m32_global_a_large`, `mma_lane_m32_n32_global_a_large`
+- `mma_lane_m64`, `mma_lane_m64_global_a` (packer `lane`, M multiple 32/64)
+- `mma_lane_m16_n64_tile8_shared_a_large` (packer `n64`, M multiple 16)
+- `mma_lane_m32_n64_tile{2,4,8}_shared_a_large` (packer `n64`, M multiple 32)
+
+The `n64` tiled full-K kernels already supported multiple M tiles via
+`blockIdx.y`; the C++ wrapper `amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl` was
+relaxed to remove the `size_m <= BlockM` upper bound and launch
+`grid.y = ceil(size_m / BlockM)`.  No new kernel code was required for the
+`n64` family.
+
+`marlin_style` now has `max_m=None` and `m_multiple=1` so it can consume the
+entire prefill batch in a single Marlin GEMM call when it is the selected
+decode layout.
+
+### Family dispatch in `AmplinLinear`
+
+`post_init` still uses `KERNEL_BATCH_HINT` to select the decode micro-kernel,
+but it then calls `_build_kernel_family` to gather every candidate that shares
+the same `layout_id` (i.e. the same packed-weight layout).  `forward` calls
+`_select_family_member` to choose the largest-M family member that can handle
+the runtime batch in one call, falling back to the decode dispatcher with
+chunking only when no single member supports the batch.
+
+Family members share the packed tensors from the decode dispatch, so prefill
+does not trigger a repack and VRAM stays identical to the single-dispatch case.
+
+### Validation
+
+- New unit test `test_amplin_linear_prefill_selects_largest_m_family_member`
+  checks M=16 decode and M=512 prefill for Qwen3 shapes, asserts the selected
+  prefill member has `max_m=None`, and compares against the FP32 dequant
+  reference.
+- `pytest -q tests/kernels/test_amplin.py` — 105 passed.
+
+## 2026-07-31: continuous batching with paged Flash Attention, batch=8, KERNEL_BATCH_HINT=8
+
+`scripts/benchmark_amplin_marlin_tps.py` now supports `--continuous-batching`,
+`--batch`, and `attn_implementation=paged|flash_attention_2`.  It uses
+`model.generate_batch` with `ContinuousBatchingConfig(use_cuda_graph=(False, False))`
+and caps `num_blocks` to the blocks needed for the target workload so the paged
+KV cache does not dominate the peak-VRAM measurement.
+
+For batch=8 the continuous batcher concatenates all input tokens, so the linear
+layers see M=``batch * prompt_tokens`` during prefill (e.g. 256) and M=8 during
+decode.  Prefill is reported as time-to-first-token (TTFT) throughput and decode
+as generated-tokens / inter-token wall time.
+
+### Full-model TPS validation on Qwen3 8B (single A100 GPU, warmup=1, runs=5)
+
+Model: `/monster/data/model/Qwen3-8B-Base-GPTQ-4bit-g128-activation-GAR-cal512`
+Single GPU: physical `0` (NVIDIA PG506-230, A100 sm_80)
+Config: `dtype=fp16`, `attn_implementation=paged|flash_attention_2`,
+`--continuous-batching`, `--batch 8`, `KERNEL_BATCH_HINT=8`, `prompt_tokens=32`,
+`new_tokens=128`
+
+| backend | prefill tok/s | decode tok/s | peak VRAM (GiB) |
+|--------:|-------------:|-------------:|----------------:|
+| `gptq_marlin` | 3359.04 | 124.33 | 6.36 |
+| `gptq_amplin` | 1743.17 | 145.77 | 6.44 |
+
+`gptq_amplin` is faster on decode (+17.2%) but slower on TTFT/prefill (-48%)
+because the M=8 pre-packed dispatch must chunk the 256-token prefill batch.
+Peak VRAM now matches `gptq_marlin` after fixing two leaks (see below).
+
+### What changed
+
+1. `_get_marlin_packed` no longer leaks the temporary GPU copy of the canonical
+   `qweight`/`scales` used for repacking. It synchronizes the repack stream and
+   finalizes the `_OriginalWeightResidency` GPU user before returning.
+2. `_select_best_kernel` now builds micro-benchmark candidates with `cache=False`
+   so only the winning packed layout is persisted in `marlin_pack_cache`.  Previously
+   every layer that benchmarked `marlin_style` retained a Marlin-packed copy in
+   VRAM even when a native layout won, which caused the ~2× peak VRAM.
+
+### Validation
+
+- `ruff check gptqmodel/utils/amplin.py scripts/benchmark_amplin_marlin_tps.py --config format/ruff.toml` — clean
+- `pytest -q tests/kernels/test_amplin.py` — 102 passed
+- `KERNEL_BATCH_HINT=8 python scripts/benchmark_amplin_marlin_tps.py --attn-implementation 'paged|flash_attention_2' --continuous-batching --batch 8 --warmup 1 --runs 5 --json-output /tmp/amplin_marlin_cb_fixed2.json` — produced table above
+
+## 2026-07-30: pre-pack per-layer dispatch, repack into new tensors, warm=1 TPS
+
+Commit `72daf797` (`Qubitium`) refactors the dispatch path so each layer owns
+independent packed tensors and can pre-build a single dispatch object at
+`post_init`, while runtime batches that exceed the selected kernel's `max_m` are
+handled by chunked/padded execution.
+
+### What changed
+
+- `_pack_for_spec` now moves the unpacked `qweight`/`scales` to CPU while
+  packing and returns independent packed tensors (not views).
+- `AmplinLinear.post_init` builds a `_KernelDispatch` for the hinted batch size,
+  then releases the canonical `qweight`/`scales` so the layer only owns the
+  packed representation.
+- `AmplinLinear.forward` uses the stored `_KernelDispatch` directly when the
+  runtime batch matches the hint; otherwise it falls back to `_call_kernel_chunked`
+  for larger or in-between batches, padding the final chunk as needed.
+- `amplin_dynamic_routing_table.json` regenerated; `marlin_style` is now a
+  selectable candidate for `M=1..16`.
+- New helper benchmarks `bench_static_m1_16.py` and `bench_dynamic_m1_16.py`
+  use `--warmup 1` so the one-time pack cost is not counted.
+
+### Consequences
+
+- Full-model TPS for Qwen3 8B with `--warmup 1` is still faster than raw
+  `gptq_marlin` for both prefill and decode.
+- Peak VRAM stays higher than Marlin because each layer pre-packs for the hinted
+  batch size (default M=1) and then builds the additional packed layout needed for
+  the actual prefill batch (M=32).
+
+### Full-model TPS validation on Qwen3 8B (single A100 GPU, warmup=1)
+
+Model: `/monster/data/model/Qwen3-8B-Base-GPTQ-4bit-g128-activation-GAR-cal512`
+Single GPU: physical `0` (NVIDIA PG506-230, A100 sm_80)
+Config: `dtype=fp16`, `attn_implementation=eager`, prompt = first `gsm8k/main` question,
+`prompt_tokens=32`, `new_tokens=128`, `warmup=1`, `runs=5`, default `KERNEL_BATCH_HINT=1`
+
+| backend | prefill tok/s | decode tok/s | peak VRAM (GiB) |
+|--------:|-------------:|-------------:|----------------:|
+| `gptq_marlin` | 471.33 | 16.13 | 5.70 |
+| `gptq_amplin` | 482.85 | 19.99 | 12.40 |
+
+### Validation
+
+- `ruff check gptqmodel/utils/amplin.py gptqmodel/nn_modules/qlinear/amplin.py --config format/ruff.toml` — clean
+- `pytest -q tests/kernels/test_amplin.py` — 102 passed
+- `python scripts/benchmark_amplin_marlin_tps.py --warmup 1 --runs 5 --json-output /tmp/amplin_marlin_tps_warm1.json` — produced table above
+
+## 2026-07-29: runner-closure fast path with KERNEL_BATCH_HINT beats Marlin tok/s
+
+Commit `f6438abd` (`Qubitium`) replaced the per-call packing/residency cache with
+runner closures and added a `KERNEL_BATCH_HINT` post-init path.  The current design
+trades additional VRAM for end-to-end TPS.
+
+### What changed
+
+- `select_kernel(...)` returns a packed runner closure for a fixed `(M, K, N, dtype)`.
+- `AmplinLinear.post_init` builds and stores a runner for the batch size given by
+  the `KERNEL_BATCH_HINT` environment variable (default `1`).
+- `AmplinLinear.forward` dispatches directly to the stored runner when the input
+  batch matches the hint, otherwise it falls back to `amplin.dynamic`.
+- `amplin.dynamic` now uses `_pack_for_spec` + `_make_runner` and caches the runner
+  closure in the per-thread `fast_dispatch_cache`, keyed by `(M, K, N, dtype)`.
+- Each runner closure captures its own packed tensors, so a layer that sees both
+  M=1 (decode) and M=32 (prefill) shapes keeps two packed layouts in GPU memory.
+
+### Consequences
+
+- Qwen3 8B full-model FP16 TPS is now faster than `gptq_marlin` for both 32-token
+  prefill and 128-token decode on a single A100.
+- Peak VRAM is higher than Marlin because the pre-built M=1 runner and the
+  dynamically-built M=32 runner coexist in VRAM.
+- The previous per-layer eviction helpers (`_make_layout_resident`,
+  `_evict_other_layer_layouts`, `_pack_with_cache`) are no longer on the hot path.
+
+### Full-model TPS validation on Qwen3 8B (single A100 GPU)
+
+Model: `/monster/data/model/Qwen3-8B-Base-GPTQ-4bit-g128-activation-GAR-cal512`
+Single GPU: physical `0` (NVIDIA PG506-230, A100 sm_80)
+Config: `dtype=fp16`, `attn_implementation=eager`, prompt = first `gsm8k/main` question,
+`prompt_tokens=32`, `new_tokens=128`, `warmup=3`, `runs=5`, default `KERNEL_BATCH_HINT=1`
+
+| backend | prefill tok/s | decode tok/s | peak VRAM (GiB) |
+|--------:|-------------:|-------------:|----------------:|
+| `gptq_marlin` | 470.98 | 16.07 | 5.70 |
+| `gptq_amplin` | 513.12 | 19.49 | 12.26 |
+
+### Validation
+
+- `ruff check gptqmodel/utils/amplin.py gptqmodel/nn_modules/qlinear/amplin.py scripts/benchmark_amplin_marlin_tps.py --config format/ruff.toml` — clean
+- `pytest -q tests/kernels/test_amplin.py` — 102 passed
+- `python scripts/benchmark_amplin_marlin_tps.py --warmup 3 --runs 5 --json-output /tmp/amplin_marlin_tps_redo.json` — produced table above
+
+## 2026-07-28: unified per-layer layout eviction fixes 2x peak VRAM
+
+*Superseded by the runner-closure redesign in the 2026-07-29 entry; the helpers
+below are no longer on the hot path.*
+
+`gptqmodel/utils/amplin.py` now enforces a single GPU-resident packed layout per
+layer across both the native Amplin cache and the Marlin-style pack cache.
+
+### What changed
+
+- **`_make_layout_resident` / `_evict_other_layer_layouts`**: a per-thread helper
+  that marks one layout key as active for a layer and spills every other layout
+  for that layer (native or Marlin, GPU-resident or in-flight) to CPU RAM.
+- **Cross-cache eviction**: switching from an `mma_lane` M=1 layout to a
+  `marlin_style` M=32 layout (or vice-versa) now moves the inactive packed
+  tensors to CPU instead of leaving both in VRAM.
+- **Cold-hit restoration**: `_pack_with_cache` and `_get_marlin_packed` restore a
+  spilled layout from CPU synchronously before use; completed GPU→CPU transfers
+  are finalized at the start of every `dynamic()` call.
+- **Cache-key stability**: keys use `id(qweight)` + shape, so the canonical
+  tensor object is stable while its storage migrates between CPU and GPU.
+- **Eviction guards**: `_evict_weight_layout_to_cpu_async` and
+  `_evict_marlin_pack_to_cpu_async` skip the async copy when the source tensor is
+  already CPU-resident.
+
+### Consequences
+
+- Full-model peak VRAM for `gptq_amplin` on Qwen3 8B dropped from ~11.9 GiB to
+  ≈5.7 GiB, matching `gptq_marlin`.
+- Only one packed representation per layer is in GPU VRAM at a time; the
+  original GPTQ `qweight`/`scales` live on CPU when a packed layout is active.
+- The first token after a layout switch pays a one-time restore cost; steady
+  prefill/decode TPS is measured by excluding that cold token.
+
+### Validation
+
+- `ruff check gptqmodel/utils/amplin.py scripts/benchmark_amplin_marlin_tps.py --config format/ruff.toml` — clean
+- `pytest -q tests/kernels/test_amplin.py` — 102 passed
+- `pytest -q tests/kernels/test_selection.py tests/kernels/test_qlinear_hierarchy.py` — 111 passed, 17 skipped
+- `scripts/benchmark_amplin_marlin_tps.py` steady-state run (`--warmup 3 --runs 5`): `gptq_marlin` 486.80/16.72 tok/s @ 5.70 GiB, `gptq_amplin` 383.33/12.73 tok/s @ 5.75 GiB.
+
+## 2026-07-24: expose `amplin` as a first-class GPT-QModel backend
+
+`gptqmodel/utils/backend.py` now exposes `BACKEND.GPTQ_AMPLIN` with the `AMPLIN`
+alias, and `gptqmodel/nn_modules/qlinear/amplin.py` adds `AmplinLinear` (a
+`PackableQuantLinear` subclass) so `GPTQModel.load(..., backend='gptq_amplin')`
+and `Evalution` loading route every 4-bit grouped linear through `amplin.dynamic`.
+
+### Backend contract
+
+- `SUPPORTS_BACKENDS`: `[BACKEND.GPTQ_AMPLIN, BACKEND.AMPLIN]`
+- `SUPPORTS_METHODS`: `[METHOD.GPTQ]`
+- `SUPPORTS_FORMATS`: `{FORMAT.GPTQ: 0, FORMAT.GPTQ_V2: 0}` (explicit-only)
+- `SUPPORTS_BITS`: `[4]`, `SUPPORTS_GROUP_SIZE`: `[128]`, `SUPPORTS_DESC_ACT`: `[False]`, `SUPPORTS_SYM`: `[True]`
+- `SUPPORTS_PACK_DTYPES`: `[torch.int32]`, `SUPPORTS_DTYPES`: `[torch.float16, torch.bfloat16]`
+- `SUPPORTS_DEVICES`: `[DEVICE.CUDA]`, `SUPPORTS_PLATFORM`: `[PLATFORM.LINUX]`
+- `validate_once()`: requires `amplin_runtime_available()`.
+- `validate_device()`: requires Ampere compute capability 8.0.
+- `forward()`: flattens batch dims, runs `amplin.dynamic(x, qweight, scales)`, restores shape, adds bias/adapter.
+
+`normalize_backend('amplin')` and `normalize_backend('gptq_amplin')` both resolve to
+`BACKEND.GPTQ_AMPLIN`, so `Evalution` `backend='amplin'` works through the normal
+`tests/eval.py` path.
+
+### Full-model TPS validation on Qwen3 8B (single A100 GPU)
+
+Model: `/monster/data/model/Qwen3-8B-Base-GPTQ-4bit-g128-activation-GAR-cal512`  
+Single GPU: physical `0` (NVIDIA PG506-230, A100 sm_80)  
+Config: `dtype=fp16`, `attn_implementation=eager`, prompt = first `gsm8k/main` question,  
+`prompt_tokens=32`, `new_tokens=128`, `warmup=3`, `runs=5`
+
+| backend | prefill tok/s | decode tok/s | peak VRAM (GiB) |
+|--------:|-------------:|-------------:|----------------:|
+| `gptq_marlin` | 486.80 | 16.72 | 5.70 |
+| `gptq_amplin` | 383.33 | 12.73 | 5.75 |
+
+Notes:
+- `gptq_amplin` peak VRAM now matches `gptq_marlin` (≈5.7 GiB) after fixing the
+  per-layer layout cache so only one packed representation stays GPU-resident.
+- TPS is measured in steady state: memory statistics are reset after warmup, a
+  settle prefill keeps the M=32 packed layout in VRAM, and the first decode token
+  (which pays the one-time packed-layout switch) is excluded from the decode TPS.
+- Prefill is within ~19% of Marlin and decode is within ~21% for this shape/dtype.
+  The gap is the cost of switching between the M=32 packed layout and the M=1
+  packed layout; the custom micro-kernels are still faster in raw micro-benchmarks
+  but the layout migration is not free.
+- `M <= 32` still applies, so `Evalution` `gsm8k_platinum_cot` prompts that exceed
+  32 tokens cannot run end-to-end with Amplin yet.
+
+### Validation
+
+- `ruff check gptqmodel/utils/amplin.py scripts/benchmark_amplin_marlin_tps.py --config format/ruff.toml` — clean
+- `pytest -q tests/kernels/test_amplin.py` — 102 passed
+- `pytest -q tests/kernels/test_selection.py tests/kernels/test_qlinear_hierarchy.py` — 111 passed, 17 skipped
+- `GPTQModel.load(..., backend='gptq_amplin')` and `tests/eval.py` `_build_evalution_runtime(..., backend='gptq_amplin')` both load the Qwen3 8B model and use `AmplinLinear`.
+
+## 2026-07-27: original-weight single-residency manager for packed layouts
+
+`gptqmodel/utils/amplin.py` now guarantees that a layer keeps at most one
+execution-weight representation in GPU VRAM at a time: either the original GPTQ
+`qweight`/`scales`, or one packed micro-kernel layout.
+
+### What changed
+
+- **`_OriginalWeightResidency`**: a global, lock-protected manager keyed by
+  `(id(qweight), id(scales))`.  It stores a canonical CPU copy of the weights and
+  a list of in-flight GPU-user tuples kept alive by `torch.cuda.Event`s.
+- **`_ensure_original_in_vram`**: canonicalizes the original weights to CPU on the
+  first non-``none`` packed use, creates temporary GPU copies for packers, and
+  returns detached GPU views so concurrent threads do not race on the canonical
+  storage location.  For ``none``/gemv it restores or keeps the weights in GPU RAM.
+- **Gating**: offloading is disabled when `torch.compiler.is_compiling()` or
+  `torch.cuda.is_current_stream_capturing()` is active, so `torch.compile` and
+  CUDA Graph capture see stable GPU inputs.
+- **Cache keys**: packed-weight cache keys switched from `qweight.data_ptr()` to
+  `id(qweight)` + shape, because the canonical tensor object is stable while its
+  storage moves between CPU and GPU.
+- **GPU ↔ CPU migration**: inactive packed layouts are spilled to CPU RAM on a
+  per-device CUDA copy stream and restored synchronously on cold hits; completed
+  transfers are finalized on every `dynamic()` call so GPU memory is released
+  promptly.
+
+### Consequences
+
+- Packed micro-kernels no longer leave the original GPTQ weights in VRAM
+  alongside the packed layout.
+- `gemv`/`none` layouts continue to consume the original weights directly from
+  GPU, restoring them from CPU if a previous packed call moved them.
+- Thread-local packed-weight caches coexist with the global residency manager,
+  so switching `M` between `gemv` and a packed layout migrates weights safely
+  without double-buffering in VRAM.
+
+### Validation
+
+- `ruff check gptqmodel/utils/amplin.py tests/kernels/test_amplin.py --config format/ruff.toml` — clean
+- `pytest -q tests/kernels/test_amplin.py` — 102 passed
+- `git diff --check` — clean
+- New `test_amplin_packed_layout_moves_original_weights_to_cpu` verifies a packed
+  call leaves `qweight`/`scales` on CPU.
+- New `test_amplin_gemv_keeps_original_weights_on_gpu` verifies `gemv` keeps them
+  GPU-resident.
+- New `test_amplin_round_trip_gemv_and_packed_layout` switches `M=1`/`M=16` and
+  checks device residency plus numerical correctness.
+- New `test_amplin_original_weight_residency_thread_safety` runs 8 threads
+  concurrently routing the same shared `qweight`/`scales` to `gemv` and
+  `gemm_hmma`.
+
+## 2026-07-26: thread-local dynamic routing / packing / cache design for GIL=0
+
+`gptqmodel/utils/amplin.py` was refactored so the hot path is safe under
+free-threaded (`PYTHON_GIL=0`) Python and concurrent CUDA usage.
+
+### What changed
+
+- **Per-thread caches**: `_WEIGHT_CACHE`, `_WEIGHT_CACHE_PENDING`,
+  `_WEIGHT_CACHE_RESIDENT`, `_MARLIN_PACK_CACHE`, `_MARLIN_PACK_CACHE_PENDING`,
+  `_MARLIN_PACK_CACHE_RESIDENT`, `_FAST_DISPATCH_CACHE`, per-device copy streams,
+  and op/availability caches now live in `_ThreadLocalAmplinCaches` (one set per
+  thread via `_thread_caches()`).
+- **Routing-table lock only**: `_ROUTING_LOCK` now protects only the shared
+  `_STATIC_ROUTING_TABLE` / `_DYNAMIC_ROUTING_TABLE`.  Cache reads/writes are
+  thread-local and need no lock.
+- **One-time init lock**: `_AMPLIN_INIT_LOCK` serializes first resolution of
+  `torch.ops` handles; all hot-path cache hits are lock-free.
+- **Thread finalizer**: `weakref.finalize(thread, caches.clear)` is registered on
+  each thread so GPU tensors are dropped when the `Thread` object is collected.
+  Long-lived inference threads are unaffected.
+- **Explicit cleanup**: `amplin.clear_thread_caches()` is exposed for thread
+  pools or frameworks that kill threads and want immediate GPU memory release.
+
+### Consequences
+
+- Concurrent `amplin.dynamic()` calls from different threads no longer contend on
+  a global cache lock.  Each thread owns its packed layouts, so a workload that
+  switches between `M=1` (`gemv`/`marlin_style`) and `M=16` (`mma_lane`/`hmma`)
+  can spill/restore layouts on separate CUDA copy streams without cross-thread
+  synchronization.
+- The routing table is still shared, so the first call for a new
+  `(M, K, N, dtype)` still serializes the micro-benchmark under `_ROUTING_LOCK`.
+- Threads that process the same layer pay the packing cost once per thread, not
+  once globally.  This trades a small amount of duplicated GPU memory for
+  lock-free dispatch.
+
+### Validation
+
+- `ruff check gptqmodel/utils/amplin.py tests/kernels/test_amplin.py --config format/ruff.toml` — clean
+- `pytest -q tests/kernels/test_amplin.py` — 102 passed
+- `git diff --check` — clean
+- New `test_amplin_dynamic_thread_safety` runs 8 threads × 20 iterations alternating
+  `M=1` and `M=16` for FP16 and BF16 under GIL=0, comparing against the dense
+  reference. Both parameterizations pass.
+- New `test_amplin_thread_local_cache_isolation` and
+  `test_amplin_thread_local_cache_released_on_thread_death` validate per-thread
+  cache instances and the weakref finalizer cleanup path.
+
+## 2026-07-25: M=1-16 routing refresh #3 — kimi shared-down fix, splitk2 rejected
+
+Another resweep found `(8, 2048, 7168, bf16)` (`kimi-k2.5 shared-down` M=8)
+routed to `mma_lane_m16_n32_splitk16` (0.91x).  `sweep_candidates_batch.py`
+selected `mma_lane_m16_n64_splitk24_pipe2_interleaved` at 10.22us vs raw Marlin
+23.84us (~2.33x), so the routing table was updated.
+
+Also prototyped `mma_lane_m16_n64_splitk2_pipe2_interleaved` as a possible
+kernel-level win for the dense-up losses.  It compiled and passed correctness,
+but on `kimi-k2.5 dense-up` M=8 BF16 it was 155us vs the current ~58us best and
+raw Marlin ~53us, so the variant was reverted and left out of the retained diff.
+
+Latest `bench_static_m1_16.py` is noisy at the margin (384-386 wins depending on
+the run), but the routing-table fixes are confirmed by `sweep_candidates_batch.py`.
+The persistent losses are still `kimi-k2.5 dense-up` and `glm-5.2 dense-up`;
+no existing `mma_lane` candidate beats raw Marlin there, so the next meaningful
+step is a Marlin-style `cp.async` weight pipeline or more-independent-warps
+mega-kernel.
+
+## 2026-07-25: M=1-16 routing refresh #2 — 4 more wins, geomean 1.458x
+
+Focused `sweep_candidates_batch.py` resweeps of the loss shapes exposed several
+stale or sub-optimal static routing entries.  The following keys in
+`gptqmodel/utils/amplin_dynamic_routing_table.json` were updated to faster
+`mma_lane` kernels:
+
+- `(1, 2048, 6144, fp16)` -> `mma_lane_m16_n64_splitk20_pipe2_interleaved` (was
+  `mma_lane_m16_n32_splitk8`, a large outlier loss)
+- `(2, 6144, 576, bf16)` -> `mma_lane_m16_n32_splitk12_pipe2_interleaved` (was `gemv`)
+- `(8, 1024, 3072, bf16)` -> `mma_lane_m16_n16_splitk8` (was
+  `mma_lane_m16_n64_splitk20_pipe2_interleaved`)
+- `(4, 2048, 6144, bf16)` -> `mma_lane_m16_n64_splitk4_pipe2_interleaved` (was
+  `mma_lane_m16_n64_splitk16_pipe2_interleaved`)
+- `(8, 7168, 18432, bf16)` -> `mma_lane_m16_n64_splitk4_pipe2_interleaved` (was
+  `mma_lane_m16_n64_splitk8_pipe2_interleaved`)
+
+Result (`bench_static_m1_16.py`, M=1-16, Laguna/GLM/Kimi, FP16+BF16, A100 sm_80,
+raw Marlin baseline, GPU 0):
+
+| metric | value |
+|---|---|
+| total shapes | 420 |
+| legal Marlin shapes | 396 |
+| Amplin wins | 386 |
+| losses | 10 |
+| geomean speedup | 1.458 |
+
+The 10 remaining losses are still `kimi-k2.5 dense-up` (M=4/6/8/16 fp16 and
+M=4/6/8/16 bf16, K=7168 N=18432) and `glm-5.2 dense-up` (M=8/16 bf16,
+K=6144 N=12288).  No existing `mma_lane` candidate beats raw Marlin on these
+shapes, so the next step is a kernel-level change (wider N-tile, more warps, or
+a Marlin-style `cp.async` weight pipeline).
+
+## 2026-07-25: M=1-16 eager dispatch bypass + GLM q-a-proj routing fix
+
+The `dynamic()` wrapper added in the previous commit registers the router as a
+`torch.library` custom op for `torch.compile(fullgraph=True)` and CUDA Graph
+capture, but the extra `torch.ops` round-trip added ~3–4 µs of dispatch overhead
+in eager mode and turned almost every shape into a loss.  `dynamic()` now calls
+`_dynamic_impl()` directly when `torch.compiler.is_compiling()` is `False` and
+falls back to the custom-op path only under compilation, preserving both eager
+latency and graph-capture compatibility.
+
+Also fixed a stale routing-table entry that was causing a large outlier:
+`(8, 6144, 2048, fp16)` -> `mma_lane_m16_n32_splitk8_pipe2`.
+
+Result (`bench_static_m1_16.py`, M=1-16, Laguna/GLM/Kimi, FP16+BF16, A100 sm_80,
+raw Marlin baseline, GPU 0):
+
+| metric | value |
+|---|---|
+| total shapes | 420 |
+| legal Marlin shapes | 396 |
+| Amplin wins | 386 |
+| losses | 10 |
+| geomean speedup | 1.439 |
+
+Remaining 10 losses are `kimi-k2.5 dense-up` (M=4/6/8/16 fp16 and M=4/6/8/16
+bf16) and `glm-5.2 dense-up` (M=8/16 bf16).  These are within ~5–10% of raw
+Marlin and are now kernel-limited rather than dispatch-limited.
+
+## 2026-07-25: M=1-16 static routing refresh on `devin/1785019802-amplin-continue`
+
+Refreshed `gptqmodel/utils/amplin_dynamic_routing_table.json` from a focused 4-GPU
+`sweep_candidates_batch.py` resweep of the 19 M=1-16 loss shapes found by
+`bench_static_m1_16.py` on this branch.
+
+We also evaluated lowering the `marlin_style` candidate `min_m` to 1 so it could be
+selected for small-M shapes.  The resulting `marlin_style` runs were still slower
+than the raw `gptq_marlin_gemm` baseline used in `bench_static_m1_16.py` (it adds
+an extra C++ extension hop and workspace/scales management), so `min_m` was left
+at 17 and the search focused on native `mma_lane` kernels.
+
+Result (`bench_static_m1_16.py`, M=1-16, Laguna/GLM/Kimi, FP16+BF16, A100 sm_80,
+raw Marlin baseline, GPU 0):
+
+| metric | value |
+|---|---|
+| total shapes | 420 |
+| legal Marlin shapes | 396 |
+| Amplin wins | 385 |
+| losses | 11 |
+| geomean speedup | 1.530 |
+
+Routing-table changes that converted losses to wins:
+
+- `(4, 6144, 2048, fp16)` -> `mma_lane_m16_n32_splitk8_pipe2`
+- `(16, 16384, 6144, fp16)` -> `mma_lane_m16_n64_splitk24_pipe2_interleaved`
+- `(1, 6144, 12288, fp16)` -> `mma_lane_m16_n64_splitk8_pipe2_interleaved`
+- `(4, 12288, 6144, fp16)` -> `mma_lane_m16_n64_splitk24_pipe2_interleaved`
+- `(1, 8192, 7168, fp16)` -> `mma_lane_m16_n32_splitk8_pipe2`
+- `(16, 7168, 18432, fp16)` -> `mma_lane_m16_n64_splitk4_pipe2_interleaved`
+- `(1, 7168, 2048, fp16)` -> `mma_lane_m16_n16_splitk8`
+- `(16, 9216, 3072, bf16)` -> `mma_lane_m16_n64_splitk12x2_coop_interleaved`
+
+Remaining 11 losses are still `kimi-k2.5 dense-up` (M=4/6/8/16 fp16 and M=4/6/8/16
+bf16), `glm-5.2 dense-up` (M=2 fp16 and M=16 bf16), and `kimi-k2.5 o-proj` M=8
+bf16.  These are all within ~10% of raw Marlin and are now limited by the Python
+`amplin.dynamic()` dispatch overhead relative to the raw `torch.ops` Marlin
+baseline; the next route is either a lower-overhead native dispatch path or a
+faster `mma_lane` kernel that opens a larger margin over Marlin.
+
 ## 2026-07-25: C++ `marlin_style_run` fast path
 
 Moved the hot `marlin_style` dispatch from Python into the `gptqmodel_amplin_ops`

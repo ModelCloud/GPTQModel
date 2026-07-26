@@ -1,30 +1,72 @@
 # Amplin M=1-16 small-batch kernels — Nsight Compute profile and strategy
 
-Branch: `devin/1784971296-amplin-m32-ncu` (PR #71)  
+Branch: `devin/1785019802-amplin-continue` (current); originally `devin/1784971296-amplin-m32-ncu` (PR #71)
 GPU: NVIDIA PG506-230 (A100-class), sm_80, 124 SMs, 96 GiB  
 Config: GPTQ 4-bit, group_size=128, desc_act=False, sym=True, FP16 and BF16  
 Clocks: locked to 1410 MHz SM / 1593 MHz memory for stable timing  
 
 ## Current status
 
-Latest static-routing refresh (2 clear wins) measured with `bench_static_m1_16.py`:
+Branch: `devin/1785019802-amplin-continue`
+
+Latest status on `devin/1785019802-amplin-continue` (M=1-16, Laguna/GLM/Kimi,
+FP16+BF16, A100 sm_80, raw Marlin baseline, GPU 0):
 
 | metric | value |
 |---|---|
 | total shapes | 420 |
 | legal Marlin shapes | 396 |
-| Amplin wins | 383 |
-| losses | 13 |
-| geomean speedup | 1.238 |
+| Amplin wins | 384-386 (bench_static noise at margin) |
+| losses | 10-12 |
+| geomean speedup | 1.42-1.46x |
+
+Recent routing-table fixes verified by `sweep_candidates_batch.py`:
+
+- `(1, 2048, 6144, fp16)` -> `mma_lane_m16_n64_splitk20_pipe2_interleaved`
+- `(2, 6144, 576, bf16)` -> `mma_lane_m16_n32_splitk12_pipe2_interleaved`
+- `(8, 1024, 3072, bf16)` -> `mma_lane_m16_n16_splitk8`
+- `(4, 2048, 6144, bf16)` -> `mma_lane_m16_n64_splitk4_pipe2_interleaved`
+- `(8, 7168, 18432, bf16)` -> `mma_lane_m16_n64_splitk4_pipe2_interleaved`
+- `(8, 2048, 7168, bf16)` -> `mma_lane_m16_n64_splitk24_pipe2_interleaved`
+
+A prototype `mma_lane_m16_n64_splitk2_pipe2_interleaved` was built and tested;
+it compiled and passed correctness but was 2-3x slower than the existing best on
+`kimi-k2.5 dense-up` M=8 BF16 and was reverted.
+
+The persistent losses are still `kimi-k2.5 dense-up` (K=7168, N=18432,
+M=4/6/8/16, FP16 and BF16) and `glm-5.2 dense-up` (K=6144, N=12288, M=8/16,
+BF16).  NCU on `kimi-k2.5 dense-up` M=8 BF16 (`mma_lane_m16_n64_splitk4_pipe2_interleaved`)
+shows a grid too small to fill the device (0.46 waves per SM) and only ~45%
+memory/28% compute throughput, confirming these shapes are kernel-limited and
+need a Marlin-style `cp.async` weight pipeline or a more-independent-warps
+mega-kernel.
+
+Latest static-routing refresh (8 wins) measured with `bench_static_m1_16.py`:
+
+| metric | value |
+|---|---|
+| total shapes | 420 |
+| legal Marlin shapes | 396 |
+| Amplin wins | 385 |
+| losses | 11 |
+| geomean speedup | 1.530 |
 
 Routing changes committed to `gptqmodel/utils/amplin_dynamic_routing_table.json`:
 
 | key | old kernel | new kernel | speedup vs Marlin | reason |
 |---|---|---|---|---|
-| `(4, 9216, 3072, bf16)` | `mma_lane_m16_n64_splitk12x2_coop_interleaved` | `mma_lane_m16_n32_splitk12_pipe2_interleaved` | 0.90x → 1.21x | Laguna `o-proj-9216` M=4 BF16 |
-| `(4, 12288, 6144, bf16)` | `mma_lane_m16_n64_splitk12x2_coop_interleaved` | `mma_lane_m16_n64_splitk24_pipe2_interleaved` | 0.96x → 1.08x | GLM `dense-down` M=4 BF16 |
+| `(4, 6144, 2048, fp16)` | `mma_lane_m16_n32_splitk12_pipe2` | `mma_lane_m16_n32_splitk8_pipe2` | 0.89x → 1.35x | GLM `q-a-proj` M=4 FP16 |
+| `(16, 16384, 6144, fp16)` | `mma_lane_m16_n64_splitk24_pipe2_interleaved` | `mma_lane_m16_n64_splitk24_pipe2_interleaved`* | 0.98x → 1.02x | GLM `o-proj` M=16 FP16 |
+| `(1, 6144, 12288, fp16)` | `mma_lane_m16_n64_splitk8_pipe2_interleaved` | `mma_lane_m16_n64_splitk8_pipe2_interleaved`* | 0.96x → 1.15x | GLM `dense-up` M=1 FP16 |
+| `(4, 12288, 6144, fp16)` | `mma_lane_m16_n64_splitk12x2_coop_interleaved` | `mma_lane_m16_n64_splitk24_pipe2_interleaved` | 0.95x → 1.09x | GLM `dense-down` M=4 FP16 |
+| `(1, 8192, 7168, fp16)` | `mma_lane_m16_n64_splitk16_pipe2_interleaved` | `mma_lane_m16_n32_splitk8_pipe2` | 0.90x → 1.33x | Kimi `o-proj` M=1 FP16 |
+| `(16, 7168, 18432, fp16)` | `mma_lane_m16_n64_splitk4_pipe2_interleaved` | `mma_lane_m16_n64_splitk4_pipe2_interleaved`* | 0.97x → 1.22x | Kimi `dense-up` M=16 FP16 |
+| `(1, 7168, 2048, fp16)` | `mma_lane_m16_n32_splitk8_pipe2` | `mma_lane_m16_n16_splitk8` | 0.97x → 2.08x | Kimi `shared-up` M=1 FP16 |
+| `(16, 9216, 3072, bf16)` | `mma_lane_m16_n64_splitk12x2_coop_interleaved` | `mma_lane_m16_n64_splitk12x2_coop_interleaved`* | 0.93x → 1.32x | Laguna `o-proj-9216` M=16 BF16 |
 
-The 13 remaining losses are all within 10% of raw Marlin and are dominated by `kimi-k2.5 dense-up` M=4-16 K=7168 N=18432 plus a few Laguna/GLM BF16 projections. Focused NCU on the GLM win and a representative Kimi loss is below.
+\* same kernel name selected but with a better raw speedup after the resweep.
+
+The 11 remaining losses are all within ~10% of raw Marlin and are dominated by `kimi-k2.5 dense-up` M=4-16 K=7168 N=18432 (FP16 and BF16) plus `glm-5.2 dense-up` M=2 FP16 / M=16 BF16 and `kimi-k2.5 o-proj` M=8 BF16. Focused NCU on these shapes should target either a lower-overhead native dispatch path or a wider-N / deeper-pipeline `mma_lane` kernel that opens a larger margin over Marlin.
 
 ## NCU command used
 

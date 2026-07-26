@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import threading
+import weakref
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -179,21 +181,24 @@ def amplin_runtime_available() -> bool:
 # Cache the runtime-availability check and individual torch.ops handles so the
 # dynamic router does not pay extension-loading overhead on every call.
 _AMPLIN_RUNTIME_AVAILABLE: bool | None = None
-_CANDIDATE_OP_CACHE: dict[str, Callable] = {}
+_AMPLIN_INIT_LOCK = threading.Lock()
 
 
 def _ensure_amplin_runtime_available() -> bool:
-    global _AMPLIN_RUNTIME_AVAILABLE
-    if _AMPLIN_RUNTIME_AVAILABLE is None:
-        _AMPLIN_RUNTIME_AVAILABLE = amplin_runtime_available()
-    return _AMPLIN_RUNTIME_AVAILABLE
+    with _AMPLIN_INIT_LOCK:
+        global _AMPLIN_RUNTIME_AVAILABLE
+        if _AMPLIN_RUNTIME_AVAILABLE is None:
+            _AMPLIN_RUNTIME_AVAILABLE = amplin_runtime_available()
+        return _AMPLIN_RUNTIME_AVAILABLE
 
 
 def _get_amplin_op(op_name: str) -> Callable:
-    op = _CANDIDATE_OP_CACHE.get(op_name)
+    caches = _thread_caches()
+    op = caches.candidate_op_cache.get(op_name)
     if op is None:
-        op = _extension_api().op("amplin", op_name)
-        _CANDIDATE_OP_CACHE[op_name] = op
+        with _AMPLIN_INIT_LOCK:
+            op = _extension_api().op("amplin", op_name)
+        caches.candidate_op_cache[op_name] = op
     return op
 
 
@@ -1355,6 +1360,11 @@ _STATIC_ROUTING_TABLE: dict[tuple[int, int, int, str], str] = {}
 _DYNAMIC_ROUTING_TABLE: dict[tuple[int, int, int, str], str] = {}
 _ROUTING_LOCK = threading.Lock()
 
+# Packed-weight caches are per-thread (see _ThreadLocalAmplinCaches), so no
+# global cache lock is required.  Existing ``with _CACHE_LOCK:`` sites are kept
+# as no-ops below to minimize churn; they can be removed in a future cleanup.
+_CACHE_LOCK = contextlib.nullcontext()
+
 
 @dataclass(frozen=True)
 class _CandidateSpec:
@@ -1369,6 +1379,9 @@ class _CandidateSpec:
     n_multiple: int = 64
     k_multiple: int = 128
     exact_ks: tuple[int, ...] | None = None
+    # Unique layout ID used for the packed-weight cache.  Defaults to the
+    # packer name because kernels that share a packer share the same layout.
+    layout_id: str = ""
 
 
 # Full candidate list for M <= 32.  Each kernel is shape-dependent; the router
@@ -1403,6 +1416,15 @@ _DYNAMIC_CANDIDATES: tuple[_CandidateSpec, ...] = (
         "hmma",
         min_m=17,
         max_m=32,
+    ),
+    # HMMA / WMMA large-M paths ---------------------------------------------
+    _CandidateSpec(
+        "gemm_hmma_m64_v3_large",
+        "gemm_hmma_m64_v3",
+        "hmma",
+        min_m=64,
+        max_m=None,
+        m_multiple=64,
     ),
     # M <= 16, N16 / N32 mma_lane split-K paths -----------------------------
     _CandidateSpec(
@@ -1508,6 +1530,15 @@ _DYNAMIC_CANDIDATES: tuple[_CandidateSpec, ...] = (
         max_m=16,
         n_multiple=512,
     ),
+    _CandidateSpec(
+        "mma_lane_m16_n64_tile8_shared_a_large",
+        "mma_lane_m16_n64_tile8_shared_a",
+        "n64",
+        min_m=64,
+        max_m=None,
+        m_multiple=16,
+        n_multiple=512,
+    ),
     # M32 mma_lane paths ----------------------------------------------------
     _CandidateSpec(
         "mma_lane_m32_global_a",
@@ -1521,6 +1552,39 @@ _DYNAMIC_CANDIDATES: tuple[_CandidateSpec, ...] = (
         "lane",
         exact_ms=(32,),
         n_multiple=8,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_global_a_large",
+        "mma_lane_m32_global_a",
+        "lane",
+        min_m=32,
+        max_m=None,
+        m_multiple=32,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n32_global_a_large",
+        "mma_lane_m32_n32_global_a",
+        "lane",
+        min_m=32,
+        max_m=None,
+        m_multiple=32,
+        n_multiple=8,
+    ),
+    _CandidateSpec(
+        "mma_lane_m64",
+        "mma_lane_m64",
+        "lane",
+        min_m=64,
+        max_m=None,
+        m_multiple=64,
+    ),
+    _CandidateSpec(
+        "mma_lane_m64_global_a",
+        "mma_lane_m64_global_a",
+        "lane",
+        min_m=64,
+        max_m=None,
+        m_multiple=64,
     ),
     _CandidateSpec(
         "mma_lane_m32_n64_splitk24_pipe2_interleaved",
@@ -1580,10 +1644,37 @@ _DYNAMIC_CANDIDATES: tuple[_CandidateSpec, ...] = (
         n_multiple=256,
     ),
     _CandidateSpec(
+        "mma_lane_m32_n64_tile2_shared_a_large",
+        "mma_lane_m32_n64_tile2_shared_a",
+        "n64",
+        min_m=64,
+        max_m=None,
+        m_multiple=32,
+        n_multiple=128,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_tile4_shared_a_large",
+        "mma_lane_m32_n64_tile4_shared_a",
+        "n64",
+        min_m=64,
+        max_m=None,
+        m_multiple=32,
+        n_multiple=256,
+    ),
+    _CandidateSpec(
         "mma_lane_m32_n64_tile8_shared_a",
         "mma_lane_m32_n64_tile8_shared_a",
         "n64",
         max_m=32,
+        n_multiple=512,
+    ),
+    _CandidateSpec(
+        "mma_lane_m32_n64_tile8_shared_a_large",
+        "mma_lane_m32_n64_tile8_shared_a",
+        "n64",
+        min_m=64,
+        max_m=None,
+        m_multiple=32,
         n_multiple=512,
     ),
     _CandidateSpec(
@@ -1629,45 +1720,436 @@ _DYNAMIC_CANDIDATES: tuple[_CandidateSpec, ...] = (
         "marlin_style",
         "marlin_style",
         "none",
-        min_m=17,
-        max_m=32,
+        min_m=1,
+        max_m=None,
+        m_multiple=1,
         n_multiple=64,
         k_multiple=128,
+        layout_id="marlin_style",
     ),
 )
 
 
-# Cache packed weights keyed by tensor memory address, shape, packer, and dtype so
-# repeated calls for the same layer avoid re-packing without reusing stale entries
-# when tensor object ids are recycled after deallocation.
-_WEIGHT_CACHE: dict[
-    tuple[int, int, tuple[int, ...], tuple[int, ...], str, torch.dtype],
-    tuple[torch.Tensor, torch.Tensor],
-] = {}
+# Sentinel used in the weight cache for the canonical (un-packed) "none" layout
+# so the original qweight tensor is not duplicated when spilling to CPU RAM.
+_NONE_WEIGHT_SENTINEL = object()
 
-# Fast-dispatch cache keyed like _WEIGHT_CACHE plus the routing key.  When the
-# routing choice and packed weights for a layer are known, repeated calls avoid
-# spec/op lookup and the _run_candidate indirection.
-_FAST_DISPATCH_CACHE: dict[
-    tuple[
-        tuple[int, int, int, str],
-        int,
-        int,
-        tuple[int, ...],
-        tuple[int, ...],
-    ],
-    tuple[Callable, torch.Tensor, torch.Tensor, bool, int],
-] = {}
+# Maximum number of packed layouts that stay GPU-resident for one layer.  Inactive
+# layouts are spilled to host RAM and moved back on demand.
+_MAX_GPU_PACKED_LAYOUTS_PER_LAYER = 1
 
-# Cache for the Marlin-style candidate's repacked weights, permuted scales and
-# workspace.  Keyed by the canonical qweight/scales pointers so repeated calls
-# for the same layer avoid the repack overhead.
-_MARLIN_PACK_CACHE: dict[
-    tuple[int, int, tuple[int, ...], tuple[int, ...], int, str],
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor, object],
-] = {}
-_MARLIN_GEMM_OP_CACHE: dict[torch.dtype, Callable] = {}
-_MARLIN_AVAILABLE_CACHE: dict[torch.dtype, bool] = {}
+
+@dataclass
+class _PendingCpuLayout:
+    """In-flight GPU->CPU weight transfer for native Amplin layouts."""
+    cpu_tensors: tuple[object, torch.Tensor]
+    gpu_tensors: tuple[object, torch.Tensor]
+    event: torch.cuda.Event
+    stream: torch.cuda.Stream
+
+
+@dataclass
+class _PendingCpuMarlinLayout:
+    """In-flight GPU->CPU weight transfer for Marlin-style layouts."""
+    cpu_tensors: tuple[torch.Tensor, torch.Tensor, torch.Tensor, object]
+    gpu_tensors: tuple[torch.Tensor, torch.Tensor, torch.Tensor, object]
+    event: torch.cuda.Event
+    stream: torch.cuda.Stream
+
+
+@dataclass
+class _ThreadLocalAmplinCaches:
+    """Per-thread packed-weight and op caches.
+
+    Normal inference runs a given module forward on a fixed thread, so each
+    thread can own its own layout cache without cross-thread synchronization.
+    """
+    weight_cache: dict = field(default_factory=dict)
+    weight_cache_pending: dict = field(default_factory=dict)
+    weight_cache_resident: dict = field(default_factory=dict)
+    weight_copy_streams: dict = field(default_factory=dict)
+    fast_dispatch_cache: dict = field(default_factory=dict)
+    marlin_pack_cache: dict = field(default_factory=dict)
+    marlin_pack_cache_pending: dict = field(default_factory=dict)
+    marlin_pack_cache_resident: dict = field(default_factory=dict)
+    marlin_copy_streams: dict = field(default_factory=dict)
+    candidate_op_cache: dict = field(default_factory=dict)
+    marlin_gemm_op_cache: dict = field(default_factory=dict)
+    marlin_available_cache: dict = field(default_factory=dict)
+
+    def clear(self) -> None:
+        """Release every tensor/op reference held by this thread's caches."""
+        self.weight_cache.clear()
+        self.weight_cache_pending.clear()
+        self.weight_cache_resident.clear()
+        self.weight_copy_streams.clear()
+        self.fast_dispatch_cache.clear()
+        self.marlin_pack_cache.clear()
+        self.marlin_pack_cache_pending.clear()
+        self.marlin_pack_cache_resident.clear()
+        self.marlin_copy_streams.clear()
+        self.candidate_op_cache.clear()
+        self.marlin_gemm_op_cache.clear()
+        self.marlin_available_cache.clear()
+
+
+_THREAD_LOCAL_CACHES = threading.local()
+
+
+def _thread_caches() -> _ThreadLocalAmplinCaches:
+    """Return (creating if necessary) this thread's isolated cache set."""
+    caches = getattr(_THREAD_LOCAL_CACHES, "caches", None)
+    if caches is None:
+        caches = _ThreadLocalAmplinCaches()
+        _THREAD_LOCAL_CACHES.caches = caches
+        # Thread-local values are not released when the thread dies.  Attach a
+        # finalizer to the Thread object so GPU memory is dropped as soon as the
+        # thread is collected (for long-lived inference threads this never fires).
+        weakref.finalize(threading.current_thread(), caches.clear)
+    return caches
+
+
+@dataclass
+class _OriginalWeightResidency:
+    """Global per-layer residency manager for the canonical GPTQ qweight/scales.
+
+    Amplin keeps at most one execution representation of a layer in GPU VRAM:
+    either the original `qweight`/`scales` (when the ``none``/gemv layout is
+    active) or one packed layout.  After a non-``none`` layout is produced, the
+    original weights are copied to CPU RAM and the GPU copy is dropped once no
+    kernel is still reading it.
+
+    This object is shared by all threads, so all mutations of `qweight.data`
+    and `scales.data` are protected by `lock`.  Active kernels that read the
+    original weights register a CUDA event so their GPU tensor stays alive even
+    if another thread moves the module's `qweight`/`scales` to CPU in the
+    meantime.
+    """
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    cpu_qweight: torch.Tensor | None = None
+    cpu_scales: torch.Tensor | None = None
+    # Each tuple is (event, gpu_qweight, gpu_scales) for an in-flight kernel
+    # that reads the canonical weights.  Completed events are reaped by
+    # `_finalize_original_gpu_users`.
+    gpu_users: list[tuple[torch.cuda.Event, torch.Tensor, torch.Tensor]] = field(
+        default_factory=list
+    )
+
+
+# Maps (id(qweight), id(scales)) to the shared residency record.
+_ORIGINAL_WEIGHT_RESIDENCY: dict[tuple[int, int], _OriginalWeightResidency] = {}
+_ORIGINAL_RESIDENCY_LOCK = threading.Lock()
+
+
+def _original_weight_residency(
+    qweight: torch.Tensor, scales: torch.Tensor
+) -> _OriginalWeightResidency:
+    """Return (creating if necessary) the shared residency record for a layer."""
+    key = (id(qweight), id(scales))
+    with _ORIGINAL_RESIDENCY_LOCK:
+        r = _ORIGINAL_WEIGHT_RESIDENCY.get(key)
+        if r is None:
+            r = _OriginalWeightResidency()
+            _ORIGINAL_WEIGHT_RESIDENCY[key] = r
+    return r
+
+
+def _finalize_original_gpu_users(r: _OriginalWeightResidency) -> None:
+    """Drop GPU tensor references whose kernels have finished."""
+    still_active: list[tuple[torch.cuda.Event, torch.Tensor, torch.Tensor]] = []
+    for event, gq, gs in r.gpu_users:
+        if event.query():
+            del gq, gs
+            continue
+        still_active.append((event, gq, gs))
+    r.gpu_users = still_active
+
+
+def _ensure_original_in_vram(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    device: torch.device,
+    move_to_cpu: bool = True,
+    return_tensors: bool = True,
+) -> tuple[_OriginalWeightResidency, torch.Tensor | None, torch.Tensor | None]:
+    """Move/restore canonical ``qweight``/``scales`` storage and return GPU views.
+
+    For non-``none`` layouts (``move_to_cpu=True``) the canonical weights are kept
+    in CPU RAM and temporary GPU copies are returned for packing.  For
+    ``none``/gemv layouts (``move_to_cpu=False``) the canonical weights are kept in
+    GPU RAM and a detached view is returned so the gemv kernel can reference
+    them safely while another thread may later move the canonical storage.
+
+    The whole operation is performed under the per-layer residency lock so the
+    returned GPU tensors are captured before another thread can change the
+    canonical storage location.
+
+    During ``torch.compile`` tracing / CUDA Graph capture this function returns GPU
+    copies without moving the canonical tensors, because the graph expects its
+    inputs to stay on the original device.
+    """
+    r = _original_weight_residency(qweight, scales)
+    with r.lock:
+        _finalize_original_gpu_users(r)
+
+        if torch.compiler.is_compiling() or torch.cuda.is_current_stream_capturing():
+            if return_tensors:
+                return (
+                    r,
+                    qweight.to(device, non_blocking=False).detach().contiguous(),
+                    scales.to(device, non_blocking=False).detach().contiguous(),
+                )
+            return r, None, None
+
+        if not move_to_cpu:
+            # gemv consumes the original weights directly; keep them GPU-resident.
+            if qweight.device.type != "cuda" or scales.device.type != "cuda":
+                if r.cpu_qweight is not None and r.cpu_scales is not None:
+                    qweight.data = r.cpu_qweight.to(device, non_blocking=False).contiguous()
+                    scales.data = r.cpu_scales.to(device, non_blocking=False).contiguous()
+                else:
+                    qweight.data = qweight.to(device, non_blocking=False).contiguous()
+                    scales.data = scales.to(device, non_blocking=False).contiguous()
+            if return_tensors:
+                return r, qweight.detach().contiguous(), scales.detach().contiguous()
+            return r, None, None
+
+        if r.cpu_qweight is None or r.cpu_scales is None:
+            # First packed use of this layer: move the canonical weights to CPU.
+            # The original GPU storage is released once no in-flight kernel holds it.
+            if qweight.device.type == "cuda":
+                r.cpu_qweight = qweight.to("cpu", non_blocking=False).contiguous()
+                r.cpu_scales = scales.to("cpu", non_blocking=False).contiguous()
+            else:
+                r.cpu_qweight = qweight.detach().contiguous()
+                r.cpu_scales = scales.detach().contiguous()
+            qweight.data = r.cpu_qweight
+            scales.data = r.cpu_scales
+        elif qweight.device.type == "cuda":
+            # Another call already canonicalized; point this Parameter at CPU home.
+            qweight.data = r.cpu_qweight
+            scales.data = r.cpu_scales
+
+        if return_tensors:
+            return (
+                r,
+                r.cpu_qweight.to(device, non_blocking=False).detach().contiguous(),
+                r.cpu_scales.to(device, non_blocking=False).detach().contiguous(),
+            )
+        return r, None, None
+
+
+def _register_original_gpu_user(
+    r: _OriginalWeightResidency,
+    event: torch.cuda.Event,
+    gpu_qweight: torch.Tensor,
+    gpu_scales: torch.Tensor,
+) -> None:
+    """Record an in-flight kernel that reads a temporary GPU copy of the
+    canonical weights.  Completed events are reaped when new copies are requested."""
+    with r.lock:
+        _finalize_original_gpu_users(r)
+        r.gpu_users.append((event, gpu_qweight, gpu_scales))
+
+
+def _layout_id_for_spec(spec: _CandidateSpec) -> str:
+    """Return the cache layout ID for a candidate; defaults to its packer."""
+    return spec.layout_id or spec.packer
+
+
+def _weight_cache_layer_key(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    dtype: torch.dtype,
+) -> tuple[int, int, tuple[int, ...], tuple[int, ...], torch.dtype]:
+    """Layer key shared by all packed layouts for one set of weights.
+
+    Use object identity (`id`) rather than `data_ptr` because the residency
+    manager may move the canonical `qweight`/`scales` between CPU and GPU,
+    changing their data pointer while the logical layer stays the same.
+    """
+    return (
+        id(qweight),
+        id(scales),
+        tuple(qweight.shape),
+        tuple(scales.shape),
+        dtype,
+    )
+
+
+def _get_weight_copy_stream(device: torch.device) -> torch.cuda.Stream:
+    """Lazily create one GPU->CPU copy stream per device."""
+    with _CACHE_LOCK:
+        stream = _thread_caches().weight_copy_streams.get(device)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            _thread_caches().weight_copy_streams[device] = stream
+        return stream
+
+
+def _finalize_weight_cache_copies() -> None:
+    """Move completed GPU->CPU weight transfers from pending to CPU cache.
+
+    Querying the recorded event tells us the copy has finished and the GPU
+    source memory is no longer needed by the copy engine.  This is polled on
+    every ``dynamic()`` call so cold hits see valid CPU tensors and completed
+    transfers release their source GPU memory promptly.
+    """
+    with _CACHE_LOCK:
+        completed = [key for key, pending in _thread_caches().weight_cache_pending.items() if pending.event.query()]
+        for key in completed:
+            pending = _thread_caches().weight_cache_pending.pop(key)
+            _thread_caches().weight_cache[key] = pending.cpu_tensors
+            # Release the source GPU tensors now; the copy engine is done with them.
+            pending.gpu_tensors = None
+
+
+def _evict_weight_layout_to_cpu_async(
+    key: tuple,
+    device: torch.device,
+) -> None:
+    """Kick off an asynchronous GPU -> CPU copy for one cached packed layout.
+
+    The copy is issued on the per-device copy stream.  The source GPU tensors
+    remain referenced in ``_thread_caches().weight_cache_pending`` until the recorded event
+    completes, at which point ``_finalize_weight_cache_copies`` drops them.
+    """
+    if key not in _thread_caches().weight_cache:
+        return
+    q, s = _thread_caches().weight_cache.pop(key)
+    is_gpu = (q is not _NONE_WEIGHT_SENTINEL and q.device.type == "cuda") or (
+        q is _NONE_WEIGHT_SENTINEL and s.device.type == "cuda"
+    )
+    if not is_gpu:
+        # Already CPU-resident; put it back and skip the async copy.
+        _thread_caches().weight_cache[key] = (q, s)
+        return
+    stream = _get_weight_copy_stream(device)
+    # Capture the default stream state before we switch to the copy stream so
+    # the copy waits for any kernels (e.g. packing ops) that produced this tensor.
+    default_event = torch.cuda.Event()
+    default_event.record()
+    with torch.cuda.stream(stream):
+        stream.wait_event(default_event)
+        if q is _NONE_WEIGHT_SENTINEL:
+            cpu_q = _NONE_WEIGHT_SENTINEL
+            gpu_q = _NONE_WEIGHT_SENTINEL
+            cpu_s = s.to("cpu", non_blocking=True)
+        else:
+            cpu_q = q.to("cpu", non_blocking=True)
+            gpu_q = q
+            cpu_s = s.to("cpu", non_blocking=True)
+    event = stream.record_event()
+    _thread_caches().weight_cache_pending[key] = _PendingCpuLayout(
+        cpu_tensors=(cpu_q, cpu_s),
+        gpu_tensors=(gpu_q, s),
+        event=event,
+        stream=stream,
+    )
+
+
+def _move_weight_layout_to_gpu(
+    key: tuple,
+    qweight: torch.Tensor,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Bring a spilled (CPU) or in-flight packed layout back to GPU.
+
+    If a GPU->CPU copy is still in flight for this key, we first synchronize
+    its recorded event so the CPU tensor is fully populated before we copy it
+    back to GPU.  This is the "cold hit" path the user asked about.
+    """
+    pending = _thread_caches().weight_cache_pending.pop(key, None)
+    if pending is not None:
+        pending.event.synchronize()
+        cpu_q, cpu_s = pending.cpu_tensors
+        # After synchronization the source GPU tensors are no longer needed by
+        # the copy engine; drop them explicitly so the pending object can be GC'd.
+        pending.gpu_tensors = None
+    else:
+        cpu_q, cpu_s = _thread_caches().weight_cache.pop(key)
+
+    if cpu_q is _NONE_WEIGHT_SENTINEL:
+        # The ``none`` layout references the canonical qweight; keep the sentinel
+        # so the caller fetches a fresh GPU view via the residency manager.
+        moved = (_NONE_WEIGHT_SENTINEL, cpu_s.to(device, non_blocking=False))
+    else:
+        moved = (
+            cpu_q.to(device, non_blocking=False),
+            cpu_s.to(device, non_blocking=False),
+        )
+    _thread_caches().weight_cache[key] = moved
+    return moved
+
+
+def _evict_other_layer_layouts(
+    layer_key: tuple,
+    keep_key: tuple,
+    device: torch.device,
+) -> None:
+    """Spill every GPU-resident layout for ``layer_key`` except ``keep_key`` to CPU.
+
+    This scans both native and Marlin caches (and pending transfers) and is the
+    mechanism that enforces the single-GPU-representation invariant per layer.
+    """
+    caches = _thread_caches()
+    prefix_len = len(layer_key)
+
+    # Native weight cache.
+    for key in list(caches.weight_cache.keys()):
+        if key[:prefix_len] == layer_key and key != keep_key:
+            _evict_weight_layout_to_cpu_async(key, device)
+    for key in list(caches.weight_cache_pending.keys()):
+        if key[:prefix_len] == layer_key and key != keep_key:
+            pending = caches.weight_cache_pending.pop(key)
+            pending.event.synchronize()
+            caches.weight_cache[key] = pending.cpu_tensors
+            pending.gpu_tensors = None
+
+    caches.weight_cache_resident[layer_key] = (
+        {keep_key}
+        if keep_key in caches.weight_cache or keep_key in caches.weight_cache_pending
+        else set()
+    )
+
+    # Marlin pack cache.
+    for key in list(caches.marlin_pack_cache.keys()):
+        if key[:prefix_len] == layer_key and key != keep_key:
+            _evict_marlin_pack_to_cpu_async(key, device)
+    for key in list(caches.marlin_pack_cache_pending.keys()):
+        if key[:prefix_len] == layer_key and key != keep_key:
+            pending = caches.marlin_pack_cache_pending.pop(key)
+            pending.event.synchronize()
+            caches.marlin_pack_cache[key] = pending.cpu_tensors
+            pending.gpu_tensors = None
+
+    caches.marlin_pack_cache_resident[layer_key] = (
+        {keep_key}
+        if keep_key in caches.marlin_pack_cache or keep_key in caches.marlin_pack_cache_pending
+        else set()
+    )
+
+
+def _make_layout_resident(
+    layer_key: tuple,
+    key: tuple,
+    device: torch.device,
+    evict: bool = True,
+) -> None:
+    """Mark ``key`` as the active GPU-resident layout for ``layer_key``.
+
+    If ``evict`` is true, every other layout for the same layer is spilled to
+    CPU RAM so at most one packed representation stays in VRAM.
+    """
+    caches = _thread_caches()
+    if key in caches.weight_cache or key in caches.weight_cache_pending:
+        caches.weight_cache_resident.setdefault(layer_key, set()).add(key)
+    elif key in caches.marlin_pack_cache or key in caches.marlin_pack_cache_pending:
+        caches.marlin_pack_cache_resident.setdefault(layer_key, set()).add(key)
+    if not evict:
+        return
+    _evict_other_layer_layouts(layer_key, key, device)
 
 
 def _pack_with_cache(
@@ -1675,31 +2157,160 @@ def _pack_with_cache(
     qweight: torch.Tensor,
     scales: torch.Tensor,
     dtype: torch.dtype,
+    device: torch.device,
+    evict: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    key = (
-        qweight.data_ptr(),
-        scales.data_ptr(),
-        tuple(qweight.shape),
-        tuple(scales.shape),
-        spec.packer,
-        dtype,
-    )
-    packed = _WEIGHT_CACHE.get(key)
-    if packed is None:
-        if spec.packer == "none":
-            packed = (qweight, scales.to(dtype))
-        elif spec.packer == "hmma":
-            packed = (pack_hmma_qweight(qweight), pack_hmma_scales(scales.to(dtype)))
+    """Return GPU-resident packed weights for ``spec``, spilling old layouts to CPU.
+
+    The eviction path is asynchronous: the transfer runs on a dedicated CUDA
+    copy stream and the source GPU tensors are released once the recorded event
+    reports completion.  Cold hits synchronize the event before moving the cached
+    CPU copy back to GPU.
+
+    Only one packed layout per layer stays GPU-resident; inactive layouts in either
+    the native or the Marlin cache are spilled to CPU RAM.
+
+    The canonical `qweight`/`scales` are stored in CPU RAM the first time this
+    layer is touched; each call creates temporary GPU copies for packing or for
+    the ``none``/gemv kernels.  Those temporary copies are held alive by CUDA
+    events until the consuming kernel finishes, so only the packed layout remains
+    in VRAM.
+
+    The caches are per-thread, so calls from different threads are isolated.
+    """
+    with _CACHE_LOCK:
+        layout_id = _layout_id_for_spec(spec)
+        layer_key = _weight_cache_layer_key(qweight, scales, dtype)
+        key = (*layer_key, layout_id)
+
+        # Complete any outstanding copies so CPU tensors become valid and source
+        # GPU memory is released before we allocate more.
+        _finalize_weight_cache_copies()
+
+        if key in _thread_caches().weight_cache or key in _thread_caches().weight_cache_pending:
+            packed = _move_weight_layout_to_gpu(key, qweight, device)
+            _make_layout_resident(layer_key, key, device, evict=evict)
+            if packed[0] is _NONE_WEIGHT_SENTINEL:
+                # gemv-style kernels consume the original weights directly.  Avoid the
+                # residency-manager overhead on the steady-state path by using the
+                # GPU-resident canonical tensors as long as they are already on the
+                # target device; otherwise restore them once and keep them there.
+                if qweight.device.type != "cuda" or scales.device.type != "cuda":
+                    _ensure_original_in_vram(qweight, scales, device, move_to_cpu=False, return_tensors=False)
+                return (qweight.detach(), packed[1].to(device, non_blocking=False))
+            # A non-``none`` layout is resident; keep the canonical weights on CPU.
+            _ensure_original_in_vram(qweight, scales, device, move_to_cpu=True, return_tensors=False)
+            return packed
+
+        if layout_id == "none":
+            # The "none" layout does not repack; keep the original qweight/scales
+            # GPU-resident and cache only the dtype-converted scales tensor.
+            if qweight.device.type == "cuda" and scales.device.type == "cuda":
+                gpu_q, gpu_s = qweight, scales
+            else:
+                _, gpu_q, gpu_s = _ensure_original_in_vram(
+                    qweight, scales, device, move_to_cpu=False
+                )
+            scales_t = gpu_s.to(dtype).contiguous().detach()
+            packed = (_NONE_WEIGHT_SENTINEL, scales_t)
+            _thread_caches().weight_cache[key] = packed
+            _make_layout_resident(layer_key, key, device, evict=evict)
+            return (gpu_q.detach(), scales_t)
+
+        # Need temporary GPU copies of the canonical weights to create a layout.
+        r, gpu_q, gpu_s = _ensure_original_in_vram(
+            qweight, scales, device, move_to_cpu=True
+        )
+        if spec.packer == "hmma":
+            packed = (pack_hmma_qweight(gpu_q), pack_hmma_scales(gpu_s.to(dtype)))
         elif spec.packer == "lane":
-            packed = (pack_mma_lane_qweight(qweight), pack_hmma_scales(scales.to(dtype)))
+            packed = (pack_mma_lane_qweight(gpu_q), pack_hmma_scales(gpu_s.to(dtype)))
         elif spec.packer == "n32_interleaved":
-            packed = (pack_mma_lane_n32_qweight(qweight), pack_hmma_scales(scales.to(dtype)))
+            packed = (pack_mma_lane_n32_qweight(gpu_q), pack_hmma_scales(gpu_s.to(dtype)))
         elif spec.packer == "n64":
-            packed = (pack_mma_lane_n64_qweight(qweight), pack_hmma_scales(scales.to(dtype)))
+            packed = (pack_mma_lane_n64_qweight(gpu_q), pack_hmma_scales(gpu_s.to(dtype)))
         else:
             raise ValueError(f"Unknown packer {spec.packer!r}")
-        _WEIGHT_CACHE[key] = packed
-    return packed
+        # The packer just read these temporary GPU copies; keep them alive until
+        # the packer kernel finishes, then they are freed and only the packed
+        # layout remains in VRAM.
+        event = torch.cuda.Event()
+        event.record()
+        _register_original_gpu_user(r, event, gpu_q, gpu_s)
+        _thread_caches().weight_cache[key] = packed
+        _make_layout_resident(layer_key, key, device, evict=evict)
+
+        return packed
+
+
+def _get_marlin_copy_stream(device: torch.device) -> torch.cuda.Stream:
+    """Lazily create one GPU->CPU copy stream per device for Marlin layouts."""
+    with _CACHE_LOCK:
+        stream = _thread_caches().marlin_copy_streams.get(device)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            _thread_caches().marlin_copy_streams[device] = stream
+        return stream
+
+
+def _finalize_marlin_cache_copies() -> None:
+    """Move completed GPU->CPU Marlin transfers from pending to CPU cache."""
+    with _CACHE_LOCK:
+        completed = [key for key, pending in _thread_caches().marlin_pack_cache_pending.items() if pending.event.query()]
+        for key in completed:
+            pending = _thread_caches().marlin_pack_cache_pending.pop(key)
+            _thread_caches().marlin_pack_cache[key] = pending.cpu_tensors
+            pending.gpu_tensors = None
+
+
+def _evict_marlin_pack_to_cpu_async(
+    key: tuple,
+    device: torch.device,
+) -> None:
+    """Kick off an async GPU -> CPU copy for one Marlin packed layout."""
+    if key not in _thread_caches().marlin_pack_cache:
+        return
+    q, s, w, b = _thread_caches().marlin_pack_cache.pop(key)
+    if q.device.type != "cuda":
+        # Already CPU-resident; put it back and skip the async copy.
+        _thread_caches().marlin_pack_cache[key] = (q, s, w, b)
+        return
+    stream = _get_marlin_copy_stream(device)
+    # Ensure the copy waits for any default-stream kernels that produced these tensors.
+    default_event = torch.cuda.Event()
+    default_event.record()
+    with torch.cuda.stream(stream):
+        stream.wait_event(default_event)
+        cpu_q = q.to("cpu", non_blocking=True)
+        cpu_s = s.to("cpu", non_blocking=True)
+        cpu_w = w.to("cpu", non_blocking=True)
+    event = stream.record_event()
+    _thread_caches().marlin_pack_cache_pending[key] = _PendingCpuMarlinLayout(
+        cpu_tensors=(cpu_q, cpu_s, cpu_w, b),
+        gpu_tensors=(q, s, w, b),
+        event=event,
+        stream=stream,
+    )
+
+
+def _move_marlin_pack_to_gpu(
+    key: tuple,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, object]:
+    """Bring a spilled or in-flight Marlin layout back to GPU, syncing first."""
+    pending = _thread_caches().marlin_pack_cache_pending.pop(key, None)
+    if pending is not None:
+        pending.event.synchronize()
+        cpu_tensors = pending.cpu_tensors
+        pending.gpu_tensors = None
+    else:
+        cpu_tensors = _thread_caches().marlin_pack_cache.pop(key)
+    moved = tuple(
+        t.to(device, non_blocking=False) if isinstance(t, torch.Tensor) else t
+        for t in cpu_tensors
+    )
+    _thread_caches().marlin_pack_cache[key] = moved
+    return moved
 
 
 def _get_marlin_packed(
@@ -1707,57 +2318,92 @@ def _get_marlin_packed(
     scales: torch.Tensor,
     size_n: int,
     dtype: torch.dtype,
+    device: torch.device,
+    evict: bool = True,
+    cache: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, object]:
-    """Repack canonical GPTQ weights/scales into Marlin's execution layout."""
-    size_k = qweight.size(0) * 8
-    key = (
-        qweight.data_ptr(),
-        scales.data_ptr(),
-        tuple(qweight.shape),
-        tuple(scales.shape),
-        size_n,
-        _dtype_name(dtype),
-    )
-    cached = _MARLIN_PACK_CACHE.get(key)
-    if cached is not None:
-        return cached
+    """Repack canonical GPTQ weights/scales into Marlin's execution layout.
 
-    perm = torch.empty(0, dtype=torch.int, device=qweight.device)
-    marlin_qweight = gptq_marlin_repack(
-        qweight.contiguous(),
-        perm,
-        size_k=size_k,
-        size_n=size_n,
-        num_bits=4,
-        dtype=dtype,
-    )
-    marlin_scales = marlin_permute_scales(
-        scales.to(dtype).contiguous(),
-        size_k=size_k,
-        size_n=size_n,
-        group_size=128,
-    )
-    workspace = marlin_make_workspace_new(qweight.device)
-    b_q_type = scalar_types.uint4b8
-    packed = (marlin_qweight, marlin_scales, workspace, b_q_type)
-    _MARLIN_PACK_CACHE[key] = packed
-    return packed
+    The cache is GPU-resident by default; inactive Marlin layouts for a layer
+    are spilled to CPU RAM asynchronously on a dedicated copy stream.  The
+    canonical weights are kept in CPU RAM and temporary GPU copies are created
+    for repacking.  Those temporary copies are held alive by a CUDA event until
+    the repack kernel finishes, leaving only the Marlin-packed tensors in VRAM.
+
+    When ``cache=False`` (used during micro-benchmarking) the packed tensors are
+    returned without entering the persistent ``marlin_pack_cache``.
+    """
+    with _CACHE_LOCK:
+        layer_key = _weight_cache_layer_key(qweight, scales, dtype)
+        key = (*layer_key, size_n, _dtype_name(dtype))
+
+        _finalize_marlin_cache_copies()
+
+        if cache and (key in _thread_caches().marlin_pack_cache or key in _thread_caches().marlin_pack_cache_pending):
+            packed = _move_marlin_pack_to_gpu(key, device)
+            _ensure_original_in_vram(qweight, scales, device, move_to_cpu=True, return_tensors=False)
+            _make_layout_resident(layer_key, key, device, evict=evict)
+            return packed
+
+        # Need temporary GPU copies of the canonical weights for repacking.
+        r, gpu_q, gpu_s = _ensure_original_in_vram(qweight, scales, device)
+        size_k = gpu_q.size(0) * 8
+        perm = torch.empty(0, dtype=torch.int, device=device)
+        marlin_qweight = gptq_marlin_repack(
+            gpu_q.contiguous(),
+            perm,
+            size_k=size_k,
+            size_n=size_n,
+            num_bits=4,
+            dtype=dtype,
+        )
+        marlin_scales = marlin_permute_scales(
+            gpu_s.to(dtype).contiguous(),
+            size_k=size_k,
+            size_n=size_n,
+            group_size=128,
+        )
+        workspace = marlin_make_workspace_new(device)
+        b_q_type = scalar_types.uint4b8
+        packed = (marlin_qweight, marlin_scales, workspace, b_q_type)
+        if cache:
+            _thread_caches().marlin_pack_cache[key] = packed
+
+        # Keep the temporary GPU copies alive until the repack finishes.
+        event = torch.cuda.Event()
+        event.record()
+        _register_original_gpu_user(r, event, gpu_q, gpu_s)
+
+        _make_layout_resident(layer_key, key, device, evict=evict)
+
+        if not torch.compiler.is_compiling() and not torch.cuda.is_current_stream_capturing():
+            # Wait for the repack kernels (and any async CPU->GPU restore in
+            # _make_layout_resident) to finish, then release the temporary
+            # canonical-weight copies.  Only the Marlin-packed tensors should
+            # remain in VRAM after this.
+            torch.cuda.synchronize(device)
+            _finalize_original_gpu_users(r)
+
+        return packed
 
 
 def _get_marlin_gemm_op(dtype: torch.dtype) -> Callable:
-    op = _MARLIN_GEMM_OP_CACHE.get(dtype)
+    caches = _thread_caches()
+    op = caches.marlin_gemm_op_cache.get(dtype)
     if op is None:
         op_name = "gptq_marlin_gemm_fp16" if dtype == torch.float16 else "gptq_marlin_gemm_bf16"
-        op = _marlin_resolve_op(dtype=dtype, op_name=op_name)
-        _MARLIN_GEMM_OP_CACHE[dtype] = op
+        with _AMPLIN_INIT_LOCK:
+            op = _marlin_resolve_op(dtype=dtype, op_name=op_name)
+        caches.marlin_gemm_op_cache[dtype] = op
     return op
 
 
 def _marlin_available_cached(dtype: torch.dtype) -> bool:
-    cached = _MARLIN_AVAILABLE_CACHE.get(dtype)
+    caches = _thread_caches()
+    cached = caches.marlin_available_cache.get(dtype)
     if cached is None:
         cached = marlin_runtime_available(dtype)
-        _MARLIN_AVAILABLE_CACHE[dtype] = cached
+        caches.marlin_available_cache[dtype] = cached
     return cached
 
 
@@ -1767,16 +2413,20 @@ def _get_marlin_style_fast_runner(
     size_n: int,
     dtype: torch.dtype,
 ) -> Callable[..., torch.Tensor]:
-    """Return a closure that runs the C++ marlin_style fast path."""
-    marlin_qweight, marlin_scales, workspace, b_q_type = _get_marlin_packed(
-        qweight, scales, size_n, dtype
-    )
+    """Return a closure that runs the C++ marlin_style fast path.
+
+    The closure re-fetches the Marlin packed layout from the cache on each call
+    so the cache can migrate it between GPU and CPU between requests.
+    """
     cpp_op = _get_amplin_op("marlin_style_run")
     size_k = qweight.size(0) * 8
 
     def _marlin_style_fast_run(
         input: torch.Tensor, *_args: object, **_kwargs: object
     ) -> torch.Tensor:
+        marlin_qweight, marlin_scales, workspace, b_q_type = _get_marlin_packed(
+            qweight, scales, size_n, dtype, input.device
+        )
         return cpp_op(
             input,
             marlin_qweight,
@@ -1796,13 +2446,15 @@ def _run_marlin_style(
     scales: torch.Tensor,
     *,
     logical_n: int,
+    evict: bool = True,
 ) -> torch.Tensor:
     size_k = input.size(-1)
     size_m = input.numel() // size_k
     size_n = logical_n
+    device = input.device
     input_2d = input.reshape(-1, size_k).contiguous()
     marlin_qweight, marlin_scales, workspace, b_q_type = _get_marlin_packed(
-        qweight, scales, size_n, input.dtype
+        qweight, scales, size_n, input.dtype, device, evict=evict
     )
     op = _get_marlin_gemm_op(input.dtype)
     output = op(
@@ -1856,39 +2508,315 @@ def _is_candidate_legal(spec: _CandidateSpec, size_m: int, size_k: int, size_n: 
     return True
 
 
-def _run_candidate(
+def _run_op_with_original(
     spec: _CandidateSpec,
+    op: Callable,
     input: torch.Tensor,
-    packed_qweight: torch.Tensor,
-    packed_scales: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    packed: tuple[torch.Tensor, torch.Tensor],
     size_n: int,
 ) -> torch.Tensor:
-    if spec.fn_name == "marlin_style":
-        return _run_marlin_style(input, packed_qweight, packed_scales, logical_n=size_n)
-    op = _get_amplin_op(spec.fn_name)
+    """Run ``op`` on ``packed`` and record a GPU-user event for ``none`` layouts.
+
+    The ``none``/gemv kernels consume the original `qweight` directly, so we must
+    keep the temporary GPU copy alive until the kernel finishes even if another
+    thread requests a different layout for the same layer.
+    """
+    layout_id = _layout_id_for_spec(spec)
     if spec.needs_logical_n:
-        return op(input, packed_qweight, packed_scales, logical_n=size_n)
-    return op(input, packed_qweight, packed_scales)
+        output = op(input, *packed, logical_n=size_n)
+    else:
+        output = op(input, *packed)
+    if layout_id == "none":
+        # gemv-style kernels use the original GPU-resident weights.  The converted
+        # scales tensor is kept alive by the weight cache, and the caller/module
+        # keeps the original qweight alive, so skip the per-call event overhead.
+        return output
+    return output
 
 
-def _time_candidate(
+@dataclass(frozen=True)
+class _KernelDispatch:
+    """Prepared kernel invocation state returned by the packing pipeline."""
+
+    op: Callable[..., torch.Tensor]
+    packed: tuple[torch.Tensor, ...]
+    name: str
+    needs_logical_n: bool
+    is_marlin_style: bool
+    size_n: int
+    size_k: int
+    min_m: int
+    max_m: int | None
+    m_multiple: int
+    exact_ms: tuple[int, ...] | None
+    packer: str
+    spec: _CandidateSpec
+
+
+@dataclass(frozen=True)
+class _KernelDispatchFamily:
+    """All micro-kernels that share the same packed-weight layout for one layer.
+
+    ``post_init`` pre-builds this family so ``forward`` can switch from the
+    small-M decode kernel to the largest-M family member that fits a prefill
+    batch without repacking the weights.
+    """
+
+    packed: tuple[torch.Tensor, ...]
+    layout_id: str
+    members: tuple[_KernelDispatch, ...]
+    default: _KernelDispatch
+
+
+def _call_kernel(dispatch: _KernelDispatch, input: torch.Tensor) -> torch.Tensor:
+    """Launch the prepared kernel with the correct positional/keyword arguments."""
+    if dispatch.is_marlin_style:
+        return dispatch.op(input, *dispatch.packed, dispatch.size_n, dispatch.size_k)
+    if dispatch.needs_logical_n:
+        return dispatch.op(input, *dispatch.packed, logical_n=dispatch.size_n)
+    return dispatch.op(input, *dispatch.packed)
+
+
+def _dispatch_supports_batch(dispatch: _KernelDispatch, batch: int) -> bool:
+    """Return whether ``dispatch`` can consume ``batch`` rows in one call."""
+    if dispatch.exact_ms is not None and batch not in dispatch.exact_ms:
+        return False
+    if batch < dispatch.min_m or (dispatch.max_m is not None and batch > dispatch.max_m):
+        return False
+    if batch % dispatch.m_multiple != 0:
+        return False
+    return True
+
+
+def _select_family_member(family: _KernelDispatchFamily, batch: int) -> _KernelDispatch | None:
+    """Pick the largest-M family member that can consume ``batch`` in one call.
+
+    Preference is: larger ``max_m`` (``None`` is largest), larger ``m_multiple``
+    (coarser M tile), then larger ``n_multiple`` (fewer N blocks).  If no member
+    supports the full batch, ``None`` is returned so the caller can fall back to
+    chunking with the decode dispatch.
+    """
+    for member in family.members:
+        if _dispatch_supports_batch(member, batch):
+            return member
+    return None
+
+
+def _next_valid_batch(dispatch: _KernelDispatch, batch: int) -> int:
+    """Return the smallest valid batch size ``>= batch`` for ``dispatch``.
+
+    The caller must ensure ``batch`` does not exceed ``dispatch.max_m``.
+    """
+    if dispatch.exact_ms is not None:
+        valid = [m for m in dispatch.exact_ms if m >= batch]
+        if valid:
+            return min(valid)
+        return max(dispatch.exact_ms)
+
+    if batch < dispatch.min_m:
+        batch = dispatch.min_m
+    if batch % dispatch.m_multiple != 0:
+        batch += dispatch.m_multiple - (batch % dispatch.m_multiple)
+    if dispatch.max_m is not None and batch > dispatch.max_m:
+        batch = dispatch.max_m - (dispatch.max_m % dispatch.m_multiple)
+    return batch
+
+
+def _call_kernel_chunked(dispatch: _KernelDispatch, input: torch.Tensor) -> torch.Tensor:
+    """Launch ``dispatch`` on ``input``, chunking if the batch exceeds ``max_m``."""
+    batch = input.size(0)
+    if _dispatch_supports_batch(dispatch, batch):
+        return _call_kernel(dispatch, input)
+
+    max_m = dispatch.max_m
+    if max_m is None:
+        if dispatch.exact_ms:
+            max_m = max(dispatch.exact_ms)
+        else:
+            raise RuntimeError(
+                f"Amplin kernel {dispatch.name!r} has no max_m/exact_ms and cannot chunk batch {batch}"
+            )
+
+    outputs: list[torch.Tensor] = []
+    start = 0
+    remaining = batch
+    while remaining > 0:
+        # Pick the largest valid chunk size not exceeding ``max_m``.
+        chunk_size = min(remaining, max_m)
+        while chunk_size >= dispatch.min_m and not _dispatch_supports_batch(dispatch, chunk_size):
+            chunk_size -= 1
+
+        if chunk_size < dispatch.min_m:
+            # Pad the final/in-between remainder up to the next valid size.
+            chunk_size = _next_valid_batch(dispatch, remaining)
+            tail = input[start:]
+            pad_rows = chunk_size - tail.size(0)
+            pad = torch.zeros(
+                (pad_rows, tail.size(1)),
+                dtype=tail.dtype,
+                device=tail.device,
+            )
+            padded = torch.cat([tail, pad], dim=0)
+            output = _call_kernel(dispatch, padded)
+            outputs.append(output[: tail.size(0)])
+            break
+
+        outputs.append(_call_kernel(dispatch, input[start : start + chunk_size]))
+        start += chunk_size
+        remaining -= chunk_size
+
+    return torch.cat(outputs, dim=0)
+
+
+def _build_kernel_dispatch(
     spec: _CandidateSpec,
-    input: torch.Tensor,
-    packed_qweight: torch.Tensor,
-    packed_scales: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    dtype: torch.dtype,
+    device: torch.device,
     size_n: int,
+    size_k: int,
+    cache: bool = True,
+) -> _KernelDispatch:
+    """Pack weights for ``spec`` and return everything needed to launch the kernel."""
+    if spec.fn_name == "marlin_style":
+        op = _get_amplin_op("marlin_style_run")
+    else:
+        op = _get_amplin_op(spec.fn_name)
+    packed = _pack_for_spec(spec, qweight, scales, dtype, device, cache=cache)
+    return _KernelDispatch(
+        op=op,
+        packed=packed,
+        name=spec.name,
+        needs_logical_n=spec.needs_logical_n,
+        is_marlin_style=spec.fn_name == "marlin_style",
+        size_n=size_n,
+        size_k=size_k,
+        min_m=spec.min_m,
+        max_m=spec.max_m,
+        m_multiple=spec.m_multiple,
+        exact_ms=spec.exact_ms,
+        packer=spec.packer,
+        spec=spec,
+    )
+
+
+def _build_kernel_family(decode_dispatch: _KernelDispatch) -> _KernelDispatchFamily:
+    """Return every micro-kernel that shares ``decode_dispatch``'s packed layout.
+
+    Members are sorted so the largest-M legal variant is tried first: larger
+    ``max_m``, then larger ``m_multiple`` (coarser M tile), then larger
+    ``n_multiple`` (fewer N blocks).  All members reuse the same ``packed``
+    tensors, so switching between them at inference time costs only an op
+    lookup + kernel launch.
+    """
+    layout_id = _layout_id_for_spec(decode_dispatch.spec)
+    members: list[_KernelDispatch] = []
+    for spec in _DYNAMIC_CANDIDATES:
+        if _layout_id_for_spec(spec) != layout_id:
+            continue
+        if spec.fn_name == "marlin_style":
+            op = _get_amplin_op("marlin_style_run")
+        else:
+            op = _get_amplin_op(spec.fn_name)
+        members.append(
+            _KernelDispatch(
+                op=op,
+                packed=decode_dispatch.packed,
+                name=spec.name,
+                needs_logical_n=spec.needs_logical_n,
+                is_marlin_style=spec.fn_name == "marlin_style",
+                size_n=decode_dispatch.size_n,
+                size_k=decode_dispatch.size_k,
+                min_m=spec.min_m,
+                max_m=spec.max_m,
+                m_multiple=spec.m_multiple,
+                exact_ms=spec.exact_ms,
+                packer=spec.packer,
+                spec=spec,
+            )
+        )
+
+    def _priority(m: _KernelDispatch) -> tuple[int, int, int]:
+        return (
+            m.max_m if m.max_m is not None else 1_000_000_000,
+            m.spec.m_multiple,
+            m.spec.n_multiple,
+        )
+
+    members.sort(key=_priority, reverse=True)
+    return _KernelDispatchFamily(
+        packed=decode_dispatch.packed,
+        layout_id=layout_id,
+        members=tuple(members),
+        default=decode_dispatch,
+    )
+
+
+def _pack_for_spec(
+    spec: _CandidateSpec,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    dtype: torch.dtype,
+    device: torch.device,
+    cache: bool = True,
+) -> tuple[torch.Tensor, ...]:
+    """Pack (or expose) weights for ``spec`` without any persistent cache.
+
+    The packed tensors are owned by the caller; no CPU/GPU migration or eviction
+    is performed here.  ``cache`` controls whether the Marlin-style repack is
+    stored in the per-thread ``marlin_pack_cache`` (enabled during steady-state
+    dispatch, disabled during candidate micro-benchmarks).
+    """
+    if spec.fn_name == "marlin_style":
+        size_n = qweight.size(-1)
+        marlin_qweight, marlin_scales, workspace, b_q_type = _get_marlin_packed(
+            qweight, scales, size_n, dtype, device, evict=False, cache=cache
+        )
+        return (marlin_qweight, marlin_scales, workspace, b_q_type.id)
+
+    q = qweight.to(device, non_blocking=False).contiguous().detach()
+    s = scales.to(device, dtype=dtype).contiguous().detach()
+    if spec.packer == "none":
+        return (q, s)
+
+    # Non-``none`` packed layouts own their own GPU tensors; move the canonical
+    # (unpacked) weights to CPU to avoid duplicate VRAM.  Callers that want to
+    # fully discard the canonical copy can meta them after ``_pack_for_spec``.
+    if qweight.device.type == "cuda":
+        qweight.data = qweight.to("cpu", non_blocking=False).contiguous()
+    if scales.device.type == "cuda":
+        scales.data = scales.to("cpu", non_blocking=False).contiguous()
+
+    if spec.packer == "hmma":
+        return (pack_hmma_qweight(q), pack_hmma_scales(s))
+    if spec.packer == "lane":
+        return (pack_mma_lane_qweight(q), pack_hmma_scales(s))
+    if spec.packer == "n32_interleaved":
+        return (pack_mma_lane_n32_qweight(q), pack_hmma_scales(s))
+    if spec.packer == "n64":
+        return (pack_mma_lane_n64_qweight(q), pack_hmma_scales(s))
+    raise ValueError(f"Unknown packer {spec.packer!r}")
+
+
+def _time_kernel(
+    dispatch: _KernelDispatch,
+    input: torch.Tensor,
     warmup: int,
     iters: int,
 ) -> float | None:
+    """Time ``dispatch`` with warmup and median timing."""
     try:
         for _ in range(warmup):
-            _run_candidate(spec, input, packed_qweight, packed_scales, size_n)
+            _call_kernel(dispatch, input)
             torch.cuda.synchronize(input.device)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         for _ in range(iters):
-            _run_candidate(spec, input, packed_qweight, packed_scales, size_n)
+            _call_kernel(dispatch, input)
         end.record()
         end.synchronize()
         return start.elapsed_time(end) / iters
@@ -1906,58 +2834,53 @@ def _select_best_kernel(
     size_n: int,
     warmup: int,
     iters: int,
-) -> tuple[str, torch.Tensor]:
-    packed_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    best_spec: _CandidateSpec | None = None
+) -> tuple[str, _KernelDispatch, torch.Tensor]:
+    """Benchmark every legal candidate and return the fastest dispatch/output."""
     best_time = float("inf")
-    best_output: torch.Tensor | None = None
+    best_spec: _CandidateSpec | None = None
+    best_dispatch: _KernelDispatch | None = None
 
     for spec in _DYNAMIC_CANDIDATES:
         if not _is_candidate_legal(spec, size_m, size_k, size_n):
             continue
         if spec.fn_name == "marlin_style" and not _marlin_available_cached(dtype):
             continue
-        if spec.packer not in packed_cache:
-            packed_cache[spec.packer] = _pack_with_cache(spec, qweight, scales, dtype)
-        packed_qweight, packed_scales = packed_cache[spec.packer]
-        elapsed = _time_candidate(spec, input, packed_qweight, packed_scales, size_n, warmup, iters)
+        try:
+            # Micro-benchmark candidates must not pollute the persistent caches;
+            # only the winning layout should stay in VRAM.
+            dispatch = _build_kernel_dispatch(
+                spec, qweight, scales, dtype, input.device, size_n, size_k, cache=False
+            )
+            elapsed = _time_kernel(dispatch, input, warmup, iters)
+        except Exception:
+            elapsed = None
         if elapsed is not None and elapsed < best_time:
             best_time = elapsed
             best_spec = spec
-            best_output = _run_candidate(spec, input, packed_qweight, packed_scales, size_n)
+            best_dispatch = dispatch
 
-    if best_spec is None:
+    if best_spec is None or best_dispatch is None:
         raise RuntimeError(
             f"No legal Amplin dynamic candidate for M={size_m}, K={size_k}, N={size_n}"
         )
 
-    # The benchmark already produced the output for the fastest candidate; use it
-    # directly and return the name so the dynamic table can be updated.
-    if best_output is None:
-        packed_qweight, packed_scales = packed_cache[best_spec.packer]
-        best_output = _run_candidate(best_spec, input, packed_qweight, packed_scales, size_n)
     torch.cuda.synchronize(input.device)
-    return best_spec.name, best_output
+    return best_spec.name, best_dispatch, _call_kernel(best_dispatch, input)
 
 
-def dynamic(
+def _dynamic_impl(
     input: torch.Tensor,
     qweight: torch.Tensor,
     scales: torch.Tensor,
-    *,
     logical_n: int | None = None,
     warmup: int = 5,
-    iters: int = 10,
+    iters: int | None = 10,
     update_dynamic_table: bool = True,
 ) -> torch.Tensor:
-    """Dispatch to the best Amplin kernel for this (M, K, N, dtype).
+    """Backend implementation for ``amplin.dynamic``.  See ``dynamic`` for docs."""
+    if iters is None:
+        iters = 10
 
-    On the first call for a given shape, the function runs a fast micro-benchmark
-    across the legal candidate kernels, picks the fastest, and stores the choice in
-    the dynamic routing table.  Subsequent calls reuse the cached choice.  A
-    static routing table (populated from benchmarks or ``set_routing_table``) is
-    consulted first and the dynamic table overrides it for newly-discovered shapes.
-    """
     if not _ensure_amplin_runtime_available():
         raise RuntimeError(amplin_runtime_error())
 
@@ -1966,28 +2889,23 @@ def dynamic(
     else:
         size_n = logical_n
 
-    # Fast path: repeated calls with the same (M, K, N, dtype) and weights skip
-    # validation, routing-table locks, and spec/op lookups.
+    device = input.device
+    dtype = input.dtype
+
+    # Fast path: repeated calls with the same (shape, dtype, weights) skip
+    # validation, routing-table locks, and spec/op lookups by launching the cached
+    # kernel directly.  ``torch.Size`` and ``torch.dtype`` are hashable, so avoid
+    # allocating tuples or converting dtype to a string here.
     if input.dim() >= 2 and input.is_contiguous():
-        size_k = input.size(-1)
-        size_m = input.numel() // size_k
-        key = (size_m, size_k, size_n, _dtype_name(input.dtype))
-        fast_key = (
-            key,
-            qweight.data_ptr(),
-            scales.data_ptr(),
-            qweight.shape,
-            scales.shape,
-        )
-        cached = _FAST_DISPATCH_CACHE.get(fast_key)
-        if cached is not None:
-            op, packed_qweight, packed_scales, needs_logical_n, cached_size_n = cached
-            if cached_size_n == size_n and (
-                op is not _run_marlin_style or _marlin_available_cached(input.dtype)
-            ):
-                if needs_logical_n:
-                    return op(input, packed_qweight, packed_scales, logical_n=size_n)
-                return op(input, packed_qweight, packed_scales)
+        fast_key = (input.shape, dtype, id(qweight), id(scales), qweight.shape, scales.shape)
+        fast_dispatch_cache = _thread_caches().fast_dispatch_cache
+        dispatch = fast_dispatch_cache.get(fast_key)
+        if dispatch is not None:
+            if dispatch.is_marlin_style:
+                return dispatch.op(input, *dispatch.packed, dispatch.size_n, dispatch.size_k)
+            if dispatch.needs_logical_n:
+                return dispatch.op(input, *dispatch.packed, logical_n=dispatch.size_n)
+            return dispatch.op(input, *dispatch.packed)
 
     input = input.contiguous()
     if input.dim() < 2:
@@ -2004,75 +2922,189 @@ def dynamic(
             "Amplin dynamic scales must have shape [K/128, N] and match input K/output N"
         )
 
-    dtype = input.dtype
+    fast_key = (input.shape, dtype, id(qweight), id(scales), qweight.shape, scales.shape)
     key = _dynamic_key(input, size_n)
     with _ROUTING_LOCK:
         choice = _DYNAMIC_ROUTING_TABLE.get(key) or _STATIC_ROUTING_TABLE.get(key)
         if choice == "marlin_style" and not _marlin_available_cached(dtype):
             choice = None
         if choice is None:
-            choice, output = _select_best_kernel(
+            choice, dispatch, output = _select_best_kernel(
                 input, qweight, scales, dtype, size_m, size_k, size_n, warmup, iters
             )
             if update_dynamic_table:
                 _DYNAMIC_ROUTING_TABLE[key] = choice
+            _thread_caches().fast_dispatch_cache[fast_key] = dispatch
             return output
 
-        fast_key = (
-            key,
-            qweight.data_ptr(),
-            scales.data_ptr(),
-            qweight.shape,
-            scales.shape,
-        )
-        cached = _FAST_DISPATCH_CACHE.get(fast_key)
-        if cached is not None:
-            op, packed_qweight, packed_scales, needs_logical_n, cached_size_n = cached
-            if cached_size_n == size_n:
-                if needs_logical_n:
-                    return op(input, packed_qweight, packed_scales, logical_n=size_n)
-                return op(input, packed_qweight, packed_scales)
+        fast_dispatch_cache = _thread_caches().fast_dispatch_cache
+        dispatch = fast_dispatch_cache.get(fast_key)
+        if dispatch is not None:
+            if dispatch.is_marlin_style:
+                return dispatch.op(input, *dispatch.packed, dispatch.size_n, dispatch.size_k)
+            if dispatch.needs_logical_n:
+                return dispatch.op(input, *dispatch.packed, logical_n=dispatch.size_n)
+            return dispatch.op(input, *dispatch.packed)
 
         spec = _CANDIDATE_BY_NAME.get(choice)
         if spec is None:
             raise RuntimeError(f"Amplin dynamic routing table contains unknown kernel {choice!r}")
-        packed_qweight, packed_scales = _pack_with_cache(spec, qweight, scales, dtype)
-        if spec.fn_name == "marlin_style":
-            op = _get_marlin_style_fast_runner(qweight, scales, size_n, dtype)
-            needs_logical_n = False
-        else:
-            op = _get_amplin_op(spec.fn_name)
-            needs_logical_n = spec.needs_logical_n
-        _FAST_DISPATCH_CACHE[fast_key] = (
-            op,
-            packed_qweight,
-            packed_scales,
-            needs_logical_n,
-            size_n,
+        dispatch = _build_kernel_dispatch(spec, qweight, scales, dtype, device, size_n, size_k)
+        _thread_caches().fast_dispatch_cache[fast_key] = dispatch
+        if dispatch.is_marlin_style:
+            return dispatch.op(input, *dispatch.packed, dispatch.size_n, dispatch.size_k)
+        if dispatch.needs_logical_n:
+            return dispatch.op(input, *dispatch.packed, logical_n=dispatch.size_n)
+        return dispatch.op(input, *dispatch.packed)
+
+def _dynamic_impl_meta(
+    input: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    logical_n: int | None = None,
+    warmup: int = 5,
+    iters: int = 10,
+    update_dynamic_table: bool = True,
+) -> torch.Tensor:
+    """Meta/FakeTensor implementation for ``gptqmodel_amplin::dynamic``."""
+    size_n = qweight.size(-1) if logical_n is None else logical_n
+    out_shape = list(input.shape[:-1]) + [size_n]
+    return torch.empty(out_shape, dtype=input.dtype, device=input.device)
+
+
+def select_kernel(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    size_m: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    *,
+    logical_n: int | None = None,
+    warmup: int = 5,
+    iters: int = 10,
+    update_dynamic_table: bool = True,
+) -> _KernelDispatch:
+    """Select, pack, and return prepared kernel invocation state for a fixed (M, K, N, dtype).
+
+    ``AmplinLinear.post_init`` should store the returned dispatch object and use
+    ``_call_kernel`` or ``_call_kernel_chunked`` in ``forward`` without going
+    through ``amplin.dynamic`` for the prepared batch range.
+    """
+    if not _ensure_amplin_runtime_available():
+        raise RuntimeError(amplin_runtime_error())
+
+    if logical_n is None:
+        size_n = qweight.size(-1)
+    else:
+        size_n = logical_n
+
+    if qweight.dim() != 2:
+        raise ValueError("Amplin select_kernel qweight must be 2D")
+    size_k = qweight.size(0) * 8
+    if scales.dim() != 2 or scales.size(0) != size_k // HMMA_K_TILE or scales.size(1) != size_n:
+        raise ValueError(
+            "Amplin select_kernel scales must have shape [K/128, N] and match input K/output N"
         )
-        if needs_logical_n:
-            return op(input, packed_qweight, packed_scales, logical_n=size_n)
-        return op(input, packed_qweight, packed_scales)
+
+    key = (size_m, size_k, size_n, _dtype_name(dtype))
+    input = torch.randn((size_m, size_k), device=device, dtype=dtype).mul_(0.25).contiguous()
+
+    with _ROUTING_LOCK:
+        choice = _DYNAMIC_ROUTING_TABLE.get(key) or _STATIC_ROUTING_TABLE.get(key)
+        if choice == "marlin_style" and not _marlin_available_cached(dtype):
+            choice = None
+
+        if choice is None:
+            choice, dispatch, _ = _select_best_kernel(
+                input, qweight, scales, dtype, size_m, size_k, size_n, warmup, iters
+            )
+            if update_dynamic_table:
+                _DYNAMIC_ROUTING_TABLE[key] = choice
+            return dispatch
+
+        spec = _CANDIDATE_BY_NAME.get(choice)
+        if spec is None:
+            raise RuntimeError(f"Amplin routing table contains unknown kernel {choice!r}")
+        return _build_kernel_dispatch(spec, qweight, scales, dtype, device, size_n, size_k)
+
+
+# Register the Python dynamic router as a custom op so ``torch.compile(fullgraph=True)``
+# treats it as an opaque kernel and CUDA Graph capture records its internal launches.
+_AMPLIN_FRAGMENT_LIB = torch.library.Library("gptqmodel_amplin", "FRAGMENT")
+_AMPLIN_FRAGMENT_LIB.define(
+    "dynamic(Tensor input, Tensor qweight, Tensor scales, int? logical_n = None, "
+    "int warmup = 5, int iters = 10, bool update_dynamic_table = True) -> Tensor"
+)
+_AMPLIN_FRAGMENT_LIB.impl("dynamic", _dynamic_impl, "CompositeExplicitAutograd")
+_AMPLIN_FRAGMENT_LIB.impl("dynamic", _dynamic_impl_meta, "Meta")
+
+
+def dynamic(
+    input: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    logical_n: int | None = None,
+    warmup: int = 5,
+    iters: int | None = 10,
+    update_dynamic_table: bool = True,
+) -> torch.Tensor:
+    """Dispatch to the best Amplin kernel for this (M, K, N, dtype).
+
+    On the first call for a given shape, the function runs a fast micro-benchmark
+    across the legal candidate kernels, picks the fastest, and stores the choice in
+    the dynamic routing table.  Subsequent calls reuse the cached choice.  A
+    static routing table (populated from benchmarks or ``set_routing_table``) is
+    consulted first and the dynamic table overrides it for newly-discovered shapes.
+
+    In eager mode the implementation is called directly to avoid an extra
+    ``torch.ops`` dispatch round-trip.  Under ``torch.compile`` the router is
+    invoked as the ``gptqmodel_amplin::dynamic`` custom op so the graph can be
+    captured in fullgraph mode and by CUDA Graph.
+    """
+    if torch.compiler.is_compiling():
+        return torch.ops.gptqmodel_amplin.dynamic(
+            input,
+            qweight,
+            scales,
+            logical_n=logical_n,
+            warmup=warmup,
+            iters=10 if iters is None else iters,
+            update_dynamic_table=update_dynamic_table,
+        )
+    return _dynamic_impl(
+        input,
+        qweight,
+        scales,
+        logical_n=logical_n,
+        warmup=warmup,
+        iters=iters,
+        update_dynamic_table=update_dynamic_table,
+    )
 
 
 def get_static_routing_table() -> dict[tuple[int, int, int, str], str]:
-    return _STATIC_ROUTING_TABLE.copy()
+    with _ROUTING_LOCK:
+        return _STATIC_ROUTING_TABLE.copy()
 
 
 def get_dynamic_routing_table() -> dict[tuple[int, int, int, str], str]:
-    return _DYNAMIC_ROUTING_TABLE.copy()
+    with _ROUTING_LOCK:
+        return _DYNAMIC_ROUTING_TABLE.copy()
 
 
 def get_routing_table() -> dict[tuple[int, int, int, str], str]:
     """Return the merged static + dynamic routing table."""
-    return {**_STATIC_ROUTING_TABLE, **_DYNAMIC_ROUTING_TABLE}
+    with _ROUTING_LOCK:
+        return {**_STATIC_ROUTING_TABLE, **_DYNAMIC_ROUTING_TABLE}
 
 
 def set_routing_table(entries: dict[tuple[int, int, int, str], str]) -> None:
     """Replace the static routing table.  Existing dynamic entries are preserved."""
-    _STATIC_ROUTING_TABLE.clear()
-    _STATIC_ROUTING_TABLE.update(entries)
-    _FAST_DISPATCH_CACHE.clear()
+    with _ROUTING_LOCK:
+        _STATIC_ROUTING_TABLE.clear()
+        _STATIC_ROUTING_TABLE.update(entries)
+    _thread_caches().fast_dispatch_cache.clear()
 
 
 def _parse_routing_key(raw_key: object) -> tuple[int, int, int, str]:
@@ -2108,8 +3140,14 @@ def save_routing_table(path: str | Path) -> None:
 
 
 def clear_dynamic_routing_table() -> None:
-    _DYNAMIC_ROUTING_TABLE.clear()
-    _FAST_DISPATCH_CACHE.clear()
+    with _ROUTING_LOCK:
+        _DYNAMIC_ROUTING_TABLE.clear()
+    _thread_caches().fast_dispatch_cache.clear()
+
+
+def clear_thread_caches() -> None:
+    """Release all packed weights, op handles, and dispatch caches for the calling thread."""
+    _thread_caches().clear()
 
 
 # Build a name -> spec lookup for cached dispatch.
@@ -2129,12 +3167,14 @@ __all__ = [
     "amplin_runtime_error",
     "amplin_supported",
     "clear_dynamic_routing_table",
+    "clear_thread_caches",
     "dynamic",
     "get_dynamic_routing_table",
     "get_routing_table",
     "get_static_routing_table",
     "load_routing_table",
     "save_routing_table",
+    "select_kernel",
     "set_routing_table",
     "gemm_hmma",
     "gemm_hmma_m64_v1",

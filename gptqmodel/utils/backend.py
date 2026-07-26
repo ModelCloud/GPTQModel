@@ -21,6 +21,8 @@ class BACKEND(str, Enum):
     GPTQ_EXLLAMA_V2 = "gptq_exllama_v2"  # FASTER: optimized for batching > 1
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
+    GPTQ_AMPLIN = "gptq_amplin"  # Amplin dynamic Ampere micro-kernel dispatcher
+    AMPLIN = "amplin"  # alias for GPTQ_AMPLIN
     GPTQ_KOMODO = "gptq_komodo"  # Ascend NPU fused-style cached int4 kernel
     GPTQ_CANNOE = "gptq_cannoe"  # Ascend CANN kernel experiment
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
@@ -110,6 +112,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.EXLLAMA_V2: BACKEND.GPTQ_EXLLAMA_V2,
         BACKEND.MACHETE: BACKEND.GPTQ_MACHETE,
         BACKEND.MARLIN: BACKEND.GPTQ_MARLIN,
+        BACKEND.AMPLIN: BACKEND.GPTQ_AMPLIN,
         BACKEND.KOMODO: BACKEND.GPTQ_KOMODO,
         BACKEND.CANNOE: BACKEND.GPTQ_CANNOE,
         BACKEND.BITBLAS: BACKEND.GPTQ_BITBLAS,
@@ -147,7 +150,9 @@ _LEGACY_BACKEND_BY_METHOD = {
     },
 }
 
-_CANONICAL_BACKEND_ALIASES = {}
+_CANONICAL_BACKEND_ALIASES = {
+    BACKEND.AMPLIN: BACKEND.GPTQ_AMPLIN,
+}
 
 _PROFILE_BY_INDEX = {
     0: PROFILE.AUTO,

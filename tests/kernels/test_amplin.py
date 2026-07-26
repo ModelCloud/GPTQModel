@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
+import gc
 import math
+import threading
+import time
 
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear.amplin import AmplinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils import amplin
+from gptqmodel.utils.backend import BACKEND
 
 
 BITS = 4
@@ -1616,3 +1621,486 @@ def test_amplin_marlin_style_matches_fp32_reference(
     torch.cuda.synchronize(sm80_device)
     assert batched.shape == (2, 16, SIZE_N)
     torch.testing.assert_close(batched.to(torch.float32), batched_expected, rtol=0, atol=atol)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_amplin_marlin_style_run_torch_compile_fullgraph(
+    packed_case: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+    dtype: torch.dtype,
+):
+    """The C++ marlin_style_run op must be traceable by torch.compile(fullgraph=True)."""
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA BF16 support required")
+    if not amplin._marlin_available_cached(dtype):
+        pytest.skip("Marlin runtime not available for this dtype")
+
+    size_m = 32
+    qweight = packed_case["qweight"].to(sm80_device).contiguous()
+    scales = packed_case["scales"].to(sm80_device, dtype=dtype).contiguous()
+
+    generator = torch.Generator(device=sm80_device)
+    generator.manual_seed(20260724 + size_m)
+    input_t = (
+        torch.randn((size_m, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator)
+        .mul_(0.25)
+        .to(dtype)
+    )
+
+    key = (size_m, SIZE_K, SIZE_N, "fp16" if dtype == torch.float16 else "bf16")
+    previous_static = amplin.get_static_routing_table()
+    try:
+        amplin.set_routing_table({**previous_static, key: "marlin_style"})
+        amplin.clear_dynamic_routing_table()
+        reference = amplin.dynamic(input_t, qweight, scales)
+
+        # Compile the raw C++ marlin_style_run op, not the Python fast-runner
+        # closure, so the test isolates the Meta/Composite implementation.
+        # The eager reference call moved the canonical weights to CPU; bring fresh
+        # GPU copies for the compile path so dispatch sees all tensors on cuda:0.
+        qweight = qweight.to(sm80_device).contiguous()
+        scales = scales.to(sm80_device, dtype=dtype).contiguous()
+        marlin_qweight, marlin_scales, workspace, b_q_type = amplin._get_marlin_packed(
+            qweight, scales, SIZE_N, dtype, sm80_device
+        )
+        cpp_op = amplin._get_amplin_op("marlin_style_run")
+        size_k = qweight.size(0) * 8
+
+        def fn(x: torch.Tensor) -> torch.Tensor:
+            return cpp_op(x, marlin_qweight, marlin_scales, workspace, b_q_type.id, SIZE_N, size_k)
+
+        compiled = torch.compile(fn, fullgraph=True)
+        output = compiled(input_t)
+    finally:
+        amplin.set_routing_table(previous_static)
+        amplin.clear_dynamic_routing_table()
+
+    assert output.shape == reference.shape
+    assert output.dtype == reference.dtype
+    torch.testing.assert_close(output, reference, rtol=0, atol=0)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_amplin_dynamic_torch_compile_fullgraph(
+    packed_case: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+    dtype: torch.dtype,
+):
+    """The Python ``amplin.dynamic`` router must be opaque to ``torch.compile(fullgraph=True)``."""
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA BF16 support required")
+    if not amplin._marlin_available_cached(dtype):
+        pytest.skip("Marlin runtime not available for this dtype")
+
+    size_m = 32
+    qweight = packed_case["qweight"].to(sm80_device).contiguous()
+    scales = packed_case["scales"].to(sm80_device, dtype=dtype).contiguous()
+
+    generator = torch.Generator(device=sm80_device)
+    generator.manual_seed(20260724 + size_m)
+    input_t = (
+        torch.randn((size_m, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator)
+        .mul_(0.25)
+        .to(dtype)
+    )
+
+    key = (size_m, SIZE_K, SIZE_N, "fp16" if dtype == torch.float16 else "bf16")
+    previous_static = amplin.get_static_routing_table()
+    try:
+        amplin.set_routing_table({**previous_static, key: "marlin_style"})
+        amplin.clear_dynamic_routing_table()
+        reference = amplin.dynamic(input_t, qweight, scales)
+
+        # The eager reference call canonicalized the weights to CPU.  Use fresh
+        # GPU copies for compilation so the custom-op dispatch sees one device.
+        qweight = qweight.to(sm80_device).contiguous()
+        scales = scales.to(sm80_device, dtype=dtype).contiguous()
+        compiled = torch.compile(amplin.dynamic, fullgraph=True)
+        output = compiled(input_t, qweight, scales)
+    finally:
+        amplin.set_routing_table(previous_static)
+        amplin.clear_dynamic_routing_table()
+
+    assert output.shape == reference.shape
+    assert output.dtype == reference.dtype
+    torch.testing.assert_close(output, reference, rtol=0, atol=0)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_amplin_dynamic_thread_safety(
+    packed_case: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+    dtype: torch.dtype,
+):
+    """Concurrent ``amplin.dynamic`` calls from many threads must be race-free."""
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA BF16 support required")
+
+    qweight = packed_case["qweight"].to(sm80_device).contiguous()
+    scales = packed_case["scales"].to(sm80_device, dtype=dtype).contiguous()
+    codes = packed_case["codes"].to(sm80_device)
+    group_indices = torch.arange(SIZE_K, device=sm80_device, dtype=torch.int64) // GROUP_SIZE
+    dense_weight = (codes.to(torch.float32) - ZERO) * scales.to(torch.float32)[group_indices]
+
+    # Reference inputs/outputs for the two batch sizes that exercise different kernels.
+    inputs: dict[int, torch.Tensor] = {}
+    expected: dict[int, torch.Tensor] = {}
+    for size_m in (1, 16):
+        generator = torch.Generator(device=sm80_device)
+        generator.manual_seed(20260724 + size_m)
+        input_t = (
+            torch.randn((size_m, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator)
+            .mul_(0.25)
+            .to(dtype)
+        )
+        inputs[size_m] = input_t
+        expected[size_m] = input_t.to(torch.float32) @ dense_weight
+
+    amplin.clear_dynamic_routing_table()
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(8)
+
+    def worker() -> None:
+        try:
+            barrier.wait()
+            for i in range(20):
+                size_m = (1, 16)[i % 2]
+                actual = amplin.dynamic(
+                    inputs[size_m], qweight, scales, warmup=1, iters=2
+                )
+                torch.cuda.synchronize(sm80_device)
+                atol = 2e-3 if dtype == torch.float16 else 2e-2
+                torch.testing.assert_close(
+                    actual.to(torch.float32), expected[size_m], rtol=0, atol=atol
+                )
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors[0]
+
+
+@pytest.mark.cuda
+def test_amplin_thread_local_cache_isolation(sm80_device: torch.device) -> None:
+    """Each Python thread must get its own _ThreadLocalAmplinCaches instance."""
+    ids: dict[int, int] = {}
+
+    def worker(tid: int) -> None:
+        ids[tid] = id(amplin._thread_caches())
+
+    t1 = threading.Thread(target=worker, args=(1,))
+    t2 = threading.Thread(target=worker, args=(2,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert len(ids) == 2
+    assert ids[1] != ids[2]
+    assert id(amplin._thread_caches()) not in (ids[1], ids[2])
+
+
+@pytest.mark.cuda
+def test_amplin_thread_local_cache_released_on_thread_death(
+    packed_case: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+) -> None:
+    """Per-thread GPU caches are cleared by the weakref finalizer when the thread dies."""
+    qweight = packed_case["qweight"].to(sm80_device).contiguous()
+    scales = packed_case["scales"].to(sm80_device, dtype=torch.float16).contiguous()
+
+    generator = torch.Generator(device=sm80_device)
+    generator.manual_seed(20260726)
+    input_t = (
+        torch.randn((16, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator)
+        .mul_(0.25)
+        .to(torch.float16)
+    )
+
+    caches_holder: dict[str, object] = {}
+
+    def worker() -> None:
+        amplin.clear_thread_caches()
+        _ = amplin.dynamic(input_t, qweight, scales, warmup=1, iters=2)
+        caches_holder["caches"] = amplin._thread_caches()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    del t
+
+    # The Thread object is weakly referenced; collect it so the finalizer fires.
+    for _ in range(20):
+        gc.collect()
+        caches = caches_holder.get("caches")
+        if caches is not None and not caches.weight_cache:  # type: ignore[attr-defined]
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("thread cache finalizer did not clear the per-thread caches")
+
+    caches = caches_holder["caches"]
+    assert not caches.weight_cache  # type: ignore[attr-defined]
+    assert not caches.weight_cache_pending  # type: ignore[attr-defined]
+    assert not caches.weight_cache_resident  # type: ignore[attr-defined]
+    assert not caches.fast_dispatch_cache  # type: ignore[attr-defined]
+    assert not caches.marlin_pack_cache  # type: ignore[attr-defined]
+    assert not caches.marlin_pack_cache_pending  # type: ignore[attr-defined]
+    assert not caches.marlin_pack_cache_resident  # type: ignore[attr-defined]
+    assert not caches.weight_copy_streams  # type: ignore[attr-defined]
+    assert not caches.marlin_copy_streams  # type: ignore[attr-defined]
+
+
+@pytest.mark.cuda
+def test_amplin_packed_layout_moves_original_weights_to_cpu(
+    packed_case: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+) -> None:
+    """A non-``none`` packed layout must leave the canonical weights in CPU RAM."""
+    qweight = packed_case["qweight"].to(sm80_device).contiguous()
+    scales = packed_case["scales"].to(sm80_device, dtype=torch.float16).contiguous()
+
+    generator = torch.Generator(device=sm80_device)
+    generator.manual_seed(20260724 + 16)
+    input_t = (
+        torch.randn((16, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator)
+        .mul_(0.25)
+        .to(torch.float16)
+    )
+
+    key = (16, SIZE_K, SIZE_N, "fp16")
+    previous_static = amplin.get_static_routing_table()
+    try:
+        amplin.set_routing_table({**previous_static, key: "gemm_hmma"})
+        amplin.clear_dynamic_routing_table()
+        _ = amplin.dynamic(input_t, qweight, scales, warmup=1, iters=2)
+        assert qweight.device.type == "cpu"
+        assert scales.device.type == "cpu"
+    finally:
+        amplin.set_routing_table(previous_static)
+        amplin.clear_dynamic_routing_table()
+
+
+@pytest.mark.cuda
+def test_amplin_gemv_keeps_original_weights_on_gpu(
+    packed_case: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+) -> None:
+    """The ``none``/gemv layout must keep the canonical weights GPU-resident."""
+    qweight = packed_case["qweight"].to(sm80_device).contiguous()
+    scales = packed_case["scales"].to(sm80_device, dtype=torch.float16).contiguous()
+
+    generator = torch.Generator(device=sm80_device)
+    generator.manual_seed(20260724 + 1)
+    input_t = (
+        torch.randn((1, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator)
+        .mul_(0.25)
+        .to(torch.float16)
+    )
+
+    key = (1, SIZE_K, SIZE_N, "fp16")
+    previous_static = amplin.get_static_routing_table()
+    try:
+        amplin.set_routing_table({**previous_static, key: "gemv"})
+        amplin.clear_dynamic_routing_table()
+        _ = amplin.dynamic(input_t, qweight, scales, warmup=1, iters=2)
+        assert qweight.device.type == "cuda"
+        assert scales.device.type == "cuda"
+    finally:
+        amplin.set_routing_table(previous_static)
+        amplin.clear_dynamic_routing_table()
+
+
+@pytest.mark.cuda
+def test_amplin_round_trip_gemv_and_packed_layout(
+    packed_case: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+) -> None:
+    """Switching between gemv and a packed layout must restore weights and stay correct."""
+    qweight = packed_case["qweight"].to(sm80_device).contiguous()
+    scales = packed_case["scales"].to(sm80_device, dtype=torch.float16).contiguous()
+    codes = packed_case["codes"].to(sm80_device)
+    group_indices = torch.arange(SIZE_K, device=sm80_device, dtype=torch.int64) // GROUP_SIZE
+    dense_weight = (codes.to(torch.float32) - ZERO) * scales.to(torch.float32)[group_indices]
+
+    key1 = (1, SIZE_K, SIZE_N, "fp16")
+    key16 = (16, SIZE_K, SIZE_N, "fp16")
+    previous_static = amplin.get_static_routing_table()
+    try:
+        amplin.set_routing_table({**previous_static, key1: "gemv", key16: "gemm_hmma"})
+        amplin.clear_dynamic_routing_table()
+
+        generator = torch.Generator(device=sm80_device)
+        generator.manual_seed(20260724 + 1)
+        input1 = (
+            torch.randn((1, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator)
+            .mul_(0.25)
+            .to(torch.float16)
+        )
+        generator.manual_seed(20260724 + 16)
+        input16 = (
+            torch.randn((16, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generator)
+            .mul_(0.25)
+            .to(torch.float16)
+        )
+
+        # First packed call is correct.
+        out16 = amplin.dynamic(input16, qweight, scales, warmup=1, iters=2)
+        torch.testing.assert_close(
+            out16.to(torch.float32), input16.to(torch.float32) @ dense_weight, rtol=0, atol=2e-3
+        )
+
+        # gemv runs correctly from the same canonical weights.
+        out1 = amplin.dynamic(input1, qweight, scales, warmup=1, iters=2)
+        torch.testing.assert_close(
+            out1.to(torch.float32), input1.to(torch.float32) @ dense_weight, rtol=0, atol=2e-3
+        )
+
+        # Packed call again still produces correct output.
+        out16_2 = amplin.dynamic(input16, qweight, scales, warmup=1, iters=2)
+        torch.testing.assert_close(
+            out16_2.to(torch.float32), input16.to(torch.float32) @ dense_weight, rtol=0, atol=2e-3
+        )
+    finally:
+        amplin.set_routing_table(previous_static)
+        amplin.clear_dynamic_routing_table()
+
+
+@pytest.mark.cuda
+def test_amplin_original_weight_residency_thread_safety(
+    packed_case: dict[str, torch.Tensor],
+    sm80_device: torch.device,
+) -> None:
+    """Shared qweight/scales can be concurrently routed to gemv and packed layouts."""
+    qweight = packed_case["qweight"].to(sm80_device).contiguous()
+    scales = packed_case["scales"].to(sm80_device, dtype=torch.float16).contiguous()
+    codes = packed_case["codes"].to(sm80_device)
+    group_indices = torch.arange(SIZE_K, device=sm80_device, dtype=torch.int64) // GROUP_SIZE
+    dense_weight = (codes.to(torch.float32) - ZERO) * scales.to(torch.float32)[group_indices]
+
+    key1 = (1, SIZE_K, SIZE_N, "fp16")
+    key16 = (16, SIZE_K, SIZE_N, "fp16")
+    previous_static = amplin.get_static_routing_table()
+    try:
+        amplin.set_routing_table({**previous_static, key1: "gemv", key16: "gemm_hmma"})
+        amplin.clear_dynamic_routing_table()
+
+        generators = {
+            1: torch.Generator(device=sm80_device).manual_seed(20260724 + 1),
+            16: torch.Generator(device=sm80_device).manual_seed(20260724 + 16),
+        }
+        inputs = {
+            m: torch.randn((m, SIZE_K), device=sm80_device, dtype=torch.float32, generator=generators[m])
+            .mul_(0.25)
+            .to(torch.float16)
+            for m in (1, 16)
+        }
+        expected = {m: inputs[m].to(torch.float32) @ dense_weight for m in (1, 16)}
+
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(8)
+
+        def worker() -> None:
+            try:
+                barrier.wait()
+                for i in range(20):
+                    size_m = (1, 16)[i % 2]
+                    actual = amplin.dynamic(inputs[size_m], qweight, scales, warmup=1, iters=2)
+                    torch.cuda.synchronize(sm80_device)
+                    torch.testing.assert_close(
+                        actual.to(torch.float32), expected[size_m], rtol=0, atol=2e-3
+                    )
+            except BaseException as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors[0]
+    finally:
+        amplin.set_routing_table(previous_static)
+        amplin.clear_dynamic_routing_table()
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "size_k,size_n",
+    [
+        pytest.param(4096, 4096, id="k4096-n4096"),
+        pytest.param(4096, 12288, id="k4096-n12288"),
+        pytest.param(12288, 4096, id="k12288-n4096"),
+    ],
+)
+def test_amplin_linear_prefill_selects_largest_m_family_member(
+    monkeypatch,
+    sm80_device,
+    size_k,
+    size_n,
+) -> None:
+    """AmplinLinear.forward switches to the largest-M family member at prefill time."""
+    monkeypatch.setenv("KERNEL_BATCH_HINT", "16")
+
+    qweight = torch.randint(
+        -2**31, 2**31 - 1, (size_k // 8, size_n), device=sm80_device, dtype=torch.int32
+    )
+    scales = (
+        torch.rand((size_k // 128, size_n), device=sm80_device, dtype=torch.float32) * 0.007
+        + 0.001
+    ).to(torch.float16)
+
+    codes = _unpack_gptq_w4(qweight, size_k)
+    group_indices = torch.arange(size_k, device=sm80_device, dtype=torch.int64) // 128
+    dense_weight = (codes.to(torch.float32) - 8) * scales.to(torch.float32)[group_indices]
+
+    layer = AmplinLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=size_k,
+        out_features=size_n,
+        bias=False,
+        pack_dtype=torch.int32,
+        adapter=None,
+        register_buffers=True,
+        backend=BACKEND.GPTQ_AMPLIN,
+        name=f"test_{size_k}_{size_n}",
+    ).to(sm80_device)
+    layer.qweight.copy_(qweight)
+    layer.scales.copy_(scales)
+
+    layer.post_init()
+
+    # decode-time M=16 should use the HINT-selected dispatch.
+    input_16 = (
+        torch.randn((16, size_k), device=sm80_device, dtype=torch.float16).mul_(0.25).contiguous()
+    )
+    expected_16 = input_16.to(torch.float32) @ dense_weight
+    out_16 = layer(input_16)
+    torch.testing.assert_close(out_16.to(torch.float32), expected_16, rtol=0, atol=2e-3)
+
+    # prefill-time M=512 should pick a family member that handles the full batch.
+    member = amplin._select_family_member(layer._amplin_family, 512)
+    assert member is not None, f"No large-M family member for {size_k}x{size_n}"
+    assert member.max_m is None, f"Prefill member {member.name} still chunks at max_m={member.max_m}"
+
+    input_512 = (
+        torch.randn((512, size_k), device=sm80_device, dtype=torch.float16).mul_(0.25).contiguous()
+    )
+    expected_512 = input_512.to(torch.float32) @ dense_weight
+    out_512 = layer(input_512)
+    assert out_512.shape == (512, size_n)
+    torch.testing.assert_close(out_512.to(torch.float32), expected_512, rtol=0, atol=2e-3)
+
+    del layer

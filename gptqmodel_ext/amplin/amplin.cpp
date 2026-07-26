@@ -1049,6 +1049,24 @@ torch::Tensor amplin_marlin_style_run_dispatch(
       size_k);
 }
 
+// Meta/FakeTensor dispatch for torch.compile shape propagation.
+torch::Tensor amplin_marlin_style_run_meta(
+    torch::Tensor input,
+    torch::Tensor marlin_qweight,
+    torch::Tensor marlin_scales,
+    torch::Tensor workspace,
+    int64_t b_q_type_id,
+    int64_t size_n,
+    int64_t size_k) {
+  auto out_shape = input.sizes().vec();
+  if (out_shape.empty()) {
+    AT_ERROR(
+        "marlin_style_run input must have at least one dimension, got scalar");
+  }
+  out_shape.back() = size_n;
+  return at::empty(out_shape, input.options());
+}
+
 }  // namespace
 
 TORCH_LIBRARY(gptqmodel_amplin, m) {
@@ -1252,4 +1270,10 @@ TORCH_LIBRARY_IMPL(gptqmodel_amplin, CUDA, m) {
   m.impl(
       "marlin_style_run",
       &amplin_marlin_style_run_dispatch);
+}
+
+TORCH_LIBRARY_IMPL(gptqmodel_amplin, Meta, m) {
+  m.impl(
+      "marlin_style_run",
+      &amplin_marlin_style_run_meta);
 }

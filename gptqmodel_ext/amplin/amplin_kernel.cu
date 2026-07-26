@@ -8536,9 +8536,7 @@ torch::Tensor amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl(
   TORCH_CHECK(
       size_k == num_groups * kHmmaBlockK,
       "Amplin M N64 tiled-A requires K to match the packed groups");
-  TORCH_CHECK(
-      size_m >= 1 && size_m <= BlockM,
-      "Amplin M N64 tiled-A flattened M must be between 1 and ", BlockM);
+  TORCH_CHECK(size_m >= 1, "Amplin M N64 tiled-A flattened M must be positive");
   TORCH_CHECK(
       logical_n > 0 &&
           logical_n % (NTiles * kHmmaBlockN) == 0 &&
@@ -8562,8 +8560,9 @@ torch::Tensor amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl(
 
   const int64_t n_tiles_per_block = NTiles * kHmmaBlockN;
   const int64_t grid_n = logical_n / n_tiles_per_block;
+  const int64_t grid_m = (size_m + BlockM - 1) / BlockM;
   TORCH_CHECK(
-      grid_n <= properties->maxGridSize[0],
+      grid_n <= properties->maxGridSize[0] && grid_m <= properties->maxGridSize[1],
       "Amplin M N64 tiled-A grid exceeds the selected CUDA device limit");
 
   std::vector<int64_t> output_sizes = input.sizes().vec();
@@ -8571,7 +8570,8 @@ torch::Tensor amplin_mma_lane_mN_n64_tiled_fullk_cuda_impl(
   auto output = torch::empty(output_sizes, input.options());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
 
-  const dim3 grid(static_cast<unsigned int>(grid_n), 1U);
+  const dim3 grid(
+      static_cast<unsigned int>(grid_n), static_cast<unsigned int>(grid_m));
   constexpr int Threads = (BlockM / kMmaM) * NTiles * kMmaLanes;
 
   if (input.scalar_type() == at::kHalf) {

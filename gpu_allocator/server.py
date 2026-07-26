@@ -283,7 +283,7 @@ def _log_status_table(allocator: GPUAllocator) -> None:
         cols=[
             {"label": "index", "width": "fit"},
             {"label": "pci_bus_id", "width": "fit"},
-            {"label": "uuid", "width": 36},
+            {"label": "uuid", "width": 40},
             {"label": "status", "width": "fit"},
             {"label": "lease_id", "width": 34},
             {"label": "session_id", "width": "fit"},
@@ -296,6 +296,22 @@ def _log_status_table(allocator: GPUAllocator) -> None:
         padding=1,
     )
     log.info("GPU status snapshot")
+    # Pre-size columns from all rows so headers and borders line up with the widest
+    # values (e.g. long session IDs or lease IDs that would otherwise shift mem_used).
+    for row in rows:
+        cols.info.simulate(
+            row["index"],
+            row["pci_bus_id"],
+            row["uuid"],
+            row["status"],
+            row["lease_id"],
+            row["session_id"],
+            row["expires_in"],
+            row["memory_total_mib"],
+            row["memory_used_mib"],
+            row["memory_free_mib"],
+            row["utilization_gpu"],
+        )
     cols.info.header()
     for row in rows:
         cols.info(
