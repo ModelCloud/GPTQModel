@@ -21,6 +21,7 @@ from .config import (
     serialize_quant_bits,
 )
 
+
 ANALYSIS_SCHEMA_VERSION = "1.0"
 PLAN_SCHEMA_VERSION = "1.0"
 
@@ -302,27 +303,30 @@ class QuantizationAnalyzer:
         max_chunk_values = self.config.max_chunk_values
         row_chunk = max(1, min(rows, max_chunk_values // max(cols, 1)))
 
-        row_sse = torch.zeros(rows, dtype=torch.float64)
-        row_signal = torch.zeros(rows, dtype=torch.float64)
-        feature_sse = torch.zeros(cols, dtype=torch.float64)
-        feature_signal = torch.zeros(cols, dtype=torch.float64)
+        # Accumulate row and feature error/signal tensors on the compute
+        # device and defer CPU transfers until the final top-k selection.
+        row_sse = torch.zeros(rows, dtype=torch.float64, device=self.compute_device)
+        row_signal = torch.zeros(rows, dtype=torch.float64, device=self.compute_device)
+        feature_sse = torch.zeros(cols, dtype=torch.float64, device=self.compute_device)
+        feature_signal = torch.zeros(cols, dtype=torch.float64, device=self.compute_device)
         group_heap: List[Tuple[float, int, Dict[str, Any]]] = []
         heap_serial = 0
 
-        total_sse = 0.0
-        total_signal = 0.0
-        total_dot = 0.0
-        total_quant_signal = 0.0
-        total_small = 0
-        total_bad_blocks = 0
+        # Keep running totals on the compute device and sync to Python scalars
+        # only once per module. This avoids the host/device round-trips that
+        # dominate the sequential analyzer path on MoE checkpoints.
+        total_sse = torch.zeros((), dtype=torch.float64, device=self.compute_device)
+        total_signal = torch.zeros((), dtype=torch.float64, device=self.compute_device)
+        total_dot = torch.zeros((), dtype=torch.float64, device=self.compute_device)
+        total_quant_signal = torch.zeros((), dtype=torch.float64, device=self.compute_device)
+        total_small = torch.zeros((), dtype=torch.long, device=self.compute_device)
+        total_bad_blocks = torch.zeros((), dtype=torch.long, device=self.compute_device)
+        total_saturation = torch.zeros((), dtype=torch.long, device=self.compute_device)
+        total_nonfinite = torch.zeros((), dtype=torch.long, device=self.compute_device)
+        observed_max_abs = torch.zeros((), dtype=torch.float32, device=self.compute_device)
+
         total_blocks = 0
-        total_saturation = 0
-        total_nonfinite = 0
-        scale_min = math.inf
-        scale_max = 0.0
-        scale_sum = 0.0
-        scale_count = 0
-        observed_max_abs = 0.0
+        scales: List[torch.Tensor] = []
 
         for row_start in range(0, rows, row_chunk):
             chunk = weight[row_start : row_start + row_chunk].to(
@@ -330,9 +334,9 @@ class QuantizationAnalyzer:
                 dtype=torch.float32,
             )
             finite = torch.isfinite(chunk)
-            total_nonfinite += int((~finite).sum().item())
+            total_nonfinite += (~finite).sum()
             chunk = torch.where(finite, chunk, torch.zeros_like(chunk))
-            observed_max_abs = max(observed_max_abs, float(torch.abs(chunk).max().item()))
+            observed_max_abs = torch.maximum(observed_max_abs, torch.abs(chunk).max())
             chunk_row_sse = torch.zeros(chunk.shape[0], device=self.compute_device)
             chunk_row_signal = torch.zeros(chunk.shape[0], device=self.compute_device)
 
@@ -361,26 +365,21 @@ class QuantizationAnalyzer:
                 block_signal = torch.sum(squared_signal, dim=1)
                 block_rel = torch.sqrt(block_sse / block_signal.clamp_min(eps))
 
-                total_sse += float(block_sse.sum().item())
-                total_signal += float(block_signal.sum().item())
-                total_dot += float(torch.sum(block * dequantized).item())
-                total_quant_signal += float(torch.sum(dequantized * dequantized).item())
-                total_small += int((torch.abs(block) <= (0.5 * scale)).sum().item())
-                total_bad_blocks += int(
-                    (block_rel > self.config.bad_block_rel_rmse_threshold).sum().item()
-                )
-                total_blocks += int(block_rel.numel())
-                total_saturation += int(((projected < qmin) | (projected > qmax)).sum().item())
+                total_sse += block_sse.sum().double()
+                total_signal += block_signal.sum().double()
+                total_dot += (block * dequantized).sum().double()
+                total_quant_signal += (dequantized * dequantized).sum().double()
+                total_small += (torch.abs(block) <= (0.5 * scale)).sum()
+                total_bad_blocks += (block_rel > self.config.bad_block_rel_rmse_threshold).sum()
+                total_blocks += block_rel.numel()
+                total_saturation += ((projected < qmin) | (projected > qmax)).sum()
 
                 chunk_row_sse += block_sse
                 chunk_row_signal += block_signal
-                feature_sse[col_start:col_end] += squared_error.sum(dim=0).double().cpu()
-                feature_signal[col_start:col_end] += squared_signal.sum(dim=0).double().cpu()
+                feature_sse[col_start:col_end] += squared_error.sum(dim=0).double()
+                feature_signal[col_start:col_end] += squared_signal.sum(dim=0).double()
 
-                scale_min = min(scale_min, float(scale.min().item()))
-                scale_max = max(scale_max, float(scale.max().item()))
-                scale_sum += float(scale.sum().item())
-                scale_count += int(scale.numel())
+                scales.append(scale)
                 heap_serial = self._retain_group_regions(
                     group_heap,
                     block_rel,
@@ -393,17 +392,39 @@ class QuantizationAnalyzer:
                 )
 
             row_end = row_start + chunk.shape[0]
-            row_sse[row_start:row_end] = chunk_row_sse.double().cpu()
-            row_signal[row_start:row_end] = chunk_row_signal.double().cpu()
+            row_sse[row_start:row_end] = chunk_row_sse.double()
+            row_signal[row_start:row_end] = chunk_row_signal.double()
+
+        if scales:
+            all_scales = torch.cat([s.view(-1) for s in scales])
+            scale_count = all_scales.numel()
+            scale_min = float(all_scales.min().item())
+            scale_max = float(all_scales.max().item())
+            scale_mean = float(all_scales.sum().item()) / scale_count
+        else:
+            scale_count = 0
+            scale_min = 0.0
+            scale_max = 0.0
+            scale_mean = 0.0
+
+        total_sse_float = float(total_sse.item())
+        total_signal_float = float(total_signal.item())
+        total_dot_float = float(total_dot.item())
+        total_quant_signal_float = float(total_quant_signal.item())
+        total_small_int = int(total_small.item())
+        total_bad_blocks_int = int(total_bad_blocks.item())
+        total_saturation_int = int(total_saturation.item())
+        total_nonfinite_int = int(total_nonfinite.item())
+        observed_max_abs_float = float(observed_max_abs.item())
 
         sample = _sample_abs(weight, self.config.max_sample_values)
         nonzero_sample = sample[sample > 0]
         median_abs = float(torch.median(nonzero_sample).item()) if nonzero_sample.numel() else 0.0
-        max_abs = observed_max_abs
+        max_abs = observed_max_abs_float
         quantiles = self._quantiles(sample)
-        rel_rmse = math.sqrt(total_sse / max(total_signal, eps))
-        cosine = total_dot / math.sqrt(max(total_signal * total_quant_signal, eps))
-        sqnr_db = 10.0 * math.log10(max(total_signal, eps) / max(total_sse, eps))
+        rel_rmse = math.sqrt(total_sse_float / max(total_signal_float, eps))
+        cosine = total_dot_float / math.sqrt(max(total_signal_float * total_quant_signal_float, eps))
+        sqnr_db = 10.0 * math.log10(max(total_signal_float, eps) / max(total_sse_float, eps))
         max_to_median = max_abs / max(median_abs, eps)
 
         output_regions = self._axis_regions(
@@ -430,16 +451,16 @@ class QuantizationAnalyzer:
             "rel_rmse": float(rel_rmse),
             "sqnr_db": _finite_number(sqnr_db),
             "cosine_similarity": _finite_number(cosine),
-            "small_value_fraction": total_small / max(total_values, 1),
-            "bad_block_fraction": total_bad_blocks / max(total_blocks, 1),
-            "saturation_fraction": total_saturation / max(total_values, 1),
-            "nonfinite_count": total_nonfinite,
+            "small_value_fraction": total_small_int / max(total_values, 1),
+            "bad_block_fraction": total_bad_blocks_int / max(total_blocks, 1),
+            "saturation_fraction": total_saturation_int / max(total_values, 1),
+            "nonfinite_count": total_nonfinite_int,
             "max_abs": max_abs,
             "median_abs": median_abs,
             "max_to_median_abs": float(max_to_median),
             "abs_quantiles": quantiles,
             "scale_min": 0.0 if scale_count == 0 else scale_min,
-            "scale_mean": scale_sum / max(scale_count, 1),
+            "scale_mean": scale_mean,
             "scale_max": scale_max,
             "num_blocks": total_blocks,
             "effective_group_size": effective_group_size,
@@ -464,18 +485,26 @@ class QuantizationAnalyzer:
         if count <= 0:
             return serial
         values, indices = torch.topk(rel_rmse, k=count)
-        for value, index in zip(values.tolist(), indices.tolist()):
+        # Gather scales and zeros for the retained indices in one vectorized
+        # operation instead of one `.item()` call per top-k region.
+        scale_vals = scale[indices, 0]
+        zero_vals = zero[indices, 0] if zero is not None else None
+        values_list = values.tolist()
+        indices_list = indices.tolist()
+        scale_list = scale_vals.tolist()
+        zero_list = zero_vals.tolist() if zero_vals is not None else None
+        for i in range(count):
             record = {
                 "kind": "group",
-                "output_channel": row_start + int(index),
+                "output_channel": row_start + int(indices_list[i]),
                 "input_start": col_start,
                 "input_end": col_end,
-                "rel_rmse": float(value),
-                "scale": float(scale[index, 0].item()),
+                "rel_rmse": float(values_list[i]),
+                "scale": float(scale_list[i]),
             }
-            if zero is not None:
-                record["zero"] = float(zero[index, 0].item())
-            item = (float(value), serial, record)
+            if zero_list is not None:
+                record["zero"] = float(zero_list[i])
+            item = (float(values_list[i]), serial, record)
             serial += 1
             if len(heap) < limit:
                 heapq.heappush(heap, item)
@@ -496,14 +525,20 @@ class QuantizationAnalyzer:
         if count <= 0:
             return []
         values, indices = torch.topk(rel, k=count)
+        # Gather the signal values for the selected indices in one shot to
+        # avoid one `.item()`/index transfer per region.
+        signal_top = signal[indices]
+        values_list = values.tolist()
+        indices_list = indices.tolist()
+        signal_list = signal_top.tolist()
         return [
             {
                 "kind": kind,
-                "index": int(index),
-                "rel_rmse": float(value),
-                "signal_l2": math.sqrt(max(float(signal[index]), 0.0)),
+                "index": int(indices_list[i]),
+                "rel_rmse": float(values_list[i]),
+                "signal_l2": math.sqrt(max(float(signal_list[i]), 0.0)),
             }
-            for value, index in zip(values.tolist(), indices.tolist())
+            for i in range(count)
         ]
 
     @staticmethod
