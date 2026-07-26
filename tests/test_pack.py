@@ -230,3 +230,49 @@ class TestPackAccuracy(unittest.TestCase):
 
                 for implementation, qweight in packed.items():
                     torch.testing.assert_close(qweight, packed["original"], rtol=0, atol=0, msg=implementation)
+
+    @parameterized.expand(
+        [
+            (bits, pack_dtype)
+            for bits in (2, 3, 4, 8)
+            for pack_dtype in (torch.int8, torch.int16, torch.int32)
+        ]
+    )
+    def test_pack_dtype_consistency(self, bits, pack_dtype):
+        """Verify qweight/qzeros buffer sizing and pack_original round-trip for all pack dtypes."""
+        group_size = 32
+        linear, scales, zeros, g_idx = self._build_inputs(bits, group_size)
+
+        pack_dtype_bits = {torch.int8: 8, torch.int16: 16, torch.int32: 32}[pack_dtype]
+        qlinear = TorchLinear(
+            bits=bits,
+            group_size=group_size,
+            sym=True,
+            desc_act=True,
+            in_features=self.in_features,
+            out_features=self.out_features,
+            pack_dtype=pack_dtype,
+            backend=BACKEND.TORCH,
+            bias=False,
+        )
+
+        # _register_gptq_buffers must size packed buffers by bits / pack_dtype_bits.
+        self.assertEqual(
+            qlinear.qweight.shape,
+            (math.ceil(self.in_features * bits / pack_dtype_bits), self.out_features),
+        )
+        self.assertEqual(
+            qlinear.qzeros.shape,
+            (math.ceil(self.in_features / group_size), math.ceil(self.out_features * bits / pack_dtype_bits)),
+        )
+
+        # 3-bit pack_original currently hardcodes 32-bit packing words.
+        if bits == 3 and pack_dtype != torch.int32:
+            self.skipTest("3-bit pack_original currently supports only 32-bit pack dtype")
+
+        qlinear.pack_original(linear, scales.t().contiguous(), zeros.t().contiguous(), g_idx=g_idx)
+        dq = qlinear.dequantize_weight()
+        expected = linear.weight.data.T
+        self.assertTrue(
+            torch.allclose(dq.to(torch.float32), expected.to(torch.float32), atol=1e-2, rtol=0)
+        )
