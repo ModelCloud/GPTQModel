@@ -1174,6 +1174,88 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
     return {qweight, qzeros};
 }
 
+namespace {
+
+// Scalar fallback for packing one row/group of AWQ integer weights.
+inline void pack_awq_word_scalar(
+    const int32_t* src,
+    int64_t src_stride,
+    int32_t* dst,
+    int64_t out_packs,
+    int bits,
+    int pack_factor,
+    int max_q,
+    const int* order) {
+    for (int64_t p = 0; p < out_packs; ++p) {
+        int32_t packed = 0;
+        for (int k = 0; k < pack_factor; ++k) {
+            const int64_t o = p * pack_factor + order[k];
+            int32_t v = src[o * src_stride];
+            v = std::max<int32_t>(0, std::min<int32_t>(v, max_q));
+            packed |= (v & max_q) << (bits * k);
+        }
+        dst[p] = packed;
+    }
+}
+
+#if PACK_BLOCK_CPU_X86
+// AVX-512 path for AWQ row packing.  Processes 16 output packs per iteration
+// using a strided 32-bit gather so each 512-bit lane holds the same nibble
+// position across 16 consecutive 32-bit words.  The gathered values are
+// masked, shifted by the AWQ interleave offsets, and summed (which is safe
+// because the shifted nibble masks never overlap).
+__attribute__((target("avx512f")))
+inline void pack_awq_row_avx512(
+    const int32_t* src,
+    int32_t* dst,
+    int64_t out_packs,
+    int bits,
+    int pack_factor,
+    int max_q,
+    const int* order_inv) {
+    const __m512i v_max_q = _mm512_set1_epi32(max_q);
+
+    // base_idx[j] = j * pack_factor  (columns to read for lane j)
+    __m512i base_idx;
+    switch (bits) {
+        case 2:
+            base_idx = _mm512_setr_epi32(
+                0, 16, 32, 48, 64, 80, 96, 112,
+                128, 144, 160, 176, 192, 208, 224, 240);
+            break;
+        case 4:
+            base_idx = _mm512_setr_epi32(
+                0, 8, 16, 24, 32, 40, 48, 56,
+                64, 72, 80, 88, 96, 104, 112, 120);
+            break;
+        case 8:
+            base_idx = _mm512_setr_epi32(
+                0, 4, 8, 12, 16, 20, 24, 28,
+                32, 36, 40, 44, 48, 52, 56, 60);
+            break;
+        default:
+            return;
+    }
+
+    const int64_t full = (out_packs / 16) * 16;
+    for (int64_t p = 0; p < full; p += 16) {
+        __m512i acc = _mm512_setzero_si512();
+        const int32_t block_start = static_cast<int32_t>(p * pack_factor);
+        for (int k = 0; k < pack_factor; ++k) {
+            __m512i idx = _mm512_add_epi32(
+                _mm512_set1_epi32(block_start + k), base_idx);
+            __m512i v = _mm512_i32gather_epi32(idx, src, 4);
+            v = _mm512_and_si512(v, v_max_q);
+            const int shift = bits * order_inv[k];
+            acc = _mm512_add_epi32(acc, _mm512_slli_epi32(v, shift));
+        }
+        _mm512_storeu_si512(dst + p, acc);
+    }
+}
+#endif
+
+} // namespace
+
 // AWQ packing helper. Takes pre-quantized integer tensors and packs them into the
 // interleaved AWQ layout (e.g. 4-bit order 0,2,4,6,1,3,5,7 per 32-bit word).
 std::tuple<at::Tensor, at::Tensor> pack_awq_cpu(
@@ -1217,47 +1299,148 @@ std::tuple<at::Tensor, at::Tensor> pack_awq_cpu(
 
     // AWQ interleaves the 4-bit columns. For 2/8-bit use the natural order.
     int order[16];
+    int order_inv[16];
     for (int i = 0; i < pack_factor; ++i) {
         order[i] = i;
+        order_inv[i] = i;
     }
     if (bits == 4) {
         const int awq_order_4[8] = {0, 2, 4, 6, 1, 3, 5, 7};
         for (int i = 0; i < 8; ++i) {
             order[i] = awq_order_4[i];
+            order_inv[awq_order_4[i]] = i;
         }
     }
 
-    at::parallel_for(0, in_features * out_packs, 0, [&](int64_t start, int64_t end) {
-        for (int64_t idx = start; idx < end; ++idx) {
-            const int64_t i = idx / out_packs;
-            const int64_t p = idx % out_packs;
-            int32_t packed = 0;
-            for (int k = 0; k < pack_factor; ++k) {
-                const int64_t o = p * pack_factor + order[k];
-                int32_t v = iw_ptr[i * iw_stride_in + o * iw_stride_out];
-                v = std::max<int32_t>(0, std::min<int32_t>(v, max_q));
-                packed |= (v & max_q) << (bits * k);
+    const bool use_avx512 =
+#if PACK_BLOCK_CPU_X86
+        cpu_supports_avx512() &&
+        (out_features <= std::numeric_limits<int32_t>::max() - 16 * pack_factor) &&
+        out_packs >= 16;
+#else
+        false;
+#endif
+
+    at::parallel_for(0, in_features, 0, [&](int64_t start, int64_t end) {
+        for (int64_t i = start; i < end; ++i) {
+            const int32_t* src = iw_ptr + i * iw_stride_in;
+            int32_t* dst = qw_ptr + i * out_packs;
+#if PACK_BLOCK_CPU_X86
+            if (use_avx512) {
+                pack_awq_row_avx512(src, dst, out_packs, bits, pack_factor, max_q, order_inv);
+                const int64_t full = (out_packs / 16) * 16;
+                if (full < out_packs) {
+                    pack_awq_word_scalar(
+                        src + full * pack_factor,
+                        iw_stride_out,
+                        dst + full,
+                        out_packs - full,
+                        bits,
+                        pack_factor,
+                        max_q,
+                        order);
+                }
+            } else
+#endif
+            {
+                pack_awq_word_scalar(src, iw_stride_out, dst, out_packs, bits, pack_factor, max_q, order);
             }
-            qw_ptr[i * out_packs + p] = packed;
         }
     });
 
-    at::parallel_for(0, groups * out_packs, 0, [&](int64_t start, int64_t end) {
-        for (int64_t idx = start; idx < end; ++idx) {
-            const int64_t g = idx / out_packs;
-            const int64_t p = idx % out_packs;
-            int32_t packed = 0;
-            for (int k = 0; k < pack_factor; ++k) {
-                const int64_t o = p * pack_factor + order[k];
-                int32_t v = z_ptr[g * z_stride_group + o * z_stride_out];
-                v = std::max<int32_t>(0, std::min<int32_t>(v, max_q));
-                packed |= (v & max_q) << (bits * k);
+    at::parallel_for(0, groups, 0, [&](int64_t start, int64_t end) {
+        for (int64_t g = start; g < end; ++g) {
+            const int32_t* src = z_ptr + g * z_stride_group;
+            int32_t* dst = qz_ptr + g * out_packs;
+#if PACK_BLOCK_CPU_X86
+            if (use_avx512) {
+                pack_awq_row_avx512(src, dst, out_packs, bits, pack_factor, max_q, order_inv);
+                const int64_t full = (out_packs / 16) * 16;
+                if (full < out_packs) {
+                    pack_awq_word_scalar(
+                        src + full * pack_factor,
+                        z_stride_out,
+                        dst + full,
+                        out_packs - full,
+                        bits,
+                        pack_factor,
+                        max_q,
+                        order);
+                }
+            } else
+#endif
+            {
+                pack_awq_word_scalar(src, z_stride_out, dst, out_packs, bits, pack_factor, max_q, order);
             }
-            qz_ptr[g * out_packs + p] = packed;
         }
     });
 
     return {qweight, qzeros};
+}
+
+// QQQ-style nibble packing.  Takes an int32 tensor where each value holds a
+// 4-bit code in the low nibble and packs 8 consecutive columns into one 32-bit
+// word (natural order).  This is used for the final Marlin bit-pack step.
+at::Tensor pack_qqq_cpu(const at::Tensor& int4_matrix, int64_t bits) {
+    TORCH_CHECK(int4_matrix.device().is_cpu(), "pack_qqq_cpu: int4_matrix must reside on CPU");
+    TORCH_CHECK(bits == 4, "pack_qqq_cpu: only 4-bit packing is currently supported");
+
+    const int pack_factor = 32 / static_cast<int>(bits);  // 8 for 4-bit
+    const int max_q = (1 << bits) - 1;
+
+    const int64_t rows = int4_matrix.size(0);
+    const int64_t cols = int4_matrix.size(1);
+    TORCH_CHECK(cols % pack_factor == 0, "pack_qqq_cpu: cols must be divisible by pack_factor");
+
+    at::Tensor int4_i32 = int4_matrix.contiguous().to(at::kInt);
+
+    const int64_t out_cols = cols / pack_factor;
+    auto q_options = at::TensorOptions().dtype(at::kInt).device(at::kCPU);
+    at::Tensor q = at::empty({rows, out_cols}, q_options);
+
+    const int32_t* src_ptr = int4_i32.const_data_ptr<int32_t>();
+    int32_t* dst_ptr = q.data_ptr<int32_t>();
+
+    const int order[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    const int order_inv[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+
+    const bool use_avx512 =
+#if PACK_BLOCK_CPU_X86
+        cpu_supports_avx512() &&
+        (cols <= std::numeric_limits<int32_t>::max() - 16 * pack_factor) &&
+        out_cols >= 16;
+#else
+        false;
+#endif
+
+    at::parallel_for(0, rows, 0, [&](int64_t start, int64_t end) {
+        for (int64_t i = start; i < end; ++i) {
+            const int32_t* src = src_ptr + i * cols;
+            int32_t* dst = dst_ptr + i * out_cols;
+#if PACK_BLOCK_CPU_X86
+            if (use_avx512) {
+                pack_awq_row_avx512(src, dst, out_cols, bits, pack_factor, max_q, order_inv);
+                const int64_t full = (out_cols / 16) * 16;
+                if (full < out_cols) {
+                    pack_awq_word_scalar(
+                        src + full * pack_factor,
+                        1,
+                        dst + full,
+                        out_cols - full,
+                        bits,
+                        pack_factor,
+                        max_q,
+                        order);
+                }
+            } else
+#endif
+            {
+                pack_awq_word_scalar(src, 1, dst, out_cols, bits, pack_factor, max_q, order);
+            }
+        }
+    });
+
+    return q;
 }
 
 } // namespace gptqmodel
@@ -1278,5 +1461,13 @@ TORCH_LIBRARY(gptqmodel, m) {
         "pack_awq_cpu",
         c10::DispatchKey::CPU,
         TORCH_FN(gptqmodel::pack_awq_cpu)
+    );
+    m.def(
+        "pack_qqq_cpu(Tensor int4_matrix, int bits) -> Tensor"
+    );
+    m.impl(
+        "pack_qqq_cpu",
+        c10::DispatchKey::CPU,
+        TORCH_FN(gptqmodel::pack_qqq_cpu)
     );
 }

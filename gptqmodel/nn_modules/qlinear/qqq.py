@@ -351,11 +351,16 @@ class QQQLinear(GroupedQuantLinear):
         # Pack 8 4-bit columns into one 32-bit word. Mask to the low nibble so both
         # unsigned group codes and signed per-channel codes encode the same bit pattern.
         res_u4 = res_i32 & 0xF
-        cols = res_u4.shape[1] // 8
-        q = torch.zeros(res_u4.shape[0], cols, dtype=torch.int32, device=res_u4.device)
-        for i in range(8):
-            q = torch.bitwise_or(q, res_u4[:, i::8] << (4 * i))
-        q = q.to(CPU)
+        try:
+            from .pack_block_ext import pack_qqq_cpu
+
+            q = pack_qqq_cpu(res_u4, self.bits).to(CPU)
+        except Exception:
+            cols = res_u4.shape[1] // 8
+            q = torch.zeros(res_u4.shape[0], cols, dtype=torch.int32, device=res_u4.device)
+            for i in range(8):
+                q = torch.bitwise_or(q, res_u4[:, i::8] << (4 * i))
+            q = q.to(CPU)
 
         #self.B[:, :] = q.to(self.B.device)
         self.register_buffer("B", q)

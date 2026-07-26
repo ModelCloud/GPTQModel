@@ -46,3 +46,13 @@ def pack_awq_cpu(intweight: Tensor, zeros: Tensor, bits: int) -> Tuple[Tensor, T
         zeros,
         int(bits),
     )
+
+
+def pack_qqq_cpu(int4_matrix: Tensor, bits: int) -> Tensor:
+    ext = load_pack_block_extension()
+    if ext is None:
+        raise RuntimeError("pack_qqq_cpu extension unavailable")
+    return torch.ops.gptqmodel.pack_qqq_cpu(
+        int4_matrix,
+        int(bits),
+    )
