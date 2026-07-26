@@ -29,7 +29,7 @@ class LagunaQModel(BaseQModel):
                 "q_proj:0",
                 "k_proj:0",
                 "v_proj:0",
-                "g_proj:0",
+                "g_proj:!",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),

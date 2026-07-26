@@ -234,3 +234,34 @@ def test_weight_only_kernels_do_not_declare_grouped_support_metadata():
         assert not hasattr(cls, "SUPPORTS_GROUP_SIZE")
         assert not hasattr(cls, "SUPPORTS_DESC_ACT")
         assert not hasattr(cls, "SUPPORTS_SYM")
+
+
+def test_gptq_quant_linear_buffer_shapes_for_non_word_aligned_out_features():
+    """Laguna's g_proj has out_features=48/72, which is a multiple of pack_factor (8) but not pack_dtype_bits (32)."""
+    import math
+
+    for out_features in (48, 72):
+        layer = TorchLinear(
+            bits=4,
+            group_size=32,
+            sym=True,
+            desc_act=False,
+            in_features=3072,
+            out_features=out_features,
+            bias=False,
+        )
+        expected_qweight_rows = math.ceil(3072 / layer.pack_factor)
+        expected_qzeros_cols = math.ceil(out_features / layer.pack_factor)
+        assert layer.qweight.shape == (expected_qweight_rows, out_features)
+        assert layer.qzeros.shape == (math.ceil(3072 / 32), expected_qzeros_cols)
+
+        # Ensure a checkpoint with the natural packed shapes loads cleanly.
+        state = {
+            "qweight": torch.zeros((expected_qweight_rows, out_features), dtype=torch.int32),
+            "qzeros": torch.zeros((math.ceil(3072 / 32), expected_qzeros_cols), dtype=torch.int32),
+            "scales": torch.zeros((math.ceil(3072 / 32), out_features), dtype=torch.float16),
+            "g_idx": torch.tensor([i // 32 for i in range(3072)], dtype=torch.int32),
+        }
+        missing, unexpected = layer.load_state_dict(state, strict=False)
+        assert not missing
+        assert not unexpected
