@@ -26,10 +26,8 @@ from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.awq_processor import AWQProcessor
-from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
 from ..looper.paroquant_processor import ParoQuantProcessor
-from ..looper.qqq_processor import QQQProcessor
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..nn_modules.fused_group_forward import (
     clear_fused_group_forward_caches,
@@ -868,10 +866,17 @@ def run_layer_stage(
                             module_name=resolved_label,
                         ):
                             qmodule = process.submodule_finalize(module, looper.gptq_model)
+
+                        # Drop the original dense module reference from the wrapper
+                        # so checkpoint-backed weights can be released before the
+                        # next layer is materialized.
+                        if isinstance(qmodule, torch.nn.Module) and isinstance(module, NamedModule):
+                            module.module = qmodule
+
                         submodule_elapsed = time.perf_counter() - submodule_start
 
                         # Disk offload (lifecycle TODO note preserved)
-                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoQuantProcessor)):
+                        if isinstance(qmodule, torch.nn.Module):
                             quant_config = getattr(looper.gptq_model, "quantize_config", None)
                             if quant_config and getattr(quant_config, "offload_to_disk", False):
                                 offload_path = getattr(quant_config, "offload_to_disk_path", None)

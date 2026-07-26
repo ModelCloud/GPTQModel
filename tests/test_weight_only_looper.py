@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 import gptqmodel.looper.weight_only_looper as weight_only_looper_module
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.quantization.config import (
     QuantizeEmbed,
@@ -492,3 +493,27 @@ def test_weight_only_looper_quantizes_embeddings_and_regular_modules(monkeypatch
         "Weight-only quantizing input embeddings",
         "Weight-only quantizing layer 0 of 0",
     ]
+
+
+def test_weight_only_looper_finalize_replaces_named_module_reference():
+    """submodule_finalize's qmodule must replace NamedModule.module so the original
+    dense module (and any checkpoint-backed tensors it holds) can be freed."""
+
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = False
+    model = _FakeQModel(qcfg)
+
+    original_module = nn.Linear(4, 4, bias=False)
+    named = NamedModule(original_module, name="linear", full_name="layers.0.linear", layer_index=0)
+
+    fake_qmodule = nn.Linear(4, 4, bias=False)
+
+    class _QModuleReturningProcessor(_FakeProcessor):
+        def submodule_finalize(self, module, _model, *, qcfg=None):
+            return fake_qmodule
+
+    looper = WeightOnlyLooper(model=model, processor=_QModuleReturningProcessor(qcfg))
+    looper._finalize_quantized_module(named, active_qcfg=qcfg)
+
+    assert named.module is fake_qmodule
+    assert original_module is not fake_qmodule

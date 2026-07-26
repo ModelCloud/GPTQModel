@@ -488,6 +488,12 @@ class WeightOnlyLooper:
                     self.gptq_model,
                     qcfg=active_qcfg,
                 )
+
+            # Drop the original dense module reference from the wrapper so the
+            # checkpoint-backed weights can be released as the layer progresses.
+            if isinstance(qmodule, torch.nn.Module):
+                named.module = qmodule
+
             self._offload_quantized_module(named, qmodule=qmodule)
         finally:
             duration = time.perf_counter() - start
@@ -1117,6 +1123,14 @@ class WeightOnlyLooper:
                     self.gptq_model.post_quantize(module)
                 else:
                     layers[layer_index] = self.gptq_model.post_quantize(module)
+
+                # Close per-shard safetensors handles so checkpoint file
+                # descriptors and any remaining mmap references are released
+                # between weight-only layers.
+                turtle_model = getattr(self.gptq_model, "turtle_model", None)
+                if turtle_model is not None and hasattr(turtle_model, "close_shard_handlers"):
+                    turtle_model.close_shard_handlers()
+
                 if pb is not None:
                     pb.current_iter_step = progress_index + 1
                     pb.draw()
