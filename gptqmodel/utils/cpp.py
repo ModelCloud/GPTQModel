@@ -65,6 +65,34 @@ _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 _TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
 
 
+def _ensure_ninja_on_path() -> None:
+    """Make the ninja binary discoverable when only the PyPI package is installed.
+
+    torch.utils.cpp_extension looks for ``ninja`` on PATH. In unactivated virtual
+    environments the ``ninja`` Python package installs the binary next to the Python
+    executable but does not add it to PATH. We prepend that directory when we can
+    locate a ninja binary there and it is not already on PATH.
+    """
+    if shutil.which("ninja"):
+        return
+
+    try:
+        import ninja
+        bin_dir = Path(ninja.BIN_DIR)
+        ninja_bin = bin_dir / "ninja"
+        if not ninja_bin.exists():
+            return
+    except Exception:
+        return
+
+    path = os.environ.get("PATH", "")
+    bin_dir_str = str(bin_dir)
+    if bin_dir_str in path.split(os.pathsep):
+        return
+
+    os.environ["PATH"] = f"{bin_dir_str}{os.pathsep}{path}"
+
+
 def _log_cache_clear_callsite(*, reason: str, target_path: str | Path) -> None:
     stack_text = "".join(traceback.format_stack(limit=32))
     log.warning(
@@ -953,6 +981,7 @@ class TorchOpsJitExtension:
                 extra_ldflags = self._resolve_sequence(self.extra_ldflags)
                 if extra_ldflags:
                     kwargs["extra_ldflags"] = extra_ldflags
+                _ensure_ninja_on_path()
                 with _temporary_merged_cuda_arch_override(
                     enabled=self.merge_visible_cuda_arch_override
                 ):

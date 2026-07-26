@@ -199,22 +199,31 @@ class WeightOnlyProcessor(LoopProcessor):
         # The new quantized module is already installed in the tree; use it
         # directly. The pack helper only needs these two one-entry dicts, so it
         # does not have to walk `model.named_modules()` while it may be mutated.
+        qmodules = {module.full_name: qmodule}
+        layers = {module.full_name: original_layer}
+
         if self._uses_direct_pack(active_qcfg):
             pack_start = time.perf_counter() if timer is not None else None
-            with log_time_block("module.pack_original", logger=log, module_name=module_label):
+            with log_time_block("pack", logger=log, module_name=module_label):
                 with parent_module_lock(parent_key):
-                    qmodule.pack_original(
-                        linear=original_layer,
-                        scales=None,
-                        zeros=None,
-                        g_idx=None,
-                        smooth=active_qcfg.smooth,
+                    packer_label = pack_module(
+                        name=module.full_name,
+                        qModules=qmodules,
+                        q_scales=None,
+                        q_zeros=None,
+                        q_g_idx=None,
+                        layers=layers,
+                        quant_linear_cls=model.qlinear_kernel,
+                        lock=None,
+                        quantize_config=active_qcfg,
+                        pack_kwargs={"smooth": active_qcfg.smooth},
+                        validate=False,
                     )
             if timer is not None and pack_start is not None:
                 timer.record(
                     "submodule_finalize_pack",
                     time.perf_counter() - pack_start,
-                    source=f"{module_label} [module.pack_original]",
+                    source=f"{module_label} [{packer_label or 'module.pack_original'}]",
                 )
 
             reference_weight = qmodule._weight_to_matrix(original_layer).detach().cpu().to(torch.float32)

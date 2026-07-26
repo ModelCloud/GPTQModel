@@ -1479,7 +1479,6 @@ class AWQuantLinear(PackedGroupedQuantLinear):
                  **kwargs):
         super().__init__(bias=bias, register_buffers=False, **kwargs)
 
-
         in_features = self.in_features
         out_features = self.out_features
 
@@ -1507,6 +1506,23 @@ class AWQuantLinear(PackedGroupedQuantLinear):
                 self.register_buffer("bias", t.zeros(out_features, dtype=t.float16))
             else:
                 self.bias = None
+
+    @t.inference_mode()
+    def dequantize_weight(self, num_itr: int = 1) -> t.Tensor:
+        """Dequantize packed AWQ weights back to a dense [in_features, out_features] float tensor."""
+        from ...quantization.awq.utils.packing_utils import dequantize_gemm
+
+        group_size = self.group_size
+        if group_size is None or group_size <= 0:
+            group_size = self.in_features
+
+        return dequantize_gemm(
+            self.qweight,
+            self.qzeros,
+            self.scales,
+            self.bits,
+            group_size,
+        )
 
     # TODO FIX ME. this hack was needed because other part of code forgot to call nn.module register_buffer()!
     def list_buffers(self) -> List:

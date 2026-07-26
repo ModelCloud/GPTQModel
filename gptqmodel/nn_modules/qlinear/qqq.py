@@ -347,15 +347,15 @@ class QQQLinear(GroupedQuantLinear):
         w = w.reshape((self.in_features // self.tile, self.out_features * self.tile))
         res = w
         res = res.reshape((-1, self._perm.numel()))[:, self._perm].reshape(res.shape)
-        q = np.zeros((res.shape[0], res.shape[1] // 8), dtype=np.uint32)
-        res = res.cpu().numpy().astype(np.uint32)
-        if self.group_size != self.in_features:
-            for i in range(8):
-                q |= res[:, i::8] << 4 * i
-        else:
-            for i in range(8):
-                q |= (res[:, i::8] & 0xF) << 4 * i
-        q = torch.from_numpy(q.astype(np.int32)).to(CPU)
+        res_i32 = res.to(torch.int32)
+        # Pack 8 4-bit columns into one 32-bit word. Mask to the low nibble so both
+        # unsigned group codes and signed per-channel codes encode the same bit pattern.
+        res_u4 = res_i32 & 0xF
+        cols = res_u4.shape[1] // 8
+        q = torch.zeros(res_u4.shape[0], cols, dtype=torch.int32, device=res_u4.device)
+        for i in range(8):
+            q = torch.bitwise_or(q, res_u4[:, i::8] << (4 * i))
+        q = q.to(CPU)
 
         #self.B[:, :] = q.to(self.B.device)
         self.register_buffer("B", q)

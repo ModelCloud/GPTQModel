@@ -63,6 +63,7 @@ from . import has_gil_disabled
 from .backend import BACKEND, normalize_backend
 from .ctx import ctx
 from .device import get_device
+from .env import env_flag
 from .hf import get_hf_config_dtype
 from .hub import hf_hub_download, model_info
 from .importer import select_quant_linear
@@ -932,18 +933,101 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 @torch.inference_mode()
+def _original_weight_matrix(linear: nn.Module) -> torch.Tensor:
+    """Return the original dense weight in [out, in] layout."""
+    weight = linear.weight.detach()
+    if isinstance(linear, _ConvNd):
+        weight = weight.flatten(1)
+    if isinstance(linear, transformers.pytorch_utils.Conv1D):
+        weight = weight.T
+    return weight
+
+
+def _validate_packed_module(
+    module: BaseQuantLinear,
+    linear: nn.Module,
+    name: str,
+    *,
+    bits: Optional[int] = None,
+    method: Optional[METHOD] = None,
+) -> Dict[str, Any]:
+    """Best-effort round-trip validation: original dense weight vs packed->dequantized.
+
+    This is intentionally lightweight: if a backend does not expose ``dequantize_weight``
+    or the validation cannot be performed for any reason, the failure is logged and
+    returned rather than crashing the quantization run.
+    """
+    try:
+        original = _original_weight_matrix(linear).to(device=CPU, dtype=torch.float32)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("pack_module: cannot snapshot original weight for %s: %s", name, exc)
+        return {"valid": False, "error": f"original weight snapshot failed: {exc}"}
+
+    if not hasattr(module, "dequantize_weight"):
+        return {"valid": False, "error": "module has no dequantize_weight"}
+
+    try:
+        dequant = module.dequantize_weight()
+        dequant = dequant.to(device=CPU, dtype=torch.float32)
+    except Exception as exc:
+        log.debug("pack_module: dequantize_weight unavailable for %s: %s", name, exc)
+        return {"valid": False, "error": f"dequantize_weight failed: {exc}"}
+
+    if dequant.shape != original.shape:
+        dequant = dequant.T
+    if dequant.shape != original.shape:
+        log.warning(
+            "pack_module: shape mismatch validating %s: original %s vs dequant %s",
+            name,
+            original.shape,
+            dequant.shape,
+        )
+        return {"valid": False, "error": f"shape mismatch {original.shape} vs {dequant.shape}"}
+
+    diff = (dequant - original).abs()
+    result = {
+        "valid": True,
+        "max_abs_err": float(diff.max().item()),
+        "mean_abs_err": float(diff.mean().item()),
+        "rmse": float((diff ** 2).mean().sqrt().item()),
+    }
+
+    strict = env_flag("GPTQMODEL_PACK_VALIDATE_STRICT", default=False)
+    threshold = os.getenv("GPTQMODEL_PACK_VALIDATE_MAX_ERR")
+    if threshold is not None:
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            threshold = None
+
+    if threshold is not None and result["max_abs_err"] > threshold:
+        msg = (
+            f"pack_module: packed weight round-trip error exceeds threshold for {name}: "
+            f"max_abs_err={result['max_abs_err']:.6f} (threshold={threshold})"
+        )
+        if strict:
+            raise RuntimeError(msg)
+        log.warning(msg)
+
+    log.debug("pack_module: validation for %s: %s", name, result)
+    return result
+
+
+@torch.inference_mode()
 def pack_module(
     name,
     qModules,
-    q_scales,
-    q_zeros,
-    q_g_idx,
-    layers,
-    quant_linear_cls,
-    lock: threading.Lock,
+    q_scales=None,
+    q_zeros=None,
+    q_g_idx=None,
+    layers=None,
+    quant_linear_cls=None,
+    lock: threading.Lock = None,
     q_scales_extra=None,
     quantize_config: Optional[QuantizeConfig] = None,
     quant_result: Optional[Dict[str, Any]] = None,
+    pack_kwargs: Optional[Dict[str, Any]] = None,
+    validate: bool = True,
 ):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     # with ctx(tctl.threadpool_limits(limits=1), lock):
@@ -952,17 +1036,21 @@ def pack_module(
 
     assert get_device(module) == CPU
     assert get_device(layer) == CPU
-    assert get_device(q_scales) == CPU
-    assert get_device(q_zeros) == CPU
 
-    # module = module.to(CPU)
-    # layer = layer.to(CPU)
-    # q_scales = q_scales.to(CPU)
-    # q_zeros = q_zeros.to(CPU)
+    # Legacy pack_model passes a per-module quant_result dict instead of individual tensors.
+    if q_scales is None and q_zeros is None and quant_result is not None:
+        entry = quant_result.get(name, {}) if isinstance(quant_result, dict) else {}
+        q_scales = entry.get("q_scales")
+        q_zeros = entry.get("q_zeros")
+        q_g_idx = entry.get("q_g_idx", q_g_idx)
+        q_scales_extra = entry.get("q_scales_extra", q_scales_extra)
 
+    if q_scales is not None:
+        assert get_device(q_scales) == CPU
+    if q_zeros is not None:
+        assert get_device(q_zeros) == CPU
     if q_g_idx is not None:
         assert get_device(q_g_idx) == CPU
-        #q_g_idx = q_g_idx.to(CPU)
 
     pack_impl = "original"
     target_device = None
@@ -993,8 +1081,10 @@ def pack_module(
     # fall back to the caller-supplied representative class (e.g. unit-test mocks).
     module_cls = type(module) if isinstance(module, BaseQuantLinear) else quant_linear_cls
 
+    quant_type = getattr(module_cls, "QUANT_TYPE", "")
+
     # TODO FIX ME..remove hard coded qqq pack
-    if module_cls.QUANT_TYPE == "qqq":
+    if quant_type == "qqq":
         if q_scales_extra is not None:
             q_scales_extra = q_scales_extra.to(CPU)
         packer_label = "module.pack"
@@ -1004,7 +1094,7 @@ def pack_module(
             module_name=name,
         ):
             module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
-    elif module_cls.QUANT_TYPE.startswith("awq_") or module_cls.QUANT_TYPE == "llm-awq":
+    elif quant_type.startswith("awq_") or quant_type == "llm-awq":
         packer_label = "module.pack"
         with log_time_block(
             packer_label,
@@ -1016,6 +1106,21 @@ def pack_module(
                 scales=q_scales,
                 zeros=q_zeros,
                 g_idx=q_g_idx,
+            )
+    elif quant_type in {"gguf", "fp8", "bitsandbytes"}:
+        # Weight-only methods that pack directly from the dense weight (optionally with smoothing).
+        packer_label = "module.pack_original"
+        with log_time_block(
+            packer_label,
+            logger=log,
+            module_name=name,
+        ):
+            module.pack_original(
+                linear=layer,
+                scales=q_scales,
+                zeros=q_zeros,
+                g_idx=q_g_idx,
+                **(pack_kwargs or {}),
             )
     else:
         effective_impl = (pack_impl or "original").lower()
@@ -1095,6 +1200,16 @@ def pack_module(
         # start = time.time()
         # qModules[name].to(layer_device)
         # log.info(f"Pack: moving module back to `{layer_device}` cost = {time.time()-start} seconds")
+
+    # Validate the packed result round-trips for every method that supports it.
+    if validate:
+        _validate_packed_module(
+            module=module,
+            linear=layer,
+            name=name,
+            bits=getattr(quantize_config, "bits", None),
+            method=getattr(quantize_config, "method", None),
+        )
 
     return packer_label
 

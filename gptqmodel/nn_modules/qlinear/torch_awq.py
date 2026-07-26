@@ -127,31 +127,21 @@ class AwqTorchLinear(AWQuantLinear):
         try:
             qweight, qzeros = pack_awq_cpu(intweight, zeros_int, self.bits)
         except Exception:
-            # Fallback to the original Python packing loops if the extension is unavailable.
-            qweight = torch.zeros(
-                (intweight.shape[0], intweight.shape[1] // pack_num),
-                dtype=torch.int32,
-                device=intweight.device,
-            )
-            qzeros = torch.zeros(
-                (zeros_int.shape[0], zeros_int.shape[1] // pack_num),
-                dtype=torch.int32,
-                device=zeros_int.device,
-            )
-
+            # Fallback vectorized packing if the compiled extension is unavailable.
             if self.bits != 4:
-                raise NotImplementedError("Only 4-bit are supported for now.")
-            order_map = [0, 2, 4, 6, 1, 3, 5, 7]
+                raise NotImplementedError("Only 4-bit AWQ packing is supported for now.")
+            order_map = torch.tensor([0, 2, 4, 6, 1, 3, 5, 7], dtype=torch.int64, device=intweight.device)
+            shifts = (torch.arange(pack_num, dtype=torch.int64, device=intweight.device) * self.bits).view(1, 1, pack_num)
 
-            for col in range(intweight.shape[1] // pack_num):
-                for i in range(pack_num):
-                    qweight_col = intweight[:, col * pack_num + order_map[i]]
-                    qweight[:, col] |= qweight_col << (i * self.bits)
+            intweight_grouped = intweight.view(intweight.shape[0], -1, pack_num)[:, :, order_map]
+            qweight = (
+                (intweight_grouped.to(torch.int64) << shifts).sum(dim=2, dtype=torch.int64) & 0xFFFFFFFF
+            ).to(torch.int32)
 
-            for col in range(zeros_int.shape[1] // pack_num):
-                for i in range(pack_num):
-                    qzero_col = zeros_int[:, col * pack_num + order_map[i]]
-                    qzeros[:, col] |= qzero_col << (i * self.bits)
+            zeros_grouped = zeros_int.view(zeros_int.shape[0], -1, pack_num)[:, :, order_map]
+            qzeros = (
+                (zeros_grouped.to(torch.int64) << shifts).sum(dim=2, dtype=torch.int64) & 0xFFFFFFFF
+            ).to(torch.int32)
 
         self.register_buffer("qweight", qweight)
         self.register_buffer("qzeros", qzeros)
