@@ -161,6 +161,7 @@ from .definitions.nemotron_labs_diffusion import NemotronLabsDiffusionQModel  # 
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
 from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
 from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
+from .definitions.olmoe import OlmoeQModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
 from .definitions.ovis2 import Ovis2QModel  # noqa: E402
@@ -319,6 +320,7 @@ MODEL_MAP = {
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
     "olmo2": LlamaQModel, # 100% llama clone
+    "olmoe": OlmoeQModel,
     "ovis": OvisQModel,
     "ovis2": Ovis2QModel,
     "ovis2_5": Ovis2_5QModel,

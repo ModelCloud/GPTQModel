@@ -247,6 +247,7 @@ class QuantizationRegionTimer:
             self._stats = OrderedDict(
                 (region, self._fresh_stat()) for region in self._region_labels.keys()
             )
+            self._last_period_snapshot: Optional[Dict[str, Dict[str, Any]]] = None
             self._header_printed = False
             self._pending_refresh = False
 
@@ -306,16 +307,54 @@ class QuantizationRegionTimer:
         with self._lock:
             if not self._pending_refresh:
                 return
-            self._print_summary_locked()
+            self._print_stats_locked(self._stats)
             self._pending_refresh = False
 
-    def _print_summary_locked(self) -> None:
+    def flush_period(self, label: Optional[str] = None) -> None:
+        """Emit a summary for the timing recorded since the last flush_period."""
+        with self._lock:
+            current = {region: dict(stat) for region, stat in self._stats.items()}
+            previous = self._last_period_snapshot or {}
+            delta = self._delta_stats(current, previous)
+            self._last_period_snapshot = current
+            if not any(stat.get("count", 0) for stat in delta.values()):
+                return
+            if label is not None:
+                self.logger.info("Telemetry summary: %s", label)
+            self._print_stats_locked(delta)
+
+    def _delta_stats(
+        self,
+        current: Dict[str, Dict[str, Any]],
+        previous: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        result: Dict[str, Dict[str, Any]] = {}
+        all_regions = set(current.keys()) | set(previous.keys())
+        for region in all_regions:
+            cur = current.get(region)
+            prev = previous.get(region)
+            if cur is None:
+                cur = self._fresh_stat()
+            if prev is None:
+                prev = self._fresh_stat()
+            count = int(cur.get("count", 0)) - int(prev.get("count", 0))
+            if count <= 0:
+                continue
+            result[region] = {
+                "total": float(cur.get("total", 0.0)) - float(prev.get("total", 0.0)),
+                "count": count,
+                "last": float(cur.get("last", 0.0)),
+                "source": cur.get("source"),
+            }
+        return result
+
+    def _print_stats_locked(self, stats: Dict[str, Dict[str, Any]]) -> None:
         self._ensure_columns_locked()
 
         # Filter out regions that have not been recorded yet.
         populated = [
             (region, stat)
-            for region, stat in self._stats.items()
+            for region, stat in stats.items()
             if stat.get("count", 0)
         ]
 

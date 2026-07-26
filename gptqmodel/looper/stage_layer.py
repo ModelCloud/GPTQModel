@@ -445,9 +445,17 @@ def run_layer_stage(
     for layer_index in pb:
         # Iterate over every transformer layer (plus lm_head when enabled) as
         # progress-bar controlled units of work.
+        layer_start = time.perf_counter()
+        progress_index = layer_index
+        log.info(
+            "StageLayer: layer lifecycle begin layer=%s progress_index=%s total=%s",
+            progress_index,
+            progress_index,
+            len(pb),
+        )
+
         if looper._check_loop_stop():
             break
-        progress_index = layer_index
         is_input_embeddings_module = quant_input_embeddings and progress_index == 0
         model_layer_index = progress_index - layer_index_offset
         is_output_embeddings_module = quant_output_embeddings and model_layer_index >= layer_count
@@ -1127,3 +1135,13 @@ def run_layer_stage(
         turtle_model = getattr(looper.gptq_model, "turtle_model", None)
         if turtle_model is not None and hasattr(turtle_model, "close_shard_handlers"):
             turtle_model.close_shard_handlers()
+
+        layer_elapsed = time.perf_counter() - layer_start
+        layer_label = f"layer {layer_index if not is_lm_head_module else 'lm_head'}"
+        log.info(
+            "StageLayer: layer lifecycle end %s wall_clock=%.3fs",
+            layer_label,
+            layer_elapsed,
+        )
+        if region_timer is not None:
+            region_timer.flush_period(label=layer_label)

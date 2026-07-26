@@ -1,26 +1,45 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
+from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
-# Both DeepSeek-v2 and DeepSeek-v2-lite are supported in this model def
-class OlmoeGPTQ(BaseGPTQModel):
-
+class OlmoeQModel(BaseQModel):
+    # OLMoE stores the expert count at the top level of its config.
     dynamic_expert_index = "num_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
+    pre_lm_head_norm_module = "model.norm"
+    rotary_embedding = "model.rotary_emb"
 
-    layers_node = "model.layers"
-    layer_type = "OlmoeDecoderLayer"
+    # MoE lifecycle hooks for the standard gate_proj/up_proj/down_proj expert layout.
+    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": (
+                "q_norm:!",
+                "q_proj:0",
+                "k_norm:!",
+                "k_proj:0",
+                "v_proj:0",
+                "o_proj:1",
+            ),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp:moe:?": {
+                "gate": ("gate:!",),
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
+            },
+        },
     ]
+
+
+__all__ = ["OlmoeQModel"]
