@@ -1120,7 +1120,7 @@ def _pack_block_extension() -> TorchOpsJitExtension:
         _PACK_BLOCK_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
             name="gptqmodel_pack_block_cpu",
             namespace="gptqmodel",
-            required_ops=("pack_block_cpu",),
+            required_ops=("pack_block_cpu", "pack_awq_cpu"),
             sources=lambda: [str(_pack_block_source_path())],
             build_root_env="GPTQMODEL_EXT_BUILD",
             default_build_root=lambda: default_torch_ops_build_root("pack_block_cpu"),

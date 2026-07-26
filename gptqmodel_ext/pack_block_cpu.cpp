@@ -1174,6 +1174,92 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
     return {qweight, qzeros};
 }
 
+// AWQ packing helper. Takes pre-quantized integer tensors and packs them into the
+// interleaved AWQ layout (e.g. 4-bit order 0,2,4,6,1,3,5,7 per 32-bit word).
+std::tuple<at::Tensor, at::Tensor> pack_awq_cpu(
+    const at::Tensor& intweight,
+    const at::Tensor& zeros,
+    int64_t bits) {
+    TORCH_CHECK(intweight.device().is_cpu(), "pack_awq_cpu: intweight must reside on CPU");
+    TORCH_CHECK(zeros.device().is_cpu(), "pack_awq_cpu: zeros must reside on CPU");
+
+    TORCH_CHECK(intweight.dim() == 2, "pack_awq_cpu: intweight must be 2D [in, out]");
+    TORCH_CHECK(zeros.dim() == 2, "pack_awq_cpu: zeros must be 2D [groups, out]");
+    TORCH_CHECK(bits == 2 || bits == 4 || bits == 8, "pack_awq_cpu: bits must be 2, 4, or 8");
+
+    const int pack_factor = 32 / static_cast<int>(bits);
+    const int max_q = (1 << bits) - 1;
+
+    const int64_t in_features = intweight.size(0);
+    const int64_t out_features = intweight.size(1);
+    const int64_t groups = zeros.size(0);
+    TORCH_CHECK(zeros.size(1) == out_features, "pack_awq_cpu: zeros second dim must match out_features");
+
+    const int64_t out_packs = out_features / pack_factor;
+    TORCH_CHECK(out_features % pack_factor == 0, "pack_awq_cpu: out_features must be divisible by pack_factor");
+
+    at::Tensor intweight_i32 = intweight.contiguous().to(at::kInt);
+    at::Tensor zeros_i32 = zeros.contiguous().to(at::kInt);
+
+    auto q_options = at::TensorOptions().dtype(at::kInt).device(at::kCPU);
+    at::Tensor qweight = at::empty({in_features, out_packs}, q_options);
+    at::Tensor qzeros = at::empty({groups, out_packs}, q_options);
+
+    const int32_t* iw_ptr = intweight_i32.const_data_ptr<int32_t>();
+    const int32_t* z_ptr = zeros_i32.const_data_ptr<int32_t>();
+    int32_t* qw_ptr = qweight.data_ptr<int32_t>();
+    int32_t* qz_ptr = qzeros.data_ptr<int32_t>();
+
+    const int64_t iw_stride_in = intweight_i32.stride(0);
+    const int64_t iw_stride_out = intweight_i32.stride(1);
+    const int64_t z_stride_group = zeros_i32.stride(0);
+    const int64_t z_stride_out = zeros_i32.stride(1);
+
+    // AWQ interleaves the 4-bit columns. For 2/8-bit use the natural order.
+    int order[16];
+    for (int i = 0; i < pack_factor; ++i) {
+        order[i] = i;
+    }
+    if (bits == 4) {
+        const int awq_order_4[8] = {0, 2, 4, 6, 1, 3, 5, 7};
+        for (int i = 0; i < 8; ++i) {
+            order[i] = awq_order_4[i];
+        }
+    }
+
+    at::parallel_for(0, in_features * out_packs, 0, [&](int64_t start, int64_t end) {
+        for (int64_t idx = start; idx < end; ++idx) {
+            const int64_t i = idx / out_packs;
+            const int64_t p = idx % out_packs;
+            int32_t packed = 0;
+            for (int k = 0; k < pack_factor; ++k) {
+                const int64_t o = p * pack_factor + order[k];
+                int32_t v = iw_ptr[i * iw_stride_in + o * iw_stride_out];
+                v = std::max<int32_t>(0, std::min<int32_t>(v, max_q));
+                packed |= (v & max_q) << (bits * k);
+            }
+            qw_ptr[i * out_packs + p] = packed;
+        }
+    });
+
+    at::parallel_for(0, groups * out_packs, 0, [&](int64_t start, int64_t end) {
+        for (int64_t idx = start; idx < end; ++idx) {
+            const int64_t g = idx / out_packs;
+            const int64_t p = idx % out_packs;
+            int32_t packed = 0;
+            for (int k = 0; k < pack_factor; ++k) {
+                const int64_t o = p * pack_factor + order[k];
+                int32_t v = z_ptr[g * z_stride_group + o * z_stride_out];
+                v = std::max<int32_t>(0, std::min<int32_t>(v, max_q));
+                packed |= (v & max_q) << (bits * k);
+            }
+            qz_ptr[g * out_packs + p] = packed;
+        }
+    });
+
+    return {qweight, qzeros};
+}
+
 } // namespace gptqmodel
 
 TORCH_LIBRARY(gptqmodel, m) {
@@ -1184,5 +1270,13 @@ TORCH_LIBRARY(gptqmodel, m) {
         "pack_block_cpu",
         c10::DispatchKey::CPU,
         TORCH_FN(gptqmodel::pack_block_cpu)
+    );
+    m.def(
+        "pack_awq_cpu(Tensor intweight, Tensor zeros, int bits) -> (Tensor, Tensor)"
+    );
+    m.impl(
+        "pack_awq_cpu",
+        c10::DispatchKey::CPU,
+        TORCH_FN(gptqmodel::pack_awq_cpu)
     );
 }

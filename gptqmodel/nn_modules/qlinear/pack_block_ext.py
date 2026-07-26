@@ -35,3 +35,14 @@ def pack_block_cpu(
         int(block_in),
         int(threads),
     )
+
+
+def pack_awq_cpu(intweight: Tensor, zeros: Tensor, bits: int) -> Tuple[Tensor, Tensor]:
+    ext = load_pack_block_extension()
+    if ext is None:
+        raise RuntimeError("pack_awq_cpu extension unavailable")
+    return torch.ops.gptqmodel.pack_awq_cpu(
+        intweight,
+        zeros,
+        int(bits),
+    )

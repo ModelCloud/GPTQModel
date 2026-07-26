@@ -12,6 +12,7 @@ from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
+from .pack_block_ext import pack_awq_cpu
 
 
 log = setup_logger()
@@ -96,7 +97,6 @@ class AwqTorchLinear(AWQuantLinear):
 
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
 
         scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
         self.register_buffer("scales", scales.clone().to(scale_dtype))
@@ -108,40 +108,50 @@ class AwqTorchLinear(AWQuantLinear):
 
         pack_num = 32 // self.bits
 
-        intweight = []
-        for idx in range(self.in_features):
-            intweight.append(
-                torch.round(
-                    (linear.weight.data[:, idx] + scale_zeros[idx // self.group_size])
-                    / self.scales[idx // self.group_size]
-                ).to(torch.int32)[:, None]
+        # Vectorized AWQ quantization on CPU, then bit-pack with the CPU extension.
+        weight = linear.weight.detach().to("cpu", copy=False)
+        scales_cpu = self.scales.to("cpu", copy=False)
+        zeros_cpu = zeros.to("cpu", copy=False)
+
+        if self.group_size > 0:
+            g_idx = torch.arange(self.in_features, device="cpu", dtype=torch.int64) // self.group_size
+        else:
+            g_idx = torch.zeros(self.in_features, device="cpu", dtype=torch.int64)
+
+        scale_zeros_exp = (zeros_cpu * scales_cpu).to(weight.dtype)[g_idx]
+        scales_exp = scales_cpu[g_idx]
+        intweight = torch.round((weight.t() + scale_zeros_exp) / scales_exp)
+        intweight = torch.clamp(intweight, 0, self.maxq).to(torch.int32)
+        zeros_int = zeros_cpu.to(torch.int32)
+
+        try:
+            qweight, qzeros = pack_awq_cpu(intweight, zeros_int, self.bits)
+        except Exception:
+            # Fallback to the original Python packing loops if the extension is unavailable.
+            qweight = torch.zeros(
+                (intweight.shape[0], intweight.shape[1] // pack_num),
+                dtype=torch.int32,
+                device=intweight.device,
             )
-        intweight = torch.cat(intweight, dim=1).t().contiguous()
+            qzeros = torch.zeros(
+                (zeros_int.shape[0], zeros_int.shape[1] // pack_num),
+                dtype=torch.int32,
+                device=zeros_int.device,
+            )
 
-        qweight = torch.zeros(
-            (intweight.shape[0], intweight.shape[1] // 32 * self.bits),
-            dtype=torch.int32,
-            device=intweight.device,
-        )
-        qzeros = torch.zeros(
-            (zeros.shape[0], zeros.shape[1] // 32 * self.bits),
-            dtype=torch.int32,
-            device=zeros.device,
-        )
+            if self.bits != 4:
+                raise NotImplementedError("Only 4-bit are supported for now.")
+            order_map = [0, 2, 4, 6, 1, 3, 5, 7]
 
-        if self.bits != 4:
-            raise NotImplementedError("Only 4-bit are supported for now.")
-        order_map = [0, 2, 4, 6, 1, 3, 5, 7]
+            for col in range(intweight.shape[1] // pack_num):
+                for i in range(pack_num):
+                    qweight_col = intweight[:, col * pack_num + order_map[i]]
+                    qweight[:, col] |= qweight_col << (i * self.bits)
 
-        for col in range(intweight.shape[1] // pack_num):
-            for i in range(pack_num):
-                qweight_col = intweight[:, col * pack_num + order_map[i]]
-                qweight[:, col] |= qweight_col << (i * self.bits)
-
-        for col in range(zeros.shape[1] // pack_num):
-            for i in range(pack_num):
-                qzero_col = zeros[:, col * pack_num + order_map[i]].to(torch.int32)
-                qzeros[:, col] |= qzero_col << (i * self.bits)
+            for col in range(zeros_int.shape[1] // pack_num):
+                for i in range(pack_num):
+                    qzero_col = zeros_int[:, col * pack_num + order_map[i]]
+                    qzeros[:, col] |= qzero_col << (i * self.bits)
 
         self.register_buffer("qweight", qweight)
         self.register_buffer("qzeros", qzeros)
