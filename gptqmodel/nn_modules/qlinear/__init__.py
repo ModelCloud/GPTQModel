@@ -123,7 +123,7 @@ class BaseQuantLinear(nn.Module):
         self.online_partial_had = False
         self.had_dim = -1
         self.K = 1
-        self.register_buffer("had_K", None, persistent=False)
+        self.had_K = None
 
         validate_args = {
             "bits": bits,

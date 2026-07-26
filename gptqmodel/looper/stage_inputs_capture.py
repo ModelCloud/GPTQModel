@@ -18,10 +18,12 @@ from ..nn_modules.hooked_linear import STOP_FORWARD_EXCEPTION, StopForward
 from ..quantization.config import QuantizeEmbed
 from ..utils.ctx import ctx
 from ..utils.device import get_device
-from ..utils.looper_helpers import device_ctx, select_forward_devices
 from ..utils.logger import setup_logger
+from ..utils.looper_helpers import device_ctx, normalize_device_like, select_forward_devices
 from ..utils.model import get_module, get_module_by_name_prefix, move_to, nested_move_to
+from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, META
+
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from .module_looper import ModuleLooper
@@ -115,14 +117,17 @@ class StageInputsCapture:
                 calibration_batches,
             )
 
-        # materialize / move.to CPU for initial input capture and for first layer to minimize VRAM usage, inputs will be stored on CPU
-        # and to mimic behavior of offload_to_disk=False for offload_to_disk=True
-        # Use calibration_data_device to specify device for calibration data (or "balanced" for round-robin across GPUs)
+        # Materialize the first layer and base modules (embeddings, lm_head,
+        # norms) on the quantization device so the initial input capture does not
+        # run on CPU and then pay a cross-device copy for every calibration batch.
+        # With offload_to_disk enabled, only the modules touched here are resident
+        # on the accelerator; the rest of the model stays on disk.
+        capture_device = normalize_device_like(self.gptq_model.quantize_config.device) or CPU
         layers[0] = self.gptq_model.shell_module_materialize(
             target_submodule=layers[0],
-            device=CPU,
+            device=capture_device,
         )
-        cur_layer_device = CPU
+        cur_layer_device = capture_device
 
         # Use calibration_data_device if specified, otherwise use cur_layer_device
         calib_device_cfg = self.gptq_model.quantize_config.calibration_data_device
@@ -300,6 +305,25 @@ class StageInputsCapture:
 
         self.gptq_model.pre_quantize_generate_hook_end()
         handle.remove()
+
+        # In offload_to_disk mode the input embedding is no longer needed once
+        # hidden-state inputs are cached. Move it to disk (unless it is tied
+        # with lm_head, which must remain on the accelerator for its own
+        # quantization pass) so later layers do not keep the embedding weight
+        # resident in device memory.
+        if (
+            self.gptq_model.quantize_config.offload_to_disk
+            and input_embeddings is not None
+            and embed_quant_mode not in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+            and not getattr(self.gptq_model.model.config, "tie_word_embeddings", False)
+        ):
+            offload_path = self.gptq_model.quantize_config.offload_to_disk_path
+            if offload_path:
+                offload_to_disk(
+                    module=input_embeddings,
+                    model=self.gptq_model.model,
+                    disk_path=offload_path,
+                )
 
         result = InputCache(
             src_inputs=src_inputs,

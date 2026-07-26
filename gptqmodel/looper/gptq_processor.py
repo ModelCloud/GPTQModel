@@ -626,9 +626,14 @@ class GPTQProcessor(LoopProcessor):
                     if not bool(sample_keep.any().item()):
                         continue
 
-                    sample_inp = inp_tensor[sample_index : sample_index + 1, sample_keep, :].contiguous()
+                    # Ensure the boolean index is on the same device as the
+                    # activation tensor when multi-GPU balancing places inputs
+                    # on different devices than the attention mask.
+                    sample_keep_device = sample_keep.to(inp_tensor.device)
+
+                    sample_inp = inp_tensor[sample_index : sample_index + 1, sample_keep_device, :].contiguous()
                     if out_tensor is not None and out_tensor.dim() >= 3 and out_tensor.shape[:2] == inp_tensor.shape[:2]:
-                        sample_out = out_tensor[sample_index : sample_index + 1, sample_keep, :].contiguous()
+                        sample_out = out_tensor[sample_index : sample_index + 1, sample_keep_device, :].contiguous()
                     else:
                         sample_out = out
                     self._add_batch_with_shared_hessian(
