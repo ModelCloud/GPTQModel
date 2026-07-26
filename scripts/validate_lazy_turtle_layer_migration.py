@@ -21,7 +21,7 @@ from gptqmodel.utils.model import move_to
 
 
 def main():
-    model_dir = "/monster/data/model/OLMoE-1B-7B-0924"
+    model_dir = os.environ.get("MODEL_DIR", "/monster/data/model/OLMoE-1B-7B-0924")
     device = torch.device("cpu")
 
     print(f"Loading OLMoE model from {model_dir} ...")
