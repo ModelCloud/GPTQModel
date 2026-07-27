@@ -799,6 +799,7 @@ class WeightOnlyLooper:
                 self.gptq_model.shell_direct_meta_materialize(
                     target_submodule=module,
                     device=CPU,
+                    module_path=module_name,
                 )
             return
 
@@ -939,6 +940,7 @@ class WeightOnlyLooper:
                     self.gptq_model.shell_direct_meta_materialize(
                         target_submodule=module,
                         device=CPU,
+                        module_path=module_name,
                     )
 
         if quant_config.offload_to_disk:
@@ -1091,6 +1093,7 @@ class WeightOnlyLooper:
                                     device=CPU,
                                     role="quant_source",
                                     named_module=named,
+                                    module_path=named.full_name,
                                 )
                                 if prepared is not named.module:
                                     named.module = prepared

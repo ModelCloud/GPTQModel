@@ -20,6 +20,7 @@ Decide which boundaries move before editing:
 Read [references/method-map.md](references/method-map.md) for the current dispatch map and test layers.
 Read [references/quantization_packing.md](references/quantization_packing.md) completely whenever work touches integer
 code reconstruction, clipping, zero-points, packing, unpacking, serialization, or cross-packer parity.
+Use `$gptqmodel-contiguous-memory` when a kernel or quantizer silently falls back or produces wrong results because a tensor is non-contiguous.
 
 ## Trace the existing contract
 

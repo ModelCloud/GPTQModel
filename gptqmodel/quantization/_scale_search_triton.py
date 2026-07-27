@@ -11,6 +11,11 @@ The Python wrapper then selects the top-k candidates, recomputes their losses
 with the exact PyTorch arithmetic used by the eager reference, and picks the
 first minimizer. This keeps the speed benefit of device-side candidate iteration
 while guaranteeing bit-exact agreement with the existing Python scale search.
+
+Note: the Triton kernels load the [rows, num_groups, group_size] input with
+pointer+stride arithmetic that assumes a contiguous layout. Callers (and the
+wrapper in Quantizer.find_params_batched) must ensure `x` is contiguous before
+launching these kernels; otherwise the kernel reads strided columns incorrectly.
 """
 
 from typing import Tuple

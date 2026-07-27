@@ -1122,10 +1122,25 @@ def _run_single_subset_pass(
             subset_index=subset_index,
             subset_total=subset_total,
         )
+    timer = getattr(looper.gptq_model, "quant_region_timer", None)
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
+        sync_start = time.perf_counter() if timer is not None else None
         torch_empty_cache(device=quant_flush_device, sync=True)
+        if timer is not None and sync_start is not None:
+            timer.record(
+                "torch_sync",
+                time.perf_counter() - sync_start,
+                source=f"stage_subset gc_empty_cache subset={subset_index}/{subset_total}",
+            )
     else:
+        sync_start = time.perf_counter() if timer is not None else None
         torch_sync()
+        if timer is not None and sync_start is not None:
+            timer.record(
+                "torch_sync",
+                time.perf_counter() - sync_start,
+                source=f"stage_subset end subset={subset_index}/{subset_total}",
+            )
 
     if subset_event_cb:
         subset_event_cb(stage="quant_complete", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=active_subset_names, processor=getattr(processor, "name", type(processor).__name__))
@@ -1251,7 +1266,7 @@ def run_subset_stage(
 
         # Create progress bar for MOE chunks
         moe_chunk_pb = logger.pb(range(len(plan.module_chunks))).manual()
-        moe_chunk_pb.title(f"MoE Chunk")
+        moe_chunk_pb.title("MoE Chunk")
 
         for chunk_idx in moe_chunk_pb:
             chunk_plan = plan.for_modules(plan.module_chunks[chunk_idx])

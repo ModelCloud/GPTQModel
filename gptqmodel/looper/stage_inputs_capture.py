@@ -73,6 +73,7 @@ class StageInputsCapture:
                 self.gptq_model.shell_direct_meta_materialize(
                     target_submodule=module,
                     device=device,
+                    module_path=module_name,
                 )
 
     def cache_inputs(
@@ -126,6 +127,7 @@ class StageInputsCapture:
         layers[0] = self.gptq_model.shell_module_materialize(
             target_submodule=layers[0],
             device=capture_device,
+            module_path=layer_label,
         )
         cur_layer_device = capture_device
 
@@ -243,6 +245,7 @@ class StageInputsCapture:
             self.gptq_model.shell_module_materialize(
                 target_submodule=module,
                 device=cur_layer_device,
+                module_path=module_name,
             )
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)

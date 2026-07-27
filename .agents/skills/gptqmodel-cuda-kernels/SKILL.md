@@ -8,6 +8,7 @@ description: Build, port, optimize, review, benchmark, or debug GPT-QModel CUDA,
 Start from a numerical reference and select the smallest kernel path that can express the operation. Keep correctness tests separate from performance benchmarks.
 
 Read [references/kernel-workflow.md](references/kernel-workflow.md). For crashes or silent corruption, also read [references/cuda-debugging.md](references/cuda-debugging.md).
+Use `$gptqmodel-contiguous-memory` when a kernel or caller silently falls back to a slow eager path because a tensor is non-contiguous.
 
 ## Choose the implementation path
 

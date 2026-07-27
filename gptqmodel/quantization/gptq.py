@@ -204,8 +204,9 @@ class GPTQ:
             return module.module
         return module
 
-    def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig] = None):
+    def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig] = None, region_timer=None):
         self.lock = threading.Lock()
+        self.region_timer = region_timer
 
         # self.num_tied_handles = 0
         # if qcfg.tied_gptq_handle is not None:
@@ -340,7 +341,7 @@ class GPTQ:
     #     return any([self.issue_zero_samples, self.issue_nan_hessian, self.issue_non_invertible])
 
     def create_quantizer(self, name: str) -> Quantizer:
-        return Quantizer(qcfg=self.qcfg, name=name)
+        return Quantizer(qcfg=self.qcfg, name=name, region_timer=self.region_timer)
 
     def shape(self):
         if hasattr(self, "module"):
@@ -1729,6 +1730,9 @@ class GPTQ:
             groups = []
             for i in range(0, self.columns, self.qcfg.group_size):
                 quantizer = copy.deepcopy(self.quantizer)
+                # Share the same region timer across group clones so all
+                # scale-search timing aggregates into one region.
+                quantizer.region_timer = self.quantizer.region_timer
                 group_end = min(i + self.qcfg.group_size, self.columns)
                 quantizer.find_params(
                     W[:, i:group_end],

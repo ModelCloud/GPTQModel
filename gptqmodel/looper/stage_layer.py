@@ -781,7 +781,14 @@ def run_layer_stage(
 
             # Finalize module after last processor
             if p_index == len(looper.processors) - 1:
+                sync_start = time.perf_counter() if region_timer is not None else None
                 torch_sync()
+                if region_timer is not None and sync_start is not None:
+                    region_timer.record(
+                        "torch_sync",
+                        time.perf_counter() - sync_start,
+                        source=f"stage_layer post_process layer={layer_index}",
+                    )
 
                 if is_embeddings_module:
                     looper.gptq_model.post_quantize(module)
@@ -810,7 +817,14 @@ def run_layer_stage(
                 pb.title(layer_title).subtitle("").draw()
 
             if p_index == len(looper.processors) - 1:
+                sync_start = time.perf_counter() if region_timer is not None else None
                 torch_sync()
+                if region_timer is not None and sync_start is not None:
+                    region_timer.record(
+                        "torch_sync",
+                        time.perf_counter() - sync_start,
+                        source=f"stage_layer pre_finalize layer={layer_index}",
+                    )
 
                 # Gather finalize tasks (can offload to disk); run them via the pool
                 finalize_tasks = []

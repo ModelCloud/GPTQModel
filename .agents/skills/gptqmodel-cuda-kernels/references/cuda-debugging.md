@@ -27,6 +27,7 @@ Do not dump model weights or tokens unless the test data is known safe and minim
 
 ## Common quantized-kernel causes
 
+- non-contiguous input tensors that the kernel assumes are contiguous, causing illegal reads or silent fallback to a slow reference (see `$gptqmodel-contiguous-memory`);
 - bit-packed tail reads crossing allocation bounds;
 - scale/zero or group-index dimensions inconsistent with the weight layout;
 - vectorized load alignment assumed but not validated;

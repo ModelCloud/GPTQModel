@@ -5,6 +5,7 @@
 
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
+import contextlib
 import os
 
 import torch
@@ -45,10 +46,11 @@ def quantize(x, scale, zero, maxq, requires_groupwise_processing: bool):
 
 
 class Quantizer(nn.Module):
-    def __init__(self, qcfg: BaseQuantizeConfig, shape=1, name: str=None):
+    def __init__(self, qcfg: BaseQuantizeConfig, shape=1, name: str=None, region_timer=None):
         super(Quantizer, self).__init__()
 
         self.qcfg = qcfg
+        self.region_timer = region_timer
         self.register_buffer("maxq", torch.tensor(0))
         self.register_buffer("scale", torch.zeros(shape))
         self.register_buffer("zero", torch.zeros(shape))
@@ -306,6 +308,13 @@ class Quantizer(nn.Module):
         return q.clamp_(-zero, maxq_f - zero).mul_(scale).sub_(x)
 
     def find_params(self, x, weight=False, *, hessian: torch.Tensor | None = None):
+        # GPU scale-search algorithms (Triton and otherwise) assume a contiguous
+        # [rows, num_groups, group_size] layout. gptq.py passes reshaped column
+        # slices that may not be, so copy the local batch to avoid silent fallback
+        # or strided-read errors without changing the quantized result.
+        if isinstance(x, torch.Tensor) and not x.is_contiguous():
+            x = x.contiguous()
+
         dev = x.device
         self.maxq = self.maxq.to(dev)
         maxq_value = getattr(self, "_maxq_value", None)
@@ -362,65 +371,72 @@ class Quantizer(nn.Module):
             method = ScaleSearchConfig(method)
 
         if method is not None and mse > 0.0:
-            prepared_hessian = None
-            if method != ScaleSearchConfig.MSE:
-                prepared_hessian = self._prepare_scale_search_hessian(
-                    hessian,
-                    method=method,
-                    columns=x.shape[1],
-                    device=dev,
-                )
-            best = torch.full([x.shape[0]], float("inf"), device=dev)
-            candidate_count = int(self.maxshrink * self.grid)
+            timer = getattr(self, "region_timer", None)
+            timer_cm = (
+                timer.measure("scale_search", source=f"find_params {self.name}")
+                if timer is not None
+                else contextlib.nullcontext()
+            )
+            with timer_cm:
+                prepared_hessian = None
+                if method != ScaleSearchConfig.MSE:
+                    prepared_hessian = self._prepare_scale_search_hessian(
+                        hessian,
+                        method=method,
+                        columns=x.shape[1],
+                        device=dev,
+                    )
+                best = torch.full([x.shape[0]], float("inf"), device=dev)
+                candidate_count = int(self.maxshrink * self.grid)
 
-            chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
-            # Vectorize the shrink factors on the device; materializing the
-            # original Python-float list one-by-one can differ by one ULP after
-            # cancellation and alter the serialized scale values.
-            shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
-            shrink = 1.0 - shrink / self.grid
-            # Precompute scale/zero for every candidate once so the chunk loop
-            # only slices views instead of recomputing elementwise ranges.
-            p = shrink.view(-1, 1)
-            xmin_all = p * xmin.unsqueeze(0)
-            xmax_all = p * xmax.unsqueeze(0)
-            if self.requires_groupwise_processing():
-                scale_all = xmax_all / self.maxq
-            else:
-                scale_all = (xmax_all - xmin_all) / self.maxq
-            if self.qcfg.sym:
-                zero_all = self.zero.unsqueeze(0).expand_as(scale_all)
-            else:
-                zero_all = torch.round(-xmin_all / scale_all)
+                chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
+                # Vectorize the shrink factors on the device; materializing the
+                # original Python-float list one-by-one can differ by one ULP after
+                # cancellation and alter the serialized scale values.
+                shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
+                shrink = 1.0 - shrink / self.grid
+                # Precompute scale/zero for every candidate once so the chunk loop
+                # only slices views instead of recomputing elementwise ranges.
+                p = shrink.view(-1, 1)
+                xmin_all = p * xmin.unsqueeze(0)
+                xmax_all = p * xmax.unsqueeze(0)
+                if self.requires_groupwise_processing():
+                    scale_all = xmax_all / self.maxq
+                else:
+                    scale_all = (xmax_all - xmin_all) / self.maxq
+                if self.qcfg.sym:
+                    zero_all = self.zero.unsqueeze(0).expand_as(scale_all)
+                else:
+                    zero_all = torch.round(-xmin_all / scale_all)
 
-            x_batch = x.unsqueeze(0)
-            for start in range(0, candidate_count, chunk_size):
-                end = min(start + chunk_size, candidate_count)
-                scale1 = scale_all[start:end]
-                zero1 = zero_all[start:end]
-                error = self._quantize_scale_search_candidates(
-                    x_batch,
-                    scale1.unsqueeze(2),
-                    zero1.unsqueeze(2),
-                    maxq_value=maxq_value,
-                )
-                errors = self._scale_search_error(
-                    error,
-                    method=method,
-                    mse=mse,
-                    hessian=prepared_hessian,
-                )
-                # torch.min returns the first index on ties. Combining one
-                # winner per chunk with a strict comparison across chunks
-                # exactly preserves the scalar loop's first-candidate rule.
-                chunk_best, chunk_index = errors.min(dim=0)
-                gather_index = chunk_index.unsqueeze(0)
-                chunk_scale = scale1.gather(0, gather_index).squeeze(0)
-                chunk_zero = zero1.gather(0, gather_index).squeeze(0)
-                take = chunk_best < best
-                best = torch.where(take, chunk_best, best)
-                self.scale = torch.where(take, chunk_scale, self.scale)
-                self.zero = torch.where(take, chunk_zero, self.zero)
+                x_batch = x.unsqueeze(0)
+                for start in range(0, candidate_count, chunk_size):
+                    end = min(start + chunk_size, candidate_count)
+                    scale1 = scale_all[start:end]
+                    zero1 = zero_all[start:end]
+                    error = self._quantize_scale_search_candidates(
+                        x_batch,
+                        scale1.unsqueeze(2),
+                        zero1.unsqueeze(2),
+                        maxq_value=maxq_value,
+                    )
+                    errors = self._scale_search_error(
+                        error,
+                        method=method,
+                        mse=mse,
+                        hessian=prepared_hessian,
+                    )
+                    # torch.min returns the first index on ties. Combining one
+                    # winner per chunk with a strict comparison across chunks
+                    # exactly preserves the scalar loop's first-candidate rule.
+                    chunk_best, chunk_index = errors.min(dim=0)
+                    gather_index = chunk_index.unsqueeze(0)
+                    chunk_scale = scale1.gather(0, gather_index).squeeze(0)
+                    chunk_zero = zero1.gather(0, gather_index).squeeze(0)
+                    take = chunk_best < best
+                    best = torch.where(take, chunk_best, best)
+                    self.scale = torch.where(take, chunk_scale, self.scale)
+                    self.zero = torch.where(take, chunk_zero, self.zero)
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
@@ -459,6 +475,14 @@ class Quantizer(nn.Module):
         Hessian for correlated objectives.  Returns (scale, zero) of shape
         [rows, num_groups].
         """
+
+        # The Triton activation/hessian scale-search kernels load x with
+        # pointer+stride arithmetic that assumes a contiguous [rows, num_groups,
+        # group_size] layout. gptq.py passes reshaped column slices that are
+        # not contiguous, so copy the local batch to unlock the fast GPU path
+        # without changing any quantized scale/zero values.
+        if isinstance(x, torch.Tensor) and not x.is_contiguous():
+            x = x.contiguous()
 
         if x.ndim != 3:
             raise ValueError(f"find_params_batched expects a 3D tensor, got {tuple(x.shape)}.")
@@ -509,118 +533,125 @@ class Quantizer(nn.Module):
             method = ScaleSearchConfig(method)
 
         if method is not None and mse > 0.0:
-            prepared_hessian = None
-            if method != ScaleSearchConfig.MSE:
-                prepared_hessian = self._prepare_scale_search_hessian_batched(
-                    hessian,
-                    method=method,
-                )
-
-            candidate_count = int(self.maxshrink * self.grid)
-
-            if (
-                os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON", "1") != "0"
-                and _triton_find_params_batched_activation is not None
-                and method == ScaleSearchConfig.ACTIVATION
-                and prepared_hessian is not None
-                and not self.requires_groupwise_processing()
-                and group_size <= 128
-                and maxq_value >= 7
-                and x.is_cuda
-                and x.is_contiguous()
-                and x.dtype in (torch.float16, torch.float32, torch.bfloat16)
-            ):
-                try:
-                    return _triton_find_params_batched_activation(
-                        x,
-                        xmin,
-                        xmax,
-                        prepared_hessian,
-                        self.grid,
-                        self.maxshrink,
-                        float(maxq_value),
-                        int(self.qcfg.sym),
-                        candidate_count,
+            timer = getattr(self, "region_timer", None)
+            timer_cm = (
+                timer.measure("scale_search", source=f"find_params_batched {self.name}")
+                if timer is not None
+                else contextlib.nullcontext()
+            )
+            with timer_cm:
+                prepared_hessian = None
+                if method != ScaleSearchConfig.MSE:
+                    prepared_hessian = self._prepare_scale_search_hessian_batched(
+                        hessian,
+                        method=method,
                     )
-                except Exception as e:
-                    log.warn(f"Triton activation scale-search failed, falling back: {e}")
 
-            if (
-                os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON", "1") != "0"
-                and _triton_find_params_batched_hessian_hybrid is not None
-                and method in (ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID)
-                and prepared_hessian is not None
-                and not self.requires_groupwise_processing()
-                and group_size <= 128
-                and maxq_value >= 15
-                and x.is_cuda
-                and x.is_contiguous()
-                and x.dtype in (torch.float16, torch.float32, torch.bfloat16)
-            ):
-                try:
-                    return _triton_find_params_batched_hessian_hybrid(
-                        x,
-                        xmin,
-                        xmax,
-                        prepared_hessian,
-                        self.grid,
-                        self.maxshrink,
-                        float(maxq_value),
-                        int(self.qcfg.sym),
-                        candidate_count,
+                candidate_count = int(self.maxshrink * self.grid)
+
+                if (
+                    os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON", "1") != "0"
+                    and _triton_find_params_batched_activation is not None
+                    and method == ScaleSearchConfig.ACTIVATION
+                    and prepared_hessian is not None
+                    and not self.requires_groupwise_processing()
+                    and group_size <= 128
+                    and maxq_value >= 7
+                    and x.is_cuda
+                    and x.is_contiguous()
+                    and x.dtype in (torch.float16, torch.float32, torch.bfloat16)
+                ):
+                    try:
+                        return _triton_find_params_batched_activation(
+                            x,
+                            xmin,
+                            xmax,
+                            prepared_hessian,
+                            self.grid,
+                            self.maxshrink,
+                            float(maxq_value),
+                            int(self.qcfg.sym),
+                            candidate_count,
+                        )
+                    except Exception as e:
+                        log.warn(f"Triton activation scale-search failed, falling back: {e}")
+
+                if (
+                    os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON", "1") != "0"
+                    and _triton_find_params_batched_hessian_hybrid is not None
+                    and method in (ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID)
+                    and prepared_hessian is not None
+                    and not self.requires_groupwise_processing()
+                    and group_size <= 128
+                    and maxq_value >= 15
+                    and x.is_cuda
+                    and x.is_contiguous()
+                    and x.dtype in (torch.float16, torch.float32, torch.bfloat16)
+                ):
+                    try:
+                        return _triton_find_params_batched_hessian_hybrid(
+                            x,
+                            xmin,
+                            xmax,
+                            prepared_hessian,
+                            self.grid,
+                            self.maxshrink,
+                            float(maxq_value),
+                            int(self.qcfg.sym),
+                            candidate_count,
+                        )
+                    except Exception as e:
+                        log.warn(f"Triton hessian/hybrid scale-search failed, falling back: {e}")
+
+                # Fallback exact candidate-chunk loop. This is kept as the
+                # strict-accuracy reference and is used when the Triton fast path
+                # is disabled or unsupported.
+                if candidate_count > 0:
+                    shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
+                    shrink = 1.0 - shrink / self.grid
+                    p = shrink.view(-1, 1, 1)
+                    xmin_all = p * xmin.unsqueeze(0)
+                    xmax_all = p * xmax.unsqueeze(0)
+                    if self.requires_groupwise_processing():
+                        scale_all = xmax_all / self.maxq
+                    else:
+                        scale_all = (xmax_all - xmin_all) / self.maxq
+                    if self.qcfg.sym:
+                        zero_all = zero.unsqueeze(0).expand(candidate_count, -1, -1)
+                    else:
+                        zero_all = torch.round(-xmin_all / scale_all)
+                else:
+                    scale_all = scale.unsqueeze(0)
+                    zero_all = zero.unsqueeze(0)
+
+                best = torch.full((rows, num_groups), float("inf"), device=dev)
+                chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
+
+                x_batch = x.unsqueeze(0)
+                for start in range(0, candidate_count, chunk_size):
+                    end = min(start + chunk_size, candidate_count)
+                    scale1 = scale_all[start:end]
+                    zero1 = zero_all[start:end]
+                    error = self._quantize_scale_search_candidates(
+                        x_batch.expand(end - start, -1, -1, -1),
+                        scale1.unsqueeze(-1),
+                        zero1.unsqueeze(-1),
+                        maxq_value=maxq_value,
                     )
-                except Exception as e:
-                    log.warn(f"Triton hessian/hybrid scale-search failed, falling back: {e}")
-
-            # Fallback exact candidate-chunk loop. This is kept as the
-            # strict-accuracy reference and is used when the Triton fast path
-            # is disabled or unsupported.
-            if candidate_count > 0:
-                shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
-                shrink = 1.0 - shrink / self.grid
-                p = shrink.view(-1, 1, 1)
-                xmin_all = p * xmin.unsqueeze(0)
-                xmax_all = p * xmax.unsqueeze(0)
-                if self.requires_groupwise_processing():
-                    scale_all = xmax_all / self.maxq
-                else:
-                    scale_all = (xmax_all - xmin_all) / self.maxq
-                if self.qcfg.sym:
-                    zero_all = zero.unsqueeze(0).expand(candidate_count, -1, -1)
-                else:
-                    zero_all = torch.round(-xmin_all / scale_all)
-            else:
-                scale_all = scale.unsqueeze(0)
-                zero_all = zero.unsqueeze(0)
-
-            best = torch.full((rows, num_groups), float("inf"), device=dev)
-            chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
-
-            x_batch = x.unsqueeze(0)
-            for start in range(0, candidate_count, chunk_size):
-                end = min(start + chunk_size, candidate_count)
-                scale1 = scale_all[start:end]
-                zero1 = zero_all[start:end]
-                error = self._quantize_scale_search_candidates(
-                    x_batch.expand(end - start, -1, -1, -1),
-                    scale1.unsqueeze(-1),
-                    zero1.unsqueeze(-1),
-                    maxq_value=maxq_value,
-                )
-                errors = self._scale_search_error_batched(
-                    error,
-                    method=method,
-                    mse=mse,
-                    hessian=prepared_hessian,
-                )
-                chunk_best, chunk_index = errors.min(dim=0)
-                gather_index = chunk_index.unsqueeze(0)
-                chunk_scale = scale1.gather(0, gather_index).squeeze(0)
-                chunk_zero = zero1.gather(0, gather_index).squeeze(0)
-                take = chunk_best < best
-                best = torch.where(take, chunk_best, best)
-                scale = torch.where(take, chunk_scale, scale)
-                zero = torch.where(take, chunk_zero, zero)
+                    errors = self._scale_search_error_batched(
+                        error,
+                        method=method,
+                        mse=mse,
+                        hessian=prepared_hessian,
+                    )
+                    chunk_best, chunk_index = errors.min(dim=0)
+                    gather_index = chunk_index.unsqueeze(0)
+                    chunk_scale = scale1.gather(0, gather_index).squeeze(0)
+                    chunk_zero = zero1.gather(0, gather_index).squeeze(0)
+                    take = chunk_best < best
+                    best = torch.where(take, chunk_best, best)
+                    scale = torch.where(take, chunk_scale, scale)
+                    zero = torch.where(take, chunk_zero, zero)
 
         return scale, zero
 

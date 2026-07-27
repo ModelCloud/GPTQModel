@@ -978,8 +978,16 @@ class ModuleLooper():
                 current_device=current,
                 target_device=target,
             )
+            timer = getattr(self.gptq_model, "quant_region_timer", None)
+            move_start = time.perf_counter() if timer is not None else None
             move_to(module_ref, device=target)
             rehome_module_to_device(module_ref, target, move_parameters=True, move_buffers=True)
+            if timer is not None and move_start is not None:
+                timer.record(
+                    "module_move",
+                    time.perf_counter() - move_start,
+                    source=f"forward_override_apply {getattr(named_module, 'full_name', name)} {current}->{target}",
+                )
             if isinstance(named_module, NamedModule):
                 setattr(named_module, "target_device", target)
             setattr(module_ref, "target_device", target)
@@ -1013,8 +1021,16 @@ class ModuleLooper():
                 module=getattr(named_module, "full_name", name) if named_module is not None else name,
                 target_device=revert_device,
             )
+            timer = getattr(self.gptq_model, "quant_region_timer", None)
+            move_start = time.perf_counter() if timer is not None else None
             move_to(module_ref, device=revert_device)
             rehome_module_to_device(module_ref, revert_device, move_parameters=True, move_buffers=True)
+            if timer is not None and move_start is not None:
+                timer.record(
+                    "module_move",
+                    time.perf_counter() - move_start,
+                    source=f"forward_override_restore {getattr(named_module, 'full_name', name)} -> {revert_device}",
+                )
             if isinstance(named_module, NamedModule):
                 setattr(named_module, "target_device", revert_device)
             setattr(module_ref, "target_device", revert_device)
@@ -1027,6 +1043,7 @@ class ModuleLooper():
     ) -> None:
         """Move processor-owned task state alongside the module it quantizes."""
 
+        timer = getattr(self.gptq_model, "quant_region_timer", None)
         task_map = getattr(processor, "tasks", None)
         if not task_map:
             return
@@ -1046,14 +1063,28 @@ class ModuleLooper():
 
         module_attr = getattr(task, "module", None)
         if isinstance(module_attr, torch.nn.Module):
+            move_start = time.perf_counter() if timer is not None else None
             move_to(module_attr, device=target_device)
             rehome_module_to_device(module_attr, target_device, move_parameters=True, move_buffers=True)
+            if timer is not None and move_start is not None:
+                timer.record(
+                    "module_move",
+                    time.perf_counter() - move_start,
+                    source=f"rehome_task module -> {target_device}",
+                )
             setattr(module_attr, "target_device", target_device)
 
         layer_attr = getattr(task, "layer", None)
         if isinstance(layer_attr, torch.nn.Module):
+            move_start = time.perf_counter() if timer is not None else None
             move_to(layer_attr, device=target_device)
             rehome_module_to_device(layer_attr, target_device, move_parameters=True, move_buffers=True)
+            if timer is not None and move_start is not None:
+                timer.record(
+                    "module_move",
+                    time.perf_counter() - move_start,
+                    source=f"rehome_task layer -> {target_device}",
+                )
             setattr(layer_attr, "target_device", target_device)
 
         quantizer = getattr(task, "quantizer", None)
@@ -1083,11 +1114,13 @@ class ModuleLooper():
         if target_device == META:
             target_device = fallback_device
 
+        module_label = getattr(named_module, "full_name", named_module.name)
         prepared = self.gptq_model.shell_module_materialize(
             target_submodule=named_module.module,
             device=target_device,
             role="forward",
             named_module=named_module,
+            module_path=module_label,
         )
         if prepared is not named_module.module:
             named_module.module = prepared
@@ -1114,18 +1147,35 @@ class ModuleLooper():
             fallback_device=fallback_device,
         )
 
+        timer = getattr(self.gptq_model, "quant_region_timer", None)
+        module_label = getattr(named_module, "full_name", named_module.name)
         if isinstance(named_module.state.get("quant_source_module"), torch.nn.Module):
             prepared = self.gptq_model.shell_module_materialize(
                 target_submodule=named_module.module,
                 device=target_device,
                 role="quant_source",
                 named_module=named_module,
+                module_path=module_label,
             )
             if prepared is not named_module.module:
                 named_module.module = prepared
         else:
+            move_start = time.perf_counter() if timer is not None else None
             move_to(named_module.module, device=target_device)
+            if timer is not None and move_start is not None:
+                timer.record(
+                    "module_move",
+                    time.perf_counter() - move_start,
+                    source=f"prepare_quant move_to {module_label} -> {target_device}",
+                )
+        move_start = time.perf_counter() if timer is not None else None
         rehome_module_to_device(named_module.module, target_device, move_parameters=True, move_buffers=True)
+        if timer is not None and move_start is not None:
+            timer.record(
+                "module_move",
+                time.perf_counter() - move_start,
+                source=f"prepare_quant rehome {module_label} -> {target_device}",
+            )
 
         setattr(named_module, "target_device", target_device)
         setattr(named_module.module, "target_device", target_device)
@@ -1762,7 +1812,8 @@ class ModuleLooper():
 
             preprocess_start = time.perf_counter()
             if isinstance(processor, GPTQProcessor):
-                processor.preprocess(subset[name], fallback=fallback)
+                region_timer = getattr(self.gptq_model, "quant_region_timer", None)
+                processor.preprocess(subset[name], fallback=fallback, region_timer=region_timer)
             else:
                 processor.preprocess(subset[name])
             preprocess_elapsed = time.perf_counter() - preprocess_start

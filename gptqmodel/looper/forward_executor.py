@@ -10,6 +10,8 @@ from __future__ import annotations
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
+import time
+
 import torch
 
 from .. import DEVICE_THREAD_POOL
@@ -466,7 +468,15 @@ class ForwardExecutor:
 
         progress_cb = _replica_progress if progress_pb is not None else None
 
+        timer = getattr(self.looper.gptq_model, "quant_region_timer", None)
+        sync_start = time.perf_counter() if timer is not None else None
         torch_sync()
+        if timer is not None and sync_start is not None:
+            timer.record(
+                "torch_sync",
+                time.perf_counter() - sync_start,
+                source=f"forward_executor.run_parallel layer={layer_index}",
+            )
 
         try:
             module_replicas = clone_module_for_devices_fn(

@@ -2018,18 +2018,39 @@ class BaseQModel(nn.Module):
         return inputs
 
     def pre_quantize(self, module: nn.Module) -> nn.Module:
-        if get_device(module) == META or _module_has_meta_tensors(module):
+        timer = getattr(self, "quant_region_timer", None)
+        src_device = get_device(module)
+        if src_device == META or _module_has_meta_tensors(module):
+            # shell_module_materialize records module_load itself.
             return self.shell_module_materialize(
                 target_submodule=module,
                 device=self.quantize_config.device,
             )
-        elif get_device(module) == CPU and self.quantize_config.device != CPU:
-            return move_to(module, device=self.quantize_config.device)
+        elif src_device == CPU and self.quantize_config.device != CPU:
+            start = time.perf_counter() if timer is not None else None
+            result = move_to(module, device=self.quantize_config.device)
+            if timer is not None and start is not None:
+                timer.record(
+                    "module_move",
+                    time.perf_counter() - start,
+                    source=f"pre_quantize {getattr(module, 'full_name', '')} {src_device}->{self.quantize_config.device}",
+                )
+            return result
         else:
             return module
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         #return self.offload_to_disk(module=module)
+        timer = getattr(self, "quant_region_timer", None)
+        if timer is not None:
+            start = time.perf_counter()
+            result = move_to(module, device=CPU)
+            timer.record(
+                "module_move",
+                time.perf_counter() - start,
+                source=f"post_quantize {getattr(module, 'full_name', '')}->{CPU}",
+            )
+            return result
         return move_to(module, device=CPU)
 
     def _replace_live_submodule(
@@ -2780,91 +2801,119 @@ class BaseQModel(nn.Module):
             non_blocking: bool = False,
             role: str = "default",
             named_module: Optional["NamedModule"] = None,
+            module_path: Optional[str] = None,
     ) -> torch.nn.Module:
-        with self._turtle_lock:
-            if role == "quant_source" and named_module is not None:
-                quant_source = named_module.state.get("quant_source_module")
-                if not isinstance(quant_source, nn.Module):
-                    decoder_plan = named_module.state.get("auto_module_decoder") or {}
-                    target_dtype = decoder_plan.get(
-                        "target_dtype",
-                        getattr(getattr(target_submodule, "weight", None), "dtype", torch.float16),
-                    )
-                    checkpoint_tensors = None
-                    if isinstance(self.turtle_model, LazyTurtle):
-                        checkpoint_tensors = self.turtle_model.checkpoint_tensors_for_submodule(
-                            target_model=self.model,
-                            target_submodule=target_submodule,
-                            recurse=False,
+        timer = getattr(self, "quant_region_timer", None)
+        start = time.perf_counter() if timer is not None else None
+        if module_path is None and named_module is not None:
+            module_path = getattr(named_module, "full_name", None)
+        try:
+            with self._turtle_lock:
+                if module_path is None and timer is not None:
+                    module_path = _get_qualified_name(self.model, target_submodule)
+                if role == "quant_source" and named_module is not None:
+                    quant_source = named_module.state.get("quant_source_module")
+                    if not isinstance(quant_source, nn.Module):
+                        decoder_plan = named_module.state.get("auto_module_decoder") or {}
+                        target_dtype = decoder_plan.get(
+                            "target_dtype",
+                            getattr(getattr(target_submodule, "weight", None), "dtype", torch.float16),
                         )
-                    quant_source = self._build_decoder_quant_source_module(
-                        target_submodule,
-                        checkpoint_tensors=checkpoint_tensors,
-                        target_dtype=target_dtype,
-                    )
-                    named_module.state["quant_source_module"] = quant_source
-
-                module = self._replace_live_submodule(target_submodule, quant_source)
-                if get_device(module) != device:
-                    module.to(device)
-                return module
-
-            turtle_model = self.turtle_model
-            if role == "forward" and named_module is not None and isinstance(turtle_model, LazyTurtle):
-                checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
-                    target_model=self.model,
-                    target_submodule=target_submodule,
-                    recurse=False,
-                )
-                weight = checkpoint_tensors.get("weight")
-                if isinstance(weight, torch.Tensor):
-                    decoder_kind = self._decoder_weight_format(
-                        weight=weight,
-                        checkpoint_tensors=checkpoint_tensors,
-                    )
-                    if decoder_kind is not None:
-                        # Packed floatx checkpoints can require decoder-specific
-                        # materialization before any dense shell weight exists.
-                        return self._prepare_auto_decoder_forward_module(
-                            target_submodule=target_submodule,
-                            device=torch.device(device),
-                            named_module=named_module,
+                        checkpoint_tensors = None
+                        if isinstance(self.turtle_model, LazyTurtle):
+                            checkpoint_tensors = self.turtle_model.checkpoint_tensors_for_submodule(
+                                target_model=self.model,
+                                target_submodule=target_submodule,
+                                recurse=False,
+                            )
+                        quant_source = self._build_decoder_quant_source_module(
+                            target_submodule,
+                            checkpoint_tensors=checkpoint_tensors,
+                            target_dtype=target_dtype,
                         )
+                        named_module.state["quant_source_module"] = quant_source
 
-            if turtle_model is None:
-                if get_device(target_submodule) != device:
-                    target_submodule.to(device)
-                module = target_submodule
-            else:
-                module = alias_from_turtle_for_submodule(
-                    target_model=self.model,
-                    turtle_model=turtle_model,
-                    target_submodule=target_submodule,
-                    device=device,
-                )
+                    module = self._replace_live_submodule(target_submodule, quant_source)
+                    if get_device(module) != device:
+                        module.to(device)
+                    return module
 
-            if role == "forward" and named_module is not None:
-                module = self._prepare_auto_decoder_forward_module(
-                    target_submodule=module,
-                    device=torch.device(device),
-                    named_module=named_module,
+                turtle_model = self.turtle_model
+                if role == "forward" and named_module is not None and isinstance(turtle_model, LazyTurtle):
+                    checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
+                        target_model=self.model,
+                        target_submodule=target_submodule,
+                        recurse=False,
+                    )
+                    weight = checkpoint_tensors.get("weight")
+                    if isinstance(weight, torch.Tensor):
+                        decoder_kind = self._decoder_weight_format(
+                            weight=weight,
+                            checkpoint_tensors=checkpoint_tensors,
+                        )
+                        if decoder_kind is not None:
+                            # Packed floatx checkpoints can require decoder-specific
+                            # materialization before any dense shell weight exists.
+                            return self._prepare_auto_decoder_forward_module(
+                                target_submodule=target_submodule,
+                                device=torch.device(device),
+                                named_module=named_module,
+                            )
+
+                if turtle_model is None:
+                    if get_device(target_submodule) != device:
+                        target_submodule.to(device)
+                    module = target_submodule
+                else:
+                    module = alias_from_turtle_for_submodule(
+                        target_model=self.model,
+                        turtle_model=turtle_model,
+                        target_submodule=target_submodule,
+                        device=device,
+                    )
+
+                if role == "forward" and named_module is not None:
+                    module = self._prepare_auto_decoder_forward_module(
+                        target_submodule=module,
+                        device=torch.device(device),
+                        named_module=named_module,
+                    )
+            return module
+        finally:
+            if timer is not None and start is not None:
+                timer.record(
+                    "module_load",
+                    time.perf_counter() - start,
+                    source=f"shell_module_materialize {module_path} -> {device}",
                 )
-        return module
 
     def shell_direct_meta_materialize(
             self,
             target_submodule: torch.nn.Module,
             device: Optional[torch.device] = None,
+            module_path: Optional[str] = None,
     ):
-        with self._turtle_lock:
-            if self.turtle_model is None:
-                return None
-            return alias_direct_meta_from_turtle_for_submodule(
-                target_model=self.model,
-                turtle_model=self.turtle_model,
-                target_submodule=target_submodule,
-                device=device,
-            )
+        timer = getattr(self, "quant_region_timer", None)
+        start = time.perf_counter() if timer is not None else None
+        try:
+            with self._turtle_lock:
+                if module_path is None and timer is not None:
+                    module_path = _get_qualified_name(self.model, target_submodule)
+                if self.turtle_model is None:
+                    return None
+                return alias_direct_meta_from_turtle_for_submodule(
+                    target_model=self.model,
+                    turtle_model=self.turtle_model,
+                    target_submodule=target_submodule,
+                    device=device,
+                )
+        finally:
+            if timer is not None and start is not None:
+                timer.record(
+                    "module_load",
+                    time.perf_counter() - start,
+                    source=f"shell_direct_meta_materialize {module_path} -> {device}",
+                )
 
     ## overrides nn.module.train()
     # def train(self, mode=True):

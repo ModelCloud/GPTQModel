@@ -218,6 +218,10 @@ class QuantizationRegionTimer:
     DEFAULT_REGIONS = [
         ("model_load", "Model load"),
         ("model_reload", "Turtle reload"),
+        ("module_load", "Module load"),
+        ("module_move", "Module move"),
+        ("torch_sync", "Torch sync"),
+        ("scale_search", "Scale search"),
         ("capture_inputs", "Capture inputs"),
         ("forward_hook", "Forward hook"),
         ("pre_quant_forward", "Pre-quant forward"),
