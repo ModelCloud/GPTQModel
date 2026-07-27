@@ -20,7 +20,7 @@ from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.inspect import get_supported_kwargs
 from ..utils.logger import setup_logger
-from ..utils.model import move_to, nested_move_to
+from ..utils.model import get_layer_name, move_to, nested_move_to
 from ..utils.safe import ThreadSafe
 from ..utils.torch import ALL_DEVICES, CPU, HAS_NPU, torch_sync
 
@@ -65,6 +65,7 @@ log = setup_logger()
 if TYPE_CHECKING:
     from ..looper.loop_processor import LoopProcessor
     from ..models._const import DEVICE
+    from ..quantization.config import BaseQuantizeConfig
 
 
 __all__ = [
@@ -74,8 +75,42 @@ __all__ = [
     "select_forward_devices",
     "normalize_device_like",
     "clone_module_for_devices",
+    "find_last_quantized_layer_index",
     "forward_batch_worker",
 ]
+
+
+def find_last_quantized_layer_index(
+    quantize_config: "BaseQuantizeConfig",
+    *,
+    layer_modules: List[List[str]],
+    layer_names: Optional[List[str]],
+    layer_count: int,
+) -> Optional[int]:
+    """Return the final layer containing a module not excluded by dynamic config."""
+
+    if quantize_config.lm_head or not layer_names:
+        return None
+
+    layer_module_names = {
+        name.split("#", 1)[0]
+        for module_group in layer_modules
+        for name in module_group
+        if name
+    }
+    if not layer_module_names:
+        return None
+
+    last_quantized_layer_index = -1
+    for candidate_layer_index in range(layer_count):
+        layer_name = get_layer_name(layer_names, candidate_layer_index)
+        if any(
+            quantize_config.dynamic_get(layer_name=f"{layer_name}.{module_name}") is not False
+            for module_name in layer_module_names
+        ):
+            last_quantized_layer_index = candidate_layer_index
+
+    return last_quantized_layer_index
 
 
 @contextmanager

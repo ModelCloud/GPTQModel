@@ -34,7 +34,7 @@ from ..looper.named_module import NamedModule
 from ..looper.paroquant_processor import ParoQuantProcessor
 from ..looper.qqq_processor import QQQProcessor
 from ..utils.device import get_device, get_device_new
-from ..utils.looper_helpers import normalize_device_like
+from ..utils.looper_helpers import find_last_quantized_layer_index, normalize_device_like
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
 from ..utils.model import find_modules, get_layer_name, get_module
 from ..utils.offload import offload_to_disk
@@ -43,40 +43,6 @@ from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from .module_looper import ModuleLooper
-
-
-def _find_last_quantized_layer_index(
-    looper: "ModuleLooper",
-    *,
-    layer_modules: List[List[str]],
-    layer_names: Optional[List[str]],
-    layer_count: int,
-) -> Optional[int]:
-    """Return the highest layer index whose tracked modules are not all dynamically skipped."""
-    if looper.gptq_model.quantize_config.lm_head or not layer_names:
-        return None
-
-    layer_module_names = {
-        name.split("#", 1)[0]
-        for module_group in layer_modules
-        for name in module_group
-        if name
-    }
-    if not layer_module_names:
-        return None
-
-    last_quantized_layer_index = -1
-    for candidate_layer_index in range(layer_count):
-        layer_name = get_layer_name(layer_names, candidate_layer_index)
-        for module_name in layer_module_names:
-            module_full_name = f"{layer_name}.{module_name}"
-            # If at least one module in this layer is not dynamically excluded,
-            # the layer still needs forward/quantization work.
-            if looper.gptq_model.quantize_config.dynamic_get(layer_name=module_full_name) != False:
-                last_quantized_layer_index = candidate_layer_index
-                break
-
-    return last_quantized_layer_index
 
 
 def _should_drain_finalize_futures_synchronously(
@@ -401,8 +367,8 @@ def run_layer_stage(
     # Trailing layers whose tracked modules are all dynamically excluded never
     # need another forward or finalize pass, so the loop can stop once the
     # final eligible layer has been processed.
-    last_quantized_layer_index = _find_last_quantized_layer_index(
-        looper,
+    last_quantized_layer_index = find_last_quantized_layer_index(
+        looper.gptq_model.quantize_config,
         layer_modules=layer_modules,
         layer_names=layer_names,
         layer_count=layer_count,
