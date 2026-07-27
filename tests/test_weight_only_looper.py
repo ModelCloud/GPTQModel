@@ -10,6 +10,8 @@ from torch import nn
 
 import gptqmodel.looper.weight_only_looper as weight_only_looper_module
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
+from gptqmodel.looper.weight_only_processor import WeightOnlyProcessor
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import RTNConfig, VramStrategy
 
 
@@ -68,6 +70,9 @@ class _FakeLogger:
         return progress
 
     def info(self, *_args, **_kwargs):
+        return None
+
+    def debug(self, *_args, **_kwargs):
         return None
 
 
@@ -164,12 +169,17 @@ class _FakeProcessor:
         self.finalized = []
         self.finalize_called = False
         self.quant_devices = []
+        self.skip_checks = []
 
     def name(self):
         return "fake_weight_only"
 
     def collect_memory_info(self, layer_index):
         self.memory_calls.append(layer_index)
+
+    def is_skipped(self, module):
+        self.skip_checks.append(module.full_name)
+        return self.qcfg.dynamic_get(layer_name=module.full_name) is False
 
     def quantize_module(self, module, *, device=None):
         self.quantized.append(module.full_name)
@@ -230,6 +240,123 @@ def test_weight_only_looper_reports_logbar_progress(monkeypatch):
     ]
     assert fake_logger.progresses[1].closed is True
     assert fake_logger.progresses[2].closed is True
+
+
+def test_weight_only_processor_reports_dynamic_exclusions():
+    qcfg = RTNConfig(
+        bits=4,
+        group_size=4,
+        offload_to_disk=False,
+        device="cpu",
+        dynamic={r"-:^layers\.0\.linear_b$": {}},
+    )
+    processor = WeightOnlyProcessor(tokenizer=None, qcfg=qcfg)
+
+    included = NamedModule(
+        nn.Linear(4, 4, bias=False),
+        name="linear_a",
+        full_name="layers.0.linear_a",
+        layer_index=0,
+    )
+    excluded = NamedModule(
+        nn.Linear(4, 4, bias=False),
+        name="linear_b",
+        full_name="layers.0.linear_b",
+        layer_index=0,
+    )
+
+    assert processor.is_skipped(included) is False
+    assert processor.is_skipped(excluded) is True
+
+
+def test_weight_only_looper_skips_dynamic_exclusions_before_device_scheduling(monkeypatch):
+    qcfg = RTNConfig(
+        bits=4,
+        group_size=4,
+        offload_to_disk=False,
+        device="cuda:0",
+        dynamic={r"-:^layers\.0\.linear_b$": {}},
+    )
+    qcfg.lm_head = False
+    fake_logger = _FakeLogger()
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.model.layers = nn.ModuleList([_WideLayer()])
+    model.simple_layer_modules = lambda **_kwargs: [["linear_a", "linear_b", "linear_c"]]
+
+    devices = [torch.device("cuda:0"), torch.device("cuda:1")]
+    submitted_devices = []
+
+    def fake_submit(device, fn, *args, **kwargs):
+        submitted_devices.append(device)
+        future = Future()
+        future.set_result(fn(*args, **kwargs))
+        return future
+
+    monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
+    monkeypatch.setattr(weight_only_looper_module, "select_forward_devices", lambda _device: devices)
+    monkeypatch.setattr(weight_only_looper_module, "device_ctx", lambda _device: nullcontext())
+    monkeypatch.setattr(weight_only_looper_module, "move_to", lambda obj, *, device, dtype=None: obj)
+    monkeypatch.setattr(weight_only_looper_module, "rehome_module_to_device", lambda *args, **kwargs: None)
+    monkeypatch.setattr(weight_only_looper_module.DEVICE_THREAD_POOL, "submit", fake_submit)
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (list(model.model.layers), ["layers.0"]),
+    )
+
+    looper = WeightOnlyLooper(model=model, processor=processor)
+    looper.loop()
+
+    expected_devices = [torch.device("cuda:0"), torch.device("cuda:1")]
+    assert processor.skip_checks == [
+        "layers.0.linear_a",
+        "layers.0.linear_b",
+        "layers.0.linear_c",
+    ]
+    assert processor.quantized == ["layers.0.linear_a", "layers.0.linear_c"]
+    assert processor.quant_devices == expected_devices
+    assert processor.finalized == [
+        ("layers.0.linear_a", torch.device("cuda:0")),
+        ("layers.0.linear_c", torch.device("cuda:1")),
+    ]
+    assert submitted_devices == expected_devices + expected_devices
+
+
+def test_weight_only_looper_fast_mode_stops_before_trailing_excluded_layers(monkeypatch):
+    qcfg = RTNConfig(
+        bits=4,
+        group_size=4,
+        offload_to_disk=False,
+        device="cpu",
+        dynamic={
+            r"-:^layers\.1\.": {},
+            r"-:^layers\.2\.": {},
+        },
+    )
+    qcfg.lm_head = False
+    fake_logger = _FakeLogger()
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.model.layers = nn.ModuleList([_TinyLayer(), _TinyLayer(), _TinyLayer()])
+
+    monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (
+            list(model.model.layers),
+            ["layers.0", "layers.1", "layers.2"],
+        ),
+    )
+
+    looper = WeightOnlyLooper(model=model, processor=processor)
+    looper.loop()
+
+    assert processor.memory_calls == [0]
+    assert processor.skip_checks == ["layers.0.linear"]
+    assert processor.quantized == ["layers.0.linear"]
+    assert processor.finalized == [("layers.0.linear", torch.device("cpu"))]
 
 
 def test_weight_only_looper_quantizes_subset_across_multiple_devices(monkeypatch):

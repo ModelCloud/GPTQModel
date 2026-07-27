@@ -35,7 +35,13 @@ from ..utils import has_gil_disabled
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.looper_helpers import device_ctx, normalize_device_like, rehome_module_to_device, select_forward_devices
+from ..utils.looper_helpers import (
+    device_ctx,
+    find_last_quantized_layer_index,
+    normalize_device_like,
+    rehome_module_to_device,
+    select_forward_devices,
+)
 from ..utils.model import (
     find_modules,
     get_layer_name,
@@ -756,8 +762,33 @@ class WeightOnlyLooper:
             )
 
         try:
+            # Trailing layers whose tracked modules are all dynamically excluded never
+            # need another forward or finalize pass, so the loop can stop once the
+            # final eligible layer has been processed.
+            last_quantized_layer_index = find_last_quantized_layer_index(
+                self.gptq_model.quantize_config,
+                layer_modules=layer_modules,
+                layer_names=layer_names,
+                layer_count=layer_count,
+            )
+
             for layer_index in range(total_layers):
                 is_lm_head_module = layer_index >= layer_count
+
+                if (
+                    not is_lm_head_module
+                    and last_quantized_layer_index is not None
+                    and layer_index > last_quantized_layer_index
+                ):
+                    # The remaining layers are fully skipped by dynamic config, so
+                    # avoid entering another layer-level quantization cycle.
+                    log.debug(
+                        "StageLayer: early stop at layer=%s, last_quantized_layer=%s",
+                        layer_index,
+                        last_quantized_layer_index,
+                    )
+                    pb.close()
+                    break
 
                 # Transformer blocks and lm_head follow the same weight-only
                 # lifecycle, but lm_head is resolved from the root model.
@@ -814,6 +845,12 @@ class WeightOnlyLooper:
                             is_lm_head_module=is_lm_head_module,
                         )
                         if named is None:
+                            continue
+
+                        # Match ModuleLooper's processor lifecycle: dynamically
+                        # excluded modules must not enter device scheduling or
+                        # quantization work.
+                        if self.processor.is_skipped(named):
                             continue
 
                         preferred_device = layer_strategy_device_map.get(module_name)

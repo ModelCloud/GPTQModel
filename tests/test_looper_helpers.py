@@ -12,6 +12,22 @@ class _DummyProcessor:
         self.current_batch_index = batch_index
 
 
+class _DynamicConfig:
+    lm_head = False
+
+    def dynamic_get(self, *, layer_name):
+        return False if layer_name.startswith(("layers.1.", "layers.2.")) else None
+
+
+def test_find_last_quantized_layer_index_uses_dynamic_exclusions():
+    assert looper_helpers.find_last_quantized_layer_index(
+        _DynamicConfig(),
+        layer_modules=[["linear#capture_only"]],
+        layer_names=["layers.0", "layers.1", "layers.2"],
+        layer_count=3,
+    ) == 0
+
+
 class _RequiresAttentionMask(torch.nn.Module):
     def __init__(self):
         super().__init__()
