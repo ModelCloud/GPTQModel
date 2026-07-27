@@ -973,6 +973,9 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
         def pre_quantize(self, module):
             return module
 
+        def should_quantize_layer(self, *_args):
+            return True
+
         def post_quantize(self, module):
             return module
 
@@ -1043,7 +1046,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
         layers=[torch.nn.Linear(64, 64) for _ in range(3)],
         layer_modules=[["foo"]],
         planning_layer_modules=[["foo"]],
-        layers_prefix="model.layers",
+        layer_names=["model.layers.0", "model.layers.1", "model.layers.2"],
         fallback=True,
         shared_kv_cache_dict={},
         pb=pb,

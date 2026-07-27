@@ -68,6 +68,11 @@ class WeightOnlyProcessor(LoopProcessor):
         )
         self.lock = threading.Lock()
 
+    def is_skipped(self, module: NamedModule) -> bool:
+        """Report whether dynamic configuration excludes this module."""
+
+        return self.qcfg.dynamic_get(layer_name=module.full_name) is False
+
     @staticmethod
     def _uses_direct_pack(qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig) -> bool:
         """Returns whether the method packs directly from the original dense weights."""
