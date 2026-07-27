@@ -237,3 +237,119 @@ def test_lazy_turtle_materialize_submodule_falls_back_to_get_qualified_name(tmp_
     assert len(called) == 1
     expected = source["inner.layer0.weight"].transpose(0, 1).contiguous()
     assert torch.equal(shell.inner.layer0.weight, expected)
+
+
+class _LagunaExpert(nn.Module):
+    """One MoE expert with the three projection weights used by Laguna-S-2.1."""
+
+    def __init__(self, in_features: int, out_features: int):
+        super().__init__()
+        self.gate_proj = nn.Linear(in_features, out_features, bias=False)
+        self.up_proj = nn.Linear(in_features, out_features, bias=False)
+        self.down_proj = nn.Linear(out_features, in_features, bias=False)
+
+
+class _LagunaMoELayer(nn.Module):
+    """One transformer layer with a 256-expert MoE MLP block."""
+
+    def __init__(self, num_experts: int = 256, in_features: int = 512, hidden_features: int = 1408):
+        super().__init__()
+        self.mlp = nn.ModuleDict({
+            "experts": nn.ModuleList([
+                _LagunaExpert(in_features, hidden_features)
+                for _ in range(num_experts)
+            ])
+        })
+
+
+class _LagunaShellModel(nn.Module):
+    """Tiny shell model that mirrors the Laguna-S-2.1 MoE layout."""
+
+    def __init__(self, num_layers: int = 1, num_experts: int = 256):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            _LagunaMoELayer(num_experts=num_experts)
+            for _ in range(num_layers)
+        ])
+
+
+@pytest.mark.parametrize("workers", [1, 4])
+def test_lazy_turtle_materialize_submodules_batch_moe_256_experts(tmp_path, monkeypatch, workers):
+    """Batch loading should load an entire MoE projection at once with multiple workers."""
+
+    monkeypatch.setenv("GPTQMODEL_LAZY_TURTLE_PARALLEL_LOAD_WORKERS", str(workers))
+
+    num_experts = 256
+    model_dir = tmp_path / "laguna_moe"
+    model_dir.mkdir()
+
+    # Build the shell on meta so LazyTurtle can populate real weights.
+    prev_device = torch.get_default_device()
+    torch.set_default_device("meta")
+    try:
+        shell = _LagunaShellModel(num_layers=1, num_experts=num_experts)
+    finally:
+        torch.set_default_device(prev_device)
+    for p in shell.parameters():
+        p.requires_grad = False
+
+    source = {}
+    expected = {}
+    for i in range(num_experts):
+        for proj in ("gate_proj", "up_proj", "down_proj"):
+            expert = shell.layers[0].mlp["experts"][i]
+            linear = getattr(expert, proj)
+            # Checkpoint stores (in, out); _transform_checkpoint_tensor transposes to (out, in).
+            w_in_out = torch.randn(linear.in_features, linear.out_features, dtype=torch.float32)
+            name = f"layers.0.mlp.experts.{i}.{proj}.weight"
+            source[name] = w_in_out
+            expected[f"experts.{i}.{proj}"] = w_in_out.transpose(0, 1).contiguous()
+
+    save_file(source, str(model_dir / "model.safetensors"))
+    _write_lazy_turtle_index(model_dir, "model.safetensors", source)
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    # Build the batch request: load every `up_proj` for layer 0 in one call.
+    submodules = [
+        (shell.layers[0].mlp["experts"][i].up_proj, f"layers.0.mlp.experts.{i}.up_proj", torch.device("cpu"))
+        for i in range(num_experts)
+    ]
+
+    captured_logs = []
+    original_log_info = structure._log_info
+
+    def _capture_log(msg, *args, **kwargs):
+        captured_logs.append(msg % args if args else msg)
+        original_log_info(msg, *args, **kwargs)
+
+    monkeypatch.setattr(structure, "_log_info", _capture_log)
+
+    turtle.materialize_submodules(
+        target_model=shell,
+        submodules=submodules,
+        non_blocking=False,
+    )
+
+    # Confirm the batched log mentions all tensors and multiple workers.
+    batch_logs = [m for m in captured_logs if "loading" in m and "grouped tensors" in m]
+    assert len(batch_logs) == 1, f"expected one batch log, got {len(batch_logs)}: {captured_logs}"
+    assert f"loading {num_experts} grouped tensors" in batch_logs[0]
+    assert f"using {workers} worker(s)" in batch_logs[0]
+
+    for i in range(num_experts):
+        loaded = shell.layers[0].mlp["experts"][i].up_proj.weight
+        exp = expected[f"experts.{i}.up_proj"]
+        assert loaded.shape == exp.shape
+        assert loaded.dtype == torch.float32
+        assert torch.equal(loaded, exp)
+
+    # The gate/down projections were not touched by the filtered batch.
+    for i in range(num_experts):
+        assert shell.layers[0].mlp["experts"][i].gate_proj.weight.device.type == "meta"
+        assert shell.layers[0].mlp["experts"][i].down_proj.weight.device.type == "meta"

@@ -12,7 +12,7 @@ import time
 from collections import defaultdict
 from contextlib import nullcontext
 from itertools import count
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch._dynamo
@@ -2793,6 +2793,25 @@ class BaseQModel(nn.Module):
         # print("DEBUG AWQ NODES:", format_nodes(nodes))
         return nodes
 
+    def _is_lazy_turtle_loaded(self, tensor: torch.Tensor, device: torch.device) -> bool:
+        if not isinstance(tensor, torch.Tensor):
+            return False
+        if tensor.device.type == "meta" or tensor.device != device:
+            return False
+        turtle_model = getattr(self, "turtle_model", None)
+        if isinstance(turtle_model, LazyTurtle):
+            return id(tensor) in turtle_model._loaded_tensor_ids
+        # Non-LazyTurtle sources materialize all at once; trust non-meta + device match.
+        return True
+
+    def _checkpoint_tensors_from_module(self, module: torch.nn.Module) -> Dict[str, torch.Tensor]:
+        tensors: Dict[str, torch.Tensor] = {}
+        for name in ("weight", "bias", "weight_scale", "weight_scale_2", "weight_scale_inv"):
+            t = getattr(module, name, None)
+            if isinstance(t, torch.Tensor):
+                tensors[name] = t
+        return tensors
+
     # Materialize the target shell module from the lazy turtle source on the requested device.
     def shell_module_materialize(
             self,
@@ -2820,7 +2839,11 @@ class BaseQModel(nn.Module):
                             getattr(getattr(target_submodule, "weight", None), "dtype", torch.float16),
                         )
                         checkpoint_tensors = None
-                        if isinstance(self.turtle_model, LazyTurtle):
+                        # If the target submodule has already been materialized (e.g. by a
+                        # batch prefetch), build the quant source from its live tensors
+                        # instead of re-reading the checkpoint from disk.
+                        weight = getattr(target_submodule, "weight", None)
+                        if isinstance(self.turtle_model, LazyTurtle) and not self._is_lazy_turtle_loaded(weight, device):
                             checkpoint_tensors = self.turtle_model.checkpoint_tensors_for_submodule(
                                 target_model=self.model,
                                 target_submodule=target_submodule,
@@ -2841,12 +2864,18 @@ class BaseQModel(nn.Module):
 
                 turtle_model = self.turtle_model
                 if role == "forward" and named_module is not None and isinstance(turtle_model, LazyTurtle):
-                    checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
-                        target_model=self.model,
-                        target_submodule=target_submodule,
-                        recurse=False,
-                        module_path=module_path,
-                    )
+                    weight = getattr(target_submodule, "weight", None)
+                    checkpoint_tensors = None
+                    if self._is_lazy_turtle_loaded(weight, device):
+                        # Reuse already-materialized live tensors for the decoder probe.
+                        checkpoint_tensors = self._checkpoint_tensors_from_module(target_submodule)
+                    if checkpoint_tensors is None:
+                        checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
+                            target_model=self.model,
+                            target_submodule=target_submodule,
+                            recurse=False,
+                            module_path=module_path,
+                        )
                     weight = checkpoint_tensors.get("weight")
                     if isinstance(weight, torch.Tensor):
                         decoder_kind = self._decoder_weight_format(
@@ -2918,6 +2947,27 @@ class BaseQModel(nn.Module):
                     time.perf_counter() - start,
                     source=f"shell_direct_meta_materialize {module_path} -> {device}",
                 )
+
+    def lazy_turtle_batch_materialize_submodules(
+        self,
+        submodules: List[Tuple[torch.nn.Module, str, torch.device]],
+        non_blocking: bool = False,
+    ) -> None:
+        """Batch materialize many submodules from the LazyTurtle checkpoint source.
+
+        `submodules` is a list of (target_submodule, module_path, target_device) tuples.
+        This lets the grouped loader dispatch all requested tensors in one parallel
+        pass instead of one tensor per submodule call.
+        """
+
+        turtle_model = getattr(self, "turtle_model", None)
+        if not isinstance(turtle_model, LazyTurtle) or not submodules:
+            return
+        turtle_model.materialize_submodules(
+            target_model=self.model,
+            submodules=submodules,
+            non_blocking=non_blocking,
+        )
 
     ## overrides nn.module.train()
     # def train(self, mode=True):

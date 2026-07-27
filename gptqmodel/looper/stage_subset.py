@@ -984,6 +984,29 @@ def _run_single_subset_pass(
 
     quant_target_devices: Dict[str, torch.device] = {}
     active_subset_names = [name for name in subset_names if name in subset]
+
+    # Batch prefetch checkpoint weights for all quant modules so LazyTurtle can load
+    # many expert tensors in one grouped parallel pass instead of one at a time.
+    batch_prefetch: List[Tuple[torch.nn.Module, str, torch.device]] = []
+    for name in active_subset_names:
+        named_module = subset[name]
+        task_map = getattr(processor, "tasks", None)
+        has_task = bool(task_map and task_map.get(name) is not None)
+        if has_task:
+            target_device = looper._assign_quant_device_for_module(
+                named_module,
+                fallback_device=cur_layer_device,
+            )
+            batch_prefetch.append(
+                (
+                    named_module.module,
+                    getattr(named_module, "full_name", named_module.name),
+                    target_device,
+                )
+            )
+    if batch_prefetch:
+        looper.gptq_model.lazy_turtle_batch_materialize_submodules(batch_prefetch)
+
     for name in active_subset_names:
         named_module = subset[name]
         # Ensure each module has a matching processor task before sending it to

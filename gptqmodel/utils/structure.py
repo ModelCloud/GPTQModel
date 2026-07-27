@@ -40,7 +40,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any, Dict, Iterable, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import pcre
 import torch
@@ -603,6 +603,11 @@ class _LazyTurtleCopyJob:
     split_dim: Optional[int]
     prefer_transposed: Optional[bool]
     target_tensor: torch.Tensor
+    # When provided, the worker copies this tensor to the target instead of reading
+    # from the checkpoint shard. This lets batch materialization move already-loaded
+    # tensors (e.g. CPU prefetches) to their final devices without re-reading disk.
+    source_tensor: Optional[torch.Tensor] = None
+    module_path: Optional[str] = None
 
 
 def _log_info(msg: str, *args) -> None:
@@ -886,6 +891,10 @@ class LazyTurtle:
         # Reuse safetensors file handles across per-module materialization calls
         # inside a layer to avoid re-parsing the JSON header for every tensor.
         self._shard_handlers: Dict[str, Any] = {}
+        # Track tensors that have already been loaded by this LazyTurtle instance so
+        # repeated materialize calls (batch prefetch followed by per-module prepare)
+        # do not overwrite live weights by reading from checkpoint again.
+        self._loaded_tensor_ids: set[int] = set()
 
     @classmethod
     def maybe_create(
@@ -962,6 +971,319 @@ class LazyTurtle:
         if hasattr(target_model, "tie_weights"):
             target_model.tie_weights()
         return target_submodule
+
+    def materialize_submodules(
+        self,
+        *,
+        target_model: torch.nn.Module,
+        submodules: List[Tuple[torch.nn.Module, str, torch.device]],
+        non_blocking: bool = False,
+    ) -> None:
+        """Materialize many independent shell submodules in a single grouped parallel load.
+
+        Each entry in `submodules` is a ``(target_submodule, module_path, device)`` tuple.
+        Checkpoint tensors for all entries are gathered into one list and dispatched to the
+        same `ThreadPoolExecutor` pool, so loading a large MoE projection block produces one
+        "using N worker(s)" log line instead of one-per-expert.
+
+        If any submodule requires concat/deferred-buffer handling that this batch path does
+        not yet support, the whole batch safely falls back to per-submodule loading.
+        """
+
+        if not submodules:
+            return
+
+        # Fast path: a single submodule is just the normal materialize path.
+        if len(submodules) == 1:
+            target_submodule, module_path, device = submodules[0]
+            self.materialize_submodule(
+                target_model=target_model,
+                target_submodule=target_submodule,
+                device=device,
+                non_blocking=non_blocking,
+                module_path=module_path,
+            )
+            return
+
+        modules_by_name = dict(target_model.named_modules())
+        all_jobs: list[_LazyTurtleCopyJob] = []
+        fallback_needed = False
+
+        with self._lock:
+            for target_submodule, module_path, device in submodules:
+                t_params = dict(target_submodule.named_parameters(recurse=True))
+                t_bufs = dict(target_submodule.named_buffers(recurse=True))
+
+                for rel_name in t_params:
+                    concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, rel_name)
+                    if concat_source is not None:
+                        fallback_needed = True
+                        break
+
+                    full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
+                    if full_name is None:
+                        continue
+                    shard = self._weight_map.get(full_name)
+                    if shard is None:
+                        fallback_needed = True
+                        break
+
+                    prefer_transposed = self._resolve_prefer_transposed_hint(
+                        target_model=target_model,
+                        module_path=module_path,
+                        rel_name=rel_name,
+                        modules_by_name=modules_by_name,
+                    )
+
+                    target_param = t_params.get(rel_name)
+                    if target_param is None:
+                        fallback_needed = True
+                        break
+
+                    is_meta = getattr(target_param, "is_meta", False) or target_param.device.type == "meta"
+                    already_loaded = id(target_param) in self._loaded_tensor_ids
+                    if not is_meta and target_param.device == device and already_loaded:
+                        continue
+                    source_tensor = None
+                    if not is_meta and already_loaded:
+                        source_tensor = target_param
+
+                    new_param = torch.nn.Parameter(
+                        torch.empty_like(target_param, device=device),
+                        requires_grad=False,
+                    )
+                    t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+                    setattr(t_parent, leaf, new_param)
+                    target_param = new_param
+
+                    all_jobs.append(
+                        _LazyTurtleCopyJob(
+                            kind="param",
+                            rel_name=rel_name,
+                            full_name=full_name,
+                            shard=shard,
+                            expert_index=expert_index,
+                            split_index=split_index,
+                            split_dim=split_dim,
+                            prefer_transposed=prefer_transposed,
+                            target_tensor=target_param,
+                            source_tensor=source_tensor,
+                            module_path=module_path,
+                        )
+                    )
+
+                if fallback_needed:
+                    break
+
+                for rel_name, target_buffer in list(t_bufs.items()):
+                    concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, rel_name)
+                    if concat_source is not None:
+                        fallback_needed = True
+                        break
+
+                    full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
+                    if full_name is None:
+                        full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
+                        expert_index = None
+                        split_index = None
+                        split_dim = None
+                    shard = self._weight_map.get(full_name)
+                    if shard is None:
+                        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+                        non_persistent = leaf in getattr(t_parent, "_non_persistent_buffers_set", set())
+                        if non_persistent:
+                            fallback_needed = True
+                            break
+                        continue
+
+                    prefer_transposed = self._resolve_prefer_transposed_hint(
+                        target_model=target_model,
+                        module_path=module_path,
+                        rel_name=rel_name,
+                        modules_by_name=modules_by_name,
+                    )
+
+                    t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+                    persistent = leaf not in getattr(t_parent, "_non_persistent_buffers_set", set())
+
+                    if target_buffer is None:
+                        fallback_needed = True
+                        break
+
+                    is_meta = getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta"
+                    already_loaded = id(target_buffer) in self._loaded_tensor_ids
+                    if not is_meta and target_buffer.device == device and already_loaded:
+                        continue
+                    source_tensor = None
+                    if not is_meta and already_loaded:
+                        source_tensor = target_buffer
+
+                    new_buffer = torch.empty_like(target_buffer, device=device)
+                    t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
+                    target_buffer = new_buffer
+
+                    all_jobs.append(
+                        _LazyTurtleCopyJob(
+                            kind="buffer",
+                            rel_name=rel_name,
+                            full_name=full_name,
+                            shard=shard,
+                            expert_index=expert_index,
+                            split_index=split_index,
+                            split_dim=split_dim,
+                            prefer_transposed=prefer_transposed,
+                            target_tensor=target_buffer,
+                            source_tensor=source_tensor,
+                            module_path=module_path,
+                        )
+                    )
+
+                if fallback_needed:
+                    break
+
+        if fallback_needed:
+            # Unlikely edge cases are handled by the well-tested per-submodule path.
+            for target_submodule, module_path, device in submodules:
+                self.materialize_submodule(
+                    target_model=target_model,
+                    target_submodule=target_submodule,
+                    device=device,
+                    non_blocking=non_blocking,
+                    module_path=module_path,
+                )
+            return
+
+        if all_jobs:
+            self._copy_grouped_entries_batch(
+                jobs=all_jobs,
+                device=None,  # per-job target already on the right device
+                non_blocking=non_blocking,
+            )
+
+        if hasattr(target_model, "tie_weights"):
+            target_model.tie_weights()
+
+    def _copy_grouped_entries_batch(
+        self,
+        *,
+        jobs: list[_LazyTurtleCopyJob],
+        device: Optional[torch.device],
+        non_blocking: bool,
+    ) -> None:
+        """Run a list of copy jobs in parallel, reading shards only when no source tensor is provided."""
+
+        shard_handlers: Dict[str, Any] = {}
+        for job in jobs:
+            if job.source_tensor is None and job.shard not in shard_handlers:
+                shard_path = os.path.join(self.model_local_path, job.shard)
+                shard_handlers[job.shard] = self._get_shard_handler(shard_path)
+
+        load_lock = threading.Lock()
+        total_read_bytes = 0
+        total_source_bytes = 0
+
+        def _worker(job: _LazyTurtleCopyJob) -> tuple[str, int, float, bool]:
+            with torch.inference_mode():
+                if job.source_tensor is not None:
+                    source = job.source_tensor.detach()
+                    if source.dtype != job.target_tensor.dtype:
+                        source = source.to(dtype=job.target_tensor.dtype)
+                    job.target_tensor.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                    return job.rel_name, _tensor_nbytes(source), 0.0, False
+
+                read_start = time.perf_counter()
+                with load_lock:
+                    handler = shard_handlers[job.shard]
+                    checkpoint_tensor = handler.get_tensor(job.full_name)
+                tensor = self._transform_checkpoint_tensor(
+                    checkpoint_tensor,
+                    expert_index=job.expert_index,
+                    split_index=job.split_index,
+                    split_dim=job.split_dim,
+                    expected_shape=tuple(job.target_tensor.shape),
+                    prefer_transposed=job.prefer_transposed,
+                )
+                if tensor is None:
+                    raise RuntimeError(
+                        self._materialization_issue_message(
+                            phase="batch submodule materialization",
+                            kind=job.kind,
+                            module_path=job.module_path,
+                            rel_name=job.rel_name,
+                            reason="checkpoint tensor could not be reshaped into the target layout",
+                            full_name=job.full_name,
+                            source_shape=tuple(checkpoint_tensor.shape),
+                            target_shape=tuple(job.target_tensor.shape),
+                            expert_index=job.expert_index,
+                            split_index=job.split_index,
+                            split_dim=job.split_dim,
+                        )
+                    )
+                if tuple(tensor.shape) != tuple(job.target_tensor.shape):
+                    raise RuntimeError(
+                        self._materialization_issue_message(
+                            phase="batch submodule materialization",
+                            kind=job.kind,
+                            module_path=job.module_path,
+                            rel_name=job.rel_name,
+                            reason="transformed checkpoint tensor shape does not match the target tensor",
+                            full_name=job.full_name,
+                            source_shape=tuple(tensor.shape),
+                            target_shape=tuple(job.target_tensor.shape),
+                            expert_index=job.expert_index,
+                            split_index=job.split_index,
+                            split_dim=job.split_dim,
+                        )
+                    )
+                source = tensor.detach()
+                if source.dtype != job.target_tensor.dtype:
+                    source = source.to(dtype=job.target_tensor.dtype)
+                job.target_tensor.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                return job.rel_name, _tensor_nbytes(tensor), time.perf_counter() - read_start, True
+
+        max_workers = _lazy_turtle_parallel_workers(len(jobs))
+        group_start = time.perf_counter()
+        sample_module = jobs[0].module_path or "<root>"
+        _log_info(
+            "LazyTurtle: loading %d grouped tensors from %d shard(s) using %d worker(s) on %s [modules=%s]",
+            len(jobs),
+            len(shard_handlers),
+            max_workers,
+            ", ".join(sorted({str(j.target_tensor.device) for j in jobs})),
+            sample_module,
+        )
+
+        if max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(_worker, job) for job in jobs]
+                for future in futures:
+                    rel_name, nbytes, read_time, from_disk = future.result()
+                    if from_disk:
+                        total_read_bytes += nbytes
+                        disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
+                    else:
+                        total_source_bytes += nbytes
+        else:
+            for job in jobs:
+                rel_name, nbytes, read_time, from_disk = _worker(job)
+                if from_disk:
+                    total_read_bytes += nbytes
+                    disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
+                else:
+                    total_source_bytes += nbytes
+
+        for job in jobs:
+            self._loaded_tensor_ids.add(id(job.target_tensor))
+
+        elapsed = time.perf_counter() - group_start
+        _log_info(
+            "LazyTurtle: loaded %d grouped tensors in %.3fs using %d worker(s), %.2f MB [modules=%s]",
+            len(jobs),
+            elapsed,
+            max_workers,
+            (total_read_bytes + total_source_bytes) / (1024 * 1024),
+            sample_module,
+        )
 
     def _convert_checkpoint_source_to_safetensors(
         self,
@@ -2325,19 +2647,23 @@ class LazyTurtle:
                                 full_name=full_name,
                             )
                         )
-                    if (
-                        getattr(target_param, "is_meta", False)
-                        or target_param.device.type == "meta"
-                        or target_param.device != device
-                    ):
-                        new_param = torch.nn.Parameter(
-                            torch.empty_like(target_param, device=device),
-                            requires_grad=False,
-                        )
-                        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
-                        setattr(t_parent, leaf, new_param)
-                        t_params[rel_name] = new_param
-                        target_param = new_param
+                    is_meta = getattr(target_param, "is_meta", False) or target_param.device.type == "meta"
+                    already_loaded = id(target_param) in self._loaded_tensor_ids
+                    if not is_meta and target_param.device == device and already_loaded:
+                        # This tensor was already materialized by a previous batch/prefetch call.
+                        continue
+                    source_tensor = None
+                    if not is_meta and already_loaded:
+                        # Move an already-loaded tensor to the requested device without re-reading disk.
+                        source_tensor = target_param
+                    new_param = torch.nn.Parameter(
+                        torch.empty_like(target_param, device=device),
+                        requires_grad=False,
+                    )
+                    t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+                    setattr(t_parent, leaf, new_param)
+                    t_params[rel_name] = new_param
+                    target_param = new_param
                     jobs.append(
                         _LazyTurtleCopyJob(
                             kind=kind,
@@ -2349,6 +2675,7 @@ class LazyTurtle:
                             split_dim=split_dim,
                             prefer_transposed=prefer_transposed,
                             target_tensor=target_param,
+                            source_tensor=source_tensor,
                         )
                     )
                 else:
@@ -2362,15 +2689,18 @@ class LazyTurtle:
                             (shard, kind, rel_name, full_name, expert_index, split_index, split_dim, prefer_transposed, t_parent, leaf, persistent)
                         )
                     else:
-                        if (
-                            getattr(target_buffer, "is_meta", False)
-                            or target_buffer.device.type == "meta"
-                            or target_buffer.device != device
-                        ):
-                            new_buffer = torch.empty_like(target_buffer, device=device)
-                            t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
-                            t_bufs[rel_name] = new_buffer
-                            target_buffer = new_buffer
+                        is_meta = getattr(target_buffer, "is_meta", False) or target_buffer.device.type == "meta"
+                        already_loaded = id(target_buffer) in self._loaded_tensor_ids
+                        if not is_meta and target_buffer.device == device and already_loaded:
+                            # This buffer was already materialized by a previous batch/prefetch call.
+                            continue
+                        source_tensor = None
+                        if not is_meta and already_loaded:
+                            source_tensor = target_buffer
+                        new_buffer = torch.empty_like(target_buffer, device=device)
+                        t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
+                        t_bufs[rel_name] = new_buffer
+                        target_buffer = new_buffer
                         jobs.append(
                             _LazyTurtleCopyJob(
                                 kind=kind,
@@ -2382,15 +2712,23 @@ class LazyTurtle:
                                 split_dim=split_dim,
                                 prefer_transposed=prefer_transposed,
                                 target_tensor=target_buffer,
+                                source_tensor=source_tensor,
                             )
                         )
 
         def _worker(job: _LazyTurtleCopyJob) -> tuple[str, int, float]:
-            read_start = time.perf_counter()
-            with load_lock:
-                handler = shard_handlers[job.shard]
-                checkpoint_tensor = handler.get_tensor(job.full_name)
             with torch.inference_mode():
+                if job.source_tensor is not None:
+                    source = job.source_tensor.detach()
+                    if source.dtype != job.target_tensor.dtype:
+                        source = source.to(dtype=job.target_tensor.dtype)
+                    job.target_tensor.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                    return job.rel_name, _tensor_nbytes(source), 0.0
+
+                read_start = time.perf_counter()
+                with load_lock:
+                    handler = shard_handlers[job.shard]
+                    checkpoint_tensor = handler.get_tensor(job.full_name)
                 tensor = self._transform_checkpoint_tensor(
                     checkpoint_tensor,
                     expert_index=job.expert_index,
@@ -2472,6 +2810,9 @@ class LazyTurtle:
                     progress.subtitle(f"{rel_name}: {loaded_entries}/{total_entries}")
                     progress.draw()
 
+        for job in jobs:
+            self._loaded_tensor_ids.add(id(job.target_tensor))
+
         # Rare case: checkpoint provides a buffer that was not pre-registered on the shell.
         for shard, kind, rel_name, full_name, expert_index, split_index, split_dim, prefer_transposed, t_parent, leaf, persistent in deferred_buffers:
             shard_path = os.path.join(self.model_local_path, shard)
@@ -2502,6 +2843,7 @@ class LazyTurtle:
             new_buffer = source.to(device=device)
             t_parent.register_buffer(leaf, new_buffer, persistent=persistent)
             t_bufs[rel_name] = new_buffer
+            self._loaded_tensor_ids.add(id(new_buffer))
             nbytes = _tensor_nbytes(tensor)
             total_read_bytes += nbytes
             disk_telemetry.record_read(nbytes, time.perf_counter() - read_start, "lazy_turtle")
