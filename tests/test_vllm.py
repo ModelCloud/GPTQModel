@@ -41,7 +41,14 @@ class TestLoadVLLM(ModelTest):
             )
 
         try:
-            import vllm._C  # noqa: F401,E402
+            from vllm import LLM  # noqa: F401,E402
+
+            try:
+                import vllm._C_stable_libtorch  # noqa: F401,E402
+            except ModuleNotFoundError:
+                # Compatibility with vLLM releases before the stable-libtorch
+                # extension became the default CUDA operator module.
+                import vllm._C  # noqa: F401,E402
         except Exception as exc:
             raise unittest.SkipTest(f"vllm runtime unavailable: {exc}")
         try:
