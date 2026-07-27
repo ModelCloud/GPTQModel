@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from shutil import which
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy
 import torch
@@ -388,11 +389,11 @@ def replace_tensor(layer: torch.nn.Module, name: str,
 
 def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
                           group_size: int) -> torch.Tensor:
-    scale_perm, scale_perm_single = get_scale_perms()
+    scale_perm, scale_perm_single = _get_scale_perm_tensors(s.device)
     if group_size < size_k and group_size != -1:
-        s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
+        s = s.reshape((-1, len(scale_perm))).index_select(1, scale_perm)
     else:
-        s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
+        s = s.reshape((-1, len(scale_perm_single))).index_select(1, scale_perm_single)
     s = s.reshape((-1, size_n)).contiguous()
 
     return s
@@ -407,6 +408,29 @@ def get_scale_perms():
         scale_perm_single.extend(
             [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
     return scale_perm, scale_perm_single
+
+
+# Cache pre-materialized permutation index tensors per device to avoid
+# converting the constant Python lists on every Marlin scales/bias call.
+_SCALE_PERM_TENSOR_CACHE: Dict[torch.device, Tuple[torch.Tensor, torch.Tensor]] = {}
+_SCALE_PERM_TENSOR_LOCK = threading.Lock()
+
+
+def _get_scale_perm_tensors(device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return (scale_perm, scale_perm_single) index tensors on `device`."""
+    cache = _SCALE_PERM_TENSOR_CACHE.get(device)
+    if cache is not None:
+        return cache
+
+    with _SCALE_PERM_TENSOR_LOCK:
+        cache = _SCALE_PERM_TENSOR_CACHE.get(device)
+        if cache is None:
+            scale_perm, scale_perm_single = get_scale_perms()
+            perm_t = torch.tensor(scale_perm, device=device, dtype=torch.long)
+            perm_single_t = torch.tensor(scale_perm_single, device=device, dtype=torch.long)
+            cache = (perm_t, perm_single_t)
+            _SCALE_PERM_TENSOR_CACHE[device] = cache
+    return cache
 
 def maybe_warn_marlin_atomic_add_env():
     if torch.compiler.is_dynamo_compiling():
@@ -716,6 +740,6 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
 
 def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
     origin_shape = s.shape
-    _, scale_perm_single = get_scale_perms()
-    s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
+    _, scale_perm_single = _get_scale_perm_tensors(s.device)
+    s = s.reshape((-1, len(scale_perm_single))).index_select(1, scale_perm_single)
     return s.reshape(*origin_shape).contiguous()
