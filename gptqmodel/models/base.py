@@ -2082,6 +2082,12 @@ class BaseQModel(nn.Module):
         if not isinstance(self.turtle_model, LazyTurtle) or self.turtle_model is None:
             return
 
+        # Fall back to the module's actual qualified path if the caller did not provide
+        # a layer_name. This keeps checkpoint tensor resolution correct for split/multi-prefix
+        # decoder architectures at the cost of one whole-model scan per layer.
+        if not layer_name:
+            layer_name = _get_qualified_name(self.model, module)
+
         skip_set = set(skip_module_names)
 
         def _is_skipped(rel_name: str) -> bool:
@@ -2109,6 +2115,7 @@ class BaseQModel(nn.Module):
                 device=base_device,
                 module_path=full_path,
                 recurse=False,
+                tie_weights=False,
             )
 
         # Batch load all skipped leaf modules onto the layer device. The cross-submodule
@@ -2129,7 +2136,12 @@ class BaseQModel(nn.Module):
             self.turtle_model.materialize_submodules(
                 target_model=self.model,
                 submodules=batch,
+                tie_weights=False,
             )
+
+        # Tie weights once for the whole layer rather than once per materialized submodule.
+        if hasattr(self.model, "tie_weights"):
+            self.model.tie_weights()
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         #return self.offload_to_disk(module=module)

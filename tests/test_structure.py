@@ -540,8 +540,10 @@ def test_base_qmodel_pre_quantize_batches_leaf_modules(tmp_path, monkeypatch):
     orig_submodule = turtle.materialize_submodule
     orig_submodules = turtle.materialize_submodules
 
-    def _patched_submodule(*, target_model, target_submodule, device, non_blocking=False, module_path=None, recurse=True):
-        submodule_calls.append({"module_path": module_path, "recurse": recurse, "device": str(device)})
+    tie_weights_calls = []
+
+    def _patched_submodule(*, target_model, target_submodule, device, non_blocking=False, module_path=None, recurse=True, tie_weights=True):
+        submodule_calls.append({"module_path": module_path, "recurse": recurse, "device": str(device), "tie_weights": tie_weights})
         return orig_submodule(
             target_model=target_model,
             target_submodule=target_submodule,
@@ -549,15 +551,22 @@ def test_base_qmodel_pre_quantize_batches_leaf_modules(tmp_path, monkeypatch):
             non_blocking=non_blocking,
             module_path=module_path,
             recurse=recurse,
+            tie_weights=tie_weights,
         )
 
-    def _patched_submodules(*, target_model, submodules, non_blocking=False):
-        submodules_calls.append(submodules)
+    def _patched_submodules(*, target_model, submodules, non_blocking=False, tie_weights=True):
+        submodules_calls.append({"submodules": submodules, "tie_weights": tie_weights})
         return orig_submodules(
             target_model=target_model,
             submodules=submodules,
             non_blocking=non_blocking,
+            tie_weights=tie_weights,
         )
+
+    def _patched_tie_weights():
+        tie_weights_calls.append(1)
+
+    monkeypatch.setattr(shell, "tie_weights", _patched_tie_weights, raising=False)
 
     monkeypatch.setattr(turtle, "materialize_submodule", _patched_submodule)
     monkeypatch.setattr(turtle, "materialize_submodules", _patched_submodules)
@@ -569,7 +578,8 @@ def test_base_qmodel_pre_quantize_batches_leaf_modules(tmp_path, monkeypatch):
     )
 
     assert len(submodules_calls) == 1
-    batch = submodules_calls[0]
+    batch = submodules_calls[0]["submodules"]
+    assert submodules_calls[0]["tie_weights"] is False
     assert len(batch) == len(skip_names)
     for _, path, device in batch:
         assert path.startswith("layers.0.mlp.experts.")
@@ -578,6 +588,13 @@ def test_base_qmodel_pre_quantize_batches_leaf_modules(tmp_path, monkeypatch):
     # Every non-leaf submodule call must use recurse=False so containers do not duplicate leaf loads.
     for call in submodule_calls:
         assert call["recurse"] is False
+
+    # No per-submodule weight tying; the whole layer should tie exactly once.
+    for call in submodule_calls:
+        assert call["tie_weights"] is False
+    for call in submodules_calls:
+        assert call["tie_weights"] is False
+    assert len(tie_weights_calls) == 1
 
     # All skipped leaf projections should be materialized as one batch.
     for i in range(num_experts):

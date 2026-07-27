@@ -957,6 +957,7 @@ class LazyTurtle:
         non_blocking: bool = False,
         module_path: Optional[str] = None,
         recurse: bool = True,
+        tie_weights: bool = True,
     ) -> torch.nn.Module:
         if module_path is None:
             module_path = _get_qualified_name(target_model, target_submodule)
@@ -969,11 +970,17 @@ class LazyTurtle:
             parts = module_path.split(".")
             for i in range(len(parts)):
                 prefix = ".".join(parts[: i + 1])
-                modules_by_name[prefix] = target_model.get_submodule(prefix)
+                try:
+                    modules_by_name[prefix] = target_model.get_submodule(prefix)
+                except (AttributeError, IndexError, KeyError):
+                    # Invalid prefix; stop building the ancestor map. The remaining
+                    # transpose-hint lookup will fall back to shape inference.
+                    break
+            modules_by_name[module_path] = target_submodule
         else:
             modules_by_name = None
         with self._lock:
-            self._copy_checkpoint_tensors_into_submodule(
+            loaded_entries = self._copy_checkpoint_tensors_into_submodule(
                 target_model=target_model,
                 target_submodule=target_submodule,
                 module_path=module_path,
@@ -982,7 +989,7 @@ class LazyTurtle:
                 non_blocking=non_blocking,
                 modules_by_name=modules_by_name,
             )
-        if hasattr(target_model, "tie_weights"):
+        if tie_weights and loaded_entries > 0 and hasattr(target_model, "tie_weights"):
             target_model.tie_weights()
         return target_submodule
 
@@ -992,6 +999,7 @@ class LazyTurtle:
         target_model: torch.nn.Module,
         submodules: List[Tuple[torch.nn.Module, str, torch.device]],
         non_blocking: bool = False,
+        tie_weights: bool = True,
     ) -> None:
         """Materialize many independent shell submodules in a single grouped parallel load.
 
@@ -1016,6 +1024,8 @@ class LazyTurtle:
                 device=device,
                 non_blocking=non_blocking,
                 module_path=module_path,
+                recurse=False,
+                tie_weights=tie_weights,
             )
             return
 
@@ -1173,10 +1183,13 @@ class LazyTurtle:
                     device=device,
                     non_blocking=non_blocking,
                     module_path=module_path,
+                    tie_weights=False,
                 )
+            if tie_weights and hasattr(target_model, "tie_weights"):
+                target_model.tie_weights()
             return
 
-        if hasattr(target_model, "tie_weights"):
+        if all_jobs and tie_weights and hasattr(target_model, "tie_weights"):
             target_model.tie_weights()
 
     def _copy_grouped_entries_batch(
@@ -2900,7 +2913,7 @@ class LazyTurtle:
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
         if not t_params and not t_bufs:
-            return
+            return 0
         if modules_by_name is None:
             modules_by_name = dict(target_model.named_modules())
         missing_nonpersistent_buffers: list[tuple[str, str]] = []
@@ -3113,6 +3126,7 @@ class LazyTurtle:
             missing_nonpersistent_buffers=missing_nonpersistent_buffers,
             device=device,
         )
+        return loaded_entries
 
     def _build_nonpersistent_buffer_template(
         self,
