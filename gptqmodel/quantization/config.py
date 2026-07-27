@@ -1645,11 +1645,52 @@ _DYNAMIC_NO_MATCH = object()
 # Global caches for dynamic override resolution.  The `dynamic` dict is treated
 # as immutable after config construction, so caching by `id(dynamic)` is safe
 # and lets cloned configs share compiled patterns and override lookups.
-_DYNAMIC_PATTERN_CACHE: Dict[int, List[Tuple[bool, Any, Dict[str, Any]]]] = {}
+_DYNAMIC_PATTERN_CACHE: Dict[int, List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]] = {}
 _DYNAMIC_OVERRIDE_CACHE: Dict[int, Dict[str, Any]] = {}
+# Exact-literal fast-path caches: a per-dynamic dict mapping literal module names
+# to their resolved override, and whether every pattern is an exact literal.
+_DYNAMIC_EXACT_LOOKUP_CACHE: Dict[int, Dict[str, Tuple[int, Union[Dict[str, Any], bool]]]] = {}
+_DYNAMIC_ALL_EXACT_CACHE: Dict[int, bool] = {}
+# Pre-separated regex patterns for mixed dynamic configs.
+_DYNAMIC_REGEX_PATTERN_CACHE: Dict[int, List[Tuple[int, bool, Any, Dict[str, Any]]]] = {}
 
-def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]) -> List[Tuple[bool, Any, Dict[str, Any]]]:
-    """Return compiled PCRE patterns for a dynamic dict, caching by object id."""
+def _extract_literal_regex_pattern(raw: str) -> Optional[str]:
+    """If `raw` is a regex that matches a single literal string, return that string."""
+    # PCRE `.match()` is start-anchored only, so a trailing `$` is required for a
+    # true exact full-string match.  A leading `^` is also required to avoid
+    # matching arbitrary prefixes.
+    if not raw.startswith("^") or not raw.endswith("$"):
+        return None
+    raw = raw[1:-1]
+    out = []
+    i = 0
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch == "\\":
+            if i + 1 >= n:
+                return None
+            nxt = raw[i + 1]
+            if nxt == "\\":
+                out.append("\\")
+                i += 2
+                continue
+            if nxt.isalnum():
+                # Regex escape such as \d, \w, \1, \x, etc.
+                return None
+            # Escaped special character -> literal.
+            out.append(nxt)
+            i += 2
+            continue
+        if ch in ".^$*+?{}[]()|":
+            return None
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]) -> List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]:
+    """Return compiled PCRE patterns (plus optional exact literal) for a dynamic dict, caching by object id."""
 
     cache_key = id(dynamic)
     patterns = _DYNAMIC_PATTERN_CACHE.get(cache_key)
@@ -1657,16 +1698,30 @@ def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]) -> List[Tuple[bool
         return patterns
 
     patterns = []
+    exact_lookup: Dict[str, Tuple[int, Union[Dict[str, Any], bool]]] = {}
+    regex_patterns: List[Tuple[int, bool, Any, Dict[str, Any]]] = []
+    all_exact = True
     if dynamic is not None:
-        for pattern, overrides in dynamic.items():
+        for index, (pattern, overrides) in enumerate(dynamic.items()):
             is_negative = pattern.startswith("-:")
             raw = pattern[2:] if pattern.startswith(("-:", "+:")) else pattern
-            try:
-                compiled = pcre.compile(raw)
-            except Exception as exc:
-                raise ValueError(f"QuantizeConfig: invalid dynamic pattern `{pattern}`") from exc
-            patterns.append((is_negative, compiled, overrides))
+            exact_literal = _extract_literal_regex_pattern(raw)
+            if exact_literal is None:
+                all_exact = False
+                try:
+                    compiled = pcre.compile(raw)
+                except Exception as exc:
+                    raise ValueError(f"QuantizeConfig: invalid dynamic pattern `{pattern}`") from exc
+                regex_patterns.append((index, is_negative, compiled, overrides))
+            else:
+                compiled = None
+                if exact_literal not in exact_lookup:
+                    exact_lookup[exact_literal] = (index, False if is_negative else dict(overrides))
+            patterns.append((is_negative, compiled, overrides, exact_literal, index))
     _DYNAMIC_PATTERN_CACHE[cache_key] = patterns
+    _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key] = exact_lookup
+    _DYNAMIC_ALL_EXACT_CACHE[cache_key] = all_exact
+    _DYNAMIC_REGEX_PATTERN_CACHE[cache_key] = regex_patterns
     return patterns
 
 def _resolve_dynamic_override(
@@ -1684,15 +1739,27 @@ def _resolve_dynamic_override(
     if cached is not _DYNAMIC_NO_MATCH:
         return cached
 
-    matched = None
-    for is_negative, compiled, overrides in _get_dynamic_patterns(dynamic):
-        if not compiled.match(module_name):
-            continue
-        if is_negative:
-            matched = False
-        else:
-            matched = dict(overrides)
-        break
+    _get_dynamic_patterns(dynamic)
+
+    # Fast path: every pattern is an exact literal module name.
+    if _DYNAMIC_ALL_EXACT_CACHE.get(cache_key, False):
+        exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key].get(module_name)
+        matched = exact_entry[1] if exact_entry is not None else None
+        override_cache[module_name] = matched
+        return matched
+
+    # Mixed fallback: find the earliest matching pattern among exact literals
+    # (O(1) lookup) and ordered regex patterns.
+    exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key].get(module_name)
+    best_index = exact_entry[0] if exact_entry is not None else None
+    matched = exact_entry[1] if exact_entry is not None else None
+
+    for index, is_negative, compiled, overrides in _DYNAMIC_REGEX_PATTERN_CACHE[cache_key]:
+        if best_index is not None and index > best_index:
+            break
+        if compiled.match(module_name):
+            matched = False if is_negative else dict(overrides)
+            break
 
     override_cache[module_name] = matched
     return matched
