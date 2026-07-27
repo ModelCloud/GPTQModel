@@ -1519,6 +1519,131 @@ QUANT_CONFIG_ARG_SYNONYMS_NEGATED = {
 }
 DYNAMIC_FIELD_SYNONYMS = {}
 
+# Sentinel used by the dynamic override cache to indicate no pattern matched.
+_DYNAMIC_NO_MATCH = object()
+
+# Global caches for dynamic override resolution.  The `dynamic` dict is treated
+# as immutable after config construction, so caching by `id(dynamic)` is safe
+# and lets cloned configs share compiled patterns and override lookups.
+_DYNAMIC_PATTERN_CACHE: Dict[int, List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]] = {}
+_DYNAMIC_OVERRIDE_CACHE: Dict[int, Dict[str, Any]] = {}
+# Exact-literal fast-path caches: a per-dynamic dict mapping literal module names
+# to their resolved override, and whether every pattern is an exact literal.
+_DYNAMIC_EXACT_LOOKUP_CACHE: Dict[int, Dict[str, Tuple[int, Union[Dict[str, Any], bool]]]] = {}
+_DYNAMIC_ALL_EXACT_CACHE: Dict[int, bool] = {}
+# Pre-separated regex patterns for mixed dynamic configs.
+_DYNAMIC_REGEX_PATTERN_CACHE: Dict[int, List[Tuple[int, bool, Any, Dict[str, Any]]]] = {}
+
+def _extract_literal_regex_pattern(raw: str) -> Optional[str]:
+    """If `raw` is a regex that matches a single literal string, return that string."""
+    # PCRE `.match()` is start-anchored only, so a trailing `$` is required for a
+    # true exact full-string match.  A leading `^` is also required to avoid
+    # matching arbitrary prefixes.
+    if not raw.startswith("^") or not raw.endswith("$"):
+        return None
+    raw = raw[1:-1]
+    out = []
+    i = 0
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch == "\\":
+            if i + 1 >= n:
+                return None
+            nxt = raw[i + 1]
+            if nxt == "\\":
+                out.append("\\")
+                i += 2
+                continue
+            if nxt.isalnum():
+                # Regex escape such as \d, \w, \1, \x, etc.
+                return None
+            # Escaped special character -> literal.
+            out.append(nxt)
+            i += 2
+            continue
+        if ch in ".^$*+?{}[]()|":
+            return None
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]) -> List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]:
+    """Return compiled PCRE patterns (plus optional exact literal) for a dynamic dict, caching by object id."""
+
+    cache_key = id(dynamic)
+    patterns = _DYNAMIC_PATTERN_CACHE.get(cache_key)
+    if patterns is not None:
+        return patterns
+
+    patterns = []
+    exact_lookup: Dict[str, Tuple[int, Union[Dict[str, Any], bool]]] = {}
+    regex_patterns: List[Tuple[int, bool, Any, Dict[str, Any]]] = []
+    all_exact = True
+    if dynamic is not None:
+        for index, (pattern, overrides) in enumerate(dynamic.items()):
+            is_negative = pattern.startswith("-:")
+            raw = pattern[2:] if pattern.startswith(("-:", "+:")) else pattern
+            exact_literal = _extract_literal_regex_pattern(raw)
+            if exact_literal is None:
+                all_exact = False
+                try:
+                    compiled = pcre.compile(raw)
+                except Exception as exc:
+                    raise ValueError(f"QuantizeConfig: invalid dynamic pattern `{pattern}`") from exc
+                regex_patterns.append((index, is_negative, compiled, overrides))
+            else:
+                compiled = None
+                if exact_literal not in exact_lookup:
+                    exact_lookup[exact_literal] = (index, False if is_negative else dict(overrides))
+            patterns.append((is_negative, compiled, overrides, exact_literal, index))
+    _DYNAMIC_PATTERN_CACHE[cache_key] = patterns
+    _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key] = exact_lookup
+    _DYNAMIC_ALL_EXACT_CACHE[cache_key] = all_exact
+    _DYNAMIC_REGEX_PATTERN_CACHE[cache_key] = regex_patterns
+    return patterns
+
+def _resolve_dynamic_override(
+    dynamic: Dict[str, Dict[str, Any]],
+    module_name: str,
+) -> Union[Dict[str, Any], bool, None]:
+    """Return the first matching dynamic override dict, False for negative, or None."""
+
+    if dynamic is None:
+        return None
+
+    cache_key = id(dynamic)
+    override_cache = _DYNAMIC_OVERRIDE_CACHE.setdefault(cache_key, {})
+    cached = override_cache.get(module_name, _DYNAMIC_NO_MATCH)
+    if cached is not _DYNAMIC_NO_MATCH:
+        return cached
+
+    _get_dynamic_patterns(dynamic)
+
+    # Fast path: every pattern is an exact literal module name.
+    if _DYNAMIC_ALL_EXACT_CACHE.get(cache_key, False):
+        exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key].get(module_name)
+        matched = exact_entry[1] if exact_entry is not None else None
+        override_cache[module_name] = matched
+        return matched
+
+    # Mixed fallback: find the earliest matching pattern among exact literals
+    # (O(1) lookup) and ordered regex patterns.
+    exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key].get(module_name)
+    best_index = exact_entry[0] if exact_entry is not None else None
+    matched = exact_entry[1] if exact_entry is not None else None
+
+    for index, is_negative, compiled, overrides in _DYNAMIC_REGEX_PATTERN_CACHE[cache_key]:
+        if best_index is not None and index > best_index:
+            break
+        if compiled.match(module_name):
+            matched = False if is_negative else dict(overrides)
+            break
+
+    override_cache[module_name] = matched
+    return matched
+
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
     """
     Checks whether the passed dictionary and its nested dicts have a *scale_dtype* key and if it's not None,
@@ -1693,35 +1818,33 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
     if dynamic is None:
         return default
 
-    for pattern, overrides in dynamic.items():
-        if pattern.startswith("-:"):
-            if pcre.compile(pattern.removeprefix("-:")).match(module_name):
-                return False
-        elif pcre.compile(pattern.removeprefix("+:")).match(module_name):
-            if key is None:
-                return overrides
-            else:
-                # subkey example: Lora override format: `{ "adapter": { "rank": 512 } }`
-                if sub_key:
-                    sub_value = overrides.get(key, None)
-                    if sub_value is None and key in DYNAMIC_FIELD_SYNONYMS:
-                        for legacy_key in DYNAMIC_FIELD_SYNONYMS[key]:
-                            if legacy_key in overrides:
-                                sub_value = overrides[legacy_key]
-                                break
-                    if isinstance(sub_value, Dict):
-                        return sub_value.get(sub_key, default)
-                    else:
-                        log.info(f"QuantConfig: Dynamic `sub_key`: `{sub_key}` failed extraction from  `sub_value`: `{sub_value}`")
-                else:
-                    if key in overrides:
-                        return overrides[key]
-                    if key in DYNAMIC_FIELD_SYNONYMS:
-                        for legacy_key in DYNAMIC_FIELD_SYNONYMS[key]:
-                            if legacy_key in overrides:
-                                return overrides[legacy_key]
-                    return default
-    return default
+    overrides = _resolve_dynamic_override(dynamic, module_name)
+    if overrides is False:
+        return False
+    if overrides is None:
+        return default
+
+    if key is None:
+        return overrides
+
+    if key in overrides:
+        sub_value = overrides[key]
+    elif key in DYNAMIC_FIELD_SYNONYMS:
+        sub_value = None
+        for legacy_key in DYNAMIC_FIELD_SYNONYMS[key]:
+            if legacy_key in overrides:
+                sub_value = overrides[legacy_key]
+                break
+    else:
+        return default
+
+    if sub_key:
+        if isinstance(sub_value, Dict):
+            return sub_value.get(sub_key, default)
+        log.info(f"QuantConfig: Dynamic `sub_key`: `{sub_key}` failed extraction from  `sub_value`: `{sub_value}`")
+        return default
+
+    return sub_value
 
 def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
     if isinstance(value, str):
