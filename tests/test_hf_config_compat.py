@@ -177,6 +177,33 @@ def test_normalize_hf_config_compat_preserves_rope_parameters_after_remote_clean
     assert config.rope_parameters["rope_theta"] == 10000.0
 
 
+def test_normalize_hf_config_compat_keeps_nanbeige_default_rope_unscaled():
+    config = SimpleNamespace(
+        model_type="nanbeige",
+        rope_scaling={"rope_type": "default", "rope_theta": 70000000.0},
+        rope_parameters={"rope_type": "default", "rope_theta": 70000000.0},
+    )
+
+    normalize_hf_config_compat(config, trust_remote_code=True)
+
+    assert config.rope_scaling is None
+    assert config.rope_parameters is None
+
+
+def test_normalize_hf_config_compat_preserves_nanbeige_scaled_rope():
+    config = SimpleNamespace(
+        model_type="nanbeige",
+        rope_scaling={"type": "linear", "factor": 2.0},
+        rope_parameters=None,
+        rope_theta=70000000.0,
+    )
+
+    normalize_hf_config_compat(config, trust_remote_code=True)
+
+    assert config.rope_scaling["type"] == "linear"
+    assert config.rope_scaling["factor"] == 2.0
+
+
 def test_normalize_hf_config_compat_restores_sliding_window_cache_alias(monkeypatch):
     monkeypatch.delattr(cache_utils, "SlidingWindowCache", raising=False)
 

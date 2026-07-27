@@ -157,6 +157,7 @@ from .definitions.mllama import MLlamaQModel, MLlamaTextQModel  # noqa: E402
 from .definitions.mobilellm import MobileLLMQModel  # noqa: E402
 from .definitions.moss import MossQModel  # noqa: E402
 from .definitions.mpt import MptQModel  # noqa: E402
+from .definitions.nanbeige import NanbeigeQModel  # noqa: E402
 from .definitions.nemotron_labs_diffusion import NemotronLabsDiffusionQModel  # noqa: E402
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
 from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
@@ -281,6 +282,7 @@ MODEL_MAP = {
     "phi4mm": Phi4MMGPTQ,
     "phimoe": PhiMoEGPTQForCausalLM,
     "mpt": MptQModel,
+    "nanbeige": NanbeigeQModel,
     "minicpm": MiniCPMGPTQ,
     "minicpm3": MiniCpm3QModel,
     "minicpmo": MiniCPMOQModel,

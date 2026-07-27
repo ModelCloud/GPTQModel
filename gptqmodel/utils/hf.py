@@ -1208,6 +1208,29 @@ def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
 
 
 def _normalize_rope_parameters_config_compat(config: Any) -> None:
+    if str(getattr(config, "model_type", "")).lower() == "nanbeige":
+        # Nanbeige's remote modeling code owns RoPE construction and treats
+        # `rope_scaling is None` as the unscaled/default path. Transformers 5
+        # derives a default `rope_scaling` dictionary from `rope_parameters`,
+        # which the legacy code mistakes for scaled RoPE and then indexes at
+        # `["type"]`. Keep only genuinely scaled Nanbeige configurations.
+        rope_candidates = (
+            getattr(config, "rope_scaling", None),
+            getattr(config, "rope_parameters", None),
+        )
+        has_scaled_rope = any(
+            isinstance(candidate, dict)
+            and (
+                candidate.get("type", candidate.get("rope_type")) not in (None, "default")
+                or candidate.get("factor") not in (None, 1, 1.0)
+            )
+            for candidate in rope_candidates
+        )
+        if not has_scaled_rope:
+            config.rope_scaling = None
+            config.rope_parameters = None
+            return
+
     rope_parameters = getattr(config, "rope_parameters", None)
     if (
         isinstance(rope_parameters, dict)
