@@ -1147,11 +1147,9 @@ def run_layer_stage(
             label=f"layer {layer_index if not is_lm_head_module else 'lm_head'} handoff",
         )
 
-        # Close per-shard safetensors handles so file descriptors are released
-        # between layers. The handles will be recreated on demand for the next layer.
-        turtle_model = getattr(looper.gptq_model, "turtle_model", None)
-        if turtle_model is not None and hasattr(turtle_model, "close_shard_handlers"):
-            turtle_model.close_shard_handlers()
+        # Keep per-shard safetensors handles open across layers. Re-opening and
+        # re-registering the host mmap for every layer is more expensive than the
+        # file descriptors, and LazyTurtle cleans them up on destruction.
 
         layer_elapsed = time.perf_counter() - layer_start
         layer_label = f"layer {layer_index if not is_lm_head_module else 'lm_head'}"

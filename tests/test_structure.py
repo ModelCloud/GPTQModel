@@ -611,3 +611,70 @@ def test_base_qmodel_pre_quantize_batches_leaf_modules(tmp_path, monkeypatch):
                 loaded,
                 source[f"layers.0.mlp.experts.{i}.{proj}.weight"].transpose(0, 1).contiguous(),
             )
+
+
+def test_lazy_turtle_parallel_workers_heuristic(monkeypatch):
+    """The worker heuristic should scale with target devices, be capped, and honor env overrides."""
+    env_key = "GPTQMODEL_LAZY_TURTLE_PARALLEL_LOAD_WORKERS"
+    import sys
+
+    def _is_gil_enabled():
+        return False
+
+    monkeypatch.setattr(sys, "_is_gil_enabled", _is_gil_enabled, raising=False)
+    monkeypatch.setattr(structure, "_is_gil_enabled", _is_gil_enabled, raising=False)
+
+    # No env override: CPU path uses os.cpu_count(), capped at 8.
+    monkeypatch.delenv(env_key, raising=False)
+    with monkeypatch.context() as m:
+        m.setattr(structure.os, "cpu_count", lambda: 16)
+        assert structure._lazy_turtle_parallel_workers(20, 0) == 8
+
+    # One CUDA device: small pool (2) is enough for async H2D.
+    monkeypatch.delenv(env_key, raising=False)
+    assert structure._lazy_turtle_parallel_workers(20, 1) == 2
+
+    # Four CUDA devices: pool scales to 8 but is capped.
+    monkeypatch.delenv(env_key, raising=False)
+    assert structure._lazy_turtle_parallel_workers(20, 4) == 8
+
+    # Fewer jobs than the heuristic still clamps to num_jobs.
+    monkeypatch.delenv(env_key, raising=False)
+    assert structure._lazy_turtle_parallel_workers(1, 4) == 1
+
+    # Env override wins.
+    monkeypatch.setenv(env_key, "3")
+    assert structure._lazy_turtle_parallel_workers(20, 4) == 3
+
+
+def test_lazy_turtle_host_register_shard_uses_safetensors_api(tmp_path, monkeypatch):
+    """_host_register_shard must read tensor keys with the real safetensors API and call cudaHostRegister."""
+
+    model_dir, source = _make_simple_checkpoint(tmp_path)
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    shard_path = str(model_dir / "model.safetensors")
+    handler = turtle._get_shard_handler(shard_path)
+
+    calls = []
+
+    class FakeCudart:
+        def cudaHostRegister(self, ptr, size, flags):
+            calls.append((ptr, size, flags))
+            return 0
+
+    monkeypatch.setattr(structure.torch.cuda, "cudart", lambda: FakeCudart())
+    turtle._host_register_shard(shard_path, handler)
+
+    assert shard_path in turtle._shard_pin_ranges
+    start, size = turtle._shard_pin_ranges[shard_path]
+    assert size > 0
+    assert len(calls) == 1
+    assert calls[0][0] == start
+    assert calls[0][1] == size
+    assert calls[0][2] == 0

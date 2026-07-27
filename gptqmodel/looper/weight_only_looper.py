@@ -1165,12 +1165,10 @@ class WeightOnlyLooper:
                 else:
                     layers[layer_index] = self.gptq_model.post_quantize(module)
 
-                # Close per-shard safetensors handles so checkpoint file
-                # descriptors and any remaining mmap references are released
-                # between weight-only layers.
-                turtle_model = getattr(self.gptq_model, "turtle_model", None)
-                if turtle_model is not None and hasattr(turtle_model, "close_shard_handlers"):
-                    turtle_model.close_shard_handlers()
+                # Keep per-shard safetensors handles open across weight-only layers.
+                # Re-opening and re-registering the host mmap per layer is more
+                # expensive than the file descriptors; LazyTurtle cleans them up on
+                # destruction.
 
                 if pb is not None:
                     pb.current_iter_step = progress_index + 1

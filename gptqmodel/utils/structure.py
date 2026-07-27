@@ -37,6 +37,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from importlib import import_module
@@ -617,7 +618,7 @@ def _log_info(msg: str, *args) -> None:
         info(msg, *args)
 
 
-def _lazy_turtle_parallel_workers(num_jobs: int) -> int:
+def _lazy_turtle_parallel_workers(num_jobs: int, num_cuda_devices: int) -> int:
     """Return the number of parallel materialization workers to use for LazyTurtle loads."""
 
     env = os.environ.get("GPTQMODEL_LAZY_TURTLE_PARALLEL_LOAD_WORKERS")
@@ -637,9 +638,16 @@ def _lazy_turtle_parallel_workers(num_jobs: int) -> int:
         gil_enabled = sys._is_gil_enabled()
     except AttributeError:
         gil_enabled = True
-    if not gil_enabled and num_jobs > 1:
-        return min(num_jobs, os.cpu_count() or 1, 8)
-    return 1
+    if gil_enabled or num_jobs <= 1:
+        return 1
+
+    if num_cuda_devices > 0:
+        # With pinned/CUDA-registered sources one worker can keep a GPU busy via
+        # async H2D. A small pool overlaps CPU header parsing with transfer.
+        max_workers = max(2, num_cuda_devices * 2)
+    else:
+        max_workers = os.cpu_count() or 1
+    return min(num_jobs, max_workers, 8)
 
 
 @dataclass
@@ -864,6 +872,7 @@ class LazyTurtle:
         module_tree: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
+        max_pinned_gb: Optional[float] = None,
     ) -> None:
         self.config = copy.deepcopy(config)
         self._model_init_kwargs = dict(model_init_kwargs or {})
@@ -890,11 +899,29 @@ class LazyTurtle:
         self._lock = threading.RLock()
         # Reuse safetensors file handles across per-module materialization calls
         # inside a layer to avoid re-parsing the JSON header for every tensor.
-        self._shard_handlers: Dict[str, Any] = {}
+        self._shard_handlers: OrderedDict[str, Any] = OrderedDict()
+        # Track CUDA host-registered ranges for shard mmap regions so H2D copies from
+        # safetensors can use pinned-memory bandwidth without an extra CPU staging copy.
+        self._shard_pin_ranges: Dict[str, tuple[int, int]] = {}
+        # LRU order and pin sizes for registered shards; used to bound the total
+        # pinned host-memory footprint. Default cap is 4 GB to avoid unbounded
+        # host-memory bloat on large MoE checkpoints while still keeping hot shards
+        # pinned across adjacent layers. Controlled via the quantize_config attribute
+        # `lazy_turtle_max_pinned_gb` (None or <=0 means unlimited).
+        self._shard_lru: OrderedDict[str, int] = OrderedDict()
+        max_pinned_gb = max_pinned_gb if max_pinned_gb is not None else 4.0
+        self._max_pinned_bytes = float("inf") if max_pinned_gb <= 0 else float(max_pinned_gb) * 1024**3
         # Track tensors that have already been loaded by this LazyTurtle instance so
         # repeated materialize calls (batch prefetch followed by per-module prepare)
         # do not overwrite live weights by reading from checkpoint again.
         self._loaded_tensor_ids: set[int] = set()
+
+    def __del__(self) -> None:
+        """Release host-registered shard memory and file handles on destruction."""
+        try:
+            self.close_shard_handlers()
+        except Exception:
+            pass
 
     @classmethod
     def maybe_create(
@@ -906,6 +933,7 @@ class LazyTurtle:
         module_tree: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
+        max_pinned_gb: Optional[float] = None,
     ) -> Optional["LazyTurtle"]:
         if not model_local_path or not os.path.isdir(model_local_path):
             return None
@@ -918,6 +946,7 @@ class LazyTurtle:
                 module_tree=module_tree,
                 hf_conversion_map_reversed=hf_conversion_map_reversed,
                 target_model=target_model,
+                max_pinned_gb=max_pinned_gb,
             )
         except Exception as exc:
             log.debug(
@@ -936,17 +965,123 @@ class LazyTurtle:
         if handler is None:
             handler = safe_open(shard_path, framework="pt", device="cpu")
             self._shard_handlers[shard_path] = handler
+        else:
+            self._shard_handlers.move_to_end(shard_path)
         return handler
+
+    def _ensure_pinned_room(
+        self,
+        needed_bytes: int,
+        protected_paths: Optional[Set[str]] = None,
+    ) -> None:
+        """Evict the oldest pinned shards until there is room for `needed_bytes`.
+
+        Shards in `protected_paths` are never evicted, so the total pinned memory
+        may temporarily exceed the configured cap by up to one batch's working set.
+        This is intentional: evicting a shard the current batch is still reading
+        from would corrupt in-flight H2D copies.
+        """
+        if self._max_pinned_bytes == float("inf") or not self._shard_lru:
+            return
+        protected = protected_paths or set()
+        current = sum(self._shard_lru.values())
+        while current and current + needed_bytes > self._max_pinned_bytes:
+            oldest = next(
+                (path for path in self._shard_lru if path not in protected),
+                None,
+            )
+            if oldest is None:
+                break
+            size = self._shard_lru.pop(oldest)
+            current -= size
+            self._evict_shard(oldest)
+
+    def _evict_shard(self, shard_path: str) -> None:
+        """Unpin and close a cached shard to free host memory."""
+        self._host_unregister_shard(shard_path)
+        handler = self._shard_handlers.pop(shard_path, None)
+        if handler is not None:
+            try:
+                handler.__exit__(None, None, None)
+            except Exception:
+                pass
+
+    def _host_register_shard(
+        self,
+        shard_path: str,
+        handler: Any,
+        protected_paths: Optional[Set[str]] = None,
+    ) -> None:
+        """Page-lock the mmap backing a safetensors shard so get_tensor views are pinned."""
+
+        if shard_path in self._shard_pin_ranges:
+            self._shard_lru.move_to_end(shard_path)
+            return
+        try:
+            keys = list(handler.keys())
+        except Exception:
+            return
+        if not keys:
+            return
+        try:
+            tensors = [handler.get_tensor(k) for k in keys]
+        except Exception:
+            return
+        if not tensors:
+            return
+        page_size = 4096
+        # Use t.data_ptr() (not untyped_storage().data_ptr()) so shared-storage views with
+        # a non-zero storage_offset still cover their actual byte range.
+        min_ptr = min(t.data_ptr() for t in tensors)
+        max_ptr = max(
+            t.data_ptr() + t.numel() * t.element_size() for t in tensors
+        )
+        start = (min_ptr // page_size) * page_size
+        end = ((max_ptr + page_size - 1) // page_size) * page_size
+        size = end - start
+        if size <= 0:
+            return
+        try:
+            self._ensure_pinned_room(size, protected_paths)
+            err = torch.cuda.cudart().cudaHostRegister(start, size, 0)
+            if int(err) != 0:
+                log.warning("LazyTurtle: cudaHostRegister failed for %s with error %s", shard_path, err)
+                return
+            # Defensive check: get_tensor may return a copy in some environments, in which case
+            # the registered range does not back the copy and H2D must fall back to blocking copies.
+            sample = handler.get_tensor(keys[0])
+            if not sample.is_pinned():
+                log.warning(
+                    "LazyTurtle: cudaHostRegister succeeded for %s but get_tensor views are not pinned; "
+                    "H2D copies will fall back to the blocking path.",
+                    shard_path,
+                )
+            self._shard_pin_ranges[shard_path] = (start, size)
+            self._shard_lru[shard_path] = size
+            self._shard_lru.move_to_end(shard_path)
+            self._shard_handlers.move_to_end(shard_path)
+        except Exception as exc:
+            log.warning("LazyTurtle: cudaHostRegister failed for %s: %s", shard_path, exc)
+
+    def _host_unregister_shard(self, shard_path: str) -> None:
+        """Unpin the mmap backing a safetensors shard after H2D copies complete."""
+        pin_range = self._shard_pin_ranges.pop(shard_path, None)
+        self._shard_lru.pop(shard_path, None)
+        if pin_range is None:
+            return
+        start, size = pin_range
+        try:
+            err = torch.cuda.cudart().cudaHostUnregister(start)
+            if int(err) != 0:
+                log.warning("LazyTurtle: cudaHostUnregister failed for %s with error %s", shard_path, err)
+        except Exception as exc:
+            log.warning("LazyTurtle: cudaHostUnregister failed for %s: %s", shard_path, exc)
 
     def close_shard_handlers(self) -> None:
         """Close any cached safetensors handles and free their file descriptors."""
         with self._lock:
-            for handler in list(self._shard_handlers.values()):
-                try:
-                    handler.__exit__(None, None, None)
-                except Exception:
-                    pass
-            self._shard_handlers.clear()
+            for shard_path in list(self._shard_handlers.keys()):
+                self._evict_shard(shard_path)
 
     def materialize_submodule(
         self,
@@ -1212,21 +1347,47 @@ class LazyTurtle:
                 shard_path = os.path.join(self.model_local_path, job.shard)
                 shard_handlers[job.shard] = self._get_shard_handler(shard_path)
 
-        load_lock = threading.Lock()
+        # Each safetensors handle is opened once and guarded by a per-shard lock so
+        # workers can read different shards concurrently.
+        shard_locks: Dict[str, threading.Lock] = {shard: threading.Lock() for shard in shard_handlers}
+
+        # CUDA H2D copies can be queued asynchronously. We keep a reference to every
+        # source tensor until a final synchronize so transfers complete before the
+        # host memory is reused.
+        target_cuda_devices = list({j.target_tensor.device for j in jobs if j.target_tensor.device.type == "cuda"})
+        use_async_h2d = bool(target_cuda_devices)
+
+        if use_async_h2d:
+            protected_paths = {os.path.join(self.model_local_path, shard) for shard in shard_handlers}
+            for shard, handler in shard_handlers.items():
+                shard_path = os.path.join(self.model_local_path, shard)
+                # Always call _host_register_shard; it no-ops for already-pinned shards and
+                # refreshes their recency in the LRU cache so hot shards are not evicted early.
+                self._host_register_shard(shard_path, handler, protected_paths=protected_paths)
+
         total_read_bytes = 0
         total_source_bytes = 0
 
-        def _worker(job: _LazyTurtleCopyJob) -> tuple[str, int, float, bool]:
+        def _copy_to_target(source: torch.Tensor, target: torch.Tensor) -> bool:
+            """Return True if the copy was non-blocking and the caller must keep `source` alive."""
+            pinned = source.is_pinned()
+            if use_async_h2d:
+                target.copy_(source, non_blocking=pinned)
+                return pinned
+            target.copy_(source, non_blocking=(non_blocking and pinned))
+            return False
+
+        def _worker(job: _LazyTurtleCopyJob) -> tuple[str, int, float, bool, torch.Tensor, bool]:
             with torch.inference_mode():
                 if job.source_tensor is not None:
                     source = job.source_tensor.detach()
                     if source.dtype != job.target_tensor.dtype:
                         source = source.to(dtype=job.target_tensor.dtype)
-                    job.target_tensor.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
-                    return job.rel_name, _tensor_nbytes(source), 0.0, False
+                    non_blocking = _copy_to_target(source, job.target_tensor)
+                    return job.rel_name, _tensor_nbytes(source), 0.0, False, source, non_blocking
 
                 read_start = time.perf_counter()
-                with load_lock:
+                with shard_locks[job.shard]:
                     handler = shard_handlers[job.shard]
                     checkpoint_tensor = handler.get_tensor(job.full_name)
                 tensor = self._transform_checkpoint_tensor(
@@ -1272,10 +1433,11 @@ class LazyTurtle:
                 source = tensor.detach()
                 if source.dtype != job.target_tensor.dtype:
                     source = source.to(dtype=job.target_tensor.dtype)
-                job.target_tensor.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
-                return job.rel_name, _tensor_nbytes(tensor), time.perf_counter() - read_start, True
+                non_blocking = _copy_to_target(source, job.target_tensor)
+                return job.rel_name, _tensor_nbytes(tensor), time.perf_counter() - read_start, True, source, non_blocking
 
-        max_workers = _lazy_turtle_parallel_workers(len(jobs))
+        num_cuda_devices = len(target_cuda_devices)
+        max_workers = _lazy_turtle_parallel_workers(len(jobs), num_cuda_devices)
         group_start = time.perf_counter()
         sample_module = jobs[0].module_path or "<root>"
         _log_info(
@@ -1287,11 +1449,14 @@ class LazyTurtle:
             sample_module,
         )
 
+        async_sources: list[torch.Tensor] = []
         if max_workers > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [executor.submit(_worker, job) for job in jobs]
                 for future in futures:
-                    rel_name, nbytes, read_time, from_disk = future.result()
+                    rel_name, nbytes, read_time, from_disk, source, non_blocking = future.result()
+                    if non_blocking:
+                        async_sources.append(source)
                     if from_disk:
                         total_read_bytes += nbytes
                         disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
@@ -1299,12 +1464,19 @@ class LazyTurtle:
                         total_source_bytes += nbytes
         else:
             for job in jobs:
-                rel_name, nbytes, read_time, from_disk = _worker(job)
+                rel_name, nbytes, read_time, from_disk, source, non_blocking = _worker(job)
+                if non_blocking:
+                    async_sources.append(source)
                 if from_disk:
                     total_read_bytes += nbytes
                     disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
                 else:
                     total_source_bytes += nbytes
+
+        if async_sources:
+            for dev in target_cuda_devices:
+                torch.cuda.synchronize(dev)
+        async_sources.clear()
 
         for job in jobs:
             self._loaded_tensor_ids.add(id(job.target_tensor))
@@ -2628,7 +2800,10 @@ class LazyTurtle:
             shard_path = os.path.join(self.model_local_path, shard)
             handler = self._get_shard_handler(shard_path)
             for rel_name, full_name in names:
-                tensors[rel_name] = handler.get_tensor(full_name)
+                # Clone so the returned tensors do not depend on the safetensors mmap.
+                # The LRU may close/evict the shard handle while the caller still holds
+                # these tensors, so a view into the mapped file would dangle.
+                tensors[rel_name] = handler.get_tensor(full_name).clone()
         return tensors
 
     def _copy_grouped_entries(
@@ -2649,13 +2824,6 @@ class LazyTurtle:
     ) -> int:
         """Materialize grouped checkpoint entries in parallel when the runtime supports it."""
 
-        # Pre-open unique shard handlers in the main thread so workers only read the cache.
-        shard_handlers: Dict[str, Any] = {}
-        for shard in grouped_names:
-            shard_path = os.path.join(self.model_local_path, shard)
-            shard_handlers[shard] = self._get_shard_handler(shard_path)
-
-        load_lock = threading.Lock()
         jobs: list[_LazyTurtleCopyJob] = []
         deferred_buffers: list[tuple] = []
 
@@ -2750,17 +2918,59 @@ class LazyTurtle:
                             )
                         )
 
-        def _worker(job: _LazyTurtleCopyJob) -> tuple[str, int, float]:
+        if not jobs and not deferred_buffers:
+            return loaded_entries
+
+        # Only open/register shards that actually need to be read from disk.
+        # Already-loaded tensors are moved from their current source without touching
+        # the checkpoint mmap, so pinning those shards would waste the pin budget.
+        needed_shards = {job.shard for job in jobs if job.source_tensor is None}
+        needed_shards.update(shard for (shard, *_) in deferred_buffers)
+
+        # Pre-open unique shard handlers in the main thread so workers only read the cache.
+        shard_handlers: Dict[str, Any] = {}
+        for shard in needed_shards:
+            shard_path = os.path.join(self.model_local_path, shard)
+            shard_handlers[shard] = self._get_shard_handler(shard_path)
+
+        # Each safetensors handle is opened once and guarded by a per-shard lock so
+        # workers can read different shards concurrently.
+        shard_locks: Dict[str, threading.Lock] = {shard: threading.Lock() for shard in shard_handlers}
+
+        # CUDA H2D copies can be queued asynchronously. We keep a reference to every
+        # source tensor until a final synchronize so transfers complete before the
+        # host memory is reused.
+        target_cuda_devices = [device] if device.type == "cuda" and jobs else []
+        use_async_h2d = bool(target_cuda_devices)
+
+        if use_async_h2d:
+            protected_paths = {os.path.join(self.model_local_path, shard) for shard in shard_handlers}
+            for shard, handler in shard_handlers.items():
+                shard_path = os.path.join(self.model_local_path, shard)
+                # Always call _host_register_shard; it no-ops for already-pinned shards and
+                # refreshes their recency in the LRU cache so hot shards are not evicted early.
+                self._host_register_shard(shard_path, handler, protected_paths=protected_paths)
+
+        def _copy_to_target(source: torch.Tensor, target: torch.Tensor) -> bool:
+            """Return True if the copy was non-blocking and the caller must keep `source` alive."""
+            pinned = source.is_pinned()
+            if use_async_h2d:
+                target.copy_(source, non_blocking=pinned)
+                return pinned
+            target.copy_(source, non_blocking=(non_blocking and pinned))
+            return False
+
+        def _worker(job: _LazyTurtleCopyJob) -> tuple[str, int, float, torch.Tensor, bool]:
             with torch.inference_mode():
                 if job.source_tensor is not None:
                     source = job.source_tensor.detach()
                     if source.dtype != job.target_tensor.dtype:
                         source = source.to(dtype=job.target_tensor.dtype)
-                    job.target_tensor.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
-                    return job.rel_name, _tensor_nbytes(source), 0.0
+                    non_blocking = _copy_to_target(source, job.target_tensor)
+                    return job.rel_name, _tensor_nbytes(source), 0.0, source, non_blocking
 
                 read_start = time.perf_counter()
-                with load_lock:
+                with shard_locks[job.shard]:
                     handler = shard_handlers[job.shard]
                     checkpoint_tensor = handler.get_tensor(job.full_name)
                 tensor = self._transform_checkpoint_tensor(
@@ -2806,13 +3016,11 @@ class LazyTurtle:
                 source = tensor.detach()
                 if source.dtype != job.target_tensor.dtype:
                     source = source.to(dtype=job.target_tensor.dtype)
-                job.target_tensor.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
-            return job.rel_name, _tensor_nbytes(tensor), time.perf_counter() - read_start
+                non_blocking = _copy_to_target(source, job.target_tensor)
+            return job.rel_name, _tensor_nbytes(tensor), time.perf_counter() - read_start, source, non_blocking
 
-        if not jobs and not deferred_buffers:
-            return loaded_entries
-
-        max_workers = _lazy_turtle_parallel_workers(len(jobs))
+        num_cuda_devices = len({j.target_tensor.device for j in jobs if j.target_tensor.device.type == "cuda"})
+        max_workers = _lazy_turtle_parallel_workers(len(jobs), num_cuda_devices)
         group_start = time.perf_counter()
         total_read_bytes = 0
         _log_info(
@@ -2824,11 +3032,14 @@ class LazyTurtle:
             module_path or "<root>",
         )
 
+        async_sources: list[torch.Tensor] = []
         if max_workers > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [executor.submit(_worker, job) for job in jobs]
                 for future in futures:
-                    rel_name, nbytes, read_time = future.result()
+                    rel_name, nbytes, read_time, source, non_blocking = future.result()
+                    if non_blocking:
+                        async_sources.append(source)
                     total_read_bytes += nbytes
                     disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
                     loaded_entries += 1
@@ -2838,7 +3049,9 @@ class LazyTurtle:
                         progress.draw()
         else:
             for job in jobs:
-                rel_name, nbytes, read_time = _worker(job)
+                rel_name, nbytes, read_time, source, non_blocking = _worker(job)
+                if non_blocking:
+                    async_sources.append(source)
                 total_read_bytes += nbytes
                 disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
                 loaded_entries += 1
@@ -2849,6 +3062,11 @@ class LazyTurtle:
 
         for job in jobs:
             self._loaded_tensor_ids.add(id(job.target_tensor))
+
+        if use_async_h2d and async_sources:
+            for dev in target_cuda_devices:
+                torch.cuda.synchronize(dev)
+            async_sources.clear()
 
         # Rare case: checkpoint provides a buffer that was not pre-registered on the shell.
         for shard, kind, rel_name, full_name, expert_index, split_index, split_dim, prefer_transposed, t_parent, leaf, persistent in deferred_buffers:

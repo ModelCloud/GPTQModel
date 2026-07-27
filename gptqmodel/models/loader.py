@@ -889,6 +889,7 @@ def ModelLoader(cls):
                         cls.resolve_hf_conversion_map_reversed(target_model=model)
                     ),
                     target_model=model,
+                    max_pinned_gb=getattr(quantize_config, "lazy_turtle_max_pinned_gb", None),
                 )
 
                 if turtle_model is None:

@@ -2611,6 +2611,13 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     # normalized to DEVICE after passing to load()
     device: Optional[Union[str, torch.device]] = field(default=None)
 
+    # Maximum host-pinned memory (GB) that LazyTurtle will keep registered across layers.
+    # None or <=0 disables the cap and keeps all touched shards pinned (fastest, more RAM).
+    lazy_turtle_max_pinned_gb: Optional[float] = field(
+        default=4.0,
+        metadata={"help": "Maximum host-pinned checkpoint shard memory (GB) for LazyTurtle. None or <=0 = unlimited."},
+    )
+
     # gptq was originally designed to pack quantized weights inside INT32 dtypes
     # allowing using different dtypes used for packing quantized weights
     # affects [`qweights`, `qzeros`]
