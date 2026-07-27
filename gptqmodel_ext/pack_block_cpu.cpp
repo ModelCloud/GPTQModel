@@ -1702,10 +1702,10 @@ std::tuple<at::Tensor, at::Tensor> gptq_block_cpu(
 
     const int64_t rows = W.size(0);
     const int64_t count = W.size(1);
-    TORCH_CHECK(
-        group_size > 0 && count % group_size == 0,
-        "gptq_block_cpu: group_size must divide count");
-    const int64_t groups = count / group_size;
+    TORCH_CHECK(group_size > 0, "gptq_block_cpu: group_size must be positive");
+    const int64_t num_full_groups = count / group_size;
+    const int64_t tail = count - num_full_groups * group_size;
+    const int64_t groups = num_full_groups + (tail > 0 ? 1 : 0);
     TORCH_CHECK(
         s.sizes() == at::IntArrayRef({rows, groups}),
         "gptq_block_cpu: scale shape must be (",
@@ -1721,7 +1721,10 @@ std::tuple<at::Tensor, at::Tensor> gptq_block_cpu(
     const float maxq_f = static_cast<float>(maxq);
 
     for (int64_t i = 0; i < count; ++i) {
-        const int64_t g = i / group_size;
+        int64_t g = i / group_size;
+        if (g >= num_full_groups) {
+            g = num_full_groups;
+        }
         at::Tensor sc = s.select(1, g).unsqueeze(1);
         at::Tensor zv = z.select(1, g).unsqueeze(1);
         at::Tensor w = W.select(1, i).unsqueeze(1);
@@ -1739,12 +1742,12 @@ std::tuple<at::Tensor, at::Tensor> gptq_block_cpu(
         at::Tensor err = (w - q) / d;
         Err.select(1, i).copy_(err.squeeze(1));
 
-        at::Tensor tail = W.narrow(1, i, count - i);
+        at::Tensor tail_view = W.narrow(1, i, count - i);
         at::Tensor hrow = H.select(0, i).narrow(0, i, count - i);
         // In-place torch.addr on the non-contiguous trailing slice replicates the
         // eager serial loop exactly, including the diagonal update that sets the
         // current column to q.
-        tail.addr_(err.view(-1), hrow, c10::Scalar(1.0), c10::Scalar(-1.0));
+        tail_view.addr_(err.view(-1), hrow, c10::Scalar(1.0), c10::Scalar(-1.0));
     }
 
     return {Q, Err};

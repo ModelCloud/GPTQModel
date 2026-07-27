@@ -948,8 +948,11 @@ def _gptq_block_reference(W1, Hinv1, scale, zero, maxq, group_size, groupwise):
     local = W1.clone()
     Q = torch.empty_like(W1)
     Err = torch.empty_like(W1)
+    num_full_groups = count // group_size
     for i in range(count):
         g = i // group_size
+        if g >= num_full_groups:
+            g = num_full_groups
         sc = scale[:, g : g + 1]
         zv = zero[:, g : g + 1]
         w = local[:, i : i + 1]
@@ -965,27 +968,69 @@ def _gptq_block_reference(W1, Hinv1, scale, zero, maxq, group_size, groupwise):
     return Q, Err
 
 
-def test_gptq_block_cpu_extension_matches_eager():
+@pytest.mark.parametrize("bits", [2, 3, 4, 8])
+@pytest.mark.parametrize("group_size", [1, 2, 4, 8, 16, 32, 64, 128, 160, 256])
+@pytest.mark.parametrize("groupwise", [False, True])
+def test_gptq_block_cpu_extension_matches_eager(bits, group_size, groupwise):
     """The compiled CPU GPTQ block step is bit-exact with the eager torch.addr loop."""
-    torch.manual_seed(0)
-    rows, count = 64, 32
-    group_size = 8
+    torch.manual_seed(bits * 1000 + group_size + int(groupwise))
+    rows, count = 64, 128
     W1 = torch.randn(rows, count, dtype=torch.float32)
     H = torch.randn(count, count, dtype=torch.float32)
     H = H @ H.T
     H.diagonal().add_(0.1)
     Hinv1 = torch.linalg.cholesky(torch.cholesky_inverse(torch.linalg.cholesky(H)))
-    scale = torch.rand(rows, count // group_size, dtype=torch.float32) * 0.05 + 0.01
-    zero = torch.rand(rows, count // group_size, dtype=torch.float32) * 5
-    maxq = 15
+
+    if groupwise:
+        maxq = 2 ** (bits - 1) - 1
+    else:
+        maxq = 2 ** bits - 1
+
+    # The scale tensor must have one entry per group spanned by the block.
+    groups = count // group_size + (1 if count % group_size != 0 else 0)
+    scale = torch.rand(rows, groups, dtype=torch.float32) * 0.05 + 0.01
+    if groupwise:
+        zero = torch.zeros_like(scale)
+    else:
+        if bits == 8 and not groupwise:
+            # Use a realistic symmetric zero point to avoid saturating the 8-bit range.
+            zero = torch.full_like(scale, float((maxq + 1) // 2))
+        else:
+            zero = torch.rand(rows, groups, dtype=torch.float32) * float(maxq)
 
     from gptqmodel.nn_modules.qlinear.pack_block_ext import gptq_block_cpu
 
-    for groupwise in (False, True):
-        Q_ref, Err_ref = _gptq_block_reference(W1, Hinv1, scale, zero, maxq, group_size, groupwise)
-        Q_ext, Err_ext = gptq_block_cpu(W1, Hinv1, scale, zero, maxq, group_size, groupwise)
-        assert torch.equal(Q_ext, Q_ref)
-        assert torch.equal(Err_ext, Err_ref)
+    Q_ref, Err_ref = _gptq_block_reference(W1, Hinv1, scale, zero, maxq, group_size, groupwise)
+    Q_ext, Err_ext = gptq_block_cpu(W1, Hinv1, scale, zero, maxq, group_size, groupwise)
+    assert torch.equal(Q_ext, Q_ref)
+    assert torch.equal(Err_ext, Err_ref)
+
+
+@pytest.mark.parametrize("bits", [2, 3, 4, 8])
+@pytest.mark.parametrize("group_size", [1, 2, 4, 8, 16, 32, 64, 128, 160, 256])
+def test_gptq_cpu_block_matches_serial_quantize(bits, group_size, monkeypatch):
+    """The compiled CPU GPTQ block path is bit-exact with the serial eager path."""
+    torch.manual_seed(bits * 1000 + group_size)
+    base_layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    base_layer.weight.data = torch.randn_like(base_layer.weight.data)
+    calibration = torch.randn(1, 4, 8)
+
+    def _run(block_cpu: str):
+        monkeypatch.setenv("GPTQMODEL_BLOCK_CPU", block_cpu)
+        layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+        layer.weight.data.copy_(base_layer.weight.data)
+        qcfg = QuantizeConfig(bits=bits, group_size=group_size, desc_act=False)
+        gptq = GPTQ(layer, qcfg=qcfg)
+        gptq.quantizer.configure(perchannel=True)
+        gptq.add_batch(calibration, None)
+        return gptq.quantize(blocksize=4)
+
+    Q_ref, scale_ref, zero_ref, g_ref, *_ = _run("0")
+    Q_cpu, scale_cpu, zero_cpu, g_cpu, *_ = _run("1")
+    assert torch.equal(Q_ref, Q_cpu)
+    assert torch.equal(scale_ref, scale_cpu)
+    assert torch.equal(zero_ref, zero_cpu)
+    assert torch.equal(g_ref, g_cpu)
 
 
 def test_find_params_batched_cpu_extension_matches_eager():

@@ -2090,11 +2090,21 @@ class GPTQ:
                     and gptq_block_cpu is not None
                     and Hinv is not None
                     and count <= 128
-                    and group_size > 0
                     and not self.qcfg.static_groups
-                    and count % group_size == 0
-                    and batched_group_count == count // group_size
                     and W1.device.type == "cpu"
+                    and (
+                        group_size == -1
+                        or (
+                            group_size > 0
+                            and (
+                                (group_size <= count and i1 % group_size == 0)
+                                or (
+                                    group_size > count
+                                    and i2 <= min(((i1 // group_size) + 1) * group_size, self.columns)
+                                )
+                            )
+                        )
+                    )
                 ):
                     try:
                         maxq_value = (
@@ -2102,19 +2112,96 @@ class GPTQ:
                             if self.quantizer.requires_groupwise_processing()
                             else 2 ** self.qcfg.bits - 1
                         )
+                        groupwise = self.quantizer.requires_groupwise_processing()
+
+                        if group_size == -1:
+                            # Per-row/channel scale was computed once for the whole layer.
+                            cpu_scale = self.quantizer.scale.view(W1.size(0), -1).contiguous()
+                            cpu_zero = self.quantizer.zero.view(W1.size(0), -1).contiguous()
+                            cpu_group_size = count
+                            cpu_num_groups = 1
+                            first_global_group = 0
+                        elif group_size > count:
+                            # This block is a slice of a larger group. Re-use the
+                            # group scale computed at the group start, or compute it
+                            # now on the full group columns.
+                            group_start = (i1 // group_size) * group_size
+                            group_end = min(group_start + group_size, self.columns)
+                            if i1 % group_size == 0 or self.quantizer.scale is None:
+                                self.quantizer.find_params(
+                                    W[:, group_start:group_end],
+                                    weight=True,
+                                    hessian=group_scale_search_hessian(group_start, group_end),
+                                )
+                            cpu_scale = self.quantizer.scale.view(W1.size(0), -1).contiguous()
+                            cpu_zero = self.quantizer.zero.view(W1.size(0), -1).contiguous()
+                            cpu_group_size = count
+                            cpu_num_groups = 1
+                            first_global_group = i1 // group_size
+                        else:
+                            # group_size <= count.  Full groups are already batched;
+                            # add a tail scale if the block ends mid-group.
+                            num_full_groups = count // group_size
+                            tail = count - num_full_groups * group_size
+                            first_global_group = i1 // group_size
+
+                            segments_scale = [batched_scale]
+                            segments_zero = [batched_zero]
+                            if tail > 0:
+                                tail_start = i1 + num_full_groups * group_size
+                                tail_group_end = min(tail_start + group_size, self.columns)
+                                self.quantizer.find_params(
+                                    W[:, tail_start:tail_group_end],
+                                    weight=True,
+                                    hessian=group_scale_search_hessian(tail_start, tail_group_end),
+                                )
+                                tail_scale = self.quantizer.scale.view(W1.size(0), -1)
+                                tail_zero = self.quantizer.zero.view(W1.size(0), -1)
+                                segments_scale.append(tail_scale)
+                                segments_zero.append(tail_zero)
+
+                            if len(segments_scale) == 1:
+                                cpu_scale = batched_scale
+                                cpu_zero = batched_zero
+                            else:
+                                cpu_scale = torch.cat(segments_scale, dim=1)
+                                cpu_zero = torch.cat(segments_zero, dim=1)
+                            cpu_group_size = group_size
+                            cpu_num_groups = num_full_groups + (1 if tail > 0 else 0)
+
                         Q1, Err1 = gptq_block_cpu(
                             W1,
                             Hinv1,
-                            batched_scale,
-                            batched_zero,
+                            cpu_scale,
+                            cpu_zero,
                             maxq_value,
-                            group_size,
-                            groupwise=self.quantizer.requires_groupwise_processing(),
+                            cpu_group_size,
+                            groupwise=groupwise,
                         )
-                        if batched_group_count > 0:
-                            scale.extend(batched_scale.chunk(batched_group_count, dim=1))
-                            zero.extend(batched_zero.chunk(batched_group_count, dim=1))
-                            now_idx = batched_first_global_idx + batched_group_count + 1
+
+                        # Append only the groups that are completed by this block.
+                        if group_size == -1:
+                            if i1 == 0:
+                                scale.extend([cpu_scale[:, k : k + 1] for k in range(cpu_num_groups)])
+                                zero.extend([cpu_zero[:, k : k + 1] for k in range(cpu_num_groups)])
+                                now_idx = first_global_group + cpu_num_groups + 1
+                        elif group_size > count:
+                            group_end = min(first_global_group * group_size + group_size, self.columns)
+                            if i2 == group_end or i2 == self.columns:
+                                scale.extend([cpu_scale[:, k : k + 1] for k in range(cpu_num_groups)])
+                                zero.extend([cpu_zero[:, k : k + 1] for k in range(cpu_num_groups)])
+                                now_idx = first_global_group + cpu_num_groups + 1
+                        else:
+                            completed_groups = num_full_groups
+                            if tail > 0:
+                                tail_start = i1 + num_full_groups * group_size
+                                tail_group_end = min(tail_start + group_size, self.columns)
+                                if i2 == tail_group_end or i2 == self.columns:
+                                    completed_groups = cpu_num_groups
+                            if completed_groups > 0:
+                                scale.extend([cpu_scale[:, k : k + 1] for k in range(completed_groups)])
+                                zero.extend([cpu_zero[:, k : k + 1] for k in range(completed_groups)])
+                                now_idx = first_global_group + completed_groups + 1
                         cpu_block_done = True
                     except Exception as exc:
                         log.warn(
