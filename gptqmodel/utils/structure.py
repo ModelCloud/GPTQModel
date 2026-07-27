@@ -956,17 +956,31 @@ class LazyTurtle:
         device: torch.device,
         non_blocking: bool = False,
         module_path: Optional[str] = None,
+        recurse: bool = True,
     ) -> torch.nn.Module:
         if module_path is None:
             module_path = _get_qualified_name(target_model, target_submodule)
+        if recurse:
+            modules_by_name: Optional[Dict[str, torch.nn.Module]] = dict(target_model.named_modules())
+        elif module_path is not None:
+            # Avoid a full model scan while still giving _resolve_prefer_transposed_hint
+            # access to the target submodule and all of its ancestors.
+            modules_by_name = {"": target_model}
+            parts = module_path.split(".")
+            for i in range(len(parts)):
+                prefix = ".".join(parts[: i + 1])
+                modules_by_name[prefix] = target_model.get_submodule(prefix)
+        else:
+            modules_by_name = None
         with self._lock:
             self._copy_checkpoint_tensors_into_submodule(
                 target_model=target_model,
                 target_submodule=target_submodule,
                 module_path=module_path,
                 device=device,
-                recurse=True,
+                recurse=recurse,
                 non_blocking=non_blocking,
+                modules_by_name=modules_by_name,
             )
         if hasattr(target_model, "tie_weights"):
             target_model.tie_weights()
@@ -2777,6 +2791,9 @@ class LazyTurtle:
                 job.target_tensor.copy_(source, non_blocking=(non_blocking and source.is_pinned()))
             return job.rel_name, _tensor_nbytes(tensor), time.perf_counter() - read_start
 
+        if not jobs and not deferred_buffers:
+            return loaded_entries
+
         max_workers = _lazy_turtle_parallel_workers(len(jobs))
         group_start = time.perf_counter()
         total_read_bytes = 0
@@ -2876,12 +2893,16 @@ class LazyTurtle:
         device: torch.device,
         recurse: bool,
         non_blocking: bool,
+        modules_by_name: Optional[Dict[str, nn.Module]] = None,
     ) -> None:
         """Materialize checkpoint tensors into a shell submodule and rebuild missing init-only buffers."""
 
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
-        modules_by_name = dict(target_model.named_modules())
+        if not t_params and not t_bufs:
+            return
+        if modules_by_name is None:
+            modules_by_name = dict(target_model.named_modules())
         missing_nonpersistent_buffers: list[tuple[str, str]] = []
 
         grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
@@ -3496,6 +3517,7 @@ def alias_from_turtle_for_submodule(
     device: torch.device,
     non_blocking: bool = False,
     module_path: Optional[str] = None,
+    recurse: bool = True,
 ) -> torch.nn.Module:
     # Lazy turtle supports materialization from checkpoint storage into CPU or accelerator devices.
     assert device not in [None, torch.device("meta")]
@@ -3510,6 +3532,7 @@ def alias_from_turtle_for_submodule(
         device=device,
         non_blocking=non_blocking,
         module_path=module_path,
+        recurse=recurse,
     )
 
 

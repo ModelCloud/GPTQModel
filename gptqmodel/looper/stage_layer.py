@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 from concurrent.futures import as_completed
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 import torch
 from defuser.modeling.replace_modules import materialize_model
@@ -47,6 +47,30 @@ from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from .module_looper import ModuleLooper
+
+
+def _build_pre_quantize_skip_plan(layer_modules: List[List[str]]) -> Set[str]:
+    """Build the relative leaf-module names that pre_quantize should skip for batch loading.
+
+    Note: this function assumes `layer_modules` has already had MoE expert placeholders
+    (e.g. `EXPERT_INDEX_PLACEHOLDER`) expanded into concrete indices by
+    `simple_layer_modules` -> `build_moe_modules_if_need` before `run_layer_stage` is
+    invoked. If a future caller passes unexpanded module trees containing `#`, the skip
+    names will not match real submodule paths and those leaves will fall back to the
+    per-submodule materialize path instead of the grouped batch load.
+    """
+
+    skip_module_names: Set[str] = set()
+    for block in layer_modules:
+        for raw_name in block:
+            if not raw_name:
+                continue
+            # layer_modules may still contain colon-delimited flags; strip them for the actual path.
+            clean_name = raw_name.split(":", 1)[0]
+            if not clean_name:
+                continue
+            skip_module_names.add(clean_name)
+    return skip_module_names
 
 
 def _should_drain_finalize_futures_synchronously(
@@ -485,7 +509,15 @@ def run_layer_stage(
         ):
             continue
 
-        module = looper.gptq_model.pre_quantize(module)
+        if is_embeddings_module or not layer_modules:
+            module = looper.gptq_model.pre_quantize(module, layer_name=layer_name or "")
+        else:
+            skip_module_names = _build_pre_quantize_skip_plan(layer_modules)
+            module = looper.gptq_model.pre_quantize(
+                module,
+                skip_module_names=skip_module_names,
+                layer_name=layer_name or "",
+            )
 
         embedding_module_name = None
         if is_input_embeddings_module:

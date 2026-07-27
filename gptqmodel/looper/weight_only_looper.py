@@ -1131,6 +1131,7 @@ class WeightOnlyLooper:
                                     role="quant_source",
                                     named_module=named,
                                     module_path=named.full_name,
+                                    recurse=False,
                                 )
                                 if prepared is not named.module:
                                     named.module = prepared

@@ -73,6 +73,7 @@ from ..utils.disk_telemetry import disk_telemetry
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
+from ..utils.looper_helpers import normalize_device_like
 from ..utils.model import (
     MODALITY,
     _module_has_meta_tensors,
@@ -2017,27 +2018,118 @@ class BaseQModel(nn.Module):
             self.post_quantize(norm)
         return inputs
 
-    def pre_quantize(self, module: nn.Module) -> nn.Module:
+    def pre_quantize(
+        self,
+        module: nn.Module,
+        *,
+        skip_module_names: Optional[set[str]] = None,
+        layer_name: str = "",
+    ) -> nn.Module:
         timer = getattr(self, "quant_region_timer", None)
         src_device = get_device(module)
+        base_device = normalize_device_like(self.quantize_config.device)
+        if base_device is None:
+            base_device = CPU
+
         if src_device == META or _module_has_meta_tensors(module):
-            # shell_module_materialize records module_load itself.
+            if (
+                skip_module_names
+                and isinstance(self.turtle_model, LazyTurtle)
+                and self.turtle_model is not None
+            ):
+                start = time.perf_counter() if timer is not None else None
+                self._pre_quantize_with_skip(
+                    module,
+                    skip_module_names=skip_module_names,
+                    base_device=base_device,
+                    layer_name=layer_name,
+                )
+                if timer is not None and start is not None:
+                    timer.record(
+                        "module_load",
+                        time.perf_counter() - start,
+                        source=f"pre_quantize {layer_name} batch_load skip={len(skip_module_names)}",
+                    )
+                return module
+
             return self.shell_module_materialize(
                 target_submodule=module,
-                device=self.quantize_config.device,
+                device=base_device,
             )
-        elif src_device == CPU and self.quantize_config.device != CPU:
+        elif src_device == CPU and base_device != CPU:
             start = time.perf_counter() if timer is not None else None
-            result = move_to(module, device=self.quantize_config.device)
+            result = move_to(module, device=base_device)
             if timer is not None and start is not None:
                 timer.record(
                     "module_move",
                     time.perf_counter() - start,
-                    source=f"pre_quantize {getattr(module, 'full_name', '')} {src_device}->{self.quantize_config.device}",
+                    source=f"pre_quantize {getattr(module, 'full_name', '')} {src_device}->{base_device}",
                 )
             return result
         else:
             return module
+
+    def _pre_quantize_with_skip(
+        self,
+        module: nn.Module,
+        *,
+        skip_module_names: set[str],
+        base_device: torch.device,
+        layer_name: str,
+    ) -> None:
+        """Load non-leaf modules directly and batch load leaf modules in parallel."""
+
+        if not isinstance(self.turtle_model, LazyTurtle) or self.turtle_model is None:
+            return
+
+        skip_set = set(skip_module_names)
+
+        def _is_skipped(rel_name: str) -> bool:
+            if rel_name in skip_set:
+                return True
+            for skip in skip_set:
+                if rel_name.startswith(skip + "."):
+                    return True
+            return False
+
+        # Load non-quantized structural modules (norms, routers, rotary embeddings, etc.)
+        # with recurse=False so we only touch their own parameters and leave the skipped
+        # leaf projections for the batched grouped load below.
+        for rel_name, sub in module.named_modules():
+            if _is_skipped(rel_name):
+                continue
+            if rel_name:
+                full_path = f"{layer_name}.{rel_name}" if layer_name else rel_name
+            else:
+                # The module itself (the decoder layer) may own direct parameters/buffers.
+                full_path = layer_name
+            self.turtle_model.materialize_submodule(
+                target_model=self.model,
+                target_submodule=sub,
+                device=base_device,
+                module_path=full_path,
+                recurse=False,
+            )
+
+        # Batch load all skipped leaf modules onto the layer device. The cross-submodule
+        # grouped loader produces a single "LazyTurtle: loading N grouped tensors ...
+        # [modules=...]" log line instead of one-per-expert "using 1 worker(s)" lines.
+        batch: List[Tuple[torch.nn.Module, str, torch.device]] = []
+        for rel_name in sorted(skip_module_names):
+            try:
+                sub = module.get_submodule(rel_name)
+            except AttributeError:
+                continue
+            if sub is None:
+                continue
+            full_path = f"{layer_name}.{rel_name}" if layer_name else rel_name
+            batch.append((sub, full_path, base_device))
+
+        if batch:
+            self.turtle_model.materialize_submodules(
+                target_model=self.model,
+                submodules=batch,
+            )
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         #return self.offload_to_disk(module=module)
@@ -2821,6 +2913,7 @@ class BaseQModel(nn.Module):
             role: str = "default",
             named_module: Optional["NamedModule"] = None,
             module_path: Optional[str] = None,
+            recurse: bool = True,
     ) -> torch.nn.Module:
         timer = getattr(self, "quant_region_timer", None)
         start = time.perf_counter() if timer is not None else None
@@ -2902,6 +2995,7 @@ class BaseQModel(nn.Module):
                         target_submodule=target_submodule,
                         device=device,
                         module_path=module_path,
+                        recurse=recurse,
                     )
 
                 if role == "forward" and named_module is not None:

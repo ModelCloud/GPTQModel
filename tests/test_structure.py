@@ -9,6 +9,7 @@ import torch.nn as nn
 from safetensors.torch import save_file
 
 import gptqmodel.utils.structure as structure
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.utils.structure import LazyTurtle, print_module_tree
 
 
@@ -411,3 +412,181 @@ def test_lazy_turtle_materialize_submodules_holds_turtle_lock(tmp_path, monkeypa
 
     assert len(lock_states) > 0, "expected shard handler(s) to be opened during batch load"
     assert all(lock_states), "LazyTurtle lock must be held while opening shard handlers"
+
+
+def test_lazy_turtle_materialize_submodule_recurse_false_avoids_model_scan(tmp_path, monkeypatch):
+    """recurse=False should only build a minimal modules_by_name map and not scan the model."""
+
+    model_dir, _ = _make_simple_checkpoint(tmp_path)
+
+    prev_device = torch.get_default_device()
+    torch.set_default_device("meta")
+    try:
+        shell = _LazyTurtleShell()
+    finally:
+        torch.set_default_device(prev_device)
+    for p in shell.parameters():
+        p.requires_grad = False
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("target_model.named_modules() should not be called when recurse=False")
+
+    monkeypatch.setattr(shell, "named_modules", _should_not_be_called)
+
+    turtle.materialize_submodule(
+        target_model=shell,
+        target_submodule=shell.inner,
+        device=torch.device("cpu"),
+        module_path="inner",
+        recurse=False,
+    )
+
+    # With recurse=False the submodule's own parameters are not loaded; children stay meta.
+    assert shell.inner.layer0.weight.device.type == "meta"
+
+
+def test_lazy_turtle_materialize_submodule_recurse_true_loads_children(tmp_path):
+    """recurse=True should descend into children and load their parameters."""
+
+    model_dir, source = _make_simple_checkpoint(tmp_path)
+    shell = _LazyTurtleShell()
+    for p in shell.parameters():
+        p.requires_grad = False
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    turtle.materialize_submodule(
+        target_model=shell,
+        target_submodule=shell.inner,
+        device=torch.device("cpu"),
+        module_path="inner",
+        recurse=True,
+    )
+
+    expected = source["inner.layer0.weight"].transpose(0, 1).contiguous()
+    assert torch.equal(shell.inner.layer0.weight, expected)
+
+
+class _TestBaseQModel(BaseQModel):
+    """Minimal BaseQModel instance for pre_quantize unit tests."""
+
+    def __init__(self, model: nn.Module, turtle_model: LazyTurtle, quantize_config: Any) -> None:
+        nn.Module.__init__(self)
+        self.model = model
+        self.turtle_model = turtle_model
+        self.quantize_config = quantize_config
+
+
+def test_base_qmodel_pre_quantize_batches_leaf_modules(tmp_path, monkeypatch):
+    """pre_quantize with skip_module_names should batch load leaves and recurse=False on containers."""
+
+    num_experts = 4
+    model_dir = tmp_path / "pre_quant"
+    model_dir.mkdir()
+
+    prev_device = torch.get_default_device()
+    torch.set_default_device("meta")
+    try:
+        shell = _LagunaShellModel(num_layers=1, num_experts=num_experts)
+    finally:
+        torch.set_default_device(prev_device)
+    for p in shell.parameters():
+        p.requires_grad = False
+
+    source = {}
+    for i in range(num_experts):
+        for proj in ("gate_proj", "up_proj", "down_proj"):
+            linear = getattr(shell.layers[0].mlp["experts"][i], proj)
+            w_in_out = torch.randn(linear.in_features, linear.out_features, dtype=torch.float32)
+            source[f"layers.0.mlp.experts.{i}.{proj}.weight"] = w_in_out
+
+    save_file(source, str(model_dir / "model.safetensors"))
+    _write_lazy_turtle_index(model_dir, "model.safetensors", source)
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    gptq_model = _TestBaseQModel(
+        model=shell,
+        turtle_model=turtle,
+        quantize_config=SimpleNamespace(device="cpu"),
+    )
+
+    skip_names = {
+        f"mlp.experts.{i}.{proj}"
+        for i in range(num_experts)
+        for proj in ("gate_proj", "up_proj", "down_proj")
+    }
+
+    submodule_calls = []
+    submodules_calls = []
+
+    orig_submodule = turtle.materialize_submodule
+    orig_submodules = turtle.materialize_submodules
+
+    def _patched_submodule(*, target_model, target_submodule, device, non_blocking=False, module_path=None, recurse=True):
+        submodule_calls.append({"module_path": module_path, "recurse": recurse, "device": str(device)})
+        return orig_submodule(
+            target_model=target_model,
+            target_submodule=target_submodule,
+            device=device,
+            non_blocking=non_blocking,
+            module_path=module_path,
+            recurse=recurse,
+        )
+
+    def _patched_submodules(*, target_model, submodules, non_blocking=False):
+        submodules_calls.append(submodules)
+        return orig_submodules(
+            target_model=target_model,
+            submodules=submodules,
+            non_blocking=non_blocking,
+        )
+
+    monkeypatch.setattr(turtle, "materialize_submodule", _patched_submodule)
+    monkeypatch.setattr(turtle, "materialize_submodules", _patched_submodules)
+
+    gptq_model.pre_quantize(
+        shell.layers[0],
+        skip_module_names=skip_names,
+        layer_name="layers.0",
+    )
+
+    assert len(submodules_calls) == 1
+    batch = submodules_calls[0]
+    assert len(batch) == len(skip_names)
+    for _, path, device in batch:
+        assert path.startswith("layers.0.mlp.experts.")
+        assert str(device) == "cpu"
+
+    # Every non-leaf submodule call must use recurse=False so containers do not duplicate leaf loads.
+    for call in submodule_calls:
+        assert call["recurse"] is False
+
+    # All skipped leaf projections should be materialized as one batch.
+    for i in range(num_experts):
+        for proj in ("gate_proj", "up_proj", "down_proj"):
+            full = f"layers.0.mlp.experts.{i}.{proj}"
+            assert any(path == full for _, path, _ in batch)
+            loaded = getattr(shell.layers[0].mlp["experts"][i], proj).weight
+            assert loaded.device.type == "cpu"
+            assert torch.equal(
+                loaded,
+                source[f"layers.0.mlp.experts.{i}.{proj}.weight"].transpose(0, 1).contiguous(),
+            )

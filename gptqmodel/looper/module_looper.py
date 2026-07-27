@@ -1121,6 +1121,7 @@ class ModuleLooper():
             role="forward",
             named_module=named_module,
             module_path=module_label,
+            recurse=False,
         )
         if prepared is not named_module.module:
             named_module.module = prepared
@@ -1156,6 +1157,7 @@ class ModuleLooper():
                 role="quant_source",
                 named_module=named_module,
                 module_path=module_label,
+                recurse=False,
             )
             if prepared is not named_module.module:
                 named_module.module = prepared
