@@ -1033,6 +1033,48 @@ def test_gptq_cpu_block_matches_serial_quantize(bits, group_size, monkeypatch):
     assert torch.equal(g_ref, g_cpu)
 
 
+@pytest.mark.parametrize("bits", [2, 3, 4, 8])
+@pytest.mark.parametrize(
+    "group_size,in_features,blocksize",
+    [
+        # group_size larger than and not divisible by blocksize triggers a
+        # serial-fallback block that crosses a group boundary, followed by a
+        # CPU block that completes the same group. The scale must not be
+        # recorded twice.
+        (160, 480, 128),
+        (12, 30, 8),
+        (96, 200, 128),
+    ],
+)
+def test_gptq_cpu_block_no_duplicate_scales_for_large_group_size(
+    bits, group_size, in_features, blocksize, monkeypatch
+):
+    """Regression for duplicated scale/zero entries when a group is split across blocks."""
+    torch.manual_seed(bits * 1000 + group_size + in_features)
+    base_layer = nn.Linear(in_features, 6, bias=False, dtype=torch.float32).eval()
+    base_layer.weight.data = torch.randn_like(base_layer.weight.data)
+    calibration = torch.randn(1, 4, in_features)
+
+    def _run(block_cpu: str):
+        monkeypatch.setenv("GPTQMODEL_BLOCK_CPU", block_cpu)
+        layer = nn.Linear(in_features, 6, bias=False, dtype=torch.float32).eval()
+        layer.weight.data.copy_(base_layer.weight.data)
+        qcfg = QuantizeConfig(bits=bits, group_size=group_size, desc_act=False)
+        gptq = GPTQ(layer, qcfg=qcfg)
+        gptq.quantizer.configure(perchannel=True)
+        gptq.add_batch(calibration, None)
+        return gptq.quantize(blocksize=blocksize)
+
+    Q_ref, scale_ref, zero_ref, g_ref, *_ = _run("0")
+    Q_cpu, scale_cpu, zero_cpu, g_cpu, *_ = _run("1")
+    assert torch.equal(Q_ref, Q_cpu)
+    assert torch.equal(scale_ref, scale_cpu)
+    assert torch.equal(zero_ref, zero_cpu)
+    assert scale_cpu.shape[1] == (in_features + group_size - 1) // group_size
+    assert zero_cpu.shape == scale_cpu.shape
+    assert torch.equal(g_ref, g_cpu)
+
+
 def test_find_params_batched_cpu_extension_matches_eager():
     """The compiled CPU scale-search fallback returns the same scale/zero as the eager fallback."""
     from gptqmodel.quantization.quantizer import Quantizer

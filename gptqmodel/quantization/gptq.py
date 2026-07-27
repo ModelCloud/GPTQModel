@@ -2179,29 +2179,30 @@ class GPTQ:
                             groupwise=groupwise,
                         )
 
-                        # Append only the groups that are completed by this block.
-                        if group_size == -1:
-                            if i1 == 0:
+                        # Append only the groups that are completed by this block and
+                        # have not already been recorded by an earlier fallback path.
+                        if first_global_group == now_idx - 1:
+                            if group_size == -1:
                                 scale.extend([cpu_scale[:, k : k + 1] for k in range(cpu_num_groups)])
                                 zero.extend([cpu_zero[:, k : k + 1] for k in range(cpu_num_groups)])
                                 now_idx = first_global_group + cpu_num_groups + 1
-                        elif group_size > count:
-                            group_end = min(first_global_group * group_size + group_size, self.columns)
-                            if i2 == group_end or i2 == self.columns:
-                                scale.extend([cpu_scale[:, k : k + 1] for k in range(cpu_num_groups)])
-                                zero.extend([cpu_zero[:, k : k + 1] for k in range(cpu_num_groups)])
-                                now_idx = first_global_group + cpu_num_groups + 1
-                        else:
-                            completed_groups = num_full_groups
-                            if tail > 0:
-                                tail_start = i1 + num_full_groups * group_size
-                                tail_group_end = min(tail_start + group_size, self.columns)
-                                if i2 == tail_group_end or i2 == self.columns:
-                                    completed_groups = cpu_num_groups
-                            if completed_groups > 0:
-                                scale.extend([cpu_scale[:, k : k + 1] for k in range(completed_groups)])
-                                zero.extend([cpu_zero[:, k : k + 1] for k in range(completed_groups)])
-                                now_idx = first_global_group + completed_groups + 1
+                            elif group_size > count:
+                                group_end = min(first_global_group * group_size + group_size, self.columns)
+                                if i2 == group_end or i2 == self.columns:
+                                    scale.extend([cpu_scale[:, k : k + 1] for k in range(cpu_num_groups)])
+                                    zero.extend([cpu_zero[:, k : k + 1] for k in range(cpu_num_groups)])
+                                    now_idx = first_global_group + cpu_num_groups + 1
+                            else:
+                                completed_groups = num_full_groups
+                                if tail > 0:
+                                    tail_start = i1 + num_full_groups * group_size
+                                    tail_group_end = min(tail_start + group_size, self.columns)
+                                    if i2 == tail_group_end or i2 == self.columns:
+                                        completed_groups = cpu_num_groups
+                                if completed_groups > 0:
+                                    scale.extend([cpu_scale[:, k : k + 1] for k in range(completed_groups)])
+                                    zero.extend([cpu_zero[:, k : k + 1] for k in range(completed_groups)])
+                                    now_idx = first_global_group + completed_groups + 1
                         cpu_block_done = True
                     except Exception as exc:
                         log.warn(
