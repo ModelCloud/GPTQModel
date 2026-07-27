@@ -542,8 +542,8 @@ def test_base_qmodel_pre_quantize_batches_leaf_modules(tmp_path, monkeypatch):
 
     tie_weights_calls = []
 
-    def _patched_submodule(*, target_model, target_submodule, device, non_blocking=False, module_path=None, recurse=True, tie_weights=True):
-        submodule_calls.append({"module_path": module_path, "recurse": recurse, "device": str(device), "tie_weights": tie_weights})
+    def _patched_submodule(*, target_model, target_submodule, device, non_blocking=False, module_path=None, recurse=True, tie_weights=True, show_progress=True):
+        submodule_calls.append({"module_path": module_path, "recurse": recurse, "device": str(device), "tie_weights": tie_weights, "show_progress": show_progress})
         return orig_submodule(
             target_model=target_model,
             target_submodule=target_submodule,
@@ -552,15 +552,17 @@ def test_base_qmodel_pre_quantize_batches_leaf_modules(tmp_path, monkeypatch):
             module_path=module_path,
             recurse=recurse,
             tie_weights=tie_weights,
+            show_progress=show_progress,
         )
 
-    def _patched_submodules(*, target_model, submodules, non_blocking=False, tie_weights=True):
-        submodules_calls.append({"submodules": submodules, "tie_weights": tie_weights})
+    def _patched_submodules(*, target_model, submodules, non_blocking=False, tie_weights=True, show_progress=True):
+        submodules_calls.append({"submodules": submodules, "tie_weights": tie_weights, "show_progress": show_progress})
         return orig_submodules(
             target_model=target_model,
             submodules=submodules,
             non_blocking=non_blocking,
             tie_weights=tie_weights,
+            show_progress=show_progress,
         )
 
     def _patched_tie_weights():
@@ -592,8 +594,10 @@ def test_base_qmodel_pre_quantize_batches_leaf_modules(tmp_path, monkeypatch):
     # No per-submodule weight tying; the whole layer should tie exactly once.
     for call in submodule_calls:
         assert call["tie_weights"] is False
+        assert call["show_progress"] is False
     for call in submodules_calls:
         assert call["tie_weights"] is False
+        assert call["show_progress"] is False
     assert len(tie_weights_calls) == 1
 
     # All skipped leaf projections should be materialized as one batch.

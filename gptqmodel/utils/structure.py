@@ -958,6 +958,7 @@ class LazyTurtle:
         module_path: Optional[str] = None,
         recurse: bool = True,
         tie_weights: bool = True,
+        show_progress: bool = True,
     ) -> torch.nn.Module:
         if module_path is None:
             module_path = _get_qualified_name(target_model, target_submodule)
@@ -988,6 +989,7 @@ class LazyTurtle:
                 recurse=recurse,
                 non_blocking=non_blocking,
                 modules_by_name=modules_by_name,
+                show_progress=show_progress,
             )
         if tie_weights and loaded_entries > 0 and hasattr(target_model, "tie_weights"):
             target_model.tie_weights()
@@ -1000,6 +1002,7 @@ class LazyTurtle:
         submodules: List[Tuple[torch.nn.Module, str, torch.device]],
         non_blocking: bool = False,
         tie_weights: bool = True,
+        show_progress: bool = True,
     ) -> None:
         """Materialize many independent shell submodules in a single grouped parallel load.
 
@@ -1026,6 +1029,7 @@ class LazyTurtle:
                 module_path=module_path,
                 recurse=False,
                 tie_weights=tie_weights,
+                show_progress=show_progress,
             )
             return
 
@@ -1184,6 +1188,7 @@ class LazyTurtle:
                     non_blocking=non_blocking,
                     module_path=module_path,
                     tie_weights=False,
+                    show_progress=show_progress,
                 )
             if tie_weights and hasattr(target_model, "tie_weights"):
                 target_model.tie_weights()
@@ -2907,7 +2912,8 @@ class LazyTurtle:
         recurse: bool,
         non_blocking: bool,
         modules_by_name: Optional[Dict[str, nn.Module]] = None,
-    ) -> None:
+        show_progress: bool = True,
+    ) -> int:
         """Materialize checkpoint tensors into a shell submodule and rebuild missing init-only buffers."""
 
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
@@ -2982,7 +2988,7 @@ class LazyTurtle:
         total_entries = sum(len(entries) for entries in grouped_names.values()) + len(concat_entries)
         progress = None
         loaded_entries = 0
-        if total_entries:
+        if total_entries and show_progress:
             progress = log.pb(range(total_entries)).manual().set(show_left_steps=False)
             module_label = module_path or "<root>"
             progress.title(f"Loading checkpoint tensors ({total_entries})")
@@ -3532,6 +3538,7 @@ def alias_from_turtle_for_submodule(
     non_blocking: bool = False,
     module_path: Optional[str] = None,
     recurse: bool = True,
+    show_progress: bool = True,
 ) -> torch.nn.Module:
     # Lazy turtle supports materialization from checkpoint storage into CPU or accelerator devices.
     assert device not in [None, torch.device("meta")]
@@ -3547,6 +3554,7 @@ def alias_from_turtle_for_submodule(
         non_blocking=non_blocking,
         module_path=module_path,
         recurse=recurse,
+        show_progress=show_progress,
     )
 
 

@@ -2116,6 +2116,7 @@ class BaseQModel(nn.Module):
                 module_path=full_path,
                 recurse=False,
                 tie_weights=False,
+                show_progress=False,
             )
 
         # Batch load all skipped leaf modules onto the layer device. The cross-submodule
@@ -2137,6 +2138,7 @@ class BaseQModel(nn.Module):
                 target_model=self.model,
                 submodules=batch,
                 tie_weights=False,
+                show_progress=False,
             )
 
         # Tie weights once for the whole layer rather than once per materialized submodule.
@@ -2926,6 +2928,7 @@ class BaseQModel(nn.Module):
             named_module: Optional["NamedModule"] = None,
             module_path: Optional[str] = None,
             recurse: bool = True,
+            show_progress: bool = True,
     ) -> torch.nn.Module:
         timer = getattr(self, "quant_region_timer", None)
         start = time.perf_counter() if timer is not None else None
@@ -3008,6 +3011,7 @@ class BaseQModel(nn.Module):
                         device=device,
                         module_path=module_path,
                         recurse=recurse,
+                        show_progress=show_progress,
                     )
 
                 if role == "forward" and named_module is not None:
