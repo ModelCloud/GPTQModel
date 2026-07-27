@@ -942,6 +942,99 @@ def test_hessian_xtx_cpu_extension_matches_eager():
     assert torch.equal(out, out_ref2)
 
 
+def _gptq_block_reference(W1, Hinv1, scale, zero, maxq, group_size, groupwise):
+    """Eager CPU reference for gptq_block_cpu using torch.addr."""
+    rows, count = W1.shape
+    local = W1.clone()
+    Q = torch.empty_like(W1)
+    Err = torch.empty_like(W1)
+    for i in range(count):
+        g = i // group_size
+        sc = scale[:, g : g + 1]
+        zv = zero[:, g : g + 1]
+        w = local[:, i : i + 1]
+        if groupwise:
+            q = sc * torch.clamp(torch.round(w / sc), -maxq, maxq)
+        else:
+            q = sc * (torch.clamp(torch.round(w / sc) + zv, 0.0, maxq) - zv)
+        Q[:, i] = q.squeeze(-1)
+        d = Hinv1[i, i]
+        err = (w - q) / d
+        Err[:, i] = err.squeeze(-1)
+        local[:, i:] = torch.addr(local[:, i:], err.view(-1), Hinv1[i, i:], alpha=-1.0)
+    return Q, Err
+
+
+def test_gptq_block_cpu_extension_matches_eager():
+    """The compiled CPU GPTQ block step is bit-exact with the eager torch.addr loop."""
+    torch.manual_seed(0)
+    rows, count = 64, 32
+    group_size = 8
+    W1 = torch.randn(rows, count, dtype=torch.float32)
+    H = torch.randn(count, count, dtype=torch.float32)
+    H = H @ H.T
+    H.diagonal().add_(0.1)
+    Hinv1 = torch.linalg.cholesky(torch.cholesky_inverse(torch.linalg.cholesky(H)))
+    scale = torch.rand(rows, count // group_size, dtype=torch.float32) * 0.05 + 0.01
+    zero = torch.rand(rows, count // group_size, dtype=torch.float32) * 5
+    maxq = 15
+
+    from gptqmodel.nn_modules.qlinear.pack_block_ext import gptq_block_cpu
+
+    for groupwise in (False, True):
+        Q_ref, Err_ref = _gptq_block_reference(W1, Hinv1, scale, zero, maxq, group_size, groupwise)
+        Q_ext, Err_ext = gptq_block_cpu(W1, Hinv1, scale, zero, maxq, group_size, groupwise)
+        assert torch.equal(Q_ext, Q_ref)
+        assert torch.equal(Err_ext, Err_ref)
+
+
+def test_find_params_batched_cpu_extension_matches_eager():
+    """The compiled CPU scale-search fallback returns the same scale/zero as the eager fallback."""
+    from gptqmodel.quantization.quantizer import Quantizer
+    from gptqmodel.nn_modules.qlinear.pack_block_ext import find_params_batched_cpu
+    from gptqmodel.quantization.config import ScaleSearchConfig
+
+    torch.manual_seed(0)
+    rows, num_groups, group_size = 32, 2, 32
+    qcfg = QuantizeConfig(bits=4, group_size=group_size)
+    quantizer = Quantizer(qcfg=qcfg)
+    quantizer.configure(perchannel=True, sym=True)
+
+    x = torch.randn(rows, num_groups, group_size, dtype=torch.float32)
+    hessian = torch.rand(num_groups, group_size, dtype=torch.float32) + 0.1
+    scale_ref, zero_ref = quantizer.find_params_batched(x, weight=True, hessian=hessian)
+
+    tmp = torch.zeros((rows, num_groups), dtype=torch.float32)
+    xmin = torch.minimum(x.amin(dim=-1), tmp)
+    xmax = torch.maximum(x.amax(dim=-1), tmp)
+    if qcfg.sym:
+        xmax = torch.maximum(torch.abs(xmin), xmax)
+        mask = xmin < 0
+        xmin = torch.where(mask, -xmax, xmin)
+    mask = (xmin == 0) & (xmax == 0)
+    xmin = torch.where(mask, -torch.ones_like(xmin), xmin)
+    xmax = torch.where(mask, torch.ones_like(xmax), xmax)
+    importance = quantizer._prepare_scale_search_hessian_batched(
+        hessian, method=ScaleSearchConfig.ACTIVATION
+    )
+
+    scale_ext, zero_ext = find_params_batched_cpu(
+        x,
+        xmin,
+        xmax,
+        importance,
+        quantizer.grid,
+        quantizer.maxshrink,
+        int(quantizer.maxq.item()),
+        qcfg.sym,
+        quantizer.requires_groupwise_processing(),
+        ScaleSearchConfig.ACTIVATION.value,
+        0.0,
+    )
+    assert torch.equal(scale_ext, scale_ref)
+    assert torch.equal(zero_ext, zero_ref)
+
+
 class TestGPTQHessian:
     """Verify GPTQ Hessian accumulation matches the closed-form reference."""
 

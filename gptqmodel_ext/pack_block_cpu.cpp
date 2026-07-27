@@ -15,6 +15,7 @@
 #include <cstring>
 #include <limits>
 #include <tuple>
+#include <vector>
 
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #include <immintrin.h>
@@ -1443,6 +1444,312 @@ at::Tensor pack_qqq_cpu(const at::Tensor& int4_matrix, int64_t bits) {
     return q;
 }
 
+// Round-to-nearest-even for float32.  This matches torch.round and the
+// Triton _round_half_to_even helper used by the GPU scale-search kernels.
+inline float round_half_to_even(float x) {
+    if (!std::isfinite(x)) {
+        return x;
+    }
+    float s = (x >= 0.0f) ? 1.0f : -1.0f;
+    float ax = x * s;
+    float y = std::floor(ax);
+    float frac = ax - y;
+    bool is_odd = (static_cast<int32_t>(y) & 1) != 0;
+    bool inc = (frac > 0.5f) || (frac == 0.5f && is_odd);
+    return s * (y + (inc ? 1.0f : 0.0f));
+}
+
+// Dequantize a single weight with the same formula used by the eager GPTQ
+// block loop (and the Triton block kernel).  This keeps the CPU block kernel
+// bit-identical to the existing PyTorch reference.
+inline float quantize_gptq(
+    float w,
+    float scale,
+    float zero,
+    float maxq,
+    bool groupwise) {
+    float ratio = w / scale;
+    // Clamp before rounding so the integer floor/parity logic stays well within
+    // the range of a 32-bit int.  The exact clamp bounds are one wider than
+    // the final quantization range, which preserves tie-breaking at the edges.
+    float ratio_min;
+    float ratio_max;
+    if (groupwise) {
+        ratio_min = -maxq - 1.0f;
+        ratio_max = maxq + 1.0f;
+    } else {
+        ratio_min = -zero - 1.0f;
+        ratio_max = maxq - zero + 1.0f;
+    }
+    if (ratio < ratio_min) {
+        ratio = ratio_min;
+    }
+    if (ratio > ratio_max) {
+        ratio = ratio_max;
+    }
+    float rounded = round_half_to_even(ratio);
+    if (groupwise) {
+        if (rounded < -maxq) {
+            rounded = -maxq;
+        }
+        if (rounded > maxq) {
+            rounded = maxq;
+        }
+        return rounded * scale;
+    }
+    float q_int = rounded + zero;
+    if (q_int < 0.0f) {
+        q_int = 0.0f;
+    }
+    if (q_int > maxq) {
+        q_int = maxq;
+    }
+    return scale * (q_int - zero);
+}
+
+// Batched activation / MSE scale search for CPU.  This mirrors the Triton
+// fast path used on CUDA: it scans all shrink candidates in C++, maintains a
+// small top-k of the best candidates per (row, group), and returns their
+// indices/scale/zero so the Python caller can recompute the exact loss with
+// the same arithmetic used by the eager fallback.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> find_params_batched_cpu_topk(
+    const at::Tensor& x,
+    const at::Tensor& xmin,
+    const at::Tensor& xmax,
+    const c10::optional<at::Tensor>& importance_opt,
+    int64_t grid,
+    double maxshrink,
+    int64_t maxq,
+    bool sym,
+    bool groupwise,
+    double mse) {
+    TORCH_CHECK(x.device().is_cpu(), "find_params_batched_cpu: x must reside on CPU");
+    TORCH_CHECK(x.dim() == 3, "find_params_batched_cpu: x must be 3D");
+    TORCH_CHECK(xmin.dim() == 2, "find_params_batched_cpu: xmin must be 2D");
+    TORCH_CHECK(xmax.dim() == 2, "find_params_batched_cpu: xmax must be 2D");
+    TORCH_CHECK(
+        xmin.sizes() == xmax.sizes(),
+        "find_params_batched_cpu: xmin and xmax must have the same shape");
+
+    at::Tensor x_f = x.contiguous().to(at::kFloat);
+    at::Tensor xmin_f = xmin.contiguous().to(at::kFloat);
+    at::Tensor xmax_f = xmax.contiguous().to(at::kFloat);
+
+    const int64_t rows = x_f.size(0);
+    const int64_t num_groups = x_f.size(1);
+    const int64_t group_size = x_f.size(2);
+
+    TORCH_CHECK(xmin_f.size(0) == rows, "find_params_batched_cpu: xmin rows mismatch");
+    TORCH_CHECK(
+        xmin_f.size(1) == num_groups, "find_params_batched_cpu: xmin groups mismatch");
+
+    bool has_importance = false;
+    at::Tensor importance_f;
+    if (importance_opt.has_value()) {
+        importance_f = importance_opt->contiguous().to(at::kFloat);
+        TORCH_CHECK(
+            importance_f.dim() == 2,
+            "find_params_batched_cpu: importance must be 2D");
+        TORCH_CHECK(
+            importance_f.size(0) == num_groups,
+            "find_params_batched_cpu: importance groups mismatch");
+        TORCH_CHECK(
+            importance_f.size(1) == group_size,
+            "find_params_batched_cpu: importance group_size mismatch");
+        has_importance = true;
+    }
+
+    int64_t candidate_count = static_cast<int64_t>(maxshrink * static_cast<double>(grid));
+    if (candidate_count < 1) {
+        candidate_count = 1;
+    }
+    constexpr int64_t TOPK_CAPACITY = 8;
+    const int64_t topk = std::min<int64_t>(candidate_count, TOPK_CAPACITY);
+
+    at::Tensor topk_idx = at::zeros(
+        {rows, num_groups, topk},
+        at::TensorOptions().dtype(at::kLong).device(x_f.device()));
+    at::Tensor topk_scale = at::empty(
+        {rows, num_groups, topk},
+        at::TensorOptions().dtype(at::kFloat).device(x_f.device()));
+    at::Tensor topk_zero = at::empty(
+        {rows, num_groups, topk},
+        at::TensorOptions().dtype(at::kFloat).device(x_f.device()));
+
+    const float* x_ptr = x_f.const_data_ptr<float>();
+    const float* xmin_ptr = xmin_f.const_data_ptr<float>();
+    const float* xmax_ptr = xmax_f.const_data_ptr<float>();
+    const float* imp_ptr = has_importance ? importance_f.const_data_ptr<float>() : nullptr;
+    int64_t* idx_ptr = topk_idx.data_ptr<int64_t>();
+    float* scale_ptr = topk_scale.data_ptr<float>();
+    float* zero_ptr = topk_zero.data_ptr<float>();
+
+    const float maxq_f = static_cast<float>(maxq);
+    const float grid_f = static_cast<float>(grid);
+    const float mse_f = static_cast<float>(mse);
+    const bool mse_is_two = std::abs(mse_f - 2.0f) < 1e-7f;
+    const float const_zero_sym = (maxq_f + 1.0f) / 2.0f;
+    const int64_t x_stride_r = num_groups * group_size;
+    const int64_t x_stride_g = group_size;
+
+    at::parallel_for(0, rows * num_groups, 64, [&](int64_t start, int64_t end) {
+        std::array<int64_t, TOPK_CAPACITY> best_idx{};
+        std::array<float, TOPK_CAPACITY> best_loss{};
+
+        for (int64_t rg = start; rg < end; ++rg) {
+            const int64_t row = rg / num_groups;
+            const int64_t g = rg % num_groups;
+            const float* x_rowg = x_ptr + row * x_stride_r + g * x_stride_g;
+            const float xmin_val = xmin_ptr[rg];
+            const float xmax_val = xmax_ptr[rg];
+            const float* imp_g = has_importance ? (imp_ptr + g * group_size) : nullptr;
+
+            for (int64_t ti = 0; ti < topk; ++ti) {
+                best_loss[ti] = std::numeric_limits<float>::infinity();
+                best_idx[ti] = 0;
+            }
+
+            for (int64_t c = 0; c < candidate_count; ++c) {
+                const float p = 1.0f - static_cast<float>(c) / grid_f;
+                const float xmin_p = p * xmin_val;
+                const float xmax_p = p * xmax_val;
+                float scale_c;
+                float zero_c;
+                if (groupwise) {
+                    scale_c = xmax_p / maxq_f;
+                    zero_c = 0.0f;
+                } else {
+                    scale_c = (xmax_p - xmin_p) / maxq_f;
+                    zero_c = sym ? const_zero_sym : round_half_to_even(-xmin_p / scale_c);
+                }
+
+                float loss = 0.0f;
+                for (int64_t j = 0; j < group_size; ++j) {
+                    const float q_val = quantize_gptq(x_rowg[j], scale_c, zero_c, maxq_f, groupwise);
+                    const float error = q_val - x_rowg[j];
+                    float w;
+                    if (has_importance) {
+                        // Activation scale search always uses squared error weighted
+                        // by the per-element importance (the mse field is ignored).
+                        w = error * error * imp_g[j];
+                    } else if (mse_is_two) {
+                        w = error * error;
+                    } else {
+                        w = std::pow(std::abs(error), mse_f);
+                    }
+                    loss += w;
+                }
+
+                if (loss < best_loss[topk - 1]) {
+                    int64_t pos = topk - 1;
+                    best_loss[pos] = loss;
+                    best_idx[pos] = c;
+                    while (pos > 0 && best_loss[pos] < best_loss[pos - 1]) {
+                        std::swap(best_loss[pos], best_loss[pos - 1]);
+                        std::swap(best_idx[pos], best_idx[pos - 1]);
+                        --pos;
+                    }
+                }
+            }
+
+            int64_t* idx_out = idx_ptr + rg * topk;
+            float* scale_out = scale_ptr + rg * topk;
+            float* zero_out = zero_ptr + rg * topk;
+            for (int64_t ti = 0; ti < topk; ++ti) {
+                const int64_t c = best_idx[ti];
+                idx_out[ti] = c;
+                const float p = 1.0f - static_cast<float>(c) / grid_f;
+                const float xmin_p = p * xmin_val;
+                const float xmax_p = p * xmax_val;
+                if (groupwise) {
+                    scale_out[ti] = xmax_p / maxq_f;
+                    zero_out[ti] = 0.0f;
+                } else {
+                    scale_out[ti] = (xmax_p - xmin_p) / maxq_f;
+                    zero_out[ti] = sym ? const_zero_sym : round_half_to_even(-xmin_p / scale_out[ti]);
+                }
+            }
+        }
+    });
+
+    return {topk_idx, topk_scale, topk_zero};
+}
+
+// Fused GPTQ block step for CPU.  Processes one contiguous column block for all
+// output rows in parallel, fusing the per-column quantize/diff/error/update
+// loop that the eager path issues as many small torch.addr/addmm calls.
+std::tuple<at::Tensor, at::Tensor> gptq_block_cpu(
+    const at::Tensor& W1,
+    const at::Tensor& Hinv1,
+    const at::Tensor& scale,
+    const at::Tensor& zero,
+    int64_t maxq,
+    int64_t group_size,
+    bool groupwise) {
+    TORCH_CHECK(W1.device().is_cpu(), "gptq_block_cpu: W1 must reside on CPU");
+    TORCH_CHECK(Hinv1.device().is_cpu(), "gptq_block_cpu: Hinv1 must reside on CPU");
+    TORCH_CHECK(scale.device().is_cpu(), "gptq_block_cpu: scale must reside on CPU");
+    TORCH_CHECK(zero.device().is_cpu(), "gptq_block_cpu: zero must reside on CPU");
+    TORCH_CHECK(W1.dim() == 2, "gptq_block_cpu: W1 must be 2D");
+    TORCH_CHECK(Hinv1.dim() == 2, "gptq_block_cpu: Hinv1 must be 2D");
+    TORCH_CHECK(W1.size(1) == Hinv1.size(0), "gptq_block_cpu: W1/Hinv1 size mismatch");
+    TORCH_CHECK(Hinv1.size(0) == Hinv1.size(1), "gptq_block_cpu: Hinv1 must be square");
+
+    at::Tensor W = W1.to(at::kFloat).clone();
+    at::Tensor H = Hinv1.to(at::kFloat);
+    at::Tensor s = scale.to(at::kFloat);
+    at::Tensor z = zero.to(at::kFloat);
+
+    const int64_t rows = W.size(0);
+    const int64_t count = W.size(1);
+    TORCH_CHECK(
+        group_size > 0 && count % group_size == 0,
+        "gptq_block_cpu: group_size must divide count");
+    const int64_t groups = count / group_size;
+    TORCH_CHECK(
+        s.sizes() == at::IntArrayRef({rows, groups}),
+        "gptq_block_cpu: scale shape must be (",
+        rows,
+        ", ",
+        groups,
+        "), got ",
+        s.sizes());
+    TORCH_CHECK(z.sizes() == s.sizes(), "gptq_block_cpu: zero shape must match scale");
+
+    at::Tensor Q = at::empty_like(W);
+    at::Tensor Err = at::empty_like(W);
+    const float maxq_f = static_cast<float>(maxq);
+
+    for (int64_t i = 0; i < count; ++i) {
+        const int64_t g = i / group_size;
+        at::Tensor sc = s.select(1, g).unsqueeze(1);
+        at::Tensor zv = z.select(1, g).unsqueeze(1);
+        at::Tensor w = W.select(1, i).unsqueeze(1);
+
+        at::Tensor q;
+        if (groupwise) {
+            q = at::clamp(at::round(w / sc), -maxq_f, maxq_f).mul(sc);
+        } else {
+            q = at::clamp(at::round(w / sc) + zv, 0.0f, maxq_f).sub(zv).mul(sc);
+        }
+
+        Q.select(1, i).copy_(q.squeeze(1));
+
+        at::Tensor d = H.select(0, i).select(0, i);
+        at::Tensor err = (w - q) / d;
+        Err.select(1, i).copy_(err.squeeze(1));
+
+        at::Tensor tail = W.narrow(1, i, count - i);
+        at::Tensor hrow = H.select(0, i).narrow(0, i, count - i);
+        // In-place torch.addr on the non-contiguous trailing slice replicates the
+        // eager serial loop exactly, including the diagonal update that sets the
+        // current column to q.
+        tail.addr_(err.view(-1), hrow, c10::Scalar(1.0), c10::Scalar(-1.0));
+    }
+
+    return {Q, Err};
+}
+
 // Hessian X^T X accumulation.  This intentionally dispatches to ATen's
 // addmm_out, which on CPU uses MKL/OpenBLAS with AVX-512/AVX2 vectorization,
 // so the result is bit-exact with torch.addmm while removing Python wrapper
@@ -1527,7 +1834,7 @@ std::tuple<at::Tensor, at::Tensor> hessian_inverse_cholesky_cpu(
     at::Tensor Hinv = at::empty({0}, H.options());
 
     if (success.item<bool>()) {
-        Hinv = at::linalg_cholesky(at::cholesky_inverse(L), true);
+        Hinv = at::linalg_cholesky(at::cholesky_inverse(L), true).contiguous();
     }
 
     return {Hinv, success};
@@ -1575,5 +1882,21 @@ TORCH_LIBRARY(gptqmodel, m) {
         "hessian_inverse_cholesky_cpu",
         c10::DispatchKey::CPU,
         TORCH_FN(gptqmodel::hessian_inverse_cholesky_cpu)
+    );
+    m.def(
+        "find_params_batched_cpu_topk(Tensor x, Tensor xmin, Tensor xmax, Tensor? importance, int grid, float maxshrink, int maxq, bool sym, bool groupwise, float mse) -> (Tensor, Tensor, Tensor)"
+    );
+    m.impl(
+        "find_params_batched_cpu_topk",
+        c10::DispatchKey::CPU,
+        TORCH_FN(gptqmodel::find_params_batched_cpu_topk)
+    );
+    m.def(
+        "gptq_block_cpu(Tensor W1, Tensor Hinv1, Tensor scale, Tensor zero, int maxq, int group_size, bool groupwise) -> (Tensor, Tensor)"
+    );
+    m.impl(
+        "gptq_block_cpu",
+        c10::DispatchKey::CPU,
+        TORCH_FN(gptqmodel::gptq_block_cpu)
     );
 }

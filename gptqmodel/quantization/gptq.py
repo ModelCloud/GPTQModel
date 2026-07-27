@@ -41,6 +41,11 @@ try:
 except Exception:
     gptq_block_triton = None
 
+try:
+    from ..nn_modules.qlinear.pack_block_ext import gptq_block_cpu
+except Exception:
+    gptq_block_cpu = None
+
 _USE_GPTQ_TRITON_BLOCK = os.environ.get("GPTQMODEL_TRITON_BLOCK", "1") != "0"
 
 
@@ -2075,7 +2080,49 @@ class GPTQ:
                             f"falling back to serial loop: {exc}"
                         )
 
-                if not triton_block_done:
+                # Compiled CPU block path for the same grouped case.  This is
+                # especially important for large MLP shapes like mlp.down where
+                # the eager per-column torch.addr loop is slow on CPU.
+                cpu_block_done = False
+                if (
+                    os.environ.get("GPTQMODEL_BLOCK_CPU", "1") != "0"
+                    and not triton_block_done
+                    and gptq_block_cpu is not None
+                    and Hinv is not None
+                    and count <= 128
+                    and group_size > 0
+                    and not self.qcfg.static_groups
+                    and count % group_size == 0
+                    and batched_group_count == count // group_size
+                    and W1.device.type == "cpu"
+                ):
+                    try:
+                        maxq_value = (
+                            2 ** (self.qcfg.bits - 1) - 1
+                            if self.quantizer.requires_groupwise_processing()
+                            else 2 ** self.qcfg.bits - 1
+                        )
+                        Q1, Err1 = gptq_block_cpu(
+                            W1,
+                            Hinv1,
+                            batched_scale,
+                            batched_zero,
+                            maxq_value,
+                            group_size,
+                            groupwise=self.quantizer.requires_groupwise_processing(),
+                        )
+                        if batched_group_count > 0:
+                            scale.extend(batched_scale.chunk(batched_group_count, dim=1))
+                            zero.extend(batched_zero.chunk(batched_group_count, dim=1))
+                            now_idx = batched_first_global_idx + batched_group_count + 1
+                        cpu_block_done = True
+                    except Exception as exc:
+                        log.warn(
+                            f"Quantization: Module `{self.name}` -> CPU block kernel failed, "
+                            f"falling back to serial loop: {exc}"
+                        )
+
+                if not triton_block_done and not cpu_block_done:
                     for i in range(count):
                         w = W1[:, i]
                         if Hinv is not None:

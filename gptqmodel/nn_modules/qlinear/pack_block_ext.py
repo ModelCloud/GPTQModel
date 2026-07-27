@@ -83,3 +83,99 @@ def hessian_inverse_cholesky_cpu(H: Tensor, diag_delta: Tensor) -> Tuple[Tensor,
         H,
         diag_delta,
     )
+
+
+def find_params_batched_cpu(
+    x: Tensor,
+    xmin: Tensor,
+    xmax: Tensor,
+    importance: Tensor | None,
+    grid: int,
+    maxshrink: float,
+    maxq: int,
+    sym: bool,
+    groupwise: bool,
+    method: str,
+    mse: float,
+) -> Tuple[Tensor, Tensor]:
+    ext = load_pack_block_extension()
+    if ext is None:
+        raise RuntimeError("find_params_batched_cpu extension unavailable")
+
+    topk_idx, topk_scale, topk_zero = torch.ops.gptqmodel.find_params_batched_cpu_topk(
+        x,
+        xmin,
+        xmax,
+        importance,
+        int(grid),
+        float(maxshrink),
+        int(maxq),
+        bool(sym),
+        bool(groupwise),
+        float(mse),
+    )
+
+    # Recompute the exact loss for the short-listed candidates with the same
+    # arithmetic used by the eager fallback / Triton recompute, and return the
+    # single best (scale, zero) per (row, group).
+    x_f = x.float()
+    maxq_t = torch.tensor(float(maxq), device=x_f.device, dtype=torch.float32)
+    maxq_f = float(maxq)
+    p = 1.0 - topk_idx.float() / grid
+    xmin_k = xmin.unsqueeze(-1) * p
+    xmax_k = xmax.unsqueeze(-1) * p
+    if groupwise:
+        scale_k = xmax_k / maxq_t
+        zero_k = torch.zeros_like(scale_k)
+    else:
+        scale_k = (xmax_k - xmin_k) / maxq_t
+        if sym:
+            zero_k = torch.full_like(scale_k, (maxq_t + 1.0) / 2.0)
+        else:
+            zero_k = torch.round(-xmin_k / scale_k)
+
+    k = topk_idx.size(-1)
+    x_exp = x_f.unsqueeze(2).expand(-1, -1, k, -1)
+    scale_k_exp = scale_k.unsqueeze(-1)
+    zero_k_exp = zero_k.unsqueeze(-1)
+    q = x_exp / scale_k_exp
+    q.round_()
+    if groupwise:
+        q.clamp_(-maxq_f, maxq_f)
+    else:
+        q.add_(zero_k_exp).clamp_(0.0, maxq_f).sub_(zero_k_exp)
+    dequant = q * scale_k_exp
+    error = dequant - x_exp
+    if method == "activation" and importance is not None:
+        error.pow_(2)
+        error.mul_(importance[None, :, None, :])
+    else:
+        error.abs_().pow_(mse)
+    losses = error.sum(dim=-1)
+    best = losses.argmin(dim=-1)
+    scale = scale_k.gather(2, best.unsqueeze(-1)).squeeze(-1)
+    zero = zero_k.gather(2, best.unsqueeze(-1)).squeeze(-1)
+    return scale, zero
+
+
+def gptq_block_cpu(
+    W1: Tensor,
+    Hinv1: Tensor,
+    scale: Tensor,
+    zero: Tensor,
+    maxq: int,
+    group_size: int,
+    groupwise: bool = False,
+) -> Tuple[Tensor, Tensor]:
+    ext = load_pack_block_extension()
+    if ext is None:
+        raise RuntimeError("gptq_block_cpu extension unavailable")
+    return torch.ops.gptqmodel.gptq_block_cpu(
+        W1,
+        Hinv1,
+        scale,
+        zero,
+        int(maxq),
+        int(group_size),
+        bool(groupwise),
+    )

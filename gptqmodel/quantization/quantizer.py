@@ -18,6 +18,11 @@ from ._scale_search_triton import (
     _triton_find_params_batched_hessian_hybrid,
 )
 
+try:
+    from ..nn_modules.qlinear.pack_block_ext import find_params_batched_cpu as _find_params_batched_cpu
+except Exception:
+    _find_params_batched_cpu = None
+
 
 log = setup_logger()
 
@@ -602,6 +607,36 @@ class Quantizer(nn.Module):
                         )
                     except Exception as e:
                         log.warn(f"Triton hessian/hybrid scale-search failed, falling back: {e}")
+
+                if (
+                    os.environ.get("GPTQMODEL_SCALE_SEARCH_CPU", "0") != "0"
+                    and _find_params_batched_cpu is not None
+                    and method in (ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.MSE)
+                    and (method != ScaleSearchConfig.MSE or abs(mse - 2.0) < 1e-6)
+                    and not self.requires_groupwise_processing()
+                    and group_size <= 128
+                    and maxq_value > 0
+                    and x.is_cpu
+                    and x.is_contiguous()
+                    and x.dtype in (torch.float16, torch.float32, torch.bfloat16)
+                ):
+                    try:
+                        importance = prepared_hessian if method == ScaleSearchConfig.ACTIVATION else None
+                        return _find_params_batched_cpu(
+                            x,
+                            xmin,
+                            xmax,
+                            importance,
+                            self.grid,
+                            self.maxshrink,
+                            maxq_value,
+                            self.qcfg.sym,
+                            self.requires_groupwise_processing(),
+                            method.value,
+                            mse,
+                        )
+                    except Exception as e:
+                        log.warn(f"CPU scale-search failed, falling back: {e}")
 
                 # Fallback exact candidate-chunk loop. This is kept as the
                 # strict-accuracy reference and is used when the Triton fast path
