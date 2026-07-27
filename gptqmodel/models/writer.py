@@ -209,6 +209,7 @@ def _materialize_meta_layers_from_turtle(model: torch.nn.Module, turtle_model) -
                 target_submodule=submodule,
                 device=torch.device("cpu"),
                 non_blocking=False,
+                module_path=path,
             )
             materialized += 1
         except Exception as exc:

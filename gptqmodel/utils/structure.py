@@ -946,13 +946,15 @@ class LazyTurtle:
         target_submodule: torch.nn.Module,
         device: torch.device,
         non_blocking: bool = False,
+        module_path: Optional[str] = None,
     ) -> torch.nn.Module:
-        path = _get_qualified_name(target_model, target_submodule)
+        if module_path is None:
+            module_path = _get_qualified_name(target_model, target_submodule)
         with self._lock:
             self._copy_checkpoint_tensors_into_submodule(
                 target_model=target_model,
                 target_submodule=target_submodule,
-                module_path=path,
+                module_path=module_path,
                 device=device,
                 recurse=True,
                 non_blocking=non_blocking,
@@ -1052,13 +1054,15 @@ class LazyTurtle:
         target_model: nn.Module,
         target_submodule: nn.Module,
         recurse: bool = False,
+        module_path: Optional[str] = None,
     ) -> Dict[str, torch.Tensor]:
         """Load checkpoint tensors for one shell submodule without mutating it."""
 
-        path = _get_qualified_name(target_model, target_submodule)
+        if module_path is None:
+            module_path = _get_qualified_name(target_model, target_submodule)
         with self._lock:
             return self._load_checkpoint_tensors_for_module_path(
-                module_path=path,
+                module_path=module_path,
                 recurse=recurse,
             )
 
@@ -1117,6 +1121,7 @@ class LazyTurtle:
         target_model: nn.Module,
         target_submodule: nn.Module,
         device: Optional[torch.device] = None,
+        module_path: Optional[str] = None,
     ):
         """Materialize only direct meta params/buffers for one shell submodule."""
 
@@ -1125,11 +1130,12 @@ class LazyTurtle:
             if device.type == "meta":
                 raise ValueError("materialize_direct_meta_tensors() does not support meta target devices.")
 
-        path = _get_qualified_name(target_model, target_submodule)
+        if module_path is None:
+            module_path = _get_qualified_name(target_model, target_submodule)
         with self._lock, torch.inference_mode():
             self._materialize_direct_meta_tensors(
                 shell_sub=target_submodule,
-                module_path=path,
+                module_path=module_path,
                 param_cache={},
                 buffer_cache={},
             )
@@ -3145,6 +3151,7 @@ def alias_from_turtle_for_submodule(
     target_submodule: torch.nn.Module,
     device: torch.device,
     non_blocking: bool = False,
+    module_path: Optional[str] = None,
 ) -> torch.nn.Module:
     # Lazy turtle supports materialization from checkpoint storage into CPU or accelerator devices.
     assert device not in [None, torch.device("meta")]
@@ -3158,6 +3165,7 @@ def alias_from_turtle_for_submodule(
         target_submodule=target_submodule,
         device=device,
         non_blocking=non_blocking,
+        module_path=module_path,
     )
 
 
@@ -3167,6 +3175,7 @@ def alias_direct_meta_from_turtle_for_submodule(
     target_submodule: torch.nn.Module,
     *,
     device: Optional[torch.device] = None,
+    module_path: Optional[str] = None,
 ):
     """Materialize only direct meta params/buffers for one shell submodule."""
 
@@ -3179,6 +3188,7 @@ def alias_direct_meta_from_turtle_for_submodule(
         target_model=target_model,
         target_submodule=target_submodule,
         device=device,
+        module_path=module_path,
     )
 
 def _is_meta_tensor(t: torch.Tensor) -> bool:

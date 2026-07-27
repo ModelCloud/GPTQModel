@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
+import gptqmodel.utils.structure as structure
 from gptqmodel.utils.structure import LazyTurtle, print_module_tree
 
 
@@ -128,3 +129,111 @@ def test_lazy_turtle_parallel_materialization_preserves_src_dst_values(tmp_path,
             reloaded[name] = f.get_tensor(name)
     for name in source:
         assert torch.equal(reloaded[name], source[name])
+
+
+def _make_simple_checkpoint(tmp_path):
+    """Create a tiny safetensors checkpoint for a _LazyTurtleShell and return the model dir."""
+    model_dir = tmp_path / "source"
+    model_dir.mkdir()
+
+    source = {"inner.layer0.weight": torch.randn(16, 32, dtype=torch.float32)}
+    save_file(source, str(model_dir / "model.safetensors"))
+    _write_lazy_turtle_index(model_dir, "model.safetensors", source)
+    return model_dir, source
+
+
+def test_lazy_turtle_materialize_submodule_uses_module_path(tmp_path, monkeypatch):
+    """Providing module_path should skip the whole-model _get_qualified_name scan."""
+
+    model_dir, source = _make_simple_checkpoint(tmp_path)
+    shell = _LazyTurtleShell()
+    for p in shell.parameters():
+        p.requires_grad = False
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("_get_qualified_name should not be called when module_path is provided")
+
+    monkeypatch.setattr(structure, "_get_qualified_name", _should_not_be_called)
+
+    turtle.materialize_submodule(
+        target_model=shell,
+        target_submodule=shell.inner,
+        device=torch.device("cpu"),
+        module_path="inner",
+    )
+
+    expected = source["inner.layer0.weight"].transpose(0, 1).contiguous()
+    loaded = shell.inner.layer0.weight
+    assert loaded.shape == expected.shape
+    assert torch.equal(loaded, expected)
+
+
+def test_lazy_turtle_checkpoint_tensors_for_submodule_uses_module_path(tmp_path, monkeypatch):
+    """Providing module_path should skip the whole-model _get_qualified_name scan."""
+
+    model_dir, source = _make_simple_checkpoint(tmp_path)
+    shell = _LazyTurtleShell()
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("_get_qualified_name should not be called when module_path is provided")
+
+    monkeypatch.setattr(structure, "_get_qualified_name", _should_not_be_called)
+
+    tensors = turtle.checkpoint_tensors_for_submodule(
+        target_model=shell,
+        target_submodule=shell.inner,
+        recurse=True,
+        module_path="inner",
+    )
+
+    assert "layer0.weight" in tensors
+    assert torch.equal(tensors["layer0.weight"], source["inner.layer0.weight"])
+
+
+def test_lazy_turtle_materialize_submodule_falls_back_to_get_qualified_name(tmp_path, monkeypatch):
+    """Without module_path the helper should still resolve the path automatically."""
+
+    model_dir, source = _make_simple_checkpoint(tmp_path)
+    shell = _LazyTurtleShell()
+    for p in shell.parameters():
+        p.requires_grad = False
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    called = []
+    original = structure._get_qualified_name
+
+    def _spy(*args, **kwargs):
+        called.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(structure, "_get_qualified_name", _spy)
+
+    turtle.materialize_submodule(
+        target_model=shell,
+        target_submodule=shell.inner,
+        device=torch.device("cpu"),
+    )
+
+    assert len(called) == 1
+    expected = source["inner.layer0.weight"].transpose(0, 1).contiguous()
+    assert torch.equal(shell.inner.layer0.weight, expected)

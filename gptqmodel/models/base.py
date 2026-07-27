@@ -2825,6 +2825,7 @@ class BaseQModel(nn.Module):
                                 target_model=self.model,
                                 target_submodule=target_submodule,
                                 recurse=False,
+                                module_path=module_path,
                             )
                         quant_source = self._build_decoder_quant_source_module(
                             target_submodule,
@@ -2844,6 +2845,7 @@ class BaseQModel(nn.Module):
                         target_model=self.model,
                         target_submodule=target_submodule,
                         recurse=False,
+                        module_path=module_path,
                     )
                     weight = checkpoint_tensors.get("weight")
                     if isinstance(weight, torch.Tensor):
@@ -2870,6 +2872,7 @@ class BaseQModel(nn.Module):
                         turtle_model=turtle_model,
                         target_submodule=target_submodule,
                         device=device,
+                        module_path=module_path,
                     )
 
                 if role == "forward" and named_module is not None:
@@ -2906,6 +2909,7 @@ class BaseQModel(nn.Module):
                     turtle_model=self.turtle_model,
                     target_submodule=target_submodule,
                     device=device,
+                    module_path=module_path,
                 )
         finally:
             if timer is not None and start is not None:
