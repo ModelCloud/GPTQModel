@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -353,3 +354,60 @@ def test_lazy_turtle_materialize_submodules_batch_moe_256_experts(tmp_path, monk
     for i in range(num_experts):
         assert shell.layers[0].mlp["experts"][i].gate_proj.weight.device.type == "meta"
         assert shell.layers[0].mlp["experts"][i].down_proj.weight.device.type == "meta"
+
+
+def test_lazy_turtle_materialize_submodules_holds_turtle_lock(tmp_path, monkeypatch):
+    """The batch materialize path must keep the LazyTurtle lock while opening shard handlers."""
+
+    num_experts = 4
+    model_dir = tmp_path / "laguna_lock"
+    model_dir.mkdir()
+
+    prev_device = torch.get_default_device()
+    torch.set_default_device("meta")
+    try:
+        shell = _LagunaShellModel(num_layers=1, num_experts=num_experts)
+    finally:
+        torch.set_default_device(prev_device)
+    for p in shell.parameters():
+        p.requires_grad = False
+
+    source = {}
+    for i in range(num_experts):
+        for proj in ("gate_proj", "up_proj", "down_proj"):
+            expert = shell.layers[0].mlp["experts"][i]
+            linear = getattr(expert, proj)
+            w_in_out = torch.randn(linear.in_features, linear.out_features, dtype=torch.float32)
+            source[f"layers.0.mlp.experts.{i}.{proj}.weight"] = w_in_out
+
+    save_file(source, str(model_dir / "model.safetensors"))
+    _write_lazy_turtle_index(model_dir, "model.safetensors", source)
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    lock_states: list[bool] = []
+    original_get_shard_handler = LazyTurtle._get_shard_handler
+
+    def _patched_get_shard_handler(self, shard_path: str) -> Any:
+        lock_states.append(self._lock._is_owned())
+        return original_get_shard_handler(self, shard_path)
+
+    monkeypatch.setattr(LazyTurtle, "_get_shard_handler", _patched_get_shard_handler)
+
+    submodules = [
+        (shell.layers[0].mlp["experts"][i].up_proj, f"layers.0.mlp.experts.{i}.up_proj", torch.device("cpu"))
+        for i in range(num_experts)
+    ]
+    turtle.materialize_submodules(
+        target_model=shell,
+        submodules=submodules,
+        non_blocking=False,
+    )
+
+    assert len(lock_states) > 0, "expected shard handler(s) to be opened during batch load"
+    assert all(lock_states), "LazyTurtle lock must be held while opening shard handlers"

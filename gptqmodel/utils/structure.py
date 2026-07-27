@@ -1141,6 +1141,15 @@ class LazyTurtle:
                 if fallback_needed:
                     break
 
+            # Keep the turtle lock held for the whole grouped copy so shard-handler
+            # creation and parallel reads are serialized with the per-submodule path.
+            if not fallback_needed and all_jobs:
+                self._copy_grouped_entries_batch(
+                    jobs=all_jobs,
+                    device=None,  # per-job target already on the right device
+                    non_blocking=non_blocking,
+                )
+
         if fallback_needed:
             # Unlikely edge cases are handled by the well-tested per-submodule path.
             for target_submodule, module_path, device in submodules:
@@ -1152,13 +1161,6 @@ class LazyTurtle:
                     module_path=module_path,
                 )
             return
-
-        if all_jobs:
-            self._copy_grouped_entries_batch(
-                jobs=all_jobs,
-                device=None,  # per-job target already on the right device
-                non_blocking=non_blocking,
-            )
 
         if hasattr(target_model, "tie_weights"):
             target_model.tie_weights()
