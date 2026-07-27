@@ -9111,7 +9111,7 @@
     "mse": 2.0,
     "offload_to_disk": true,
     "offload_to_disk_path": null,
-    "pack_impl": "gpu",
+    "pack_impl": "cpu",
     "quantization_diagnostics": "auto",
     "scale_search": "activation",
     "wait_for_submodule_finalizers": false,
