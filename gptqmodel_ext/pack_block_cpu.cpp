@@ -360,11 +360,52 @@ inline void transpose_16x16_avx512(
     _mm512_storeu_ps(&dst[15 * ld_dst], p);
 }
 
+// Convert 16 packed bfloat16 values to 16 floats by shifting the 16-bit pattern
+// into the upper half of a 32-bit float word (lower mantissa bits are zero).
+__attribute__((target("avx512f")))
+inline __m512 bf16_vec_to_float(__m256i v16) {
+    const __m512i v32 = _mm512_cvtepu16_epi32(v16);
+    return _mm512_castsi512_ps(_mm512_slli_epi32(v32, 16));
+}
+
+// Load 16 output rows of 32 input weights and transpose into two 16x16 float
+// blocks: t0 covers input lanes 0..15 and t1 covers lanes 16..31.
+__attribute__((target("avx512f")))
+inline void pack_qweight_load_transpose_32x16(
+    const void* weight_ptr,
+    bool weight_is_bf16,
+    int64_t out,
+    int64_t out_stride,
+    int64_t base_input,
+    float* t0,
+    float* t1) {
+    if (weight_is_bf16) {
+        const at::BFloat16* w = static_cast<const at::BFloat16*>(weight_ptr);
+        alignas(64) float row_f0[16][16];
+        alignas(64) float row_f1[16][16];
+        for (int i = 0; i < 16; ++i) {
+            const at::BFloat16* p = w + (out + i) * out_stride + base_input;
+            const __m256i lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
+            const __m256i hi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + 16));
+            _mm512_storeu_ps(&row_f0[i][0], bf16_vec_to_float(lo));
+            _mm512_storeu_ps(&row_f1[i][0], bf16_vec_to_float(hi));
+        }
+        transpose_16x16_avx512(&row_f0[0][0], 16, t0, 16);
+        transpose_16x16_avx512(&row_f1[0][0], 16, t1, 16);
+    } else {
+        const float* w = static_cast<const float*>(weight_ptr);
+        const float* src0 = w + out * out_stride + base_input;
+        transpose_16x16_avx512(src0, out_stride, t0, 16);
+        transpose_16x16_avx512(src0 + 16, out_stride, t1, 16);
+    }
+}
+
 // AVX-512 path for bits 2, 4, 8.  Processes 16 output channels at a time.
 template <int bits, int pack_factor>
 __attribute__((target("avx512f")))
 void pack_qweight_avx512(
-    const float* weight_ptr,
+    const void* weight_ptr,
+    bool weight_is_bf16,
     const float* scales_ptr,
     const float* scale_zeros_ptr,
     const int32_t* gidx_ptr,
@@ -380,12 +421,6 @@ void pack_qweight_avx512(
     const __m512 eps_ps = _mm512_set1_ps(1e-6f);
     const __m512 maxq_ps = _mm512_set1_ps(static_cast<float>(max_q));
     const __m512i zero_epi = _mm512_setzero_si512();
-
-    alignas(64) int32_t out_offsets_data[16];
-    for (int i = 0; i < 16; ++i) {
-        out_offsets_data[i] = i * static_cast<int32_t>(out_stride);
-    }
-    const __m512i out_offsets = _mm512_load_si512(out_offsets_data);
 
     alignas(64) int32_t lane_qvals[32][16];
     alignas(64) float t0[16][16];
@@ -406,14 +441,11 @@ void pack_qweight_avx512(
         }
 
         if (uniform_group) {
-            // Uniform group: transpose contiguous 16x16 weight slices so we can
-            // load each output row with efficient vmovups instead of strided gathers.
             const int32_t group = gidx_block[0];
             const int64_t scale_offset_base = static_cast<int64_t>(group) * scales_stride;
             for (int64_t out = 0; out < out_features; out += 16) {
-                const float* src0 = weight_ptr + out * out_stride + base_input;
-                transpose_16x16_avx512(src0, out_stride, &t0[0][0], 16);
-                transpose_16x16_avx512(src0 + 16, out_stride, &t1[0][0], 16);
+                pack_qweight_load_transpose_32x16(
+                    weight_ptr, weight_is_bf16, out, out_stride, base_input, &t0[0][0], &t1[0][0]);
 
                 __m512 scale = _mm512_loadu_ps(scales_ptr + scale_offset_base + out);
                 const __m512 offset = _mm512_loadu_ps(scale_zeros_ptr + scale_offset_base + out);
@@ -425,7 +457,8 @@ void pack_qweight_avx512(
                     __m512 qf = _mm512_div_ps(_mm512_add_ps(w, offset), scale);
                     qf = _mm512_max_ps(qf, zero_ps);
                     qf = _mm512_min_ps(qf, maxq_ps);
-                    const __m512i q = _mm512_cvt_roundps_epi32(qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                    const __m512i q = _mm512_cvt_roundps_epi32(
+                        qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
                     _mm512_storeu_si512(reinterpret_cast<__m512i*>(lane_qvals[lane]), q);
                 }
                 for (int lane = 16; lane < 32; ++lane) {
@@ -433,7 +466,8 @@ void pack_qweight_avx512(
                     __m512 qf = _mm512_div_ps(_mm512_add_ps(w, offset), scale);
                     qf = _mm512_max_ps(qf, zero_ps);
                     qf = _mm512_min_ps(qf, maxq_ps);
-                    const __m512i q = _mm512_cvt_roundps_epi32(qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                    const __m512i q = _mm512_cvt_roundps_epi32(
+                        qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
                     _mm512_storeu_si512(reinterpret_cast<__m512i*>(lane_qvals[lane]), q);
                 }
 
@@ -442,7 +476,8 @@ void pack_qweight_avx512(
                     for (int pf = 0; pf < pack_factor; ++pf) {
                         const int idx = bit_plane * pack_factor + pf;
                         const int shift = bits * pf;
-                        const __m512i qv = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(lane_qvals[idx]));
+                        const __m512i qv = _mm512_loadu_si512(
+                            reinterpret_cast<const __m512i*>(lane_qvals[idx]));
                         acc = _mm512_or_si512(acc, _mm512_sllv_epi32(qv, _mm512_set1_epi32(shift)));
                     }
                     _mm512_storeu_si512(
@@ -452,14 +487,18 @@ void pack_qweight_avx512(
             }
         } else {
             for (int64_t out = 0; out < out_features; out += 16) {
+                pack_qweight_load_transpose_32x16(
+                    weight_ptr, weight_is_bf16, out, out_stride, base_input, &t0[0][0], &t1[0][0]);
+
                 for (int lane = 0; lane < 32; ++lane) {
                     const int32_t group = gidx_block[lane];
-                    const float* wbase = weight_ptr + static_cast<int64_t>(out) * out_stride + base_input + lane;
-                    const __m512 w = _mm512_i32gather_ps(out_offsets, wbase, 4);
+                    const float* w_ptr = (lane < 16) ? &t0[lane][0] : &t1[lane - 16][0];
+                    const __m512 w = _mm512_loadu_ps(w_ptr);
 
                     const float* sbase = scales_ptr + static_cast<int64_t>(group) * scales_stride + out;
                     __m512 scale = _mm512_loadu_ps(sbase);
-                    const __m512 offset = _mm512_loadu_ps(scale_zeros_ptr + static_cast<int64_t>(group) * scales_stride + out);
+                    const __m512 offset = _mm512_loadu_ps(
+                        scale_zeros_ptr + static_cast<int64_t>(group) * scales_stride + out);
 
                     const __mmask16 zero_mask = _mm512_cmp_ps_mask(scale, zero_ps, _CMP_EQ_OQ);
                     scale = _mm512_mask_blend_ps(zero_mask, scale, eps_ps);
@@ -468,7 +507,8 @@ void pack_qweight_avx512(
                     qf = _mm512_max_ps(qf, zero_ps);
                     qf = _mm512_min_ps(qf, maxq_ps);
 
-                    const __m512i q = _mm512_cvt_roundps_epi32(qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                    const __m512i q = _mm512_cvt_roundps_epi32(
+                        qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
                     _mm512_storeu_si512(reinterpret_cast<__m512i*>(lane_qvals[lane]), q);
                 }
 
@@ -477,7 +517,8 @@ void pack_qweight_avx512(
                     for (int pf = 0; pf < pack_factor; ++pf) {
                         const int idx = bit_plane * pack_factor + pf;
                         const int shift = bits * pf;
-                        const __m512i qv = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(lane_qvals[idx]));
+                        const __m512i qv = _mm512_loadu_si512(
+                            reinterpret_cast<const __m512i*>(lane_qvals[idx]));
                         acc = _mm512_or_si512(acc, _mm512_sllv_epi32(qv, _mm512_set1_epi32(shift)));
                     }
                     _mm512_storeu_si512(
@@ -492,7 +533,8 @@ void pack_qweight_avx512(
 // AVX-512 3-bit packing helper.  Each 32-element lane block produces 3 packed 32-bit words.
 __attribute__((target("avx512f")))
 void pack_qweight_3bit_avx512(
-    const float* weight_ptr,
+    const void* weight_ptr,
+    bool weight_is_bf16,
     const float* scales_ptr,
     const float* scale_zeros_ptr,
     const int32_t* gidx_ptr,
@@ -507,12 +549,6 @@ void pack_qweight_3bit_avx512(
     const __m512 zero_ps = _mm512_setzero_ps();
     const __m512 eps_ps = _mm512_set1_ps(1e-6f);
     const __m512 maxq_ps = _mm512_set1_ps(static_cast<float>(max_q));
-
-    alignas(64) int32_t out_offsets_data[16];
-    for (int i = 0; i < 16; ++i) {
-        out_offsets_data[i] = i * static_cast<int32_t>(out_stride);
-    }
-    const __m512i out_offsets = _mm512_load_si512(out_offsets_data);
 
     alignas(64) int32_t lane_qvals[32][16];
     alignas(64) float t0[16][16];
@@ -536,9 +572,8 @@ void pack_qweight_3bit_avx512(
             const int32_t group = gidx_block[0];
             const int64_t scale_offset_base = static_cast<int64_t>(group) * scales_stride;
             for (int64_t out = 0; out < out_features; out += 16) {
-                const float* src0 = weight_ptr + out * out_stride + base_input;
-                transpose_16x16_avx512(src0, out_stride, &t0[0][0], 16);
-                transpose_16x16_avx512(src0 + 16, out_stride, &t1[0][0], 16);
+                pack_qweight_load_transpose_32x16(
+                    weight_ptr, weight_is_bf16, out, out_stride, base_input, &t0[0][0], &t1[0][0]);
 
                 __m512 scale = _mm512_loadu_ps(scales_ptr + scale_offset_base + out);
                 const __m512 offset = _mm512_loadu_ps(scale_zeros_ptr + scale_offset_base + out);
@@ -604,14 +639,18 @@ void pack_qweight_3bit_avx512(
             }
         } else {
             for (int64_t out = 0; out < out_features; out += 16) {
+                pack_qweight_load_transpose_32x16(
+                    weight_ptr, weight_is_bf16, out, out_stride, base_input, &t0[0][0], &t1[0][0]);
+
                 for (int lane = 0; lane < 32; ++lane) {
                     const int32_t group = gidx_block[lane];
-                    const float* wbase = weight_ptr + static_cast<int64_t>(out) * out_stride + base_input + lane;
-                    const __m512 w = _mm512_i32gather_ps(out_offsets, wbase, 4);
+                    const float* w_ptr = (lane < 16) ? &t0[lane][0] : &t1[lane - 16][0];
+                    const __m512 w = _mm512_loadu_ps(w_ptr);
 
                     const float* sbase = scales_ptr + static_cast<int64_t>(group) * scales_stride + out;
                     __m512 scale = _mm512_loadu_ps(sbase);
-                    const __m512 offset = _mm512_loadu_ps(scale_zeros_ptr + static_cast<int64_t>(group) * scales_stride + out);
+                    const __m512 offset = _mm512_loadu_ps(
+                        scale_zeros_ptr + static_cast<int64_t>(group) * scales_stride + out);
 
                     const __mmask16 zero_mask = _mm512_cmp_ps_mask(scale, zero_ps, _CMP_EQ_OQ);
                     scale = _mm512_mask_blend_ps(zero_mask, scale, eps_ps);
@@ -620,7 +659,8 @@ void pack_qweight_3bit_avx512(
                     qf = _mm512_max_ps(qf, zero_ps);
                     qf = _mm512_min_ps(qf, maxq_ps);
 
-                    const __m512i q = _mm512_cvt_roundps_epi32(qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                    const __m512i q = _mm512_cvt_roundps_epi32(
+                        qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
                     _mm512_storeu_si512(reinterpret_cast<__m512i*>(lane_qvals[lane]), q);
                 }
 
@@ -841,7 +881,8 @@ void pack_qweight_3bit_avx2(
 
 template <int bits, int pack_factor>
 void dispatch_pack_qweight(
-    const float* weight_ptr,
+    const void* weight_ptr,
+    bool weight_is_bf16,
     const float* scales_ptr,
     const float* scale_zeros_ptr,
     const int32_t* gidx_ptr,
@@ -866,12 +907,13 @@ void dispatch_pack_qweight(
     }
 
 #if PACK_BLOCK_CPU_X86
-    // Gather indices are 32-bit; ensure the largest per-vector offset stays in range.
-    const bool gather_offsets_safe = out_stride <= (std::numeric_limits<int32_t>::max() / 16);
-    if (gather_offsets_safe && out_features % 16 == 0 && cpu_supports_avx512()) {
+    // AVX-512 path loads contiguous 16x32 weight blocks and transposes them,
+    // so it no longer relies on 32-bit gather offsets.
+    if (out_features % 16 == 0 && cpu_supports_avx512()) {
         at::parallel_for(0, num_blocks, grain, [&](int64_t begin, int64_t end) {
             pack_qweight_avx512<bits, pack_factor>(
                 weight_ptr,
+                weight_is_bf16,
                 scales_ptr,
                 scale_zeros_ptr,
                 gidx_ptr,
@@ -886,10 +928,12 @@ void dispatch_pack_qweight(
         });
         return;
     }
-    if (gather_offsets_safe && out_features % 8 == 0 && cpu_supports_avx2()) {
+    // Gather indices are 32-bit; ensure the largest per-vector offset stays in range.
+    const bool gather_offsets_safe = out_stride <= (std::numeric_limits<int32_t>::max() / 16);
+    if (!weight_is_bf16 && gather_offsets_safe && out_features % 8 == 0 && cpu_supports_avx2()) {
         at::parallel_for(0, num_blocks, grain, [&](int64_t begin, int64_t end) {
             pack_qweight_avx2<bits, pack_factor>(
-                weight_ptr,
+                static_cast<const float*>(weight_ptr),
                 scales_ptr,
                 scale_zeros_ptr,
                 gidx_ptr,
@@ -906,9 +950,10 @@ void dispatch_pack_qweight(
     }
 #endif
 
+    TORCH_CHECK(!weight_is_bf16, "bfloat16 weights require AVX-512 packing path");
     at::parallel_for(0, num_blocks, grain, [&](int64_t begin, int64_t end) {
         pack_qweight_scalar(
-            weight_ptr,
+            static_cast<const float*>(weight_ptr),
             scales_ptr,
             scale_zeros_ptr,
             gidx_ptr,
@@ -925,7 +970,8 @@ void dispatch_pack_qweight(
 }
 
 void dispatch_pack_qweight_3bit(
-    const float* weight_ptr,
+    const void* weight_ptr,
+    bool weight_is_bf16,
     const float* scales_ptr,
     const float* scale_zeros_ptr,
     const int32_t* gidx_ptr,
@@ -950,11 +996,11 @@ void dispatch_pack_qweight_3bit(
     }
 
 #if PACK_BLOCK_CPU_X86
-    const bool gather_offsets_safe = out_stride <= (std::numeric_limits<int32_t>::max() / 16);
-    if (gather_offsets_safe && out_features % 16 == 0 && cpu_supports_avx512()) {
+    if (out_features % 16 == 0 && cpu_supports_avx512()) {
         at::parallel_for(0, num_blocks, grain, [&](int64_t begin, int64_t end) {
             pack_qweight_3bit_avx512(
                 weight_ptr,
+                weight_is_bf16,
                 scales_ptr,
                 scale_zeros_ptr,
                 gidx_ptr,
@@ -969,10 +1015,11 @@ void dispatch_pack_qweight_3bit(
         });
         return;
     }
-    if (gather_offsets_safe && out_features % 8 == 0 && cpu_supports_avx2()) {
+    const bool gather_offsets_safe = out_stride <= (std::numeric_limits<int32_t>::max() / 16);
+    if (!weight_is_bf16 && gather_offsets_safe && out_features % 8 == 0 && cpu_supports_avx2()) {
         at::parallel_for(0, num_blocks, grain, [&](int64_t begin, int64_t end) {
             pack_qweight_3bit_avx2(
-                weight_ptr,
+                static_cast<const float*>(weight_ptr),
                 scales_ptr,
                 scale_zeros_ptr,
                 gidx_ptr,
@@ -989,9 +1036,10 @@ void dispatch_pack_qweight_3bit(
     }
 #endif
 
+    TORCH_CHECK(!weight_is_bf16, "bfloat16 weights require AVX-512 packing path");
     at::parallel_for(0, num_blocks, grain, [&](int64_t begin, int64_t end) {
         pack_qweight_scalar(
-            weight_ptr,
+            static_cast<const float*>(weight_ptr),
             scales_ptr,
             scale_zeros_ptr,
             gidx_ptr,
@@ -1101,13 +1149,18 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
 
     TORCH_CHECK(word_bits == 32, "Only 32-bit packing supported");
 
-    at::Tensor weight_f = weight.contiguous().to(at::kFloat);
+    at::Tensor weight_contig;
+    at::Tensor weight_f;
+    const void* weight_ptr = nullptr;
+    bool weight_is_bf16 = false;
+    const bool input_is_bf16 = weight.scalar_type() == at::kBFloat16;
+
     at::Tensor scales_f = scales.contiguous().to(at::kFloat);
     at::Tensor zeros_i32 = zeros.contiguous().to(at::kInt);
     at::Tensor g_idx_i32 = g_idx.contiguous().to(at::kInt);
 
-    const int64_t out_features = weight_f.size(0);
-    const int64_t in_features = weight_f.size(1);
+    const int64_t out_features = weight.size(0);
+    const int64_t in_features = weight.size(1);
     const int64_t threads_eff = clamped_threads(threads, in_features, out_features);
     TORCH_CHECK(g_idx_i32.size(0) == in_features, "g_idx length mismatch");
     TORCH_CHECK(in_features % word_bits == 0, "in_features must be divisible by word_bits");
@@ -1116,6 +1169,19 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
     TORCH_CHECK(scales_f.size(1) == out_features, "scales shape mismatch");
     TORCH_CHECK(zeros_i32.size(0) == groups && zeros_i32.size(1) == out_features, "zeros shape mismatch");
     TORCH_CHECK(out_features % word_bits == 0, "out_features must be divisible by word_bits");
+
+    bool use_avx512_for_bf16 = false;
+#if PACK_BLOCK_CPU_X86
+    use_avx512_for_bf16 = input_is_bf16 && cpu_supports_avx512();
+#endif
+    if (use_avx512_for_bf16) {
+        weight_contig = weight.contiguous();
+        weight_ptr = weight_contig.const_data_ptr<at::BFloat16>();
+        weight_is_bf16 = true;
+    } else {
+        weight_f = weight.contiguous().to(at::kFloat);
+        weight_ptr = weight_f.const_data_ptr<float>();
+    }
 
     if (block_in <= 0) {
         block_in = word_bits;
@@ -1132,7 +1198,6 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
     at::Tensor qweight = at::empty({num_blocks * rows_per_group, out_features}, q_options);
 
     const int max_q = (1 << bits) - 1;
-    const float* weight_ptr = weight_f.const_data_ptr<float>();
     const float* scales_ptr = scales_f.const_data_ptr<float>();
     const int32_t* zeros_ptr = zeros_i32.const_data_ptr<int32_t>();
     const int32_t* gidx_ptr = g_idx_i32.const_data_ptr<int32_t>();
@@ -1151,6 +1216,7 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
             case 2:
                 dispatch_pack_qweight<2, 16>(
                     weight_ptr,
+                    weight_is_bf16,
                     scales_ptr,
                     scale_zeros_ptr,
                     gidx_ptr,
@@ -1168,6 +1234,7 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
             case 4:
                 dispatch_pack_qweight<4, 8>(
                     weight_ptr,
+                    weight_is_bf16,
                     scales_ptr,
                     scale_zeros_ptr,
                     gidx_ptr,
@@ -1185,6 +1252,7 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
             case 8:
                 dispatch_pack_qweight<8, 4>(
                     weight_ptr,
+                    weight_is_bf16,
                     scales_ptr,
                     scale_zeros_ptr,
                     gidx_ptr,
@@ -1203,6 +1271,7 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
     } else if (bits == 3) {
         dispatch_pack_qweight_3bit(
             weight_ptr,
+            weight_is_bf16,
             scales_ptr,
             scale_zeros_ptr,
             gidx_ptr,
