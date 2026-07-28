@@ -44,6 +44,7 @@ from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profi
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
+    build_shell_model,
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
     has_native_transformers_causallm_support,
@@ -79,6 +80,7 @@ from ..utils.model import (
     is_embeddings_module_quantized,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
+    materialize_meta_tensors,
     simple_dispatch_model,
 )
 from ._const import DEVICE, HAS_NPU, normalize_device
@@ -622,7 +624,14 @@ def _load_quantized_gguf_checkpoint_into_model(
     model: torch.nn.Module,
     gguf_checkpoint_path: str,
     tensor_key_mapping: dict[str, str],
+    device_map: Optional[Dict[str, Union[str, int, torch.device]]] = None,
 ) -> None:
+    from accelerate.utils.modeling import set_module_tensor_to_device
+    from transformers.modeling_utils import get_device
+
+    if device_map is None:
+        raise ValueError("Loader: `device_map` is required for native quantized GGUF loading.")
+
     reader = internal_gguf.GGUFReader(gguf_checkpoint_path)
     loaded: set[str] = set()
 
@@ -637,6 +646,10 @@ def _load_quantized_gguf_checkpoint_into_model(
 
         if isinstance(target_module, GGUFTorchLinear) and attr_name == "weight":
             resolved_target_name = f"{module_name}.qweight" if module_name else "qweight"
+
+        target_device = get_device(device_map, resolved_target_name, valid_torch_device=True)
+
+        if isinstance(target_module, GGUFTorchLinear) and attr_name == "weight":
             packed = torch.from_numpy(np.array(tensor.data, dtype=np.uint8, copy=True, order="C"))
             expected = _lookup_model_slot_tensor(model, resolved_target_name)
             if tuple(packed.shape) != tuple(expected.shape):
@@ -644,7 +657,13 @@ def _load_quantized_gguf_checkpoint_into_model(
                     f"Loader: GGUF qweight shape mismatch for `{resolved_target_name}`. "
                     f"Expected {tuple(expected.shape)}, got {tuple(packed.shape)}."
                 )
-            _assign_model_slot_tensor(model, resolved_target_name, packed)
+            set_module_tensor_to_device(
+                model,
+                resolved_target_name,
+                target_device,
+                value=packed,
+                clear_cache=False,
+            )
             loaded.add(resolved_target_name)
             continue
 
@@ -652,10 +671,16 @@ def _load_quantized_gguf_checkpoint_into_model(
         weights = internal_gguf.dequantize_to_torch(
             tensor.data,
             tensor.tensor_type,
-            device=reference.device,
+            device=target_device,
             dtype=reference.dtype,
         )
-        _assign_model_slot_tensor(model, resolved_target_name, weights)
+        set_module_tensor_to_device(
+            model,
+            resolved_target_name,
+            target_device,
+            value=weights,
+            clear_cache=False,
+        )
         loaded.add(resolved_target_name)
 
     missing_qweights = []
@@ -1360,48 +1385,25 @@ def ModelLoader(cls):
             set_dtype_compat(args, dtype)
 
             try:
+                model = build_shell_model(
+                    cls.loader,
+                    config,
+                    trust_remote_code=trust_remote_code,
+                    **args,
+                )
+            except RuntimeError as exc:
+                # Some trust_remote_code model constructors call int()/item() on tensors
+                # during __init__, which breaks when the shell is built on the meta device.
+                if not _is_meta_shell_build_error(exc):
+                    raise
+                log.warn(
+                    "Loader: meta-device shell build failed for `%s`; falling back to direct CPU load: %s",
+                    model_local_path,
+                    exc,
+                )
                 model = cls.loader.from_config(
                     config, trust_remote_code=trust_remote_code, **args
                 )
-            except FileNotFoundError as exc:
-                # trust_remote_code dynamic-module caches can be incomplete for
-                # legacy Deci files; rebuild missing shim + refresh once.
-                missing_path = str(exc)
-                if (
-                    trust_remote_code
-                    and "transformers_modules" in missing_path
-                    and "No such file or directory" in missing_path
-                ):
-                    missing_file = None
-                    if "'" in missing_path:
-                        parts = missing_path.split("'")
-                        if len(parts) >= 2:
-                            missing_file = parts[1]
-
-                    if (
-                        missing_file
-                        and missing_file.endswith("__configuration_llama.py")
-                        and not os.path.exists(missing_file)
-                    ):
-                        os.makedirs(os.path.dirname(missing_file), exist_ok=True)
-                        with open(missing_file, "w", encoding="utf-8") as fp:
-                            fp.write("from transformers.models.llama.configuration_llama import *\n")
-
-                    auto_map = getattr(config, "auto_map", None) or {}
-                    class_ref = auto_map.get("AutoModelForCausalLM")
-                    if isinstance(class_ref, str):
-                        from transformers.dynamic_module_utils import get_class_from_dynamic_module
-                        get_class_from_dynamic_module(
-                            class_ref,
-                            str(getattr(config, "_name_or_path", "")),
-                            force_download=True,
-                        )
-
-                    model = cls.loader.from_config(
-                        config, trust_remote_code=trust_remote_code, **args
-                    )
-                else:
-                    raise
             _convert_model_with_defuser(cls, model, cleanup_original=True)
             model.checkpoint_file_name = model_save_name
             if native_gguf_qspec is not None:
@@ -1806,13 +1808,24 @@ def ModelLoader(cls):
             )
 
         if native_gguf_qspec is not None:
-            model = simple_dispatch_model(model, device_map)
+            # Only materialize computed non-persistent buffers (e.g. RoPE inv_freq).
+            # The GGUF loader below allocates each quantized weight directly on its
+            # target device, so we avoid a transient full-model garbage allocation.
+            materialize_meta_tensors(model, device_map, only_non_persistent_buffers=True)
             _load_quantized_gguf_checkpoint_into_model(
                 model=model,
                 gguf_checkpoint_path=gguf_checkpoint_path,
                 tensor_key_mapping=gguf_tensor_key_mapping,
+                device_map=device_map,
             )
+            # Any non-quant persistent parameters/buffers not covered by the GGUF
+            # checkpoint are materialized after the load, then the model is dispatched.
+            materialize_meta_tensors(model, device_map)
+            model = simple_dispatch_model(model, device_map)
         else:
+            # Buffers not present in the checkpoint (e.g. RoPE inv_freq) can be left on
+            # meta after init_empty_weights; allocate them on the right device before dispatch.
+            materialize_meta_tensors(model, device_map)
             # TODO: Why are we using this custom function and not dispatch_model?
             model = simple_dispatch_model(model, device_map)
 

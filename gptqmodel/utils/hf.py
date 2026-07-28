@@ -1937,8 +1937,8 @@ def build_shell_model(
     """
     init_kwargs = model_init_kwargs.copy()
 
-    del init_kwargs["device_map"]
-    del init_kwargs["_fast_init"]
+    init_kwargs.pop("device_map", None)
+    init_kwargs.pop("_fast_init", None)
     # All nn.Parameters and buffers are created
 
     normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)

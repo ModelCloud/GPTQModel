@@ -286,6 +286,150 @@ def nested_move_to(v, device, dtype: torch.dtype = None):
         return v
 
 
+def _is_meta_tensor(tensor: torch.Tensor | None) -> bool:
+    return tensor is not None and (getattr(tensor, "is_meta", False) or tensor.device.type == "meta")
+
+
+def materialize_meta_tensors(
+    model: nn.Module,
+    device_map: Dict[str, Union[str, int, torch.device]],
+    only_non_persistent_buffers: bool = False,
+) -> None:
+    """Materialize meta-device parameters/buffers on their target devices.
+
+    When a model shell is built with ``init_empty_weights(include_buffers=True)``,
+    buffers that are not stored in the checkpoint (e.g. RoPE ``inv_freq``) remain on
+    the meta device. This helper allocates them on the correct device, marks every
+    tensor that was actually loaded from the checkpoint, and then runs the model's
+    own ``_init_weights`` on the modules that own missing tensors so computed
+    non-persistent buffers get their correct values while already-loaded weights are
+    preserved. Any materialized tensor whose parent could not be re-initialized is
+    logged so uninitialized memory does not stay silent.
+
+    Args:
+        only_non_persistent_buffers: If ``True``, only materialize and re-initialize
+            non-persistent buffers (e.g. RoPE ``inv_freq``). Use this for the GGUF
+            path, where the GGUF loader is responsible for allocating quantized
+            parameters and persistent buffers.
+    """
+    from itertools import chain
+
+    try:
+        from accelerate.utils import has_offloaded_params
+    except ImportError:
+        def has_offloaded_params(module) -> bool:  # noqa: ARG001
+            return False
+
+    from accelerate.utils.modeling import set_module_tensor_to_device
+    from transformers import initialization as transformers_init
+    from transformers.modeling_utils import get_device
+
+    if not device_map:
+        return
+
+    # Remember which tensors were meta before we materialize them, so we can
+    # leave those un-marked and let _init_weights fill them in below. Also record
+    # which buffers are non-persistent (i.e. computed at construction and not stored
+    # in the checkpoint) so the final diagnostic pass only warns about those and
+    # does not spam for parameters that a later GGUF/quant load will fill.
+    non_persistent_buffer_names = set()
+    for mod_name, module in model.named_modules():
+        for buf_name in getattr(module, "_non_persistent_buffers_set", ()):
+            non_persistent_buffer_names.add(
+                f"{mod_name}.{buf_name}" if mod_name else buf_name
+            )
+
+    meta_tensor_names = set()
+    missing_module_names = set()
+    for name, tensor in chain(model.named_parameters(), model.named_buffers()):
+        if not _is_meta_tensor(tensor):
+            continue
+        if only_non_persistent_buffers and name not in non_persistent_buffer_names:
+            continue
+        parent, _, _ = name.rpartition(".")
+        parent_module = model.get_submodule(parent) if parent else model
+        if has_offloaded_params(parent_module):
+            # Accelerate disk-offloaded modules keep meta placeholders whose real
+            # data lives in offload hooks; do not overwrite them here.
+            continue
+        meta_tensor_names.add(name)
+        missing_module_names.add(parent)
+
+    for name, tensor in chain(model.named_parameters(), model.named_buffers()):
+        if name not in meta_tensor_names:
+            continue
+        target_device = get_device(device_map, name, valid_torch_device=True)
+        value = torch.empty_like(tensor, device=target_device)
+        set_module_tensor_to_device(model, name, target_device, value=value)
+
+    # Mark every tensor that was already real (loaded from the checkpoint) so
+    # _init_weights skips them. Newly materialized empty tensors stay unmarked.
+    # NOTE: `_is_hf_initialized` is an internal Transformers state convention used
+    # by `transformers.initialization` and `PreTrainedModel.initialize_weights` to
+    # avoid re-initializing already-loaded tensors. It is not a public API and may
+    # change across Transformers versions, so keep this coupling isolated here.
+    # When we only materialize non-persistent buffers (GGUF pre-load), no
+    # parameters have been loaded yet, so skip marking to avoid tagging still-meta
+    # quant weights as initialized.
+    if not only_non_persistent_buffers:
+        for name, tensor in chain(model.named_parameters(), model.named_buffers()):
+            if name not in meta_tensor_names:
+                tensor._is_hf_initialized = True
+
+    if not hasattr(model, "_init_weights"):
+        return
+
+    # Re-initialize modules that still contain missing (materialized) tensors.
+    # Guard torch.nn.init so it respects the _is_hf_initialized flag; this protects
+    # already-loaded weights even when custom _init_weights calls torch.nn.init
+    # directly. We call _init_weights on the immediate parent of each missing tensor,
+    # including non-leaf parents, so computed buffers attached to containers are not
+    # silently skipped. Exceptions are logged because an un-recomputed buffer is a
+    # correctness issue.
+    module_by_name = dict(model.named_modules())
+    reinitialized_module_names = set()
+    with transformers_init.guard_torch_init_functions():
+        for name in missing_module_names:
+            module = module_by_name.get(name)
+            if module is None:
+                continue
+            try:
+                model._init_weights(module)
+                reinitialized_module_names.add(name)
+            except Exception as exc:
+                log.warn(
+                    "materialize_meta_tensors: _init_weights failed for `%s` (%s): %s",
+                    name,
+                    module.__class__.__name__,
+                    exc,
+                )
+
+    # Final diagnostic pass: any meta-derived *non-persistent* buffer whose parent
+    # was not successfully re-initialized may still contain uninitialized memory.
+    # Warn so this does not stay silent. We deliberately limit this to
+    # non-persistent buffers because parameters will be filled by the checkpoint
+    # load; warning about every quant weight before GGUF/quant load would be noise.
+    # For those floating-point buffers we also flag non-finite values.
+    for name, tensor in model.named_buffers():
+        if name not in meta_tensor_names or name not in non_persistent_buffer_names:
+            continue
+        parent, _, _ = name.rpartition(".")
+        if parent not in reinitialized_module_names:
+            log.warn(
+                "materialize_meta_tensors: non-persistent buffer `%s` was materialized from meta but "
+                "its parent module `%s` was not re-initialized; it may contain uninitialized values.",
+                name,
+                parent or "<root>",
+            )
+            continue
+        if tensor.dtype.is_floating_point and not torch.isfinite(tensor).all():
+            log.warn(
+                "materialize_meta_tensors: non-persistent buffer `%s` contains non-finite values after "
+                "re-initialization; this usually indicates uninitialized memory.",
+                name,
+            )
+
+
 def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.Module]:
     if not layers:
         layers = SUPPORTS_MODULE_TYPES
@@ -506,9 +650,9 @@ def create_quant_module(
     else:
         ori_layer_device = submodule.list_buffers()[0].device
 
-    if ori_layer_device.type != CPU.type:
+    if ori_layer_device.type not in (CPU.type, "meta"):
         raise AssertionError(
-            f"Expected `{name}` to reside on CPU during quant module creation, "
+            f"Expected `{name}` to reside on CPU or meta during quant module creation, "
             f"but found tensors on `{ori_layer_device}`."
         )
 
@@ -619,24 +763,25 @@ def create_quant_module(
     if err is not None:
         raise err
 
-    new_layer = linear_cls(
-        bits=constructor_bits,
-        group_size=tmp_group_size,
-        desc_act=tmp_desc_act,
-        sym=tmp_sym,
-        in_features=in_features,
-        out_features=out_features,
-        pack_dtype=tmp_pack_dtype,
-        bias=bias,
-        dtype=dtype,
-        #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
-        name=name,
-        lm_head_name=lm_head_name,
-        backend=backend,
-        register_buffers=register_buffers,
-        adapter=adapter,
-        **tmp_init_kwargs,
-    )
+    with torch.device(ori_layer_device):
+        new_layer = linear_cls(
+            bits=constructor_bits,
+            group_size=tmp_group_size,
+            desc_act=tmp_desc_act,
+            sym=tmp_sym,
+            in_features=in_features,
+            out_features=out_features,
+            pack_dtype=tmp_pack_dtype,
+            bias=bias,
+            dtype=dtype,
+            #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
+            name=name,
+            lm_head_name=lm_head_name,
+            backend=backend,
+            register_buffers=register_buffers,
+            adapter=adapter,
+            **tmp_init_kwargs,
+        )
     new_layer.device = ori_layer_device
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
     # Return the new quantized module so callers can pass it directly to
