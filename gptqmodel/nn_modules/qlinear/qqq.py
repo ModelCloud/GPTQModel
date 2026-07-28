@@ -288,7 +288,13 @@ class QQQLinear(GroupedQuantLinear):
         return buf
 
     #def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor = None):
-    def pack(self, linear: torch.nn.Module, scales: torch.Tensor, s_extra=None):
+    def pack(
+        self,
+        linear: torch.nn.Module,
+        scales: torch.Tensor,
+        s_extra=None,
+        workers: Optional[int] = None,
+    ):
         """Pack a fake-quantized linear layer into this actual Marlin representation.
         @linear: fake-quantized `torch.nn.Linear` layer to convert (must be of type `torch.float16`)
         @scales: corresponding quantization scales of shape `(infeatures, groups)`
@@ -354,7 +360,8 @@ class QQQLinear(GroupedQuantLinear):
         try:
             from .pack_block_ext import pack_qqq_cpu
 
-            q = pack_qqq_cpu(res_u4, self.bits).to(CPU)
+            qqq_threads = workers if workers and workers > 0 else -1
+            q = pack_qqq_cpu(res_u4, self.bits, qqq_threads).to(CPU)
         except Exception:
             cols = res_u4.shape[1] // 8
             q = torch.zeros(res_u4.shape[0], cols, dtype=torch.int32, device=res_u4.device)

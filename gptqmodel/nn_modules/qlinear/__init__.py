@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import copy
 import math
-import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -926,7 +925,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             zeros: t.Tensor,
             g_idx: t.Tensor,
             block_in: int = 8192,
-            workers: int = 8,
+            workers: Optional[int] = None,
     ):
         self.pack_block(linear, scales, zeros, g_idx, block_in, workers)
 
@@ -938,7 +937,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             zeros: t.Tensor,
             g_idx: t.Tensor,
             block_in: int = 8192,
-            workers: int = 1,
+            workers: Optional[int] = None,
     ):
         """
         Parallel qweight pack on CPU (threaded over input blocks). qzeros path = original logic.
@@ -950,7 +949,7 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         Args:
           block_in: number of input channels per task (must be multiple of 32).
-          workers:  number of worker threads (None -> auto; 1 -> single-thread).
+          workers:  number of worker threads (None or <=0 -> auto; >0 -> explicit count).
         """
 
         MASK32 = (1 << 32) - 1  # for safe masking when packing via int64
@@ -973,7 +972,6 @@ class PackableQuantLinear(GPTQQuantLinear):
         # ---------- ORIGINAL scales/zeros logic (unchanged) ----------
         scales = scales.T.contiguous()  # [G, out]
         zeros = zeros.T.contiguous()  # [G, out]
-        scale_zeros = zeros * scales  # [G, out]
         num_groups = scales.shape[0]
 
         # small buffers
@@ -994,17 +992,7 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         disable_ext = env_flag("GPTQMODEL_DISABLE_PACK_EXT")
         force_ext = env_flag("GPTQMODEL_FORCE_PACK_EXT")
-        pack_block_threads = workers if workers and workers > 0 else 1
-        env_threads = os.getenv("GPTQMODEL_PACK_THREADS")
-        if env_threads:
-            try:
-                pack_block_threads = max(int(env_threads), 1)
-            except ValueError:
-                log.warning(
-                    "pack_block: invalid GPTQMODEL_PACK_THREADS `%s`; defaulting to %d.",
-                    env_threads,
-                    pack_block_threads,
-                )
+        pack_block_threads = workers if workers and workers > 0 else -1
 
         if not disable_ext and bits in (2, 3, 4, 8):
             try:
@@ -1134,6 +1122,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             del Wblk, gsel, sz_blk_T, s_blk_T, int_block
 
         # ---------- schedule blocks across a thread pool ----------
+        scale_zeros = zeros.to(t.float32) * scales  # [G, out]
         starts = list(range(0, in_features, block_in))
         ranges = [(i0, min(i0 + block_in, in_features)) for i0 in starts]
         len(ranges)

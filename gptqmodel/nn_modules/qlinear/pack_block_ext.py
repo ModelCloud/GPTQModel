@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -37,7 +37,12 @@ def pack_block_cpu(
     )
 
 
-def pack_awq_cpu(intweight: Tensor, zeros: Tensor, bits: int) -> Tuple[Tensor, Tensor]:
+def pack_awq_cpu(
+    intweight: Tensor,
+    zeros: Tensor,
+    bits: int,
+    threads: Optional[int] = -1,
+) -> Tuple[Tensor, Tensor]:
     ext = load_pack_block_extension()
     if ext is None:
         raise RuntimeError("pack_awq_cpu extension unavailable")
@@ -45,16 +50,22 @@ def pack_awq_cpu(intweight: Tensor, zeros: Tensor, bits: int) -> Tuple[Tensor, T
         intweight,
         zeros,
         int(bits),
+        int(threads),
     )
 
 
-def pack_qqq_cpu(int4_matrix: Tensor, bits: int) -> Tensor:
+def pack_qqq_cpu(
+    int4_matrix: Tensor,
+    bits: int,
+    threads: Optional[int] = -1,
+) -> Tensor:
     ext = load_pack_block_extension()
     if ext is None:
         raise RuntimeError("pack_qqq_cpu extension unavailable")
     return torch.ops.gptqmodel.pack_qqq_cpu(
         int4_matrix,
         int(bits),
+        int(threads),
     )
 
 

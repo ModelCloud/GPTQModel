@@ -303,11 +303,14 @@ class AwqGEMMTritonLinear(AWQuantLinear):
         scales: torch.Tensor,
         zeros: torch.Tensor,
         g_idx: torch.Tensor = None,
+        workers: Optional[int] = None,
     ):
         if self.bits != 3:
             from .gemm_awq import AwqGEMMLinear
 
-            return AwqGEMMLinear.pack(self, linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
+            return AwqGEMMLinear.pack(
+                self, linear=linear, scales=scales, zeros=zeros, g_idx=g_idx, workers=workers
+            )
 
         from ..triton_utils.three_bit import pack_3bit
 

@@ -200,7 +200,14 @@ class AwqGEMMLinear(AWQuantLinear):
 
         return out.reshape(out_shape)
 
-    def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor=None):
+    def pack(
+        self,
+        linear: nn.Module,
+        scales: torch.Tensor,
+        zeros: torch.Tensor,
+        g_idx: torch.Tensor=None,
+        workers: Optional[int]=None,
+    ):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
         scales = scales.t().contiguous()
@@ -233,7 +240,8 @@ class AwqGEMMLinear(AWQuantLinear):
         zeros_int = zeros_cpu.to(torch.int32)
 
         try:
-            qweight, qzeros = pack_awq_cpu(intweight, zeros_int, self.bits)
+            awq_threads = workers if workers and workers > 0 else -1
+            qweight, qzeros = pack_awq_cpu(intweight, zeros_int, self.bits, awq_threads)
         except Exception:
             # Fallback to the original Python packing loops if the extension is unavailable.
             qweight = torch.zeros(

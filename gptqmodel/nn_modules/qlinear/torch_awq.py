@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch
+from typing import Optional
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
@@ -91,7 +92,14 @@ class AwqTorchLinear(AWQuantLinear):
             f"bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}"
         )
 
-    def pack(self, linear: torch.nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
+    def pack(
+        self,
+        linear: torch.nn.Module,
+        scales: torch.Tensor,
+        zeros: torch.Tensor,
+        g_idx: torch.Tensor = None,
+        workers: Optional[int] = None,
+    ):
         del g_idx
         assert scales is not None and zeros is not None
 
@@ -125,7 +133,8 @@ class AwqTorchLinear(AWQuantLinear):
         zeros_int = zeros_cpu.to(torch.int32)
 
         try:
-            qweight, qzeros = pack_awq_cpu(intweight, zeros_int, self.bits)
+            awq_threads = workers if workers and workers > 0 else -1
+            qweight, qzeros = pack_awq_cpu(intweight, zeros_int, self.bits, awq_threads)
         except Exception:
             # Fallback vectorized packing if the compiled extension is unavailable.
             if self.bits != 4:

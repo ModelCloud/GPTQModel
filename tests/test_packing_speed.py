@@ -213,11 +213,7 @@ class TestPackingSpeed(unittest.TestCase):
         reference_time = None
 
         for threads in thread_options:
-            os.environ["GPTQMODEL_PACK_THREADS"] = str(threads)
-            try:
-                elapsed = self._time_pack_impl(qlinearCls, backend, impl="cpu", repeats=repeats, threads=1)
-            finally:
-                os.environ.pop("GPTQMODEL_PACK_THREADS", None)
+            elapsed = self._time_pack_impl(qlinearCls, backend, impl="cpu", repeats=repeats, threads=threads)
 
             if reference_time is None:
                 reference_time = elapsed
@@ -236,12 +232,10 @@ class TestPackingSpeed(unittest.TestCase):
         repeats = 5
 
         os.environ["GPTQMODEL_DISABLE_PACK_EXT"] = "1"
-        os.environ["GPTQMODEL_PACK_THREADS"] = "2"
         try:
             baseline = self._time_pack_impl(qlinearCls, backend, impl="cpu", repeats=repeats, threads=1)
         finally:
             os.environ.pop("GPTQMODEL_DISABLE_PACK_EXT", None)
-            os.environ.pop("GPTQMODEL_PACK_THREADS", None)
 
         try:
             from gptqmodel.nn_modules.qlinear import pack_block_ext as ext_mod
@@ -255,12 +249,10 @@ class TestPackingSpeed(unittest.TestCase):
             self.pack(qlinearCls, backend)
 
         os.environ["GPTQMODEL_FORCE_PACK_EXT"] = "1"
-        os.environ["GPTQMODEL_PACK_THREADS"] = "2"
         try:
             cpp_time = self._time_pack_impl(qlinearCls, backend, impl="cpu", repeats=repeats, threads=1)
         finally:
             os.environ.pop("GPTQMODEL_FORCE_PACK_EXT", None)
-            os.environ.pop("GPTQMODEL_PACK_THREADS", None)
 
         print(
             "pack_block extension speedup",

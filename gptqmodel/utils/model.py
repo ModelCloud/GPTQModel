@@ -1198,9 +1198,11 @@ def pack_module(
         assert get_device(q_g_idx) == CPU
 
     pack_impl = "original"
+    pack_threads = None
     target_device = None
     if quantize_config is not None:
         pack_impl = getattr(quantize_config, "pack_impl", "original") or "original"
+        pack_threads = getattr(quantize_config, "pack_threads", None)
         cfg_device = getattr(quantize_config, "device", None)
         if isinstance(cfg_device, DEVICE):
             target_device = cfg_device.to_torch_device()
@@ -1238,7 +1240,7 @@ def pack_module(
             logger=log,
             module_name=name,
         ):
-            module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
+            module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra, workers=pack_threads)
     elif quant_type.startswith("awq_") or quant_type == "llm-awq":
         packer_label = "module.pack"
         with log_time_block(
@@ -1251,6 +1253,7 @@ def pack_module(
                 scales=q_scales,
                 zeros=q_zeros,
                 g_idx=q_g_idx,
+                workers=pack_threads,
             )
     elif quant_type in {"gguf", "fp8", "bitsandbytes"}:
         # Weight-only methods that pack directly from the dense weight (optionally with smoothing).
@@ -1319,6 +1322,7 @@ def pack_module(
                         scales=q_scales,
                         zeros=q_zeros,
                         g_idx=q_g_idx,
+                        workers=pack_threads,
                     )
                 except ValueError:
                     module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)

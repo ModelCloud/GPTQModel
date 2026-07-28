@@ -2693,6 +2693,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     # packing implementation hint (`original` = legacy CPU pack, `gpu` enables CUDA pack, `cpu` forces block CPU pack).
     pack_impl: str = field(default="cpu")
 
+    # Number of CPU threads to use for packing. None or 0 lets the extension auto-select.
+    pack_threads: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of CPU threads to use for packing. None or 0 = auto."},
+    )
+
     adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
 
     # controls cpu memory saving by offloading layers/modules to disk in the slow quantization process

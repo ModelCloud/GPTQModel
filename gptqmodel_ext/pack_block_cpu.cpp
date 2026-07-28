@@ -7,6 +7,10 @@
 #include <torch/extension.h>
 #include <torch/library.h>
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <climits>
@@ -45,14 +49,63 @@ inline bool env_flag_enabled(const char* name) {
     }
 }
 
-inline int64_t clamped_threads(int64_t requested) {
+inline int64_t clamped_threads(int64_t requested, int64_t rows, int64_t cols) {
     const int64_t hard_limit = 32;
     const int64_t available = at::get_num_threads();
-    if (requested > 0) {
-        return std::max<int64_t>(1, std::min<int64_t>(requested, std::min<int64_t>(available, hard_limit)));
+    // Auto-select thread count based on workload size.  Target one thread per
+    // ~512K output elements to keep OpenMP/allocator overhead low for small
+    // layers while still scaling up to all available threads for large layers.
+    const int64_t n = rows * cols;
+    const int64_t per_thread = 524288;
+    int64_t auto_threads = (n + per_thread - 1) / per_thread;
+    if (auto_threads < 1) {
+        auto_threads = 1;
     }
-    return std::max<int64_t>(1, std::min<int64_t>(available, hard_limit));
+    auto_threads = std::min<int64_t>(auto_threads, std::min<int64_t>(available, hard_limit));
+    if (requested > 0) {
+        return std::max<int64_t>(1, std::min<int64_t>(requested, auto_threads));
+    }
+    return auto_threads;
 }
+
+// RAII helper to temporarily limit the number of OpenMP/ATen threads for the
+// packing loops.  Conversions (aten::to) are done before the guard is created so
+// they remain multi-threaded; only the cache-sensitive bit-packing loops run
+// with the requested thread count.
+//
+// We set the OpenMP thread limit directly with omp_set_num_threads because
+// at::set_num_threads from a JIT extension may resolve to a per-module inline
+// copy and not affect libtorch's at::parallel_for scheduling.
+class NumThreadsGuard {
+    int saved_;
+    bool active_;
+
+public:
+    explicit NumThreadsGuard(int64_t requested)
+#if defined(_OPENMP)
+        : saved_(omp_get_max_threads()), active_(false) {
+        if (requested > 0 && requested != saved_) {
+            omp_set_num_threads(static_cast<int>(requested));
+            active_ = true;
+        }
+#else
+        : saved_(at::get_num_threads()), active_(false) {
+        if (requested > 0 && requested != saved_) {
+            at::set_num_threads(static_cast<int>(requested));
+            active_ = true;
+        }
+#endif
+    }
+    ~NumThreadsGuard() {
+        if (active_) {
+#if defined(_OPENMP)
+            omp_set_num_threads(saved_);
+#else
+            at::set_num_threads(saved_);
+#endif
+        }
+    }
+};
 
 #if PACK_BLOCK_CPU_X86
 // __builtin_cpu_supports is only safe to use after the process has initialized
@@ -802,7 +855,7 @@ void dispatch_pack_qweight(
     int max_q,
     int64_t threads,
     int64_t block_in) {
-    const int64_t threads_eff = clamped_threads(threads);
+    const int64_t threads_eff = clamped_threads(threads, in_features, out_features);
     const int64_t blocks_per_chunk = std::max<int64_t>(1, block_in / 32);
     int64_t grain = num_blocks / threads_eff;
     if (grain <= 0) {
@@ -886,7 +939,7 @@ void dispatch_pack_qweight_3bit(
     int max_q,
     int64_t threads,
     int64_t block_in) {
-    const int64_t threads_eff = clamped_threads(threads);
+    const int64_t threads_eff = clamped_threads(threads, in_features, out_features);
     const int64_t blocks_per_chunk = std::max<int64_t>(1, block_in / 32);
     int64_t grain = num_blocks / threads_eff;
     if (grain <= 0) {
@@ -1015,9 +1068,10 @@ void pack_qzeros(
     int32_t* qzeros_ptr,
     int64_t qzeros_cols,
     int64_t groups,
+    int64_t out_features,
     int bits,
     int64_t threads) {
-    const int64_t threads_eff = clamped_threads(threads);
+    const int64_t threads_eff = clamped_threads(threads, groups, out_features);
     const int64_t grain = std::max<int64_t>(1, groups / threads_eff);
     at::parallel_for(0, groups, grain, [&](int64_t begin, int64_t end) {
         pack_qzeros_scalar(zeros_ptr, zeros_stride, qzeros_ptr, qzeros_cols, begin, end, bits);
@@ -1052,10 +1106,9 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
     at::Tensor zeros_i32 = zeros.contiguous().to(at::kInt);
     at::Tensor g_idx_i32 = g_idx.contiguous().to(at::kInt);
 
-    at::Tensor scale_zeros = zeros_i32.to(at::kFloat) * scales_f;
-
     const int64_t out_features = weight_f.size(0);
     const int64_t in_features = weight_f.size(1);
+    const int64_t threads_eff = clamped_threads(threads, in_features, out_features);
     TORCH_CHECK(g_idx_i32.size(0) == in_features, "g_idx length mismatch");
     TORCH_CHECK(in_features % word_bits == 0, "in_features must be divisible by word_bits");
 
@@ -1081,12 +1134,17 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
     const int max_q = (1 << bits) - 1;
     const float* weight_ptr = weight_f.const_data_ptr<float>();
     const float* scales_ptr = scales_f.const_data_ptr<float>();
-    const float* scale_zeros_ptr = scale_zeros.const_data_ptr<float>();
+    const int32_t* zeros_ptr = zeros_i32.const_data_ptr<int32_t>();
     const int32_t* gidx_ptr = g_idx_i32.const_data_ptr<int32_t>();
     int32_t* qweight_ptr = qweight.data_ptr<int32_t>();
 
+    at::Tensor scale_zeros = zeros_i32.to(at::kFloat) * scales_f;
+    const float* scale_zeros_ptr = scale_zeros.const_data_ptr<float>();
+
     const int64_t out_stride = in_features;
     const int64_t scales_stride = out_features;
+
+    NumThreadsGuard guard(threads_eff);
 
     if (bits == 2 || bits == 4 || bits == 8) {
         switch (bits) {
@@ -1104,7 +1162,7 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
                     num_blocks,
                     groups,
                     max_q,
-                    threads,
+                    threads_eff,
                     block_in);
                 break;
             case 4:
@@ -1121,7 +1179,7 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
                     num_blocks,
                     groups,
                     max_q,
-                    threads,
+                    threads_eff,
                     block_in);
                 break;
             case 8:
@@ -1138,7 +1196,7 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
                     num_blocks,
                     groups,
                     max_q,
-                    threads,
+                    threads_eff,
                     block_in);
                 break;
         }
@@ -1156,21 +1214,19 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
             num_blocks,
             groups,
             max_q,
-            threads,
+            threads_eff,
             block_in);
     } else {
         TORCH_CHECK(false, "Unsupported bits value", bits);
     }
 
-    at::Tensor zeros_i32_contig = zeros_i32.contiguous();
-    const int32_t* zeros_ptr = zeros_i32_contig.const_data_ptr<int32_t>();
-    const int64_t zeros_stride = zeros_i32_contig.size(1);
+    const int64_t zeros_stride = zeros_i32.size(1);
 
     int64_t qzeros_cols = (out_features / word_bits) * bits;
     at::Tensor qzeros = at::zeros({groups, qzeros_cols}, q_options);
     int32_t* qzeros_ptr = qzeros.data_ptr<int32_t>();
 
-    pack_qzeros(zeros_ptr, zeros_stride, qzeros_ptr, qzeros_cols, groups, static_cast<int>(bits), threads);
+    pack_qzeros(zeros_ptr, zeros_stride, qzeros_ptr, qzeros_cols, groups, out_features, static_cast<int>(bits), threads_eff);
 
     return {qweight, qzeros};
 }
@@ -1262,7 +1318,8 @@ inline void pack_awq_row_avx512(
 std::tuple<at::Tensor, at::Tensor> pack_awq_cpu(
     const at::Tensor& intweight,
     const at::Tensor& zeros,
-    int64_t bits) {
+    int64_t bits,
+    int64_t threads) {
     TORCH_CHECK(intweight.device().is_cpu(), "pack_awq_cpu: intweight must reside on CPU");
     TORCH_CHECK(zeros.device().is_cpu(), "pack_awq_cpu: zeros must reside on CPU");
 
@@ -1322,7 +1379,11 @@ std::tuple<at::Tensor, at::Tensor> pack_awq_cpu(
         false;
 #endif
 
-    at::parallel_for(0, in_features, 0, [&](int64_t start, int64_t end) {
+    const int64_t awq_threads = clamped_threads(threads, in_features, out_features);
+    NumThreadsGuard awq_guard(awq_threads);
+
+    const int64_t grain_in = std::max<int64_t>(1, in_features / awq_threads);
+    at::parallel_for(0, in_features, grain_in, [&](int64_t start, int64_t end) {
         for (int64_t i = start; i < end; ++i) {
             const int32_t* src = iw_ptr + i * iw_stride_in;
             int32_t* dst = qw_ptr + i * out_packs;
@@ -1349,7 +1410,8 @@ std::tuple<at::Tensor, at::Tensor> pack_awq_cpu(
         }
     });
 
-    at::parallel_for(0, groups, 0, [&](int64_t start, int64_t end) {
+    const int64_t grain_groups = std::max<int64_t>(1, groups / awq_threads);
+    at::parallel_for(0, groups, grain_groups, [&](int64_t start, int64_t end) {
         for (int64_t g = start; g < end; ++g) {
             const int32_t* src = z_ptr + g * z_stride_group;
             int32_t* dst = qz_ptr + g * out_packs;
@@ -1382,7 +1444,7 @@ std::tuple<at::Tensor, at::Tensor> pack_awq_cpu(
 // QQQ-style nibble packing.  Takes an int32 tensor where each value holds a
 // 4-bit code in the low nibble and packs 8 consecutive columns into one 32-bit
 // word (natural order).  This is used for the final Marlin bit-pack step.
-at::Tensor pack_qqq_cpu(const at::Tensor& int4_matrix, int64_t bits) {
+at::Tensor pack_qqq_cpu(const at::Tensor& int4_matrix, int64_t bits, int64_t threads) {
     TORCH_CHECK(int4_matrix.device().is_cpu(), "pack_qqq_cpu: int4_matrix must reside on CPU");
     TORCH_CHECK(bits == 4, "pack_qqq_cpu: only 4-bit packing is currently supported");
 
@@ -1414,7 +1476,11 @@ at::Tensor pack_qqq_cpu(const at::Tensor& int4_matrix, int64_t bits) {
         false;
 #endif
 
-    at::parallel_for(0, rows, 0, [&](int64_t start, int64_t end) {
+    const int64_t qqq_threads = clamped_threads(threads, rows, cols);
+    NumThreadsGuard qqq_guard(qqq_threads);
+
+    const int64_t grain_rows = std::max<int64_t>(1, rows / qqq_threads);
+    at::parallel_for(0, rows, grain_rows, [&](int64_t start, int64_t end) {
         for (int64_t i = start; i < end; ++i) {
             const int32_t* src = src_ptr + i * cols;
             int32_t* dst = dst_ptr + i * out_cols;
@@ -1855,7 +1921,7 @@ TORCH_LIBRARY(gptqmodel, m) {
         TORCH_FN(gptqmodel::pack_block_cpu)
     );
     m.def(
-        "pack_awq_cpu(Tensor intweight, Tensor zeros, int bits) -> (Tensor, Tensor)"
+        "pack_awq_cpu(Tensor intweight, Tensor zeros, int bits, int threads=-1) -> (Tensor, Tensor)"
     );
     m.impl(
         "pack_awq_cpu",
@@ -1863,7 +1929,7 @@ TORCH_LIBRARY(gptqmodel, m) {
         TORCH_FN(gptqmodel::pack_awq_cpu)
     );
     m.def(
-        "pack_qqq_cpu(Tensor int4_matrix, int bits) -> Tensor"
+        "pack_qqq_cpu(Tensor int4_matrix, int bits, int threads=-1) -> Tensor"
     );
     m.impl(
         "pack_qqq_cpu",

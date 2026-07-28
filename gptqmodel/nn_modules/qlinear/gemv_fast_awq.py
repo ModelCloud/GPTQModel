@@ -5,6 +5,7 @@
 
 import torch
 from torch import nn
+from typing import Optional
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
@@ -231,7 +232,14 @@ class AwqGEMVFastLinear(AWQuantLinear):
             return self.scaled_zeros
         raise ValueError(f"Unsupported zeros buffer: {self.zeros_name}")
 
-    def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
+    def pack(
+        self,
+        linear: nn.Module,
+        scales: torch.Tensor,
+        zeros: torch.Tensor,
+        g_idx: torch.Tensor = None,
+        workers: Optional[int] = None,
+    ):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
         scale_zeros = zeros * scales

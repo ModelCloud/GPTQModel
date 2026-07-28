@@ -115,6 +115,7 @@ class AWQBitBlasKernel(BitblasBaseQuantLinear):
         scales: torch.Tensor,
         zeros: torch.Tensor,
         g_idx: Optional[torch.Tensor] = None,
+        workers: Optional[int] = None,
     ) -> None:
         del g_idx
 
