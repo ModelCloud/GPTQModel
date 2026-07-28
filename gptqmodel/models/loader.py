@@ -42,6 +42,10 @@ from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2, BaseQuant
 from ..utils import internal_gguf
 from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
 from ..utils.exllamav3 import replace_exllamav3_placeholders
+from ..utils.moe_dispatch import (
+    enable_grouped_dispatch_for_model,
+    register_linear_loop_experts,
+)
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
     build_shell_model,
@@ -166,7 +170,7 @@ def _maybe_print_module_tree(model) -> None:
         print_module_tree(model=model)
 
 
-def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
+def _convert_model_with_defuser(cls, model, cleanup_original: bool, enable_grouped_moe_dispatch: bool = False) -> bool:
     converted = defuser.convert_model(model, cleanup_original=cleanup_original)
 
     defuser_module_paths = getattr(cls, "defuser_module_paths", ())
@@ -177,6 +181,12 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
                 log.warn("Loader: defuser module path `%s` was not found.", module_path)
                 continue
             converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
+
+    # Only swap in the grouped GEMM MoE dispatch for post-quantization inference;
+    # quantization still needs the defused per-expert forward for per-module calibration.
+    if converted and enable_grouped_moe_dispatch:
+        register_linear_loop_experts()
+        enable_grouped_dispatch_for_model(model)
 
     return converted
 
@@ -948,12 +958,12 @@ def ModelLoader(cls):
                 )
                 if getattr(model, "config", None) is config:
                     model.config = copy.deepcopy(config)
-                _convert_model_with_defuser(cls, model, cleanup_original=False)
+                _convert_model_with_defuser(cls, model, cleanup_original=False, enable_grouped_moe_dispatch=False)
                 model._model_init_kwargs = fallback_init_kwargs
                 _maybe_print_module_tree(model=model)
                 turtle_model = None
             else:
-                _convert_model_with_defuser(cls, model, cleanup_original=False)
+                _convert_model_with_defuser(cls, model, cleanup_original=False, enable_grouped_moe_dispatch=False)
                 shell_model_init_kwargs = dict(model_init_kwargs_without_internal)
                 shell_model_init_kwargs.update(hf_gguf_load_kwargs)
                 model._model_init_kwargs = shell_model_init_kwargs
@@ -990,7 +1000,7 @@ def ModelLoader(cls):
             )
             if getattr(model, "config", None) is config:
                 model.config = copy.deepcopy(config)
-            _convert_model_with_defuser(cls, model, cleanup_original=False)
+            _convert_model_with_defuser(cls, model, cleanup_original=False, enable_grouped_moe_dispatch=False)
             direct_model_init_kwargs = dict(model_init_kwargs_without_internal)
             direct_model_init_kwargs.update(hf_gguf_load_kwargs)
             model._model_init_kwargs = direct_model_init_kwargs
@@ -1404,7 +1414,7 @@ def ModelLoader(cls):
                 model = cls.loader.from_config(
                     config, trust_remote_code=trust_remote_code, **args
                 )
-            _convert_model_with_defuser(cls, model, cleanup_original=True)
+            _convert_model_with_defuser(cls, model, cleanup_original=True, enable_grouped_moe_dispatch=True)
             model.checkpoint_file_name = model_save_name
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
