@@ -648,7 +648,12 @@ def _batched_marlin_moe_supported(
     intermediate_dim: int,
     dtype: torch.dtype,
 ) -> bool:
-    """Return True when the Marlin-packed experts can use the batched/offset MoE kernel."""
+    """Return True when the Marlin-packed experts can use the batched/offset MoE kernel.
+
+    Experts may have different packed ``scales`` shapes (different ``group_size``)
+    as long as their ``qweight`` shapes and runtime dimensions are uniform; such
+    experts are clustered and launched as separate ``moe_wna16_marlin_gemm`` calls.
+    """
     if not _is_marlin_expert(expert0):
         return False
     if not _marlin_moe_available():
@@ -684,11 +689,12 @@ def _batched_marlin_moe_supported(
             return False
 
         ref_shape_qw = tuple(target.qweight.shape)
-        ref_shape_sc = tuple(target.scales.shape)
+        ref = (target.padded_in_features, target.padded_out_features, target.is_k_full, target.weight_type)
         for i in range(1, num_experts):
             other_proj = getattr(getattr(self, str(i)), attr)
             other_target = _marlin_moe_target(other_proj)
-            if tuple(other_target.qweight.shape) != ref_shape_qw or tuple(other_target.scales.shape) != ref_shape_sc:
+            other_ref = (other_target.padded_in_features, other_target.padded_out_features, other_target.is_k_full, other_target.weight_type)
+            if tuple(other_target.qweight.shape) != ref_shape_qw or other_ref != ref:
                 return False
 
     gate = expert0.gate_proj
@@ -733,15 +739,18 @@ def _set_stacked_tensor(target: object, name: str, tensor: torch.Tensor) -> None
         setattr(target, name, tensor)
 
 
-def _prestack_marlin_moe_weights(self: nn.Module, expert0: nn.Module) -> dict[str, tuple]:
-    """Pre-stack all expert Marlin qweight/scales once so decode paths avoid per-call copies.
+def _prestack_marlin_moe_weights(self: nn.Module, expert0: nn.Module) -> dict[str, list[dict[str, object]]]:
+    """Pre-stack expert Marlin packed weights into shape-homogeneous clusters.
 
-    The per-expert projection objects (either ``MarlinLinear`` or a
-    ``_FusedQuantGroup``'s ``_FusedMarlinKernel``) have their ``qweight`` and
-    ``scales`` replaced by views into the stacked tensor.  This keeps total
-    memory roughly flat while removing the ``active.tolist()``/``torch.stack``
-    overhead from every forward.  Returns a dict keyed by ``"gate"``, ``"up"``,
-    ``"down"`` or ``"gateup"``.
+    Experts whose ``qweight`` shape and runtime dimensions match but whose
+    ``scales`` shape differs (e.g. different ``group_size``) are grouped into
+    separate clusters.  Each cluster owns a ``[cluster_size, ...]`` stacked
+    weight tensor and a membership mapping from global expert IDs to the local
+    cluster index used by ``moe_wna16_marlin_gemm``.  Per-expert ``qweight`` and
+    ``scales`` are replaced by views into their cluster tensor.
+
+    Returns a dict keyed by ``"gate"``, ``"up"``, ``"down"`` or ``"gateup"``,
+    with each value a list of cluster descriptors.
     """
     num_experts = self.num_experts
     fused_gateup = _expert_gateup_is_fused(expert0)
@@ -754,9 +763,10 @@ def _prestack_marlin_moe_weights(self: nn.Module, expert0: nn.Module) -> dict[st
         proj_specs.append(("up", "up_proj"))
     proj_specs.append(("down", "down_proj"))
 
-    stacked: dict[str, tuple] = {}
+    clusters_by_proj: dict[str, list[dict[str, object]]] = {}
     for proj_key, attr_name in proj_specs:
         targets: list[object] = []
+        global_ids: list[int] = []
         for i in range(num_experts):
             expert = getattr(self, str(i))
             obj = getattr(expert, attr_name)
@@ -764,30 +774,81 @@ def _prestack_marlin_moe_weights(self: nn.Module, expert0: nn.Module) -> dict[st
                 obj = obj._gptqmodel_fused_group
             target = getattr(obj, "kernel", obj)
             targets.append(target)
+            global_ids.append(i)
 
-        q0 = targets[0].qweight
-        s0 = targets[0].scales
-        device = q0.device
-        stacked_qw = torch.empty((num_experts, *q0.shape), dtype=q0.dtype, device=device)
-        stacked_sc = torch.empty((num_experts, *s0.shape), dtype=s0.dtype, device=device)
-
+        # Cluster by (qweight shape, scales shape, is_k_full, weight_type).
+        cluster_map: dict[tuple, list[int]] = {}
         for i, target in enumerate(targets):
-            stacked_qw[i].copy_(target.qweight)
-            stacked_sc[i].copy_(target.scales)
-            _set_stacked_tensor(target, "qweight", stacked_qw[i])
-            _set_stacked_tensor(target, "scales", stacked_sc[i])
+            key = (
+                tuple(target.qweight.shape),
+                tuple(target.scales.shape),
+                target.padded_in_features,
+                target.padded_out_features,
+                target.is_k_full,
+                getattr(target.weight_type, "id", target.weight_type),
+            )
+            cluster_map.setdefault(key, []).append(i)
 
-        stacked[proj_key] = (
-            stacked_qw,
-            stacked_sc,
-            targets[0].weight_type,
-            targets[0].padded_in_features,
-            targets[0].padded_out_features,
-            targets[0].is_k_full,
-        )
+        clusters: list[dict[str, object]] = []
+        for key, member_indices in cluster_map.items():
+            first = targets[member_indices[0]]
+            device = first.qweight.device
+            stacked_qw = torch.empty((len(member_indices), *first.qweight.shape), dtype=first.qweight.dtype, device=device)
+            stacked_sc = torch.empty((len(member_indices), *first.scales.shape), dtype=first.scales.dtype, device=device)
 
-    self._marlin_moe_stacked = stacked
-    return stacked
+            # membership[global_id] = local cluster id; non-members map to 0 (a valid local id used only for padding rows).
+            membership = torch.zeros(num_experts, dtype=torch.int64, device=device)
+            in_cluster = torch.zeros(num_experts, dtype=torch.bool, device=device)
+            cluster_global_ids = torch.empty(len(member_indices), dtype=torch.int64, device=device)
+            for local_id, global_id in enumerate(member_indices):
+                target = targets[global_id]
+                stacked_qw[local_id].copy_(target.qweight)
+                stacked_sc[local_id].copy_(target.scales)
+                _set_stacked_tensor(target, "qweight", stacked_qw[local_id])
+                _set_stacked_tensor(target, "scales", stacked_sc[local_id])
+                membership[global_id] = local_id
+                in_cluster[global_id] = True
+                cluster_global_ids[local_id] = global_id
+
+            clusters.append({
+                "qweight": stacked_qw,
+                "scales": stacked_sc,
+                "weight_type": first.weight_type,
+                "padded_in_features": first.padded_in_features,
+                "padded_out_features": first.padded_out_features,
+                "is_k_full": first.is_k_full,
+                "membership": membership,
+                "in_cluster": in_cluster,
+                "global_ids": cluster_global_ids,
+            })
+
+        clusters_by_proj[proj_key] = clusters
+
+    self._marlin_moe_stacked = clusters_by_proj
+    return clusters_by_proj
+
+
+def _moe_scatter_cluster_output(
+    cluster_out: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    in_cluster: torch.Tensor,
+    topk_ids: torch.Tensor,
+    global_out: torch.Tensor,
+) -> None:
+    """Scatter a cluster's kernel output back into the global pair-ordered buffer.
+
+    Only rows whose original token-expert pair belongs to this cluster are
+    written.  ``in_cluster`` is a ``[num_experts]`` bool tensor and ``topk_ids``
+    is the global (batch, top_k) expert ids used to build the membership mask.
+    """
+    num_pairs = topk_ids.numel()
+    valid = sorted_token_ids < num_pairs
+    valid_global_ids = sorted_token_ids[valid]
+    pair_in_cluster = in_cluster[topk_ids.flatten()]
+    member_rows = pair_in_cluster[valid_global_ids]
+    if member_rows.any():
+        member_ids = valid_global_ids[member_rows]
+        global_out[member_ids] = cluster_out[member_ids]
 
 
 def _batched_marlin_moe_forward(
@@ -796,12 +857,11 @@ def _batched_marlin_moe_forward(
     top_k_index: torch.Tensor,
     top_k_weights: torch.Tensor,
 ) -> torch.Tensor:
-    """Batched/offset Marlin MoE mega-kernel dispatch.
+    """Batched/offset Marlin MoE mega-kernel dispatch with shape clustering.
 
-    Uses pre-stacked per-expert Marlin packed weights and a vectorized
-    token-expert alignment so each decode forward only launches one (or two, for
-    non-fused gate/up) batched Marlin GEMMs per projection without Python loops
-    or per-call ``torch.stack`` copies.
+    Experts with different packed ``scales`` shapes (e.g. different
+    ``group_size``) are launched as separate ``moe_wna16_marlin_gemm`` calls,
+    but still without Python per-expert loops or per-call ``torch.stack``.
     """
     if hidden_states.dim() == 3:
         batch_size, seq_len, hidden_dim = hidden_states.shape
@@ -833,15 +893,10 @@ def _batched_marlin_moe_forward(
     gate_out_features = gate_proj.out_features
     up_out_features = up_proj.out_features
 
-    # Pre-stack expert packed weights once and use global expert IDs in the kernel.
+    # Pre-stack expert packed weights into homogeneous clusters once.
     stacked = getattr(self, "_marlin_moe_stacked", None)
     if stacked is None:
         stacked = _prestack_marlin_moe_weights(self, expert0)
-
-    block_size = _moe_block_size(num_tokens, num_top_k)
-    active, sorted_token_ids, expert_ids, num_tokens_post_padded = _moe_align_block_size(
-        topk_ids, block_size
-    )
 
     workspace = getattr(self, "_marlin_moe_workspace", None)
     if workspace is None or workspace.device != device:
@@ -850,12 +905,9 @@ def _batched_marlin_moe_forward(
         workspace = marlin_make_workspace_new(device, max_blocks_per_sm=4)
         self._marlin_moe_workspace = workspace
 
+    block_size = _moe_block_size(num_tokens, num_top_k)
     topk_weights_flat = topk_w.reshape(-1).contiguous()
     fused_gateup = _expert_gateup_is_fused(expert0)
-
-    # Map local expert_ids to the original (global) expert indices.  The kernel
-    # can then index into the pre-stacked [num_experts, ...] weight tensor.
-    global_expert_ids = active.long()[expert_ids.long()].to(torch.int32)
 
     def _maybe_pad(x: torch.Tensor, padded_in: int) -> torch.Tensor:
         if x.size(-1) == padded_in:
@@ -863,120 +915,149 @@ def _batched_marlin_moe_forward(
         pad = padded_in - x.size(-1)
         return F.pad(x, (0, pad))
 
+    # Helper: run the Marlin MoE mega-kernel for one shape cluster.
+    def _cluster_marlin_gemm(
+        x: torch.Tensor,
+        cluster: dict[str, object],
+        out_features: int,
+        top_k: int,
+        mul_topk_weights: bool,
+        size_m: int,
+    ) -> torch.Tensor:
+        membership = cluster["membership"]
+        in_cluster = cluster["in_cluster"]
+        # Build cluster-local topk ids; non-member pairs map to local id 0 (a valid expert) and are zero-weighted/masked later.
+        local_topk_ids = membership[topk_ids.long()].to(torch.int32)
+
+        active, sorted_token_ids, expert_ids, num_tokens_post_padded = _moe_align_block_size(
+            local_topk_ids, block_size
+        )
+
+        x_padded = _maybe_pad(x, cluster["padded_in_features"]).contiguous()
+        out = moe_wna16_marlin_gemm(
+            x_padded,
+            cluster["qweight"],
+            cluster["scales"],
+            workspace,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            topk_weights_flat,
+            cluster["weight_type"],
+            moe_block_size=block_size,
+            top_k=top_k,
+            size_m=size_m,
+            size_n=cluster["padded_out_features"],
+            size_k=cluster["padded_in_features"],
+            is_k_full=cluster["is_k_full"],
+            use_fp32_reduce=True,
+            use_atomic_add=False,
+            mul_topk_weights=mul_topk_weights,
+        )
+        if out.size(-1) > out_features:
+            out = out[..., :out_features]
+        return out, sorted_token_ids, in_cluster
+
     # Gate / up projection (one fused GEMM when gate/up are fused, two otherwise).
     if fused_gateup:
-        fused_qw, fused_sc, weight_type, pin, pout, is_k_full = stacked["gateup"]
         group = getattr(gate_proj, "_gptqmodel_fused_group")
         gate_slice = group.slices[0]
         up_slice = group.slices[1]
-
-        x_padded = _maybe_pad(hidden_states, pin).contiguous()
-        fused_out = moe_wna16_marlin_gemm(
-            x_padded,
-            fused_qw,
-            fused_sc,
-            workspace,
-            sorted_token_ids,
-            global_expert_ids,
-            num_tokens_post_padded,
-            topk_weights_flat,
-            weight_type,
-            moe_block_size=block_size,
-            top_k=num_top_k,
-            size_m=num_tokens,
-            size_n=pout,
-            size_k=pin,
-            is_k_full=is_k_full,
-            use_fp32_reduce=True,
-            use_atomic_add=False,
-            mul_topk_weights=False,
+        total_out_features = gate_out_features + up_out_features
+        gate_up_out = torch.zeros(
+            (num_tokens * num_top_k, total_out_features), dtype=dtype, device=device
         )
-        gate_out = fused_out[:, gate_slice[0] : gate_slice[1]]
-        up_out = fused_out[:, up_slice[0] : up_slice[1]]
+        for cluster in stacked["gateup"]:
+            fused_out, sorted_token_ids, in_cluster = _cluster_marlin_gemm(
+                hidden_states,
+                cluster,
+                total_out_features,
+                top_k=num_top_k,
+                mul_topk_weights=False,
+                size_m=num_tokens,
+            )
+            _moe_scatter_cluster_output(
+                fused_out, sorted_token_ids, in_cluster, topk_ids, gate_up_out
+            )
+        gate_out = gate_up_out[:, gate_slice[0] : gate_slice[1]]
+        up_out = gate_up_out[:, up_slice[0] : up_slice[1]]
     else:
-        gate_qw, gate_sc, gate_wt, gate_pin, gate_pout, gate_is_k = stacked["gate"]
-        up_qw, up_sc, up_wt, up_pin, up_pout, up_is_k = stacked["up"]
-
-        x_padded = _maybe_pad(hidden_states, gate_pin).contiguous()
-        gate_out = moe_wna16_marlin_gemm(
-            x_padded,
-            gate_qw,
-            gate_sc,
-            workspace,
-            sorted_token_ids,
-            global_expert_ids,
-            num_tokens_post_padded,
-            topk_weights_flat,
-            gate_wt,
-            moe_block_size=block_size,
-            top_k=num_top_k,
-            size_m=num_tokens,
-            size_n=gate_pout,
-            size_k=gate_pin,
-            is_k_full=gate_is_k,
-            use_fp32_reduce=True,
-            use_atomic_add=False,
-            mul_topk_weights=False,
+        gate_out = torch.zeros(
+            (num_tokens * num_top_k, gate_out_features), dtype=dtype, device=device
         )
-        gate_out = gate_out[:, :gate_out_features]
+        for cluster in stacked["gate"]:
+            c_out, sorted_token_ids, in_cluster = _cluster_marlin_gemm(
+                hidden_states,
+                cluster,
+                gate_out_features,
+                top_k=num_top_k,
+                mul_topk_weights=False,
+                size_m=num_tokens,
+            )
+            _moe_scatter_cluster_output(
+                c_out, sorted_token_ids, in_cluster, topk_ids, gate_out
+            )
 
-        up_out = moe_wna16_marlin_gemm(
-            x_padded,
-            up_qw,
-            up_sc,
-            workspace,
-            sorted_token_ids,
-            global_expert_ids,
-            num_tokens_post_padded,
-            topk_weights_flat,
-            up_wt,
-            moe_block_size=block_size,
-            top_k=num_top_k,
-            size_m=num_tokens,
-            size_n=up_pout,
-            size_k=up_pin,
-            is_k_full=up_is_k,
-            use_fp32_reduce=True,
-            use_atomic_add=False,
-            mul_topk_weights=False,
+        up_out = torch.zeros(
+            (num_tokens * num_top_k, up_out_features), dtype=dtype, device=device
         )
-        up_out = up_out[:, :up_out_features]
+        for cluster in stacked["up"]:
+            c_out, sorted_token_ids, in_cluster = _cluster_marlin_gemm(
+                hidden_states,
+                cluster,
+                up_out_features,
+                top_k=num_top_k,
+                mul_topk_weights=False,
+                size_m=num_tokens,
+            )
+            _moe_scatter_cluster_output(
+                c_out, sorted_token_ids, in_cluster, topk_ids, up_out
+            )
 
     act = _apply_expert_gate(self, gate_out, up_out)
     del gate_out, up_out
 
-    # Pad activation to the down projection's padded input dimension.
-    down_qw, down_sc, down_wt, down_pin, down_pout, down_is_k = stacked["down"]
-    act_padded = _maybe_pad(act, down_pin).contiguous()
-    del act
-
-    down_out = moe_wna16_marlin_gemm(
-        act_padded,
-        down_qw,
-        down_sc,
-        workspace,
-        sorted_token_ids,
-        global_expert_ids,
-        num_tokens_post_padded,
-        topk_weights_flat,
-        down_wt,
-        moe_block_size=block_size,
-        top_k=1,
-        size_m=num_tokens * num_top_k,
-        size_n=down_pout,
-        size_k=down_pin,
-        is_k_full=down_is_k,
-        use_fp32_reduce=True,
-        use_atomic_add=False,
-        mul_topk_weights=True,
+    # Down projection: each cluster is launched over the activated pairs.
+    down_out = torch.zeros(
+        (num_tokens * num_top_k, hidden_dim), dtype=torch.float32, device=device
     )
+    for cluster in stacked["down"]:
+        membership = cluster["membership"]
+        in_cluster = cluster["in_cluster"]
+        # Down uses top_k=1 and one row per token-expert pair.
+        local_topk_ids = membership[topk_ids.long()].to(torch.int32)
+        active, sorted_token_ids, expert_ids, num_tokens_post_padded = _moe_align_block_size(
+            local_topk_ids, block_size
+        )
+        act_padded = _maybe_pad(act, cluster["padded_in_features"]).contiguous()
+        c_out = moe_wna16_marlin_gemm(
+            act_padded,
+            cluster["qweight"],
+            cluster["scales"],
+            workspace,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            topk_weights_flat,
+            cluster["weight_type"],
+            moe_block_size=block_size,
+            top_k=1,
+            size_m=num_tokens * num_top_k,
+            size_n=cluster["padded_out_features"],
+            size_k=cluster["padded_in_features"],
+            is_k_full=cluster["is_k_full"],
+            use_fp32_reduce=True,
+            use_atomic_add=False,
+            mul_topk_weights=True,
+        )
+        if c_out.size(-1) > hidden_dim:
+            c_out = c_out[..., :hidden_dim]
+        _moe_scatter_cluster_output(
+            c_out, sorted_token_ids, in_cluster, topk_ids, down_out
+        )
 
     final_hidden_states = (
-        down_out[:, :hidden_dim]
-        .view(num_tokens, num_top_k, hidden_dim)
-        .to(torch.float32)
-        .sum(dim=1)
-        .to(dtype)
+        down_out.view(num_tokens, num_top_k, hidden_dim).sum(dim=1).to(dtype)
     )
 
     if batch_size is not None:

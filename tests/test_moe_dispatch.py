@@ -557,3 +557,30 @@ def test_grouped_moe_dispatch_marlin_moe_laguna_like() -> None:
 
     assert getattr(module, "_moe_dispatch_backend", None) == "marlin_moe"
     torch.testing.assert_close(grouped, expected, atol=2.0, rtol=0.05)
+
+
+def test_moe_scatter_cluster_output_respects_pair_id_order() -> None:
+    """_moe_scatter_cluster_output must write each pair's result to its global pair id."""
+    from gptqmodel.utils.moe_dispatch import _moe_scatter_cluster_output
+
+    num_pairs = 12
+    hidden = 4
+    # Each row encodes its pair id in the first column.
+    cluster_out = torch.arange(num_pairs, dtype=torch.float32, device="cuda").view(-1, 1).expand(-1, hidden)
+    # Non-monotonic token-expert ids: the argsort below will permute pair ids.
+    topk_ids = torch.tensor(
+        [[0, 2], [3, 1], [0, 3], [2, 1], [1, 0], [3, 2]],
+        dtype=torch.int64,
+        device="cuda",
+    )
+    flat = topk_ids.flatten()
+    sorted_indices = torch.argsort(flat, stable=True)
+    sorted_token_ids = torch.full((16,), num_pairs, dtype=torch.int32, device="cuda")
+    sorted_token_ids[:num_pairs] = sorted_indices
+    in_cluster = torch.tensor([True, True, True, True], dtype=torch.bool, device="cuda")
+    global_out = torch.full((num_pairs, hidden), -1.0, device="cuda")
+
+    _moe_scatter_cluster_output(cluster_out, sorted_token_ids, in_cluster, topk_ids, global_out)
+
+    expected = cluster_out[:num_pairs]
+    torch.testing.assert_close(global_out, expected)

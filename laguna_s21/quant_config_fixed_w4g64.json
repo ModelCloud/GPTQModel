@@ -1,0 +1,52 @@
+{
+  "bits": 4,
+  "checkpoint_format": "gptq",
+  "desc_act": false,
+  "format": "gptq",
+  "group_size": 64,
+  "lm_head": false,
+  "meta": {
+    "act_group_aware": true,
+    "auto_forward_data_parallel": true,
+    "dense_vram_strategy": "balanced",
+    "dense_vram_strategy_devices": null,
+    "enable_shared_hessian_cache": true,
+    "fallback": {
+      "smooth": null,
+      "strategy": "rtn",
+      "threshold": "0.5%"
+    },
+    "gc_mode": "interval",
+    "gptaq": null,
+    "hessian": {
+      "chunk_bytes": null,
+      "chunk_size": null,
+      "staging_dtype": "float32"
+    },
+    "mock_quantization": false,
+    "moe_vram_strategy": "balanced",
+    "moe_vram_strategy_devices": null,
+    "mse": 2.0,
+    "offload_to_disk": true,
+    "offload_to_disk_path": null,
+    "pack_impl": "cpu",
+    "quantization_diagnostics": "auto",
+    "scale_search": "activation",
+    "wait_for_submodule_finalizers": false,
+    "weight_only_quant_threads": null
+  },
+  "method": "gptq",
+  "pack_dtype": "int32",
+  "quant_method": "gptq",
+  "sym": true,
+  "dense_vram_strategy": "balanced",
+  "moe_vram_strategy": "balanced",
+  "moe": {
+    "routing": {
+      "class": "ExpertsRoutingBypass",
+      "batch_size": null
+    }
+  },
+  "offload_to_disk": true,
+  "calibration_data_device": "balanced"
+}
