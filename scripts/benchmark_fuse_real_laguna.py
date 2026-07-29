@@ -18,6 +18,10 @@ import argparse
 import os
 import sys
 
+# Ensure we use the local repo sources, not any installed GPT-QModel egg.
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, repo_root)
+
 # Parse --gpu before any CUDA context is created.
 _gpu = "0"
 for i, arg in enumerate(sys.argv):
@@ -45,11 +49,29 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--max-new-tokens", type=int, default=1)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--attn-implementation", type=str, default="flash_attention_2",
+                   help="Attention implementation to request during load.")
+    p.add_argument("--disable-speculative", action="store_true",
+                   help="Disable any speculative decoding config from the checkpoint.")
+    p.add_argument("--optimize", action="store_true",
+                   help="Call model.optimize() after load/fuse to compile the model.")
+    p.add_argument("--optimize-mode", type=str, default="reduce-overhead",
+                   help="Torch compile mode passed to model.optimize().")
+    p.add_argument("--optimize-backend", type=str, default="inductor",
+                   help="Torch compile backend passed to model.optimize().")
     return p.parse_args()
 
 
 def _mean(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
+
+
+def _throughput(batch: int, seq: int, max_new_tokens: int | None, mean_ms: float) -> tuple[float, float]:
+    total_tokens = batch * (seq + (max_new_tokens or 0))
+    decode_tokens = batch * (max_new_tokens or 0)
+    tok_per_sec = total_tokens / (mean_ms / 1000.0)
+    decode_tok_per_sec = decode_tokens / (mean_ms / 1000.0) if decode_tokens > 0 else 0.0
+    return tok_per_sec, decode_tok_per_sec
 
 
 def _run_forward(
@@ -112,14 +134,36 @@ def main():
     print(f"Batch sizes: {args.batch_sizes}, seq_len: {args.seq_len}, max_new_tokens: {args.max_new_tokens}")
 
     backend = getattr(BACKEND, args.backend.upper(), BACKEND.GPTQ_MARLIN)
-    print("Loading model...")
+    print(f"Loading model with attn_implementation={args.attn_implementation!r}...")
+    load_kwargs = {
+        "backend": backend,
+        "trust_remote_code": True,
+        "device": "cuda:0",
+        "attn_implementation": args.attn_implementation,
+    }
     model = GPTQModel.load(
         args.model_path,
-        backend=backend,
-        trust_remote_code=True,
-        device="cuda:0",
+        **load_kwargs,
     )
     print("Model loaded.")
+
+    # Disable speculative decoding if requested; it can distort per-token
+    # timing and is not relevant for the fused-quantization benchmarks.
+    if args.disable_speculative:
+        gen_cfg = getattr(model.model, "generation_config", None) or getattr(model, "generation_config", None)
+        if gen_cfg is not None:
+            if getattr(gen_cfg, "speculative_config", None) is not None:
+                gen_cfg.speculative_config = None
+            gen_cfg.do_sample = False
+            print("Disabled speculative decoding / do_sample.")
+
+    # Report the attention implementation that is actually in use.
+    attn_impl = (
+        getattr(model.config, "_attn_implementation", None)
+        or getattr(model.config, "attn_implementation", None)
+    )
+    print(f"Attention implementation: {attn_impl}")
+
 
     vocab_size = _vocab_size(model)
     cases = [(b, args.seq_len) for b in args.batch_sizes]
@@ -150,25 +194,48 @@ def main():
             max_new_tokens=args.max_new_tokens,
         )
         mean_ms = _mean(times)
-        total_tokens = batch * (seq + (args.max_new_tokens or 0))
-        tok_per_sec = total_tokens / (mean_ms / 1000.0)
+        tok_per_sec, decode_tok_per_sec = _throughput(batch, seq, args.max_new_tokens, mean_ms)
         results.append({
             "batch": batch,
             "seq": seq,
             "ms": mean_ms,
             "tok/s": tok_per_sec,
+            "decode_tok/s": decode_tok_per_sec,
             "state": "unfused",
         })
-        print(f"  unfused: {mean_ms:.3f} ms, {tok_per_sec:.1f} tok/s")
+        print(f"  unfused: {mean_ms:.3f} ms, {tok_per_sec:.1f} tok/s ({decode_tok_per_sec:.1f} decode tok/s)")
 
+    fused_state = "unfused"
     if args.fuse:
         print("\nFusing model...")
-        counts = model.fuse(qkv=True, gate_up=True, free_original_weights=True)
+        counts = model.fuse(
+            qkv=True,
+            gate_up=True,
+            gate_up_activation=True,
+            free_original_weights=True,
+        )
         print(f"  Fused counts: {counts}")
 
+        from gptqmodel.utils.moe_dispatch import (
+            enable_grouped_dispatch_for_model,
+            register_linear_loop_experts,
+        )
+        registered = register_linear_loop_experts()
+        moe_enabled = enable_grouped_dispatch_for_model(model.model)
+        print(f"  Registered GPT-QModel linear_loop experts: {registered}")
+        print(f"  Enabled grouped MoE dispatch for {moe_enabled} module(s).")
+        fused_state = "fused"
+
+    if args.optimize:
+        print("\nCompiling model...")
+        model.optimize(backend=args.optimize_backend, mode=args.optimize_mode, fullgraph=False)
+        print("Model compiled.")
+        fused_state = "fused+compiled"
+
+    if args.fuse or args.optimize:
         for batch, seq in cases:
             input_ids = input_ids_by_case[(batch, seq)]
-            print(f"\nBenchmarking fused batch={batch} seq={seq}")
+            print(f"\nBenchmarking {fused_state} batch={batch} seq={seq}")
             with torch.inference_mode():
                 out = model(input_ids)
                 logits_fused = out.logits if hasattr(out, "logits") else out
@@ -182,21 +249,27 @@ def main():
                 max_new_tokens=args.max_new_tokens,
             )
             mean_ms = _mean(times)
-            total_tokens = batch * (seq + (args.max_new_tokens or 0))
-            tok_per_sec = total_tokens / (mean_ms / 1000.0)
+            tok_per_sec, decode_tok_per_sec = _throughput(batch, seq, args.max_new_tokens, mean_ms)
             results.append({
                 "batch": batch,
                 "seq": seq,
                 "ms": mean_ms,
                 "tok/s": tok_per_sec,
-                "state": "fused",
+                "decode_tok/s": decode_tok_per_sec,
+                "state": fused_state,
             })
-            print(f"  fused: {mean_ms:.3f} ms, {tok_per_sec:.1f} tok/s")
+            print(
+                f"  {fused_state}: {mean_ms:.3f} ms, {tok_per_sec:.1f} tok/s "
+                f"({decode_tok_per_sec:.1f} decode tok/s)"
+            )
 
     print("\n=== Summary ===")
-    print(f"{'state':<10} {'batch':>6} {'seq':>5} {'ms':>10} {'tok/s':>12}")
+    print(f"{'state':<10} {'batch':>6} {'seq':>5} {'ms':>10} {'tok/s':>12} {'decode_tok/s':>14}")
     for r in results:
-        print(f"{r['state']:<10} {r['batch']:>6} {r['seq']:>5} {r['ms']:>10.3f} {r['tok/s']:>12.1f}")
+        print(
+            f"{r['state']:<10} {r['batch']:>6} {r['seq']:>5} {r['ms']:>10.3f} "
+            f"{r['tok/s']:>12.1f} {r['decode_tok/s']:>14.1f}"
+        )
 
     if args.fuse:
         print("\n=== Accuracy ===")

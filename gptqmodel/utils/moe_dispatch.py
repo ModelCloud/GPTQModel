@@ -53,6 +53,24 @@ _ORIENTATION_CACHE: dict[int, bool | None] = {}
 _MARLIN_MOE_AVAILABLE: bool | None = None
 
 
+def _grouped_mm_min_tokens() -> int:
+    """Minimum token-expert pairs before the grouped dispatch path is attempted.
+
+    The batched/offset Marlin MoE kernel and grouped ``grouped_mm`` path both pay
+    off for prefill and moderate-to-large batches, but for very small decode
+    batches the per-call overhead of building the block-aligned token-expert index
+    and stacking active-expert weights can dominate.  The default (1) keeps the
+    grouped path enabled for all shapes; raise it via the environment variable when
+    profiling shows the fallback is faster for a given model/workload.
+    """
+    import os
+
+    try:
+        return int(os.environ.get("GPTQMODEL_GROUPED_MM_MIN_TOKENS", "1"))
+    except ValueError:
+        return 1
+
+
 def _marlin_moe_available() -> bool:
     """Return whether the batched/offset Marlin MoE mega-kernel can be loaded."""
     global _MARLIN_MOE_AVAILABLE
@@ -72,27 +90,40 @@ def _moe_align_block_size(
     followed by ``num_tokens*top_k`` as padding fill.  ``expert_ids`` are local indices
     (0 .. num_active-1) into ``active_experts`` and therefore into a stacked weight
     tensor built in the same order.
+
+    This implementation is fully vectorized except for a small loop over the active
+    experts; it avoids per-expert ``nonzero`` and ``tolist`` calls that force
+    device-to-host synchronization on the hot decode path.
     """
     flat = topk_ids.flatten()
     numel = flat.numel()
-    active = torch.unique(flat, sorted=True)
-    sorted_ids: list[torch.Tensor] = []
-    expert_ids: list[torch.Tensor] = []
-    for i, expert in enumerate(active.tolist()):
-        pos = (flat == expert).nonzero(as_tuple=False).flatten().to(torch.int32)
-        pad = (block_size - pos.numel() % block_size) % block_size
-        if pad:
-            pos = torch.cat(
-                [pos, torch.full((pad,), numel, dtype=torch.int32, device=flat.device)]
-            )
-        sorted_ids.append(pos)
-        expert_ids.append(
-            torch.full((pos.numel() // block_size,), i, dtype=torch.int32, device=flat.device)
-        )
-    sorted_token_ids = torch.cat(sorted_ids)
-    expert_ids_tensor = torch.cat(expert_ids)
+    sorted_indices = torch.argsort(flat, stable=True)
+    sorted_flat = flat[sorted_indices]
+    active, counts = torch.unique_consecutive(sorted_flat, return_counts=True)
+
+    padded_counts = ((counts + block_size - 1) // block_size) * block_size
+    total_padded = int(padded_counts.sum().item())
+
+    sorted_token_ids = torch.full(
+        (total_padded,), numel, dtype=torch.int32, device=flat.device
+    )
+    expert_ids_tensor = torch.empty(
+        (total_padded // block_size,), dtype=torch.int32, device=flat.device
+    )
+    out_pos = 0
+    exp_pos = 0
+    start = 0
+    for i, c in enumerate(counts.tolist()):
+        if c:
+            sorted_token_ids[out_pos : out_pos + c] = sorted_indices[start : start + c]
+            blocks = (c + block_size - 1) // block_size
+            expert_ids_tensor[exp_pos : exp_pos + blocks] = i
+            out_pos += blocks * block_size
+            exp_pos += blocks
+        start += c
+
     num_tokens_post_padded = torch.tensor(
-        sorted_token_ids.numel(), dtype=torch.int32, device=flat.device
+        total_padded, dtype=torch.int32, device=flat.device
     )
     return active, sorted_token_ids, expert_ids_tensor, num_tokens_post_padded
 
@@ -438,7 +469,11 @@ def _extract_fused_gateup_dense_weight(
     return w.to(device=device, dtype=dtype).contiguous()
 
 
-def _can_use_grouped_mm(self: nn.Module, hidden_states: torch.Tensor) -> bool:
+def _can_use_grouped_mm(
+    self: nn.Module,
+    hidden_states: torch.Tensor,
+    top_k_index: torch.Tensor | None = None,
+) -> bool:
     """Return True when this experts module can use the fast MoE dispatch path."""
     if getattr(self, "_grouped_mm_ok", False):
         return True
@@ -448,6 +483,15 @@ def _can_use_grouped_mm(self: nn.Module, hidden_states: torch.Tensor) -> bool:
     if hidden_states.device.type != "cuda":
         return False
     if hidden_states.dtype not in (torch.float16, torch.bfloat16):
+        return False
+
+    # Avoid the grouped dispatch overhead for very small token counts (typical
+    # single-token decode).  Stacking active-expert weights and building the
+    # block-aligned index costs more than the per-expert loop at this scale.
+    total_pairs = hidden_states.size(0)
+    if top_k_index is not None:
+        total_pairs *= top_k_index.size(-1)
+    if total_pairs < _grouped_mm_min_tokens():
         return False
 
     expert0 = getattr(self, "0", None)
@@ -478,7 +522,7 @@ def _can_use_grouped_mm(self: nn.Module, hidden_states: torch.Tensor) -> bool:
     # experts.  It removes per-expert launch overhead by grouping tokens by expert
     # and jumping directly to the packed expert weight in a single CUDA kernel.
     if is_marlin and _batched_marlin_moe_supported(
-        expert0, hidden_dim, intermediate_dim, hidden_states.dtype
+        self, expert0, hidden_dim, intermediate_dim, hidden_states.dtype
     ):
         self._grouped_mm_ok = True
         self._moe_dispatch_backend = "marlin_moe"
@@ -501,11 +545,10 @@ def _can_use_grouped_mm(self: nn.Module, hidden_states: torch.Tensor) -> bool:
     )
 
     if is_marlin_fused:
-        if grouped_dense_ok:
-            self._grouped_mm_ok = True
-            self._moe_dispatch_backend = "grouped_mm"
-            return True
-        # Fall back to one Marlin kernel launch per active expert/per projection.
+        # The batched/offset kernel is not usable (usually heterogeneous packed
+        # shapes in this checkpoint).  Fall back to one Marlin kernel launch per
+        # active expert/per projection; this still removes the CPU-side defuser
+        # loop overhead and keeps the fast packed Marlin path.
         self._grouped_mm_ok = True
         self._moe_dispatch_backend = "marlin"
         return True
@@ -570,8 +613,15 @@ def _marlin_experts_project(
         # gate_proj and up_proj may be a fused _FusedQuantGroup (one Marlin kernel)
         # or two separate MarlinLinear modules (two kernels). Either way, the
         # forward calls produce the gate and up activations for this block.
-        gate_out = expert.gate_proj(x_block)
-        up_out = expert.up_proj(x_block)
+        gate_group = getattr(expert.gate_proj, "_gptqmodel_fused_group", None)
+        up_group = getattr(expert.up_proj, "_gptqmodel_fused_group", None)
+        if gate_group is not None and gate_group is up_group:
+            gate_up_out = gate_group._compute(x_block)
+            gate_out = gate_up_out[..., gate_group.slices[0][0] : gate_group.slices[0][1]]
+            up_out = gate_up_out[..., gate_group.slices[1][0] : gate_group.slices[1][1]]
+        else:
+            gate_out = expert.gate_proj(x_block)
+            up_out = expert.up_proj(x_block)
         gated = _apply_expert_gate(self, gate_out, up_out)
         del gate_out, up_out
         down_block = expert.down_proj(gated)
@@ -582,7 +632,17 @@ def _marlin_experts_project(
     )
 
 
+def _marlin_moe_target(proj: nn.Module) -> object:
+    """Resolve the packed-weight target for a Marlin-backed projection."""
+    target = getattr(proj, "kernel", proj)
+    group = getattr(proj, "_gptqmodel_fused_group", None)
+    if group is not None and hasattr(group, "kernel"):
+        target = group.kernel
+    return target
+
+
 def _batched_marlin_moe_supported(
+    self: nn.Module,
     expert0: nn.Module,
     hidden_dim: int,
     intermediate_dim: int,
@@ -598,16 +658,15 @@ def _batched_marlin_moe_supported(
     if hidden_dim % 8 != 0 or intermediate_dim % 8 != 0:
         return False
 
+    num_experts = getattr(self, "num_experts", None)
+    if num_experts is None:
+        return False
+
     for attr in ("gate_proj", "up_proj", "down_proj"):
         proj = getattr(expert0, attr, None)
         if proj is None or _has_extra_transform(proj):
             return False
-        # Fused gate/up keeps the packed buffers inside the fused group kernel,
-        # while the member module's redundant buffers may have been released.
-        target = getattr(proj, "kernel", proj)
-        group = getattr(proj, "_gptqmodel_fused_group", None)
-        if group is not None and hasattr(group, "kernel"):
-            target = group.kernel
+        target = _marlin_moe_target(proj)
         if not all(
             hasattr(target, name)
             for name in (
@@ -623,6 +682,14 @@ def _batched_marlin_moe_supported(
         wt = getattr(target, "weight_type", None)
         if wt is None or getattr(wt, "id", None) is None:
             return False
+
+        ref_shape_qw = tuple(target.qweight.shape)
+        ref_shape_sc = tuple(target.scales.shape)
+        for i in range(1, num_experts):
+            other_proj = getattr(getattr(self, str(i)), attr)
+            other_target = _marlin_moe_target(other_proj)
+            if tuple(other_target.qweight.shape) != ref_shape_qw or tuple(other_target.scales.shape) != ref_shape_sc:
+                return False
 
     gate = expert0.gate_proj
     up = expert0.up_proj
@@ -645,6 +712,84 @@ def _batched_marlin_moe_supported(
     return True
 
 
+def _marlin_packed(obj: nn.Module) -> tuple:
+    """Return packed Marlin buffers, either from a _FusedQuantGroup or a MarlinLinear."""
+    target = getattr(obj, "kernel", obj)
+    return (
+        target.qweight,
+        target.scales,
+        target.weight_type,
+        target.padded_in_features,
+        target.padded_out_features,
+        target.is_k_full,
+    )
+
+
+def _set_stacked_tensor(target: object, name: str, tensor: torch.Tensor) -> None:
+    """Assign a view of a stacked tensor, handling nn.Parameter attributes."""
+    if isinstance(target, nn.Module) and name in target._parameters:
+        setattr(target, name, torch.nn.Parameter(tensor, requires_grad=False))
+    else:
+        setattr(target, name, tensor)
+
+
+def _prestack_marlin_moe_weights(self: nn.Module, expert0: nn.Module) -> dict[str, tuple]:
+    """Pre-stack all expert Marlin qweight/scales once so decode paths avoid per-call copies.
+
+    The per-expert projection objects (either ``MarlinLinear`` or a
+    ``_FusedQuantGroup``'s ``_FusedMarlinKernel``) have their ``qweight`` and
+    ``scales`` replaced by views into the stacked tensor.  This keeps total
+    memory roughly flat while removing the ``active.tolist()``/``torch.stack``
+    overhead from every forward.  Returns a dict keyed by ``"gate"``, ``"up"``,
+    ``"down"`` or ``"gateup"``.
+    """
+    num_experts = self.num_experts
+    fused_gateup = _expert_gateup_is_fused(expert0)
+
+    proj_specs: list[tuple[str, str]] = []
+    if fused_gateup:
+        proj_specs.append(("gateup", "gate_proj"))
+    else:
+        proj_specs.append(("gate", "gate_proj"))
+        proj_specs.append(("up", "up_proj"))
+    proj_specs.append(("down", "down_proj"))
+
+    stacked: dict[str, tuple] = {}
+    for proj_key, attr_name in proj_specs:
+        targets: list[object] = []
+        for i in range(num_experts):
+            expert = getattr(self, str(i))
+            obj = getattr(expert, attr_name)
+            if hasattr(obj, "_gptqmodel_fused_group"):
+                obj = obj._gptqmodel_fused_group
+            target = getattr(obj, "kernel", obj)
+            targets.append(target)
+
+        q0 = targets[0].qweight
+        s0 = targets[0].scales
+        device = q0.device
+        stacked_qw = torch.empty((num_experts, *q0.shape), dtype=q0.dtype, device=device)
+        stacked_sc = torch.empty((num_experts, *s0.shape), dtype=s0.dtype, device=device)
+
+        for i, target in enumerate(targets):
+            stacked_qw[i].copy_(target.qweight)
+            stacked_sc[i].copy_(target.scales)
+            _set_stacked_tensor(target, "qweight", stacked_qw[i])
+            _set_stacked_tensor(target, "scales", stacked_sc[i])
+
+        stacked[proj_key] = (
+            stacked_qw,
+            stacked_sc,
+            targets[0].weight_type,
+            targets[0].padded_in_features,
+            targets[0].padded_out_features,
+            targets[0].is_k_full,
+        )
+
+    self._marlin_moe_stacked = stacked
+    return stacked
+
+
 def _batched_marlin_moe_forward(
     self: nn.Module,
     hidden_states: torch.Tensor,
@@ -653,11 +798,10 @@ def _batched_marlin_moe_forward(
 ) -> torch.Tensor:
     """Batched/offset Marlin MoE mega-kernel dispatch.
 
-    Launches one (or two, for non-fused gate/up) batched Marlin GEMMs per
-    projection over the active experts.  Token-expert indices are grouped by
-    expert and padded to ``moe_block_size`` so the CUDA mega-kernel can jump
-    directly to the correct expert weight.  This avoids per-expert Python
-    loop launches for Marlin-packed MoE checkpoints.
+    Uses pre-stacked per-expert Marlin packed weights and a vectorized
+    token-expert alignment so each decode forward only launches one (or two, for
+    non-fused gate/up) batched Marlin GEMMs per projection without Python loops
+    or per-call ``torch.stack`` copies.
     """
     if hidden_states.dim() == 3:
         batch_size, seq_len, hidden_dim = hidden_states.shape
@@ -689,6 +833,11 @@ def _batched_marlin_moe_forward(
     gate_out_features = gate_proj.out_features
     up_out_features = up_proj.out_features
 
+    # Pre-stack expert packed weights once and use global expert IDs in the kernel.
+    stacked = getattr(self, "_marlin_moe_stacked", None)
+    if stacked is None:
+        stacked = _prestack_marlin_moe_weights(self, expert0)
+
     block_size = _moe_block_size(num_tokens, num_top_k)
     active, sorted_token_ids, expert_ids, num_tokens_post_padded = _moe_align_block_size(
         topk_ids, block_size
@@ -704,41 +853,9 @@ def _batched_marlin_moe_forward(
     topk_weights_flat = topk_w.reshape(-1).contiguous()
     fused_gateup = _expert_gateup_is_fused(expert0)
 
-    def _marlin_packed(obj: nn.Module) -> tuple:
-        """Return packed buffers, either from a _FusedQuantGroup or a MarlinLinear."""
-        target = getattr(obj, "kernel", obj)
-        return (
-            target.qweight,
-            target.scales,
-            target.weight_type,
-            target.padded_in_features,
-            target.padded_out_features,
-            target.is_k_full,
-        )
-
-    def _stack_projection(
-        proj_name: str,
-        fused_group_attr: str | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, object, int, int, bool]:
-        """Stack active-expert packed buffers for one projection."""
-        qw_list: list[torch.Tensor] = []
-        sc_list: list[torch.Tensor] = []
-        first_obj = None
-        for e in active.tolist():
-            expert = getattr(self, str(e))
-            if fused_group_attr:
-                obj = getattr(expert, fused_group_attr)
-                obj = getattr(obj, "_gptqmodel_fused_group")
-            else:
-                obj = getattr(expert, proj_name)
-            qw, sc, wt, pin, pout, is_k_full = _marlin_packed(obj)
-            qw_list.append(qw)
-            sc_list.append(sc)
-            if first_obj is None:
-                first_obj = (wt, pin, pout, is_k_full)
-        stack_qw = torch.stack(qw_list, dim=0).contiguous()
-        stack_sc = torch.stack(sc_list, dim=0).to(dtype).contiguous()
-        return (stack_qw, stack_sc, *first_obj)
+    # Map local expert_ids to the original (global) expert indices.  The kernel
+    # can then index into the pre-stacked [num_experts, ...] weight tensor.
+    global_expert_ids = active.long()[expert_ids.long()].to(torch.int32)
 
     def _maybe_pad(x: torch.Tensor, padded_in: int) -> torch.Tensor:
         if x.size(-1) == padded_in:
@@ -748,9 +865,7 @@ def _batched_marlin_moe_forward(
 
     # Gate / up projection (one fused GEMM when gate/up are fused, two otherwise).
     if fused_gateup:
-        fused_qw, fused_sc, weight_type, pin, pout, is_k_full = _stack_projection(
-            "", fused_group_attr="gate_proj"
-        )
+        fused_qw, fused_sc, weight_type, pin, pout, is_k_full = stacked["gateup"]
         group = getattr(gate_proj, "_gptqmodel_fused_group")
         gate_slice = group.slices[0]
         up_slice = group.slices[1]
@@ -762,7 +877,7 @@ def _batched_marlin_moe_forward(
             fused_sc,
             workspace,
             sorted_token_ids,
-            expert_ids,
+            global_expert_ids,
             num_tokens_post_padded,
             topk_weights_flat,
             weight_type,
@@ -779,8 +894,8 @@ def _batched_marlin_moe_forward(
         gate_out = fused_out[:, gate_slice[0] : gate_slice[1]]
         up_out = fused_out[:, up_slice[0] : up_slice[1]]
     else:
-        gate_qw, gate_sc, gate_wt, gate_pin, gate_pout, gate_is_k = _stack_projection("gate_proj")
-        up_qw, up_sc, up_wt, up_pin, up_pout, up_is_k = _stack_projection("up_proj")
+        gate_qw, gate_sc, gate_wt, gate_pin, gate_pout, gate_is_k = stacked["gate"]
+        up_qw, up_sc, up_wt, up_pin, up_pout, up_is_k = stacked["up"]
 
         x_padded = _maybe_pad(hidden_states, gate_pin).contiguous()
         gate_out = moe_wna16_marlin_gemm(
@@ -789,7 +904,7 @@ def _batched_marlin_moe_forward(
             gate_sc,
             workspace,
             sorted_token_ids,
-            expert_ids,
+            global_expert_ids,
             num_tokens_post_padded,
             topk_weights_flat,
             gate_wt,
@@ -811,7 +926,7 @@ def _batched_marlin_moe_forward(
             up_sc,
             workspace,
             sorted_token_ids,
-            expert_ids,
+            global_expert_ids,
             num_tokens_post_padded,
             topk_weights_flat,
             up_wt,
@@ -831,7 +946,7 @@ def _batched_marlin_moe_forward(
     del gate_out, up_out
 
     # Pad activation to the down projection's padded input dimension.
-    down_qw, down_sc, down_wt, down_pin, down_pout, down_is_k = _stack_projection("down_proj")
+    down_qw, down_sc, down_wt, down_pin, down_pout, down_is_k = stacked["down"]
     act_padded = _maybe_pad(act, down_pin).contiguous()
     del act
 
@@ -841,7 +956,7 @@ def _batched_marlin_moe_forward(
         down_sc,
         workspace,
         sorted_token_ids,
-        expert_ids,
+        global_expert_ids,
         num_tokens_post_padded,
         topk_weights_flat,
         down_wt,
@@ -1008,7 +1123,7 @@ def linear_loop_experts_forward(
     explicitly opted in via ``_gptqmodel_grouped_dispatch_enabled``; this keeps
     quantization/calibration on the defused per-expert loop.
     """
-    if getattr(self, GROUPED_DISPATCH_FLAG, False) and _can_use_grouped_mm(self, hidden_states):
+    if getattr(self, GROUPED_DISPATCH_FLAG, False) and _can_use_grouped_mm(self, hidden_states, top_k_index):
         try:
             return _grouped_mm_dequant_experts_forward(self, hidden_states, top_k_index, top_k_weights)
         except Exception as exc:  # noqa: BLE001

@@ -547,6 +547,49 @@ result = model.generate("Uncovering deep insights begins with")[0] # tokens
 print(model.tokenizer.decode(result)) # string output
 ```
 
+### Fused Quantized Inference
+
+For supported models, GPT-QModel can fuse same-input GPTQ projection groups
+(QKV attention and MLP gate/up) into a single quantized GEMM, and MoE experts
+can be dispatched through a batched/offset Marlin mega-kernel.  This reduces
+Python launch overhead and improves decode throughput.
+
+```py
+from gptqmodel import BACKEND, GPTQModel
+
+model = GPTQModel.load(
+    quant_path,
+    backend=BACKEND.GPTQ_MARLIN,  # or BACKEND.TRITONV2
+    attn_implementation="flash_attention_2",
+)
+
+# Opt-in after load. QKV and gate/up fusion are installed in memory only and
+# do not change the serialized checkpoint.
+model.fuse(
+    qkv=True,
+    gate_up=True,
+    gate_up_activation=True,      # also fuse act(gate) * up -> down
+    free_original_weights=True,    # halves fused-group VRAM but breaks save()
+)
+
+result = model.generate("What is the capital of France?", max_new_tokens=128)[0]
+print(model.tokenizer.decode(result))
+```
+
+Requirements and caveats:
+- All members of a fused group must share `bits`, `group_size`, `sym`, `desc_act`/`g_idx`,
+  `pack_dtype`, and device.
+- Fused attention and MLP paths are supported for `TritonV2Linear` and `MarlinLinear`
+  backends.
+- For MoE checkpoints using `GPTQ_MARLIN`, the dispatcher will automatically select a
+  batched/offset Marlin mega-kernel (`marlin_moe`) when the active experts and
+  token-expert alignment fit the supported layout.
+- `free_original_weights=True` removes per-member packed buffers; `model.save()`
+  and any code reading member `.qweight`/`.scales` will fail. Use `free_original_weights=False`
+  if you need to save or inspect the original modules.
+- See `docs/inference_fusion.md` for the full design, benchmark tables, and per-phase
+  rollout notes.
+
 ### EoRA Accuracy Recovery: Enhanced Post-Quant Error Recovery via Lora
 
 GPT-QModel supports EoRA, a LoRA method developed by Nvidia that can further improve the accuracy of the quantized model.
