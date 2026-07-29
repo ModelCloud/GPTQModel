@@ -1097,22 +1097,24 @@ class LazyTurtle:
     ) -> torch.nn.Module:
         if module_path is None:
             module_path = _get_qualified_name(target_model, target_submodule)
-        if recurse:
-            modules_by_name: Optional[Dict[str, torch.nn.Module]] = dict(target_model.named_modules())
-        elif module_path is not None:
-            # Avoid a full model scan while still giving _resolve_prefer_transposed_hint
-            # access to the target submodule and all of its ancestors.
-            modules_by_name = {"": target_model}
+        if module_path is not None:
+            # Avoid a full model scan. _resolve_prefer_transposed_hint only needs the
+            # target submodule, its ancestors, and (when recursing) its descendants.
+            modules_by_name: Optional[Dict[str, torch.nn.Module]] = {"": target_model}
             parts = module_path.split(".")
             for i in range(len(parts)):
                 prefix = ".".join(parts[: i + 1])
                 try:
                     modules_by_name[prefix] = target_model.get_submodule(prefix)
                 except (AttributeError, IndexError, KeyError):
-                    # Invalid prefix; stop building the ancestor map. The remaining
-                    # transpose-hint lookup will fall back to shape inference.
                     break
             modules_by_name[module_path] = target_submodule
+            if recurse:
+                for subname, submod in target_submodule.named_modules():
+                    full_name = f"{module_path}.{subname}" if subname else module_path
+                    modules_by_name[full_name] = submod
+        elif recurse:
+            modules_by_name = dict(target_model.named_modules())
         else:
             modules_by_name = None
         with self._lock:
