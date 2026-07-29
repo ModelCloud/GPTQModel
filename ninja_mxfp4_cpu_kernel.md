@@ -702,3 +702,59 @@ through `GPTQModel.load`.  The synthetic GPT2 integration above validates the
 backend plumbing; adding real K3 support would need a new `module_tree` for the
 `kimi_linear` architecture and either quantizing the 0.4B weights to MXFP4 or
 finding/converting an already-quantized K3 checkpoint.
+
+## Kimi-K3-0.40B MXFP4 checkpoint
+
+### What was done
+
+* Added `gptqmodel/models/definitions/kimi_k3.py` (`KimiK3QModel`) and
+  registered `kimi_k3` in `gptqmodel/models/auto.py` so `GPTQModel.load` can
+  route to `Mxfp4CpuLinear` for K3 checkpoints.
+* `module_tree` covers the heterogeneous `language_model.model.layers` of
+  `inference-optimization/Kimi-K3-0.40B`:
+  * `self_attn` with both `KimiDeltaAttention` (`q/k/v_proj`, `f_a/b_proj`,
+    `b_proj`, `g_proj`, `o_proj`) and `KimiMLAAttention` (`q_a/b_proj`,
+    `kv_a_proj_with_mqa`, `kv_b_proj`, `g_proj`, `o_proj`).
+  * Dense `mlp` (`gate_proj`, `up_proj`, `down_proj`) in layer 0.
+  * `block_sparse_moe` in layers 1-7, including per-expert `w1/w2/w3`, the
+    `shared_experts` gate/up/down, `routed_expert_down_proj` /
+    `routed_expert_up_proj`, and the `gate` router.
+  * Residual gating linears `self_attention_res_proj` and `mlp_res_proj`.
+* Added `scripts/quantize_kimi_k3_0.4b_mxfp4.py`, which downloads the
+  `inference-optimization/Kimi-K3-0.40B` FP32 checkpoint and replaces all
+  quantizable `language_model.model` `nn.Linear` modules with
+  `Mxfp4CpuLinear(use_vnni=False)`, saves `model.safetensors`, the tokenizer,
+  and a `quantize_config.json` (`MXFP4Config`).
+
+### Saved checkpoint
+
+Local path: `/home/ubuntu/kimi-k3-0.4b-mxfp4-cpu` (persistent across the session; also at
+`/tmp/kimi-k3-0.4b-mxfp4-cpu` after running the quantization script).
+
+```python
+import gptqmodel
+loaded = gptqmodel.GPTQModel.load(
+    "/home/ubuntu/kimi-k3-0.4b-mxfp4-cpu",
+    backend="mxfp4_cpu",
+    device="cpu",
+    dtype="bfloat16",
+    trust_remote_code=True,
+)
+```
+
+### Verification
+
+* `GPTQModel.load(..., backend="mxfp4_cpu")` selects `Mxfp4CpuLinear` for
+  **282** `nn.Linear` modules in the K3 language model.
+* Smoke tests on `layers[0].self_attn.q_proj` and `layers[3].self_attn.q_a_proj`
+  produced the correct output shape and finite values:
+  * `q_proj`: `(1, 1024)` -> `(1, 256)`
+  * `q_a_proj`: `(1, 1024)` -> `(1, 256)`
+* The full `language_model(...)` forward cannot run on this CPU-only VM yet
+  because `KimiDeltaAttention` uses `fla`'s `ShortConvolution` / `causal_conv1d`
+  which is a Triton kernel with no CPU driver.  The individual MXFP4 CPU
+  qlinear projections work, which is exactly what the kernel tests need.
+* `pytest -q tests/kernels/test_mxfp4_cpu_qlinear.py` — 7 passed.
+* `pytest -q tests/kernels/test_mxfp4_cpu_kernel.py` — 8 passed.
+* `ruff check --config format/ruff.toml gptqmodel/models/definitions/kimi_k3.py
+  gptqmodel/models/auto.py scripts/quantize_kimi_k3_0.4b_mxfp4.py` — clean.

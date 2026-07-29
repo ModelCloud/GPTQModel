@@ -132,6 +132,7 @@ from .definitions.interns1 import InternS1QModel  # noqa: E402
 from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
+from .definitions.kimi_k3 import KimiK3QModel  # noqa: E402
 from .definitions.laguna import LagunaQModel  # noqa: E402
 from .definitions.lfm2 import LFM2QModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
@@ -214,6 +215,7 @@ MODEL_MAP = {
     "gpt_neo": GptNeoQModel,
     "kimi_k2": DeepSeekV3QModel, # 100% DeepSeekV3QModel clone
     "kimi_k25": KimiK25QModel,
+    "kimi_k3": KimiK3QModel,
     "klear": KlearQModel,
     "laguna": LagunaQModel,
     "gpt_neox": GPTNeoXQModel,
