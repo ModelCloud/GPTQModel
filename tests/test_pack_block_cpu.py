@@ -213,6 +213,40 @@ class TestPackBlockCpu(unittest.TestCase):
         ext = self._pack_block(bits, group_size, True, torch.bfloat16, linear, scales_T, zeros_T, g_idx)
         self._assert_same_pack(ext, ref)
 
+    def test_pack_block_uniform_tie_rounding(self):
+        """Reciprocal-multiply in the uniform AVX-512 path is not bit-exact on ties.
+
+        This test drives desc_act=False, bits<=4 with non-unit scales and weights
+        chosen so the true quantized value is exactly on a half-integer boundary.
+        """
+        # (bits, scale, zero, N) pairs known to differ between true division and
+        # reciprocal-multiply in IEEE-754 round-to-nearest-even.
+        tie_cases = [
+            (2, 6.1875062767865625, 1, 1),
+            (3, 61.321125294441885, 4, 1),
+            (4, 1.8754279872729955, 15, 1),
+        ]
+        in_features = self.in_features
+        out_features = self.out_features
+        group_size = 32
+        groups = in_features // group_size
+
+        for bits, scale, zero, N in tie_cases:
+            for dtype in (torch.float32, torch.bfloat16):
+                with self.subTest(bits=bits, scale=scale, zero=zero, N=N, dtype=dtype):
+                    scales = torch.full((groups, out_features), scale, dtype=torch.float32)
+                    zeros = torch.full((groups, out_features), zero, dtype=torch.int32)
+                    g_idx = torch.arange(in_features, dtype=torch.long) // group_size
+                    weight_val = scale * (N + 0.5 - zero)
+                    weight = torch.full((out_features, in_features), weight_val, dtype=dtype)
+                    linear = nn.Linear(in_features, out_features, bias=False, dtype=dtype)
+                    linear.weight.data = weight
+                    scales_T = scales.t().contiguous()
+                    zeros_T = zeros.t().contiguous()
+                    ref = self._pack_original(bits, group_size, False, dtype, linear, scales_T, zeros_T, g_idx)
+                    ext = self._pack_block(bits, group_size, False, dtype, linear, scales_T, zeros_T, g_idx)
+                    self._assert_same_pack(ext, ref)
+
     @parameterized.expand(
         [
             (1,),
@@ -253,6 +287,22 @@ class TestPackBlockCpu(unittest.TestCase):
         with patch.dict(os.environ, env, clear=False):
             ext = self._pack_block(bits, group_size, True, dtype, linear, scales_T, zeros_T, g_idx)
         self._assert_same_pack(ext, ref)
+
+
+    def test_pack_block_tiling_alignment(self):
+        """Output tiling must stay 16-aligned with odd worker counts and large outputs."""
+        orig_in, orig_out = self.in_features, self.out_features
+        self.in_features, self.out_features = 512, 4096
+        try:
+            bits = 4
+            group_size = 128
+            dtype = torch.bfloat16
+            linear, scales_T, zeros_T, g_idx = self._build_inputs(bits, group_size, False, dtype)
+            ref = self._pack_original(bits, group_size, False, dtype, linear, scales_T, zeros_T, g_idx)
+            ext = self._pack_block(bits, group_size, False, dtype, linear, scales_T, zeros_T, g_idx, workers=7)
+            self._assert_same_pack(ext, ref)
+        finally:
+            self.in_features, self.out_features = orig_in, orig_out
 
 
 if __name__ == "__main__":

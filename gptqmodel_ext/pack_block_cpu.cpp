@@ -156,6 +156,12 @@ void normalize_gidx_block(
     }
 }
 
+struct PackBlockRun {
+    int64_t start;
+    int64_t count;
+    int32_t group;
+};
+
 void pack_qweight_scalar(
     const float* weight_ptr,
     const float* scales_ptr,
@@ -400,7 +406,285 @@ inline void pack_qweight_load_transpose_32x16(
     }
 }
 
-// AVX-512 path for bits 2, 4, 8.  Processes 16 output channels at a time.
+// Uniform-block AVX-512 helper: all 32 lanes share one scale/offset.
+// Use one true division per weight to stay bit-exact with the Python reference.
+template <int bits, int pack_factor>
+__attribute__((target("avx512f"))) __attribute__((always_inline))
+inline void pack_qweight_avx512_uniform_block(
+    const void* weight_ptr,
+    bool weight_is_bf16,
+    const float* scales_ptr,
+    const float* scale_zeros_ptr,
+    int32_t* qweight_ptr,
+    int64_t out_features,
+    int64_t out_stride,
+    int64_t scales_stride,
+    int64_t base_input,
+    int row_base,
+    int32_t group,
+    int max_q) {
+    const __m512 zero_ps = _mm512_setzero_ps();
+    const __m512 eps_ps = _mm512_set1_ps(1e-6f);
+    const __m512 maxq_ps = _mm512_set1_ps(static_cast<float>(max_q));
+    const __m512i zero_epi = _mm512_setzero_si512();
+
+    alignas(64) float t0_a[16][16];
+    alignas(64) float t1_a[16][16];
+    alignas(64) float t0_b[16][16];
+    alignas(64) float t1_b[16][16];
+
+    const int64_t scale_offset_base = static_cast<int64_t>(group) * scales_stride;
+
+    for (int64_t out = 0; out < out_features; out += 32) {
+        const int64_t out_b = out + 16;
+        const bool has_b = (out_b < out_features);
+
+        pack_qweight_load_transpose_32x16(
+            weight_ptr, weight_is_bf16, out, out_stride, base_input, &t0_a[0][0], &t1_a[0][0]);
+        if (has_b) {
+            pack_qweight_load_transpose_32x16(
+                weight_ptr, weight_is_bf16, out_b, out_stride, base_input, &t0_b[0][0], &t1_b[0][0]);
+        }
+
+        __m512 scale_a = _mm512_loadu_ps(scales_ptr + scale_offset_base + out);
+        const __m512 offset_a = _mm512_loadu_ps(scale_zeros_ptr + scale_offset_base + out);
+        __mmask16 zero_mask = _mm512_cmp_ps_mask(scale_a, zero_ps, _CMP_EQ_OQ);
+        scale_a = _mm512_mask_blend_ps(zero_mask, scale_a, eps_ps);
+
+        __m512 scale_b = zero_ps;
+        __m512 offset_b = zero_ps;
+        if (has_b) {
+            scale_b = _mm512_loadu_ps(scales_ptr + scale_offset_base + out_b);
+            offset_b = _mm512_loadu_ps(scale_zeros_ptr + scale_offset_base + out_b);
+            zero_mask = _mm512_cmp_ps_mask(scale_b, zero_ps, _CMP_EQ_OQ);
+            scale_b = _mm512_mask_blend_ps(zero_mask, scale_b, eps_ps);
+        }
+
+        __m512i acc_a[bits];
+        __m512i acc_b[bits];
+        for (int bp = 0; bp < bits; ++bp) {
+            acc_a[bp] = zero_epi;
+            acc_b[bp] = zero_epi;
+        }
+
+        for (int lane = 0; lane < 32; ++lane) {
+            const float* ptr_a = (lane < 16) ? &t0_a[lane][0] : &t1_a[lane - 16][0];
+            const __m512 w_a = _mm512_loadu_ps(ptr_a);
+            __m512 qf_a = _mm512_div_ps(_mm512_add_ps(w_a, offset_a), scale_a);
+            qf_a = _mm512_max_ps(qf_a, zero_ps);
+            qf_a = _mm512_min_ps(qf_a, maxq_ps);
+            const __m512i q_a = _mm512_cvt_roundps_epi32(
+                qf_a, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+            const int idx_a = lane / pack_factor;
+            const int shift_a = bits * (lane - idx_a * pack_factor);
+            acc_a[idx_a] = _mm512_or_si512(
+                acc_a[idx_a], _mm512_sllv_epi32(q_a, _mm512_set1_epi32(shift_a)));
+
+            if (has_b) {
+                const float* ptr_b = (lane < 16) ? &t0_b[lane][0] : &t1_b[lane - 16][0];
+                const __m512 w_b = _mm512_loadu_ps(ptr_b);
+                __m512 qf_b = _mm512_div_ps(_mm512_add_ps(w_b, offset_b), scale_b);
+                qf_b = _mm512_max_ps(qf_b, zero_ps);
+                qf_b = _mm512_min_ps(qf_b, maxq_ps);
+                const __m512i q_b = _mm512_cvt_roundps_epi32(
+                    qf_b, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                const int idx_b = lane / pack_factor;
+                const int shift_b = bits * (lane - idx_b * pack_factor);
+                acc_b[idx_b] = _mm512_or_si512(
+                    acc_b[idx_b], _mm512_sllv_epi32(q_b, _mm512_set1_epi32(shift_b)));
+            }
+        }
+
+        for (int bit_plane = 0; bit_plane < bits; ++bit_plane) {
+            _mm512_storeu_si512(
+                reinterpret_cast<__m512i*>(qweight_ptr + (row_base + bit_plane) * out_features + out),
+                acc_a[bit_plane]);
+            if (has_b) {
+                _mm512_storeu_si512(
+                    reinterpret_cast<__m512i*>(qweight_ptr + (row_base + bit_plane) * out_features + out_b),
+                    acc_b[bit_plane]);
+            }
+        }
+    }
+}
+
+// Fused uniform-block AVX-512 helper: process multiple consecutive 32-input
+// blocks that all share the same group, amortizing scale/offset loads.
+template <int bits, int pack_factor>
+__attribute__((target("avx512f"))) __attribute__((always_inline))
+inline void pack_qweight_avx512_uniform_fused(
+    const void* weight_ptr,
+    bool weight_is_bf16,
+    const float* scales_ptr,
+    const float* scale_zeros_ptr,
+    int32_t* qweight_ptr,
+    int64_t out_features,
+    int64_t out_begin,
+    int64_t out_end,
+    int64_t out_stride,
+    int64_t scales_stride,
+    int64_t block_idx_start,
+    int64_t block_count,
+    int32_t group,
+    int max_q) {
+    const __m512 zero_ps = _mm512_setzero_ps();
+    const __m512 eps_ps = _mm512_set1_ps(1e-6f);
+    const __m512 maxq_ps = _mm512_set1_ps(static_cast<float>(max_q));
+    const __m512i zero_epi = _mm512_setzero_si512();
+
+    alignas(64) float t0[16][16];
+    alignas(64) float t1[16][16];
+
+    const int64_t scale_offset_base = static_cast<int64_t>(group) * scales_stride;
+
+    for (int64_t out = out_begin; out < out_end; out += 16) {
+        __m512 scale = _mm512_loadu_ps(scales_ptr + scale_offset_base + out);
+        const __m512 offset = _mm512_loadu_ps(scale_zeros_ptr + scale_offset_base + out);
+        const __mmask16 zero_mask = _mm512_cmp_ps_mask(scale, zero_ps, _CMP_EQ_OQ);
+        scale = _mm512_mask_blend_ps(zero_mask, scale, eps_ps);
+
+        for (int64_t b = 0; b < block_count; ++b) {
+            const int64_t base_input = (block_idx_start + b) * 32;
+            const int row_base = static_cast<int>((block_idx_start + b) * bits);
+            pack_qweight_load_transpose_32x16(
+                weight_ptr, weight_is_bf16, out, out_stride, base_input, &t0[0][0], &t1[0][0]);
+
+            __m512i acc[bits];
+            for (int bp = 0; bp < bits; ++bp) {
+                acc[bp] = zero_epi;
+            }
+
+            for (int lane = 0; lane < 32; ++lane) {
+                const float* ptr = (lane < 16) ? &t0[lane][0] : &t1[lane - 16][0];
+                const __m512 w = _mm512_loadu_ps(ptr);
+                __m512 qf = _mm512_div_ps(_mm512_add_ps(w, offset), scale);
+                qf = _mm512_max_ps(qf, zero_ps);
+                qf = _mm512_min_ps(qf, maxq_ps);
+                const __m512i q = _mm512_cvt_roundps_epi32(
+                    qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                const int idx = lane / pack_factor;
+                const int shift = bits * (lane - idx * pack_factor);
+                acc[idx] = _mm512_or_si512(
+                    acc[idx], _mm512_sllv_epi32(q, _mm512_set1_epi32(shift)));
+            }
+
+            for (int bit_plane = 0; bit_plane < bits; ++bit_plane) {
+                _mm512_storeu_si512(
+                    reinterpret_cast<__m512i*>(qweight_ptr + (row_base + bit_plane) * out_features + out),
+                    acc[bit_plane]);
+            }
+        }
+    }
+}
+
+// Non-uniform-block AVX-512 helper: each lane may use a different scale/offset.
+template <int bits, int pack_factor>
+__attribute__((target("avx512f"))) __attribute__((always_inline))
+inline void pack_qweight_avx512_nonuniform_block(
+    const void* weight_ptr,
+    bool weight_is_bf16,
+    const float* scales_ptr,
+    const float* scale_zeros_ptr,
+    int32_t* qweight_ptr,
+    int64_t out_features,
+    int64_t out_stride,
+    int64_t scales_stride,
+    int64_t base_input,
+    int row_base,
+    const int32_t* gidx_block,
+    int max_q) {
+    const __m512 zero_ps = _mm512_setzero_ps();
+    const __m512 eps_ps = _mm512_set1_ps(1e-6f);
+    const __m512 maxq_ps = _mm512_set1_ps(static_cast<float>(max_q));
+    const __m512i zero_epi = _mm512_setzero_si512();
+
+    alignas(64) int32_t lane_qvals[32][16];
+    alignas(64) float t0[16][16];
+    alignas(64) float t1[16][16];
+
+    for (int64_t out = 0; out < out_features; out += 16) {
+        pack_qweight_load_transpose_32x16(
+            weight_ptr, weight_is_bf16, out, out_stride, base_input, &t0[0][0], &t1[0][0]);
+
+        for (int lane = 0; lane < 32; ++lane) {
+            const int32_t group = gidx_block[lane];
+            const float* w_ptr = (lane < 16) ? &t0[lane][0] : &t1[lane - 16][0];
+            const __m512 w = _mm512_loadu_ps(w_ptr);
+
+            const float* sbase = scales_ptr + static_cast<int64_t>(group) * scales_stride + out;
+            __m512 scale = _mm512_loadu_ps(sbase);
+            const __m512 offset = _mm512_loadu_ps(
+                scale_zeros_ptr + static_cast<int64_t>(group) * scales_stride + out);
+
+            const __mmask16 zero_mask = _mm512_cmp_ps_mask(scale, zero_ps, _CMP_EQ_OQ);
+            scale = _mm512_mask_blend_ps(zero_mask, scale, eps_ps);
+
+            __m512 qf = _mm512_div_ps(_mm512_add_ps(w, offset), scale);
+            qf = _mm512_max_ps(qf, zero_ps);
+            qf = _mm512_min_ps(qf, maxq_ps);
+
+            const __m512i q = _mm512_cvt_roundps_epi32(
+                qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+            _mm512_storeu_si512(reinterpret_cast<__m512i*>(lane_qvals[lane]), q);
+        }
+
+        for (int bit_plane = 0; bit_plane < bits; ++bit_plane) {
+            __m512i acc = zero_epi;
+            for (int pf = 0; pf < pack_factor; ++pf) {
+                const int idx = bit_plane * pack_factor + pf;
+                const int shift = bits * pf;
+                const __m512i qv = _mm512_loadu_si512(
+                    reinterpret_cast<const __m512i*>(lane_qvals[idx]));
+                acc = _mm512_or_si512(acc, _mm512_sllv_epi32(qv, _mm512_set1_epi32(shift)));
+            }
+            _mm512_storeu_si512(
+                reinterpret_cast<__m512i*>(qweight_ptr + (row_base + bit_plane) * out_features + out),
+                acc);
+        }
+    }
+}
+
+// 2D output-channel tiling for uniform g_idx: parallelize over output tiles and
+// process each input-group run over the tile, so weight rows and qweight rows are
+// both accessed in contiguous streams.
+template <int bits, int pack_factor>
+__attribute__((target("avx512f")))
+void pack_qweight_avx512_output_tiled(
+    const void* weight_ptr,
+    bool weight_is_bf16,
+    const float* scales_ptr,
+    const float* scale_zeros_ptr,
+    const PackBlockRun* runs,
+    int64_t num_runs,
+    int32_t* qweight_ptr,
+    int64_t out_features,
+    int64_t out_begin,
+    int64_t out_end,
+    int64_t out_stride,
+    int64_t scales_stride,
+    int max_q) {
+    for (int64_t r = 0; r < num_runs; ++r) {
+        pack_qweight_avx512_uniform_fused<bits, pack_factor>(
+            weight_ptr,
+            weight_is_bf16,
+            scales_ptr,
+            scale_zeros_ptr,
+            qweight_ptr,
+            out_features,
+            out_begin,
+            out_end,
+            out_stride,
+            scales_stride,
+            runs[r].start,
+            runs[r].count,
+            runs[r].group,
+            max_q);
+    }
+}
+
+// AVX-512 dispatcher for bits 2, 4, 8.  Delegates uniform vs non-uniform blocks to
+// dedicated helpers; for uniform desc_act=False groups it fuses consecutive
+// same-group 32-input blocks to amortize scale/offset loads.
 template <int bits, int pack_factor>
 __attribute__((target("avx512f")))
 void pack_qweight_avx512(
@@ -417,16 +701,8 @@ void pack_qweight_avx512(
     int64_t block_end,
     int64_t groups,
     int max_q) {
-    const __m512 zero_ps = _mm512_setzero_ps();
-    const __m512 eps_ps = _mm512_set1_ps(1e-6f);
-    const __m512 maxq_ps = _mm512_set1_ps(static_cast<float>(max_q));
-    const __m512i zero_epi = _mm512_setzero_si512();
-
-    alignas(64) int32_t lane_qvals[32][16];
-    alignas(64) float t0[16][16];
-    alignas(64) float t1[16][16];
-
-    for (int64_t block_idx = block_begin; block_idx < block_end; ++block_idx) {
+    int64_t block_idx = block_begin;
+    while (block_idx < block_end) {
         const int64_t base_input = block_idx * 32;
         const int row_base = static_cast<int>(block_idx * bits);
         alignas(64) int32_t gidx_block[32];
@@ -442,90 +718,43 @@ void pack_qweight_avx512(
 
         if (uniform_group) {
             const int32_t group = gidx_block[0];
-            const int64_t scale_offset_base = static_cast<int64_t>(group) * scales_stride;
-            for (int64_t out = 0; out < out_features; out += 16) {
-                pack_qweight_load_transpose_32x16(
-                    weight_ptr, weight_is_bf16, out, out_stride, base_input, &t0[0][0], &t1[0][0]);
-
-                __m512 scale = _mm512_loadu_ps(scales_ptr + scale_offset_base + out);
-                const __m512 offset = _mm512_loadu_ps(scale_zeros_ptr + scale_offset_base + out);
-                const __mmask16 zero_mask = _mm512_cmp_ps_mask(scale, zero_ps, _CMP_EQ_OQ);
-                scale = _mm512_mask_blend_ps(zero_mask, scale, eps_ps);
-
-                for (int lane = 0; lane < 16; ++lane) {
-                    const __m512 w = _mm512_loadu_ps(&t0[lane][0]);
-                    __m512 qf = _mm512_div_ps(_mm512_add_ps(w, offset), scale);
-                    qf = _mm512_max_ps(qf, zero_ps);
-                    qf = _mm512_min_ps(qf, maxq_ps);
-                    const __m512i q = _mm512_cvt_roundps_epi32(
-                        qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-                    _mm512_storeu_si512(reinterpret_cast<__m512i*>(lane_qvals[lane]), q);
-                }
-                for (int lane = 16; lane < 32; ++lane) {
-                    const __m512 w = _mm512_loadu_ps(&t1[lane - 16][0]);
-                    __m512 qf = _mm512_div_ps(_mm512_add_ps(w, offset), scale);
-                    qf = _mm512_max_ps(qf, zero_ps);
-                    qf = _mm512_min_ps(qf, maxq_ps);
-                    const __m512i q = _mm512_cvt_roundps_epi32(
-                        qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-                    _mm512_storeu_si512(reinterpret_cast<__m512i*>(lane_qvals[lane]), q);
-                }
-
-                for (int bit_plane = 0; bit_plane < bits; ++bit_plane) {
-                    __m512i acc = zero_epi;
-                    for (int pf = 0; pf < pack_factor; ++pf) {
-                        const int idx = bit_plane * pack_factor + pf;
-                        const int shift = bits * pf;
-                        const __m512i qv = _mm512_loadu_si512(
-                            reinterpret_cast<const __m512i*>(lane_qvals[idx]));
-                        acc = _mm512_or_si512(acc, _mm512_sllv_epi32(qv, _mm512_set1_epi32(shift)));
+            // Find how many consecutive blocks share this exact uniform group.
+            int64_t run_end = block_idx + 1;
+            while (run_end < block_end) {
+                const int64_t next_base = run_end * 32;
+                alignas(64) int32_t next_gidx[32];
+                normalize_gidx_block(gidx_ptr, next_base, groups, next_gidx);
+                bool next_uniform = true;
+                for (int i = 0; i < 32; ++i) {
+                    if (next_gidx[i] != group) {
+                        next_uniform = false;
+                        break;
                     }
-                    _mm512_storeu_si512(
-                        reinterpret_cast<__m512i*>(qweight_ptr + (row_base + bit_plane) * out_features + out),
-                        acc);
                 }
+                if (!next_uniform) {
+                    break;
+                }
+                ++run_end;
             }
+            const int64_t block_count = run_end - block_idx;
+            if (block_count == 1) {
+                pack_qweight_avx512_uniform_block<bits, pack_factor>(
+                    weight_ptr, weight_is_bf16, scales_ptr, scale_zeros_ptr, qweight_ptr,
+                    out_features, out_stride, scales_stride, base_input, row_base,
+                    group, max_q);
+            } else {
+                pack_qweight_avx512_uniform_fused<bits, pack_factor>(
+                    weight_ptr, weight_is_bf16, scales_ptr, scale_zeros_ptr, qweight_ptr,
+                    out_features, 0, out_features, out_stride, scales_stride, block_idx, block_count,
+                    group, max_q);
+            }
+            block_idx = run_end;
         } else {
-            for (int64_t out = 0; out < out_features; out += 16) {
-                pack_qweight_load_transpose_32x16(
-                    weight_ptr, weight_is_bf16, out, out_stride, base_input, &t0[0][0], &t1[0][0]);
-
-                for (int lane = 0; lane < 32; ++lane) {
-                    const int32_t group = gidx_block[lane];
-                    const float* w_ptr = (lane < 16) ? &t0[lane][0] : &t1[lane - 16][0];
-                    const __m512 w = _mm512_loadu_ps(w_ptr);
-
-                    const float* sbase = scales_ptr + static_cast<int64_t>(group) * scales_stride + out;
-                    __m512 scale = _mm512_loadu_ps(sbase);
-                    const __m512 offset = _mm512_loadu_ps(
-                        scale_zeros_ptr + static_cast<int64_t>(group) * scales_stride + out);
-
-                    const __mmask16 zero_mask = _mm512_cmp_ps_mask(scale, zero_ps, _CMP_EQ_OQ);
-                    scale = _mm512_mask_blend_ps(zero_mask, scale, eps_ps);
-
-                    __m512 qf = _mm512_div_ps(_mm512_add_ps(w, offset), scale);
-                    qf = _mm512_max_ps(qf, zero_ps);
-                    qf = _mm512_min_ps(qf, maxq_ps);
-
-                    const __m512i q = _mm512_cvt_roundps_epi32(
-                        qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-                    _mm512_storeu_si512(reinterpret_cast<__m512i*>(lane_qvals[lane]), q);
-                }
-
-                for (int bit_plane = 0; bit_plane < bits; ++bit_plane) {
-                    __m512i acc = zero_epi;
-                    for (int pf = 0; pf < pack_factor; ++pf) {
-                        const int idx = bit_plane * pack_factor + pf;
-                        const int shift = bits * pf;
-                        const __m512i qv = _mm512_loadu_si512(
-                            reinterpret_cast<const __m512i*>(lane_qvals[idx]));
-                        acc = _mm512_or_si512(acc, _mm512_sllv_epi32(qv, _mm512_set1_epi32(shift)));
-                    }
-                    _mm512_storeu_si512(
-                        reinterpret_cast<__m512i*>(qweight_ptr + (row_base + bit_plane) * out_features + out),
-                        acc);
-                }
-            }
+            pack_qweight_avx512_nonuniform_block<bits, pack_factor>(
+                weight_ptr, weight_is_bf16, scales_ptr, scale_zeros_ptr, qweight_ptr,
+                out_features, out_stride, scales_stride, base_input, row_base,
+                gidx_block, max_q);
+            ++block_idx;
         }
     }
 }
@@ -910,6 +1139,69 @@ void dispatch_pack_qweight(
     // AVX-512 path loads contiguous 16x32 weight blocks and transposes them,
     // so it no longer relies on 32-bit gather offsets.
     if (out_features % 16 == 0 && cpu_supports_avx512()) {
+        // desc_act=False gives uniform 32-input blocks. Fuse consecutive blocks
+        // that share the same group, then parallelize over output-channel tiles
+        // so each thread streams a contiguous output slice through all groups.
+        bool all_uniform = true;
+        std::vector<int32_t> block_groups(num_blocks);
+        for (int64_t b = 0; b < num_blocks; ++b) {
+            alignas(64) int32_t gidx_block[32];
+            normalize_gidx_block(gidx_ptr, b * 32, groups, gidx_block);
+            bool uniform = true;
+            for (int i = 1; i < 32; ++i) {
+                if (gidx_block[i] != gidx_block[0]) {
+                    uniform = false;
+                    break;
+                }
+            }
+            if (!uniform) {
+                all_uniform = false;
+                break;
+            }
+            block_groups[b] = gidx_block[0];
+        }
+        if (all_uniform) {
+            std::vector<PackBlockRun> runs;
+            runs.reserve(num_blocks);
+            int64_t b = 0;
+            while (b < num_blocks) {
+                int64_t e = b + 1;
+                while (e < num_blocks && block_groups[e] == block_groups[b]) {
+                    ++e;
+                }
+                runs.push_back({b, e - b, block_groups[b]});
+                b = e;
+            }
+            // Parallelize over 16-column groups so every task boundary is
+            // 16-aligned; out_features is guaranteed to be a multiple of 16 here.
+            const int64_t total_out_groups = out_features / 16;
+            int64_t out_tile_groups = ((out_features + threads_eff - 1) / threads_eff + 15) / 16;
+            if (out_tile_groups < 8) {
+                out_tile_groups = 8;
+            }
+            if (out_tile_groups > total_out_groups) {
+                out_tile_groups = total_out_groups;
+            }
+            at::parallel_for(0, total_out_groups, out_tile_groups, [&](int64_t gb, int64_t ge) {
+                const int64_t out_begin = gb * 16;
+                const int64_t out_end = ge * 16;
+                pack_qweight_avx512_output_tiled<bits, pack_factor>(
+                    weight_ptr,
+                    weight_is_bf16,
+                    scales_ptr,
+                    scale_zeros_ptr,
+                    runs.data(),
+                    static_cast<int64_t>(runs.size()),
+                    qweight_ptr,
+                    out_features,
+                    out_begin,
+                    out_end,
+                    out_stride,
+                    scales_stride,
+                    max_q);
+            });
+            return;
+        }
         at::parallel_for(0, num_blocks, grain, [&](int64_t begin, int64_t end) {
             pack_qweight_avx512<bits, pack_factor>(
                 weight_ptr,
