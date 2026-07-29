@@ -3,6 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from .analysis import (
+                     AnalysisSelection,
+                     QuantizationAnalyzer,
+                     apply_analysis_plan,
+                     render_analysis_markdown,
+                     report_to_json,
+)
 from .config import (
                      FORMAT,
                      FORMAT_FIELD_CHECKPOINT,
@@ -29,6 +36,7 @@ from .config import (
                      GPTAQConfig,
                      GPTQConfig,
                      HessianConfig,
+                     MXFP4Config,
                      ParoConfig,
                      PreProcessorCode,
                      PreProcessorConfig,
@@ -51,13 +59,6 @@ from .config import (
                      TensorParallelPadderConfig,
                      WeightOnlyConfig,
                      WeightOnlyMethod,
-)
-from .analysis import (
-                     AnalysisSelection,
-                     QuantizationAnalyzer,
-                     apply_analysis_plan,
-                     render_analysis_markdown,
-                     report_to_json,
 )
 from .foem import FOEM
 from .gptaq import GPTAQ

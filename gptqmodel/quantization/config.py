@@ -119,6 +119,7 @@ class FORMAT(str, Enum):
     BITBLAS = "bitblas"
     QQQ = "qqq"
     EXL3 = "exl3"
+    MXFP4 = "mxfp4"
 
     GEMM = "gemm"
     GEMV = "gemv"
@@ -139,6 +140,7 @@ class METHOD(str, Enum):
     AWQ = "awq"
     EXL3 = "exl3"
     PARO = "paroquant"
+    MXFP4 = "mxfp4"
 
 
 class ScaleSearchConfig(str, Enum):
@@ -689,6 +691,8 @@ def resolve_quant_format(
         return FORMAT.EXL3
     if method == METHOD.PARO:
         return FORMAT.PAROQUANT
+    if method == METHOD.MXFP4:
+        return FORMAT.MXFP4
 
     if isinstance(format_value, FORMAT):
         return format_value
@@ -1547,6 +1551,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.PARO: {
         FORMAT.PAROQUANT,
     },
+    METHOD.MXFP4: {
+        FORMAT.MXFP4,
+    },
 }
 
 GPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
@@ -1608,6 +1615,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.LLM_AWQ: METHOD.AWQ,
     FORMAT.PAROQUANT: METHOD.PARO,
     FORMAT.QQQ: METHOD.QQQ,
+    FORMAT.MXFP4: METHOD.MXFP4,
 }
 
 # inference only methods should go here
@@ -2000,6 +2008,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.EXL3
         if value == FORMAT.PAROQUANT:
             return METHOD.PARO
+        if value == FORMAT.MXFP4:
+            return METHOD.MXFP4
         try:
             return METHOD(value)
         except ValueError as exc:
@@ -2543,6 +2553,19 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.QQQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.QQQ
+    elif target_cls is MXFP4Config:
+        expected_method = METHOD.MXFP4
+        format_value = normalized.get(FORMAT_FIELD_CODE)
+        normalized_format = None
+        if format_value is not None:
+            try:
+                normalized_format = _normalize_format(format_value)
+                normalized[FORMAT_FIELD_CODE] = normalized_format
+            except ValueError:
+                normalized_format = None
+        if normalized_format is not None and normalized_format != FORMAT.MXFP4:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.MXFP4}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.MXFP4
     else:
         expected_method = METHOD.GPTQ
 
@@ -4678,6 +4701,89 @@ def clone_weight_only_config_for_module(
 clone_rtn_config_for_module = clone_weight_only_config_for_module
 
 
+@dataclass
+class MXFP4Config(PreProcessorConfig):
+    bits: int = field(default=4, metadata={"choices": [4]})
+    method: METHOD = field(default=METHOD.MXFP4)
+    format: FORMAT = field(default=FORMAT.MXFP4)
+    group_size: int = field(default=-1)
+    desc_act: Optional[bool] = field(default=False)
+    sym: bool = field(default=True)
+
+    def _resolve_checkpoint_format(self) -> FORMAT:
+        self.format = _normalize_format(self.format)
+        if self.format != FORMAT.MXFP4:
+            raise ValueError(f"MXFP4Config: `format` must be `{FORMAT.MXFP4}`.")
+        return FORMAT.MXFP4
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.MXFP4,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return (FORMAT.MXFP4,)
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def __post_init__(self):
+        self._normalize_preprocessor_state()
+        super().__post_init__()
+
+        if self.bits != 4:
+            raise ValueError("MXFP4Config: `bits` must be `4`.")
+        if self.method != METHOD.MXFP4:
+            raise ValueError("MXFP4Config: `method` must be `mxfp4`.")
+
+        self.group_size = -1
+        self.desc_act = False
+        self.sym = True
+        self.format = _normalize_format(self.format)
+
+        if self.dynamic is not None:
+            self.dynamic = {
+                **{k: v for k, v in self.dynamic.items() if k.startswith("-")},
+                **{k: v for k, v in self.dynamic.items() if not k.startswith("-")},
+            }
+            for layer, layer_dict in self.dynamic.items():
+                self._normalize_dynamic_layer_config(
+                    layer,
+                    layer_dict,
+                    valid_bit_widths=[4],
+                    checkpoint_format=FORMAT.MXFP4,
+                )
+
+    def _normalize_dynamic_layer_config(
+        self,
+        layer_name: str,
+        layer_dict: Dict[str, Any],
+        *,
+        valid_bit_widths: List[int],
+        checkpoint_format: FORMAT,
+    ) -> None:
+        del valid_bit_widths, checkpoint_format
+        if "bits" in layer_dict and int(layer_dict["bits"]) != 4:
+            raise ValueError(f"MXFP4Config: layer `{layer_name}` only supports 4-bit MXFP4 weights.")
+        if "group_size" in layer_dict and layer_dict["group_size"] not in (-1, None):
+            raise ValueError("MXFP4Config: `group_size` is not used; keep it at `-1`.")
+        if "desc_act" in layer_dict and bool(layer_dict["desc_act"]):
+            raise ValueError("MXFP4Config: `desc_act` is not supported.")
+        if "sym" in layer_dict and layer_dict["sym"] is not True:
+            raise ValueError("MXFP4Config: `sym` must stay `True`.")
+        raw_format = layer_dict.get(FORMAT_FIELD_CODE, layer_dict.get("fmt"))
+        if raw_format is not None:
+            layer_dict[FORMAT_FIELD_CODE] = _normalize_format(raw_format)
+        layer_dict.pop("fmt", None)
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {}
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out[FORMAT_FIELD_CODE] = self.format.value
+
+    def uses_weight_only_lifecycle(self) -> bool:
+        return True
+
+
 def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantizeConfig]:
     method = payload.get(METHOD_FIELD_CODE, payload.get(QUANT_METHOD_FIELD, METHOD.GPTQ))
     raw_format_value = payload.get(FORMAT_FIELD_CODE, payload.get(FORMAT_FIELD_CHECKPOINT, FORMAT.GPTQ))
@@ -4753,6 +4859,8 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return AWQConfig
     if format_value == FORMAT.MARLIN:
         return AWQConfig if method == METHOD.AWQ else GPTQConfig
+    if method == METHOD.MXFP4 or format_value == FORMAT.MXFP4:
+        return MXFP4Config
     return GPTQConfig
 
 
@@ -4771,6 +4879,7 @@ def _known_quantize_config_field_names() -> set[str]:
         EXL3Config,
         RTNConfig,
         GGUFConfig,
+        MXFP4Config,
     ):
         field_names.update(field.name for field in fields(cls))
     return field_names

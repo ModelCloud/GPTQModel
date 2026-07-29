@@ -29,6 +29,9 @@ class BACKEND(str, Enum):
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
     GPTQ_HUMMING = "gptq_humming"  # InclusionAI Humming JIT kernel for GPTQ
 
+    # MXFP4 CPU kernel
+    MXFP4_CPU = "mxfp4_cpu"
+
     # QQQ kernels
     QQQ = "qqq"  # marlin-based qqq kernel
     QQQ_TORCH = "qqq_torch"
