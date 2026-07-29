@@ -26,9 +26,9 @@ class LagunaQModel(BaseQModel):
             "self_attn": (
                 "q_norm:!",
                 "k_norm:!",
-                "q_proj:0",
-                "k_proj:0",
-                "v_proj:0",
+                "q_proj:0:q",
+                "k_proj:0:k",
+                "v_proj:0:v",
                 "g_proj:!",
                 "o_proj:1",
             ),
@@ -36,14 +36,14 @@ class LagunaQModel(BaseQModel):
             "mlp:moe": {
                 # Native Transformers uses the plural name, while Laguna S 2.1's
                 # custom model code keeps the checkpoint's singular name.
-                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-                "shared_expert": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_experts": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+                "shared_expert": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 "gate": ("gate:!",),
                 "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
                 # Dense fallback used by Laguna's first decoder block.
-                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
             },
         },
     ]

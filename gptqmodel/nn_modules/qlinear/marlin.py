@@ -33,6 +33,7 @@ from ...utils.marlin import (
     _marlin_capability_supported,
     _transform_param,
     apply_gptq_marlin_linear,
+    gptq_marlin_gemm,
     gptq_marlin_repack,
     marlin_import_exception,
     marlin_is_k_full,
@@ -486,6 +487,78 @@ class MarlinLinear(GPTQQuantLinear):
             if lora_workspace is not None:
                 buf.append(lora_workspace)
         return buf
+
+    @torch.inference_mode()
+    def dequantize_weight(
+        self,
+        dtype: Optional[torch.dtype] = None,
+        max_chunk_rows: int = 1024,
+    ) -> torch.Tensor:
+        """Return a dense (in_features, out_features) weight tensor.
+
+        This is implemented by feeding an identity input through the Marlin GEMM:
+        each output row is the dequantized weight row for the corresponding input
+        dimension.  It is exact with respect to ``self.forward`` and therefore safe
+        to use as a dense fallback for grouped GEMM or for correctness probing.
+        """
+        param = next(iter(self.parameters()), None)
+        target_dtype = dtype or self.compute_dtype or (param.dtype if param is not None else self.qweight.dtype)
+        device = self.qweight.device
+
+        k_padded = self.padded_in_features
+        n_padded = self.padded_out_features
+        rows = self.in_features
+        out_cols = self.out_features
+
+        if k_padded == 0 or n_padded == 0 or rows == 0:
+            return torch.empty(rows, out_cols, dtype=target_dtype, device=device)
+
+        workspace = getattr(self, "workspace", None)
+        if workspace is None:
+            workspace = marlin_make_workspace_new(device, min_workspace_blocks=128)
+
+        # Process in chunks so the identity-input scratch tensor stays modest for
+        # large K (e.g. 7168-dim routed latent in Kimi-K3-like shapes).
+        chunks: list[torch.Tensor] = []
+        c = torch.empty((max_chunk_rows, n_padded), dtype=target_dtype, device=device)
+
+        for start in range(0, rows, max_chunk_rows):
+            end = min(start + max_chunk_rows, rows)
+            cur_m = end - start
+
+            a = torch.zeros((cur_m, k_padded), dtype=target_dtype, device=device)
+            local_idx = torch.arange(cur_m, device=device)
+            a[local_idx, local_idx + start] = 1.0
+
+            c_chunk = c if cur_m == max_chunk_rows else torch.empty((cur_m, n_padded), dtype=target_dtype, device=device)
+
+            gptq_marlin_gemm(
+                a,
+                c_chunk,
+                self.qweight,
+                None,
+                self.scales,
+                None,
+                self.qzeros,
+                self.g_idx,
+                self.g_idx_sort_indices,
+                workspace,
+                self.weight_type,
+                cur_m,
+                n_padded,
+                k_padded,
+                self.is_k_full,
+                False,
+                self.fp32,
+                False,
+                False,
+                0,
+            )
+            # Clone the slice so the next iteration's in-place write into `c` cannot
+            # overwrite previously-collected full-chunk rows.
+            chunks.append(c_chunk[:, :out_cols].clone())
+
+        return torch.cat(chunks, dim=0)
 
     def forward(self, x: torch.Tensor):
         if x.shape[-1] != self.in_features:

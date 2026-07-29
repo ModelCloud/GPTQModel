@@ -1639,6 +1639,89 @@ class BaseQModel(nn.Module):
         """shortcut for model.prepare_inputs_for_generation"""
         return self.model.prepare_inputs_for_generation(*args, **kwargs)
 
+    def fuse(
+        self,
+        qkv: bool = True,
+        gate_up: bool = True,
+        free_original_weights: bool = True,
+        gate_up_activation: bool = True,
+    ) -> Dict[str, int]:
+        """Fuse compatible quantized projection groups for inference.
+
+        This is an opt-in step after `GPTQModel.load(...)`. It scans the
+        underlying `transformers` model for `q_proj`/`k_proj`/`v_proj` and
+        `gate_proj`/`up_proj` groups that share the same GPTQ backend,
+        `bits`, `group_size`, `g_idx`, and device, and replaces their forward
+        methods with a single concatenated GEMM. The fused state is kept only in
+        memory and is not persisted to disk on `save()`.
+
+        Args:
+            qkv: Whether to fuse attention QKV projections.
+            gate_up: Whether to fuse MLP gate/up projections.
+            free_original_weights: Whether to delete the per-member packed
+                weight buffers after the fused kernel owns a concatenated copy.
+                This roughly halves the fused group's memory footprint but means
+                `save()` cannot serialize the fused model; call `fuse()` again
+                with `free_original_weights=False` if you need to save.
+            gate_up_activation: Whether to also fuse the MLP activation
+                (SiLU, GeLU, ReLU, tanh, etc.) and down projection into a single
+                gate/up/down pass when the MLP structure can be detected. This
+                further reduces Python launch overhead and intermediate memory.
+
+        Returns:
+            A mapping of fusion type to number of groups installed.
+        """
+        if not (self.quantized or self.load_quantized_model):
+            log.warning(
+                "BaseQModel.fuse() is intended for quantized inference models; "
+                "skipping because neither `quantized` nor `load_quantized_model` is set."
+            )
+            return {"qkv": 0, "gate_up": 0}
+
+        if free_original_weights:
+            log.warn.once(
+                "BaseQModel.fuse(free_original_weights=True) removes per-member "
+                "packed weight buffers. `model.save()` and any code that reads "
+                "member `.qweight`/`.scales` buffers will fail after this call. "
+                "Pass free_original_weights=False if you need to save or inspect."
+            )
+
+        from ..nn_modules.fused_quant_linear import (
+            get_module_tree_fusion_candidates,
+            install_fused_gate_up,
+            install_fused_qkv,
+        )
+
+        qkv_candidates = None
+        gateup_candidates = None
+        if getattr(self, "module_tree", None) is not None:
+            try:
+                qkv_candidates, gateup_candidates = get_module_tree_fusion_candidates(self.module_tree)
+                if not qkv_candidates:
+                    qkv_candidates = None
+                if not gateup_candidates:
+                    gateup_candidates = None
+            except Exception:
+                pass
+
+        counts: Dict[str, int] = {}
+        if qkv:
+            counts["qkv"] = install_fused_qkv(
+                self.model,
+                candidates=qkv_candidates,
+                free_original_weights=free_original_weights,
+            )
+        if gate_up:
+            counts["gate_up"] = install_fused_gate_up(
+                self.model,
+                candidates=gateup_candidates,
+                free_original_weights=free_original_weights,
+                fuse_activation=gate_up_activation,
+            )
+
+        log.info(f"Fused {sum(counts.values())} quantized projection group(s): {counts}")
+        return counts
+
     def save(
             self,
             save_dir: str,

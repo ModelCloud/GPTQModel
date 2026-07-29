@@ -17,6 +17,6 @@ class QwenQModel(BaseQModel):
             "ln_1": ("ln_1:!",),
             "attn": ("c_attn:0", "c_proj:1"),
             "ln_2": ("ln_2:!",),
-            "mlp": ("w1:0", "w2:0", "c_proj:1"),
+            "mlp": ("w1:0:up", "w2:0:gate", "c_proj:1:down"),
         }
     ]

@@ -128,6 +128,11 @@ _EXTENSION_SPECS = (
         )(),
     ),
     _ExtensionSpec(
+        name="marlin_moe",
+        aliases=(),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin_moe", "_MARLIN_MOE_TORCH_OPS_EXTENSION"),
+    ),
+    _ExtensionSpec(
         name="grasshopper",
         aliases=("gptq_grasshopper",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.grasshopper", "_GRASSHOPPER_TORCH_OPS_EXTENSION"),

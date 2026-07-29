@@ -231,7 +231,7 @@ def quant_matmul_248_kernel(
             b = (b >> shifter[:, None]) & maxq  # Extract the N-bit values
 
         a = tl.load(a_ptrs, mask=a_mask & k_mask[None, :], other=0.0)  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
-        b = (b - zeros) * scales  # Scale and shift
+        b = ((b - zeros) * scales).to(a.dtype)  # Scale and shift, match A dtype for tl.dot
 
         accumulator += tl.dot(a, b)
         a_ptrs += BLOCK_SIZE_K
@@ -405,7 +405,7 @@ def transpose_quant_matmul_248_kernel(
             b = (b >> shifter[:, None]) & maxq  # Extract the N-bit values
 
         a = tl.load(a_ptrs, mask=a_mask & n_mask[None, :], other=0.0)  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
-        b = (b - zeros) * scales  # Scale and shift
+        b = ((b - zeros) * scales).to(a.dtype)  # Scale and shift, match A dtype for tl.dot
         b = tl.trans(b)
 
         accumulator += tl.dot(a, b)
