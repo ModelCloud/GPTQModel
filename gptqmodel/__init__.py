@@ -286,16 +286,17 @@ from .quantization import (
     GGUFConfig,
     GPTAQConfig,
     GPTQConfig,
+    QuantizationAnalyzer,
     QuantizeConfig,
     QuantizeEmbed,
     QuantizeEmbedConfig,
-    QuantizationAnalyzer,
     RTNConfig,
     ScaleSearchConfig,
     WeightOnlyConfig,
     apply_analysis_plan,
 )
 from .utils import BACKEND, PROFILE
+from .utils.reshard import ShardStrategy, reshard
 from .version import __version__
 
 

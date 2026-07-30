@@ -268,6 +268,41 @@ GPT-QModel supports four scale-search objectives for GPTQ-style quantization: `M
 * ✨ `lm_head` module quant inference support for further VRAM reduction.
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) optimized tile based inference.
 * 💯 CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
+* 🚀 Per-layer checkpoint sharding (`ShardStrategy.PER_LAYER`) for faster `LazyTurtle` loading of large dense models. See [docs/sharding.md](docs/sharding.md).
+
+## Checkpoint Sharding
+
+Large dense checkpoints are usually split into multi-GB `safetensors` shards. When `LazyTurtle` materializes layers one at a time it re-reads small ranges from those huge files, which causes the OS page cache / ZFS ARC to churn and makes later layers load progressively slower. GPT-QModel supports per-layer sharding: one `safetensors` file per transformer layer plus a separate final shard for embeddings, final norm, and `lm_head`.
+
+The layer-node prefix is auto-detected from the checkpoint's `config.json` and the matching `GPTQModel` definition, with a fallback to tensor-name heuristics, so it works for `model.layers`, `language_model.model.layers`, `transformer.h`, and other model-family layouts. You can also pass `layer_prefixes=[...]` explicitly.
+
+Reshard an existing dense checkpoint without loading it fully into memory:
+
+```python
+from gptqmodel import reshard, ShardStrategy
+
+reshard(
+    "/monster/data/model/Laguna-S-2.1",
+    "/monster/data/model/Laguna-S-2.1-PER-LAYER",
+    strategy=ShardStrategy.PER_LAYER,
+)
+```
+
+Or save a freshly quantized model directly into per-layer shards:
+
+```python
+from gptqmodel import GPTQModel, QuantizeConfig, ShardStrategy
+
+model = GPTQModel.load("modelcloud/Laguna-S-2.1-bf16")
+model.quantize(examples, quantize_config=QuantizeConfig(
+    bits=4,
+    group_size=128,
+    shard_strategy=ShardStrategy.PER_LAYER,
+))
+model.save("/path/to/Laguna-S-2.1-GPTQ-PER-LAYER")
+```
+
+For the motivation, layout, and tuning notes see [docs/sharding.md](docs/sharding.md).
 
 ## Who's Using GPT-QModel?
 

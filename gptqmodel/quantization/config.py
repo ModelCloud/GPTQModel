@@ -177,6 +177,14 @@ class QuantizeEmbedConfig:
     embed_only: bool = True
 
 
+class ShardStrategy(str, Enum):
+    """Safetensors checkpoint sharding strategy used during save and reshard."""
+
+    PER_LAYER = "per_layer"
+    """One output shard per transformer layer. Non-layer tensors (embeddings,
+    final norm, lm_head) are grouped into a separate non-layer shard."""
+
+
 class FallbackStrategy(str, Enum):
     """
     +-----------+----------------------+---------------------------+------------------------------+
@@ -2317,6 +2325,23 @@ def _normalize_gc_mode(value: Union[str, GcMode]) -> GcMode:
     return value
 
 
+def _normalize_shard_strategy(value: Optional[Union[str, ShardStrategy]]) -> Optional[ShardStrategy]:
+    if value is None:
+        return None
+    if isinstance(value, ShardStrategy):
+        return value
+    if isinstance(value, str):
+        try:
+            return ShardStrategy(value.lower())
+        except ValueError as exc:
+            raise ValueError(
+                f"QuantizeConfig: `shard_strategy` must be one of {[v.value for v in ShardStrategy]}."
+            ) from exc
+    raise ValueError(
+        "QuantizeConfig: `shard_strategy` must be a ShardStrategy, str, or None."
+    )
+
+
 def _normalize_moe_config(value: Optional[Union[MoEConfig, Dict[str, Any]]]) -> Optional[MoEConfig]:
     if value is None:
         return None
@@ -2792,6 +2817,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         metadata={"help": "Explicit device pool for MoE expert modules. Each expert family (gate/up/down) stays on one device."},
     )
 
+    # Checkpoint sharding strategy used when saving quantized models.
+    # ``per_layer`` writes one safetensors file per transformer layer and a
+    # separate file for non-layer tensors (embeddings, norm, lm_head).
+    shard_strategy: Optional[ShardStrategy] = field(default=ShardStrategy.PER_LAYER)
+
     gc_mode: GcMode = field(
         default=GcMode.INTERVAL,
         metadata={"help": "Garbage collection mode: 'interval' for regular GC or 'on_stage_end' for GC after stage end (after forward pass, quantize, layer finilization)."}
@@ -2968,6 +2998,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         )
         self.gc_mode = _normalize_gc_mode(self.gc_mode)
         self.moe = _normalize_moe_config(self.moe)
+        self.shard_strategy = _normalize_shard_strategy(self.shard_strategy)
         if self.weight_only_quant_threads is not None:
             try:
                 self.weight_only_quant_threads = int(self.weight_only_quant_threads)
@@ -3241,6 +3272,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "offload_to_disk": "offload_to_disk",
             "offload_to_disk_path": "offload_to_disk_path",
             "pack_impl": "pack_impl",
+            "shard_strategy": "shard_strategy",
             "mse": "mse",
             "scale_search": "scale_search",
             "mock_quantization": "mock_quantization",
@@ -3382,6 +3414,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
         meta_payload["pack_impl"] = self.pack_impl
         meta_payload["gc_mode"] = self.gc_mode.value if isinstance(self.gc_mode, GcMode) else self.gc_mode
+        meta_payload["shard_strategy"] = self.shard_strategy.value if self.shard_strategy is not None else None
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
         meta_payload["weight_only_quant_threads"] = self.weight_only_quant_threads

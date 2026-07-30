@@ -12,7 +12,7 @@ import json
 import os
 import shutil
 from os.path import isfile, join
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pcre
 import torch
@@ -47,6 +47,7 @@ from ..quantization.config import (
     META_QUANTIZER_GPTQMODEL,
     META_VALUE_URI,
     MIN_VERSION_WITH_V2,
+    ShardStrategy,
     resolve_quant_format,
 )
 from ..quantization.diagnostics import render_quantization_diagnostics_markdown
@@ -117,6 +118,24 @@ def _parse_split_by(value: Optional[str]) -> Optional[str]:
     if normalized not in SUPPORTED_SPLIT_BY:
         raise ValueError(f"Unsupported split_by value: {value}. Supported values: None, 'layer'.")
     return normalized
+
+
+def _normalize_shard_strategy_for_save(value: Optional[Union[str, ShardStrategy]]) -> Optional[ShardStrategy]:
+    if value is None:
+        return None
+    if isinstance(value, ShardStrategy):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("", "none"):
+            return None
+        try:
+            return ShardStrategy(normalized)
+        except ValueError as exc:
+            raise ValueError(
+                f"Unsupported shard_strategy value: {value}. Supported values: {', '.join(v.value for v in ShardStrategy)}."
+            ) from exc
+    raise TypeError("shard_strategy must be a ShardStrategy, string, or None.")
 
 
 def _materialize_remaining_meta_params_from_turtle(model: torch.nn.Module, turtle_model) -> int:
@@ -897,6 +916,102 @@ def _stream_state_dict_to_layer_dirs(
 
     return expected_files, tensor_to_filename, total_size
 
+
+def _stream_state_dict_per_layer_shards(
+    state_dict: Dict[str, Any],
+    save_dir: str,
+    model_base_name: str,
+    model_save_name: str,
+    metadata: Dict[str, str],
+    max_shard_size: Optional[int],
+    layer_prefixes: List[str],
+) -> tuple[List[str], Dict[str, str], int]:
+    """Stream a state dict into per-layer safetensors shards in the root dir.
+
+    Each transformer layer becomes one output shard; all non-layer tensors
+    (embeddings, final norm, lm_head, ...) are grouped into a final shard.
+    Output files are named ``model-XXXXX-of-YYYYY.safetensors`` in ``save_dir``.
+    """
+    layer_groups: Dict[str, Dict[str, Any]] = {}
+    non_layer_group: Dict[str, Any] = {}
+    for tensor_name, tensor_source in state_dict.items():
+        group_name, is_layer_group = _resolve_layer_split_group(tensor_name, layer_prefixes)
+        if is_layer_group:
+            layer_groups.setdefault(group_name, {})[tensor_name] = tensor_source
+        else:
+            non_layer_group[tensor_name] = tensor_source
+
+    ordered_groups: List[Tuple[str, Dict[str, Any]]] = []
+    for key in sorted(layer_groups, key=lambda s: _layer_sort_key(s, layer_prefixes)):
+        ordered_groups.append((key, layer_groups[key]))
+    if non_layer_group:
+        ordered_groups.append(("non_layer", non_layer_group))
+
+    staging_dir = os.path.join(save_dir, ".per_layer_staging")
+    shutil.rmtree(staging_dir, ignore_errors=True)
+    os.makedirs(staging_dir, exist_ok=True)
+
+    group_filenames: List[List[str]] = []
+    group_tensor_maps: List[Dict[str, str]] = []
+    total_size = 0
+
+    for group_key, group_state in ordered_groups:
+        group_dir = os.path.join(staging_dir, group_key)
+        os.makedirs(group_dir, exist_ok=True)
+        filenames, tensor_to_filename, group_total_size = streaming_state_dict_to_shards(
+            group_state,
+            save_dir=group_dir,
+            model_base_name=model_base_name,
+            single_file_name=model_save_name,
+            metadata=metadata,
+            max_shard_size=max_shard_size,
+        )
+        group_filenames.append(filenames)
+        group_tensor_maps.append(tensor_to_filename)
+        total_size += group_total_size
+
+    expected_files: List[str] = []
+    tensor_to_filename: Dict[str, str] = {}
+    counter = 1
+    total_shards = sum(len(f) for f in group_filenames)
+
+    group_keys = [g[0] for g in ordered_groups]
+    for group_key, filenames, local_map in zip(group_keys, group_filenames, group_tensor_maps):
+        final_names = [f"{model_base_name}-{counter + i:05d}-of-{total_shards:05d}.safetensors" for i in range(len(filenames))]
+        for local_name, final_name in zip(filenames, final_names):
+            src = os.path.join(staging_dir, group_key, local_name)
+            dst = os.path.join(save_dir, final_name)
+            shutil.move(src, dst)
+            expected_files.append(final_name)
+        for tensor_name, local_name in local_map.items():
+            idx = filenames.index(local_name)
+            tensor_to_filename[tensor_name] = final_names[idx]
+        counter += len(filenames)
+
+    shutil.rmtree(staging_dir, ignore_errors=True)
+
+    _cleanup_saved_weight_files(
+        save_dir=save_dir,
+        expected_files=expected_files,
+        model_base_name=model_base_name,
+        model_save_name=model_save_name,
+    )
+
+    return expected_files, tensor_to_filename, total_size
+
+
+def _layer_sort_key(group_name: str, layer_prefixes: List[str]) -> tuple:
+    """Return a stable sort key for a layer group name like ``model.layers.0``."""
+    for prefix in layer_prefixes:
+        if group_name.startswith(f"{prefix}."):
+            suffix = group_name[len(prefix) + 1:]
+            try:
+                return (layer_prefixes.index(prefix), int(suffix))
+            except ValueError:
+                pass
+    return (len(layer_prefixes), group_name)
+
+
 def ModelWriter(cls):
     def save_pretrained(
             self,
@@ -1079,6 +1194,7 @@ def ModelWriter(cls):
             meta_quantizer: Optional[str] = None,
             eora_path: Optional[str] = None,
             split_by: Optional[str] = None,
+            shard_strategy: Optional[Union[ShardStrategy, str]] = None,
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -1386,7 +1502,26 @@ def ModelWriter(cls):
         metadata_dict["format"] = "pt"
         split_by_mode = _parse_split_by(split_by)
 
-        if split_by_mode == "layer":
+        if shard_strategy is None and getattr(self.quantize_config, "shard_strategy", None):
+            shard_strategy = self.quantize_config.shard_strategy
+        if isinstance(shard_strategy, str):
+            shard_strategy = _normalize_shard_strategy_for_save(shard_strategy)
+
+        if shard_strategy is ShardStrategy.PER_LAYER and not self.qlinear_kernel.SUPPORTS_SHARDS:
+            log.warn("Per-layer sharding is not supported for this quant. Falling back to a single checkpoint file.")
+            shard_strategy = None
+
+        if shard_strategy is ShardStrategy.PER_LAYER:
+            expected_files, tensor_to_filename, total_size_bytes = _stream_state_dict_per_layer_shards(
+                state_dict,
+                save_dir=save_dir,
+                model_base_name=model_base_name,
+                model_save_name=model_save_name,
+                metadata=metadata_dict,
+                max_shard_size=max_shard_size_bytes,
+                layer_prefixes=self.extract_layers_node(),
+            )
+        elif split_by_mode == "layer":
             expected_files, tensor_to_filename, total_size_bytes = _stream_state_dict_to_layer_dirs(
                 state_dict,
                 save_dir=save_dir,
@@ -1415,7 +1550,7 @@ def ModelWriter(cls):
 
         total_size_mb = total_size_bytes / (1024 * 1024)
 
-        if split_by_mode == "layer" or len(expected_files) > 1:
+        if shard_strategy is ShardStrategy.PER_LAYER or split_by_mode == "layer" or len(expected_files) > 1:
             index = {
                 "metadata": {"total_size": total_size_bytes},
                 "weight_map": tensor_to_filename,

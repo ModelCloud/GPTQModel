@@ -52,6 +52,7 @@ from ..quantization.config import (
     GcMode,
     QuantizeEmbed,
     QuantizeEmbedConfig,
+    ShardStrategy,
     VramStrategy,
     dynamic_get,
     resolve_quant_format,
@@ -1730,6 +1731,7 @@ class BaseQModel(nn.Module):
             meta_quantizer: Optional[str] = None,
             eora_path: Optional[str] = None,
             split_by: Optional[str] = None,
+            shard_strategy: Optional[Union[ShardStrategy, str]] = None,
             **kwargs,
     ):
         timer = getattr(self, "quant_region_timer", None)
@@ -1754,7 +1756,9 @@ class BaseQModel(nn.Module):
                         max_shard_size=max_shard_size,
                         meta_quantizer=meta_quantizer,
                         eora_path=eora_path,
-                        split_by=split_by)
+                        split_by=split_by,
+                        shard_strategy=shard_strategy,
+                    )
 
                 # overwrite quant_override_files
                 for name, value in self.quant_override_files.items():
