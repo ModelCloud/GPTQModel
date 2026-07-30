@@ -884,18 +884,47 @@ class LazyTurtle:
         target_submodule: torch.nn.Module,
         device: torch.device,
         non_blocking: bool = False,
+        module_path: Optional[str] = None,
+        recurse: bool = True,
+        tie_weights: bool = True,
+        show_progress: bool = True,
     ) -> torch.nn.Module:
-        path = _get_qualified_name(target_model, target_submodule)
+        if module_path is None:
+            module_path = _get_qualified_name(target_model, target_submodule)
+
+        # Build only the ancestor chain plus the descendant subtree for the target
+        # module. _resolve_prefer_transposed_hint only needs these entries, so a full
+        # target_model.named_modules() scan is avoided on every materialize call.
+        modules_by_name: Optional[Dict[str, torch.nn.Module]] = None
+        if module_path is not None:
+            modules_by_name = {"": target_model}
+            parts = module_path.split(".")
+            for i in range(len(parts)):
+                prefix = ".".join(parts[: i + 1])
+                try:
+                    modules_by_name[prefix] = target_model.get_submodule(prefix)
+                except (AttributeError, IndexError, KeyError):
+                    break
+            modules_by_name[module_path] = target_submodule
+            if recurse:
+                for subname, submod in target_submodule.named_modules():
+                    full_name = f"{module_path}.{subname}" if subname else module_path
+                    modules_by_name[full_name] = submod
+        elif recurse:
+            modules_by_name = dict(target_model.named_modules())
+
         with self._lock:
-            self._copy_checkpoint_tensors_into_submodule(
+            loaded_entries = self._copy_checkpoint_tensors_into_submodule(
                 target_model=target_model,
                 target_submodule=target_submodule,
-                module_path=path,
+                module_path=module_path,
                 device=device,
-                recurse=True,
+                recurse=recurse,
                 non_blocking=non_blocking,
+                modules_by_name=modules_by_name,
+                show_progress=show_progress,
             )
-        if hasattr(target_model, "tie_weights"):
+        if tie_weights and loaded_entries > 0 and hasattr(target_model, "tie_weights"):
             target_model.tie_weights()
         return target_submodule
 
@@ -2274,12 +2303,17 @@ class LazyTurtle:
         device: torch.device,
         recurse: bool,
         non_blocking: bool,
-    ) -> None:
+        modules_by_name: Optional[Dict[str, nn.Module]] = None,
+        show_progress: bool = True,
+    ) -> int:
         """Materialize checkpoint tensors into a shell submodule and rebuild missing init-only buffers."""
 
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
-        modules_by_name = dict(target_model.named_modules())
+        if modules_by_name is None:
+            # Fall back to a full model scan when the caller has not supplied a
+            # targeted ancestor+descendant map.
+            modules_by_name = dict(target_model.named_modules())
         missing_nonpersistent_buffers: list[tuple[str, str]] = []
 
         grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
@@ -2346,7 +2380,7 @@ class LazyTurtle:
         total_entries = sum(len(entries) for entries in grouped_names.values()) + len(concat_entries)
         progress = None
         loaded_entries = 0
-        if total_entries:
+        if total_entries and show_progress:
             progress = log.pb(range(total_entries)).manual().set(show_left_steps=False)
             module_label = module_path or "<root>"
             progress.title(f"Loading checkpoint tensors ({total_entries})")
@@ -2600,6 +2634,7 @@ class LazyTurtle:
             missing_nonpersistent_buffers=missing_nonpersistent_buffers,
             device=device,
         )
+        return loaded_entries
 
     def _build_nonpersistent_buffer_template(
         self,
