@@ -12,28 +12,60 @@ This file governs the whole repository. Keep changes narrowly scoped, preserve C
 
 ## Route work to the local skills
 
-- Quantization algorithms, formats, packing, protocols, calibration, GPTQ, AWQ, QQQ, FP8, GGUF, EXL3, ParoQuant, RTN, or bitsandbytes: use `$gptqmodel-quantization`.
+- Quantization algorithms, calibration, formats, protocols, GPTQ, AWQ, QQQ, FP8, EXL3, ParoQuant, RTN, or
+  bitsandbytes: use `$gptqmodel-quantization`.
+- CPU-side tensor packing (`pack_block_cpu`, `pack_awq_cpu`, `pack_qqq_cpu`), AVX-512/AVX2 dispatch, dtype conversion,
+  and thread-parallel packing: use `$gptqmodel-cpu-packing`.
 - Pre/during/post quantization error analysis, risky module/weight/channel/embedding/LM-head discovery, severe quality
   regressions, pre-pack loss or scale spikes, pack/dequant/kernel isolation, or higher-bit/RTN/mixed-precision controls:
   also use `$gptqmodel-quantization-regressions`.
-- Quantized linear implementations, backend selection, capability declarations, fallback, or availability checks: use `$gptqmodel-backends`.
+- Quantized linear implementations, backend selection, capability declarations, fallback, or availability checks:
+  use `$gptqmodel-backends`.
 - CUDA, C++, CUTLASS, Triton, JIT extensions, correctness debugging, or kernel benchmarks: use `$gptqmodel-cuda-kernels`.
-- Torch-profiler traces, Nsight analysis, bottleneck attribution, launch gaps, overlap, or fusion opportunities: use `$gptqmodel-gpu-profiling`.
-- GPU correctness tests, performance benchmarks, user-specified GPU IDs, idle-device preflights, or long-running
-  live result tables: use `$gptqmodel-gpu-testing`.
-- Multi-kernel fusion, cooperative or persistent mega-kernels, cross-phase scratch reuse, grid barriers, fused phase scheduling, or launch-count reduction: also use `$gptqmodel-mega-kernels`.
-- Nsight Systems capture, `.nsys-rep` reports, CUDA launch gaps, memory copies, or NCCL timeline analysis: also use `$perf-nsight-systems`.
-- Nsight Compute kernel metrics, `.ncu-rep` reports, SOL/roofline, occupancy, memory hierarchy, or warp stalls: also use `$perf-nsight-compute-analysis`.
-- CUDA-event timing, warmed workload benchmarks, or NVTX instrumentation: also use `$perf-workload-profiling`.
-- Ampere or A100 tuning: also use `$gptqmodel-ampere-kernels`.
-- Hopper or H100 tuning: also use `$gptqmodel-hopper-kernels`.
+- Multi-kernel fusion, cooperative or persistent mega-kernels, cross-phase scratch reuse, grid barriers, fused phase
+  scheduling, or launch-count reduction: also use `$gptqmodel-mega-kernels`.
+- MoE routing, expert dispatch, grouped GEMM, per-expert loops, and QKV/gate-up fusion inside MoE models:
+  use `$gptqmodel-moe`.
+- Fused inference QKV/gate-up, `model.fuse()`, `flash_attention_2`, and decode/prefill optimization:
+  use `$gptqmodel-inference-fusion`.
+- LazyTurtle/meta-device shell, batched safetensors loading, pinned-memory shard cache, and pre-quantize loading:
+  use `$gptqmodel-lazy-turtle`.
+- Checkpoint sharding (`reshard`), `ShardStrategy`, parallel shard writes, and save/load integration:
+  use `$gptqmodel-sharding`.
+- Checkpoint formats (MXFP4, GGUF, vLLM/sglang, EoRA adapters, format conversion): use `$gptqmodel-checkpoint-formats`.
 - New model families, `module_tree`, MoE adapters, or `MODEL_MAP`: use `$gptqmodel-model-support`.
 - Tokenizer initialization, normalization, special-token compatibility, prompt rendering, chat templates, or
-  unexpectedly low inference/evaluation scores: use `$gptqmodel-tokenizer-normalization`.
+  unexpectedly low generation scores: use `$gptqmodel-tokenizer-normalization`.
+- Post-quantization evaluation (Evalution, GSM8K, lm-eval, perplexity, sanity generation): use `$gptqmodel-evaluation`.
+- GPU correctness tests, performance benchmarks, user-specified GPU IDs, idle-device preflights, or long-running
+  live result tables: use `$gptqmodel-gpu-testing`.
+- GPU allocator CLI/client for leasing one or more GPUs: use `$gpu-allocator-cli`.
+- Contiguous-memory layout regressions in quantization or kernel paths: use `$gptqmodel-contiguous-memory`.
+- Torch-profiler traces, Nsight analysis, bottleneck attribution, launch gaps, overlap, or fusion opportunities:
+  use `$gptqmodel-gpu-profiling`.
+- Nsight Systems capture, `.nsys-rep` reports, CUDA launch gaps, memory copies, or NCCL timeline analysis:
+  use `$perf-nsight-systems`.
+- Nsight Compute kernel metrics, `.ncu-rep` reports, SOL/roofline, occupancy, memory hierarchy, or warp stalls:
+  use `$perf-nsight-compute-analysis`.
+- CUDA-event timing, warmed workload benchmarks, or NVTX instrumentation: use `$perf-workload-profiling`.
+- Lightweight telemetry injection and interpretation (`module_load`, `module_move`, `torch_sync`, `disk_telemetry`):
+  use `$gptqmodel-telemetry`.
 - Reproducing a user-reported bug from an exact command, script, or log excerpt (error, warning, or discrepancy)
   and collecting telemetry before source inspection: use `$run-user-command-with-telemetry`.
+- Upstream sync, ports, public release notes, or disclosure-boundary review: use `$gptqmodel-upstream`.
+- Ampere or A100 tuning: also use `$gptqmodel-ampere-kernels`.
+- Hopper or H100 tuning: also use `$gptqmodel-hopper-kernels`.
 
 Read every selected `SKILL.md` completely before editing. Follow its linked references only when relevant to the task.
+
+### Profiling and telemetry quick map
+
+| What you need | Primary skill |
+|---|---|
+| Add timing/instrumentation to a region | `$gptqmodel-telemetry` (or `$perf-workload-profiling` for CUDA-event benchmarks) |
+| Capture a trace or Chrome/Perfetto timeline | `$gptqmodel-gpu-profiling` |
+| System-level `nsys` timeline, launch gaps, NCCL | `$perf-nsight-systems` |
+| Kernel-level `ncu` metrics, SOL%, roofline | `$perf-nsight-compute-analysis` |
 
 ## Tokenizer normalization ownership
 

@@ -1,5 +1,5 @@
 ---
-name: cpu-optimization
+name: gptqmodel-cpu-packing
 description: Optimize CPU-side tensor packing, dtype conversion, and thread-parallel kernels in GPT-QModel. Use when profiling or modifying pack_block_cpu, pack_awq_cpu, pack_qqq_cpu, or any host-side tensor transform that feeds a quantized linear backend.
 ---
 
