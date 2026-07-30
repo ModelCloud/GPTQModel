@@ -14,16 +14,24 @@ repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, repo_root)
 
 import torch  # noqa: E402
-from torch.profiler import ProfilerActivity, record_function, profile  # noqa: E402
+from torch.profiler import ProfilerActivity, profile  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--model-path", default="/monster/data/model/Laguna-S-2.1-GPTQ-FIXED")
     p.add_argument("--gpu", type=str, default="0")
+    p.add_argument("--device-map", type=str, default=None)
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--seq-len", type=int, default=1)
     p.add_argument("--fuse", action="store_true")
+    p.add_argument("--no-fuse-qkv", action="store_true", help="Only used with --fuse")
+    p.add_argument("--no-fuse-gate-up", action="store_true", help="Only used with --fuse")
+    p.add_argument("--no-fuse-gate-up-activation", action="store_true", help="Only used with --fuse")
+    p.add_argument("--moe-grouped-dispatch", action="store_true",
+                   help="Enable GPTQModel grouped (linear_loop) MoE dispatch without model.fuse().")
+    p.add_argument("--moe-backend", type=str, default="marlin",
+                   help="MoE backend for grouped dispatch: 'marlin' or 'marlin_moe'.")
     p.add_argument("--disable-speculative", action="store_true")
     p.add_argument("--attn-implementation", type=str, default="flash_attention_2")
     p.add_argument("--trace", type=str, default="laguna_decode_trace.json")
@@ -38,14 +46,17 @@ def main() -> None:
     from gptqmodel import BACKEND, GPTQModel
 
     backend = BACKEND.GPTQ_MARLIN
+    load_kwargs = {
+        "backend": backend,
+        "trust_remote_code": True,
+        "attn_implementation": args.attn_implementation,
+    }
+    if args.device_map:
+        load_kwargs["device_map"] = args.device_map
+    else:
+        load_kwargs["device"] = "cuda:0"
     print("Loading model...")
-    model = GPTQModel.load(
-        args.model_path,
-        backend=backend,
-        trust_remote_code=True,
-        device="cuda:0",
-        attn_implementation=args.attn_implementation,
-    )
+    model = GPTQModel.load(args.model_path, **load_kwargs)
     print("Model loaded.")
 
     if args.disable_speculative:
@@ -56,20 +67,23 @@ def main() -> None:
             gen_cfg.do_sample = False
             print("Disabled speculative decoding / do_sample.")
 
-    if args.fuse:
-        counts = model.fuse(
-            qkv=True,
-            gate_up=True,
-            gate_up_activation=True,
-            free_original_weights=True,
-        )
-        print(f"Fused: {counts}")
+    os.environ["GPTQMODEL_MARLIN_MOE_BACKEND"] = args.moe_backend
 
+    if args.fuse or args.moe_grouped_dispatch:
         from gptqmodel.utils.moe_dispatch import enable_grouped_dispatch_for_model, register_linear_loop_experts
         registered = register_linear_loop_experts()
         moe_enabled = enable_grouped_dispatch_for_model(model.model)
         print(f"Registered GPT-QModel linear_loop experts: {registered}")
         print(f"Enabled grouped MoE dispatch for {moe_enabled} module(s).")
+
+    if args.fuse:
+        counts = model.fuse(
+            qkv=not args.no_fuse_qkv,
+            gate_up=not args.no_fuse_gate_up,
+            gate_up_activation=not args.no_fuse_gate_up_activation,
+            free_original_weights=True,
+        )
+        print(f"Fused: {counts}")
 
     vocab_size = getattr(model.config, "vocab_size", 32000)
     input_ids = torch.randint(0, vocab_size, (args.batch_size, args.seq_len), device="cuda:0")
@@ -86,10 +100,11 @@ def main() -> None:
         with_stack=True,
         profile_memory=True,
     ) as prof:
-        with record_function("generate_step"):
-            with torch.inference_mode():
-                _ = model.generate(input_ids, max_new_tokens=1, do_sample=False, use_cache=True)
-            torch.cuda.synchronize()
+        torch.cuda.nvtx.range_push("generate_step")
+        with torch.inference_mode():
+            _ = model.generate(input_ids, max_new_tokens=1, do_sample=False, use_cache=True)
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_pop()
 
     print("\nTop CUDA kernels by total time:")
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=30))

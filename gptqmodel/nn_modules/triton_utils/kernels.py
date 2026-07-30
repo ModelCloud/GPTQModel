@@ -542,3 +542,89 @@ class QuantLinearInferenceOnlyFunction(torch.autograd.Function):
     def forward(ctx, input, qweight, scales, qzeros, g_idx, bits, maxq):
         output = quant_matmul_248(input, qweight, scales, qzeros, g_idx, bits, maxq)
         return output
+
+
+@triton.jit
+def _fused_silu_mul_kernel(
+    gate_ptr,
+    up_ptr,
+    out_ptr,
+    M,
+    N,
+    stride_gm,
+    stride_gn,
+    stride_um,
+    stride_un,
+    stride_om,
+    stride_on,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """2-D elementwise silu(gate) * up; output may alias gate for in-place use."""
+    pid = tl.program_id(0)
+    numel = M * N
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < numel
+    row = offsets // N
+    col = offsets % N
+    gate_off = row * stride_gm + col * stride_gn
+    up_off = row * stride_um + col * stride_un
+    out_off = row * stride_om + col * stride_on
+    gate = tl.load(gate_ptr + gate_off, mask=mask)
+    up = tl.load(up_ptr + up_off, mask=mask)
+    # Match eager F.silu(gate) * up: silu in fp32 then cast to the dtype, then
+    # multiply by up and cast back. This keeps BF16 grouped-GEMM parity.
+    gate_f = gate.to(tl.float32)
+    up_f = up.to(tl.float32)
+    gate_silu = (gate_f * tl.sigmoid(gate_f)).to(gate.dtype)
+    out_f = gate_silu.to(tl.float32) * up_f
+    tl.store(out_ptr + out_off, out_f.to(gate.dtype), mask=mask)
+
+
+def fused_silu_mul(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Compute ``silu(gate) * up`` in a single Triton kernel launch.
+
+    Supports in-place operation by passing ``out=gate``.
+    """
+    if gate.shape != up.shape:
+        raise ValueError(f"fused_silu_mul shape mismatch: {gate.shape} vs {up.shape}")
+    if gate.device != up.device:
+        raise ValueError("gate and up must be on the same device")
+    if gate.dtype != up.dtype:
+        raise ValueError(f"gate and up must have the same dtype: {gate.dtype} vs {up.dtype}")
+    if gate.dim() != 2 or up.dim() != 2:
+        raise ValueError("fused_silu_mul only supports 2-D tensors")
+
+    if out is None:
+        # Allocate a row-major contiguous output so downstream Marlin GEMMs can
+        # avoid a separate contiguous() copy before launching the kernel.
+        out = gate.new_empty(gate.shape)
+    elif out.shape != gate.shape:
+        raise ValueError(f"out shape mismatch: {out.shape} vs {gate.shape}")
+    elif out.device != gate.device:
+        raise ValueError("out must be on the same device as gate")
+
+    M, N = gate.shape
+    if M == 0 or N == 0:
+        return out
+
+    with torch.cuda.device(gate.device):
+        grid = (triton.cdiv(M * N, 1024),)
+        _fused_silu_mul_kernel[grid](
+            gate,
+            up,
+            out,
+            M,
+            N,
+            gate.stride(0),
+            gate.stride(1),
+            up.stride(0),
+            up.stride(1),
+            out.stride(0),
+            out.stride(1),
+            BLOCK_SIZE=1024,
+        )
+    return out

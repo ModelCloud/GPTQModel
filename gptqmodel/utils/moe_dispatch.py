@@ -14,6 +14,9 @@ the plain per-expert fallback lives in Defuser and is used during quantization.
 
 from __future__ import annotations
 
+import os
+import weakref
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -27,7 +30,64 @@ from gptqmodel.utils.marlin_moe import (
 
 DEBUG_ON = env_flag("DEBUG")
 
+# Lazy import of the Triton fused silu*mul kernel; if Triton is unavailable or
+# the kernel fails to load we fall back to the eager act_fn(gate) * up path.
+_FUSED_SILU_MUL: object | None = None
+
+
+def _load_fused_silu_mul() -> bool:
+    """Load the fused SiLU*mul Triton kernel once; return True on success."""
+    global _FUSED_SILU_MUL
+    if _FUSED_SILU_MUL is None:
+        try:
+            from gptqmodel.nn_modules.triton_utils.kernels import fused_silu_mul
+
+            _FUSED_SILU_MUL = fused_silu_mul
+        except Exception:
+            _FUSED_SILU_MUL = False
+    return _FUSED_SILU_MUL is not False
+
+
+def _is_silu_activation(act_fn) -> bool:
+    """Return True when ``act_fn`` is a SiLU implementation."""
+    if act_fn is None:
+        return False
+    if isinstance(act_fn, nn.Module):
+        name = type(act_fn).__name__
+    else:
+        name = getattr(act_fn, "__name__", "")
+    return name in ("SiLU", "SiLUActivation", "silu")
+
+
+def _resolve_apply_gate(module: nn.Module):
+    """Return a callable that applies the expert activation (gate * up) without hot-path getattr.
+
+    Prefer the fused SiLU*mul Triton kernel for standard SwiGLU/SiLU gating; fall back
+    to the module's own ``_apply_gate`` or the eager ``act_fn(gate) * up`` path when
+    the activation is not SiLU or the kernel cannot be loaded.
+    """
+    act_fn = getattr(module, "act_fn", None)
+    if _is_silu_activation(act_fn) and _load_fused_silu_mul():
+        # Allocate a new contiguous output; Marlin GEMMs that follow can skip
+        # a redundant contiguous() copy of the strided gate slice.
+        return lambda gate, up: _FUSED_SILU_MUL(gate, up)
+
+    try:
+        apply_gate = module._apply_gate
+        return lambda gate, up: apply_gate(torch.cat([gate, up], dim=-1))
+    except AttributeError:
+        pass
+
+    if act_fn is None:
+        raise AttributeError(f"{module.__class__.__name__} must define either `_apply_gate` or `act_fn`.")
+    return lambda gate, up: act_fn(gate) * up
+
 LINEAR_LOOP_IMPL = "linear_loop"
+
+# Weak-key cache for per-expert dispatch metadata. Storing it on the module can
+# interfere with torch.compile / serialization and is automatically cleaned up
+# when the experts module is garbage-collected.
+_EXPERT_DISPATCH_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 # Per-experts-module flag that enables the grouped GEMM fast path.
 # Only models loaded for post-quantization inference should set this; quantization
@@ -91,9 +151,8 @@ def _moe_align_block_size(
     (0 .. num_active-1) into ``active_experts`` and therefore into a stacked weight
     tensor built in the same order.
 
-    This implementation is fully vectorized except for a small loop over the active
-    experts; it avoids per-expert ``nonzero`` and ``tolist`` calls that force
-    device-to-host synchronization on the hot decode path.
+    Fully vectorized: no per-expert ``nonzero``, ``tolist`` or ``item`` calls, so the
+    hot decode path does not issue device-to-host synchronizations.
     """
     flat = topk_ids.flatten()
     numel = flat.numel()
@@ -102,30 +161,39 @@ def _moe_align_block_size(
     active, counts = torch.unique_consecutive(sorted_flat, return_counts=True)
 
     padded_counts = ((counts + block_size - 1) // block_size) * block_size
-    total_padded = int(padded_counts.sum().item())
+    num_active = active.numel()
+
+    # Each active expert can contribute up to (block_size - 1) padding slots, so an
+    # upper-bound allocation avoids a device-to-host size query.
+    max_total_padded = numel + num_active * (block_size - 1)
+    max_blocks = max_total_padded // block_size
+
+    starts = counts.cumsum(0) - counts
+    ends = starts + counts
+    out_starts = padded_counts.cumsum(0) - padded_counts
+
+    device = flat.device
+    arange = torch.arange(numel, device=device, dtype=torch.int64)
+    expert_of = torch.searchsorted(ends, arange, right=True)
+    pos = out_starts[expert_of] + (arange - starts[expert_of])
 
     sorted_token_ids = torch.full(
-        (total_padded,), numel, dtype=torch.int32, device=flat.device
+        (max_total_padded,), numel, dtype=torch.int64, device=device
     )
-    expert_ids_tensor = torch.empty(
-        (total_padded // block_size,), dtype=torch.int32, device=flat.device
-    )
-    out_pos = 0
-    exp_pos = 0
-    start = 0
-    for i, c in enumerate(counts.tolist()):
-        if c:
-            sorted_token_ids[out_pos : out_pos + c] = sorted_indices[start : start + c]
-            blocks = (c + block_size - 1) // block_size
-            expert_ids_tensor[exp_pos : exp_pos + blocks] = i
-            out_pos += blocks * block_size
-            exp_pos += blocks
-        start += c
+    sorted_token_ids.scatter_(0, pos, sorted_indices)
+    sorted_token_ids = sorted_token_ids.to(torch.int32)
 
-    num_tokens_post_padded = torch.tensor(
-        total_padded, dtype=torch.int32, device=flat.device
-    )
-    return active, sorted_token_ids, expert_ids_tensor, num_tokens_post_padded
+    blocks_per_expert = padded_counts // block_size
+    expert_ids = torch.full((max_blocks,), -1, dtype=torch.int32, device=device)
+    if num_active > 0:
+        repeated = torch.repeat_interleave(
+            torch.arange(num_active, device=device, dtype=torch.int32),
+            blocks_per_expert.to(torch.int64),
+        )
+        expert_ids[: repeated.numel()] = repeated
+
+    num_tokens_post_padded = padded_counts.sum().to(torch.int32)
+    return active, sorted_token_ids, expert_ids, num_tokens_post_padded
 
 
 def _moe_block_size(num_tokens: int, top_k: int) -> int:
@@ -508,7 +576,6 @@ def _can_use_grouped_mm(
         return False
 
     is_marlin = _is_marlin_expert(expert0)
-    is_marlin_fused = is_marlin and _expert_gateup_is_fused(expert0)
     if is_marlin:
         # The per-expert Marlin path must at least be able to run; if it cannot,
         # grouped_mm cannot save us.
@@ -518,48 +585,39 @@ def _can_use_grouped_mm(
             self._grouped_mm_failed = True
             return False
 
-    # Prefer the native batched/offset Marlin MoE mega-kernel for Marlin-packed
-    # experts.  It removes per-expert launch overhead by grouping tokens by expert
-    # and jumping directly to the packed expert weight in a single CUDA kernel.
-    if is_marlin and _batched_marlin_moe_supported(
-        self, expert0, hidden_dim, intermediate_dim, hidden_states.dtype
-    ):
+    # For Marlin-packed experts the per-expert packed Marlin active loop is the
+    # fastest known dispatch for the Laguna-S-2.1 W4G64 shape class after
+    # removing D2H scalar syncs: it uses the optimized ``gptq_marlin_gemm`` kernel
+    # for each active expert block and has lower launch overhead than the
+    # batched/offset mega-kernel for small-to-moderate batch sizes.  Keep the
+    # mega-kernel and dense grouped GEMM paths available behind explicit opt-ins.
+    if is_marlin:
+        backend = "marlin"
+        marlin_moe_backend = os.environ.get("GPTQMODEL_MARLIN_MOE_BACKEND", "per_expert")
+        supported = marlin_moe_backend == "marlin_moe" and _batched_marlin_moe_supported(
+            self, expert0, hidden_dim, intermediate_dim, hidden_states.dtype
+        )
+        if supported:
+            backend = "marlin_moe"
+        elif marlin_moe_backend == "grouped_mm" and _can_extract_dense_expert(
+            expert0, hidden_dim, intermediate_dim, hidden_states.dtype, hidden_states.device
+        ):
+            backend = "grouped_mm"
         self._grouped_mm_ok = True
-        self._moe_dispatch_backend = "marlin_moe"
+        self._moe_dispatch_backend = backend
         return True
 
-    # For Marlin-packed experts the dense grouped_mm path is only used when the
-    # gate and up projections have already been fused.  In that case the fused
-    # `dequantize_weight` (which dequantizes the concatenated Marlin-packed weight
-    # as one GEMM) matches the packed Marlin kernel output better than per-module
-    # dequantization.  Non-fused Marlin experts stay on the per-expert Marlin path.
-    if is_marlin and not is_marlin_fused:
-        self._grouped_mm_ok = True
-        self._moe_dispatch_backend = "marlin"
-        return True
-
-    # Whether TritonV2 or fused Marlin, the grouped_mm path only works if we can
-    # extract a dense (in, out) weight for every active-expert projection.
     grouped_dense_ok = _grouped_mm_available() and _can_extract_dense_expert(
         expert0, hidden_dim, intermediate_dim, hidden_states.dtype, hidden_states.device
     )
 
-    if is_marlin_fused:
-        # The batched/offset kernel is not usable (usually heterogeneous packed
-        # shapes in this checkpoint).  Fall back to one Marlin kernel launch per
-        # active expert/per projection; this still removes the CPU-side defuser
-        # loop overhead and keeps the fast packed Marlin path.
+    if grouped_dense_ok:
         self._grouped_mm_ok = True
-        self._moe_dispatch_backend = "marlin"
+        self._moe_dispatch_backend = "grouped_mm"
         return True
 
-    if not grouped_dense_ok:
-        self._grouped_mm_failed = True
-        return False
-
-    self._grouped_mm_ok = True
-    self._moe_dispatch_backend = "grouped_mm"
-    return True
+    self._grouped_mm_failed = True
+    return False
 
 
 def _project_fused_gateup(
@@ -572,15 +630,21 @@ def _project_fused_gateup(
     offsets: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Dequantize the fused gate+up weight for active experts, stack, and grouped_mm."""
+    cache = _get_expert_dispatch_cache(self)
+    gateup_groups = cache["gateup_groups"]
     weights: list[torch.Tensor] = []
     for expert_idx in active_experts.tolist():
-        expert = getattr(self, str(expert_idx))
-        w = _extract_fused_gateup_dense_weight(expert, dtype, device)
-        if w is None:
+        fused, gate_group, _, _ = gateup_groups[expert_idx]
+        if not fused or gate_group is None:
             raise RuntimeError(
                 f"Unable to extract fused gate/up weight for expert {expert_idx} in {self.__class__.__name__}"
             )
-        weights.append(w)
+        w = gate_group.dequantize_weight(dtype)
+        if w is None or w.shape != (gate_group.in_features, gate_group.total_out_features):
+            raise RuntimeError(
+                f"Unable to extract fused gate/up weight for expert {expert_idx} in {self.__class__.__name__}"
+            )
+        weights.append(w.to(device=device, dtype=dtype).contiguous())
 
     stack = torch.stack(weights, dim=0)
     del weights
@@ -589,6 +653,52 @@ def _project_fused_gateup(
     gate = gateup_out[..., :intermediate_dim]
     up = gateup_out[..., intermediate_dim:]
     return gate, up
+
+
+def _get_expert_dispatch_cache(self: nn.Module) -> dict:
+    """Return precomputed per-expert projection handles for `self`.
+
+    The cache is built once per experts module and contains direct module
+    references for every expert, eliminating repeated `getattr(self, str(idx))`
+    and fused-group introspection in the hot forward path.
+    """
+    cache = _EXPERT_DISPATCH_CACHE.get(self)
+    if cache is not None:
+        return cache
+
+    num_experts = int(self.num_experts)
+    modules = self._modules
+    experts = [modules[str(i)] for i in range(num_experts)]
+    gate_projs = []
+    up_projs = []
+    down_projs = []
+    gateup_groups = []
+    for expert in experts:
+        gate_proj = expert._modules["gate_proj"]
+        up_proj = expert._modules["up_proj"]
+        gate_group = getattr(gate_proj, "_gptqmodel_fused_group", None)
+        up_group = getattr(up_proj, "_gptqmodel_fused_group", None)
+        fused = gate_group is not None and gate_group is up_group
+        gateup_groups.append((fused, gate_group if fused else None, gate_proj, up_proj))
+        gate_projs.append(gate_proj)
+        up_projs.append(up_proj)
+        down_projs.append(expert._modules["down_proj"])
+
+    cache = {
+        "experts": experts,
+        "gate_projs": gate_projs,
+        "up_projs": up_projs,
+        "down_projs": down_projs,
+        "proj_by_attr": {
+            "gate_proj": gate_projs,
+            "up_proj": up_projs,
+            "down_proj": down_projs,
+        },
+        "gateup_groups": gateup_groups,
+        "apply_gate": _resolve_apply_gate(self),
+    }
+    _EXPERT_DISPATCH_CACHE[self] = cache
+    return cache
 
 
 def _marlin_experts_project(
@@ -601,35 +711,100 @@ def _marlin_experts_project(
 ) -> torch.Tensor:
     """Run the per-expert Marlin kernels for gate/up/down over sorted token blocks."""
     down_blocks: list[torch.Tensor] = []
+    cache = _get_expert_dispatch_cache(self)
+    gateup_groups = cache["gateup_groups"]
+    down_projs = cache["down_projs"]
+    apply_gate = cache["apply_gate"]
+
+    # Pull the small routing metadata to the host once instead of issuing a
+    # device->host scalar transfer inside the per-expert loop.
+    active_experts_list = active_experts.tolist()
+    offsets_list = offsets.tolist()
     prev = 0
-    for i, expert_idx in enumerate(active_experts.tolist()):
-        end = int(offsets[i].item())
+    for i, expert_idx in enumerate(active_experts_list):
+        end = int(offsets_list[i])
         x_block = selected_hidden[prev:end]
         prev = end
         if x_block.size(0) == 0:
             continue
 
-        expert = getattr(self, str(expert_idx))
-        # gate_proj and up_proj may be a fused _FusedQuantGroup (one Marlin kernel)
-        # or two separate MarlinLinear modules (two kernels). Either way, the
-        # forward calls produce the gate and up activations for this block.
-        gate_group = getattr(expert.gate_proj, "_gptqmodel_fused_group", None)
-        up_group = getattr(expert.up_proj, "_gptqmodel_fused_group", None)
-        if gate_group is not None and gate_group is up_group:
+        fused, gate_group, gate_proj, up_proj = gateup_groups[expert_idx]
+        if fused:
             gate_up_out = gate_group._compute(x_block)
             gate_out = gate_up_out[..., gate_group.slices[0][0] : gate_group.slices[0][1]]
             up_out = gate_up_out[..., gate_group.slices[1][0] : gate_group.slices[1][1]]
         else:
-            gate_out = expert.gate_proj(x_block)
-            up_out = expert.up_proj(x_block)
-        gated = _apply_expert_gate(self, gate_out, up_out)
+            gate_out = gate_proj(x_block)
+            up_out = up_proj(x_block)
+        gated = apply_gate(gate_out, up_out)
         del gate_out, up_out
-        down_block = expert.down_proj(gated)
-        down_blocks.append(down_block)
+        down_blocks.append(down_projs[expert_idx](gated))
 
     return torch.cat(down_blocks, dim=0) if down_blocks else torch.empty(
         0, hidden_dim, device=selected_hidden.device, dtype=selected_hidden.dtype
     )
+
+
+@torch._dynamo.disable
+def _marlin_experts_project_one_token(
+    self: nn.Module,
+    hidden_states: torch.Tensor,
+    top_k_index: torch.Tensor,
+    top_k_weights: torch.Tensor,
+) -> torch.Tensor:
+    """M=1 decode fast path for Marlin-packed MoE experts.
+
+    Avoids sorting, token-expert gather/scatter, and padding for a single token
+    with ``top_k`` routed experts. Each active expert runs its fused gate/up
+    and down Marlin kernels once; contributions are weighted-summed in FP32.
+    """
+    cache = _get_expert_dispatch_cache(self)
+    gateup_groups = cache["gateup_groups"]
+    down_projs = cache["down_projs"]
+    apply_gate = cache["apply_gate"]
+
+    hidden_dim = hidden_states.size(-1)
+    device = hidden_states.device
+    dtype = hidden_states.dtype
+    num_experts = self.num_experts
+
+    # top_k_index has shape (1, top_k) after the batched reshape.
+    expert_ids = top_k_index[0].clamp(max=num_experts - 1)
+    weights = top_k_weights[0].to(dtype)
+
+    # One small device->host transfer per MoE layer instead of per pair.
+    expert_ids_list = expert_ids.tolist()
+    weights_list = weights.tolist()
+
+    # Accumulate weight per expert so duplicated top-k ids only compute once.
+    expert_to_weight: dict[int, float] = {}
+    for e, w in zip(expert_ids_list, weights_list):
+        if e >= num_experts:
+            continue
+        expert_to_weight[e] = expert_to_weight.get(e, 0.0) + float(w)
+
+    # Flatten to 2-D and force one contiguous copy up front so every Marlin call
+    # downstream sees a row-major (M, K) input and can skip its own contiguous() copy.
+    x = hidden_states.reshape(-1, hidden_dim)
+    if not x.is_contiguous():
+        x = x.contiguous()
+
+    out = torch.zeros(1, hidden_dim, device=device, dtype=torch.float32)
+    for expert_idx, weight in expert_to_weight.items():
+        fused, gate_group, gate_proj, up_proj = gateup_groups[expert_idx]
+        if fused:
+            gate_up_out = gate_group._compute(x)
+            gate_out = gate_up_out[..., gate_group.slices[0][0] : gate_group.slices[0][1]]
+            up_out = gate_up_out[..., gate_group.slices[1][0] : gate_group.slices[1][1]]
+        else:
+            gate_out = gate_proj(x)
+            up_out = up_proj(x)
+        gated = apply_gate(gate_out, up_out)
+        del gate_out, up_out
+        down = down_projs[expert_idx](gated)
+        out.add_(down.to(torch.float32), alpha=weight)
+
+    return out.to(dtype)
 
 
 def _marlin_moe_target(proj: nn.Module) -> object:
@@ -731,101 +906,84 @@ def _marlin_packed(obj: nn.Module) -> tuple:
     )
 
 
-def _set_stacked_tensor(target: object, name: str, tensor: torch.Tensor) -> None:
-    """Assign a view of a stacked tensor, handling nn.Parameter attributes."""
-    if isinstance(target, nn.Module) and name in target._parameters:
-        setattr(target, name, torch.nn.Parameter(tensor, requires_grad=False))
-    else:
-        setattr(target, name, tensor)
+def _marlin_moe_target(obj: object) -> object:
+    """Return the concrete Marlin packed-weight holder for a projection object."""
+    if hasattr(obj, "_gptqmodel_fused_group"):
+        obj = obj._gptqmodel_fused_group
+    return getattr(obj, "kernel", obj)
 
 
-def _prestack_marlin_moe_weights(self: nn.Module, expert0: nn.Module) -> dict[str, list[dict[str, object]]]:
-    """Pre-stack expert Marlin packed weights into shape-homogeneous clusters.
+def _active_cluster_key(target: object) -> tuple:
+    """Shape/runtime key used to group active experts into homogeneous clusters."""
+    return (
+        tuple(target.qweight.shape),
+        tuple(target.scales.shape),
+        target.padded_in_features,
+        target.padded_out_features,
+        target.is_k_full,
+        getattr(target.weight_type, "id", target.weight_type),
+    )
 
-    Experts whose ``qweight`` shape and runtime dimensions match but whose
-    ``scales`` shape differs (e.g. different ``group_size``) are grouped into
-    separate clusters.  Each cluster owns a ``[cluster_size, ...]`` stacked
-    weight tensor and a membership mapping from global expert IDs to the local
-    cluster index used by ``moe_wna16_marlin_gemm``.  Per-expert ``qweight`` and
-    ``scales`` are replaced by views into their cluster tensor.
 
-    Returns a dict keyed by ``"gate"``, ``"up"``, ``"down"`` or ``"gateup"``,
-    with each value a list of cluster descriptors.
+def _build_active_clusters_for_proj(
+    proj_targets: list[object],
+    active_global_ids: list[int],
+    num_experts: int,
+    device: torch.device,
+) -> list[dict[str, object]]:
+    """Build one or more homogeneous Marlin MoE clusters from active experts.
+
+    Only the experts that are actually routed for this forward are copied into a
+    contiguous ``[num_active, ...]`` tensor.  This keeps the per-forward extra
+    allocation small (``top_k * weight_size`` for one projection) so the
+    batched/offset mega-kernel works on large checkpoints without a full prestack.
     """
-    num_experts = self.num_experts
-    fused_gateup = _expert_gateup_is_fused(expert0)
+    if not active_global_ids:
+        return []
 
-    proj_specs: list[tuple[str, str]] = []
-    if fused_gateup:
-        proj_specs.append(("gateup", "gate_proj"))
-    else:
-        proj_specs.append(("gate", "gate_proj"))
-        proj_specs.append(("up", "up_proj"))
-    proj_specs.append(("down", "down_proj"))
+    cluster_map: dict[tuple, list[int]] = {}
+    for global_id in active_global_ids:
+        target = proj_targets[global_id]
+        cluster_map.setdefault(_active_cluster_key(target), []).append(global_id)
 
-    clusters_by_proj: dict[str, list[dict[str, object]]] = {}
-    for proj_key, attr_name in proj_specs:
-        targets: list[object] = []
-        global_ids: list[int] = []
-        for i in range(num_experts):
-            expert = getattr(self, str(i))
-            obj = getattr(expert, attr_name)
-            if hasattr(obj, "_gptqmodel_fused_group"):
-                obj = obj._gptqmodel_fused_group
-            target = getattr(obj, "kernel", obj)
-            targets.append(target)
-            global_ids.append(i)
+    clusters: list[dict[str, object]] = []
+    for global_ids in cluster_map.values():
+        first = proj_targets[global_ids[0]]
+        num = len(global_ids)
 
-        # Cluster by (qweight shape, scales shape, is_k_full, weight_type).
-        cluster_map: dict[tuple, list[int]] = {}
-        for i, target in enumerate(targets):
-            key = (
-                tuple(target.qweight.shape),
-                tuple(target.scales.shape),
-                target.padded_in_features,
-                target.padded_out_features,
-                target.is_k_full,
-                getattr(target.weight_type, "id", target.weight_type),
-            )
-            cluster_map.setdefault(key, []).append(i)
+        stacked_qw = torch.empty(
+            (num, *first.qweight.shape), dtype=first.qweight.dtype, device=device
+        )
+        stacked_sc = torch.empty(
+            (num, *first.scales.shape), dtype=first.scales.dtype, device=device
+        )
 
-        clusters: list[dict[str, object]] = []
-        for key, member_indices in cluster_map.items():
-            first = targets[member_indices[0]]
-            device = first.qweight.device
-            stacked_qw = torch.empty((len(member_indices), *first.qweight.shape), dtype=first.qweight.dtype, device=device)
-            stacked_sc = torch.empty((len(member_indices), *first.scales.shape), dtype=first.scales.dtype, device=device)
+        # membership[global_id] = local cluster id; non-members map to 0 (a valid
+        # local id used only for padding rows by moe_wna16_marlin_gemm).
+        membership = torch.zeros(num_experts, dtype=torch.int64, device=device)
+        in_cluster = torch.zeros(num_experts, dtype=torch.bool, device=device)
+        cluster_global_ids = torch.empty(num, dtype=torch.int64, device=device)
+        for local_id, global_id in enumerate(global_ids):
+            target = proj_targets[global_id]
+            stacked_qw[local_id].copy_(target.qweight)
+            stacked_sc[local_id].copy_(target.scales)
+            membership[global_id] = local_id
+            in_cluster[global_id] = True
+            cluster_global_ids[local_id] = global_id
 
-            # membership[global_id] = local cluster id; non-members map to 0 (a valid local id used only for padding rows).
-            membership = torch.zeros(num_experts, dtype=torch.int64, device=device)
-            in_cluster = torch.zeros(num_experts, dtype=torch.bool, device=device)
-            cluster_global_ids = torch.empty(len(member_indices), dtype=torch.int64, device=device)
-            for local_id, global_id in enumerate(member_indices):
-                target = targets[global_id]
-                stacked_qw[local_id].copy_(target.qweight)
-                stacked_sc[local_id].copy_(target.scales)
-                _set_stacked_tensor(target, "qweight", stacked_qw[local_id])
-                _set_stacked_tensor(target, "scales", stacked_sc[local_id])
-                membership[global_id] = local_id
-                in_cluster[global_id] = True
-                cluster_global_ids[local_id] = global_id
+        clusters.append({
+            "qweight": stacked_qw,
+            "scales": stacked_sc,
+            "weight_type": first.weight_type,
+            "padded_in_features": first.padded_in_features,
+            "padded_out_features": first.padded_out_features,
+            "is_k_full": first.is_k_full,
+            "membership": membership,
+            "in_cluster": in_cluster,
+            "global_ids": cluster_global_ids,
+        })
 
-            clusters.append({
-                "qweight": stacked_qw,
-                "scales": stacked_sc,
-                "weight_type": first.weight_type,
-                "padded_in_features": first.padded_in_features,
-                "padded_out_features": first.padded_out_features,
-                "is_k_full": first.is_k_full,
-                "membership": membership,
-                "in_cluster": in_cluster,
-                "global_ids": cluster_global_ids,
-            })
-
-        clusters_by_proj[proj_key] = clusters
-
-    self._marlin_moe_stacked = clusters_by_proj
-    return clusters_by_proj
+    return clusters
 
 
 def _moe_scatter_cluster_output(
@@ -846,9 +1004,36 @@ def _moe_scatter_cluster_output(
     valid_global_ids = sorted_token_ids[valid]
     pair_in_cluster = in_cluster[topk_ids.flatten()]
     member_rows = pair_in_cluster[valid_global_ids]
-    if member_rows.any():
-        member_ids = valid_global_ids[member_rows]
+    member_ids = valid_global_ids[member_rows]
+    if member_ids.numel() > 0:
         global_out[member_ids] = cluster_out[member_ids]
+
+
+def _build_single_cluster_stack(
+    proj_targets: list[object],
+    active_global_ids: list[int],
+    device: torch.device,
+) -> dict[str, object] | None:
+    """Build one homogeneous cluster from active experts with a single ``torch.stack``.
+
+    Returns ``None`` if the active experts do not share the same packed shape,
+    in which case the caller should fall back to per-shape clustering.
+    """
+    first = proj_targets[0]
+    try:
+        stacked_qw = torch.stack([t.qweight for t in proj_targets], dim=0).to(device)
+        stacked_sc = torch.stack([t.scales for t in proj_targets], dim=0).to(device)
+    except RuntimeError:
+        return None
+    return {
+        "qweight": stacked_qw,
+        "scales": stacked_sc,
+        "weight_type": first.weight_type,
+        "padded_in_features": first.padded_in_features,
+        "padded_out_features": first.padded_out_features,
+        "is_k_full": first.is_k_full,
+        "global_ids": active_global_ids,
+    }
 
 
 def _batched_marlin_moe_forward(
@@ -857,12 +1042,7 @@ def _batched_marlin_moe_forward(
     top_k_index: torch.Tensor,
     top_k_weights: torch.Tensor,
 ) -> torch.Tensor:
-    """Batched/offset Marlin MoE mega-kernel dispatch with shape clustering.
-
-    Experts with different packed ``scales`` shapes (e.g. different
-    ``group_size``) are launched as separate ``moe_wna16_marlin_gemm`` calls,
-    but still without Python per-expert loops or per-call ``torch.stack``.
-    """
+    """Batched/offset Marlin MoE mega-kernel dispatch with shape clustering."""
     if hidden_states.dim() == 3:
         batch_size, seq_len, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -881,22 +1061,76 @@ def _batched_marlin_moe_forward(
     topk_ids = top_k_index.to(torch.int32)
     topk_w = top_k_weights.to(torch.float32)
     sentinel_mask = topk_ids >= num_experts
-    if sentinel_mask.any():
-        if topk_w is top_k_weights:
-            topk_w = topk_w.clone()
-        topk_w = topk_w.masked_fill(sentinel_mask, 0.0)
-        topk_ids = topk_ids.clamp(max=num_experts - 1)
+    topk_w = topk_w.masked_fill(sentinel_mask, 0.0)
+    topk_ids = topk_ids.clamp(max=num_experts - 1)
 
-    expert0 = getattr(self, "0")
-    gate_proj = expert0.gate_proj
-    up_proj = expert0.up_proj
+    cache = _get_expert_dispatch_cache(self)
+    expert0 = cache["experts"][0]
+    gate_proj = cache["gate_projs"][0]
+    up_proj = cache["up_projs"][0]
     gate_out_features = gate_proj.out_features
     up_out_features = up_proj.out_features
+    fused_gateup = _expert_gateup_is_fused(expert0)
 
-    # Pre-stack expert packed weights into homogeneous clusters once.
-    stacked = getattr(self, "_marlin_moe_stacked", None)
-    if stacked is None:
-        stacked = _prestack_marlin_moe_weights(self, expert0)
+    active_global_ids_t = torch.unique(topk_ids, sorted=True)
+    active_global_ids = active_global_ids_t.tolist()
+
+    # Try to build one stacked cluster per projection; a single stacked copy is
+    # much cheaper than the per-index copy loop used by the generic builder.
+    stacked: dict[str, list[dict[str, object]]] = {}
+    if fused_gateup:
+        gateup_targets = [
+            _marlin_moe_target(
+                group if (fused and group is not None) else gate_p
+            )
+            for i in active_global_ids
+            for fused, group, gate_p, up_p in (cache["gateup_groups"][i],)
+        ]
+        gateup_cluster = _build_single_cluster_stack(
+            gateup_targets, active_global_ids, device
+        )
+        if gateup_cluster is None:
+            stacked["gateup"] = _build_active_clusters_for_proj(
+                gateup_targets, active_global_ids, num_experts, device
+            )
+        else:
+            stacked["gateup"] = [gateup_cluster]
+    else:
+        gate_targets = [
+            _marlin_moe_target(cache["gate_projs"][i]) for i in active_global_ids
+        ]
+        up_targets = [
+            _marlin_moe_target(cache["up_projs"][i]) for i in active_global_ids
+        ]
+        gate_cluster = _build_single_cluster_stack(
+            gate_targets, active_global_ids, device
+        )
+        up_cluster = _build_single_cluster_stack(
+            up_targets, active_global_ids, device
+        )
+        if gate_cluster is None or up_cluster is None:
+            stacked["gate"] = _build_active_clusters_for_proj(
+                gate_targets, active_global_ids, num_experts, device
+            )
+            stacked["up"] = _build_active_clusters_for_proj(
+                up_targets, active_global_ids, num_experts, device
+            )
+        else:
+            stacked["gate"] = [gate_cluster]
+            stacked["up"] = [up_cluster]
+
+    down_targets = [
+        _marlin_moe_target(cache["down_projs"][i]) for i in active_global_ids
+    ]
+    down_cluster = _build_single_cluster_stack(
+        down_targets, active_global_ids, device
+    )
+    if down_cluster is None:
+        stacked["down"] = _build_active_clusters_for_proj(
+            down_targets, active_global_ids, num_experts, device
+        )
+    else:
+        stacked["down"] = [down_cluster]
 
     workspace = getattr(self, "_marlin_moe_workspace", None)
     if workspace is None or workspace.device != device:
@@ -907,7 +1141,6 @@ def _batched_marlin_moe_forward(
 
     block_size = _moe_block_size(num_tokens, num_top_k)
     topk_weights_flat = topk_w.reshape(-1).contiguous()
-    fused_gateup = _expert_gateup_is_fused(expert0)
 
     def _maybe_pad(x: torch.Tensor, padded_in: int) -> torch.Tensor:
         if x.size(-1) == padded_in:
@@ -915,7 +1148,6 @@ def _batched_marlin_moe_forward(
         pad = padded_in - x.size(-1)
         return F.pad(x, (0, pad))
 
-    # Helper: run the Marlin MoE mega-kernel for one shape cluster.
     def _cluster_marlin_gemm(
         x: torch.Tensor,
         cluster: dict[str, object],
@@ -926,7 +1158,6 @@ def _batched_marlin_moe_forward(
     ) -> torch.Tensor:
         membership = cluster["membership"]
         in_cluster = cluster["in_cluster"]
-        # Build cluster-local topk ids; non-member pairs map to local id 0 (a valid expert) and are zero-weighted/masked later.
         local_topk_ids = membership[topk_ids.long()].to(torch.int32)
 
         active, sorted_token_ids, expert_ids, num_tokens_post_padded = _moe_align_block_size(
@@ -958,7 +1189,145 @@ def _batched_marlin_moe_forward(
             out = out[..., :out_features]
         return out, sorted_token_ids, in_cluster
 
-    # Gate / up projection (one fused GEMM when gate/up are fused, two otherwise).
+    # Fast path: exactly one shape cluster per projection.  The same MoE
+    # routing applies to gate/up/down, so alignment metadata is computed once.
+    single_cluster = all(len(v) == 1 for v in stacked.values())
+    if single_cluster:
+        search_ids = active_global_ids_t.to(torch.int64)
+        flat_topk = topk_ids.flatten().to(torch.int64)
+        local_topk_ids = torch.searchsorted(search_ids, flat_topk).to(torch.int32)
+        _, sorted_token_ids, expert_ids, num_tokens_post_padded = _moe_align_block_size(
+            local_topk_ids, block_size
+        )
+
+        if fused_gateup:
+            group = getattr(gate_proj, "_gptqmodel_fused_group")
+            gate_slice = group.slices[0]
+            up_slice = group.slices[1]
+            gateup_cluster = stacked["gateup"][0]
+            gate_up_out = torch.empty(
+                (num_tokens * num_top_k, gateup_cluster["padded_out_features"]),
+                dtype=dtype,
+                device=device,
+            )
+            moe_wna16_marlin_gemm(
+                _maybe_pad(hidden_states, gateup_cluster["padded_in_features"]).contiguous(),
+                gateup_cluster["qweight"],
+                gateup_cluster["scales"],
+                workspace,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                topk_weights_flat,
+                gateup_cluster["weight_type"],
+                moe_block_size=block_size,
+                top_k=num_top_k,
+                size_m=num_tokens,
+                size_n=gateup_cluster["padded_out_features"],
+                size_k=gateup_cluster["padded_in_features"],
+                is_k_full=gateup_cluster["is_k_full"],
+                mul_topk_weights=False,
+                c=gate_up_out,
+            )
+            gate_out = gate_up_out[..., gate_slice[0] : gate_slice[1]]
+            up_out = gate_up_out[..., up_slice[0] : up_slice[1]]
+        else:
+            gate_cluster = stacked["gate"][0]
+            gate_out_buf = torch.empty(
+                (num_tokens * num_top_k, gate_cluster["padded_out_features"]),
+                dtype=dtype,
+                device=device,
+            )
+            moe_wna16_marlin_gemm(
+                _maybe_pad(hidden_states, gate_cluster["padded_in_features"]).contiguous(),
+                gate_cluster["qweight"],
+                gate_cluster["scales"],
+                workspace,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                topk_weights_flat,
+                gate_cluster["weight_type"],
+                moe_block_size=block_size,
+                top_k=num_top_k,
+                size_m=num_tokens,
+                size_n=gate_cluster["padded_out_features"],
+                size_k=gate_cluster["padded_in_features"],
+                is_k_full=gate_cluster["is_k_full"],
+                mul_topk_weights=False,
+                c=gate_out_buf,
+            )
+            gate_out = gate_out_buf[..., :gate_out_features]
+
+            up_cluster = stacked["up"][0]
+            up_out_buf = torch.empty(
+                (num_tokens * num_top_k, up_cluster["padded_out_features"]),
+                dtype=dtype,
+                device=device,
+            )
+            moe_wna16_marlin_gemm(
+                _maybe_pad(hidden_states, up_cluster["padded_in_features"]).contiguous(),
+                up_cluster["qweight"],
+                up_cluster["scales"],
+                workspace,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                topk_weights_flat,
+                up_cluster["weight_type"],
+                moe_block_size=block_size,
+                top_k=num_top_k,
+                size_m=num_tokens,
+                size_n=up_cluster["padded_out_features"],
+                size_k=up_cluster["padded_in_features"],
+                is_k_full=up_cluster["is_k_full"],
+                mul_topk_weights=False,
+                c=up_out_buf,
+            )
+            up_out = up_out_buf[..., :up_out_features]
+
+        apply_gate = _resolve_apply_gate(self)
+        act = apply_gate(gate_out, up_out)
+        del gate_out, up_out
+
+        down_cluster = stacked["down"][0]
+        down_out_buf = torch.empty(
+            (num_tokens * num_top_k, down_cluster["padded_out_features"]),
+            dtype=dtype,
+            device=device,
+        )
+        moe_wna16_marlin_gemm(
+            _maybe_pad(act, down_cluster["padded_in_features"]).contiguous(),
+            down_cluster["qweight"],
+            down_cluster["scales"],
+            workspace,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            topk_weights_flat,
+            down_cluster["weight_type"],
+            moe_block_size=block_size,
+            top_k=1,
+            size_m=num_tokens * num_top_k,
+            size_n=down_cluster["padded_out_features"],
+            size_k=down_cluster["padded_in_features"],
+            is_k_full=down_cluster["is_k_full"],
+            mul_topk_weights=True,
+            c=down_out_buf,
+        )
+        down_out = down_out_buf[..., :hidden_dim]
+        final_hidden_states = (
+            down_out.to(torch.float32)
+            .view(num_tokens, num_top_k, hidden_dim)
+            .sum(dim=1)
+            .to(dtype)
+        )
+
+        if batch_size is not None:
+            final_hidden_states = final_hidden_states.view(batch_size, seq_len, hidden_dim)
+        return final_hidden_states
+
+    # Multi-cluster fallback: process each homogeneous shape cluster separately.
     if fused_gateup:
         group = getattr(gate_proj, "_gptqmodel_fused_group")
         gate_slice = group.slices[0]
@@ -1014,44 +1383,22 @@ def _batched_marlin_moe_forward(
                 c_out, sorted_token_ids, in_cluster, topk_ids, up_out
             )
 
-    act = _apply_expert_gate(self, gate_out, up_out)
+    apply_gate = _resolve_apply_gate(self)
+    act = apply_gate(gate_out, up_out)
     del gate_out, up_out
 
-    # Down projection: each cluster is launched over the activated pairs.
     down_out = torch.zeros(
         (num_tokens * num_top_k, hidden_dim), dtype=torch.float32, device=device
     )
     for cluster in stacked["down"]:
-        membership = cluster["membership"]
-        in_cluster = cluster["in_cluster"]
-        # Down uses top_k=1 and one row per token-expert pair.
-        local_topk_ids = membership[topk_ids.long()].to(torch.int32)
-        active, sorted_token_ids, expert_ids, num_tokens_post_padded = _moe_align_block_size(
-            local_topk_ids, block_size
-        )
-        act_padded = _maybe_pad(act, cluster["padded_in_features"]).contiguous()
-        c_out = moe_wna16_marlin_gemm(
-            act_padded,
-            cluster["qweight"],
-            cluster["scales"],
-            workspace,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            topk_weights_flat,
-            cluster["weight_type"],
-            moe_block_size=block_size,
+        c_out, sorted_token_ids, in_cluster = _cluster_marlin_gemm(
+            act,
+            cluster,
+            hidden_dim,
             top_k=1,
-            size_m=num_tokens * num_top_k,
-            size_n=cluster["padded_out_features"],
-            size_k=cluster["padded_in_features"],
-            is_k_full=cluster["is_k_full"],
-            use_fp32_reduce=True,
-            use_atomic_add=False,
             mul_topk_weights=True,
+            size_m=num_tokens * num_top_k,
         )
-        if c_out.size(-1) > hidden_dim:
-            c_out = c_out[..., :hidden_dim]
         _moe_scatter_cluster_output(
             c_out, sorted_token_ids, in_cluster, topk_ids, down_out
         )
@@ -1095,13 +1442,26 @@ def _grouped_mm_dequant_experts_forward(
     num_tokens = hidden_states.size(0)
     num_experts = self.num_experts
 
+    # Single-token decode fast path for the per-expert Marlin dispatcher.
+    # The general path below builds a sorted/padded token-expert index which
+    # costs several kernel launches per layer; for M=1 those are all overhead.
+    if num_tokens == 1 and getattr(self, "_moe_dispatch_backend", None) == "marlin":
+        out = _marlin_experts_project_one_token(self, hidden_states, top_k_index, top_k_weights)
+        if batch_size is not None:
+            out = out.view(batch_size, seq_len, hidden_dim)
+        return out
+
+    cache = _get_expert_dispatch_cache(self)
+    proj_by_attr = cache["proj_by_attr"]
+
     token_idx = torch.arange(num_tokens, device=device).unsqueeze(1).expand(-1, num_top_k).reshape(-1)
     sample_weights = top_k_weights.reshape(-1).to(hidden_states.dtype)
     expert_ids = top_k_index.reshape(-1)
 
     sentinel_mask = expert_ids >= num_experts
-    if sentinel_mask.any():
-        expert_ids = expert_ids.clamp(max=num_experts - 1)
+    # Clamp without a device->host sync; the masked_fill below zeros the weight
+    # for any sentinel entries.
+    expert_ids = expert_ids.clamp(max=num_experts - 1)
 
     if expert_ids.numel() == 0:
         final_hidden_states = torch.zeros(num_tokens, hidden_dim, device=device, dtype=hidden_states.dtype)
@@ -1120,7 +1480,7 @@ def _grouped_mm_dequant_experts_forward(
     counts_local = torch.bincount(local_sorted, minlength=e_active)
     offsets = torch.cumsum(counts_local, dim=0, dtype=torch.int64).to(torch.int32)
 
-    expert0 = getattr(self, "0")
+    expert0 = cache["experts"][0]
     intermediate_dim = expert0.gate_proj.out_features
 
     # Defer the grouped_mm lookup until the grouped-mm branch is actually used.
@@ -1132,9 +1492,9 @@ def _grouped_mm_dequant_experts_forward(
         """Dequantize one projection for the active experts, stack, and grouped_mm."""
         weights: list[torch.Tensor] = []
         biases: list[torch.Tensor | None] = []
+        projs = proj_by_attr[expert_attr]
         for expert_idx in active_experts.tolist():
-            expert = getattr(self, str(expert_idx))
-            proj = getattr(expert, expert_attr)
+            proj = projs[expert_idx]
             w = _extract_expert_dense_weight(proj, in_f, out_f, hidden_states.dtype, device)
             if w is None:
                 raise RuntimeError(
@@ -1169,7 +1529,7 @@ def _grouped_mm_dequant_experts_forward(
         else:
             gate_out = _project("gate_proj", hidden_dim, intermediate_dim, selected_hidden)
             up_out = _project("up_proj", hidden_dim, intermediate_dim, selected_hidden)
-        gated = _apply_expert_gate(self, gate_out, up_out)
+        gated = cache["apply_gate"](gate_out, up_out)
         del gate_out, up_out
 
         down_out = _project("down_proj", intermediate_dim, hidden_dim, gated)
@@ -1177,9 +1537,8 @@ def _grouped_mm_dequant_experts_forward(
 
     weighted = down_out * sample_weights_sorted.unsqueeze(-1)
     del down_out
-    if sentinel_mask.any():
-        sentinel_sorted = sentinel_mask[perm]
-        weighted = weighted.masked_fill(sentinel_sorted.unsqueeze(-1), 0.0)
+    sentinel_sorted = sentinel_mask[perm]
+    weighted = weighted.masked_fill(sentinel_sorted.unsqueeze(-1), 0.0)
 
     inv_perm = torch.empty_like(perm)
     inv_perm[perm] = torch.arange(perm.size(0), device=device)
@@ -1191,6 +1550,7 @@ def _grouped_mm_dequant_experts_forward(
     return final_hidden_states.to(hidden_states.dtype)
 
 
+@torch._dynamo.disable
 def linear_loop_experts_forward(
     self: nn.Module,
     hidden_states: torch.Tensor,

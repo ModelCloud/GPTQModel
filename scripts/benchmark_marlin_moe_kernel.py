@@ -48,7 +48,7 @@ from gptqmodel.utils.moe_dispatch import (  # noqa: E402
 
 
 MODEL_SHAPES = {
-    "laguna-s-2.1": (3072, 12288),
+    "laguna-s-2.1": (3072, 1024),
     "qwen3.5-27b": (5120, 17408),
     "llama-like": (4096, 11008),
     "kimi-k3": (1792, 1792),
@@ -180,15 +180,23 @@ def _run_backend(
         # No grouped dispatch flag: falls through to the defuser per-expert loop.
         if hasattr(experts, GROUPED_DISPATCH_FLAG):
             delattr(experts, GROUPED_DISPATCH_FLAG)
+        patcher = None
     elif backend == "grouped_mm":
         setattr(experts, GROUPED_DISPATCH_FLAG, True)
-        # Force the legacy dense grouped_mm path for Marlin by disabling the mega-kernel.
-        patcher = patch.object(
-            _moe_dispatch,
-            "_batched_marlin_moe_supported",
-            return_value=False,
-        )
+        # Force the dense grouped_mm dequant path for Marlin-packed experts.
+        patcher = patch.dict(os.environ, {"GPTQMODEL_MARLIN_MOE_BACKEND": "grouped_mm"})
         patcher.start()
+    elif backend == "marlin":
+        # Force the per-expert packed Marlin active loop (grouped dispatch but no
+        # grouped_mm and no batched/offset mega-kernel).
+        setattr(experts, GROUPED_DISPATCH_FLAG, True)
+        patchers = [
+            patch.dict(os.environ, {"GPTQMODEL_MARLIN_MOE_BACKEND": "per_expert"}),
+            patch.object(_moe_dispatch, "_batched_marlin_moe_supported", return_value=False),
+        ]
+        for p in patchers:
+            p.start()
+        patcher = patchers
     else:  # marlin_moe
         setattr(experts, GROUPED_DISPATCH_FLAG, True)
         patcher = None
@@ -202,7 +210,10 @@ def _run_backend(
             ms, tokps = _benchmark(experts, hidden_dim, batch, seq, experts.top_k, reps)
             results.append((ms, tokps))
     finally:
-        if backend == "grouped_mm":
+        if isinstance(patcher, list):
+            for p in patcher:
+                p.stop()
+        elif patcher is not None:
             patcher.stop()  # type: ignore[union-attr]
 
     return results
@@ -220,7 +231,7 @@ def main():
         "--backends",
         type=str,
         default="per_expert,grouped_mm,marlin_moe",
-        help="Comma-separated list from: per_expert, grouped_mm, marlin_moe",
+        help="Comma-separated list from: per_expert, grouped_mm, marlin, marlin_moe",
     )
     args = parser.parse_args()
 

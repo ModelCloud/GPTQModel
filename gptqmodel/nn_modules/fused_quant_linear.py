@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 import uuid
 from types import MethodType
 from typing import Any, Callable, List, Optional, Tuple
@@ -692,11 +693,13 @@ class _FusedQuantGroup:
         )
 
 
+@torch._dynamo.disable
 def _fused_projection_forward(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
     group = self._gptqmodel_fused_group
     return group.forward(self._gptqmodel_fused_idx, x)
 
 
+@torch._dynamo.disable
 def _fused_gateup_mlp_forward(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
     """Fused gate/up MLP forward: one fused GEMM, then act(gate) * up and down."""
     group = self._gptqmodel_fused_gateup_group
@@ -910,6 +913,16 @@ def _is_moe_expert_parent(parent_name: str) -> bool:
     return any(marker in parent_name for marker in markers)
 
 
+_MOE_INDIVIDUAL_EXPERT_RE = re.compile(r"\.(experts|shared_experts)\.\d+(?:\.|$)")
+
+
+def _is_moe_individual_expert(parent_name: str) -> bool:
+    """Return True if `parent_name` is one expert inside an MoE expert list."""
+    if not parent_name:
+        return False
+    return _MOE_INDIVIDUAL_EXPERT_RE.search(parent_name) is not None
+
+
 def _install_fused_group(
     model: nn.Module,
     member_names: Tuple[str, ...],
@@ -924,6 +937,13 @@ def _install_fused_group(
             continue
 
         category = "qkv" if attr_name == _FUSED_QKV_CACHE_ATTR else "gateup"
+        # Fusing gate/up inside each individual MoE expert duplicates packed
+        # weight memory (torch.cat per expert).  The batched/offset Marlin MoE
+        # mega-kernel handles gate and up more efficiently from their original
+        # packed buffers; skip per-expert gate/up fusion when this parent is an
+        # individual expert inside an MoE list.
+        if category == "gateup" and _is_moe_individual_expert(parent_name):
+            continue
         group = _FusedQuantGroup(
             members,
             attr_name=attr_name,

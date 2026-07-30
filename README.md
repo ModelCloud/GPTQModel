@@ -616,9 +616,11 @@ Requirements and caveats:
   `pack_dtype`, and device.
 - Fused attention and MLP paths are supported for `TritonV2Linear` and `MarlinLinear`
   backends.
-- For MoE checkpoints using `GPTQ_MARLIN`, the dispatcher will automatically select a
-  batched/offset Marlin mega-kernel (`marlin_moe`) when the active experts and
-  token-expert alignment fit the supported layout.
+- For MoE checkpoints using `GPTQ_MARLIN`, the dispatcher defaults to a per-expert
+  packed Marlin active loop; this is currently the fastest path for the
+  Laguna-S-2.1 shape class.  To force the batched/offset mega-kernel (`marlin_moe`)
+  instead, set `GPTQMODEL_MARLIN_MOE_BACKEND=marlin_moe`.
+- See `docs/model_inference_optimize.md` for Laguna-S-2.1-specific benchmark results.
 - `free_original_weights=True` removes per-member packed buffers; `model.save()`
   and any code reading member `.qweight`/`.scales` will fail. Use `free_original_weights=False`
   if you need to save or inspect the original modules.

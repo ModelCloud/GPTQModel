@@ -215,6 +215,12 @@ def _parse_args() -> argparse.Namespace:
                    help="Maximum tolerated GPU compute utilization (%%) during preflight.")
     p.add_argument("--preflight-mem-mb", type=int, default=512,
                    help="Maximum tolerated GPU memory use (MiB) during preflight.")
+    p.add_argument("--compile", action="store_true",
+                   help="torch.compile(model.model) after fuse with the requested backend/mode.")
+    p.add_argument("--cache-implementation", type=str, default=None,
+                   help="Cache implementation passed to model.generate (e.g. 'static', 'dynamic').")
+    p.add_argument("--max-cache-len", type=int, default=4096,
+                   help="Max cache length for static cache.")
     return p.parse_args()
 
 
@@ -250,7 +256,11 @@ def _run_forward(
     repeats: int,
     warmup: int,
     max_new_tokens: int | None,
+    cache_kwargs: dict | None = None,
 ) -> list[float]:
+    gen_kwargs = {"do_sample": False, "use_cache": True}
+    if cache_kwargs:
+        gen_kwargs.update(cache_kwargs)
     # Warmup
     with torch.inference_mode():
         for _ in range(warmup):
@@ -258,8 +268,7 @@ def _run_forward(
                 _ = model.generate(
                     input_ids,
                     max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    use_cache=True,
+                    **gen_kwargs,
                 )
             else:
                 _ = model(input_ids)
@@ -274,8 +283,7 @@ def _run_forward(
                 _ = model.generate(
                     input_ids,
                     max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    use_cache=True,
+                    **gen_kwargs,
                 )
             else:
                 _ = model(input_ids)
@@ -339,6 +347,9 @@ def main() -> None:
         or getattr(model.config, "attn_implementation", None)
     )
     print(f"Attention implementation: {attn_impl}")
+    print(f"Cache implementation: {args.cache_implementation or 'dynamic'}")
+    if args.cache_implementation and args.cache_implementation.lower() == "static":
+        print(f"Max cache length: {args.max_cache_len}")
 
     input_device = next(model.model.parameters()).device if hasattr(model, "model") else torch.device("cuda:0")
     print(f"Input device: {input_device}")
@@ -366,6 +377,12 @@ def main() -> None:
     results = []
 
     base_state = "grouped" if args.moe_grouped_dispatch else "unfused"
+    cache_kwargs: dict | None = None
+    if args.cache_implementation:
+        cache_kwargs = {"cache_implementation": args.cache_implementation}
+        if args.cache_implementation.lower() == "static":
+            cache_kwargs["max_cache_len"] = args.max_cache_len
+
     for batch, seq in cases:
         input_ids = input_ids_by_case[(batch, seq)]
         print(f"\nBenchmarking {base_state} batch={batch} seq={seq}")
@@ -380,6 +397,7 @@ def main() -> None:
             repeats=args.repeats,
             warmup=args.warmup,
             max_new_tokens=args.max_new_tokens,
+            cache_kwargs=cache_kwargs,
         )
         mean_ms = _mean(times)
         tok_per_sec, decode_tok_per_sec = _throughput(batch, seq, args.max_new_tokens, mean_ms)
@@ -410,6 +428,18 @@ def main() -> None:
         model.optimize(backend=args.optimize_backend, mode=args.optimize_mode, fullgraph=False)
         print("Model compiled.")
 
+    if args.compile:
+        print("\nCompiling model.model with torch.compile...")
+        import torch as _torch
+        model.model = _torch.compile(
+            model.model,
+            backend=args.optimize_backend,
+            mode=args.optimize_mode,
+            fullgraph=False,
+            dynamic=True,
+        )
+        print("Model.model compiled.")
+
     if args.fuse or args.optimize:
         fused_suffix = "fused+compiled" if args.optimize else "fused"
         fused_label = f"{base_state}+{fused_suffix}"
@@ -427,6 +457,7 @@ def main() -> None:
                 repeats=args.repeats,
                 warmup=args.warmup,
                 max_new_tokens=args.max_new_tokens,
+                cache_kwargs=cache_kwargs,
             )
             mean_ms = _mean(times)
             tok_per_sec, decode_tok_per_sec = _throughput(batch, seq, args.max_new_tokens, mean_ms)

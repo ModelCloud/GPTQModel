@@ -486,10 +486,13 @@ def test_fused_qkv_and_moe_gateup_coexist() -> None:
 def test_grouped_moe_dispatch_marlin_moe_non_fused(
     num_experts: int,
     top_k: int,
+    monkeypatch,
 ) -> None:
     """Batched/offset Marlin MoE mega-kernel matches per-expert loop without fused gate/up."""
     from defuser.modeling.moe_experts_interface import linear_loop_experts_forward as per_expert_forward
     from gptqmodel.utils.moe_dispatch import GROUPED_DISPATCH_FLAG, linear_loop_experts_forward
+
+    monkeypatch.setenv("GPTQMODEL_MARLIN_MOE_BACKEND", "marlin_moe")
 
     module = nn.Module()
     module.num_experts = num_experts
@@ -521,7 +524,7 @@ def test_grouped_moe_dispatch_marlin_moe_non_fused(
     torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8,
     reason="Marlin requires Ampere or newer",
 )
-def test_grouped_moe_dispatch_marlin_moe_laguna_like() -> None:
+def test_grouped_moe_dispatch_marlin_moe_laguna_like(monkeypatch) -> None:
     """Batched Marlin MoE must be accurate on Laguna-S-2.1-like fused gate/up shapes."""
     from defuser.modeling.moe_experts_interface import linear_loop_experts_forward as per_expert_forward
     from gptqmodel.nn_modules.fused_quant_linear import install_fused_gate_up
@@ -531,6 +534,8 @@ def test_grouped_moe_dispatch_marlin_moe_laguna_like() -> None:
     hidden_dim = 1792
     intermediate_dim = 1792
     top_k = 6
+
+    monkeypatch.setenv("GPTQMODEL_MARLIN_MOE_BACKEND", "marlin_moe")
 
     module = nn.Module()
     module.num_experts = num_experts
@@ -584,3 +589,45 @@ def test_moe_scatter_cluster_output_respects_pair_id_order() -> None:
 
     expected = cluster_out[:num_pairs]
     torch.testing.assert_close(global_out, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Marlin dispatch requires CUDA")
+@pytest.mark.skipif(
+    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8,
+    reason="Marlin requires Ampere or newer",
+)
+def test_marlin_experts_project_one_token() -> None:
+    """The M=1 Marlin decode fast path must match the per-expert loop."""
+    from defuser.modeling.moe_experts_interface import linear_loop_experts_forward as per_expert_forward
+    from gptqmodel.utils.moe_dispatch import GROUPED_DISPATCH_FLAG, linear_loop_experts_forward
+
+    num_experts = 4
+    hidden_dim = 128
+    intermediate_dim = 64
+    top_k = 2
+
+    module = nn.Module()
+    module.num_experts = num_experts
+    for i in range(num_experts):
+        container = _ExpertContainer()
+        container.gate_proj = _make_marlin_linear(hidden_dim, intermediate_dim, group_size=64)
+        container.up_proj = _make_marlin_linear(hidden_dim, intermediate_dim, group_size=64)
+        container.down_proj = _make_marlin_linear(intermediate_dim, hidden_dim, group_size=64)
+        module.add_module(str(i), container)
+    module.act_fn = F.silu
+    module = module.cuda()
+
+    assert install_fused_gate_up(module) == num_experts
+    setattr(module, GROUPED_DISPATCH_FLAG, True)
+
+    hs = torch.randn(1, hidden_dim, device="cuda", dtype=torch.bfloat16)
+    topk_idx = torch.randint(0, num_experts, (1, top_k), device="cuda")
+    topk_w = torch.rand(1, top_k, device="cuda", dtype=torch.bfloat16)
+    topk_w = topk_w / topk_w.sum(dim=-1, keepdim=True)
+
+    with torch.inference_mode():
+        expected = per_expert_forward(module, hs, topk_idx, topk_w)
+        grouped = linear_loop_experts_forward(module, hs, topk_idx, topk_w)
+
+    assert getattr(module, "_moe_dispatch_backend", None) == "marlin"
+    torch.testing.assert_close(grouped, expected, atol=2.0, rtol=0.05)
