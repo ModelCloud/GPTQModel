@@ -17,7 +17,7 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default="/monster/data/model/Laguna-S-2.1",
+        default="/monster/data/model/Laguna-S-2.1-Per-Layer-07-30",
         help="Path to the dense Laguna-S-2.1 checkpoint.",
     )
     parser.add_argument(
@@ -47,13 +47,13 @@ def main():
     parser.add_argument(
         "--dataset-size",
         type=int,
-        default=512,
+        default=2048,
         help="Number of calibration samples.",
     )
     parser.add_argument(
         "--calibration-concat-size",
         type=int,
-        default=2048,
+        default=4096,
         help="Calibration concatenation size.",
     )
     parser.add_argument(
