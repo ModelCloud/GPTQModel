@@ -245,10 +245,130 @@ now the highest-impact next step.
    GPU for M=1.  A dedicated decode GEMV (or vLLM/SGLang-style fused MLP/QKV
    GEMV) would close the remaining gap after routing overhead is removed.
 
+## Attempt 6: per-shape-cluster batched/offset Marlin MoE on multi-GPU
+
+The per-shape-cluster batched/offset Marlin MoE mega-kernel from PR #131 was
+benchmarked end-to-end on the real checkpoint with `device_map="auto"` across
+eight A100 96 GB GPUs.  The script was extended with `--device-map`,
+`--moe-grouped-dispatch`, and partial `--fuse-qkv` / `--fuse-gate-up` toggles.
+
+### Environment
+
+- GPUs: 8 × NVIDIA A100 96 GB (sm80), `CUDA_DEVICE_ORDER=PCI_BUS_ID`
+- PyTorch: 2.13.0+cu130, Triton: 3.7.1
+- Model: `/monster/data/model/Laguna-S-2.1-GPTQ-FIXED` (59 GB, dynamic `group_size` 32/128)
+- Backend: `GPTQ_MARLIN`, attention: `flash_attention_2`
+- `device_map="auto"` placed alternating layers across all 8 GPUs
+- Grouped MoE dispatch was enabled before the first benchmark pass; `model.fuse()`
+  was applied between the `grouped` and `grouped+fused` passes.
+
+### Decode benchmark (`seq_len=1`, `max_new_tokens=1`)
+
+`python scripts/benchmark_fuse_real_laguna.py --device-map auto --moe-grouped-dispatch --fuse --batch-sizes 1 2 4 8 16 32 --seq-len 1 --max-new-tokens 1 --repeats 3 --warmup 1 --disable-speculative --attn-implementation flash_attention_2`
+
+| state         | batch | seq | ms        | decode tok/s | vs unfused |
+|---------------|------:|----:|----------:|-------------:|-----------:|
+| unfused       | 1     | 1   | 806.014   | 1.2          | 1.00 |
+| grouped       | 1     | 1   | 804.691   | 1.2          | 1.00 |
+| grouped+fused | 1     | 1   | 821.973   | 1.2          | 1.00 |
+| unfused       | 2     | 1   | 955.778   | 2.1          | 1.00 |
+| grouped       | 2     | 1   | 938.507   | 2.1          | 1.02 |
+| grouped+fused | 2     | 1   | 986.297   | 2.0          | 0.95 |
+| unfused       | 4     | 1   | 1220.220  | 3.3          | 1.00 |
+| grouped       | 4     | 1   | 1268.229  | 3.2          | 0.96 |
+| grouped+fused | 4     | 1   | 1243.457  | 3.2          | 0.98 |
+| unfused       | 8     | 1   | 1552.040  | 5.2          | 1.00 |
+| grouped       | 8     | 1   | 1621.252  | 4.9          | 0.96 |
+| grouped+fused | 8     | 1   | 1569.243  | 5.1          | 1.01 |
+| unfused       | 16    | 1   | 1991.398  | 8.0          | 1.00 |
+| grouped       | 16    | 1   | 2091.442  | 7.7          | 0.95 |
+| grouped+fused | 16    | 1   | 1983.665  | 8.1          | 1.01 |
+| unfused       | 32    | 1   | 2660.461  | 12.0         | 1.00 |
+| grouped       | 32    | 1   | 2711.911  | 11.8         | 0.98 |
+| grouped+fused | 32    | 1   | 2544.893  | 12.6         | 1.05 |
+
+### Prefill benchmark (`seq_len=128`, `max_new_tokens=0`)
+
+`python scripts/benchmark_fuse_real_laguna.py --device-map auto --moe-grouped-dispatch --fuse --batch-sizes 1 2 4 8 16 32 --seq-len 128 --max-new-tokens 0 --repeats 3 --warmup 1 --disable-speculative --attn-implementation flash_attention_2`
+
+| state         | batch | seq | ms        | tok/s | vs grouped |
+|---------------|------:|----:|----------:|------:|-----------:|
+| grouped       | 1     | 128 | 4466.509  | 28.7  | 1.00 |
+| grouped+fused | 1     | 128 | 3634.465  | 35.2  | 1.23 |
+| grouped       | 2     | 128 | 5233.611  | 48.9  | 1.00 |
+| grouped+fused | 2     | 128 | 3902.759  | 65.6  | 1.34 |
+| grouped       | 4     | 128 | 5531.480  | 92.6  | 1.00 |
+| grouped+fused | 4     | 128 | 4244.137  | 120.6 | 1.30 |
+| grouped       | 8     | 128 | 5041.711  | 203.1 | 1.00 |
+| grouped+fused | 8     | 128 | 4665.898  | 219.5 | 1.08 |
+| grouped       | 16    | 128 | 5421.639  | 377.7 | 1.00 |
+| grouped+fused | 16    | 128 | 4937.165  | 414.8 | 1.10 |
+| grouped       | 32    | 128 | 6121.439  | 669.1 | 1.00 |
+| grouped+fused | 32    | 128 | 5336.268  | 767.6 | 1.15 |
+
+### Numerical parity
+
+Decode logits (`max_new_tokens=1`) stay within BF16 accumulation tolerance:
+`max_abs_diff` ≤ 14.75, `mean_abs_diff` ≤ 0.52.
+
+Prefill logits (`seq_len=128`) show slightly larger but still acceptable drift:
+`max_abs_diff` ≤ 23.25, `mean_abs_diff` ≤ 0.99.
+
+### Observations
+
+- The per-shape-cluster batched/offset Marlin MoE path is **neutral to slightly
+  regressive for decode** when `device_map="auto"` spreads layers across all 8
+  GPUs.  Cross-device data movement and `accelerate` dispatch overhead dominate
+  the kernel-launch savings.
+- `model.fuse()` on top of grouped dispatch gives a modest **+5% decode** win at
+  batch 32 and **+15–34% prefill** wins across batch sizes, but it is far from
+  the 4× decode target.
+- Multi-GPU `device_map="auto"` is actually **slower** than the single-GPU
+  Attempt 5 numbers for small-batch decode/prefill, so single-GPU execution is
+  preferred whenever it fits.
+- `model.fuse()` still OOMs on a single A100 because concatenating gate/up
+  packed weights temporarily doubles per-module memory and the checkpoint already
+  consumes ~90 GB after load.
+
+### Updated hypothesis for 4× decode
+
+1. **Run on a single GPU and avoid the multi-GPU copy tax.**  This means either
+   fitting the model on one 96 GB card or using a tight tensor-parallel layout
+   that keeps each layer on one device.
+2. **Collapse each MoE layer to one homogeneous `group_size`** (e.g. the uniform
+   W4G64 config in `laguna_s21/quant_config_fixed_w4g64.json`).  That eliminates
+   the per-shape clusters and allows a single `moe_wna16_marlin_gemm` launch per
+   projection per MoE layer.
+3. **Add an M=1 skinny GEMV path** for the batched MoE kernel, because the
+   standard Marlin small-batch configuration does not fully utilize the GPU
+   for single-token decode.
+
 ## Reproduction
 
 ```bash
-# Baseline decode benchmark
+# Multi-GPU per-shape-cluster decode benchmark
+python scripts/benchmark_fuse_real_laguna.py \
+  --device-map auto \
+  --moe-grouped-dispatch \
+  --fuse \
+  --batch-sizes 1 2 4 8 16 32 \
+  --seq-len 1 --max-new-tokens 1 \
+  --repeats 3 --warmup 1 \
+  --disable-speculative \
+  --attn-implementation flash_attention_2
+
+# Multi-GPU per-shape-cluster prefill benchmark
+python scripts/benchmark_fuse_real_laguna.py \
+  --device-map auto \
+  --moe-grouped-dispatch \
+  --fuse \
+  --batch-sizes 1 2 4 8 16 32 \
+  --seq-len 128 --max-new-tokens 0 \
+  --repeats 3 --warmup 1 \
+  --disable-speculative \
+  --attn-implementation flash_attention_2
+
+# Single-GPU baseline (requires a physical GPU with enough free memory)
 python scripts/benchmark_fuse_real_laguna.py \
   --gpu 6 \
   --batch-sizes 1 2 4 8 16 32 \

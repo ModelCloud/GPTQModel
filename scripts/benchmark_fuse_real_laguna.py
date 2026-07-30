@@ -8,41 +8,114 @@ Loads the real quantized checkpoint, optionally fuses QKV and gate/up groups,
 runs forward/generate on the requested batch/sequence sizes, and reports
 latency, throughput, and numerical parity.
 
-The `--gpu` flag must be parsed before `import torch` so `CUDA_VISIBLE_DEVICES`
-takes effect.
+GPU IDs are interpreted as physical PCI-bus-ordered indices from
+`nvidia-smi` (`CUDA_DEVICE_ORDER=PCI_BUS_ID` is set at import time).  Use
+`--skip-preflight` to bypass the idle-gate when nvidia-smi is unavailable.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
+import time
 
 # Ensure we use the local repo sources, not any installed GPT-QModel egg.
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, repo_root)
 
-# Parse --gpu before any CUDA context is created.
-_gpu = "0"
-for i, arg in enumerate(sys.argv):
-    if arg == "--gpu" and i + 1 < len(sys.argv):
-        _gpu = sys.argv[i + 1]
-        break
-    if arg.startswith("--gpu="):
-        _gpu = arg.split("=", 1)[1]
-        break
-os.environ["CUDA_VISIBLE_DEVICES"] = _gpu
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-import torch  # noqa: E402
+
+def _query_nvidia_smi_gpus() -> list[dict]:
+    """Return a list of GPU dicts from nvidia-smi with physical indices."""
+    cmd = [
+        "nvidia-smi",
+        "--query-gpu=index,pci.bus_id,uuid,utilization.gpu,memory.used",
+        "--format=csv,noheader,nounits",
+    ]
+    out = subprocess.check_output(cmd, text=True)
+    rows: list[dict] = []
+    for line in out.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 5:
+            continue
+        rows.append({
+            "index": int(parts[0]),
+            "pci": parts[1],
+            "uuid": parts[2],
+            "util": float(parts[3]) if parts[3] else 0.0,
+            "mem": float(parts[4]) if parts[4] else 0.0,
+        })
+    return rows
+
+
+def _preflight(args: argparse.Namespace) -> None:
+    """Verify target GPU(s) are idle before importing Torch."""
+    if args.skip_preflight:
+        print("Preflight: skipped (--skip-preflight).")
+        return
+
+    try:
+        all_gpus = _query_nvidia_smi_gpus()
+    except Exception as exc:  # noqa: BLE001
+        print(f"Preflight: nvidia-smi not available ({exc}); continuing without idle check.")
+        return
+
+    if args.device_map is not None:
+        targets = [g["index"] for g in all_gpus]
+        label = f"all {len(targets)} visible GPUs (device_map={args.device_map})"
+    else:
+        targets = [int(x.strip()) for x in args.gpu.split(",") if x.strip()]
+        label = f"GPU(s) {targets}"
+
+    print(f"Preflight: checking {label} for {args.preflight_samples} consecutive idle samples...")
+    last_rows: dict[int, dict] = {}
+    for sample in range(args.preflight_samples):
+        last_rows = {g["index"]: g for g in _query_nvidia_smi_gpus()}
+        for idx in targets:
+            if idx not in last_rows:
+                raise RuntimeError(f"Preflight: requested GPU {idx} not found in nvidia-smi inventory.")
+            g = last_rows[idx]
+            if g["util"] > args.preflight_util_threshold:
+                raise RuntimeError(
+                    f"Preflight: GPU {idx} has non-zero compute utilization "
+                    f"({g['util']}%) at sample {sample + 1}/{args.preflight_samples}."
+                )
+            if g["mem"] > args.preflight_mem_mb:
+                raise RuntimeError(
+                    f"Preflight: GPU {idx} has {g['mem']} MiB memory used "
+                    f"(threshold {args.preflight_mem_mb} MiB) at sample "
+                    f"{sample + 1}/{args.preflight_samples}."
+                )
+        if sample < args.preflight_samples - 1:
+            time.sleep(1.0)
+
+    print("Preflight: passed.")
+    for idx in targets:
+        g = last_rows[idx]
+        print(
+            f"  GPU {idx}: PCI {g['pci']}, UUID {g['uuid']}, "
+            f"util={g['util']}%, mem={g['mem']}MiB"
+        )
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--model-path", default="/monster/data/model/Laguna-S-2.1-GPTQ-FIXED")
     p.add_argument("--backend", default="GPTQ_MARLIN")
-    p.add_argument("--gpu", type=str, default="0")
+    p.add_argument("--gpu", type=str, default="0",
+                   help="Physical CUDA device index for single-GPU load (ignored when --device-map is set).")
+    p.add_argument("--device-map", type=str, default=None,
+                   help="torch device_map for load (e.g. 'auto'). When set, --gpu is ignored.")
     p.add_argument("--fuse", action="store_true", help="Apply model.fuse() before benchmark")
+    p.add_argument("--fuse-qkv", action="store_true", default=None,
+                   help="Fuse QKV projections (default: same as --fuse).")
+    p.add_argument("--fuse-gate-up", action="store_true", default=None,
+                   help="Fuse gate/up projections (default: same as --fuse).")
+    p.add_argument("--moe-grouped-dispatch", action="store_true",
+                   help="Enable GPT-QModel grouped/batched MoE dispatch before benchmarking.")
     p.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 2, 4, 8])
     p.add_argument("--seq-len", type=int, default=1)
     p.add_argument("--repeats", type=int, default=5)
@@ -59,7 +132,22 @@ def _parse_args() -> argparse.Namespace:
                    help="Torch compile mode passed to model.optimize().")
     p.add_argument("--optimize-backend", type=str, default="inductor",
                    help="Torch compile backend passed to model.optimize().")
+    p.add_argument("--skip-preflight", action="store_true",
+                   help="Skip the nvidia-smi idle preflight.")
+    p.add_argument("--preflight-samples", type=int, default=3,
+                   help="Number of consecutive idle nvidia-smi samples to require.")
+    p.add_argument("--preflight-util-threshold", type=float, default=0.0,
+                   help="Maximum tolerated GPU compute utilization (%%) during preflight.")
+    p.add_argument("--preflight-mem-mb", type=int, default=1000,
+                   help="Maximum tolerated GPU memory use (MiB) during preflight.")
     return p.parse_args()
+
+
+# Parse args and preflight before importing torch/CUDA.
+args = _parse_args()
+_preflight(args)
+
+import torch  # noqa: E402
 
 
 def _mean(xs: list[float]) -> float:
@@ -72,6 +160,11 @@ def _throughput(batch: int, seq: int, max_new_tokens: int | None, mean_ms: float
     tok_per_sec = total_tokens / (mean_ms / 1000.0)
     decode_tok_per_sec = decode_tokens / (mean_ms / 1000.0) if decode_tokens > 0 else 0.0
     return tok_per_sec, decode_tok_per_sec
+
+
+def _sync_all_devices() -> None:
+    for i in range(torch.cuda.device_count()):
+        torch.cuda.synchronize(i)
 
 
 def _run_forward(
@@ -93,14 +186,13 @@ def _run_forward(
                 )
             else:
                 _ = model(input_ids)
-    torch.cuda.synchronize()
+    _sync_all_devices()
 
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
     times = []
     with torch.inference_mode():
         for _ in range(repeats):
-            start.record()
+            _sync_all_devices()
+            start = time.perf_counter()
             if max_new_tokens and max_new_tokens > 0:
                 _ = model.generate(
                     input_ids,
@@ -110,9 +202,8 @@ def _run_forward(
                 )
             else:
                 _ = model(input_ids)
-            end.record()
-            torch.cuda.synchronize()
-            times.append(start.elapsed_time(end))
+            _sync_all_devices()
+            times.append((time.perf_counter() - start) * 1000.0)
     return times
 
 
@@ -120,9 +211,11 @@ def _vocab_size(model) -> int:
     return getattr(model, "config", None) and getattr(model.config, "vocab_size", None) or 32000
 
 
-def main():
-    args = _parse_args()
+def main() -> None:
     torch.manual_seed(args.seed)
+
+    if args.device_map is None:
+        torch.cuda.set_device(int(args.gpu))
 
     from gptqmodel import BACKEND, GPTQModel
 
@@ -138,9 +231,12 @@ def main():
     load_kwargs = {
         "backend": backend,
         "trust_remote_code": True,
-        "device": "cuda:0",
         "attn_implementation": args.attn_implementation,
     }
+    if args.device_map is not None:
+        load_kwargs["device_map"] = args.device_map
+    else:
+        load_kwargs["device"] = f"cuda:{args.gpu}"
     model = GPTQModel.load(
         args.model_path,
         **load_kwargs,
@@ -164,6 +260,17 @@ def main():
     )
     print(f"Attention implementation: {attn_impl}")
 
+    input_device = next(model.model.parameters()).device if hasattr(model, "model") else torch.device("cuda:0")
+    print(f"Input device: {input_device}")
+
+    from gptqmodel.utils.moe_dispatch import (
+        enable_grouped_dispatch_for_model,
+        register_linear_loop_experts,
+    )
+    if args.moe_grouped_dispatch:
+        registered = register_linear_loop_experts()
+        moe_enabled = enable_grouped_dispatch_for_model(model.model)
+        print(f"Grouped MoE dispatch: registered={registered}, enabled={moe_enabled} module(s)")
 
     vocab_size = _vocab_size(model)
     cases = [(b, args.seq_len) for b in args.batch_sizes]
@@ -171,16 +278,17 @@ def main():
     input_ids_by_case: dict[tuple[int, int], torch.Tensor] = {}
     for batch, seq in cases:
         input_ids_by_case[(batch, seq)] = torch.randint(
-            0, vocab_size, (batch, seq), device="cuda:0"
+            0, vocab_size, (batch, seq), device=input_device
         )
 
     unfused_logits: dict[tuple[int, int], torch.Tensor] = {}
     fused_logits: dict[tuple[int, int], torch.Tensor] = {}
     results = []
 
+    base_state = "grouped" if args.moe_grouped_dispatch else "unfused"
     for batch, seq in cases:
         input_ids = input_ids_by_case[(batch, seq)]
-        print(f"\nBenchmarking unfused batch={batch} seq={seq}")
+        print(f"\nBenchmarking {base_state} batch={batch} seq={seq}")
         with torch.inference_mode():
             out = model(input_ids)
             logits_unfused = out.logits if hasattr(out, "logits") else out
@@ -201,41 +309,33 @@ def main():
             "ms": mean_ms,
             "tok/s": tok_per_sec,
             "decode_tok/s": decode_tok_per_sec,
-            "state": "unfused",
+            "state": base_state,
         })
-        print(f"  unfused: {mean_ms:.3f} ms, {tok_per_sec:.1f} tok/s ({decode_tok_per_sec:.1f} decode tok/s)")
+        print(f"  {base_state}: {mean_ms:.3f} ms, {tok_per_sec:.1f} tok/s ({decode_tok_per_sec:.1f} decode tok/s)")
 
-    fused_state = "unfused"
     if args.fuse:
+        fuse_qkv = args.fuse_qkv if args.fuse_qkv is not None else True
+        fuse_gate_up = args.fuse_gate_up if args.fuse_gate_up is not None else True
         print("\nFusing model...")
         counts = model.fuse(
-            qkv=True,
-            gate_up=True,
-            gate_up_activation=True,
+            qkv=fuse_qkv,
+            gate_up=fuse_gate_up,
+            gate_up_activation=fuse_gate_up,
             free_original_weights=True,
         )
         print(f"  Fused counts: {counts}")
-
-        from gptqmodel.utils.moe_dispatch import (
-            enable_grouped_dispatch_for_model,
-            register_linear_loop_experts,
-        )
-        registered = register_linear_loop_experts()
-        moe_enabled = enable_grouped_dispatch_for_model(model.model)
-        print(f"  Registered GPT-QModel linear_loop experts: {registered}")
-        print(f"  Enabled grouped MoE dispatch for {moe_enabled} module(s).")
-        fused_state = "fused"
 
     if args.optimize:
         print("\nCompiling model...")
         model.optimize(backend=args.optimize_backend, mode=args.optimize_mode, fullgraph=False)
         print("Model compiled.")
-        fused_state = "fused+compiled"
 
     if args.fuse or args.optimize:
+        fused_suffix = "fused+compiled" if args.optimize else "fused"
+        fused_label = f"{base_state}+{fused_suffix}"
         for batch, seq in cases:
             input_ids = input_ids_by_case[(batch, seq)]
-            print(f"\nBenchmarking {fused_state} batch={batch} seq={seq}")
+            print(f"\nBenchmarking {fused_label} batch={batch} seq={seq}")
             with torch.inference_mode():
                 out = model(input_ids)
                 logits_fused = out.logits if hasattr(out, "logits") else out
@@ -256,10 +356,10 @@ def main():
                 "ms": mean_ms,
                 "tok/s": tok_per_sec,
                 "decode_tok/s": decode_tok_per_sec,
-                "state": fused_state,
+                "state": fused_label,
             })
             print(
-                f"  {fused_state}: {mean_ms:.3f} ms, {tok_per_sec:.1f} tok/s "
+                f"  {fused_label}: {mean_ms:.3f} ms, {tok_per_sec:.1f} tok/s "
                 f"({decode_tok_per_sec:.1f} decode tok/s)"
             )
 
