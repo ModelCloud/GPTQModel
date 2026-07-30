@@ -17,8 +17,9 @@ The implementation is deliberately streaming: it parses all source shard
 headers once to build a routing plan, then opens the source shards one at a
 time.  Tensors are routed to per-output-group temporary partial files and the
 source shard is closed before the next one is opened.  Final output shards are
-merged from the partials at the end.  Peak host memory is therefore bounded by
-a source shard (typically ~5 GB) plus the largest output-group staging buffer,
+merged from the partials in parallel using a bounded thread pool (up to
+``num_write_workers`` shards in flight).  Peak host memory is therefore bounded by
+a source shard (typically ~5 GB) plus ``num_write_workers`` output-group buffers,
 not the size of the whole checkpoint.
 """
 
@@ -28,6 +29,7 @@ import shutil
 import struct
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 from safetensors import safe_open
@@ -251,6 +253,7 @@ def reshard(
     max_shard_size_gb: Optional[float] = None,
     overwrite: bool = False,
     progress: bool = True,
+    num_write_workers: int = 8,
 ) -> Dict[str, Any]:
     """Re-shard a safetensors checkpoint into a new directory.
 
@@ -272,6 +275,9 @@ def reshard(
             shards.
         overwrite: if ``True`` and ``target_path`` exists, remove it first.
         progress: if ``True``, emit a LogBar progress bar and periodic telemetry.
+        num_write_workers: number of parallel threads used when merging partial
+            files and writing the final output shards. Default is ``8``; set to
+            ``1`` to recover the previous serial write behavior.
 
     Returns:
         A dictionary with ``output_files``, ``num_layers``, ``num_tensors``,
@@ -514,12 +520,14 @@ def reshard(
         else:
             write_pb = None
 
-        # Phase 2: merge partial files into final output shards.
+        # Phase 2: merge partial files into final output shards in parallel.
         new_weight_map: Dict[str, str] = {}
         output_files: List[str] = []
         total_written = 0
 
-        for group, subgroup_names, final_filename in final_plan:
+        def _write_output_shard(args: Tuple[str, List[str], str]) -> Tuple[str, int, float, List[str]]:
+            """Worker: merge partials for one output shard and write it."""
+            group, subgroup_names, final_filename = args
             subgroup_idx = name_to_subgroup[subgroup_names[0]][1]
             partial_paths = subgroup_partial_files[(group, subgroup_idx)]
             merged: Dict[str, Any] = {}
@@ -531,29 +539,44 @@ def reshard(
             save_file(merged, output_path, metadata=output_metadata)
             write_elapsed = time.perf_counter() - write_start
             shard_size = os.path.getsize(output_path)
-            disk_telemetry.record_write(shard_size, write_elapsed)
-            total_written += shard_size
-
-            for name in subgroup_names:
-                new_weight_map[name] = final_filename
-            output_files.append(final_filename)
-
-            log.info(
-                "Output shard %d/%d: %s (%s, %d tensor(s)) in %.2fs (%s/s)",
-                len(output_files),
-                total_output_shards,
-                final_filename,
-                _fmt_bytes(shard_size),
-                len(subgroup_names),
-                write_elapsed,
-                _fmt_bytes(shard_size / write_elapsed) if write_elapsed > 0 else "N/A",
-            )
-
             del merged
-            if write_pb:
-                write_pb.next()
-                write_pb.subtitle(f"{final_filename} | {group}")
-                write_pb.draw()
+            return final_filename, shard_size, write_elapsed, subgroup_names
+
+        with ThreadPoolExecutor(max_workers=num_write_workers) as executor:
+            futures = {
+                executor.submit(_write_output_shard, item): item
+                for item in final_plan
+            }
+            for future in as_completed(futures):
+                try:
+                    final_filename, shard_size, write_elapsed, subgroup_names = future.result()
+                except Exception:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
+
+                group = futures[future][0]
+                disk_telemetry.record_write(shard_size, write_elapsed)
+                total_written += shard_size
+
+                for name in subgroup_names:
+                    new_weight_map[name] = final_filename
+                output_files.append(final_filename)
+
+                log.info(
+                    "Output shard %d/%d: %s (%s, %d tensor(s)) in %.2fs (%s/s)",
+                    len(output_files),
+                    total_output_shards,
+                    final_filename,
+                    _fmt_bytes(shard_size),
+                    len(subgroup_names),
+                    write_elapsed,
+                    _fmt_bytes(shard_size / write_elapsed) if write_elapsed > 0 else "N/A",
+                )
+
+                if write_pb:
+                    write_pb.next()
+                    write_pb.subtitle(f"{final_filename} | {group}")
+                    write_pb.draw()
 
     finally:
         # Always clean up staging, even on failure.
