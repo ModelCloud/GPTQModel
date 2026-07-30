@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 
+import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
@@ -63,6 +64,32 @@ def _build_source_dir(tmp: str, *, prefix: str = "model.layers", config: dict = 
 def _build_source_dir_with_prefix(tmp: str, prefix: str) -> str:
     """Compatibility helper used by pre-existing tests."""
     return _build_source_dir(tmp, prefix=prefix, config={})
+
+
+def _load_source_state_dict(src_path: str) -> dict:
+    """Load the complete source state dict from a safetensors checkpoint."""
+    index_path = os.path.join(src_path, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path, encoding="utf-8") as fp:
+            index = json.load(fp)
+        weight_map = index.get("weight_map", {})
+        state = {}
+        for shard in sorted(set(weight_map.values())):
+            state.update(load_file(os.path.join(src_path, shard)))
+        return state
+
+    # Single-file checkpoint.
+    shard_path = os.path.join(src_path, "model.safetensors")
+    if os.path.isfile(shard_path):
+        return load_file(shard_path)
+
+    files = [f for f in os.listdir(src_path) if f.endswith(".safetensors")]
+    if not files:
+        raise FileNotFoundError(f"No safetensors files found in {src_path}")
+    if len(files) == 1:
+        return load_file(os.path.join(src_path, files[0]))
+
+    raise ValueError(f"Multiple unindexed safetensors files in {src_path}: {files}")
 
 
 def test_reshard_per_layer_creates_index_and_shards():
@@ -267,3 +294,76 @@ def test_reshard_preserves_safetensors_metadata():
                 meta = handler.metadata()
             assert meta.get("format") == "pt"
             assert meta.get("custom_key") == "custom_value"
+
+
+LLAMA_3_2_1B_INSTRUCT_PATH = "/monster/data/model/Llama-3.2-1B-Instruct"
+QWEN3_MOE_LAYERS_1_PATH = "/monster/data/model/Qwen3-30B-A3B-layers-1"
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    not os.path.isdir(LLAMA_3_2_1B_INSTRUCT_PATH),
+    reason=f"{LLAMA_3_2_1B_INSTRUCT_PATH} not available",
+)
+def test_reshard_real_llama_3_2_1b_instruct():
+    """End-to-end per-layer reshard of the dense Llama-3.2-1B-Instruct checkpoint."""
+    src = LLAMA_3_2_1B_INSTRUCT_PATH
+    with open(os.path.join(src, "config.json"), encoding="utf-8") as fp:
+        config = json.load(fp)
+    expected_layers = config["num_hidden_layers"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        dst = os.path.join(tmp, "per-layer")
+        result = reshard(src, dst, strategy=ShardStrategy.PER_LAYER, progress=False)
+
+        assert result["num_layers"] == expected_layers
+        assert os.path.isfile(os.path.join(dst, "model.safetensors.index.json"))
+
+        # Verify every tensor is present and unchanged.
+        original = _load_source_state_dict(src)
+        for fn in os.listdir(dst):
+            if not fn.endswith(".safetensors"):
+                continue
+            for name, tensor in load_file(os.path.join(dst, fn)).items():
+                diff = (tensor - original[name]).abs().max().item()
+                assert diff == 0.0, f"{name} differs after reshard"
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    not os.path.isdir(QWEN3_MOE_LAYERS_1_PATH),
+    reason=f"{QWEN3_MOE_LAYERS_1_PATH} not available",
+)
+def test_reshard_real_qwen3_moe_single_layer():
+    """End-to-end per-layer reshard of a 1-layer Qwen3-MoE checkpoint.
+
+    This exercises the MoE path where a single layer contains many expert
+    weight tensors (``mlp.experts.{idx}.*``) but still maps to one shard.
+    """
+    src = QWEN3_MOE_LAYERS_1_PATH
+    with open(os.path.join(src, "config.json"), encoding="utf-8") as fp:
+        config = json.load(fp)
+    expected_layers = config["num_hidden_layers"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        dst = os.path.join(tmp, "per-layer")
+        result = reshard(src, dst, strategy=ShardStrategy.PER_LAYER, progress=False)
+
+        assert result["num_layers"] == expected_layers
+        assert os.path.isfile(os.path.join(dst, "model.safetensors.index.json"))
+
+        # Verify at least one expert tensor exists in the (single) layer shard.
+        index_path = os.path.join(dst, "model.safetensors.index.json")
+        with open(index_path, encoding="utf-8") as fp:
+            index = json.load(fp)
+        expert_names = [n for n in index["weight_map"] if ".mlp.experts." in n]
+        assert expert_names, "expected MoE expert tensors in the sharded checkpoint"
+
+        # Verify every tensor is present and unchanged.
+        original = _load_source_state_dict(src)
+        for fn in os.listdir(dst):
+            if not fn.endswith(".safetensors"):
+                continue
+            for name, tensor in load_file(os.path.join(dst, fn)).items():
+                diff = (tensor - original[name]).abs().max().item()
+                assert diff == 0.0, f"{name} differs after reshard"
