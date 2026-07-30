@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 
+
 # Ensure we use the local repo sources, not any installed GPT-QModel egg.
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, repo_root)
@@ -35,7 +36,10 @@ def _query_nvidia_smi_gpus() -> list[dict]:
         "--query-gpu=index,pci.bus_id,uuid,utilization.gpu,memory.used",
         "--format=csv,noheader,nounits",
     ]
-    out = subprocess.check_output(cmd, text=True)
+    try:
+        out = subprocess.check_output(cmd, text=True)
+    except Exception:  # noqa: BLE001
+        return []
     rows: list[dict] = []
     for line in out.strip().splitlines():
         parts = [p.strip() for p in line.split(",")]
@@ -49,6 +53,45 @@ def _query_nvidia_smi_gpus() -> list[dict]:
             "mem": float(parts[4]) if parts[4] else 0.0,
         })
     return rows
+
+
+def _parse_gpu_list(gpu_arg: str) -> list[int]:
+    """Parse a comma-separated list of physical GPU indices."""
+    return [int(x.strip()) for x in gpu_arg.split(",") if x.strip()]
+
+
+def _set_cuda_visible_devices(args: argparse.Namespace) -> None:
+    """Restrict this process to the requested GPU(s) before torch is imported.
+
+    For single-GPU runs this is the single ``--gpu`` index.  For ``--device-map``
+    runs the process is restricted to the full visible set (all physical GPUs)
+    because ``device_map`` will decide how to distribute layers across them.
+    """
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        # Honor an explicit external restriction.
+        return
+
+    gpu_indices = _parse_gpu_list(args.gpu)
+
+    if args.device_map is None:
+        if len(gpu_indices) != 1:
+            raise ValueError(
+                f"--gpu must be a single physical index for single-GPU load; got {args.gpu!r}. "
+                "Use --device-map for multi-GPU."
+            )
+        target_uuids: list[str] = []
+        for g in _query_nvidia_smi_gpus():
+            if g["index"] == gpu_indices[0]:
+                target_uuids.append(g["uuid"])
+        if target_uuids:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(target_uuids)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_indices[0])
+    else:
+        # Restrict to all visible GPUs; device_map will manage distribution.
+        all_gpus = _query_nvidia_smi_gpus()
+        if all_gpus:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(g["uuid"] for g in all_gpus)
 
 
 def _preflight(args: argparse.Namespace) -> None:
@@ -67,38 +110,70 @@ def _preflight(args: argparse.Namespace) -> None:
         targets = [g["index"] for g in all_gpus]
         label = f"all {len(targets)} visible GPUs (device_map={args.device_map})"
     else:
-        targets = [int(x.strip()) for x in args.gpu.split(",") if x.strip()]
+        targets = _parse_gpu_list(args.gpu)
         label = f"GPU(s) {targets}"
 
-    print(f"Preflight: checking {label} for {args.preflight_samples} consecutive idle samples...")
-    last_rows: dict[int, dict] = {}
-    for sample in range(args.preflight_samples):
-        last_rows = {g["index"]: g for g in _query_nvidia_smi_gpus()}
+    if not targets:
+        raise RuntimeError("Preflight: no target GPUs specified.")
+
+    _check_idle(args, targets, label, "preflight")
+    print("Preflight: passed.")
+    last_rows = {g["index"]: g for g in _query_nvidia_smi_gpus()}
+    for idx in targets:
+        g = last_rows.get(idx)
+        if g:
+            print(
+                f"  GPU {idx}: PCI {g['pci']}, UUID {g['uuid']}, "
+                f"util={g['util']}%, mem={g['mem']}MiB"
+            )
+
+
+def _check_idle(
+    args: argparse.Namespace,
+    targets: list[int],
+    label: str,
+    stage: str,
+    samples: int | None = None,
+) -> None:
+    """Run consecutive idle samples on the requested GPUs."""
+    samples = samples if samples is not None else args.preflight_samples
+    print(f"Preflight ({stage}): checking {label} for {samples} consecutive idle samples...")
+    for sample in range(samples):
+        rows = {g["index"]: g for g in _query_nvidia_smi_gpus()}
         for idx in targets:
-            if idx not in last_rows:
-                raise RuntimeError(f"Preflight: requested GPU {idx} not found in nvidia-smi inventory.")
-            g = last_rows[idx]
+            if idx not in rows:
+                raise RuntimeError(f"Preflight ({stage}): requested GPU {idx} not found in nvidia-smi inventory.")
+            g = rows[idx]
             if g["util"] > args.preflight_util_threshold:
                 raise RuntimeError(
-                    f"Preflight: GPU {idx} has non-zero compute utilization "
-                    f"({g['util']}%) at sample {sample + 1}/{args.preflight_samples}."
+                    f"Preflight ({stage}): GPU {idx} has non-zero compute utilization "
+                    f"({g['util']}%) at sample {sample + 1}/{samples}."
                 )
             if g["mem"] > args.preflight_mem_mb:
                 raise RuntimeError(
-                    f"Preflight: GPU {idx} has {g['mem']} MiB memory used "
+                    f"Preflight ({stage}): GPU {idx} has {g['mem']} MiB memory used "
                     f"(threshold {args.preflight_mem_mb} MiB) at sample "
-                    f"{sample + 1}/{args.preflight_samples}."
+                    f"{sample + 1}/{samples}."
                 )
-        if sample < args.preflight_samples - 1:
+        if sample < samples - 1:
             time.sleep(1.0)
 
-    print("Preflight: passed.")
-    for idx in targets:
-        g = last_rows[idx]
-        print(
-            f"  GPU {idx}: PCI {g['pci']}, UUID {g['uuid']}, "
-            f"util={g['util']}%, mem={g['mem']}MiB"
-        )
+
+def _recheck_idle(args: argparse.Namespace, stage: str) -> None:
+    """Re-run the idle check (e.g. after model load, before timing)."""
+    if args.skip_preflight:
+        return
+    all_gpus = _query_nvidia_smi_gpus()
+    if args.device_map is not None:
+        targets = [g["index"] for g in all_gpus]
+        label = f"all {len(targets)} visible GPUs"
+    else:
+        targets = _parse_gpu_list(args.gpu)
+        label = f"GPU(s) {targets}"
+    if not targets:
+        return
+    _check_idle(args, targets, label, stage, samples=1)
+    print(f"Preflight ({stage}): passed.")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -110,10 +185,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--device-map", type=str, default=None,
                    help="torch device_map for load (e.g. 'auto'). When set, --gpu is ignored.")
     p.add_argument("--fuse", action="store_true", help="Apply model.fuse() before benchmark")
-    p.add_argument("--fuse-qkv", action="store_true", default=None,
-                   help="Fuse QKV projections (default: same as --fuse).")
-    p.add_argument("--fuse-gate-up", action="store_true", default=None,
-                   help="Fuse gate/up projections (default: same as --fuse).")
+    p.add_argument("--fuse-qkv", action=argparse.BooleanOptionalAction, default=None,
+                   help="Fuse QKV projections (default: same as --fuse; use --no-fuse-qkv to disable).")
+    p.add_argument("--fuse-gate-up", action=argparse.BooleanOptionalAction, default=None,
+                   help="Fuse gate/up projections (default: same as --fuse; use --no-fuse-gate-up to disable).")
     p.add_argument("--moe-grouped-dispatch", action="store_true",
                    help="Enable GPT-QModel grouped/batched MoE dispatch before benchmarking.")
     p.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 2, 4, 8])
@@ -138,13 +213,14 @@ def _parse_args() -> argparse.Namespace:
                    help="Number of consecutive idle nvidia-smi samples to require.")
     p.add_argument("--preflight-util-threshold", type=float, default=0.0,
                    help="Maximum tolerated GPU compute utilization (%%) during preflight.")
-    p.add_argument("--preflight-mem-mb", type=int, default=1000,
+    p.add_argument("--preflight-mem-mb", type=int, default=512,
                    help="Maximum tolerated GPU memory use (MiB) during preflight.")
     return p.parse_args()
 
 
-# Parse args and preflight before importing torch/CUDA.
+# Parse args and restrict CUDA visibility before importing torch/CUDA.
 args = _parse_args()
+_set_cuda_visible_devices(args)
 _preflight(args)
 
 import torch  # noqa: E402
@@ -163,6 +239,7 @@ def _throughput(batch: int, seq: int, max_new_tokens: int | None, mean_ms: float
 
 
 def _sync_all_devices() -> None:
+    """Synchronize only the GPUs this process is allowed to see."""
     for i in range(torch.cuda.device_count()):
         torch.cuda.synchronize(i)
 
@@ -215,7 +292,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     if args.device_map is None:
-        torch.cuda.set_device(int(args.gpu))
+        torch.cuda.set_device(0)
 
     from gptqmodel import BACKEND, GPTQModel
 
@@ -236,12 +313,15 @@ def main() -> None:
     if args.device_map is not None:
         load_kwargs["device_map"] = args.device_map
     else:
-        load_kwargs["device"] = f"cuda:{args.gpu}"
+        load_kwargs["device"] = "cuda:0"
     model = GPTQModel.load(
         args.model_path,
         **load_kwargs,
     )
     print("Model loaded.")
+
+    # Re-check idle state after the (possibly long) model load.
+    _recheck_idle(args, "post-load")
 
     # Disable speculative decoding if requested; it can distort per-token
     # timing and is not relevant for the fused-quantization benchmarks.
@@ -314,8 +394,8 @@ def main() -> None:
         print(f"  {base_state}: {mean_ms:.3f} ms, {tok_per_sec:.1f} tok/s ({decode_tok_per_sec:.1f} decode tok/s)")
 
     if args.fuse:
-        fuse_qkv = args.fuse_qkv if args.fuse_qkv is not None else True
-        fuse_gate_up = args.fuse_gate_up if args.fuse_gate_up is not None else True
+        fuse_qkv = args.fuse_qkv if args.fuse_qkv is not None else args.fuse
+        fuse_gate_up = args.fuse_gate_up if args.fuse_gate_up is not None else args.fuse
         print("\nFusing model...")
         counts = model.fuse(
             qkv=fuse_qkv,
