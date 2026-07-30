@@ -30,6 +30,8 @@ This file governs the whole repository. Keep changes narrowly scoped, preserve C
 - New model families, `module_tree`, MoE adapters, or `MODEL_MAP`: use `$gptqmodel-model-support`.
 - Tokenizer initialization, normalization, special-token compatibility, prompt rendering, chat templates, or
   unexpectedly low inference/evaluation scores: use `$gptqmodel-tokenizer-normalization`.
+- Reproducing a user-reported bug from an exact command, script, or log excerpt (error, warning, or discrepancy)
+  and collecting telemetry before source inspection: use `$run-user-command-with-telemetry`.
 
 Read every selected `SKILL.md` completely before editing. Follow its linked references only when relevant to the task.
 
