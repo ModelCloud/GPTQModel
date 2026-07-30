@@ -12,7 +12,7 @@ import time
 from collections import defaultdict
 from contextlib import nullcontext
 from itertools import count
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch._dynamo
@@ -194,6 +194,11 @@ class BaseQModel(nn.Module):
     module_tree: List[str] = None
     # Override module_tree according to different QUANT_METHOD
     module_tree_overrides: dict[METHOD, List[str]] = None
+
+    # Cache of role/semantic module-tree flags keyed by the path within a layer.
+    # Populated by ``_build_layer_modules_for_tree`` and consulted by the looper
+    # when constructing ``NamedModule`` wrappers.
+    _module_tree_flags_cache: ClassVar[Dict[Type["BaseQModel"], Dict[str, frozenset]]] = {}
 
     # Strict=True -> all layer_modules must exists in model
     # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
@@ -475,6 +480,21 @@ class BaseQModel(nn.Module):
         return name, flags
 
     @classmethod
+    def _set_module_tree_flags(cls, path: str, flags: frozenset) -> None:
+        """Store role/semantic flags for a module-tree path (within a decoder layer)."""
+
+        cache = cls._module_tree_flags_cache.setdefault(cls, {})
+        if path not in cache:
+            cache[path] = flags
+
+    @classmethod
+    def get_module_tree_flags(cls, path: str) -> frozenset:
+        """Return the role/semantic flags associated with ``path`` in the module tree, if any."""
+
+        cache = cls._module_tree_flags_cache.get(cls, {})
+        return cache.get(path, frozenset())
+
+    @classmethod
     def has_moe_flag(cls, module_spec: str) -> bool:
         """
         Check if a module specification has the :moe flag.
@@ -675,7 +695,9 @@ class BaseQModel(nn.Module):
                             continue
                         for index in range(num_experts):
                             for n in segment_names:
-                                moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                                expanded = n.replace(EXPERT_INDEX_PLACEHOLDER, str(index))
+                                moe_simple[-1].append(expanded)
+                                cls._set_module_tree_flags(expanded, cls.get_module_tree_flags(n))
                     # Currently, only need to add `capture_only_modules` to `['mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']`
                     # or ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
                     # or ['mlp.shared_experts.gate_proj', 'mlp.shared_experts.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
@@ -687,7 +709,9 @@ class BaseQModel(nn.Module):
                     # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.up_proj', ...]
                     for n in names:
                         for index in range(num_experts):
-                            moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                            expanded = n.replace(EXPERT_INDEX_PLACEHOLDER, str(index))
+                            moe_simple[-1].append(expanded)
+                            cls._set_module_tree_flags(expanded, cls.get_module_tree_flags(n))
 
             return moe_simple
 
@@ -3210,10 +3234,14 @@ class BaseQModel(nn.Module):
             raise ValueError("Mapping configuration not found in the tree.")
 
         out_blocks = []
-        alias_groups: Dict[tuple[str | None, int], List[tuple[str, bool, bool]]] = {}
+        alias_groups: Dict[tuple[str | None, int], List[tuple[str, bool, bool, List[str]]]] = {}
         alias_meta: Dict[tuple[str | None, int], Dict[str, int]] = {}
         alias_seq = count()
         group_seq = count()
+
+        def _role_flags(flags: List[str]) -> List[str]:
+            """Return role/semantic flags (exclude structural/special/numeric markers)."""
+            return sorted(f for f in flags if f and not f.isdigit() and f not in ("!", "?", "moe"))
 
         def _parse_token(token: str) -> tuple[str, List[str]]:
             return cls._parse_module_flags(token)
@@ -3246,12 +3274,14 @@ class BaseQModel(nn.Module):
             scope = scope_key if scope_key is not None else _get_scope(parent_name)
             parent_alias_scope = scope if parent_has_numeric else parent_name
 
-            def _make_entry(full_path: str, has_bang: bool, capture_only: bool, *, alias_base: int, alias_rel: int, alias_scope: str | None) -> tuple:
-                return (full_path, has_bang, capture_only, alias_scope, (alias_base, alias_rel))
+            def _make_entry(full_path: str, has_bang: bool, capture_only: bool, extra_flags: List[str], *, alias_base: int, alias_rel: int, alias_scope: str | None) -> tuple:
+                return (full_path, has_bang, capture_only, extra_flags, alias_scope, (alias_base, alias_rel))
 
             child_group_offset = parent_group_offset
             add_parent = parent_has_bang or (parent_capture_only and include_capture_only)
+            parent_extra_flags = _role_flags(parent_flags)
             if add_parent:
+                cls._set_module_tree_flags(parent_name, frozenset(parent_extra_flags))
                 alias_base = parent_rel_group if parent_has_numeric else parent_group
                 parent_entry_scope = f"{parent_alias_scope}.__parent__" if parent_alias_scope is not None else None
                 groups[parent_group].append(
@@ -3259,6 +3289,7 @@ class BaseQModel(nn.Module):
                         parent_name,
                         parent_has_bang,
                         parent_capture_only,
+                        parent_extra_flags,
                         alias_base=alias_base,
                         alias_rel=0,
                         alias_scope=parent_entry_scope,
@@ -3290,11 +3321,14 @@ class BaseQModel(nn.Module):
                     alias_scope = scope if parent_has_numeric else parent_name
                     alias_base = parent_rel_group if parent_has_numeric else grp
                     alias_rel = child_rel_group if parent_has_numeric else 0
+                    child_extra_flags = _role_flags(child_flags)
+                    cls._set_module_tree_flags(full_path, frozenset(child_extra_flags))
                     groups[grp].append(
                         _make_entry(
                             full_path,
                             has_bang,
                             capture_only,
+                            child_extra_flags,
                             alias_base=alias_base,
                             alias_rel=alias_rel,
                             alias_scope=alias_scope,
@@ -3338,6 +3372,7 @@ class BaseQModel(nn.Module):
                                     template_parent,
                                     False,
                                     False,
+                                    [],
                                     alias_base=alias_base,
                                     alias_rel=0,
                                     alias_scope=alias_scope,
@@ -3366,8 +3401,8 @@ class BaseQModel(nn.Module):
 
             return groups
 
-        def _register_alias(order_idx: int, item: tuple[str, bool, bool, str | None, tuple[int, int]]):
-            full_path, has_bang, capture_only, scope, alias_parts = item
+        def _register_alias(order_idx: int, item: tuple[str, bool, bool, List[str], str | None, tuple[int, int]]):
+            full_path, has_bang, capture_only, extra_flags, scope, alias_parts = item
             if capture_only and not include_capture_only:
                 return
             alias_scope = scope
@@ -3377,10 +3412,10 @@ class BaseQModel(nn.Module):
             meta = alias_meta.get(key)
             if meta is None:
                 alias_meta[key] = {"order": order_idx, "seq": next(alias_seq)}
-                alias_groups[key] = [(full_path, has_bang, capture_only)]
+                alias_groups[key] = [(full_path, has_bang, capture_only, extra_flags)]
             else:
                 meta["order"] = min(meta["order"], order_idx)
-                alias_groups[key].append((full_path, has_bang, capture_only))
+                alias_groups[key].append((full_path, has_bang, capture_only, extra_flags))
 
         for parent, entries in mapping.items():
             groups = process_entries(parent, entries)
@@ -3389,22 +3424,20 @@ class BaseQModel(nn.Module):
                 order_idx = next(group_seq)
                 items = groups[g]
                 for item in items:
-                    if len(item) == 3:
-                        full_path, has_bang, capture_only = item
-                        scope = full_path
-                        alias_parts = (g, 0)
-                        _register_alias(order_idx, (full_path, has_bang, capture_only, scope, alias_parts))
-                    else:
-                        _register_alias(order_idx, item)
+                    _register_alias(order_idx, item)
 
         for key in sorted(alias_groups.keys(), key=lambda k: (alias_meta[k]["order"], alias_meta[k]["seq"])):
             block = []
-            for full_path, has_bang, capture_only in alias_groups[key]:
+            for full_path, has_bang, capture_only, _ in alias_groups[key]:
                 name = full_path
                 if has_bang:
                     name += NOT_QUANTIZE_FLAG
                 if capture_only and include_capture_only:
                     name += CAPTURE_ONLY_FLAG
+                # Role/semantic flags (e.g. :q, :gate, :up, :down) are stored in
+                # ``NamedModule.state["module_tree_flags"]`` by the looper; keeping
+                # them out of the emitted name string avoids breaking consumers that
+                # resolve module paths from these tokens.
                 block.append(name)
             out_blocks.append(block)
 

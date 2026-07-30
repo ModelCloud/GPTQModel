@@ -32,7 +32,6 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
-from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import HookedLinear
 from ..quantization.config import (
     METHOD,
@@ -173,6 +172,12 @@ class ModuleLooper():
 
         self.processors = processors
         self.gptq_model = model
+
+        # Processors need to inspect the active model (e.g. MoE lifecycle hooks)
+        # when deciding how to share per-subset state.
+        for processor in self.processors:
+            processor.gptq_model = self.gptq_model
+
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
 
         self.support_batch_quantize = model.support_batch_quantize
@@ -1769,22 +1774,27 @@ class ModuleLooper():
         create_start = time.perf_counter()
         subset = {}
         capture_only_flags: Dict[str, bool] = {}
-        for n in names:
-            capture_only = False
-            if n.endswith(CAPTURE_ONLY_FLAG):
-                capture_only = True
-                n = n.split(CAPTURE_ONLY_FLAG, 1)[0]
-            if n in full:
-                subset[n] = full[n]
+        get_module_tree_flags = getattr(self.gptq_model, "get_module_tree_flags", lambda _p: frozenset())
+        for token in names:
+            if isinstance(token, str):
+                name, flags = BaseQModel._parse_module_flags(token)
+            else:
+                name, flags = token, []
+            capture_only = "?" in flags
+            not_quantize = "!" in flags
+            if not_quantize:
+                continue
+            if name in full:
+                subset[name] = full[name]
             elif capture_only:
                 # Obtain the CAPTURE_ONLY_FLAG Module separately
-                subset[n], _ = get_module_by_name_prefix(module, module_name=n)
+                subset[name], _ = get_module_by_name_prefix(module, module_name=name)
             # some modules have layer_modules that are dynamic based on config
             # ref: deepseek v2/v3/r1
             elif self.gptq_model.layer_modules_strict:
-                raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
+                raise ValueError(f"layer module item `{name}` not found in model, please check your model config.")
             if capture_only:
-                capture_only_flags[n] = True  # forward-only modules should not be finalized
+                capture_only_flags[name] = True  # forward-only modules should not be finalized
         skipped_modules = []
         total_modules = len(subset)
         progress_interval = max(1, total_modules // 10)
@@ -1811,6 +1821,12 @@ class ModuleLooper():
                     named_module.state.setdefault("layer_module", layer_module)
             elif capture_only_flags.get(name, False):
                 subset[name].state["capture_only"] = True
+
+            named_module = subset[name]
+            named_module.state.setdefault(
+                "module_tree_flags",
+                get_module_tree_flags(name),
+            )
 
             preprocess_start = time.perf_counter()
             if isinstance(processor, GPTQProcessor):

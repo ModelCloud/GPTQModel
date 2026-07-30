@@ -454,10 +454,11 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             if not has_expert_projs or experts_module is None or not hasattr(experts_module, '__iter__') or not experts_attr_name:
                 return
 
-            if hidden_states.dim() == 3:
-                hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
-            else:
-                hidden_states_2d = hidden_states
+            # Keep the [B, S, H] shape so the keep-mask applied by
+            # pre_process_fwd_hook drops padding positions; otherwise a flattened
+            # view would include padded tokens and inflate expert sample counts
+            # to batch_size * seq_len instead of the number of valid tokens.
+            hidden_states_for_experts = hidden_states
 
             for expert_idx, expert in enumerate(experts_module):
                 gate_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.gate_proj_name}"
@@ -469,7 +470,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
 
                 gate_module_ref = getattr(expert, self.gate_proj_name, None)
                 expert_device = get_device(gate_module_ref) if gate_module_ref is not None else get_device(expert)
-                expert_input = move_to(hidden_states_2d, expert_device)
+                expert_input = move_to(hidden_states_for_experts, expert_device)
 
                 try:
                     if down_key in subset:

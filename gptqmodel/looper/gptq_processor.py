@@ -268,6 +268,23 @@ class GPTQProcessor(LoopProcessor):
 
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
+
+    def _hessian_group_signature_for_module(self, task: GPTQ, name: str) -> Tuple[object, ...]:
+        """Build the shared-Hessian group signature, isolating per-expert down projections for MoE bypass."""
+
+        signature = (int(task.columns), self._hessian_config_signature(task.qcfg))
+        if not self._is_bypass_moe_routing():
+            return signature
+
+        expert_key = self._module_expert_isolation_key(name)
+        flags = self._module_tree_flags(task)
+        is_down = "down" in flags or (not flags and self._module_is_expert_down_proj(name))
+        if expert_key is not None and is_down:
+            # Each expert's down projection consumes a distinct intermediate activation,
+            # so its Hessian must not be shared with other experts.
+            signature = signature + (expert_key,)
+        return signature
+
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Builds the per-module GPTQ/GPTAQ/FOEM task after applying dynamic overrides."""
 
@@ -369,6 +386,7 @@ class GPTQProcessor(LoopProcessor):
             task._shared_hessian_inverse_lock = None
             task._shared_hessian_inverse_ref_counts = None
             task._shared_hessian_stats = None
+            task._shared_hessian_logical_key = False
 
         if not self._enable_shared_hessian_cache:
             return
@@ -387,11 +405,12 @@ class GPTQProcessor(LoopProcessor):
                 continue
 
             # Same-input sharing is only valid for modules whose Hessian shape
-            # and accumulation settings match. Output rows may differ.
-            group_signature = (
-                int(task.columns),
-                self._hessian_config_signature(task.qcfg),
-            )
+            # and accumulation settings match. Output rows may differ.  For MoE
+            # bypass routing, each expert's down projection consumes a distinct
+            # intermediate activation, so it must not share a Hessian with other
+            # experts.  Gate/up projections see the same hidden state for every
+            # expert and continue to share across experts.
+            group_signature = self._hessian_group_signature_for_module(task, name)
             groups.setdefault(group_signature, []).append(name)
 
         for group_index, (group_signature, names) in enumerate(groups.items()):
@@ -410,6 +429,19 @@ class GPTQProcessor(LoopProcessor):
                 group_signature,
             )
             self._shared_hessian_group_counts[accum_key] = len(names)
+
+            # In MoE bypass mode the same hidden-state tensor is dispatched to
+            # many experts and may be copied across devices.  The per-device
+            # copies have different storage pointers and devices, so the default
+            # tensor-identity cache key would create one cache entry per copy and
+            # inflate each module's sample count by the number of devices.  Mark
+            # these groups as logical: the cache key is based on the group/batch
+            # identity instead of the physical storage pointer.
+            is_logical_group = (
+                self._is_bypass_moe_routing()
+                and any(self._module_expert_isolation_key(n) is not None for n in names)
+            )
+
             shared_state = {
                 "lock": threading.Lock(),
                 "partials": {},
@@ -435,6 +467,7 @@ class GPTQProcessor(LoopProcessor):
                 task._shared_hessian_inverse_lock = self._shared_hessian_inverse_lock
                 task._shared_hessian_inverse_ref_counts = self._shared_hessian_inverse_ref_counts
                 task._shared_hessian_stats = self._shared_hessian_stats
+                task._shared_hessian_logical_key = is_logical_group
 
             self._shared_hessian_inverse_ref_counts.update(inverse_ref_counts)
 
@@ -481,6 +514,7 @@ class GPTQProcessor(LoopProcessor):
             task._shared_hessian_inverse_lock = None
             task._shared_hessian_inverse_ref_counts = None
             task._shared_hessian_stats = None
+            task._shared_hessian_logical_key = False
 
     def clear_shared_hessian_subset(self) -> None:
         """Compatibility wrapper for tests/tools that call the GPTQ-specific hook."""
@@ -508,6 +542,18 @@ class GPTQProcessor(LoopProcessor):
         group_key = getattr(task, "_shared_hessian_accum_key", None)
         if group_key is None:
             return None
+        # Logical-key groups share one cache entry per batch because every module
+        # in the group consumes the same logical activation (e.g. all MoE gate/up
+        # projections under routing=bypass).  Using a fixed placeholder instead of
+        # the tensor storage pointer stops device-copy aliasing from inflating the
+        # per-module sample count.
+        if getattr(task, "_shared_hessian_logical_key", False):
+            return (
+                group_key,
+                batch_index,
+                cache_extra,
+                0,
+            )
         return (
             group_key,
             batch_index,

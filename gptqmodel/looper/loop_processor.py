@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,14 +20,23 @@ from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS,
-                             QUANT_LOG_NSAMPLES)
-from ..quantization.config import QuantizeConfig
+from ..models.writer import (
+    PROCESS_LOG_FWD_TIME,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_TIME,
+    PROCESS_USED_MEMORY,
+    QUANT_LOG_DAMP,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_NSAMPLES,
+)
+from ..quantization.config import ExpertsRoutingBypass, QuantizeConfig
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
 from ..utils.random_str import get_random_string
 from ..utils.torch import CPU, DEVICE_0, DEVICE_1, HAS_NPU
+
 
 log = setup_logger()
 
@@ -203,6 +213,63 @@ class LoopProcessor:
         # processors can retrieve deterministic ordering information (e.g.
         # GPTQ's Hessian updates) even when forwards run on multiple threads.
         self._batch_tls = threading.local()
+
+    # ------------------------------------------------------------------
+    # Generic module-tree / MoE helpers used by all processors
+    # ------------------------------------------------------------------
+    def _is_bypass_moe_routing(self) -> bool:
+        """Return True when the active config forwards every calibration token to all experts."""
+
+        moe = getattr(self.qcfg, "moe", None)
+        return moe is not None and isinstance(getattr(moe, "routing", None), ExpertsRoutingBypass)
+
+    def _module_expert_isolation_key(self, name: str) -> Optional[Tuple[str, int]]:
+        """Return (expert_block_name, expert_index) if ``name`` points inside a routed expert list.
+
+        Example:
+            For ``name = "model.layers.0.mlp.experts.12.gate_proj"`` and
+            ``expert_block_names = ["experts"]``, the regex
+            ``(?<!\\w)experts\\.(\\d+)(?:\\.|$)`` matches the ``.12.`` segment,
+            captures ``12``, and returns ``("experts", 12)``.
+
+            This deliberately uses a negative lookbehind ``(?<!\\w)`` to avoid
+            matching substrings like ``shared_experts.0.gate_proj`` when the
+            true expert block name is ``experts``; only the word ``experts``
+            preceded by a non-word character (typically a dot) is accepted.
+
+        Returns:
+            A ``(block_name, expert_index)`` tuple when an expert index is
+            found, otherwise ``None`` (e.g. for shared experts or non-MoE
+            modules).
+        """
+
+        hooks = getattr(getattr(self, "gptq_model", None), "moe_lifecycle_hooks", None)
+        if hooks is None:
+            return None
+
+        for block_name in getattr(hooks, "expert_block_names", ["experts"]):
+            pattern = rf"(?<!\w){re.escape(block_name)}\.(\d+)(?:\.|$)"
+            match = re.search(pattern, name)
+            if match:
+                return (block_name, int(match.group(1)))
+        return None
+
+    def _module_tree_flags(self, task: Any) -> frozenset:
+        """Return the module-tree flags stored on the wrapped module, if any."""
+
+        named_module = getattr(task, "_named_module", None)
+        if isinstance(named_module, NamedModule):
+            return named_module.state.get("module_tree_flags", frozenset())
+        return frozenset()
+
+    def _module_is_expert_down_proj(self, name: str) -> bool:
+        """Fallback for modules without ``module_tree_flags`` already set."""
+
+        hooks = getattr(getattr(self, "gptq_model", None), "moe_lifecycle_hooks", None)
+        if hooks is None:
+            return False
+        down_name = getattr(hooks, "down_proj_name", None)
+        return down_name is not None and name.endswith(f".{down_name}")
 
     @staticmethod
     def _build_log_file_path(processor_name: str, current_time: str) -> Path:
@@ -838,12 +905,10 @@ def get_max_memory() -> str:
 
     stats_0 = torch.cuda.memory_stats(DEVICE_0)
     active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
-    peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
 
     if torch.cuda.device_count() > 1:
         stats_1 = torch.cuda.memory_stats(DEVICE_1)
         active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
-        peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
 
         max_memory = f"{active_0:.2f}MB, {active_1:.2f}MB"
     else:
