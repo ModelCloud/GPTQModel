@@ -487,22 +487,23 @@ def _build_evalution_runtime(
             gpu_memory_utilization = engine_options.get("gpu_memory_utilization", 0.9)
             llm_kwargs = dict(engine_options.get("llm_kwargs", {}) or {})
 
-            engine = evalution.VLLM(
-                dtype=engine_dtype,
-                batch_size=batch_size,
-                trust_remote_code=trust_remote_code,
-                padding_side=engine_padding_side,
-                seed=_evalution_engine_seed(engine_options),
-                tokenizer_mode=engine_options.get("tokenizer_mode", "auto"),
-                tensor_parallel_size=int(tensor_parallel_size),
-                gpu_memory_utilization=float(gpu_memory_utilization),
-                quantization=engine_options.get("quantization"),
-                max_model_len=int(max_model_len) if max_model_len is not None else None,
-                enforce_eager=bool(engine_options.get("enforce_eager", False)),
-                tokenizer_revision=engine_options.get("tokenizer_revision"),
-                vllm_path=engine_options.get("vllm_path"),
-                llm_kwargs=llm_kwargs,
-            )
+            vllm_config = {
+                "dtype": engine_dtype,
+                "batch_size": batch_size,
+                "trust_remote_code": trust_remote_code,
+                "padding_side": engine_padding_side,
+                "seed": _evalution_engine_seed(engine_options),
+                "tokenizer_mode": engine_options.get("tokenizer_mode", "auto"),
+                "tensor_parallel_size": int(tensor_parallel_size),
+                "gpu_memory_utilization": float(gpu_memory_utilization),
+                "quantization": engine_options.get("quantization"),
+                "max_model_len": int(max_model_len) if max_model_len is not None else None,
+                "enforce_eager": bool(engine_options.get("enforce_eager", False)),
+                "tokenizer_revision": engine_options.get("tokenizer_revision"),
+                "vllm_path": engine_options.get("vllm_path"),
+                "llm_kwargs": llm_kwargs,
+            }
+            engine = safe_kwargs_call(evalution.VLLM, kwargs=vllm_config)
         else:
             sglang_config = _build_sglang_engine_kwargs(
                 engine_options=engine_options,

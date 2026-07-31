@@ -68,8 +68,38 @@ def test_build_evalution_runtime_supports_vllm_engine_options():
     captured = {}
 
     class FakeVLLM:
-        def __init__(self, **kwargs):
-            captured["engine_kwargs"] = kwargs
+        def __init__(
+            self,
+            *,
+            dtype=None,
+            batch_size=None,
+            trust_remote_code=None,
+            padding_side=None,
+            seed=None,
+            tokenizer_mode=None,
+            tensor_parallel_size=None,
+            gpu_memory_utilization=None,
+            quantization=None,
+            max_model_len=None,
+            enforce_eager=None,
+            tokenizer_revision=None,
+            llm_kwargs=None,
+        ):
+            captured["engine_kwargs"] = {
+                "dtype": dtype,
+                "batch_size": batch_size,
+                "trust_remote_code": trust_remote_code,
+                "padding_side": padding_side,
+                "seed": seed,
+                "tokenizer_mode": tokenizer_mode,
+                "tensor_parallel_size": tensor_parallel_size,
+                "gpu_memory_utilization": gpu_memory_utilization,
+                "quantization": quantization,
+                "max_model_len": max_model_len,
+                "enforce_eager": enforce_eager,
+                "tokenizer_revision": tokenizer_revision,
+                "llm_kwargs": llm_kwargs,
+            }
 
         def build(self, model_config):
             captured["model_config"] = model_config
@@ -101,6 +131,7 @@ def test_build_evalution_runtime_supports_vllm_engine_options():
             "quantization": "gptq",
             "tokenizer_mode": "auto",
             "max_model_len": "4096",
+            "vllm_path": "/tmp/legacy-vllm",
             "foo": "bar",
         },
         tokenizer=None,
@@ -115,6 +146,7 @@ def test_build_evalution_runtime_supports_vllm_engine_options():
     assert captured["engine_kwargs"]["tensor_parallel_size"] == 2
     assert captured["engine_kwargs"]["quantization"] == "gptq"
     assert captured["engine_kwargs"]["max_model_len"] == 4096
+    assert "vllm_path" not in captured["engine_kwargs"]
 
 
 def test_build_evalution_runtime_supports_sglang_engine_options():

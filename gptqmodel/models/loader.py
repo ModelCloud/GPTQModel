@@ -88,6 +88,59 @@ log = setup_logger()
 
 ATTN_IMPLEMENTATION = "attn_implementation"
 
+_EXTERNAL_BACKEND_FORMATS = {
+    BACKEND.VLLM: {
+        FORMAT.GPTQ,
+        FORMAT.GEMM,
+    },
+    BACKEND.SGLANG: {
+        FORMAT.GPTQ,
+        FORMAT.GPTQ_V2,
+        FORMAT.GEMM,
+        FORMAT.MARLIN,
+    },
+}
+
+
+def _validate_external_backend_format(backend: BACKEND, format_code: FORMAT) -> None:
+    supported_formats = _EXTERNAL_BACKEND_FORMATS.get(backend)
+    if supported_formats is None or format_code in supported_formats:
+        return
+    supported = ", ".join(f"FORMAT.{item.name}" for item in sorted(supported_formats, key=lambda item: item.name))
+    raise ValueError(f"{backend} backend only supports {supported}: actual = {format_code}")
+
+
+def _external_runtime_device_kwargs(
+    device: DEVICE,
+    requested_device_map: Optional[Union[str, Dict[str, Union[str, int]]]],
+) -> Dict[str, Union[str, int]]:
+    runtime_kwargs: Dict[str, Union[str, int]] = {"device": device.type}
+    if not requested_device_map or device not in {DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU}:
+        return runtime_kwargs
+
+    targets = (
+        {requested_device_map}
+        if isinstance(requested_device_map, str)
+        else set(requested_device_map.values())
+    )
+    if len(targets) != 1:
+        return runtime_kwargs
+    target = targets.pop()
+
+    if isinstance(target, int):
+        runtime_kwargs["base_gpu_id"] = target
+        return runtime_kwargs
+    if not isinstance(target, str) or target in {"cpu", "disk", "meta"}:
+        return runtime_kwargs
+
+    try:
+        explicit_device = torch.device(target)
+    except (RuntimeError, ValueError):
+        return runtime_kwargs
+    if explicit_device.index is not None:
+        runtime_kwargs["base_gpu_id"] = explicit_device.index
+    return runtime_kwargs
+
 
 def _should_print_module_tree() -> bool:
     """Keep expensive module-tree dumps opt-in during model loading."""
@@ -968,12 +1021,6 @@ def ModelLoader(cls):
         backend = normalize_backend(backend)
         device = auto_select_device(device, backend)
 
-        if backend == BACKEND.VLLM:
-            import os
-
-            # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
-            os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
-
         model_local_path = get_model_local_path(model_id_or_path, **kwargs_without_internal)
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
         native_support = has_native_transformers_causallm_support(model_local_path)
@@ -1116,15 +1163,15 @@ def ModelLoader(cls):
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             runtime_generate = None
-            if backend == BACKEND.VLLM:
-                if format_code not in [FORMAT.GPTQ, FORMAT.GEMM]:
-                    raise ValueError(f"{backend} backend only supports FORMAT.GPTQ or FORMAT.GEMM: actual = {qcfg.format}")
-            elif backend == BACKEND.SGLANG:
-                if format_code != FORMAT.GPTQ:
-                    raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {qcfg.format}")
+            _validate_external_backend_format(backend, format_code)
 
             if backend == BACKEND.VLLM:
-                from ..utils.vllm import load_model_by_vllm, vllm_generate
+                from ..utils.vllm import (
+                    get_vllm_device,
+                    get_vllm_model_config,
+                    load_model_by_vllm,
+                    vllm_generate,
+                )
 
                 model = load_model_by_vllm(
                     model=model_local_path,
@@ -1132,18 +1179,23 @@ def ModelLoader(cls):
                     **kwargs_without_internal,
                 )
 
-                model.config = model.llm_engine.model_config
-                model.device = model.llm_engine.vllm_config.device_config.device
+                model.config = get_vllm_model_config(model)
+                runtime_device = get_vllm_device(model)
+                if runtime_device is not None:
+                    model.device = runtime_device
                 runtime_generate = vllm_generate
 
             elif backend == BACKEND.SGLANG:
                 from ..utils.sglang import load_model_by_sglang, sglang_generate
 
+                sglang_kwargs = dict(kwargs_without_internal)
+                for key, value in _external_runtime_device_kwargs(device, requested_device_map).items():
+                    sglang_kwargs.setdefault(key, value)
                 model, hf_config = load_model_by_sglang(
                     model=model_local_path,
                     trust_remote_code=trust_remote_code,
                     dtype=torch.float16,
-                    **kwargs_without_internal,
+                    **sglang_kwargs,
                 )
                 model.config = hf_config
                 runtime_generate = sglang_generate
