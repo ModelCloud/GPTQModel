@@ -159,7 +159,7 @@ def rotate_mlp_output(layer, Q, device):
     W.online_partial_had = False
     W.had_dim = -1
     had_K, K = get_hadK(W.in_features)
-    W.had_K = had_K
+    W.set_had_K(had_K)
     W.K = K
 
     if W.bias is not None:

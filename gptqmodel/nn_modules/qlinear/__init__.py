@@ -122,11 +122,16 @@ class BaseQuantLinear(nn.Module):
         self._autotune_result: Any = None
 
         # Rotation/online-Hadamard state for SpinQuant/QuaRot inference.
+        # Do NOT register `had_K` as a buffer unless a real tensor is supplied:
+        # `accelerate` iterates non-persistent buffers during disk offloading and
+        # `set_module_tensor_to_device` fails on `None` buffer values. The
+        # rotation/loader paths explicitly call `register_buffer("had_K", ...,
+        # persistent=False)` when the Hadamard matrix is actually computed.
         self.online_full_had = False
         self.online_partial_had = False
         self.had_dim = -1
         self.K = 1
-        self.register_buffer("had_K", None, persistent=False)
+        self.had_K = None
 
         validate_args = {
             "bits": bits,
@@ -469,6 +474,25 @@ class BaseQuantLinear(nn.Module):
 
         self.clear_autotune()
         return super().train(mode)
+
+    def set_had_K(self, had_K: Optional[t.Tensor]):
+        """Set or clear the rotation Hadamard matrix, keeping it as a non-persistent buffer only when a real tensor is supplied.
+
+        Avoids registering `had_K` as a `None` non-persistent buffer, because
+        `accelerate` iterates such buffers during disk offloading and
+        `set_module_tensor_to_device` raises on `None` values.
+        """
+        # Remove any existing plain attribute or buffer slot so that
+        # `register_buffer` can (re-)install the non-persistent buffer cleanly.
+        if "had_K" in self.__dict__:
+            del self.__dict__["had_K"]
+        if "had_K" in self._buffers:
+            del self._buffers["had_K"]
+
+        if had_K is not None:
+            self.register_buffer("had_K", had_K, persistent=False)
+        else:
+            self.had_K = None
 
     def _apply_rotation_to_input(self, x: t.Tensor) -> t.Tensor:
         """Apply online Hadamard transform to the input for SpinQuant/QuaRot inference."""

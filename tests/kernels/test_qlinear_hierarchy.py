@@ -265,3 +265,22 @@ def test_gptq_quant_linear_buffer_shapes_for_non_word_aligned_out_features():
         missing, unexpected = layer.load_state_dict(state, strict=False)
         assert not missing
         assert not unexpected
+
+
+def test_had_k_placeholder_is_not_a_none_buffer():
+    """Non-persistent None buffers break accelerate's disk offloader; keep had_K as a plain attribute until rotation/loader materializes a real tensor."""
+    layer = TorchLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=64,
+        out_features=64,
+        bias=False,
+        register_buffers=False,
+    )
+    assert layer.had_K is None
+    assert "had_K" not in layer._buffers
+    assert "had_K" not in layer.state_dict()
+    # Accelerate should not see a None tensor during offloading.
+    assert "had_K" not in {name for name, _ in layer.named_buffers()}
